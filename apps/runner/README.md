@@ -24,7 +24,8 @@ Three pieces:
 
 - **`backend/`** — the `SandboxBackend` seam. `docker/` is the only place a
   container runtime is named; `fake.ts` is an in-memory implementation the
-  whole loop is tested against. A new substrate (Fly, k8s, microVMs) is a new
+  whole loop is tested against. A new substrate (another container runtime,
+  a VM-per-sandbox runtime, a managed service) is a new
   module plus one line in `index.ts`.
 - **`ws/`** — the control channel a sandbox's supervisor dials, authenticated
   by a single-use bootstrap token minted per spawn.
@@ -132,7 +133,7 @@ can read the per-runner count beside the ceiling on `GET /v1/runners`.
 
 The sandbox image ships rootless podman and a `docker` CLI shim
 (`podman-docker`) so agents can run `docker run`-class work — a capability of
-the **hosted microVM substrate**, where every sandbox owns a whole kernel.
+a substrate where every sandbox owns a whole kernel (a per-sandbox VM).
 Under this runner's Docker backend the same binaries are intentionally inert:
 every sandbox is pinned with `no-new-privileges`, `CapDrop: ALL`, and the
 Docker daemon's **default seccomp profile**, which together deny the
@@ -143,31 +144,23 @@ neuters the setuid `newuidmap`/`newgidmap` helpers). That combination is the
 tenant boundary here — **do not weaken any of it** (in particular, never add
 `seccomp=unconfined`) to chase nested containers; an agent that tries will see
 userns/permission errors, and `/etc/containers/README.onecli` inside the image
-says why. On the microVM substrate, container storage lives under `/workspace`
+says why. Where the sandbox owns its kernel, container storage lives under `/workspace`
 (the durable home), so images and volumes survive sandbox restarts there.
 
-## Root in the sandbox (not offered; hosted-only if ever)
+## Root in the sandbox (not offered)
 
-The agent runs as `node`, never as root, on both substrates, and the runner
-sets no sudoers rule. The reasons differ by backend:
-
-- **Docker backend (self-host):** the same `no-new-privileges` + `CapDrop:
-ALL` + default-seccomp triple above IS the tenant boundary on a shared
-  kernel. Granting root inside such a container is not a setting to flip;
-  it would mean a different runtime (a gVisor `runsc` option) or a minimal
-  capability set under userns-remap (dpkg alone needs `CHOWN, DAC_OVERRIDE,
-FOWNER, SETUID, SETGID`). Both are real work and both weaken the story this
-  section pins, so neither is planned.
-- **Hosted microVM substrate:** root would be safe kernel-wise (one kernel per
-  sandbox) and was sketched as Tier 2 of `plans/agent-owns-its-machine.md`
-  (passwordless `sudo` written by the boot script). It is **deferred, not
-  built**: durable installs need no root — Nix on the durable home
-  (`nix profile install`), `npm -g`, `pip --user`, and rootless podman all
-  work as `node` and survive relaunch — and `send_file` hands results back
-  without it. The one thing `sudo` would add is an ephemeral `apt install`,
-  which Nix covers durably. Revisit only if agents hit a genuinely
-  system-level wall (a mount, a sysctl) that a package manager cannot solve;
-  the plan's §5 credential audit is a precondition.
+The agent runs as `node`, never as root, and the runner
+sets no sudoers rule. On the Docker backend the
+same `no-new-privileges` + `CapDrop: ALL` + default-seccomp triple above IS
+the tenant boundary on a shared kernel. Granting root inside such a
+container is not a setting to flip; it would mean a different runtime (a
+gVisor `runsc` option) or a minimal capability set under userns-remap (dpkg
+alone needs `CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID`). Both are real
+work and both weaken the story this section pins, so neither is planned.
+Durable installs need no root anyway: Nix on the durable home (`nix profile
+install`), `npm -g`, `pip --user`, and rootless podman (where available) all
+work as `node` and survive relaunch, and `send_file` hands results back
+without it.
 
 ## Orphan reaping
 

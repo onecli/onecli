@@ -15,10 +15,10 @@ import type { PlatformLlmProvider } from "../../providers/platform-llm";
  * accept a keyless agent instead of refusing to boot it.
  *
  * The two halves stay in agreement by construction: both read the same env
- * vars (the deploy wires the same Secrets Manager secret into both task
- * definitions) and mirror the same key-shape rule (`sk-ant-` prefix — the
- * deploy provisions the secret with a generated placeholder so tasks can
- * boot before an operator pastes the real key; the placeholder must read as
+ * vars (a deployment injects the same secret into both processes) and
+ * mirror the same key-shape rule (`sk-ant-` prefix — a deployment may
+ * provision the secret with a generated placeholder so processes can boot
+ * before an operator pastes the real key; the placeholder must read as
  * "unconfigured" on both sides).
  */
 

@@ -11,7 +11,7 @@ import type { SshCaSigner } from "../../providers/types";
 /**
  * Cloud SSH CA: an asymmetric KMS key (ECC_NIST_EDWARDS25519) whose private
  * half is non-extractable — every certificate/grant mint is a kms:Sign call,
- * IAM-scoped to the api-server task and visible in CloudTrail. Pure Ed25519:
+ * access-scoped and auditable. Pure Ed25519:
  * MessageType RAW (the whole to-be-signed blob goes to KMS, never a digest —
  * FIPS 186-5 EdDSA signs the message itself) and the returned signature is
  * the raw 64 bytes, no DER/mpint conversion anywhere.

@@ -563,7 +563,7 @@ export interface AgentWithGrantsSummary extends Agent {
 }
 
 /** The current organization (`GET /v1/org`). `byoLegacy` is the org's
- * creation world on cloud (sandbox-platform §3.10, re-decided 2026-08-23):
+ * creation world on cloud:
  * false = hosted-first creation, true = BYO-only creation (hosted starts with
  * an onboarding call). `byoEnabled` (the mixed world, 2026-08-29) is only
  * read when `byoLegacy` is false: it additionally allows BYO creation beside
@@ -604,7 +604,7 @@ export interface InstanceInfo {
     homeDurability?: "resident" | "snapshot";
   };
   /**
-   * The SSH front door (sandbox-platform step 5): present only when this
+   * The SSH front door: present only when this
    * deployment can mint certificates and terminate SSH. Same optional-field
    * contract as `runners`: absent (an older API, or a deployment without the
    * front door) means "no SSH here" — the rail auto-hides the agent's SSH
@@ -613,7 +613,7 @@ export interface InstanceInfo {
   ssh?: {
     host: string;
     /** Public SSH port. Optional: an older API answers without it (assume
-     *  22). Cloud is 22 (the NLB); self-host a high port. */
+     *  22). Default 22; self-host a high port. */
     port?: number;
   };
 }

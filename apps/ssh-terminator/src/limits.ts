@@ -1,6 +1,6 @@
 /**
- * Pre-auth hardening for the public SSH listener. The NLB is pure L4 — it
- * adds zero flood protection — so these caps ARE the defense: a global
+ * Pre-auth hardening for the public SSH listener. A plain L4 load balancer
+ * adds zero flood protection, so these caps ARE the defense: a global
  * concurrent ceiling, a per-IP concurrent ceiling, and a per-IP token bucket
  * on connection attempts. Refusals are hint-free by contract (the caller
  * just ends the socket); the pre-auth TIMEOUT lives with the server, which

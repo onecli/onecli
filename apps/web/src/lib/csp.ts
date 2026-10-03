@@ -1,13 +1,13 @@
 /**
  * Content-Security-Policy for the cloud dashboard (OC-01).
  *
- * The CSP moved from a static CloudFront ResponseHeadersPolicy row into the
- * app so `script-src` can drop `'unsafe-inline'` / `'unsafe-eval'` in favor
+ * The CSP lives in the app (not a static edge header) so `script-src` can
+ * drop `'unsafe-inline'` / `'unsafe-eval'` in favor
  * of a per-request nonce: Next.js reads the request's CSP header during SSR
  * and stamps the nonce onto every framework, chunk, and inline script it
  * emits — something a static edge header can never do. `proxy.ts` generates
  * the nonce, threads it to the layout via `x-nonce`, and mirrors the header
- * onto the response; the CloudFront policy no longer carries a CSP row.
+ * onto the response.
  *
  * Env access is a literal dot read at call time (the public-origins rules):
  * Next.js can only inline `NEXT_PUBLIC_*` literals, and tests stub env per
@@ -23,7 +23,7 @@ export const createCspNonce = (): string => {
 
 /**
  * The full policy, one nonce per request. Every directive except
- * `script-src` is byte-equivalent to the retired CloudFront row; the
+ * `script-src` is byte-equivalent to the previous static policy; the
  * api/auth hosts are resolved instead of hardcoded so dev and prod both get
  * their own domains.
  */

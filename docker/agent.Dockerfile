@@ -107,8 +107,8 @@ RUN JCODE_NO_AUTO_UPDATE=1 JCODE_NO_TELEMETRY=1 /opt/jcode/jcode --version \
 # first-stage installer (https://nixos.org/nix/install) pins for this
 # release — copied from it, verified here unconditionally. The tarball is
 # unpacked HERE (the image ships no xz for the agent to depend on) into a
-# non-/nix path: anything baked under /nix would be shadowed the moment the
-# boot phase bind-mounts the agent's durable store there. The agent runs
+# non-/nix path: anything baked under /nix would be shadowed the moment a
+# deployment mounts the agent's durable store there. The agent runs
 # `onecli-nix-install` (below) to install FROM this directory, offline —
 # no runtime download, no curl-pipe-sh, and no egress-policy dependency.
 FROM base AS nix-dist
@@ -175,11 +175,10 @@ WORKDIR /app
 # tini as PID 1: Node is not an init (signal handling differs, orphans are
 # never reaped). Common tools are the agent's hands — every outbound request
 # they make still exits through the gateway (§3.4).
-# e2fsprogs + util-linux serve the Kubernetes/Kata boot phase (the sandbox
-# manager's boot.sh formats and mounts the raw block home, then setpriv-drops
-# to `node` — plans/sandbox-platform.md step 2); inert under the Docker
-# backend, where the home arrives as a pre-mounted volume.
-# openssh-sftp-server + openssh-client serve the SSH front door (step 5):
+# e2fsprogs + util-linux let a deployment that hands the sandbox a raw disk
+# format and mount it as the home; inert under the Docker backend, where the
+# home arrives as a pre-mounted volume.
+# openssh-sftp-server + openssh-client serve the SSH front door:
 # the terminator's relay execs /usr/lib/openssh/sftp-server for sftp and
 # modern scp (≥9.0 rides sftp), and openssh-client provides the in-guest scp
 # binary legacy `scp -O` targets — no daemon, no listener, the no-inbound
@@ -191,8 +190,8 @@ WORKDIR /app
 # default rootless network) + slirp4netns (fallback), fuse-overlayfs
 # (storage fallback; native overlay is the expected driver), aardvark-dns +
 # iptables (netavark named networks / compose), catatonit (pod infra /
-# --init). This is a capability of the hosted microVM substrate, where each
-# sandbox owns a whole kernel; under the self-host Docker backend the same
+# --init). This is a capability of sandboxes that own a whole kernel (a
+# per-sandbox VM); under the self-host Docker backend the same
 # binaries are deliberately inert — the runner pins `no-new-privileges` +
 # `CapDrop: ALL` on every sandbox (apps/runner/src/backend/docker/
 # docker-backend.ts, pinned by its test), which neuters the setuid helpers.
@@ -223,7 +222,7 @@ WORKDIR /app
 #   systemd, vs 168 with). The gate below pins systemd's ABSENCE.
 # - chromium-sandbox is the setuid helper (400 KB) that lets chromium's
 #   DEFAULT sandbox run as uid 1000 where user namespaces are available —
-#   the hosted microVM. Under the self-host Docker backend the same
+#   a sandbox with its own kernel. Under the self-host Docker backend the same
 #   `no-new-privileges` + `CapDrop: ALL` that neuter podman's setuid helpers
 #   neuter this one too, and chromium must be told `--no-sandbox` (Playwright:
 #   `chromiumSandbox: false`). Same law as podman: never weaken the Docker
@@ -239,8 +238,8 @@ WORKDIR /app
 #   NODE_EXTRA_CA_CERTS. Every page here is re-signed by the gateway CA, so
 #   without the import agent-entrypoint.sh does with this tool, every load
 #   fails ERR_CERT_AUTHORITY_INVALID and the agent's escape by trial is
-#   ignoreHTTPSErrors — verification off for every site (measured live on
-#   prod, 2026-09-09). The gate below proves the import is what chromium
+#   ignoreHTTPSErrors — verification off for every site (measured live,
+#   2026-09-09). The gate below proves the import is what chromium
 #   trusts, on a real handshake.
 # gcc + g++ + make + libc6-dev + python3-dev: the C toolchain for native npm
 # and pip modules (better-sqlite3, sharp, bcrypt, psycopg2, lxml…) that ship
@@ -279,8 +278,8 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 #   cgroupfs manager with cgroups disabled (limits come from the sandbox
 #   itself; there is no journald for events/logs either), and
 #   image_copy_tmp_dir="storage" so pull staging lands on the agent's own
-#   home volume instead of /var/tmp on the ephemeral rootfs (which sits on
-#   shared node storage under Kata). base_hosts_file="" pins "copy the
+#   home volume instead of /var/tmp on the ephemeral rootfs (which may sit on
+#   storage shared with other sandboxes). base_hosts_file="" pins "copy the
 #   sandbox's /etc/hosts into containers" — the only way a nested container
 #   can resolve the gateway proxy host (sandboxes have no DNS egress).
 # - registries.conf (root-owned): docker.io for unqualified names, so
@@ -288,7 +287,7 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 # - storage.conf (node-owned, USER-level — rootless podman ignores the
 #   graphroot in /etc/containers/storage.conf): graphroot on /workspace, the
 #   durable home, so images/containers/volumes survive relaunch and
-#   park/wake. The file stays at its /home/node path ON PURPOSE, even now
+#   sleep. The file stays at its /home/node path ON PURPOSE, even now
 #   that ~ lives at /workspace/.home: this copy is image-baked and
 #   self-heals every boot (an agent-editable durable copy would not), and
 #   the storage path inside it is a DURABLE-DATA FORMAT CONTRACT — moving
@@ -457,7 +456,7 @@ RUN chromium --version \
   && unzip -v | head -1 \
   && wget --version | head -1 \
   # chromium-sandbox: the setuid helper must actually be setuid, or the
-  # DEFAULT sandbox path dies as uid 1000 on the hosted substrate.
+  # DEFAULT sandbox path dies as uid 1000 where the sandbox owns its kernel.
   && test -u /usr/lib/chromium/chrome-sandbox \
   # The systemd guard: the dbus-x11-before-chromium ordering above is what
   # keeps an init system out of this image, and a dependency change upstream
@@ -523,9 +522,8 @@ RUN chromium --version \
 # pieces:
 # - usermod: passwd is where the Docker substrate derives HOME from (runc
 #   fills HOME from the passwd entry when the env lacks it — spawn AND
-#   exec); the hosted boot script and agent-entrypoint.sh export the same
-#   literal (byte-equal contract with apps/sandbox-manager/src/constants.ts
-#   AGENT_POSIX_HOME).
+#   exec); agent-entrypoint.sh, and any deployment that boots the sandbox
+#   itself, export the same literal (AGENT_POSIX_HOME).
 # - the profile.d drop-in: SSH login shells — Debian's /etc/profile RESETS
 #   PATH, so the entrypoint's export cannot survive `bash -l`/`sh -lc`.
 #   APPENDED, never prepended: a tenant-writable dir ahead of the system
@@ -612,8 +610,8 @@ ENV NODE_OPTIONS=--enable-source-maps
 # socket) — EPHEMERAL by design: its disappearance across a relaunch is how
 # podman detects a "reboot" and resets stale container state. The dir is baked
 # into the image so it exists on every fresh rootfs regardless of what spawns
-# the process (supervisor, docker exec, an SSH session); on the microVM
-# substrate the boot phase additionally mounts a tmpfs over it. Nothing else
+# the process (supervisor, docker exec, an SSH session); a deployment may
+# additionally mount a tmpfs over it. Nothing else
 # in the image reads XDG_RUNTIME_DIR (no systemd/logind here).
 ENV XDG_RUNTIME_DIR=/tmp/onecli-xdg-run
 RUN install -d -m 0700 -o node -g node /tmp/onecli-xdg-run
@@ -624,10 +622,10 @@ ENV CONTAINERS_STORAGE_CONF=/home/node/.config/containers/storage.conf
 # `npm -g` and `pip --user` share ONE durable root: both bin dirs unify at
 # /workspace/.home/.local/bin — the single PATH entry the entrypoint and
 # /etc/profile.d/onecli-path.sh append. ENV (not entrypoint-only) so
-# docker-exec / pods-exec sessions inherit it too. Deliberately NO `ENV
+# docker-exec / remote-exec sessions inherit it too. Deliberately NO `ENV
 # HOME` here: it would poison later build-stage RUNs and fork the
 # substrates (Docker seeds named volumes from image content); HOME comes
-# from passwd (usermod above), the hosted boot script, and the entrypoint.
+# from passwd (usermod above), the deployment's boot, and the entrypoint.
 ENV NPM_CONFIG_PREFIX=/workspace/.home/.local
 # PEP 668 pin — without it every `pip install` on this base refuses. Safe
 # here: no system component uses python, and as uid 1000 the system

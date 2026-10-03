@@ -1,15 +1,15 @@
 /**
  * Credential redaction for anything that leaves the sandbox as a log line.
  *
- * The supervisor's stderr is shipped off-node (in the hosted cloud, to a log
- * group operators read), so a token that reaches a log line is a token
+ * The supervisor's stderr leaves the sandbox (a hosted deployment ships it
+ * to its operators' log store), so a token that reaches a log line is a token
  * that left the sandbox. The proxy credential (`aoc_`) is the one this
  * process genuinely holds (it rides HTTPS_PROXY, and every tool error that
  * echoes a proxy URL would otherwise carry it), but every other family the
  * platform mints is scrubbed too: the user/org API keys (`oc_`, `oc_org_`),
  * SCIM tokens (`oc_scim_`), the runner (`rnr_`) and channel adapter
  * (`cha_`) credentials. None may appear in a sandbox, and a log line is the
- * last place to catch one that did. A hosted deployment's node-side log
+ * last place to catch one that did. A deployment's log
  * pipeline that repeats this rule must mirror the same list.
  *
  * Prefix + at least 16 token characters, never a bare prefix: the floor
@@ -19,8 +19,8 @@
  * `oc_` inside `aoc_` is not double-matched. The prefix survives redaction so
  * an operator can still tell WHICH family leaked.
  *
- * A hosted deployment's log pipeline may apply the same rule again
- * off-node: this is the first line, not the only one.
+ * A deployment's log pipeline may apply the same rule again
+ * downstream: this is the first line, not the only one.
  */
 export const TOKEN_PREFIXES = [
   "aoc_",

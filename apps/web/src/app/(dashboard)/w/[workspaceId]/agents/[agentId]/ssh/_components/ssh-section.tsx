@@ -10,7 +10,7 @@ import { SshKeyPicker } from "./ssh-key-picker";
 import { SshConnectSteps } from "./ssh-connect-steps";
 
 /**
- * The agent's SSH section (sandbox-platform step 5): pick a registered key,
+ * The agent's SSH section: pick a registered key,
  * mint a short-lived certificate with one click, connect with plain `ssh`.
  * First run registers the key inline (shared form — the account page owns
  * the full manager). Hosted-only via the section table — the rail never

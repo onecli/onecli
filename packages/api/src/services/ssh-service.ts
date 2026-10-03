@@ -41,10 +41,10 @@ import { wakeSandboxFor } from "./turn-service";
 import { canAccessWorkspaceAsUser } from "./workspace-access-check";
 
 /**
- * The SSH front door's control-plane half (plans/sandbox-platform.md step 5):
+ * The SSH front door's control-plane half:
  * certificate minting for authenticated users, and the terminator's session
  * surface (open / heartbeat / close) — the narrow terminator↔control-plane
- * channel §3.8 pre-authorized. Liveness truth is the heartbeat LEASE
+ * channel. Liveness truth is the heartbeat LEASE
  * (`SSH_SESSION_LEASE_SECONDS`), never the status column alone; the
  * stale-session sweep closes what a crashed terminator abandoned.
  */
@@ -80,7 +80,7 @@ const asEd25519Signer = async (
 export interface MintedSshCertificate {
   certificate: string;
   host: string;
-  /** Public SSH port — 22 on cloud (the NLB), a high port on self-host. */
+  /** Public SSH port — 22 by default, a high port on self-host. */
   port: number;
   /** The SSH username — the immutable agent id (the cert's principal). */
   user: string;
@@ -204,7 +204,7 @@ export const mintSshCertificate = async (
 
   // Speculative wake (issues-file fold-in): the mint is a strong signal an
   // SSH connect is seconds away — start the boot now so wake-on-connect
-  // usually finds a warm pod. One-shot: if the user never connects, the
+  // usually finds a warm sandbox. One-shot: if the user never connects, the
   // ordinary idle-stop parks it again.
   await wakeSandboxFor(agentId);
   signalWork();
@@ -422,7 +422,8 @@ export interface SshHeartbeatResult {
 
 /**
  * Renew the session lease and RE-RUN the access law. Revocation is detected
- * here (the pull-shaped kill signal — nothing can dial into the agent VPC),
+ * here (the pull-shaped kill signal — nothing can dial into the sandbox
+ * network),
  * and the row is closed SERVER-SIDE at detection so keep-awake drops even if
  * a hostile terminator keeps heartbeating.
  */
@@ -535,11 +536,12 @@ const closeSshSessionRow = async (
   // ONLY for a session that actually ATTACHED. A session that never reached
   // the relay (wake timeout, broker refusal) did no work, and stamping for it
   // is actively harmful: idle-stop is what recovers a sandbox the control
-  // plane still reads `running` after its pod vanished out-of-band (node
-  // death — the runner's reconcile only iterates pods it can still see), and
+  // plane still reads `running` after it vanished out-of-band (a host
+  // failure — the runner's reconcile only iterates sandboxes it can still
+  // see), and
   // that arm is gated on `last_active_at`. Stamping on every failed attempt
   // would let a user retrying ssh push their own agent's recovery out by the
-  // idle window each time. Measured on the dev live gate.
+  // idle window each time. Measured live.
   if (session.attachedAt) {
     await db.sandbox.updateMany({
       where: { id: session.sandboxId },

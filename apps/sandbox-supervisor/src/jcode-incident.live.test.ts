@@ -411,7 +411,7 @@ describe.skipIf(!LIVE)("the stuck-sandbox incident, fixed (live jcode)", () => {
   }, 240_000);
 
   it("a Slack presence attached MID-RUN reaches the live conversation's next turn — the doc AND the tools the model sees (the dev incident, 2026-09-15)", async () => {
-    // Observed on dev: an agent whose session was already awake had Slack
+    // Observed live: an agent whose session was already awake had Slack
     // attached; the home sync re-rendered CLAUDE.md, but jcode captures the
     // instruction doc and the MCP tool list at session start, so the same
     // session kept telling a Slack user it had no Slack access. The mock

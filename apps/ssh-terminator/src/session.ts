@@ -53,7 +53,7 @@ const PROGRESS_THROTTLE_MS = 10_000;
  * Same ordering rule as the terminator server's refusal path: writing the
  * banner and calling `endConnection()` in the SAME tick loses it — OpenSSH
  * takes the DISCONNECT out of the same read batch and exits without flushing.
- * Measured on the dev live gate: deleting the terminator pod dropped a live
+ * Measured live: stopping the terminator dropped a live
  * PTY session in 0.8s but printed a bare "Received disconnect … :11:" instead
  * of "the server is shutting down, reconnect shortly". Revocation, max
  * duration and idle timeout all ride the same path, so all four reasons were
@@ -157,8 +157,8 @@ export interface ConnectionSession<T> {
   /**
    * Drop the cached exec target so the next ensureTarget re-resolves. The
    * cache holds a target for up to ~570s with no failure-driven refresh —
-   * a reaped session trio or a re-pinned pod makes it stale mid-session,
-   * and the dial-retry path (server.ts) is what heals that (step 6).
+   * a reaped session or a relocated sandbox makes it stale mid-session,
+   * and the dial-retry path (server.ts) is what heals that.
    */
   invalidateTarget(): void;
   registerChannel(channel: NotifiableChannel, hasPty: boolean): () => void;

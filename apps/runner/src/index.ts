@@ -228,7 +228,7 @@ const main = async (): Promise<void> => {
       collector.flushAll();
       // Bounded: a control plane that is itself down must not hold the
       // process open past its termination grace period. The runner's own
-      // settle covers in-flight lifecycle work and ITS report chain (step 4).
+      // settle covers in-flight lifecycle work and ITS report chain.
       await Promise.race([
         Promise.all([runner.settle(), reportChain]),
         new Promise((resolve) => setTimeout(resolve, SHUTDOWN_DRAIN_MS)),

@@ -168,9 +168,9 @@ export const parsePagination = (query: {
 };
 
 /**
- * The absolute /scim/v2 base for meta.location. CloudFront/ALB terminate
- * TLS, so the request URL the app sees is http — honor X-Forwarded-Proto
- * (the ALB sets it from the listener) so locations say https in deployment.
+ * The absolute /scim/v2 base for meta.location. A TLS-terminating proxy
+ * means the request URL the app sees is http — honor X-Forwarded-Proto
+ * (the proxy sets it) so locations say https in deployment.
  */
 export const scimBaseUrl = (
   requestUrl: string,

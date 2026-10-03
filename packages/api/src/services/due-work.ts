@@ -40,7 +40,7 @@ const log = logger.child({ component: "due-work" });
 const STALE_CLAIM_SECONDS = 300;
 
 /**
- * A LEASE-CURRENT SSH session (sandbox-platform step 5): the terminator
+ * A LEASE-CURRENT SSH session: the terminator
  * heartbeats every ~30s, so a session whose `last_heartbeat_at` is inside
  * the lease window is a human at a live prompt — and one whose terminator
  * crashed goes silent and self-expires here without any cleanup write (the
@@ -175,9 +175,9 @@ export interface DueTurn {
   /**
    * When this turn's claim-latency clock started — the same
    * COALESCE(retried_at, promoted_at, created_at) the turn-budget sweeps
-   * use. Server-side telemetry only (the claim-wait log line → the cloud's
-   * metric filter); never on the runner wire. Optional so test fakes that
-   * predate it stay valid.
+   * use. Server-side telemetry only (the claim-wait log line → a
+   * deployment's log-based metric); never on the runner wire. Optional so
+   * test fakes that predate it stay valid.
    */
   waitedSince?: Date;
 }
@@ -286,11 +286,10 @@ interface SyncRow {
 const TURN_LIMIT = 5;
 
 /**
- * The claim-wait log line's contract with the cloud's CloudWatch metric
- * filter (step 6): the filter pattern is built from EXACTLY these two
- * strings and byte-pinned by an infra drift test that reads this file — a
- * rename here without the infra edit would silently kill the TurnQueueSeconds
- * metric and its alarm (NOT_BREACHING = nobody would ever know).
+ * The claim-wait log line is a metric carrier: a deployment's log-based
+ * metric can match on EXACTLY these two strings, so treat them as a
+ * contract — a rename here silently kills any metric (and alarm) built on
+ * them.
  */
 export const WORK_CLAIMED_LOG_MSG = "work claimed";
 export const WORK_CLAIMED_WAIT_FIELD = "waitedSeconds";

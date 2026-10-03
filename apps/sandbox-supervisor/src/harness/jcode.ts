@@ -111,8 +111,7 @@ const JCODE_HOME_DIRNAME = ".jcode-home";
 /**
  * The agent's POSIX home under the workspace volume — byte-equal with the
  * agent image's contract (docker/agent-entrypoint.sh's export,
- * agent.Dockerfile `usermod -d`) and AGENT_POSIX_HOME in
- * packages/sandbox-shared/src/constants.ts. Derived from homeDir, NEVER from
+ * agent.Dockerfile `usermod -d`, AGENT_POSIX_HOME). Derived from homeDir, NEVER from
  * process.env.HOME: in local dev that is the developer's real home, and the
  * purge lists below DELETE from it.
  */

@@ -20,8 +20,8 @@ vi.mock("@/hooks/use-counts", () => ({
   useCounts: () => ({ data: undefined }),
 }));
 
-// The rail reads the instance for the SSH auto-hide gate (sandbox-platform
-// step 5). Mutable so the gate tests below can flip it; the default is an
+// The rail reads the instance for the SSH auto-hide gate. Mutable so the
+// gate tests below can flip it; the default is an
 // instance WITH ssh, so the gated entry renders like any other row.
 const instanceState: { value: InstanceInfo | null } = { value: null };
 const instanceWithSsh = (): InstanceInfo => ({
@@ -98,7 +98,7 @@ describe("the rail's Slack connected mark", () => {
 });
 
 /**
- * The SSH auto-hide gate (sandbox-platform step 5): an instance-gated entry
+ * The SSH auto-hide gate: an instance-gated entry
  * exists only where the deployment has the capability. Loading shows the
  * entry — loading must never render as unavailable (the availability.ts law).
  */

@@ -34,7 +34,7 @@ describe("isTranscriptRejected", () => {
 });
 
 /** The gateway's real trial-credit 403 body, as the harness wraps it (the
- * shape observed live in dev — prose mentions no refusal token, so without
+ * shape observed live — prose mentions no refusal token, so without
  * its own code this fell through to the raw red-box passthrough). */
 const TRIAL_CREDIT_403 =
   'Anthropic API error (403 Forbidden): {"add_key_url":"https://app-dev.onecli.sh/w/x/connections/llms","error":"trial_credit_exhausted","limit_usd":5.0,"message":"Your free OneCLI trial credit ($5.00) is used up. Add your own Anthropic API key in the OneCLI dashboard to keep going: https://app-dev.onecli.sh/w/x/connections/llms","period":"total"}';

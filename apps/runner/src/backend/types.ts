@@ -2,7 +2,7 @@
  * THE SANDBOX BACKEND SEAM (plans/hosted-agents-v2.md §3.14 rule 2, §3.9).
  *
  * The runner's lifecycle logic speaks only this interface. v2 ships local
- * Docker; gVisor, microVMs, Fly, and managed substrates are ADDED backends,
+ * Docker; other runtimes and managed substrates are ADDED backends,
  * never edits to the runner — and the home contract is part of the same
  * interface, so a new substrate brings its own durability implementation
  * behind the same opaque ref.
@@ -35,8 +35,8 @@ export class ImageUnavailableError extends Error {
  * (the ImageUnavailableError pattern) so the runner can classify it
  * `reasonCode: "at_capacity"` — the control plane's honest "too many agents
  * are running right now" copy — without knowing any substrate's error
- * shapes. On the cloud backend this carries the manager's 422
- * `workspace_quota_exceeded` (the per-workspace ResourceQuota, step 6).
+ * shapes. On the cloud backend this carries the remote service's 422
+ * `workspace_quota_exceeded` (its per-workspace capacity limit).
  */
 export class SandboxCapacityError extends Error {
   constructor(detail: string) {
@@ -68,7 +68,7 @@ export interface SandboxSpec {
   sandboxId: string;
   /**
    * The workspace the sandbox's agent lives in — a DOMAIN id, not a runtime
-   * concept. Namespaced backends (the cloud manager) fence every sandbox
+   * concept. Namespaced backends fence every sandbox
    * inside its workspace; the Docker backend ignores it. Optional because an
    * older control plane may not send it — a backend that requires it refuses
    * loudly instead of guessing.
@@ -95,8 +95,8 @@ export interface SandboxSnapshot {
   running: boolean;
   payloadHash: string | null;
   /**
-   * The substrate's own lifecycle phase, when it has one (a Kubernetes pod
-   * phase). Absent/null on substrates without the concept — consumers must
+   * The substrate's own lifecycle phase, when it has one (an orchestrator's
+   * pod phase). Absent/null on substrates without the concept — consumers must
    * treat that as "running is the whole truth". The boot-crash classifier
    * reads it to tell a genuinely TERMINAL container from one that is merely
    * not running yet (Pending while its image pulls).

@@ -17,8 +17,8 @@ export const orgRoutes = () => {
   const app = new Hono<ApiEnv>();
 
   // GET /v1/org — the org object plus its creation-world posture. `byoLegacy`
-  // is the manually-operated per-org switch (sandbox-platform §3.10 as
-  // re-decided 2026-08-23): on cloud, false = hosted-first creation, true =
+  // is the manually-operated per-org switch: on cloud, false = hosted-first
+  // creation, true =
   // BYO-only creation. `byoEnabled` (mixed world, 2026-08-29) is only read
   // when `byoLegacy` is false: it additionally allows BYO creation beside the
   // hosted default. Both inert on self-host — the web ignores them there.

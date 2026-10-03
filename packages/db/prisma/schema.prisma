@@ -628,7 +628,7 @@ model ProcessWatch {
   @@map("process_watches")
 }
 
-// ── SSH front door (plans/sandbox-platform.md step 5, §3.8) ──
+// ── SSH front door ──
 // One customer SSH session into a hosted agent's sandbox, reported by the
 // SSH terminator over its own authenticated surface. LIVENESS truth is the
 // lease (`lastHeartbeatAt` within the lease window) — never the status

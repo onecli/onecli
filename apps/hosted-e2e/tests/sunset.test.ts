@@ -5,8 +5,8 @@ import { seedTenant } from "../src/fixtures.js";
 /**
  * The sunset-posture matrix leg (the v2-todo reserved slot, paid by the
  * step-8 flip): this suite runs the ONPREM stack, where the cloud
- * creation-world gate (`Organization.byoLegacy`, sandbox-platform §3.10 as
- * re-decided 2026-08-23) must be INERT — byo creation stays byte-identical
+ * creation-world gate (`Organization.byoLegacy`) must be INERT — byo
+ * creation stays byte-identical
  * whatever the column says, in both directions. The cloud arm of the matrix
  * is proven in packages/api (agent-service{,.pg}.test.ts, the gate reads the
  * edition per call); this leg pins the self-host posture against a live

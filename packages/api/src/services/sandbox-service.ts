@@ -133,9 +133,9 @@ export const buildSandboxStartPayload = async (
     ok: true,
     agentId: agent.id,
     payload: {
-      // The workspace fence for namespaced backends (sandbox-platform step 3):
-      // the cloud manager creates every sandbox inside its workspace's
-      // namespace. Composed at dispatch from the same row as everything else.
+      // The workspace fence for namespaced backends: a namespaced backend
+      // creates every sandbox inside its workspace. Composed at dispatch
+      // from the same row as everything else.
       workspaceId: agent.workspaceId,
       env: config.env,
       files: [

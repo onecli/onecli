@@ -32,7 +32,7 @@ export const AUDIT_ACTIONS = {
   // reading "invite" then "accept" is how the join is reconstructed.
   INVITE: "invite",
   ACCEPT: "accept",
-  // SSH front door (sandbox-platform step 5): a short-lived user certificate
+  // SSH front door: a short-lived user certificate
   // signed for a (user, agent) pair — an access GRANT, so first-class rather
   // than CREATE. Metadata carries ids + the cert serial, never key material.
   MINT: "mint",
@@ -105,7 +105,7 @@ export const AUDIT_SERVICES = {
   // EE-only (member provisioning): pre-minted placeholder accounts handed out
   // via claim links. CREATE = minted, ACCEPT = claimed.
   PROVISION: "provision",
-  // SSH front door (sandbox-platform step 5): certificate mints (MINT) and
+  // SSH front door: certificate mints (MINT) and
   // terminator-reported session open/close. Free shared code, dark without
   // an SSH CA configured; sourceIp in metadata is terminator-reported.
   SSH: "ssh",

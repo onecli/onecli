@@ -9,7 +9,7 @@ import {
 } from "../services/ssh-service";
 
 /**
- * The SSH terminator's own surface (plans/sandbox-platform.md step 5) — the
+ * The SSH terminator's own surface — the
  * narrow terminator↔control-plane channel, authenticated by the static
  * SSH_TERMINATOR_SECRET alone (terminator-auth middleware; unset = every
  * call refused, the dark posture). The terminator's word is never trusted
@@ -17,7 +17,7 @@ import {
  * re-verifies it against the CA, deriving every id from signed material.
  *
  * Heartbeats are the kill signal's transport (pull-shaped — nothing can dial
- * into the agent VPC): each one re-runs the access law and reports `revoked`
+ * into the sandbox network): each one re-runs the access law and reports `revoked`
  * back; the row is closed server-side at detection so keep-awake drops even
  * if the terminator misbehaves.
  */

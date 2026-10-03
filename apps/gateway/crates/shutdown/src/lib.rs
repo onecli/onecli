@@ -29,7 +29,7 @@ use tracing::{info, warn};
 /// Sized against the tightest real budget — the all-in-one container gets
 /// Docker's default 10s between SIGTERM and SIGKILL — with a second of
 /// headroom, so even a fully-burned shutdown still gets to log that it
-/// finished. ECS allows 30s.
+/// finished. Orchestrators commonly allow 30s.
 const DEFAULT_SHUTDOWN_SECS: u64 = 9;
 
 const SHUTDOWN_SECS_ENV: &str = "GATEWAY_SHUTDOWN_TIMEOUT_SECS";

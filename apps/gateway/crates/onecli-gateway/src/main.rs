@@ -86,7 +86,7 @@ async fn main() -> Result<()> {
         run_healthcheck(cli.port).await;
     }
 
-    // Initialize logging — JSON for production (CloudWatch), text for dev
+    // Initialize logging — JSON for production (log aggregators), text for dev
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     if std::env::var("LOG_FORMAT").as_deref() == Ok("json") {
@@ -188,7 +188,7 @@ async fn main() -> Result<()> {
     let ca = CertificateAuthority::load_or_generate(&data_dir).await?;
     info!("CA certificate loaded");
 
-    // Support both DATABASE_URL (OSS) and individual DB_* vars (cloud ECS from Secrets Manager)
+    // Support both DATABASE_URL and individual DB_* vars (injected separately by some deployments)
     let database_url = match std::env::var("DATABASE_URL") {
         Ok(url) => url,
         Err(_) => {
@@ -239,7 +239,7 @@ async fn main() -> Result<()> {
     let vault_service = Arc::new(VaultService::new(providers, policy_engine.pool.clone()));
     info!("vault service initialized");
 
-    // Redis (ElastiCache with TLS + AUTH) when REDIS_HOST is set, else in-memory.
+    // Redis (managed Redis with TLS + AUTH) when REDIS_HOST is set, else in-memory.
     let cache = wiring::create_cache_store().await?;
     info!("cache store created");
 
@@ -299,10 +299,11 @@ fn expand_tilde(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-/// Assemble a postgres URL from the individual DB_* parts (cloud ECS injects
-/// them from Secrets Manager). Username and password are percent-encoded —
-/// RDS-managed passwords contain special characters that would corrupt the
-/// URL. Env values come in as parameters so tests never mutate process env.
+/// Assemble a postgres URL from the individual DB_* parts (some deployments
+/// inject them separately). Username and password are percent-encoded —
+/// managed-database passwords can contain special characters that would
+/// corrupt the URL. Env values come in as parameters so tests never mutate
+/// process env.
 fn database_url_from_parts(host: &str, port: &str, user: &str, pass: &str, name: &str) -> String {
     use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
     let user = utf8_percent_encode(user, NON_ALPHANUMERIC);
@@ -313,7 +314,7 @@ fn database_url_from_parts(host: &str, port: &str, user: &str, pass: &str, name:
 /// Self-probe for container healthchecks (`onecli-gateway --healthcheck`):
 /// GET /healthz on 127.0.0.1:{port}, exit 0 on a 2xx, exit 1 otherwise. The
 /// explicit exits matter — the release profile is panic=abort, so any
-/// unwind-free failure path must still produce a clean 0/1 for Docker/ECS.
+/// unwind-free failure path must still produce a clean 0/1 for any orchestrator.
 async fn run_healthcheck(port: u16) -> ! {
     let healthy = healthcheck_ok(port).await;
     std::process::exit(if healthy { 0 } else { 1 });
@@ -323,7 +324,7 @@ async fn healthcheck_ok(port: u16) -> bool {
     // .no_proxy(): with a proxy env var set, reqwest would send the request
     // absolute-form through the proxy — and the gateway dispatches
     // absolute-form requests down its own proxy path, never to /healthz.
-    // Failures go to stderr, which `docker inspect` and the ECS console keep
+    // Failures go to stderr, which `docker inspect` (and any orchestrator) keeps
     // as the probe's output — an unhealthy verdict should say why.
     let client = match reqwest::Client::builder()
         .no_proxy()
@@ -385,7 +386,7 @@ mod tests {
     fn database_url_from_parts_is_table_driven() {
         // (host, port, user, pass, name) → expected URL. The special-character
         // rows are MUTATION-PROOF: drop the percent-encoding and they fail —
-        // an RDS-managed password with `@:/?#[]%` would corrupt the URL.
+        // a managed-database password with `@:/?#[]%` would corrupt the URL.
         let cases: &[(&str, &str, &str, &str, &str, &str)] = &[
             (
                 "db.internal",

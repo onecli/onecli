@@ -20,9 +20,9 @@ const log = logger.child({ component: "transcript-stream" });
 
 /**
  * How often the stream emits a keep-alive. Must stay under the tightest hop:
- * CloudFront's 60s origin response timeout caps the gap between packets, and
- * the ALB's 60s idle timeout needs at least one byte (it does not count
- * HTTP/2 PINGs). 15s is the WHATWG suggestion and leaves 4x margin.
+ * CDNs and load balancers commonly cap the gap between packets at ~60s and
+ * need at least one byte (HTTP/2 PINGs do not count). 15s is the WHATWG
+ * suggestion and leaves 4x margin.
  *
  * It is also the connection's dead-peer detector, which is why it runs even
  * on a busy stream: hono's `write` swallows its own errors, so a failed write
@@ -104,7 +104,7 @@ export const streamTranscript = (
   // does not change that — this header is the switch. Without it every
   // self-hosted install behind nginx (the common onprem shape) gets a
   // stream that still "works" and is no longer live, which is the failure
-  // mode hardest to notice. CloudFront's half is handled in the CDK.
+  // mode hardest to notice. A CDN in front needs its own equivalent setting.
   c.header("X-Accel-Buffering", "no");
 
   return streamSSE(
@@ -306,7 +306,7 @@ export const streamTranscript = (
             // GAP REPAIR. Seqs are contiguous per conversation and every
             // event — deltas included — is published, so a hole in the live
             // tail means a publish was dropped (a Redis blip) or arrived
-            // out of order across pods. Advancing `lastSeq` over the hole
+            // out of order across instances. Advancing `lastSeq` over the hole
             // would make the dedupe hide its durable events for the life of
             // the connection — so read them back first: this event's publish
             // happened after its commit and commits are seq-ordered, so

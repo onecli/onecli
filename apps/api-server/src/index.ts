@@ -25,8 +25,8 @@ const server = serve({ fetch: app.fetch, port }, () => {
 // AWS Marketplace overage metering (no-op unless the listing is configured).
 startAwsMarketplaceMeteringJob();
 
-// Must exceed the ALB idle timeout (65s) or the ALB reuses connections
-// Node has already closed → sporadic 502s.
+// Must exceed a fronting load balancer's idle timeout (commonly 60–65s) or it
+// reuses connections Node has already closed → sporadic 502s.
 if (server instanceof Server) {
   server.keepAliveTimeout = 70000;
   server.headersTimeout = 71000;

@@ -48,7 +48,7 @@ const RETRY_MIN_MS = 1_000;
 const RETRY_MAX_MS = 30_000;
 /**
  * Cadence of the `starting` progress heartbeat a claimed start emits from the
- * moment it is ENQUEUED until it settles (step 4). The control plane's
+ * moment it is ENQUEUED until it settles. The control plane's
  * stale-claim window is 300s measured on the row's update clock; a start
  * queued behind the lifecycle semaphore (or executing a minutes-long wake)
  * emits no ordinary events in that window, and without the heartbeat the
@@ -157,7 +157,7 @@ export interface Runner {
   containerRefOf(sandboxId: string): string | undefined;
   /**
    * Resolves once every enqueued work item and every queued report has
-   * settled. `tick` only ENQUEUES (step 4) — this is the deterministic drain
+   * settled. `tick` only ENQUEUES — this is the deterministic drain
    * tests (and the shutdown path) wait on.
    */
   settle(): Promise<void>;
@@ -264,7 +264,7 @@ export const createRunner = ({
   const sandboxContainers = new Map<string, string>();
 
   /**
-   * THE LIFECYCLE EXECUTOR (step 4). Every work item runs on its sandbox's
+   * THE LIFECYCLE EXECUTOR. Every work item runs on its sandbox's
    * FIFO chain — which is where all the per-sandbox ordering guarantees live
    * (sync frames before the turn frame, deliver before steer, a start before
    * anything dispatched after it). Only STARTS additionally take the global
@@ -317,7 +317,7 @@ export const createRunner = ({
   const startHeartbeats = new Map<string, NodeJS.Timeout>();
   /**
    * Fresh creates admitted past the capacity check but not yet visibly
-   * `running` (a cloud pod boots for minutes; a booting sibling is invisible
+   * `running` (a remote sandbox can boot for minutes; a booting sibling is invisible
    * to the live count). Without this, N concurrent starts all read the same
    * stale count and all pass at capacity − 1. Entries are pruned inside the
    * check itself: an id now running (or gone — a failed create) drops out.
@@ -1080,9 +1080,9 @@ export const createRunner = ({
     const expected = new Set(assigned.sandboxIds);
     const unreachable: RunnerEvent[] = [];
 
-    // Statuses first, snapshots second — so a pod can only APPEAR between
+    // Statuses first, snapshots second — so a sandbox can only APPEAR between
     // the reads, never leave a healthy sandbox looking vanished: reporting
-    // `stopped` requires "believed running" to predate "no pod exists".
+    // `stopped` requires "believed running" to predate "no sandbox exists".
     const snapshots = await backend.listSandboxes();
     for (const snapshot of snapshots) {
       if (expected.has(snapshot.sandboxId)) {
@@ -1107,15 +1107,15 @@ export const createRunner = ({
          */
         /**
          * BOOT CRASH — the container we spawned died before its supervisor
-         * ever dialled in (step 4). Its token was never consumed, so
+         * ever dialled in. Its token was never consumed, so
          * `awaitingConnection` stays true FOREVER and both arms below are
          * structurally blind to it; unclassified, the control plane
          * respawns it every 30s for the full turn ceiling while the churn
-         * pins its node. Every conjunct is an attempt fence: the ref must be
-         * OUR spawn, its start must have fully SETTLED (a mid-boot pod is
+         * pins its capacity. Every conjunct is an attempt fence: the ref must be
+         * OUR spawn, its start must have fully SETTLED (a mid-boot sandbox is
          * dead-looking for minutes while its image pulls), the phase — when
          * the substrate reports one — must be genuinely TERMINAL (a create
-         * can return optimistically at its image-watch budget with the pod
+         * can return optimistically at its image-watch budget with the sandbox
          * still Pending; "not running" alone would classify a boot that is
          * merely slow), the dial-in grace must have elapsed, and one
          * classification per corpse — a repeat report while the re-start is
@@ -1234,9 +1234,9 @@ export const createRunner = ({
 
     /**
      * THE VANISHED-POD ARM — the reverse diff the loop above cannot see.
-     * Every arm above requires a snapshot to exist, but a pod deleted
-     * out-of-band (node death and its Kubernetes GC, an eviction, a
-     * `kubectl delete`, a `docker rm`) leaves NO snapshot at all: the
+     * Every arm above requires a snapshot to exist, but a sandbox deleted
+     * out-of-band (a host failure, an eviction, a manual delete,
+     * a `docker rm`) leaves NO snapshot at all: the
      * control plane keeps reading `running`, a `running` sandbox is never
      * re-started, turns black-hole until the 30-minute ceiling, and only
      * idle-stop eventually unwedges it. So: a sandbox the control plane
@@ -1247,7 +1247,7 @@ export const createRunner = ({
      *
      * Fences, each load-bearing: `running` only, because `starting`/
      * `stopping` are the 300s stale-claim's business and everything else
-     * expects no pod (a deliberate park flips to `stopping` at claim time,
+     * expects no sandbox (a deliberate park flips to `stopping` at claim time,
      * so it never enters); a queued or executing start, whose create call is
      * legitimately absent from snapshots mid-flight (the capacity prune
      * documents the same caveat); a queued stop, which will report `stopped`
@@ -1287,7 +1287,7 @@ export const createRunner = ({
           sandboxId,
           status: "stopped",
         });
-        // The pod is gone; drop what this process remembered about it — the
+        // The sandbox is gone; drop what this process remembered about it — the
         // same pair a deliberate stop clears. `admittedNew` is load-bearing:
         // the capacity prune skips ids with an executing start, so the
         // recovery start for THIS sandbox would count its own stale
@@ -1328,9 +1328,9 @@ export const createRunner = ({
   };
 
   /**
-   * Reconcile passes must never OVERLAP (the manager's lifecycle-sweep
-   * overlap-skip precedent): `missingWhileRunning` is cross-pass memory, and
-   * a slow pass (a wedged manager, a fleet of corpses to reap) overlapping a
+   * Reconcile passes must never OVERLAP: `missingWhileRunning` is cross-pass
+   * memory, and
+   * a slow pass (a wedged backend, a fleet of corpses to reap) overlapping a
    * fresh interval tick would let two stale reads of ONE window count as
    * "consecutive" — reporting `stopped` over a healthy agent, exactly what
    * the two-pass fence exists to prevent. A skipped call is covered by the
@@ -1348,7 +1348,7 @@ export const createRunner = ({
   };
 
   /**
-   * Route one claimed item onto its sandbox's chain (step 4). Cross-sandbox
+   * Route one claimed item onto its sandbox's chain. Cross-sandbox
    * order is NOT preserved — per-sandbox order is, and that is where every
    * documented ordering invariant lives. At `lifecycleConcurrency: 1` the
    * semaphore keeps backend-touching work (starts) globally serialized

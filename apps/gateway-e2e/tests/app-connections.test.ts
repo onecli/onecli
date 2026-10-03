@@ -376,7 +376,7 @@ describe("app connection resolution", () => {
       expect(JSON.stringify(body)).not.toContain("e2e-snow-");
 
       // And it reaches the activity feed. Before #1158 this failure was
-      // visible only in CloudWatch: an un-injected answer was logged as a
+      // visible only in server logs: an un-injected answer was logged as a
       // plain allow and dropped. Terminating runs the final telemetry flush,
       // so the row is in Postgres when the process exits.
       expect((await gw.terminate()).code).toBe(0);

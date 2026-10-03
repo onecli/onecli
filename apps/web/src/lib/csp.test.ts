@@ -4,7 +4,7 @@ import { buildCsp, createCspNonce } from "./csp";
 /**
  * OC-01 pins: script-src must never regress back to 'unsafe-inline' /
  * 'unsafe-eval' in production, and the rest of the policy must keep the
- * hardened shape the retired CloudFront header had.
+ * hardened shape the previous static header had.
  */
 
 const directives = (csp: string): Map<string, string> => {

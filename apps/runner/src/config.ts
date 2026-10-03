@@ -46,8 +46,8 @@ export interface RunnerConfig {
   /** Minimum age before a stale-label object may be reaped. */
   orphanGraceSeconds: number;
   /**
-   * The `cloud` backend's sandbox-manager endpoint + shared service secret
-   * (plans/sandbox-platform.md step 3). No defaults, and required only when
+   * The `cloud` backend's remote endpoint + shared service secret. No
+   * defaults, and required only when
    * RUNNER_BACKEND=cloud — every other backend must not even be asked to
    * carry them. Checked at boot so a missing value is one clear line, not a
    * stream of 401s.
@@ -55,27 +55,27 @@ export interface RunnerConfig {
   sandboxManagerUrl: string | null;
   sandboxManagerToken: string | null;
   /**
-   * Ceiling on waiting for the manager to ACCEPT a park (the parker job
-   * created — never the upload itself, which completes manager-side): bounds
-   * the predecessor pod's 30s termination grace plus slack.
+   * Ceiling on waiting for the backend to ACCEPT a park (never the archive
+   * itself, which completes backend-side): bounds the predecessor
+   * sandbox's termination grace plus slack.
    */
   cloudParkWaitSeconds: number;
   /**
-   * Ceiling on waking a home: a wake may pay a still-finishing park, a
-   * fresh node provision (~2 min) and a full restore stream.
+   * Ceiling on waking a home: a wake may pay a still-finishing park, fresh
+   * capacity coming up, and a full restore.
    */
   cloudWakeWaitSeconds: number;
   /**
    * How long a create watches the new sandbox for an image-pull refusal
-   * (the cloud analogue of Docker's synchronous pull failure).
+   * (the remote analogue of Docker's synchronous pull failure).
    */
   cloudImageWaitSeconds: number;
   /**
-   * How many sandbox STARTS may execute concurrently (step 4). Default 1
+   * How many sandbox STARTS may execute concurrently. Default 1
    * keeps backend-touching work globally serialized — docker operations on
    * one self-host box contend, and a burst of parallel image pulls is how a
-   * laptop falls over. The cloud deployment raises it: there each start is a
-   * remote Kubernetes operation (a wake can legitimately hold for minutes),
+   * laptop falls over. A remote backend raises it: there each start is a
+   * remote operation (a wake can legitimately hold for minutes),
    * and serializing them head-of-line-blocks every other sandbox. Stops are
    * never gated on this — they are cheap everywhere, and a stop stuck in a
    * queue past the control plane's 300s stale-claim window is re-dispatched

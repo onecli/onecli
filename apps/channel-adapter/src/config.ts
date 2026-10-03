@@ -16,7 +16,7 @@ export interface AdapterConfig {
    * and remains the bearer against an old control plane that mints nothing. */
   token: string;
   /** The instance's stable name — the key its registration row survives
-   * restarts under. Unset, it derives from the hostname: unique per ECS task
+   * restarts under. Unset, it derives from the hostname: unique per instance
    * and per container with zero configuration (compose and `pnpm dev` both
    * set an explicit name). */
   name: string;

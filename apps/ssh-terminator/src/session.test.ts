@@ -210,8 +210,8 @@ describe("createConnectionSession — open/close contract", () => {
 
   // The reason is only useful if it LEAVES. Severing the transport in the same
   // tick as the banner loses it: OpenSSH takes the DISCONNECT out of the same
-  // read batch and exits without flushing (measured on the dev live gate — a
-  // terminator pod delete dropped a live PTY session with a bare
+  // read batch and exits without flushing (measured live — stopping the
+  // terminator dropped a live PTY session with a bare
   // "Received disconnect … :11:" instead of the shutdown banner).
   it("holds the connection open until the banner has flushed", async () => {
     const h = harness();

@@ -736,7 +736,7 @@ export const slackProvider: ChannelProvider = {
     } catch (err) {
       // Narration decorates a loader that is already standing, so a refusal
       // costs the words and nothing else. Stable message + Slack's own code,
-      // so the rate is measurable in CloudWatch.
+      // so the rate is measurable in the logs.
       log.info(
         { err: String(err), channel },
         "slack narration refused; native loader stands",

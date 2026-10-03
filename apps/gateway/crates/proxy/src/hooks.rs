@@ -308,7 +308,7 @@ fn emit_block_telemetry(
 /// `connection_host_mismatch`). Its own decision, `NeedsConnection`, because
 /// an un-injected `Allowed` row is never persisted: without it the failure
 /// an agent hit (the Salesforce and Snowflake incidents) was visible only in
-/// CloudWatch, never in the activity feed.
+/// server logs, never in the activity feed.
 pub(crate) fn record_needs_connection(mut meta: RequestMeta, error: &str) {
     meta.decision = Some(telemetry::core::RequestDecision::NeedsConnection {
         error: error.to_string(),

@@ -225,7 +225,7 @@ interface ConversationRuntime {
    * already running. jcode captures the instruction doc and the MCP tool
    * list at session start, so the running session would keep answering from
    * the OLD doc (an agent attached to Slack mid-run told a Slack user it had
-   * no Slack access — observed on dev, 2026-09-15). The next turn on this
+   * no Slack access — observed live, 2026-09-15). The next turn on this
    * conversation drops the session and starts a fresh one over the same
    * resume ref, which re-reads the doc and re-lists the tools. Never applied
    * to an IN-FLIGHT turn: the flag waits for the turn to end.

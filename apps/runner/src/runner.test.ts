@@ -144,7 +144,7 @@ beforeEach(() => {
 });
 
 /**
- * `tick` only ENQUEUES since step 4 — the executor runs items on per-sandbox
+ * `tick` only ENQUEUES — the executor runs items on per-sandbox
  * chains. Driving a poll deterministically means ticking and then settling.
  */
 const drive = async (): Promise<void> => {
@@ -562,7 +562,7 @@ describe("a sandbox that is running but unreachable", () => {
 });
 
 describe("the vanished-pod arm (expected running, no snapshot)", () => {
-  // A pod deleted out-of-band (node death and its Kubernetes GC, an
+  // A sandbox deleted out-of-band (a host failure, an
   // eviction, a `docker rm`) leaves NO snapshot, so every snapshot-driven
   // arm above is structurally blind: the control plane keeps reading
   // `running`, a `running` sandbox is never re-started, and only the
@@ -570,7 +570,7 @@ describe("the vanished-pod arm (expected running, no snapshot)", () => {
   // once absence has held for two consecutive passes, and the ordinary wake
   // path recovers.
 
-  /** Start sb-1, let it settle running, then vanish its pod out-of-band. */
+  /** Start sb-1, let it settle running, then vanish it out-of-band. */
   const vanish = async (): Promise<void> => {
     queued.push(startItem("sb-1"));
     await drive();
@@ -607,7 +607,7 @@ describe("the vanished-pod arm (expected running, no snapshot)", () => {
     posted.length = 0;
 
     await runner.reconcile();
-    // The pod is back (a transient list blind spot healed), and healthy —
+    // The sandbox is back (a transient list blind spot healed), and healthy —
     // give it a live channel so the snapshot arms stay quiet too.
     backend.sandboxes.set("sb-1", record);
     connected.add("sb-1");
@@ -626,7 +626,7 @@ describe("the vanished-pod arm (expected running, no snapshot)", () => {
 
   it("never fires for a sandbox the control plane does not read as running", async () => {
     // `starting`/`stopping` are the 300s stale-claim's business; everything
-    // else expects no pod at all.
+    // else expects no sandbox at all.
     await vanish();
     const quiet = [
       "unprovisioned",
@@ -686,7 +686,7 @@ describe("the vanished-pod arm (expected running, no snapshot)", () => {
   });
 
   it("never fires while a start is QUEUED behind the sandbox's executing stop", async () => {
-    // The realistic shape: the pod vanishes while a stop is mid-execution
+    // The realistic shape: the sandbox vanishes while a stop is mid-execution
     // and the recovery start is already queued behind it on the chain.
     // MUTATION-PROOF: drop the queuedStarts fence and the expect fails —
     // the executing stop has already drained its queuedStops slot and no
@@ -1290,7 +1290,7 @@ describe("the lifecycle executor (step 4)", () => {
 
   it("counts in-flight fresh creates against capacity", async () => {
     // N concurrent slots reading one stale live count would all pass at
-    // capacity − 1 — and a booting cloud pod is invisible to `running`.
+    // capacity − 1 — and a booting remote sandbox is invisible to `running`.
     runner = createRunner({
       config: { ...config, lifecycleConcurrency: 2 },
       backend,
@@ -1419,8 +1419,8 @@ describe("post-start boot-crash classification (step 4)", () => {
         reasonCode: "start_failed",
       },
     ]);
-    // The corpse is removed: it held the home's RWO claim, and the manager
-    // can neither park nor release the node while it exists.
+    // The corpse is removed: while it exists it still holds the home, so
+    // the backend can neither park nor release it.
     expect(backend.sandboxes.has("sb-1")).toBe(false);
     expect(runner.containerRefOf("sb-1")).toBeUndefined();
   });
@@ -1550,8 +1550,8 @@ describe("review fixes (step-4 whole-PR review)", () => {
   });
 
   it("does NOT classify a Pending-phase snapshot as a boot crash", async () => {
-    // The cloud create can return optimistically at its image-watch budget
-    // with the pod still Pending — slow, not dead. Only a terminal phase
+    // A remote create can return optimistically at its image-watch budget
+    // with the sandbox still Pending — slow, not dead. Only a terminal phase
     // (or a substrate with no phase concept) may classify.
     runner = createRunner({
       config,

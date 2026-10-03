@@ -10,8 +10,8 @@ const log = logger.child({ component: "event-bus" });
  * `publish`/`subscribe` and nowhere else. The implementation is chosen per
  * edition through the provider seam (`../providers/event-bus.ts`): onprem — a
  * single api instance — uses the in-process emitter below; cloud, where api
- * pods multiply behind a load balancer, injects a Redis pub/sub bus so a
- * `publish` on one pod reaches an SSE stream held on another
+ * instances multiply behind a load balancer, injects a Redis pub/sub bus so a
+ * `publish` on one instance reaches an SSE stream held on another
  * (`../ee/event-bus/redis-event-bus.ts`). Shared code never imports `ee/`, so
  * the Redis bus is injected at boot, never referenced here.
  *

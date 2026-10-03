@@ -85,8 +85,8 @@ export const deleteImage = (agentId: string) =>
   apiDelete(`/v1/agents/${encodeURIComponent(agentId)}/image`);
 
 /**
- * Mint a short-lived OpenSSH user certificate for this hosted agent
- * (sandbox-platform step 5). The source is a registered key's id (the
+ * Mint a short-lived OpenSSH user certificate for this hosted agent.
+ * The source is a registered key's id (the
  * one-click path) or a pasted public key line. Refusals are STATES the SSH
  * section renders inline off `ApiError.status`: 404 = no SSH front door on
  * this deployment or the registered key is gone, 422 = not an ed25519 key,

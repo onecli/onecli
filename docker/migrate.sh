@@ -3,12 +3,12 @@ set -e
 
 # One-shot database migration runner, baked into the dedicated migrations
 # image (docker/migrations.Dockerfile). The compose `migrations` service
-# (self-host) and the cloud migration task both run this to completion before
+# (self-host) and any managed deployment's migration job run this to completion before
 # any serving container starts — the servers themselves never migrate.
 #
-# DATABASE_URL may be preset, or assembled from DB_* parts (the cloud task
-# injects DB_HOST plus DB_USERNAME/DB_PASSWORD from Secrets Manager; the
-# password is URL-encoded because RDS-managed passwords can contain special
+# DATABASE_URL may be preset, or assembled from DB_* parts (a deployment may
+# inject DB_HOST plus DB_USERNAME/DB_PASSWORD separately; the
+# password is URL-encoded because managed-database passwords can contain special
 # characters).
 if [ -z "$DATABASE_URL" ] && [ -n "$DB_HOST" ]; then
   ENCODED_PASSWORD=$(node -e 'process.stdout.write(encodeURIComponent(process.env.DB_PASSWORD ?? ""))')

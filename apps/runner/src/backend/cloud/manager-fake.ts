@@ -2,14 +2,14 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
 /**
- * A hand-rolled, HTTP-level sandbox-manager fake for the cloud backend's
- * conformance suite. Deliberately NOT an import of apps/sandbox-manager:
- * that app is cloud-only while this runner syncs to the OSS mirror, so any
- * import would break the mirror's build — and an HTTP fake also exercises
+ * A hand-rolled, HTTP-level fake of the remote sandbox service for the
+ * cloud backend's conformance suite. Deliberately NOT an import of the real
+ * service: this runner must build on its own, so it may depend on nothing
+ * but the HTTP contract — and an HTTP fake also exercises
  * the real manager-client (fetch, auth header, envelope decoding), which an
  * injected client object would bypass.
  *
- * Behavior is the manager's documented contract: pod-UID refs, tolerant
+ * Behavior is the service's documented contract: opaque refs, tolerant
  * stops, owner-scoped snapshots, poll-driven park/wake. Tests script the
  * interesting states directly on the exposed maps/queues.
  */
@@ -34,9 +34,9 @@ export interface RecordedRequest {
 export interface FakeManager {
   url: string;
   requests: RecordedRequest[];
-  /** containerRef → snapshot; mutate to script pod states. */
+  /** containerRef → snapshot; mutate to script sandbox states. */
   sandboxes: Map<string, FakeSnapshot>;
-  /** sandboxId → runnerId owner (the PVC-ish home list). */
+  /** sandboxId → runnerId owner (the home list). */
   homes: Map<string, string>;
   /** Managed objects answered verbatim by GET /v1/managed. */
   managed: unknown[];
@@ -46,20 +46,20 @@ export interface FakeManager {
   /** When set, the next create answers this instead of succeeding. */
   nextCreateError: { status: number; code: string; message: string } | null;
   /** When set, the next create answers 201 with THIS body — a version-skewed
-   * manager whose 2xx shape the client must refuse fail-closed. */
+   * service whose 2xx shape the client must refuse fail-closed. */
   nextCreateBody: unknown | null;
   /** New sandboxes appear with this state. */
   createRunning: boolean;
   /** Fail this many requests with a 500 before answering normally —
-   * simulates a manager mid-redeploy / an NLB flow drop. */
+   * simulates a service mid-redeploy / a dropped load-balancer flow. */
   failNextRequests: number;
-  /** Answer park/wake with the step-2 manager's `{ok:true}` shape. */
+  /** Answer park/wake with an older service's `{ok:true}` shape. */
   legacyParkAnswers: boolean;
-  /** Truncate this many 2xx bodies (a dying pod mid-read) before answering
+  /** Truncate this many 2xx bodies (a dying instance mid-read) before answering
    * normally — exercises the `bad_body` transient path. */
   truncateNextBodies: number;
   /** Answer the next park/wake with this house error (e.g. 503
-   * not_configured) instead of a status — a deterministic manager refusal. */
+   * not_configured) instead of a status — a deterministic service refusal. */
   nextHomeError: { status: number; code: string; message: string } | null;
   close(): Promise<void>;
 }

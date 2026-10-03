@@ -94,8 +94,8 @@ const cronOf = (schedule: string, timezone: string): Cron => {
 
 /**
  * Ceiling on the per-occurrence wake-storm jitter. Late-only 0..300s is the
- * deliberate reading of the plan's "±5 min" (plans/sandbox-platform.md step
- * 4): a schedule may fire late, never early — "daily at 9:00" firing at 8:57
+ * deliberate reading of a "±5 min" budget: a schedule may fire late, never
+ * early — "daily at 9:00" firing at 8:57
  * would surprise the person who wrote it.
  */
 export const CRON_JITTER_MAX_SECONDS = 300;

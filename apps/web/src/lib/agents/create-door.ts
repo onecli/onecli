@@ -7,8 +7,7 @@ import { showsHostedSurface } from "./availability";
  * same corner).
  *
  * On CLOUD the door is chosen by the org's creation world — the manually
- * operated `Organization.byoLegacy` column (sandbox-platform §3.10 as
- * re-decided 2026-08-23), served by GET /v1/org:
+ * operated `Organization.byoLegacy` column, served by GET /v1/org:
  *
  * - `false` (every org by default): hosted-only. One button, straight into
  *   hosted creation, whatever agents the workspace already holds — the server

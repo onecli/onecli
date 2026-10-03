@@ -1,6 +1,6 @@
 import Script from "next/script";
 
-// Baked at build time by the cloud image (deploy.yml build-args). Unset —
+// Baked at build time by the cloud image (build args). Unset —
 // every self-host build — means the script never mounts and no site id
 // ships in the bundle.
 const FATHOM_SITE_ID = process.env.NEXT_PUBLIC_FATHOM_SITE_ID;

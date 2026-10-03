@@ -229,7 +229,7 @@ export const createApiApp = (
   // The channel adapter's own surface (step 6): `cha_` family only, the
   // runner-daemon pattern.
   app.route("/channel-adapter", channelAdapterRoutes());
-  // The SSH terminator's own surface (sandbox-platform step 5): static
+  // The SSH terminator's own surface: static
   // terminator secret only — the narrow terminator↔control-plane channel.
   // Dark (blanket 401) until SSH_TERMINATOR_SECRET is configured.
   app.route("/ssh-terminator", sshTerminatorRoutes());

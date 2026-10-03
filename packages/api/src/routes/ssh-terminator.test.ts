@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// The SSH terminator surface's HTTP contract (sandbox-platform step 5):
+// The SSH terminator surface's HTTP contract:
 // static-secret separation in BOTH directions (the one-credential-per-plane
 // law), hint-free 401s, the dark posture when the secret is unset, and the
 // three verbs' shapes. Service behavior (cert verification, the access law,

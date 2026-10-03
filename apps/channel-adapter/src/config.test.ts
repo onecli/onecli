@@ -39,8 +39,8 @@ describe("defaults", () => {
   it("fills every address and cadence from the local-dev defaults", () => {
     expect(loadConfig(base)).toEqual({
       token: "cha_secret",
-      // Unset name derives a per-host identity: unique per ECS task/container
-      // with zero configuration, so N cloud instances never collide on the
+      // Unset name derives a per-host identity: unique per instance/container
+      // with zero configuration, so N instances never collide on the
       // registration row (compose and `pnpm dev` set explicit names).
       name: `channel-adapter-${hostname()}`,
       controlPlaneUrl: "http://localhost:10256",

@@ -43,7 +43,7 @@ pub fn check_ha_entitlement(redis_host: Option<&str>, entitled: bool) -> Result<
 ///
 /// `REDIS_HOST` (default `localhost` — callers gate on its presence before
 /// choosing a Redis backend, so the default never fires in practice),
-/// `REDIS_PORT` (default `6379`), TLS on by default (`rediss://`, ElastiCache)
+/// `REDIS_PORT` (default `6379`), TLS on by default (`rediss://`, managed Redis)
 /// with `REDIS_TLS=false` opting out (local plain Docker Redis), and
 /// `REDIS_PASSWORD` percent-encoded into the userinfo when set.
 fn redis_url_from_env() -> String {

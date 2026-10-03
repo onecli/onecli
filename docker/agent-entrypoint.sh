@@ -25,9 +25,9 @@ fi
 
 # The durable POSIX home: ~ lives ON the home volume (/workspace), so
 # dotfiles, shell history, `npm -g` and `pip --user` installs survive a
-# sandbox relaunch and park/wake. Byte-equal contract with the image's
-# passwd entry (agent.Dockerfile `usermod -d`), the hosted boot script's
-# export (apps/sandbox-manager/src/constants.ts AGENT_POSIX_HOME), and
+# sandbox relaunch and sleep. Byte-equal contract with the image's
+# passwd entry (agent.Dockerfile `usermod -d`), the AGENT_POSIX_HOME a
+# deployment's own boot exports, and
 # /etc/profile.d/onecli-path.sh. Re-exported here unconditionally so the
 # image is self-contained under ANY spawner — an older boot script, a bare
 # `docker run` — and created HERE, post-drop, as uid 1000: root must never
@@ -57,8 +57,8 @@ mkdir -p "$HOME/.local/bin" 2>/dev/null || true
 # this one path covers every build, including one Playwright downloads).
 # Without the gateway CA there every page load through the MITM fails
 # ERR_CERT_AUTHORITY_INVALID, and the escape an agent finds by trial is
-# ignoreHTTPSErrors — verification off for every site (measured live on
-# prod, 2026-09-09). So import it here, as uid 1000, onto the durable home,
+# ignoreHTTPSErrors — verification off for every site (measured live,
+# 2026-09-09). So import it here, as uid 1000, onto the durable home,
 # after HOME exists:
 # - the nickname carries the CA's fingerprint, which makes the import
 #   idempotent (present → nothing to do) and rotation-safe (a new gateway
@@ -124,8 +124,8 @@ export PATH
 #   NIX_SSL_CERT_FILE > SSL_CERT_FILE, so an explicit value is what makes
 #   every nix download through the gateway trust the MITM (measured).
 # - USER: nix's own tooling (and the hook, for shells the AGENT opens and
-#   sources it in) guards on it. The hosted boot script exports it; a bare
-#   `docker run` does not.
+#   sources it in) guards on it. A deployment's own boot may export it; a
+#   bare `docker run` does not.
 export USER="${USER:-node}"
 NIX_PROFILE_LINK="$HOME/.local/state/nix/profile"
 [ -e "$NIX_PROFILE_LINK" ] || NIX_PROFILE_LINK="$HOME/.nix-profile"
@@ -143,10 +143,10 @@ unset NIX_PROFILE_LINK
 
 # Rootless podman keeps its image/container store on the durable home
 # (/workspace, per the baked storage.conf's rootless_storage_path), so it
-# survives a sandbox relaunch and park/wake. Pre-create the store tree
+# survives a sandbox relaunch and sleep. Pre-create the store tree
 # node-owned: podman does not create <graphroot>/tmp before the first pull's
 # store-init needs it (and image_copy_tmp_dir="storage" stages pulls there,
-# off the shared node disk). Best-effort — a home this process can't write is
+# off the ephemeral rootfs). Best-effort — a home this process can't write is
 # already a fatal problem the supervisor reports; never block boot on it.
 # Idempotent: a restored home already has the tree, with the agent's images.
 mkdir -p /workspace/.local/share/containers/storage/tmp 2>/dev/null || true

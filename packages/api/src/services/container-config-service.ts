@@ -80,9 +80,9 @@ export const resolveContainerConfigAgent = async (
 
 export const CA_CONTAINER_PATH = "/tmp/onecli-gateway-ca.pem";
 // Stays on the EPHEMERAL rootfs on purpose, even though ~ is now durable
-// (/workspace/.home): spawn files may never target the durable home (the
-// manager's validations refuse /workspace/** — a prior spawn could pre-plant
-// a symlink for root's `install` to follow), and the stub is a per-spawn
+// (/workspace/.home): spawn files may never target the durable home (a
+// remote backend refuses spawn files under /workspace/** — a prior spawn
+// could pre-plant a symlink for root's `install` to follow), and the stub is a per-spawn
 // placeholder the gateway splices over anyway. CODEX_HOME (env) pins it.
 const CODEX_HOME_CONTAINER_PATH = "/home/node/.codex";
 

@@ -61,7 +61,7 @@ export const SECRET_SPECS = [
     isValid: nonEmpty,
     // The api and the ssh-terminator share this ONE value (the terminator's
     // control-plane token = the api's SSH_TERMINATOR_SECRET). Cloud injects
-    // it from Secrets Manager, and the coupled SSH key material (CA key,
+    // it as a deployment secret, and the coupled SSH key material (CA key,
     // host key) is provisioned only outside cloud by ensureSshEnv — so mint
     // this only outside cloud too, or the surface half-arms (a live
     // /v1/ssh-terminator with no CA behind it).

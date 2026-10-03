@@ -463,8 +463,8 @@ describe("putFiles (payload file injection)", () => {
     const stubEntries = parseTarEntries(puts[1]!.raw!);
     expect(stubEntries).toEqual([
       // Chain first, node-owned and writable by the workload — never
-      // root-owned dirs the agent cannot use (the cloud boot script's
-      // `install -d -o node -g node` contract).
+      // root-owned dirs the agent cannot use (the node-owned contract every
+      // substrate keeps).
       {
         name: ".codex/",
         typeflag: "5",

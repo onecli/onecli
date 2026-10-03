@@ -3,8 +3,8 @@
 #
 # Carries exactly what a migration run needs — the lockfile-pinned Prisma CLI,
 # packages/db/prisma (schema + migrations), and docker/migrate.sh — and nothing
-# else. The compose `migrations` service (self-host) and the cloud migration
-# Fargate task both run this image with its default CMD; the serving images
+# else. The compose `migrations` service (self-host) and any managed
+# deployment's migration job run this image with its default CMD; the serving images
 # contain no migration tooling. One ONECLI_VERSION / image tag pins it in
 # lockstep with the services, so the migrations that run are always the ones
 # the code beside them expects.

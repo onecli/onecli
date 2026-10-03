@@ -3,12 +3,12 @@ import { IS_CLOUD } from "../lib/env";
 import { WORK_CLAIMED_LOG_MSG, WORK_CLAIMED_WAIT_FIELD } from "./due-work";
 
 /**
- * The turn-queue telemetry line (step 6): one log line per claimed turn —
- * the exact shape the cloud's TurnQueueSeconds metric filter is pinned to.
+ * The turn-queue telemetry line: one log line per claimed turn — the exact
+ * shape a deployment's log-based metric can match on.
  *
- * In CLOUD the line is a metric carrier and prod runs LOG_LEVEL=warn, so the
- * child logger pins its own `info` level there — or the one environment the
- * alarm watches would never produce the line. Onprem has no filter reading
+ * In CLOUD the line is a metric carrier and the root level may be
+ * LOG_LEVEL=warn, so the child logger pins its own `info` level there — or
+ * the line would never be produced. Onprem has no metric reading
  * it, so the operator's chosen root level stands. One factory, with the
  * edition injectable so the pinning behavior is testable against a real
  * warn-level root. Telemetry only: nothing thrown here may break the claim

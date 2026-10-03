@@ -3,8 +3,8 @@
  *
  * Log forwarding must stay bounded no matter what the source does: a
  * runaway harness (or an agent deliberately flooding its own log) must not
- * turn into unbounded stderr (in the hosted cloud every line is shipped and
- * billed). Refusals are counted, never silent: the caller reports the count
+ * turn into unbounded stderr (a deployment that ships every line pays for
+ * every line). Refusals are counted, never silent: the caller reports the count
  * on the next line it lets through (`takeSuppressed`), so a gap in the log
  * always says how big it was.
  */

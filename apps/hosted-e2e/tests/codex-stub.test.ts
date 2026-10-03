@@ -14,7 +14,7 @@ import { runTurn } from "../src/v1.js";
  * granted an OpenAI OAuth secret gets `/home/node/.codex/auth.json` in its
  * spawn payload — a directory the agent image does NOT ship. The docker
  * backend must create the missing chain itself (Docker's archive endpoint
- * 404s on a missing extraction path; the Kata boot script isn't here to
+ * 404s on a missing extraction path; no boot script runs here to
  * `install -d`), and everything must land owned by the workload user: the
  * stub is mode 0600, so a root-owned copy is unreadable and Codex boots
  * credential-less.

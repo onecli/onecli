@@ -114,9 +114,8 @@ export const sandboxStartPayloadSchema = z.object({
   env: z.record(z.string(), z.string()),
   files: z.array(sandboxFileSchema),
   /**
-   * The workspace the sandbox's agent lives in (step 3 of
-   * plans/sandbox-platform.md). Namespaced backends (the cloud manager) fence
-   * every sandbox inside its workspace's namespace and need this at create
+   * The workspace the sandbox's agent lives in. Namespaced backends fence
+   * every sandbox inside its workspace and need this at create
    * time; the Docker backend ignores it. Optional so an older control plane
    * keeps working against a newer runner — a backend that REQUIRES it refuses
    * loudly instead of guessing.
@@ -470,7 +469,7 @@ export const runnerSandboxesResponseSchema = z.object({
   /**
    * What the control plane currently BELIEVES about each assigned sandbox,
    * keyed by sandbox id — the vanished-pod arm's input: a sandbox believed
-   * `running` with no backend snapshot is a pod that died out-of-band, and
+   * `running` with no backend snapshot is a sandbox that died out-of-band, and
    * the runner is the only party positioned to notice. `sandboxIds` stays
    * the reap authority; this field is advisory. Values ride as open strings
    * (never an enum — a future status must not break an old runner's parse),

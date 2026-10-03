@@ -139,7 +139,7 @@ export const buildSharedAppManifest = (input: {
         // the app-manager user scopes on a non-enrolled team fails creation
         // with "Illegal user scopes found" — stricter than the authorize URL,
         // which grants the scopes and refuses only at spend time
-        // (invalid_manager_app; live-verified on dev, 2026-08-26).
+        // (invalid_manager_app; verified against Slack, 2026-08-26).
         ...(slackAppManagerApproved() ? { user: [...SHARED_USER_SCOPES] } : {}),
       },
       redirect_urls: [inbound("oauth/callback")],

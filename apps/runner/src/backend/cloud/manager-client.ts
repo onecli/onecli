@@ -1,9 +1,9 @@
 /**
- * HTTP client for the sandbox-manager's REST API (plans/sandbox-platform.md
- * step 3). Deliberately tiny: base URL + shared service secret, bounded
+ * HTTP client for the remote sandbox service's REST API. Deliberately tiny:
+ * base URL + shared service secret, bounded
  * per-call timeouts, and the house error envelope decoded into one typed
  * error — the backend above it speaks the SandboxBackend seam, this file
- * speaks HTTP, and nothing else in the runner knows the manager exists.
+ * speaks HTTP, and nothing else in the runner knows the service exists.
  *
  * Request bodies are NEVER logged: a create body carries `spec.env`, which
  * includes the sandbox's live gateway proxy token.
@@ -12,19 +12,19 @@
 /** Default per-call timeout — every endpoint answers promptly… */
 const REQUEST_TIMEOUT_MS = 15_000;
 /**
- * …except create, which can legitimately hold the manager's live-spawn fence
- * (45s default) plus its pod wait (20s) plus namespace/PVC ensure work.
+ * …except create, which can legitimately wait on the service's own
+ * admission and startup work.
  */
 const CREATE_TIMEOUT_MS = 90_000;
 /**
- * …and destroy-home, which drains any in-flight parker pods (up to their 30s
- * kill grace) before deleting the archive object — so a truncated home is
- * never resurrected by a late upload. Must exceed the manager's drain
- * ceiling, or the runner aborts mid-drain and logs a spurious reap failure.
+ * …and destroy-home, which waits out any in-flight archive before deleting
+ * it — so a truncated home is never resurrected by a late upload. Must
+ * exceed the service's own drain ceiling, or the runner aborts mid-drain
+ * and logs a spurious reap failure.
  */
 const DESTROY_HOME_TIMEOUT_MS = 60_000;
 
-/** The manager refused or failed a call — its house envelope, typed. */
+/** The service refused or failed a call — its house envelope, typed. */
 export class ManagerApiError extends Error {
   constructor(
     readonly status: number,
@@ -36,7 +36,7 @@ export class ManagerApiError extends Error {
   }
 }
 
-/** One sandbox snapshot as the manager reports it. */
+/** One sandbox snapshot as the service reports it. */
 export interface ManagerSandboxSnapshot {
   sandboxId: string;
   containerRef: string;
@@ -55,13 +55,13 @@ export interface ManagerManagedObject {
   createdAt: string | null;
 }
 
-/** Park/wake progress as the manager's stateless state machine reports it. */
+/** Park/wake progress as the service's stateless state machine reports it. */
 export type ParkStatus = "pending" | "parking" | "parked";
 export type WakeStatus = "waking" | "ready";
 
 /** Where a brand-new home is born when the wake has to create it: the
- * create body's ownership trio, sent on the wake. The manager uses it only
- * for a home with no PVC and no archive; anything that exists is placed by
+ * create body's ownership trio, sent on the wake. The service uses it only
+ * for a home that does not exist yet; anything that exists is placed by
  * its own truth. */
 export interface ManagerWakePlacement {
   workspaceId: string;
@@ -92,8 +92,8 @@ export interface ManagerClient {
     request: ManagerCreateSandboxRequest,
   ): Promise<{ containerRef: string }>;
   startSandbox(ref: string): Promise<void>;
-  /** `sandboxId` lets the manager resolve the pod with a label-scoped list
-   * instead of a fleet-wide scan — optional, additive (step 4). */
+  /** `sandboxId` lets the service resolve the sandbox with a scoped lookup
+   * instead of a fleet-wide scan — optional, additive. */
   stopSandbox(ref: string, sandboxId?: string): Promise<void>;
   removeSandbox(ref: string, sandboxId?: string): Promise<void>;
   listSandboxes(runnerId: string): Promise<ManagerSandboxSnapshot[]>;
@@ -135,7 +135,7 @@ export const createManagerClient = (
 
     if (!response.ok) {
       // The house envelope when present; a bare status otherwise (a proxy or
-      // a dying pod can answer before Hono does).
+      // a dying instance can answer before the service does).
       const envelope = (await response.json().catch(() => null)) as {
         error?: { code?: string; message?: string };
       } | null;
@@ -147,9 +147,9 @@ export const createManagerClient = (
     }
 
     // A 2xx with an unparsable body is a FAILURE, never a null the caller
-    // dereferences into a TypeError: a dying pod behind the NLB can truncate
-    // a body mid-read, and that must surface as the typed transport error
-    // the retry logic understands.
+    // dereferences into a TypeError: a dying instance behind a load balancer
+    // can truncate a body mid-read, and that must surface as the typed
+    // transport error the retry logic understands.
     try {
       return (await response.json()) as unknown;
     } catch {
@@ -163,8 +163,8 @@ export const createManagerClient = (
 
   /**
    * Park/wake answers are validated FAIL-CLOSED against the exact status
-   * vocabulary: anything else (most likely a version-skewed manager — the
-   * step-2 build answers `{ok:true}`) must be an error, never read as
+   * vocabulary: anything else (most likely a version-skewed service) must
+   * be an error, never read as
    * progress or, worse, as completion.
    */
   const expectStatus = <T extends string>(
@@ -187,7 +187,7 @@ export const createManagerClient = (
   };
 
   /**
-   * The same fail-closed posture for every other 2xx body: a skewed manager
+   * The same fail-closed posture for every other 2xx body: a skewed service
    * (or an intermediary answering 2xx JSON of another shape) must surface as
    * the honest `unexpected_status` refusal — never as `undefined` flowing
    * into refs and list logic until it dies somewhere confusing (a

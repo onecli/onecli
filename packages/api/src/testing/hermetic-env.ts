@@ -147,7 +147,7 @@ export const AMBIENT_HAZARD_VARS: readonly string[] = [
   "TURN_CEILING_WARNING_SECONDS",
   "TURN_STALL_SECONDS",
   "MAX_HELD_AWAKE_SANDBOXES",
-  // SSH front door (sandbox-platform step 5)
+  // SSH front door
   "SSH_TERMINATOR_SECRET",
   "SSH_CA_KMS_KEY_ARN",
   "SSH_CA_PRIVATE_KEY",

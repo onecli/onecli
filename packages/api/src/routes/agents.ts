@@ -301,7 +301,7 @@ export const agentRoutes = () => {
     return c.json(result);
   });
 
-  // POST /agents/:agentId/ssh-certificate (sandbox-platform step 5): mint a
+  // POST /agents/:agentId/ssh-certificate: mint a
   // short-lived OpenSSH user certificate for this agent. Same authz stack as
   // every agent sub-resource (workspace-fenced lookup inside the service);
   // the hosted-kind gate is the service's — the regenerate-token pattern

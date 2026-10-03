@@ -276,9 +276,9 @@ mod tests {
         assert_eq!(parse(Edition::Cloud, Some("   "), Some("500"), None), None);
     }
 
-    // The deploy provisions the secret with a GENERATED placeholder so the
-    // task can boot before an operator pastes the real key. A key that does
-    // not look like an Anthropic credential must read as "unconfigured" —
+    // A deployment may provision the secret with a GENERATED placeholder so
+    // the process can boot before an operator pastes the real key. A key
+    // that does not look like an Anthropic credential must read as "unconfigured" —
     // otherwise the placeholder would be injected upstream as if real.
     #[test]
     fn parse_rejects_a_placeholder_shaped_key() {

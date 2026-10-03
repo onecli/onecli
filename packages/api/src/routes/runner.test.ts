@@ -129,7 +129,7 @@ vi.mock("../services/cron-fire-service", () => ({
 }));
 
 // The poll's ssh-session sweep + the instance route's availability posture
-// (sandbox-platform step 5) — mocked so the route graph loads without the
+// — mocked so the route graph loads without the
 // ssh service; the sweep is non-fatal like every sweep.
 vi.mock("../services/ssh-service", () => ({
   sweepSshSessions: vi.fn(async () => {}),

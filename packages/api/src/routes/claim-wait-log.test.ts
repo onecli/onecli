@@ -8,10 +8,9 @@ import {
 } from "../services/due-work";
 
 /**
- * The claim-wait line is a METRIC CARRIER (the cloud's TurnQueueSeconds
- * filter reads it from the api-server log group), and prod runs
- * LOG_LEVEL=warn — the step-6 review found the naive `log.info` never exists
- * in exactly the environment the alarm watches. These tests drive the REAL
+ * The claim-wait line is a METRIC CARRIER (a log-based metric can read it),
+ * and production commonly runs LOG_LEVEL=warn — a naive `log.info` would
+ * never exist in exactly the environment an alarm watches. These tests drive the REAL
  * factories the route wires (not a re-derivation of the mechanism), so a
  * regression in the shipped code fails here.
  */
@@ -24,7 +23,7 @@ const captured = (): { root: pino.Logger; lines: string[] } => {
       callback();
     },
   });
-  // warn root = the prod api-server shape (api-server-stack LOG_LEVEL).
+  // warn root = a production api-server shape (LOG_LEVEL=warn).
   return { root: pino({ level: "warn" }, sink), lines };
 };
 

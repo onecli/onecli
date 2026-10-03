@@ -46,8 +46,8 @@ pub struct PendingApproval {
     /// Deserialize-only rename compat (temporary — deletion recipe in
     /// `compat.rs`): a post-rename binary reads PRE-rename Redis payloads
     /// (`project_id`), so approvals created before a deploy that crosses the
-    /// rename survive onto new pods. The REVERSE is deliberately uncovered —
-    /// rows a new pod writes are invisible to not-yet-replaced old pods for
+    /// rename survive onto new instances. The REVERSE is deliberately uncovered —
+    /// rows a new instance writes are invisible to not-yet-replaced old ones for
     /// the rolling window, bounded by the 190s Redis TTL (and moot under the
     /// planned scale-to-zero cutover).
     #[serde(alias = "project_id")]

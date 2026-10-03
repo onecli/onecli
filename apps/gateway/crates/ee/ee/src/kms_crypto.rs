@@ -29,7 +29,7 @@ pub struct KmsEnvelopeCrypto {
 
 impl KmsEnvelopeCrypto {
     /// Build the backend from the environment: AWS credentials and region come
-    /// from the standard SDK chain (env vars, instance metadata, ECS task
+    /// from the standard SDK chain (env vars, instance metadata, an attached
     /// role); `KMS_KEY_ARN` is read at encrypt time.
     pub async fn from_env() -> Self {
         let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;

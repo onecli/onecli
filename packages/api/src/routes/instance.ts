@@ -48,10 +48,10 @@ export const instanceRoutes = (version?: string) => {
         gateway: origins.gateway,
         mode: origins.mode,
       },
-      // The SSH front door (sandbox-platform step 5): absent means "not on
+      // The SSH front door: absent means "not on
       // this deployment" — the optional-field contract `runners` set. Only
-      // the public DNS host and port, never CA or session facts. Cloud
-      // advertises :22 (the NLB); self-host an unprivileged high port.
+      // the public DNS host and port, never CA or session facts. Default
+      // :22; self-host an unprivileged high port.
       ...(sshAvailable() ? { ssh: { host: SSH_HOST, port: SSH_PORT } } : {}),
     });
   });

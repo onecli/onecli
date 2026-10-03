@@ -5,7 +5,7 @@ import { createEditionSlot } from "./edition-state";
 import type { SshCaSigner } from "./types";
 
 /**
- * The SSH certificate authority (plans/sandbox-platform.md step 5): signs
+ * The SSH certificate authority: signs
  * user certificates and session grants. Nullable by design — `null` means
  * the SSH front door is not configured and the whole surface stays dark
  * (the RUNNER_TOKEN posture). Cloud injects the KMS-backed signer via

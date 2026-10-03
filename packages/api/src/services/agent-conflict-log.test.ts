@@ -33,7 +33,7 @@ const captured = (): { root: pino.Logger; lines: string[] } => {
       callback();
     },
   });
-  // warn root = the prod api-server shape (api-server-stack LOG_LEVEL).
+  // warn root = a production api-server shape (LOG_LEVEL=warn).
   return { root: pino({ level: "warn" }, sink), lines };
 };
 

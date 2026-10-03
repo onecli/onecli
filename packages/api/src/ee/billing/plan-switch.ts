@@ -147,7 +147,7 @@ const searchOrgSubscriptions = async (
  * That is not cosmetic: every reconcile-on-read lists subscriptions for the
  * STORED customer, finds nothing active, and writes `subscriptionStatus` back
  * to "free" — silently downgrading a paying customer moments after checkout
- * (live incident, org ifmgushjgmxhqeds on Scale, 2026-09). Searching on the
+ * (live incident, 2026-09). Searching on the
  * `organizationId` metadata every subscription we create carries is what makes
  * the lookup independent of the customer-id drift; the caller then repairs the
  * stored id.

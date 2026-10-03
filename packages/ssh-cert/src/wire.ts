@@ -2,7 +2,7 @@
  * SSH wire-format primitives (RFC 4251 §5), the subset OpenSSH certificates
  * need: `string` (uint32 length + bytes), `uint32`, and `uint64`. Kept
  * dependency-free on purpose — this package is consumed by both the control
- * plane (cert minting) and the sandbox platform (terminator + broker
+ * plane (cert minting) and the SSH front door (terminator + broker
  * verification), and a wire codec must not drag either's dependency tree
  * into the other.
  */

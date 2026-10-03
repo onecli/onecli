@@ -48,7 +48,7 @@ type Catalog = HashMap<String, HashMap<String, CatalogTool>>;
 // is the gateway's own build artifact — derived from the shared TS catalog by
 // `pnpm generate:catalog` and drift-checked (`ee/apps/catalog-json.test.ts`).
 // One generated catalog for every edition (shared + cloud providers), derived
-// from the TS registry by `cloud-scripts/generate-catalog.ts` and drift-checked
+// from the TS registry by a generator script and drift-checked
 // by `catalog-json.test.ts`.
 const CATALOG_JSON: &str = include_str!("catalog.generated.json");
 

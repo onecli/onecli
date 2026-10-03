@@ -3676,9 +3676,9 @@ describe.skipIf(!PROOF_URL)(
       // The RESOLVED model, from the granted key's provider — nobody chose it.
       expect(decision.payload.model).toBe(anthropic.defaultModel);
       expect(decision.payload.env.ANTHROPIC_API_KEY).toBe("placeholder");
-      // The workspace fence for namespaced backends (sandbox-platform step 3):
-      // the cloud manager refuses a create without it, so dropping this field
-      // must fail HERE, not as a live 400 on dev.
+      // The workspace fence for namespaced backends: a namespaced backend
+      // refuses a create without it, so dropping this field
+      // must fail HERE, not as a live 400.
       expect(decision.payload.workspaceId).toBe(WORKSPACE);
     });
 

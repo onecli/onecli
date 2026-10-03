@@ -77,9 +77,9 @@ const normalizeDomain = (raw: string): string => {
  * or null when the email has no valid domain. Non-throwing: callers on
  * login paths skip rather than error.
  *
- * The PreSignUp Lambda re-implements this as `normalizeEmailDomain`
- * (packages/infra/lambdas/pre-signup/linking.ts) because it can't import this
- * package — keep the two in lockstep.
+ * The identity provider's pre-signup hook re-implements this as
+ * `normalizeEmailDomain` because it can't import this package — keep the
+ * two in lockstep.
  */
 export const emailDomainOf = (email: string): string | null => {
   const at = email.lastIndexOf("@");

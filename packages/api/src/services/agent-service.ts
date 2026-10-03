@@ -245,8 +245,8 @@ export const createAgent = async (
     );
   }
 
-  // Cloud creation worlds (sandbox-platform §3.10 as re-decided 2026-08-23,
-  // mixed world added 2026-08-29): the org's byoLegacy column picks the
+  // Cloud creation worlds (mixed world added 2026-08-29): the org's
+  // byoLegacy column picks the
   // creation door — false means hosted-first (BYO additionally allowed when
   // byoEnabled is set: the gradual-migration world), true means BYO-only
   // (hosted starts with an onboarding call; byoEnabled is never consulted).

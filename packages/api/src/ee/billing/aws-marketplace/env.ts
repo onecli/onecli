@@ -1,8 +1,8 @@
 // AWS Marketplace SaaS listing config (plans/aws-marketplace-listing.md).
 // Presence of the product code is the runtime switch: unset (dev, OSS,
 // staging without a listing) disables every marketplace flow and the client
-// falls back to the in-memory fake. No ARNs or account ids here — per
-// CLOUD-DEVELOPMENT.md these values arrive via deploy-time env only.
+// falls back to the in-memory fake. No ARNs or account ids here — these
+// values arrive via deploy-time env only.
 
 export const AWS_MARKETPLACE_PRODUCT_CODE =
   process.env.AWS_MARKETPLACE_PRODUCT_CODE ?? "";
@@ -27,8 +27,8 @@ export const AWS_MARKETPLACE_REGION =
   process.env.AWS_MARKETPLACE_REGION ?? "us-east-1";
 
 /**
- * ARN of the infra-owned SNS topic that relays AWS Marketplace EventBridge
- * license events to the api-server (packages/infra: api-server-stack).
+ * ARN of the SNS topic that relays AWS Marketplace EventBridge
+ * license events to the api-server.
  * The event intake only accepts SNS messages from exactly this topic.
  */
 export const AWS_MARKETPLACE_SNS_TOPIC_ARN =

@@ -1136,7 +1136,7 @@ describe("the live stream", () => {
   });
 
   it("REPAIRS a hole in the live tail from history — a dropped publish must not hide durable events", async () => {
-    // The Redis bus may drop or reorder a publish (a blip, cross-pod
+    // The Redis bus may drop or reorder a publish (a blip, cross-instance
     // interleaving). Without the repair, `lastSeq` jumps the hole and the
     // dedupe hides the missing durable events for the life of the
     // connection — the client never reconnects because keep-alives flow.
@@ -1285,7 +1285,7 @@ describe("the live stream", () => {
 
   it("RELEASES its subscription when the reader goes away", async () => {
     // A closed tab that left a listener behind would leak one per reconnect,
-    // and the ALB closes these connections hourly no matter what.
+    // and load balancers recycle these connections no matter what.
     const before = subscriberCount("cv-1");
     const res = await app.request("/v1/conversations/cv-1/stream", {
       headers: AUTH,

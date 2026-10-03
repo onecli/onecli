@@ -1,24 +1,17 @@
 import { ConfigError } from "./errors";
 
-/** The sandbox platform's base CloudWatch namespace — duplicated privately
- * from the manager's constants (the runner/supervisor precedent): local/test
- * fallback only, never published to in cloud mode. */
+/** The base metric namespace: local/test fallback only, never published to
+ * in cloud mode. */
 const BASE_METRIC_NAMESPACE = "OneCLI/SandboxPlatform";
 
 /**
- * Resolve the CloudWatch namespace this process publishes to (step 6) —
- * the terminator's copy of the sandbox platform's one namespace law.
+ * Resolve the metric namespace this process publishes to. Cloud mode must
+ * name it explicitly: a deployment scopes its metrics per environment, and a
+ * silent fallback to the shared base would publish where nothing is watching
+ * (or be refused outright). Local/test falls back to the base constant.
  *
- * Per-env in cloud (`OneCLI/SandboxPlatform/<env>`): dev and prod share one
- * AWS account, so the base namespace would merge their dimensionless series
- * and both envs' alarms would watch the blend. Cloud mode must name it
- * explicitly — the PutMetricData IAM condition is exact-match, so a silent
- * fallback to the base would publish into AccessDenied: total metric loss
- * with fire-and-forget emitters and NOT_BREACHING alarms (nothing would
- * ever turn red). Local/test falls back to the base constant.
- *
- * `cloudMode` is this process's own "we run deployed" signal (a Secrets
- * Manager ARN being present), passed in by its config seam.
+ * `cloudMode` is this process's own "we run deployed" signal (a secret ARN
+ * being present), passed in by its config seam.
  */
 export const resolveMetricNamespace = (
   raw: string | undefined,

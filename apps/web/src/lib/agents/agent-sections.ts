@@ -116,7 +116,7 @@ export const AGENT_SECTIONS: readonly AgentSection[] = [
   // GIVEN, beside the connections it can reach.
   { section: "models", title: "Models", icon: Cpu, group: "access" },
   {
-    // A shell on the agent's computer (sandbox-platform step 5) is the other
+    // A shell on the agent's computer (SSH) is the other
     // way IN — an Access entry. Hosted-only (a BYO agent has no computer) and
     // instance-gated: only deployments with the SSH front door show it.
     section: "ssh",

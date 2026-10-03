@@ -56,11 +56,11 @@ impl CertificateAuthority {
     /// Load an existing CA from environment variables, disk, or generate a new one.
     ///
     /// Priority:
-    /// 1. `GATEWAY_CA_KEY` + `GATEWAY_CA_CERT` env vars (cloud: injected from Secrets Manager)
+    /// 1. `GATEWAY_CA_KEY` + `GATEWAY_CA_CERT` env vars (injected by the deployment)
     /// 2. Files at `{data_dir}/gateway/ca.key` and `ca.pem` (OSS: persisted on disk)
     /// 3. Generate a new CA and persist to disk (OSS: first startup)
     pub async fn load_or_generate(data_dir: &Path) -> Result<Self> {
-        // Check env vars first (cloud mode — CA injected by ECS from Secrets Manager)
+        // Check env vars first (a deployment that injects the CA as a secret)
         if let (Ok(key_pem), Ok(cert_pem)) = (
             std::env::var("GATEWAY_CA_KEY"),
             std::env::var("GATEWAY_CA_CERT"),

@@ -155,20 +155,20 @@ export const CHANNEL_ADAPTER_TOKEN = process.env.CHANNEL_ADAPTER_TOKEN ?? "";
  * `ee/attachments/s3-blob-store.ts`). Set to a bucket name and, on an
  * entitled deployment, NEW attachment bytes go to S3 and downloads become
  * presigned URLs; unset (or unlicensed) keeps the inline-Postgres arm, which
- * self-host runs by default. Credentials come from the SDK's default chain
- * (the task role on cloud), never from env. Rows already written inline keep
+ * self-host runs by default. Credentials come from the SDK's default chain,
+ * never from env. Rows already written inline keep
  * reading from Postgres — the two arms coexist per row (`storageRef`).
  */
 export const ATTACHMENTS_S3_BUCKET = process.env.ATTACHMENTS_S3_BUCKET ?? "";
 
-// ── SSH front door (plans/sandbox-platform.md step 5) ─────────────────────
+// ── SSH front door ─────────────────────────────────────────────────────────
 
 /**
  * The terminator's service secret — the narrow terminator↔control-plane
- * channel (§3.8's pre-authorized fallback). Presenting exactly this value
+ * channel. Presenting exactly this value
  * authorizes `/v1/ssh-terminator/*` and NOTHING else; empty means the
  * surface refuses everything (the RUNNER_TOKEN dark posture). Never the
- * runner↔manager secret, never a DB token family — one credential per plane.
+ * runner's secret, never a DB token family — one credential per plane.
  */
 export const SSH_TERMINATOR_SECRET = process.env.SSH_TERMINATOR_SECRET ?? "";
 
@@ -182,7 +182,7 @@ export const SSH_CA_KMS_KEY_ARN = process.env.SSH_CA_KMS_KEY_ARN ?? "";
 /** Onprem CA: an ed25519 PKCS#8 PEM private key. Unset = surface dark. */
 export const SSH_CA_PRIVATE_KEY = process.env.SSH_CA_PRIVATE_KEY ?? "";
 
-/** Public SSH endpoint host (e.g. `ssh-dev.onecli.sh`). Unset = surface dark. */
+/** Public SSH endpoint host (e.g. `ssh.example.com`). Unset = surface dark. */
 export const SSH_HOST = process.env.SSH_HOST ?? "";
 
 const positiveInt = (raw: string | undefined, fallback: number): number => {
@@ -191,9 +191,9 @@ const positiveInt = (raw: string | undefined, fallback: number): number => {
 };
 
 /**
- * Public SSH endpoint PORT. Default 22 — cloud fronts the terminator with an
- * NLB on :22, so the advertised port and the generated connect command stay
- * exactly as before. Self-host publishes an unprivileged high port instead
+ * Public SSH endpoint PORT. Default 22, so the advertised port and the
+ * generated connect command stay plain. Self-host publishes an unprivileged
+ * high port instead
  * (a default-on listener cannot bind :22), which the client honors via
  * `ssh -p`.
  */
@@ -274,8 +274,8 @@ export const EGRESS_REGION = firstConfigured(process.env.EGRESS_REGION) ?? null;
  * (VS Code Remote opens the server bootstrap plus a probe connection, and
  * without ControlMaster each window adds one), one or two hand terminals, and
  * a transient `scp`/`sftp` already reaches five. The earlier ceiling of 3
- * refused a single developer mid-workflow on the dev live gate. Each session
- * costs one ServiceAccount/Role/RoleBinding plus one exec stream, so the real
+ * refused a single developer mid-workflow in live testing. Each session
+ * costs a scoped credential plus one exec stream, so the real
  * protections are the terminator's global and per-IP caps — this one only
  * stops one agent from being used as an unbounded fan-out.
  */

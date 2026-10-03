@@ -9,7 +9,7 @@ import type { KubeExecTarget } from "./exec-backend";
 import { createKubeResolver } from "./resolver";
 
 /**
- * The kube resolver's wire law, over a REAL socket: the manager's four
+ * The kube resolver's wire law, over a REAL socket: the broker's four
  * refusal codes are deterministic (ResolverRefusedError), EVERYTHING else —
  * 401 rotation skew, unknown codes, malformed bodies — is transport-class
  * (the wake poll rides it out, bounded); and a ready answer comes back as a

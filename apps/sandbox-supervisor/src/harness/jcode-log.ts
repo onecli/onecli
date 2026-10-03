@@ -12,9 +12,9 @@ import { redactSecrets } from "../logs/redact";
  * <date>.log`, a file on the agent's home volume that no platform
  * component reads. Measured on the pinned build: 2 lines reach the daemon's
  * stderr, 32+ reach the file, and #1124's root cause was only provable from
- * that file (recovered from parked chunks in S3). Re-emitting it through
+ * that file. Re-emitting it through
  * `log()` puts it on the supervisor's stderr, which every substrate already
- * collects: `docker logs` on self-host, the node log shipper in the cloud.
+ * collects (`docker logs` on self-host).
  *
  * Vendor-specific by construction (the line format, the level vocabulary,
  * the noise families), which is why it lives beside jcode.ts and nowhere

@@ -205,8 +205,8 @@ struct FlushContext {
 /// Initialize the telemetry background flush task.
 /// Must be called once at startup from `main()`.
 pub fn init(pool: PgPool, cache: Arc<dyn CacheStore>) {
-    // No baked-in defaults: both come from the deployment env (the cloud task
-    // definition sets them), and PostHog stays self-disabled unless BOTH are
+    // No baked-in defaults: both come from the deployment env, and PostHog
+    // stays self-disabled unless BOTH are
     // present — an API key with nowhere to send it is still off.
     let api_key = std::env::var("POSTHOG_API_KEY").unwrap_or_default();
     let api_host = std::env::var("POSTHOG_HOST").unwrap_or_default();

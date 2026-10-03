@@ -84,7 +84,7 @@ export const updateAgentSchema = z
   );
 
 /**
- * POST /agents/:agentId/ssh-certificate (sandbox-platform step 5). Exactly
+ * POST /agents/:agentId/ssh-certificate. Exactly
  * one source: a pasted public key (ed25519 only — the interop-proven cert
  * path; the service re-parses and refuses anything else with an actionable
  * message) OR a registered key's id. Strict objects make the arms mutually

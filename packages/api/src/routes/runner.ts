@@ -117,8 +117,8 @@ const logClaimWait = createLogClaimWait(logger);
  */
 
 /** How long a held poll may sit. Bounded well under the api-server's 70s
- * keep-alive and cloud's 65s ALB idle timeout, so a poll always returns an
- * answer rather than being cut mid-flight. */
+ * keep-alive and a typical load balancer's ~60s idle timeout, so a poll
+ * always returns an answer rather than being cut mid-flight. */
 const MAX_WAIT_SECONDS = 25;
 /** The attachment retention sweep rides the work poll, once per this per
  * process (module state: one api process, one clock). */
@@ -255,7 +255,7 @@ export const runnerRoutes = () => {
         log.warn({ err }, "attachment retention sweep failed"),
       );
     }
-    // SSH sessions a crashed terminator abandoned (sandbox-platform step 5):
+    // SSH sessions a crashed terminator abandoned:
     // lease-expired rows are closed here so the per-agent cap and the audit
     // record stay honest — keep-awake already ignores them (the lease is the
     // truth). Same non-fatal posture.
@@ -692,7 +692,7 @@ export const runnerRoutes = () => {
    * and absent here is an orphan to destroy (which is how agent deletion
    * reaches the compute plane). `statuses` rides along (additive-optional on
    * the wire) so reconcile can also run the reverse diff — a sandbox believed
-   * `running` with no backend snapshot is a pod that vanished out-of-band.
+   * `running` with no backend snapshot is a sandbox that vanished out-of-band.
    */
   app.get("/sandboxes", async (c) => {
     const { runnerId } = c.get("runner");

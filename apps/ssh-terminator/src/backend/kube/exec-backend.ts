@@ -12,21 +12,20 @@ const log = logger.child({ component: "exec-backend" });
 
 /**
  * Wrap the shared guest payload in this substrate's identity drop.
- * `pods/exec` lands as in-container root with root's identity env
- * (HOME=/root, CWD=/app — the boot script's exports are invisible to exec'd
- * processes), which would break VS Code Remote and default scp/sftp paths,
- * so every session wraps in the same identity drop the boot phase uses:
+ * An exec here lands as in-container root with root's identity env
+ * (HOME=/root, CWD=/app — the container's own exports are invisible to
+ * exec'd processes), which would break VS Code Remote and default scp/sftp
+ * paths, so every session wraps in an identity drop:
  * explicit identity env, then setpriv to uid-1000 "node", landing in
  * /workspace (the durable home; ~ is /workspace/.home on the same volume,
- * so dotfiles — and ~/.vscode-server — survive park/wake).
+ * so dotfiles — and ~/.vscode-server — survive sleep).
  *
  * Two pinned constraints, both load-bearing:
  * - NEVER `--reset-env`: it would strip the spawn env, the gateway proxy
  *   credential included, killing all in-guest egress.
- * - The drop is UX/consistency, NOT a security boundary — the customer owns
- *   their guest kernel (privileged container in their own microVM) and can
- *   re-escalate; the real boundaries stay Kata isolation and the gateway
- *   network fence.
+ * - The drop is UX/consistency, NOT a security boundary — the user may own
+ *   the sandbox's whole kernel and can re-escalate; the real boundaries are
+ *   the substrate's isolation and the gateway.
  */
 export const buildKubeGuestCommand = (request: RelayRequest): string[] => [
   "env",
@@ -55,14 +54,13 @@ export interface KubeExecTarget {
   namespace: string;
   pod: string;
   container: string;
-  /** The broker-minted per-session ServiceAccount token. */
+  /** The broker-minted per-session token. */
   token: string;
   /** `https://host:port` of the API server. */
   server: string;
   /**
-   * CA bundle file for the API server. The terminator pod runs with
-   * automountServiceAccountToken: false, so the in-cluster default CA path
-   * does not exist — the chart mounts the kube-root-ca ConfigMap instead.
+   * CA bundle file for the API server (the terminator holds no in-cluster
+   * default credentials, so the trust root is provided explicitly).
    */
   caFile: string;
 }
@@ -97,17 +95,17 @@ class ResizableStdout extends PassThrough {
 }
 
 /**
- * The transport has NO built-in keepalive and the NLB idles connections out
- * at ~350s — a quiet-but-open shell must be pinged under that.
+ * The transport has NO built-in keepalive and load balancers idle quiet
+ * connections out — a quiet-but-open shell must be pinged under that.
  */
 const PING_INTERVAL_MS = 25_000;
 
 export const createKubeExecBackend = (): ExecBackend<KubeExecTarget> => ({
   async exec(target, request, io, tty) {
     const command = buildKubeGuestCommand(request);
-    // Per-session KubeConfig, built by hand: the pod holds no ServiceAccount
-    // credentials (automount off), so loadFromCluster() has nothing to read —
-    // trust is the mounted root CA file plus the broker-minted token.
+    // Per-session KubeConfig, built by hand: this process holds no default
+    // cluster credentials, so loadFromCluster() has nothing to read —
+    // trust is the provided root CA file plus the broker-minted token.
     const kubeConfig = new KubeConfig();
     kubeConfig.loadFromClusterAndUser(
       {
@@ -176,7 +174,7 @@ export const createKubeExecBackend = (): ExecBackend<KubeExecTarget> => ({
     });
     ws.on("close", () => {
       clearInterval(pinger);
-      // A close before any exit status is pod churn or a severed dial — an
+      // A close before any exit status is sandbox churn or a severed dial — an
       // honest relay_error, never a fabricated exit code.
       rejectExit(new ExecDisconnectedError("exec transport closed"));
     });

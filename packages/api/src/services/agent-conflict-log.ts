@@ -25,12 +25,12 @@ import { IS_CLOUD } from "../lib/env";
  *   concurrent creates of the same identifier. Rare, and genuinely worth
  *   noticing.
  *
- * Level is INFO on purpose. This is an expected outcome, not a fault, and
- * prod's health check reads `level >= WARN` — logging it as a warning would
+ * Level is INFO on purpose. This is an expected outcome, not a fault, and a
+ * deployment may alert on `level >= WARN` — logging it as a warning would
  * recreate the very noise-vs-signal problem the issue is about. But pino
- * drops a below-level line BEFORE it is written and prod runs
- * `LOG_LEVEL=warn`, so a naive `log.info` would never exist in the one
- * environment that matters. The child therefore pins its own `info` level in
+ * drops a below-level line BEFORE it is written and a production root may
+ * run `LOG_LEVEL=warn`, so a naive `log.info` would never exist where it
+ * matters. The child therefore pins its own `info` level in
  * CLOUD — the `claim-wait-log.ts` idiom, for the same reason: a
  * metric-carrying line the root level must not be able to silence. Onprem
  * has nothing reading it, so the operator's chosen level stands.

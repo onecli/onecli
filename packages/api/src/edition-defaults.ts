@@ -76,7 +76,7 @@ let applied = false;
  * - `createApiApp` — every HTTP host (web /v1 catch-all, api-server, SCIM).
  * - the web app's eager server init (`lib/init/server.ts`) — server actions
  *   call the shared services directly without ever running `createApiApp`.
- * - standalone server scripts (`cloud-scripts/*`) that touch providers.
+ * - standalone server scripts that touch providers.
  *
  * A cloud read of an uninjected default FAILS LOUDLY (see
  * `providers/edition-state.ts`) — silently falling through to the onprem
@@ -155,9 +155,9 @@ export const ensureEditionDefaults = (): void => {
     // fails the boot.
     setDefaultPlatformLlm(eePlatformLlm);
 
-    // Cross-pod live transcript fan-out: api runs multiple pods, so the
+    // Cross-instance live transcript fan-out: with multiple api instances, the
     // in-process emitter delivers a publish to no one when the runner's event
-    // POST and a browser's SSE stream land on different pods. Redis pub/sub
+    // POST and a browser's SSE stream land on different instances. Redis pub/sub
     // carries every publish between them. The subscriber MUST be its own
     // connection: ioredis forbids commands on a connection in subscriber mode.
     //
@@ -165,7 +165,7 @@ export const ensureEditionDefaults = (): void => {
     // — unlike rate-limit/quota, which degrade at their call site — the cloud
     // arm MUST inject SOMETHING or the first getEventBus() throws. When Redis
     // is absent (dev/staging/a misconfigured cloud), inject the in-process
-    // emitter explicitly: it keeps a single-pod cloud correct and multi-pod
+    // emitter explicitly: it keeps a single instance correct and multiple
     // no worse than the pre-fix behavior, rather than 500ing every event.
     setDefaultEventBus(
       hasRedisConfigured()

@@ -510,7 +510,7 @@ describe.skipIf(!sshAvailable)("terminator e2e (real OpenSSH client)", () => {
   // reason MUST reach their terminal: severing the connection in the same
   // tick as the notice loses it, and the client then prints a bare
   // "Received disconnect ... :11:" with an empty description — indistinguishable
-  // from a crash or a network fault. Found on the dev live gate.
+  // from a crash or a network fault. Found in live testing.
   it("tells the client WHY session-open was refused (no PTY)", async () => {
     const h = await openHarness({
       openDelayMs: 250,

@@ -5,16 +5,16 @@ import { createMiddleware } from "hono/factory";
 import { SSH_TERMINATOR_SECRET } from "../lib/env";
 
 /**
- * Static-secret auth for the SSH terminator's control-plane channel
- * (plans/sandbox-platform.md step 5, §3.8's narrow terminator↔control-plane
- * credential). Deliberately its own middleware and its own secret — the
+ * Static-secret auth for the SSH terminator's control-plane channel (the
+ * narrow terminator↔control-plane credential). Deliberately its own
+ * middleware and its own secret — the
  * one-credential-per-plane law: this value authorizes `/v1/ssh-terminator/*`
  * and NOTHING else; no other family passes here, and this secret passes
  * nowhere else. It is a service-to-service secret (the
  * GATEWAY_INTERNAL_SECRET shape), never a DB-backed token family.
  *
- * sha256-then-timingSafeEqual (the sandbox-manager's auth middleware
- * pattern): hashing first removes even the length branch as a timing signal.
+ * sha256-then-timingSafeEqual: hashing first removes even the length branch
+ * as a timing signal.
  * Unset secret = the surface refuses everything — dark, fail-closed.
  */
 

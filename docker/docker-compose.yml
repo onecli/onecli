@@ -334,7 +334,7 @@ services:
       - onecli
       - sandboxes
 
-  # The SSH front door (sandbox-platform step 5): terminates ssh with the
+  # The SSH front door: terminates ssh with the
   # short-lived certificates the api mints and bridges each session into an
   # agent's container. Rides the `runner` profile — SSH into a hosted agent
   # is meaningless without the runner — so both install doors enable it by

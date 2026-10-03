@@ -22,7 +22,7 @@ import type { DockerExecTarget } from "./exec-backend";
  * The docker substrate's resolver. Unlike the kube arm — where an
  * independent broker process holds the trust anchor — resolver and relay
  * share this process, so the resolver verifies BOTH signed artifacts itself
- * (the Resolver contract's own-trust-anchor law, mirroring the manager
+ * (the Resolver contract's own-trust-anchor law, mirroring the kube
  * broker's checks one-for-one) before asking the daemon anything, then
  * resolves the sandbox to a RUNNING container by label at attach time:
  * every wake REPLACES the container, so a stored reference would be stale
@@ -41,7 +41,7 @@ const TARGET_REUSE_MS = 60_000;
 
 /** Grant ids land in a label filter; our control plane only ever signs
  * well-shaped ids, so a violation is refused outright — never sanitized
- * (the manager broker's exact posture). */
+ * (the kube broker's exact posture). */
 const ID_SHAPE = /^[A-Za-z0-9_-]{1,64}$/;
 
 const verifyArtifacts = (
@@ -175,7 +175,7 @@ export const createDockerResolver = (
     },
 
     // No per-session substrate state exists on this arm (the kube broker
-    // deletes a per-session ServiceAccount trio here).
+    // deletes a per-session credential here).
     close: () => Promise.resolve(),
   };
 };

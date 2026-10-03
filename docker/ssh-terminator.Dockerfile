@@ -1,4 +1,4 @@
-# OneCLI SSH terminator — the sandbox platform's SSH front door (hosted agents)
+# OneCLI SSH terminator — the SSH front door to hosted agents
 # Build context: repo root (run with `docker build -f docker/ssh-terminator.Dockerfile .`)
 #
 # It terminates ssh with the short-lived certificates the api mints and bridges

@@ -5,7 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { proofDatabaseUrl } from "../testing/pg-proof.js";
 
 /**
- * The SSH front door's DB laws on REAL PostgreSQL (sandbox-platform step 5):
+ * The SSH front door's DB laws on REAL PostgreSQL:
  * the lease-current session as the third keep-awake shape, session-driven
  * start dueness INSIDE the failed-status backoff frame (the hot-loop guard,
  * mutation-covered), wake priority, the lease-aware per-agent cap, the
@@ -490,9 +490,9 @@ describe.skipIf(!PROOF_URL)("heartbeat + close + sweep", () => {
   });
 
   it("a session that NEVER attached must not touch the idle clock", async () => {
-    // Measured on the dev live gate: idle-stop is what recovers a sandbox the
-    // control plane still reads `running` after its pod vanished (the runner's
-    // reconcile only iterates pods it can still see), and that arm is gated on
+    // Measured live: idle-stop is what recovers a sandbox the
+    // control plane still reads `running` after it vanished (the runner's
+    // reconcile only iterates sandboxes it can still see), and that arm is gated on
     // last_active_at. If a failed connect stamped it, a user retrying ssh
     // would push their own agent's recovery out by the idle window each time.
     const ids = await seedAgentWithSandbox("noattach", { status: "running" });

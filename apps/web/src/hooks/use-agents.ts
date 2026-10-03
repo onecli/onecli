@@ -265,8 +265,8 @@ export const useRegenerateToken = () => {
 };
 
 /**
- * Mint a short-lived SSH certificate for a hosted agent (sandbox-platform
- * step 5). Headless (the use-crons convention): the SSH section owns the
+ * Mint a short-lived SSH certificate for a hosted agent. Headless (the
+ * use-crons convention): the SSH section owns the
  * error copy, because refusals must render inline as states — 404 (no SSH
  * front door here), 422 (not an ed25519 key), 429 (mint rate limit). No
  * query invalidation: the cert is one-time material nothing caches. And no

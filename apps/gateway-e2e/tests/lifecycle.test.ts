@@ -39,7 +39,7 @@ describe("lifecycle", () => {
     async (cx) => {
       const gw = await cx.startGateway();
 
-      // The image healthchecks (Dockerfile HEALTHCHECK, ECS task def) run
+      // The image healthchecks (Dockerfile HEALTHCHECK, orchestrator probes) run
       // exactly this invocation — the exit code is the contract.
       expect(await healthcheckExit(gw.port)).toBe(0);
 

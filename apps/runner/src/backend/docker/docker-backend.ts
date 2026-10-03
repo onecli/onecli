@@ -52,10 +52,8 @@ const HOME_MOUNT = "/workspace";
  * The agent image's unprivileged user, by NUMBER. The create body pins
  * `User: "node"` by name, but tar headers carry numeric ids and the daemon
  * extracts them verbatim — so injected files are owned by whatever is written
- * here. 1000 is the node base image's uid/gid for that user, the same value
- * the cloud boot phase compares against when it installs these same payload
- * files node-owned on the Kata substrate (apps/sandbox-manager/src/boot/
- * boot-script.ts, NODE_UID).
+ * here. 1000 is the node base image's uid/gid for that user — the same value
+ * every substrate must use when it installs these payload files node-owned.
  */
 const NODE_UID = 1000;
 const NODE_GID = 1000;
@@ -65,8 +63,8 @@ const NODE_GID = 1000;
  * symlink on the volume for the daemon's root-driven extraction to follow —
  * it resolves in-container symlinks) or the system directories the image's
  * own tooling lives in (a control-plane bug must not be able to overwrite
- * /usr/local/bin/node in every sandbox). `/onecli-init/` from the cloud list
- * is omitted: that mount does not exist on this substrate.
+ * /usr/local/bin/node in every sandbox). Mounts that exist only on other
+ * substrates are omitted: they do not exist here.
  */
 const FORBIDDEN_PATH_PREFIXES = [
   `${HOME_MOUNT}/`,
@@ -80,9 +78,8 @@ const FORBIDDEN_PATH_PREFIXES = [
 
 /**
  * Refuse a payload file path the injection must never touch — the same
- * conservative allowlist the cloud manager enforces on the identical payload
- * (apps/sandbox-manager/src/validations.ts `containerPathSchema`; not
- * importable, that package is cloud-only): one substrate trust model. The
+ * conservative allowlist every substrate enforces on the identical payload:
+ * one substrate trust model. The
  * wire schema only enforces a non-empty string, and beyond the shared rules
  * one shape is dangerous specifically HERE: a relative path would spin the
  * ancestor walk forever (`posix.dirname(".") === "."`).
@@ -235,8 +232,8 @@ export const createDockerBackend = (
       // an existing directory too (verified against a real daemon), so a
       // blanket ancestor entry would silently chown system paths. The chain
       // is created node-owned — the workload must be able to write its own
-      // config dirs (the cloud boot script does the same with `install -d
-      // -o node -g node`, /home/node/.codex being the motivating case).
+      // config dirs (every substrate keeps this node-owned contract,
+      // /home/node/.codex being the motivating case).
       const chain = missing.map(
         (_, index): TarEntry => ({
           kind: "directory",
@@ -370,7 +367,7 @@ export const createDockerBackend = (
               // syscalls unless CAP_SYS_ADMIN is held, CapDrop:ALL removes that
               // capability, and no-new-privileges neuters the setuid uidmap
               // helpers — so rootless containers cannot set up their user
-              // namespace here (they are a hosted-microVM-only capability; see
+              // namespace here (they need a sandbox that owns its kernel; see
               // apps/runner/README.md). NEVER add a `seccomp=…` SecurityOpt
               // that weakens the default profile: seccomp is the actual syscall
               // gate, and `seccomp=unconfined` would re-open single-uid rootless

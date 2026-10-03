@@ -6,8 +6,8 @@ import { redactingReplacer } from "./logs/redact";
  * would corrupt the event stream.
  *
  * Every string value is redacted (`redactingReplacer`) on its way out:
- * stderr leaves the sandbox (`docker logs` on self-host, the node log
- * shipper in the cloud), and error strings routinely echo a proxy URL
+ * stderr leaves the sandbox (`docker logs` on self-host, the deployment's
+ * log pipeline elsewhere), and error strings routinely echo a proxy URL
  * carrying the agent's credential. Values, not the serialized line: a token
  * after a newline serializes behind `\n`, where a line-level pattern cannot
  * see it.

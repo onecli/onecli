@@ -63,8 +63,7 @@ export const buildDockerExecConfig = (
 ): ExecCreateConfig => ({
   AttachStdin: true,
   AttachStdout: true,
-  // The daemon refuses stderr alongside a TTY the same way the K8s API
-  // server does — the TTY stream carries both.
+  // The daemon refuses stderr alongside a TTY — the TTY stream carries both.
   AttachStderr: !tty,
   Tty: tty,
   User: "node",

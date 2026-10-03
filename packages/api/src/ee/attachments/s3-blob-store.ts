@@ -21,7 +21,7 @@ import { attachmentDownloadDisposition } from "@onecli/agent-protocol";
  * BYTES go to a dedicated bucket, and downloads become short-lived presigned
  * URLs so the api leaves the byte path entirely — the two properties the
  * inline-Postgres arm cannot have at scale (a 25 MB `bytea` per send_file
- * against a 100 GB RDS allowance; one pooled connection and one in-process
+ * against a bounded database allowance; one pooled connection and one in-process
  * buffer per download).
  *
  * Selected by `ensureEditionDefaults()` when the deployment is ENTITLED and
@@ -36,8 +36,8 @@ import { attachmentDownloadDisposition } from "@onecli/agent-protocol";
  * name); the presigned GET pins `Content-Disposition: attachment` and the
  * stored media type in the SIGNATURE (response-* overrides), so a stored
  * SVG/HTML cannot be coaxed into rendering inline from the bucket by anyone
- * holding the URL. Bucket policy (infra) blocks public access and requires
- * TLS; SSE-KMS is the bucket default so no per-request key handling here.
+ * holding the URL. The bucket itself should block public access, require
+ * TLS, and encrypt by default — no per-request key handling here.
  */
 
 const STORAGE_REF_PREFIX = "s3:";

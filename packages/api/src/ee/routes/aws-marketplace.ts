@@ -1,8 +1,8 @@
 // AWS Marketplace event intake (plans/aws-marketplace-listing.md §4),
 // Concurrent Agreements standard: AWS Marketplace emits license lifecycle
 // events to EventBridge (source `aws.agreement-marketplace`, us-east-1
-// default bus). Our CDK subscribes an SNS topic to those rules and points
-// an HTTPS subscription at this endpoint, so each POST carries an SNS
+// default bus). The deployment subscribes an SNS topic to those rules and
+// points an HTTPS subscription at this endpoint, so each POST carries an SNS
 // envelope whose Message is the EventBridge event:
 //   "License Updated - Manufacturer"       → re-sync entitlements
 //   "License Deprovisioned - Manufacturer" → final overage metering within
