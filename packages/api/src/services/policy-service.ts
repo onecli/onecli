@@ -10,6 +10,7 @@ import type {
   PolicyTargetInput,
 } from "../validations/policy";
 import { isSessionPolicy } from "../validations/policy";
+import { GRANT_SOURCE } from "./grants-compile";
 
 // ── Unified policy engine service (policy_rules_v2) ─────────────────────────
 // CRUD + reorder + publish over the priority-ordered, first-match rule model.
@@ -1104,6 +1105,117 @@ export const setPolicyDefaultAction = async (
     });
   });
   return toRuleDto(updated);
+};
+
+/**
+ * A principal about to be deleted, with the policy scope its rules live in.
+ * Agents only appear in their workspace's rules and groups only in their
+ * organization's (`assertIdentitiesValid`); a user can be named in the rules
+ * of every organization they ever belonged to, so a user carries no scope.
+ */
+export type DeletedPrincipal =
+  | { kind: "agent"; id: string; workspaceId: string }
+  | { kind: "group"; id: string; organizationId: string }
+  | { kind: "user"; id: string };
+
+/**
+ * Forget a principal in the policy rules, in the draft and in every retained
+ * published generation alike. Runs INSIDE the caller's transaction, BEFORE the
+ * principal's row goes.
+ *
+ * Why it must: the identity's `agent_id` / `user_id` / `group_id` cascades,
+ * and a rule left with NO identity does not vanish. In the block/allow engine
+ * an empty identity means "everyone", so a rule that named only this
+ * principal would silently start applying to everyone: a grant's "everything
+ * else: block" blocking its siblings, an org "only this group may reach X"
+ * allow opening X past a deny default, a "block this user" blocking all users.
+ * So a rule whose ONLY identity is this principal goes with it (its targets
+ * and conditions cascade), whatever its source; a rule naming other principals
+ * too just loses this one by the cascade, which is exactly right.
+ *
+ * Applied to the live generation in place rather than by republishing: a
+ * republish would also ship whatever the scope has staged in its draft,
+ * past the plan gates `publishPolicy` re-asserts. Retained generations are
+ * rollback targets, so they are cleaned too (rolling back to one would
+ * otherwise resurrect the rule identity-less).
+ *
+ * Locking: what closes the race is the principal's ROW lock. Inserting an
+ * identity takes a share lock on the row it references (the FK check), so
+ * once the delete holds `FOR UPDATE` on that row, no new identity naming the
+ * principal can commit before the row is gone; it waits, then fails the FK.
+ * An identity written before the lock was taken is visible to the delete
+ * below. The scope locks (taken first, sorted) order this against the writers
+ * that take them, so they never deadlock with it. An agent's caller holds
+ * the workspace scope lock and then the agent's row lock (see `deleteAgent`);
+ * a group's arm and a user's arm take theirs here.
+ *
+ * Returns the organizations whose rules changed, so the caller can flush
+ * their gateway caches after the commit. An agent's caller flushes its
+ * workspace (as for every agent delete), so its arm returns none.
+ */
+export const dropPrincipalFromPolicyInTx = async (
+  tx: Prisma.TransactionClient,
+  principal: DeletedPrincipal,
+): Promise<string[]> => {
+  switch (principal.kind) {
+    case "agent": {
+      const agentId = principal.id;
+      await tx.policyRuleV2.deleteMany({
+        where: {
+          scope: "workspace",
+          workspaceId: principal.workspaceId,
+          OR: [
+            { identities: { some: { agentId }, every: { agentId } } },
+            // A GRANT is one agent's rule by construction, so one with no
+            // identity is always an orphan. The migration that removed the
+            // old ones runs before the rollout, so a delete by the previous
+            // release in that window can still leave one; sweep it on the
+            // next delete.
+            { source: GRANT_SOURCE, identities: { none: {} } },
+          ],
+        },
+      });
+      return [];
+    }
+    case "group": {
+      const { organizationId, id: groupId } = principal;
+      await lockScope(tx, { scope: "organization", organizationId });
+      await tx.$queryRaw`SELECT id FROM groups WHERE id = ${groupId} FOR UPDATE`;
+      const { count } = await tx.policyRuleV2.deleteMany({
+        where: {
+          scope: "organization",
+          organizationId,
+          identities: { some: { groupId }, every: { groupId } },
+        },
+      });
+      return count > 0 ? [organizationId] : [];
+    }
+    case "user": {
+      const userId = principal.id;
+      const where: Prisma.PolicyRuleV2WhereInput = {
+        scope: "organization",
+        identities: { some: { userId }, every: { userId } },
+      };
+      const organizationsOf = async () =>
+        (
+          await tx.policyRuleV2.findMany({
+            where,
+            select: { organizationId: true },
+            distinct: ["organizationId"],
+          })
+        )
+          .flatMap((r) => (r.organizationId ? [r.organizationId] : []))
+          .sort();
+      for (const organizationId of await organizationsOf()) {
+        await lockScope(tx, { scope: "organization", organizationId });
+      }
+      await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`;
+      // Re-read under the row lock: the set the delete below actually covers.
+      const organizationIds = await organizationsOf();
+      await tx.policyRuleV2.deleteMany({ where });
+      return organizationIds;
+    }
+  }
 };
 
 export interface PublishResult {

@@ -212,6 +212,15 @@ vi.mock("@onecli/db", () => {
   const noopDeleteMany = { deleteMany: async () => ({}) };
 
   const models = () => ({
+    // No channel presences in this route fixture: the lifecycle lock is
+    // granted, the enqueue finds nothing, and processing an empty id list is
+    // a no-op. Real locking, enqueue and retry behavior are covered by the
+    // PostgreSQL cleanup proof suites.
+    $queryRaw: async (sql: TemplateStringsArray) =>
+      sql.join("").includes("pg_try_advisory_xact_lock")
+        ? [{ locked: true }]
+        : [],
+    agentChannel: { findMany: async () => [] },
     apiKey: apiKeyModel(),
     agent: agentModel(),
     workspace: workspaceModel(),

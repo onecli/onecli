@@ -157,6 +157,360 @@
       ]
     }
   },
+  "apollo-io": {
+    "add_to_sequence": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/emailer_campaigns/*/add_contact_ids"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "bulk_enrich_companies": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/organizations/bulk_enrich"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "bulk_update_accounts": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/accounts/bulk_update",
+        "/api/v1/accounts/update_owners"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "bulk_update_contacts": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/contacts/bulk_update",
+        "/api/v1/contacts/update_stages",
+        "/api/v1/contacts/update_owners"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "complete_task": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/tasks/*/complete",
+        "/api/v1/tasks/*/skip"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_account": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/accounts",
+        "/api/v1/accounts/bulk_create"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_contact": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/contacts",
+        "/api/v1/contacts/bulk_create"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_deal": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/opportunities"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_task": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/tasks",
+        "/api/v1/tasks/bulk_create"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "enrich_company": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/organizations/enrich",
+        "/api/v1/organizations/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "enrich_person": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/people/match",
+        "/api/v1/people/bulk_match",
+        "/api/v1/people/*/"
+      ],
+      "methods": [
+        "POST",
+        "GET"
+      ]
+    },
+    "get_account": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/accounts/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_company_job_postings": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/organizations/*/job_postings"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_contact": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/contacts/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_deal": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/opportunities/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_profile": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/users/api_profile"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_task": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/tasks/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_deals": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/opportunities/search"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_email_accounts": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/email_accounts"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_users": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/users/search"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search_accounts": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/accounts/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_companies": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/mixed_companies/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_contacts": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/contacts/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_emails": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/emailer_messages/search"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search_people": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/mixed_people/api_search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_sequences": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/emailer_campaigns/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_tasks": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/tasks/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_account": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/accounts/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_contact": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/contacts/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_deal": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/opportunities/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_task": {
+      "hosts": [
+        "api.apollo.io"
+      ],
+      "paths": [
+        "/api/v1/tasks/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    }
+  },
   "attio": {
     "create_comment": {
       "hosts": [
@@ -974,6 +1328,114 @@
       "methods": [
         "POST",
         "GET"
+      ]
+    }
+  },
+  "clay": {
+    "get_credit_balance": {
+      "hosts": [
+        "api.clay.com"
+      ],
+      "paths": [
+        "/public/v0/credits/balance"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_me": {
+      "hosts": [
+        "api.clay.com"
+      ],
+      "paths": [
+        "/public/v0/me"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_routine_results": {
+      "hosts": [
+        "api.clay.com"
+      ],
+      "paths": [
+        "/public/v0/routines/run/*/results",
+        "/public/v0/routines/run-batch/*/results"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "query_tables": {
+      "hosts": [
+        "api.clay.com"
+      ],
+      "paths": [
+        "/public/v0/tables/query"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "run_routine": {
+      "hosts": [
+        "api.clay.com"
+      ],
+      "paths": [
+        "/public/v0/routines/*/run"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "run_routine_batch": {
+      "hosts": [
+        "api.clay.com"
+      ],
+      "paths": [
+        "/public/v0/routines/*/run-batch/start",
+        "/public/v0/routines/*/run-batch/upload-url"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search": {
+      "hosts": [
+        "api.clay.com"
+      ],
+      "paths": [
+        "/public/v0/search/query-mode",
+        "/public/v0/search/query-mode/*/run",
+        "/public/v0/search/filters-mode",
+        "/public/v0/search/filters-mode/*/run"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_reference": {
+      "hosts": [
+        "api.clay.com"
+      ],
+      "paths": [
+        "/public/v0/search/query-mode/reference",
+        "/public/v0/search/filters-mode/fields",
+        "/public/v0/workflows/runs/query/reference"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search_workflow_runs": {
+      "hosts": [
+        "api.clay.com"
+      ],
+      "paths": [
+        "/public/v0/workflows/runs/query"
+      ],
+      "methods": [
+        "POST"
       ]
     }
   },
@@ -5516,6 +5978,340 @@
       ]
     }
   },
+  "posthog": {
+    "create_annotation": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/annotations/"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_dashboard": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/dashboards/"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_feature_flag": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/feature_flags/"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_insight": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/insights/"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_current_user": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/users/@me/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_insight": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/insights/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_project": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_annotations": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/annotations/",
+        "/api/projects/*/annotations/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_cohorts": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/cohorts/",
+        "/api/projects/*/cohorts/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_dashboards": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/dashboards/",
+        "/api/projects/*/dashboards/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_definitions": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/event_definitions/",
+        "/api/projects/*/property_definitions/",
+        "/api/projects/*/actions/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_error_issues": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/error_tracking/issues/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_events": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/events/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_experiments": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/experiments/",
+        "/api/projects/*/experiments/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_feature_flags": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/feature_flags/",
+        "/api/projects/*/feature_flags/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_insights": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/insights/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_persons": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/persons/",
+        "/api/projects/*/persons/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_projects": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/organizations/*/projects/",
+        "/api/organizations/",
+        "/api/organizations/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_session_recordings": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/session_recordings/",
+        "/api/projects/*/session_recordings/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_surveys": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/surveys/",
+        "/api/projects/*/surveys/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "run_query": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/query/",
+        "/api/projects/*/query/*/"
+      ],
+      "methods": [
+        "POST",
+        "GET"
+      ]
+    },
+    "update_dashboard": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/dashboards/*/"
+      ],
+      "methods": [
+        "PATCH",
+        "PUT",
+        "DELETE"
+      ]
+    },
+    "update_feature_flag": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/feature_flags/*/"
+      ],
+      "methods": [
+        "PATCH",
+        "PUT",
+        "DELETE"
+      ]
+    },
+    "update_insight": {
+      "hosts": [
+        "us.posthog.com",
+        "eu.posthog.com",
+        "app.posthog.com"
+      ],
+      "paths": [
+        "/api/projects/*/insights/*/"
+      ],
+      "methods": [
+        "PATCH",
+        "PUT",
+        "DELETE"
+      ]
+    }
+  },
   "resend": {
     "create_batch": {
       "hosts": [
@@ -5559,6 +6355,156 @@
       ],
       "methods": [
         "POST"
+      ]
+    }
+  },
+  "salesforce": {
+    "create_record": {
+      "hosts": [
+        "*.my.salesforce.com"
+      ],
+      "paths": [
+        "/services/data/v*/sobjects/*/"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_record": {
+      "hosts": [
+        "*.my.salesforce.com"
+      ],
+      "paths": [
+        "/services/data/v*/sobjects/*/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "describe_object": {
+      "hosts": [
+        "*.my.salesforce.com"
+      ],
+      "paths": [
+        "/services/data/v*/sobjects/*/describe"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_record": {
+      "hosts": [
+        "*.my.salesforce.com"
+      ],
+      "paths": [
+        "/services/data/v*/sobjects/*/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_objects": {
+      "hosts": [
+        "*.my.salesforce.com"
+      ],
+      "paths": [
+        "/services/data/v*/sobjects/",
+        "/services/data/v*/sobjects"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_resources": {
+      "hosts": [
+        "*.my.salesforce.com"
+      ],
+      "paths": [
+        "/services/data/v*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_versions": {
+      "hosts": [
+        "*.my.salesforce.com"
+      ],
+      "paths": [
+        "/services/data/",
+        "/services/data"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "query": {
+      "hosts": [
+        "*.my.salesforce.com"
+      ],
+      "paths": [
+        "/services/data/v*/query",
+        "/services/data/v*/query/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "query_all": {
+      "hosts": [
+        "*.my.salesforce.com"
+      ],
+      "paths": [
+        "/services/data/v*/queryAll",
+        "/services/data/v*/queryAll/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "query_all_more": {
+      "hosts": [
+        "*.my.salesforce.com"
+      ],
+      "paths": [
+        "/services/data/v*/queryAll/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "query_more": {
+      "hosts": [
+        "*.my.salesforce.com"
+      ],
+      "paths": [
+        "/services/data/v*/query/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search": {
+      "hosts": [
+        "*.my.salesforce.com"
+      ],
+      "paths": [
+        "/services/data/v*/search",
+        "/services/data/v*/search/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_record": {
+      "hosts": [
+        "*.my.salesforce.com"
+      ],
+      "paths": [
+        "/services/data/v*/sobjects/*/*"
+      ],
+      "methods": [
+        "PATCH"
       ]
     }
   },
@@ -5715,125 +6661,6 @@
       ],
       "methods": [
         "PUT"
-      ]
-    }
-  },
-  "slack": {
-    "add_reaction": {
-      "hosts": [
-        "slack.com"
-      ],
-      "paths": [
-        "/api/reactions.add"
-      ],
-      "methods": [
-        "POST"
-      ]
-    },
-    "auth_test": {
-      "hosts": [
-        "slack.com"
-      ],
-      "paths": [
-        "/api/auth.test"
-      ],
-      "methods": [
-        "GET",
-        "POST"
-      ]
-    },
-    "channel_history": {
-      "hosts": [
-        "slack.com"
-      ],
-      "paths": [
-        "/api/conversations.history"
-      ],
-      "methods": [
-        "GET",
-        "POST"
-      ]
-    },
-    "channel_info": {
-      "hosts": [
-        "slack.com"
-      ],
-      "paths": [
-        "/api/conversations.info"
-      ],
-      "methods": [
-        "GET",
-        "POST"
-      ]
-    },
-    "channel_replies": {
-      "hosts": [
-        "slack.com"
-      ],
-      "paths": [
-        "/api/conversations.replies"
-      ],
-      "methods": [
-        "GET",
-        "POST"
-      ]
-    },
-    "list_channels": {
-      "hosts": [
-        "slack.com"
-      ],
-      "paths": [
-        "/api/conversations.list"
-      ],
-      "methods": [
-        "GET",
-        "POST"
-      ]
-    },
-    "list_users": {
-      "hosts": [
-        "slack.com"
-      ],
-      "paths": [
-        "/api/users.list"
-      ],
-      "methods": [
-        "GET",
-        "POST"
-      ]
-    },
-    "post_message": {
-      "hosts": [
-        "slack.com"
-      ],
-      "paths": [
-        "/api/chat.postMessage"
-      ],
-      "methods": [
-        "POST"
-      ]
-    },
-    "update_message": {
-      "hosts": [
-        "slack.com"
-      ],
-      "paths": [
-        "/api/chat.update"
-      ],
-      "methods": [
-        "POST"
-      ]
-    },
-    "user_info": {
-      "hosts": [
-        "slack.com"
-      ],
-      "paths": [
-        "/api/users.info"
-      ],
-      "methods": [
-        "GET",
-        "POST"
       ]
     }
   },

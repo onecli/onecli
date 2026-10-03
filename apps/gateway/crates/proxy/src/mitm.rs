@@ -95,6 +95,13 @@ pub async fn mitm(
                     let is_ws = super::websocket::is_websocket_upgrade(&req);
                     let connection_id = connect::extract_connection_id(req.headers());
                     let request_path = req.uri().path_and_query().map(|pq| pq.to_string());
+                    // Kept for a transport failure, which answers after `req`
+                    // has been consumed by the forward.
+                    let failed = FailedRequest {
+                        method: req.method().clone(),
+                        path: request_path.clone().unwrap_or_else(|| "/".to_string()),
+                        start: std::time::Instant::now(),
+                    };
 
                     // Re-resolve rules from cache on each request so that
                     // secret/rule changes take effect without a reconnect.
@@ -137,7 +144,7 @@ pub async fn mitm(
                                     }
                                     Err(e) => {
                                         warn!(host = %host, error = ?e, "WebSocket handler failed");
-                                        Ok(response::resolution_failed())
+                                        Ok(transport_failure_response(&rules, &ctx, hostname, &failed, &e))
                                     }
                                 }
                             } else {
@@ -164,7 +171,7 @@ pub async fn mitm(
                                     }
                                     Err(e) => {
                                         warn!(host = %host, error = ?e, "request forwarding failed");
-                                        Ok::<_, anyhow::Error>(response::resolution_failed())
+                                        Ok::<_, anyhow::Error>(transport_failure_response(&rules, &ctx, hostname, &failed, &e))
                                     }
                                 }
                             }
@@ -210,6 +217,53 @@ pub struct InterceptToken {
     pub expires_in: i64,
 }
 
+/// What a transport-failure answer needs to know about the request it
+/// answers, captured before the forward consumes it.
+struct FailedRequest {
+    method: hyper::Method,
+    path: String,
+    start: std::time::Instant,
+}
+
+/// The response for a request that could not be delivered upstream at all
+/// (DNS, connect, TLS, or an in-flight transport error).
+///
+/// When the request went to a host none of the agent's granted host-gated
+/// connections is bound to, THAT is the explanation the agent needs — the
+/// #1137 shape is a placeholder hostname that does not resolve — so answer
+/// with the bound host(s), and record it in the activity feed like every
+/// other guidance answer. Otherwise, a failure to reach the upstream says so
+/// (`upstream_unreachable`); anything else keeps the generic 502.
+fn transport_failure_response<S>(
+    rules: &ResolvedRules,
+    proxy_ctx: &ProxyContext,
+    hostname: &str,
+    request: &FailedRequest,
+    error: &anyhow::Error,
+) -> hyper::Response<response::ForwardBody<S>> {
+    match rules.host_mismatch.as_deref() {
+        Some(connections) => {
+            super::hooks::record_host_mismatch_failure(
+                proxy_ctx,
+                hostname,
+                request.method.as_str(),
+                &request.path,
+                request.start,
+            );
+            response::connection_host_mismatch(hostname, &request.path, connections)
+        }
+        None if is_upstream_send_failure(error) => response::upstream_unreachable(hostname),
+        None => response::resolution_failed(),
+    }
+}
+
+/// Whether `error` is the upstream client failing to deliver the request
+/// (the `reqwest` send), as opposed to a local failure before it (buffering
+/// the request body, preparing a condition match).
+fn is_upstream_send_failure(error: &anyhow::Error) -> bool {
+    error.chain().any(|e| e.is::<reqwest::Error>())
+}
+
 /// Per-request resolved rules, bundled for passing to `forward_request`.
 #[derive(Debug)]
 pub struct ResolvedRules {
@@ -219,7 +273,9 @@ pub struct ResolvedRules {
     /// `injection_rules`, so use [`Self::injects`] — never
     /// `injection_rules.is_empty()` — to ask whether a credential is in play.
     pub pending_injections: Vec<crate::connect::PendingInjection>,
-    pub access_restricted: bool,
+    /// The kind of credential the workspace holds for this host but this agent
+    /// was not granted (`ConnectResponse::access_restricted`).
+    pub access_restricted: Option<crate::connect::RestrictedCredential>,
     /// Ready-to-use interception data when the resolved connection has a
     /// cached token that should be served instead of forwarding.
     pub intercept_token: Option<InterceptToken>,
@@ -255,6 +311,14 @@ pub struct ResolvedRules {
     /// the per-request availability pre-check. Unrestricted (all available) in
     /// OSS, when the org is "open", or when enforcement is off.
     pub available_apps: db::AvailableApps,
+    /// Granted host-gated connections that refused THIS request because it
+    /// went to a host other than their bound one (`AppConnectionResult::
+    /// HostMismatch`), each annotated with that host. Set only when nothing
+    /// else injected. Informational: the request still forwards; when it then
+    /// fails in a way the mismatch explains (transport failure, an auth-class
+    /// upstream response), the failure is answered with these choices instead
+    /// of a misleading generic error (#1137).
+    pub host_mismatch: Option<Vec<crate::connect::ConnectionChoice>>,
 }
 
 impl ResolvedRules {
@@ -335,6 +399,7 @@ async fn resolve_rules(
     // Id of the connection that wins injection (if any) — rides with
     // `session_policy` under the same attribution law.
     let mut winning_connection_id: Option<String> = None;
+    let mut host_mismatch: Option<Vec<crate::connect::ConnectionChoice>> = None;
 
     // Resolve app connections whenever any exist and MERGE their rules with
     // the secret rules. A shared host (e.g. www.googleapis.com) can carry
@@ -402,6 +467,11 @@ async fn resolve_rules(
                 debug!(host = %hostname, "requested connection not found; secret rules serve this path");
             }
             Ok(AppConnectionResult::NoConnections) => {}
+            // Nothing injects, exactly as `NoConnections`; the choices ride
+            // along so a downstream failure can be explained (#1137).
+            Ok(AppConnectionResult::HostMismatch { connections }) => {
+                host_mismatch = Some(connections);
+            }
             Err(e) => {
                 if !secrets_serve {
                     return Err(e);
@@ -448,6 +518,12 @@ async fn resolve_rules(
 
     let mut injection_rules = inject::merge_injection_rules(app_rules, secret_rules);
 
+    // A non-injecting alias host (login.salesforce.com): nothing can inject,
+    // but the agent's connection of the owning provider tells it where it
+    // SHOULD have gone.
+    let host_mismatch =
+        host_mismatch.or_else(|| connect::alias_host_choices(&resp.alias_connections));
+
     // Vault fallback — only when neither secrets nor apps yielded any rules. A
     // connection awaiting its credential counts as "apps yielded rules": it
     // will inject once allowed, and adopting a vault credential alongside it
@@ -472,6 +548,7 @@ async fn resolve_rules(
             session_policy,
             winning_connection_id,
             budget_bindings: resp.budget_bindings,
+            host_mismatch,
         }),
         app_connections: resp.app_connections,
     })
@@ -863,5 +940,202 @@ mod tests {
         };
         let (auth, _) = applied_auth("/anything", &rules.injection_rules);
         assert_eq!(auth.as_deref(), Some("Basic vault-cred"));
+    }
+
+    // ── host mismatch (#1137) ─────────────────────────────────────────────
+
+    use response::test_support::{body_json, TestBody};
+
+    /// A connection row with real encrypted credentials bound to another host.
+    async fn gated_app_conn(
+        engine: &PolicyEngine,
+        id: &str,
+        provider: &str,
+        creds: serde_json::Value,
+    ) -> db::AppConnectionRow {
+        let mut row = app_conn(id, provider);
+        row.credentials = Some(
+            engine
+                .crypto
+                .encrypt(&creds.to_string())
+                .await
+                .expect("encrypt"),
+        );
+        row
+    }
+
+    /// The mismatch is SOFT at resolution: the request still resolves (no
+    /// injection, exactly as before), and the choices ride on `ResolvedRules`
+    /// for the failure paths to explain what happened.
+    #[tokio::test]
+    async fn host_mismatch_resolves_uncredentialed_and_records_the_choices() {
+        let engine = PolicyEngine::test_stub();
+        let store = cache::in_memory();
+        let host = "your-domain.my.salesforce.com";
+        let conn = gated_app_conn(
+            &engine,
+            "sf1",
+            "salesforce",
+            serde_json::json!({ "access_token": "t", "instance_host": "acme.my.salesforce.com" }),
+        )
+        .await;
+        seed_connect(&store, host, vec![], vec![conn]).await;
+
+        let res = resolve_rules(
+            &ctx(),
+            host,
+            &engine,
+            &*store,
+            &[],
+            None,
+            Some("/services/data/v60.0/sobjects/Opportunity"),
+        )
+        .await
+        .unwrap();
+        let ResolveResult::Resolved { rules, .. } = res else {
+            panic!("expected Resolved");
+        };
+        assert!(!rules.injects(), "a mismatched host must inject nothing");
+        let choices = rules.host_mismatch.as_deref().expect("mismatch recorded");
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].id, "sf1");
+        assert_eq!(choices[0].host.as_deref(), Some("acme.my.salesforce.com"));
+
+        // And the transport-failure answer for these rules is the 421, not
+        // the opaque 502 — the #1137 shape (placeholder host, DNS failure).
+        let resp: hyper::Response<TestBody> = transport_failure_response(
+            &rules,
+            &ctx(),
+            host,
+            &failed_get("/services/data/v60.0/sobjects/Opportunity"),
+            &anyhow::anyhow!("dns error"),
+        );
+        assert_eq!(resp.status(), hyper::StatusCode::MISDIRECTED_REQUEST);
+    }
+
+    fn failed_get(path: &str) -> FailedRequest {
+        FailedRequest {
+            method: hyper::Method::GET,
+            path: path.to_string(),
+            start: std::time::Instant::now(),
+        }
+    }
+
+    /// Without a recorded mismatch, a local failure keeps the generic
+    /// `resolution_failed`, and a failed upstream send says the host could
+    /// not be reached — never "failed to resolve rules".
+    #[tokio::test]
+    async fn transport_failure_without_mismatch_names_what_failed() {
+        let engine = PolicyEngine::test_stub();
+        let store = cache::in_memory();
+        seed_connect(&store, HOST, vec![], vec![]).await;
+        let res = resolve_rules(&ctx(), HOST, &engine, &*store, &[], None, Some("/x"))
+            .await
+            .unwrap();
+        let ResolveResult::Resolved { rules, .. } = res else {
+            panic!("expected Resolved");
+        };
+        assert!(rules.host_mismatch.is_none());
+
+        let local = anyhow::anyhow!("buffering request body");
+        let resp: hyper::Response<TestBody> =
+            transport_failure_response(&rules, &ctx(), HOST, &failed_get("/x"), &local);
+        assert_eq!(resp.status(), hyper::StatusCode::BAD_GATEWAY);
+        assert_eq!(body_json(resp).await["error"], "resolution_failed");
+
+        // A real reqwest send failure: nothing listens on the discard port.
+        let send_err = reqwest::Client::new()
+            .get("http://127.0.0.1:9/")
+            .send()
+            .await
+            .expect_err("nothing listens on :9");
+        let wrapped = anyhow::Error::new(send_err).context("forwarding to http://127.0.0.1:9/");
+        assert!(is_upstream_send_failure(&wrapped));
+        let resp: hyper::Response<TestBody> =
+            transport_failure_response(&rules, &ctx(), HOST, &failed_get("/x"), &wrapped);
+        assert_eq!(resp.status(), hyper::StatusCode::BAD_GATEWAY);
+        let json = body_json(resp).await;
+        assert_eq!(json["error"], "upstream_unreachable");
+        assert_eq!(json["host"], HOST);
+    }
+
+    fn alias_conn(id: &str, instance_host: Option<&str>) -> db::AppConnectionRow {
+        db::AppConnectionRow {
+            id: id.to_string(),
+            provider: "salesforce".to_string(),
+            scope: "workspace".to_string(),
+            credentials: None,
+            label: Some("jane@acme.com".to_string()),
+            metadata: instance_host.map(|h| serde_json::json!({ "bound_host": h })),
+            session_policy: None,
+        }
+    }
+
+    async fn resolve_alias(
+        host: &str,
+        alias_connections: Vec<db::AppConnectionRow>,
+    ) -> Box<ResolvedRules> {
+        let engine = PolicyEngine::test_stub();
+        let store = cache::in_memory();
+        let resp = ConnectResponse {
+            workspace_id: Some("p1".to_string()),
+            organization_id: Some("o1".to_string()),
+            alias_connections,
+            ..Default::default()
+        };
+        store
+            .set(&format!("connect:o1:p1:tok:{host}"), &resp, 60)
+            .await;
+        let res = resolve_rules(
+            &ctx(),
+            host,
+            &engine,
+            &*store,
+            &[],
+            None,
+            Some("/services/oauth2/userinfo"),
+        )
+        .await
+        .unwrap();
+        let ResolveResult::Resolved { rules, .. } = res else {
+            panic!("expected Resolved");
+        };
+        rules
+    }
+
+    /// The prod incident: an agent with a connected Salesforce org calls
+    /// `login.salesforce.com`. Nothing may inject there, but the request must
+    /// carry the bound host so the failure is answered with it.
+    #[tokio::test]
+    async fn alias_host_records_the_bound_host_without_injecting() {
+        let rules = resolve_alias(
+            "login.salesforce.com",
+            vec![alias_conn("sf1", Some("acme.my.salesforce.com"))],
+        )
+        .await;
+        assert!(!rules.injects(), "an alias host must never inject");
+        let choices = rules.host_mismatch.as_deref().expect("mismatch recorded");
+        assert_eq!(choices[0].id, "sf1");
+        assert_eq!(choices[0].host.as_deref(), Some("acme.my.salesforce.com"));
+    }
+
+    /// A stored host outside the provider's zone is never vouched for.
+    #[tokio::test]
+    async fn alias_host_never_vouches_for_an_out_of_zone_bound_host() {
+        let rules = resolve_alias(
+            "login.salesforce.com",
+            vec![alias_conn("sf1", Some("evil.test"))],
+        )
+        .await;
+        let choices = rules.host_mismatch.as_deref().expect("mismatch recorded");
+        assert_eq!(choices[0].host, None);
+    }
+
+    /// No connection of the owning provider → no mismatch; the failure path
+    /// falls through to the native connect link.
+    #[tokio::test]
+    async fn alias_host_without_connections_records_nothing() {
+        let rules = resolve_alias("login.salesforce.com", vec![]).await;
+        assert!(rules.host_mismatch.is_none());
     }
 }

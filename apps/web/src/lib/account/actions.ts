@@ -2,13 +2,9 @@
 
 import { db } from "@onecli/db";
 import { getServerSession } from "@/lib/auth/server";
-import { logger } from "@onecli/api/lib/logger";
 import { activeMembershipWhere } from "@onecli/api/services/organization-service";
 import { enforceSsoSession } from "@onecli/api/ee/sso/sso-enforcement";
 import { normalizePlan, getPlanConfig } from "@onecli/api/ee/billing/plans";
-import { safeAction, type ActionResult } from "@/lib/safe-action";
-
-const log = logger.child({ component: "account-actions" });
 
 const requireUser = async () => {
   const session = await getServerSession();
@@ -28,7 +24,6 @@ const requireUser = async () => {
 
 export interface AccountPreferencesData {
   email: string;
-  hasOrgs: boolean;
   /**
    * Whether this account signs in with a password at all. A self-hosted user
    * who only ever used Google has no credential to change, and offering them
@@ -41,53 +36,15 @@ export const getAccountPreferencesData =
   async (): Promise<AccountPreferencesData> => {
     const user = await requireUser();
 
-    const [orgCount, credentialCount] = await Promise.all([
-      db.organizationMember.count({ where: { userId: user.id } }),
-      db.account.count({
-        where: { userId: user.id, providerId: "credential" },
-      }),
-    ]);
+    const credentialCount = await db.account.count({
+      where: { userId: user.id, providerId: "credential" },
+    });
 
     return {
       email: user.email,
-      hasOrgs: orgCount > 0,
       hasPassword: credentialCount > 0,
     };
   };
-
-export const deleteAccountAction = async (): Promise<ActionResult> => {
-  return safeAction(async () => {
-    const user = await requireUser();
-
-    log.info(
-      { userId: user.id, userEmail: user.email },
-      "account deletion requested",
-    );
-
-    const membershipCount = await db.organizationMember.count({
-      where: { userId: user.id },
-    });
-    if (membershipCount > 0) {
-      throw new Error(
-        "You must leave or delete all organizations before deleting your account",
-      );
-    }
-
-    await db.workspace.updateMany({
-      where: { createdByUserId: user.id },
-      data: { createdByUserId: null },
-    });
-
-    await db.$transaction([
-      db.apiKey.deleteMany({ where: { userId: user.id } }),
-      db.onboardingSurvey.deleteMany({ where: { userId: user.id } }),
-      db.auditLog.deleteMany({ where: { userId: user.id } }),
-      db.user.delete({ where: { id: user.id } }),
-    ]);
-
-    log.info({ userId: user.id }, "user account deleted");
-  });
-};
 
 export interface AuditLogEntry {
   id: string;

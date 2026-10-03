@@ -11,7 +11,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { getApp } from "@onecli/api/apps/registry";
 import { useAppMessages } from "@/hooks/use-app-connected";
-import { useSetConnectionGrant } from "@/hooks/use-grants";
+import { useInvalidateGrants } from "@/hooks/use-grants";
 import { queryKeys } from "@/lib/api/keys";
 import { connectPopupHeight, openConnectPopup } from "@/lib/connect-popup";
 import { connectionsPath, WORKSPACE_PATH_RE } from "@/lib/navigation";
@@ -45,36 +45,27 @@ export const AttachParamDialog = () => {
   const provider = raw && PROVIDER_ID_RE.test(raw) && getApp(raw) ? raw : null;
 
   const queryClient = useQueryClient();
-  const setGrant = useSetConnectionGrant();
+  const invalidateGrants = useInvalidateGrants();
   // Claim fence: only popups THIS door opened are handled — the in-chat
   // card's listener fences on its own claims the same way, so one event
   // never fans out across surfaces. A SET keyed by provider (the card's
   // shape — not a boolean, not the current URL param): the landing must
-  // complete — cache refresh and the auto-grant the Slack button promised —
-  // even if the dialog was closed or the param changed to a DIFFERENT
-  // provider while the popup was in flight, and a stale claim must never be
-  // consumed by another provider's popup.
+  // complete (the cache refresh that shows the new account attached) even
+  // if the dialog was closed or the param changed to a DIFFERENT provider
+  // while the popup was in flight, and a stale claim must never be consumed
+  // by another provider's popup.
   const claimed = useRef(new Set<string>());
 
   useAppMessages({
-    onConnected: ({ provider: connected, connectionId }) => {
+    onConnected: ({ provider: connected }) => {
       if (!connected || !claimed.current.has(connected)) return;
       claimed.current.delete(connected);
-      // The pool changed even without a fresh id — refresh the list and the
-      // count badges, like the in-chat card does.
-      void queryClient.invalidateQueries({
-        queryKey: queryKeys.connections.all(),
-      });
+      // The pool changed even without a fresh id, and a fresh account arrives
+      // already granted, with full access, to every agent of the workspace
+      // (the API's workspace auto-attach): refresh the list, the grant views
+      // and the count badges, like the in-chat card does.
+      invalidateGrants();
       void queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
-      // Fresh connection from this door: wire the agent up with full access
-      // — the outcome the Slack card's button promised.
-      if (connectionId && agentId) {
-        setGrant.mutate({
-          agentId,
-          connectionId,
-          input: { access: "full" },
-        });
-      }
     },
     // The app needs credentials configured before it can connect; this
     // dialog has no config surface, so route to the connections page — the

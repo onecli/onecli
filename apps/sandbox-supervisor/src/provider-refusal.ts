@@ -55,6 +55,22 @@ export const isTrialCreditExhausted = (message: string): boolean =>
   TRIAL_CREDIT_SHAPE.test(message);
 
 /**
+ * The provider rejecting the CONVERSATION ITSELF as malformed: Anthropic's
+ * 400 for a `tool_use` not answered by a `tool_result` in the very next
+ * message, and its sibling for a `tool_result` no `tool_use` asked for.
+ * Neither is a key problem (so it must never read as a provider refusal),
+ * and neither can succeed on resend: the stored transcript is replayed
+ * whole on every turn, so the same request is rejected forever until the
+ * transcript is repaired (issue #1194: a torn checkpoint doubled it).
+ * Matched on the provider's own wording, which names the block types.
+ */
+const TRANSCRIPT_REJECTED_SHAPE =
+  /tool_use`? ids were found without `?tool_result|unexpected `?tool_use_id`? found in `?tool_result/i;
+
+export const isTranscriptRejected = (message: string): boolean =>
+  TRANSCRIPT_REJECTED_SHAPE.test(message);
+
+/**
  * Whether a harness terminal error is the MODEL PROVIDER refusing the
  * request (usage limit, exhausted credits, revoked key) — the one live-
  * harness failure a person can actually fix, so it earns a code and

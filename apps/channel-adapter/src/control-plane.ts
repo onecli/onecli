@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { readCappedBinaryBody } from "@onecli/channels";
 import {
   adapterActionDecisionResponseSchema,
   adapterConfigResponseSchema,
@@ -32,6 +33,10 @@ import {
  * cast, so a contract drift fails loudly here instead of somewhere deep in a
  * poll loop.
  */
+
+/** A byte pull is a 25 MB-class body over an internal hop; the JSON calls' budget
+ * would cut a slow fetch mid-stream. */
+const ATTACHMENT_TIMEOUT_MS = 60_000;
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 
@@ -107,6 +112,14 @@ export interface ControlPlaneClient {
     conversationId: string,
     since: number | undefined,
   ): Promise<z.infer<typeof adapterTranscriptResponseSchema>>;
+  /** The bytes of one of the agent's outbound files (a work item's
+   * `turn.attachments[i].id`). Null when the control plane refuses (not this
+   * instance's to read, or gone) — the mirror then posts a link line. Capped
+   * at `maxBytes`; a larger body is treated as a refusal, never buffered. */
+  fetchAttachment(
+    attachmentId: string,
+    maxBytes: number,
+  ): Promise<Uint8Array | null>;
   /** Resolve `@[Name]` names for the completion pass (normalized in). The
    * conversation carries the find_recipient anchors that outrank the
    * directory. */
@@ -361,6 +374,32 @@ export const createControlPlane = (options: {
         }),
         { body: {} },
       ),
+
+    fetchAttachment: async (attachmentId, maxBytes) => {
+      const path = `/channel-adapter/attachments/${encodeURIComponent(attachmentId)}`;
+      const doFetch = () =>
+        fetch(`${options.baseUrl}/v1${path}`, {
+          headers: { authorization: `Bearer ${bearer}` },
+          signal: AbortSignal.timeout(ATTACHMENT_TIMEOUT_MS),
+        });
+      let response = await doFetch();
+      if (response.status === 401 && (await recoverFromDisplacement())) {
+        response = await doFetch();
+      }
+      if (response.status === 404) {
+        await response.body?.cancel().catch(() => {});
+        return null;
+      }
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => {});
+        throw new ControlPlaneError(
+          response.status,
+          `control plane answered ${response.status} for ${path}`,
+        );
+      }
+      const body = await readCappedBinaryBody(response, maxBytes);
+      return body.ok ? body.bytes : null;
+    },
 
     readTranscript: (conversationId, since) =>
       call(

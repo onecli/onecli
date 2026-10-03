@@ -9,6 +9,9 @@ import {
   type HomeSyncFile,
 } from "@onecli/agent-protocol";
 import { getGatewaySkill } from "../lib/skills/gateway-skill";
+import { channelPresencesForRender } from "./channels/agent-channel-service";
+import { peersForRender } from "./channels/agent-peer-roster";
+import { connectionsForRender } from "./agent-connections-render";
 import {
   MEMORY_INDEX_LINE_CLIP,
   clipLine,
@@ -76,6 +79,20 @@ export const bumpHomeForOrganization = async (
     data: { homeDesiredGeneration: { increment: 1 } },
   });
   if (count > 0) signalWork();
+};
+
+/**
+ * The bump for a resource scope: every agent that could see a change at
+ * that level (a workspace's connections, an org's connections or policy).
+ * A scope with neither id reaches no sandbox and is a no-op.
+ */
+export const bumpHomeForScope = async (scope: {
+  workspaceId?: string;
+  organizationId?: string;
+}): Promise<void> => {
+  if (scope.workspaceId) await bumpHomeForWorkspace(scope.workspaceId);
+  else if (scope.organizationId)
+    await bumpHomeForOrganization(scope.organizationId);
 };
 
 // ── The composer ────────────────────────────────────────────────────────────
@@ -346,11 +363,16 @@ export const buildHomeSyncItem = async (
   const manifest = files.map((file) => file.path);
   // ALWAYS present on the final part, empty string meaning "cleared" — an
   // omitted field reads as "unchanged" at the supervisor, which would pin a
-  // cleared brief to its old text until the next boot.
+  // cleared brief to its old text until the next boot. Same law for the
+  // channel presences: an empty array means "none" (a detached presence
+  // must leave the doc), omission would mean "unchanged".
   const finalExtras = {
     prune: manifest,
     instructions: agent.instructions ?? "",
     agentName: agent.name ?? "",
+    channels: await channelPresencesForRender(agentId),
+    peers: await peersForRender(agentId),
+    connections: await connectionsForRender(agentId),
   };
 
   // Pack files greedily into bare parts.

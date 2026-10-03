@@ -266,7 +266,7 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
     ).toBe(true);
   });
 
-  it("custom tri-state: allow / ask / blocked-complement / terminal, bound to the winner", async () => {
+  it("custom tri-state: allow / ask / blocked-complement, unlisted needs approval", async () => {
     await grants.setConnectionGrant(
       SCOPE,
       AGENT,
@@ -280,7 +280,10 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
     );
 
     const draft = await grantRows({ status: "draft" });
+    // allow / ask / blocked / everything-else (needs approval).
     expect(draft).toHaveLength(4);
+    const terminal = draft.find((r) => r.name.endsWith(": everything else"));
+    expect(terminal).toMatchObject({ action: "allow", requireApproval: true });
 
     const allowed = await decide({
       path: "/gmail/v1/users/me/drafts",
@@ -297,8 +300,8 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
     });
     expect(asked).toMatchObject({ action: "allow", requireApproval: true });
 
-    // Any other endpoint of the provider dies on the blocked complement or the
-    // terminal — an EXPLICIT block, not a default.
+    // A catalog tool the user did not pick (`search_messages`) dies on the
+    // blocked complement: an EXPLICIT block, not a default.
     const blocked = await decide({
       path: "/gmail/v1/users/me/messages",
       method: "GET",
@@ -306,6 +309,16 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
     });
     expect(blocked.action).toBe("block");
     expect(blocked.byDefault).toBeFalsy();
+
+    // An endpoint the catalog does not describe at all (Gmail's `history`
+    // sync) is held for approval by the terminal: not refused outright, and
+    // not silently allowed by the workspace's allow default either.
+    const unlisted = await decide({
+      path: "/gmail/v1/users/me/history",
+      method: "GET",
+      winner: CONN_WORK,
+    });
+    expect(unlisted).toMatchObject({ action: "allow", requireApproval: true });
 
     // The step-1 winner-binding: the same request via the same-provider
     // SIBLING matches none of the stack and rides the workspace's allow default.
@@ -403,7 +416,7 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
     );
     expect(published.filter((r) => r.source === "grant")).toHaveLength(0);
 
-    // The stack (including its terminal block) is gone — back to the default.
+    // The whole stack is gone, so the request is back on the default.
     const after = await decide({
       path: "/gmail/v1/users/me/drafts",
       method: "POST",
@@ -809,24 +822,70 @@ describe.skipIf(!PROOF_URL)("a grant reaches the sandbox", () => {
 
   it("granting a secret marks a RUNNING sandbox for respawn", async () => {
     await seedSandbox("running");
+    await db.secret.update({
+      where: { id: SECRET },
+      data: { type: "anthropic" },
+    });
+
+    try {
+      await grants.setSecretGrant(SCOPE, HOSTED_AGENT, SECRET, null);
+
+      // `unprovisioned` is what the dispatch seam's start arm claims — the next
+      // poll composes a fresh payload and the runner recreates the container.
+      expect(await sandboxStatus()).toBe("unprovisioned");
+    } finally {
+      await db.secret.update({
+        where: { id: SECRET },
+        data: { type: "generic" },
+      });
+    }
+  });
+
+  it("granting a GENERIC secret leaves the container alone", async () => {
+    // The spawn payload is built from LLM keys only; a generic (custom) secret
+    // is spliced at the wire like a connection. Every new workspace secret is
+    // now granted to every agent at once, so respawning on it would kill every
+    // live session in the workspace to change nothing.
+    await seedSandbox("running");
 
     await grants.setSecretGrant(SCOPE, HOSTED_AGENT, SECRET, null);
 
-    // `unprovisioned` is what the dispatch seam's start arm claims — the next
-    // poll composes a fresh payload and the runner recreates the container.
-    expect(await sandboxStatus()).toBe("unprovisioned");
+    expect(await sandboxStatus()).toBe("running");
   });
 
-  it("REVOKING a secret marks it for respawn too", async () => {
+  it("REVOKING an LLM key marks it for respawn too", async () => {
+    await db.secret.update({
+      where: { id: SECRET },
+      data: { type: "anthropic" },
+    });
+    try {
+      await grants.setSecretGrant(SCOPE, HOSTED_AGENT, SECRET, null);
+      await seedSandbox("running");
+
+      await grants.removeSecretGrant(SCOPE, HOSTED_AGENT, SECRET, null);
+
+      // Losing the only OAuth secret flips the placeholder back to
+      // `ANTHROPIC_API_KEY`; a container still advertising the old one would
+      // go on sending a header the gateway no longer fills.
+      expect(await sandboxStatus()).toBe("unprovisioned");
+    } finally {
+      await db.secret.update({
+        where: { id: SECRET },
+        data: { type: "generic" },
+      });
+    }
+  });
+
+  it("REVOKING a GENERIC secret leaves the container alone", async () => {
+    // Same reason as the grant: the payload never named it. A detach on every
+    // agent at once (turning a workspace secret off) must not kill every
+    // live session in the workspace.
     await grants.setSecretGrant(SCOPE, HOSTED_AGENT, SECRET, null);
     await seedSandbox("running");
 
     await grants.removeSecretGrant(SCOPE, HOSTED_AGENT, SECRET, null);
 
-    // Losing the only OAuth secret flips the placeholder back to
-    // `ANTHROPIC_API_KEY`; a container still advertising the old one would go
-    // on sending a header the gateway no longer fills.
-    expect(await sandboxStatus()).toBe("unprovisioned");
+    expect(await sandboxStatus()).toBe("running");
   });
 
   it("an idempotent no-op grant does NOT recreate the container", async () => {

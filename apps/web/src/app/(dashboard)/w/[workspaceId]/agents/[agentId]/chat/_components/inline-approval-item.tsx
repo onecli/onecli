@@ -1,18 +1,20 @@
 "use client";
 
 import { useState } from "react";
-import { ShieldAlert } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Message, MessageContent } from "@onecli/ui/components/message";
 import { cn } from "@onecli/ui/lib/utils";
-import type { PendingApproval } from "@/lib/api/approvals";
+import type { PendingApproval, SettledOutcome } from "@/lib/api/approvals";
 import { ApprovalActions } from "@/lib/components/approvals/approval-actions";
+import { ApprovalAppIcon } from "@/lib/components/approvals/approval-app-icon";
 import { ApprovalDetailsDialog } from "@/lib/components/approvals/approval-details-dialog";
+import { ApprovalPreview } from "@/lib/components/approvals/approval-preview";
+import { rowsBesideTitle } from "@/lib/components/approvals/approval-rows";
+import { ApprovalTitle } from "@/lib/components/approvals/approval-title";
 import {
   formatCountdown,
   useCountdown,
 } from "@/lib/components/approvals/use-countdown";
-import type { SettledOutcome } from "./use-approval-cards";
 
 /** How much of a long detail value (e.g. an email body) the card shows. */
 const DETAIL_CLAMP_CLASS = "line-clamp-4";
@@ -44,7 +46,7 @@ export const InlineApprovalItem = ({
 }) => {
   const remaining = useCountdown(approval.expiresAt);
   const urgent = remaining <= 30;
-  const details = approval.summary?.details ?? [];
+  const details = rowsBesideTitle(approval.summary);
   const [detailsOpen, setDetailsOpen] = useState(false);
 
   // Settled — and ONLY settled — renders the record row. The poll is the
@@ -61,7 +63,10 @@ export const InlineApprovalItem = ({
             className="bg-muted/50 text-muted-foreground flex w-fit max-w-[80%] items-baseline gap-1 rounded-xl border px-4 py-2 text-sm"
           >
             <span className="min-w-0 truncate font-medium">
-              {approval.summary?.action ?? `${approval.method} request`}
+              <ApprovalTitle
+                summary={approval.summary}
+                fallback={`${approval.method} request`}
+              />
             </span>
             <span className="shrink-0">· {SETTLED_COPY[settled]}</span>
           </div>
@@ -76,14 +81,22 @@ export const InlineApprovalItem = ({
         <div className="bg-muted/50 w-fit max-w-[80%] overflow-hidden rounded-xl border">
           {/* Header: what the agent wants to do, and how long the offer lasts. */}
           <div className="flex items-center gap-2.5 px-4 pt-3 pb-2">
-            <ShieldAlert
-              aria-hidden="true"
-              className="size-4 shrink-0 text-amber-600 dark:text-amber-500"
-            />
+            <ApprovalAppIcon appId={approval.app} />
             <p className="min-w-0 truncate text-sm font-semibold">
               <span className="sr-only">Approval needed: </span>
-              {approval.summary?.action ?? `${approval.method} request`}
+              <ApprovalTitle
+                summary={approval.summary}
+                fallback={`${approval.method} request`}
+              />
             </p>
+            <Button
+              variant="ghost"
+              size="xs"
+              onClick={() => setDetailsOpen(true)}
+              className="text-muted-foreground hover:text-foreground -my-1 shrink-0"
+            >
+              Details
+            </Button>
             <span
               className={cn(
                 "text-muted-foreground ms-auto shrink-0 text-xs tabular-nums",
@@ -96,50 +109,37 @@ export const InlineApprovalItem = ({
             </span>
           </div>
 
-          {/* The parsed request — To / Subject / Body for an email. */}
+          {/* The parsed request (To / Subject / Body for an email), minus
+              the record the title already names. The endpoint lives in
+              Details; a card with no rows left keeps it, since then it is the
+              only hint of what the request does. */}
           {details.length > 0 ? (
-            <dl className="space-y-1.5 px-4 pb-1 text-sm">
-              {details.map((d, i) => (
-                <div key={`${d.label}-${i}`} className="flex gap-1.5">
-                  <dt className="text-muted-foreground shrink-0">{d.label}:</dt>
-                  <dd
-                    className={cn(
-                      "min-w-0 break-words whitespace-pre-wrap",
-                      DETAIL_CLAMP_CLASS,
-                    )}
-                  >
-                    {d.value}
-                  </dd>
-                </div>
-              ))}
-            </dl>
+            <ApprovalPreview
+              kind={approval.summary?.kind}
+              details={details}
+              className="px-4 pb-3"
+            />
           ) : (
-            approval.bodyPreview && (
-              <p
-                className={cn(
-                  "px-4 pb-1 text-sm break-words whitespace-pre-wrap",
-                  DETAIL_CLAMP_CLASS,
-                )}
-              >
-                {approval.bodyPreview}
+            <>
+              {/* Legacy rows with no structured summary carry only text. */}
+              {!approval.summary && approval.bodyPreview && (
+                <p
+                  className={cn(
+                    "px-4 pb-1 text-sm break-words whitespace-pre-wrap",
+                    DETAIL_CLAMP_CLASS,
+                  )}
+                >
+                  {approval.bodyPreview}
+                </p>
+              )}
+              <p className="text-muted-foreground min-w-0 truncate px-4 pb-2 text-xs">
+                {approval.host}
+                {approval.path}
               </p>
-            )
+            </>
           )}
 
-          <p className="text-muted-foreground min-w-0 truncate px-4 pb-2 text-xs">
-            {approval.host}
-            {approval.path}
-          </p>
-
-          <div className="flex items-center gap-2 border-t bg-background/50 px-3 py-2">
-            <Button
-              variant="ghost"
-              size="xs"
-              onClick={() => setDetailsOpen(true)}
-              className="text-muted-foreground hover:text-foreground shrink-0"
-            >
-              Details
-            </Button>
+          <div className="flex items-center gap-2 border-t bg-background/50 px-4 py-2">
             {/* The consequence of walking away — same sentence as the Slack
                 card, so every surface teaches the same rule. */}
             <p className="text-muted-foreground min-w-0 truncate text-xs">
@@ -155,6 +155,8 @@ export const InlineApprovalItem = ({
         <ApprovalDetailsDialog
           approval={detailsOpen ? approval : null}
           onClose={() => setDetailsOpen(false)}
+          // The card above already shows the full readable preview.
+          showSummary={false}
         />
       </MessageContent>
     </Message>

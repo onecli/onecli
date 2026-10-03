@@ -68,6 +68,10 @@ fn is_websocket_forwarded_header(name: &HeaderName) -> bool {
     if s == "host" || s == "content-length" || s == crate::connect::CONNECTION_ID_HEADER {
         return false;
     }
+    // The agent's batch-grouping headers never leave the gateway.
+    if approval::BATCH_HEADERS.contains(&s) {
+        return false;
+    }
     if WEBSOCKET_HANDSHAKE_HEADERS.contains(&s) {
         return true;
     }
@@ -428,46 +432,21 @@ fn emit_telemetry(
         "WebSocket upgrade"
     );
 
-    if let (Some(pid), Some(aid)) = (
-        proxy_ctx.workspace_id.as_deref(),
-        proxy_ctx.agent_id.as_deref(),
-    ) {
-        let hostname = common::util::strip_port(host);
-        let (provider, _) =
-            apps::provider_for_host_and_path(hostname, path).unwrap_or((hostname, hostname));
-
-        telemetry::on_request(telemetry::RequestEvent {
-            org_id: proxy_ctx
-                .organization_id
-                .as_deref()
-                .unwrap_or("")
-                .to_string(),
-            workspace_id: pid.to_string(),
-            agent_id: aid.to_string(),
-            agent_name: proxy_ctx
-                .agent_name
-                .as_deref()
-                .unwrap_or("unknown")
-                .to_string(),
-            method: "WEBSOCKET".to_string(),
-            host: host.to_string(),
-            path: path.to_string(),
-            provider: provider.to_string(),
-            status: 101,
-            latency_ms: start.elapsed().as_millis() as u32,
-            injection_count: injection_count as u16,
-            timestamp: time::OffsetDateTime::now_utc()
-                .format(&time::format_description::well_known::Iso8601::DEFAULT)
-                .unwrap_or_default(),
-            injected: injection_count > 0,
-            decision: telemetry::core::RequestDecision::Allowed,
-            connection_label: None,
-            existing_log_id: None,
-            log_id: None,
-            budget_charge: None,
-            matched_rule: None,
-        });
-    }
+    // A completed upgrade is logged as a 101 with the injections the
+    // handshake carried.
+    let Some(mut meta) = hooks::request_meta(
+        proxy_ctx,
+        host,
+        "WEBSOCKET",
+        path,
+        101,
+        start.elapsed().as_millis() as u32,
+    ) else {
+        return;
+    };
+    meta.injection_count = injection_count as u16;
+    meta.injected = injection_count > 0;
+    telemetry::on_request(meta.into_event(None));
 }
 
 #[cfg(test)]
@@ -499,6 +478,13 @@ mod tests {
 
         let name = HeaderName::from_static("transfer-encoding");
         assert!(!is_websocket_forwarded_header(&name));
+
+        for name in approval::BATCH_HEADERS {
+            assert!(
+                !is_websocket_forwarded_header(&HeaderName::from_static(name)),
+                "{name} must never reach the upstream API"
+            );
+        }
     }
 
     #[test]

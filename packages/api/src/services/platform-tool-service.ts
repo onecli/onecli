@@ -1,6 +1,8 @@
 import { db } from "@onecli/db";
 import {
   MAX_TOOL_RESULT_CHARS,
+  type RunnerAttachmentUploadHeaders,
+  type RunnerAttachmentUploadResponse,
   type RunnerMemoryWriteRequest,
   type RunnerMemoryWriteResponse,
   type RunnerToolCallRequest,
@@ -41,10 +43,18 @@ import {
   skillUpdateArgsSchema,
 } from "../validations/skills";
 import {
+  completeTaskArgsSchema,
   findRecipientArgsSchema,
+  messageAgentArgsSchema,
   sendMessageArgsSchema,
 } from "../validations/recipients";
 import { requestSend } from "./channels/send-message-service";
+import {
+  completeTask,
+  requestCommunicate,
+} from "./channels/agent-link-service";
+import { createOutboundAttachment } from "./attachment-service";
+import { removedPresenceNotice } from "./channels/agent-channel-service";
 import {
   anchorRecipient,
   findChannels,
@@ -241,6 +251,32 @@ const toolError = (message: string): RunnerToolCallResponse => ({
   ok: false,
   error: message,
 });
+
+/**
+ * What a delivered `message_agent` tells the model about where things go
+ * next, by how the message landed against the pair's task state (the PR
+ * after 5b). The words are the model's only guide here, so each says the
+ * one thing to do: continue in the pair conversation and report; tell the
+ * person it is queued; or, with no task, expect the reply in the pair
+ * conversation.
+ */
+const sentNote = (
+  to: string,
+  task: "opened" | "queued" | "joined" | "ongoing" | "none",
+): string => {
+  switch (task) {
+    case "opened":
+      return `Delivered. This opened a task for the person: continue with ${to} in your conversation with it (its replies arrive there, prefixed "${to} (agent):"), and finish with complete_task there; your report reaches the person here on its own. Tell the person you will report back.`;
+    case "joined":
+      return `Delivered within the open task with ${to}. Continue in your conversation with it and finish with complete_task there.`;
+    case "queued":
+      return `${to} is busy with another task; this one is queued and starts on its own when ${to} is free. Tell the person the answer will take longer.`;
+    case "ongoing":
+      return `Delivered within the open task. ${to}'s reply, if any, arrives here prefixed "${to} (agent):".`;
+    case "none":
+      return `Delivered. ${to}'s reply, if any, arrives as a message prefixed "${to} (agent):" in your conversation with ${to}.`;
+  }
+};
 
 /**
  * The ONE agent-authored memory write path shared by both doors (the
@@ -453,6 +489,92 @@ export const executeMemoryFileWrite = async (
       ok: false,
       retryable: true,
       error: "The write failed unexpectedly.",
+    };
+  }
+};
+
+/**
+ * POST /v1/runner/attachments — a file the agent is sending back
+ * (`send_file`, Tier 3), relayed by the runner with the bytes already read
+ * and stream-capped by the route. The memory-write door's exact trust
+ * posture: identity DERIVED from the two authenticated facts (runner token +
+ * channel-stamped sandbox), a hint-free fence miss, and the calling turn
+ * VERIFIED under the fenced agent before a byte is stored — here the turn is
+ * not just anchoring, it is the row's parent, so the service refuses rather
+ * than degrades when it does not hold. Audited under the human whose turn
+ * the file answers (the memory convention): name, size, hash, ids — never
+ * content.
+ */
+export const executeAttachmentUpload = async (
+  runnerId: string,
+  headers: RunnerAttachmentUploadHeaders,
+  mimeType: string,
+  bytes: Buffer,
+): Promise<RunnerAttachmentUploadResponse> => {
+  const identity = await resolveIdentity(runnerId, headers.sandboxId);
+  if (!identity) {
+    log.warn(
+      { runnerId, sandboxId: headers.sandboxId },
+      "attachment upload from a sandbox this runner does not host",
+    );
+    return { ok: false, error: "This file cannot be sent right now." };
+  }
+  try {
+    const stored = await createOutboundAttachment({
+      agentId: identity.agentId,
+      conversationId: headers.conversationId,
+      turnId: headers.turnId,
+      name: headers.name,
+      mimeType,
+      caption: headers.caption ?? null,
+      bytes,
+      declaredSha256: headers.sha256,
+    });
+    if (!stored.ok) return { ok: false, error: stored.error };
+
+    // Attribution: the person whose turn this file answers (the turn's
+    // author, when there is one). A platform-authored turn has no human to
+    // attribute and records nothing — the row itself is the record there.
+    // BEST-EFFORT once the file is stored: the memory door lets an audit
+    // failure surface as the write's failure because its save is an
+    // idempotent upsert; a file is not — telling the model "not stored"
+    // about a stored file invites a retry that lands a DUPLICATE. So a
+    // failed audit is logged loudly and the truthful answer still goes out.
+    try {
+      await auditAsCreator(
+        identity,
+        stored.turnUserId,
+        AUDIT_ACTIONS.CREATE,
+        AUDIT_SERVICES.ATTACHMENT,
+        {
+          attachmentId: stored.meta.id,
+          conversationId: headers.conversationId,
+          turnId: headers.turnId,
+          name: stored.meta.name,
+          sizeBytes: String(stored.meta.sizeBytes),
+          sha256: headers.sha256,
+          direction: "outbound",
+        },
+      );
+    } catch (auditError) {
+      log.error(
+        { error: auditError, attachmentId: stored.meta.id },
+        "outbound attachment stored but its audit record failed",
+      );
+    }
+    return { ok: true, attachmentId: stored.meta.id };
+  } catch (error) {
+    if (error instanceof ServiceError) {
+      return { ok: false, error: error.message };
+    }
+    log.error(
+      { error, sandboxId: headers.sandboxId, turnId: headers.turnId },
+      "outbound attachment upload failed",
+    );
+    return {
+      ok: false,
+      retryable: true,
+      error: "The file could not be stored. Try once more.",
     };
   }
 };
@@ -805,6 +927,11 @@ export const executePlatformTool = async (
         if (!args.success) {
           return toolError(args.error.issues[0]?.message ?? "Invalid input");
         }
+        // A resumed session keeps a withdrawn tool listed; when the only
+        // presence is a REMOVED one, "nobody matching" would read as "keep
+        // looking". Say what actually happened instead.
+        const removedNotice = await removedPresenceNotice(identity.agentId);
+        if (removedNotice) return toolError(removedNotice);
         const query = args.data.query.trim();
         const wantsChannel =
           args.data.kind === "channel" || query.startsWith("#");
@@ -904,6 +1031,8 @@ export const executePlatformTool = async (
         if (!args.success) {
           return toolError(args.error.issues[0]?.message ?? "Invalid input");
         }
+        const removedNotice = await removedPresenceNotice(identity.agentId);
+        if (removedNotice) return toolError(removedNotice);
         // Provenance-verified origin: the approval's outcome notice lands on
         // the calling turn, so the model hears the decision where it asked.
         // A forged context degrades to no anchor, never to authority.
@@ -929,6 +1058,64 @@ export const executePlatformTool = async (
                   to: outcome.to,
                   note: "The workspace owner was asked first. Their decision arrives as a notice in this conversation.",
                 },
+        };
+      }
+
+      case "message_agent": {
+        const args = messageAgentArgsSchema.safeParse(request.args);
+        if (!args.success) {
+          return toolError(args.error.issues[0]?.message ?? "Invalid input");
+        }
+        // Provenance-verified origin, same as send_message: the decision
+        // notice lands on the asking turn.
+        const context = await resolveContext(identity, request, "provenance");
+        const outcome = await requestCommunicate({
+          fromAgentId: identity.agentId,
+          to: args.data.to,
+          text: args.data.text,
+          originConversationId: context.originConversationId,
+          originTurnId: context.turnId,
+        });
+        return {
+          ok: true,
+          result:
+            outcome.kind === "sent"
+              ? {
+                  status: "sent",
+                  to: outcome.to,
+                  ...(outcome.task !== "none" && { task: outcome.task }),
+                  note: sentNote(outcome.to, outcome.task),
+                }
+              : {
+                  status: "held",
+                  to: outcome.to,
+                  note: "The owners were asked first. The decision arrives as a notice in this conversation.",
+                },
+        };
+      }
+
+      case "complete_task": {
+        const args = completeTaskArgsSchema.safeParse(request.args);
+        if (!args.success) {
+          return toolError(args.error.issues[0]?.message ?? "Invalid input");
+        }
+        // Provenance: WHICH pair the call came from decides which task it
+        // completes; a forged or missing context degrades to "your one open
+        // task, or name the peer", never to another agent's task.
+        const context = await resolveContext(identity, request, "provenance");
+        const done = await completeTask({
+          agentId: identity.agentId,
+          report: args.data.report,
+          originConversationId: context.originConversationId,
+          peer: args.data.peer ?? null,
+        });
+        return {
+          ok: true,
+          result: {
+            status: "reported",
+            to: done.peerName,
+            note: `Your report was delivered to the person. The task with ${done.peerName} is closed; a new question from them opens a new one.`,
+          },
         };
       }
 

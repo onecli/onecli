@@ -8,6 +8,7 @@ import { z } from "zod";
  * safe constants) rather than growing its own agent-protocol edge.
  */
 export {
+  ATTACHMENT_RETENTION_DAYS,
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENTS_PER_MESSAGE,
   isPreviewableImageType,

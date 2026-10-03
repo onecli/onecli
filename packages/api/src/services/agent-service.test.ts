@@ -55,6 +55,24 @@ const homeSync = vi.hoisted(() => ({
 
 vi.mock("./home-sync-service", () => homeSync);
 
+// The #1115 conflict line. Spied, not sprayed: which of the two conflicts
+// fired IS the contract (the 409 and its message are identical either way,
+// so `conflictReason` is the only thing that tells a benign idempotent
+// `ensureAgent` apart from a real concurrent race). The emitted JSON and the
+// prod-level pinning are proven in agent-conflict-log.test.ts.
+const conflictLog = vi.hoisted(() => ({
+  calls: [] as Record<string, unknown>[],
+}));
+
+vi.mock("./agent-conflict-log", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./agent-conflict-log")>();
+  return {
+    ...actual,
+    createLogAgentConflict: () => (details: Record<string, unknown>) =>
+      void conflictLog.calls.push(details),
+  };
+});
+
 vi.mock("@onecli/db", () => {
   class PrismaClientKnownRequestError extends Error {
     code: string;
@@ -159,6 +177,7 @@ beforeEach(() => {
   store.orgByoLegacy = false;
   store.orgByoEnabled = false;
   homeSync.bumpHomeForAgent.mockClear();
+  conflictLog.calls = [];
 });
 
 describe("createAgent — the creation-world gates (cloud, §3.10 re-decided)", () => {
@@ -381,6 +400,17 @@ describe("createAgent — validation", () => {
     await expect(
       createAgent("p1", { name: "Name", identifier: "taken" }),
     ).rejects.toMatchObject({ code: "CONFLICT" });
+    // #1115: the 409 is the idempotent-ensure path, and this line is the only
+    // record that says so — it names the identifier AND the agent it collided
+    // with, which the access log (method/path/status/orgId) cannot.
+    expect(conflictLog.calls).toEqual([
+      {
+        workspaceId: "p1",
+        identifier: "taken",
+        reason: "existing",
+        existingAgentId: expect.any(String),
+      },
+    ]);
   });
 
   it("maps a racing unique-constraint violation to the same 409", async () => {
@@ -391,6 +421,12 @@ describe("createAgent — validation", () => {
     await expect(
       createAgent("p1", { name: "Name", identifier: "racy" }),
     ).rejects.toMatchObject({ code: "CONFLICT" });
+    // Same status and same message as the pre-check above — so the REASON is
+    // the only thing separating a real race from routine ensure traffic. No
+    // existingAgentId: the insert failed, so there was nothing to name.
+    expect(conflictLog.calls).toEqual([
+      { workspaceId: "p1", identifier: "racy", reason: "race" },
+    ]);
   });
 
   it("does not swallow an unrelated database error", async () => {

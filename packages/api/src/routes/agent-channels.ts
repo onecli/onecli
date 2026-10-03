@@ -28,6 +28,12 @@ import {
   setContactPolicy,
 } from "../services/channels/send-message-service";
 import {
+  forgetLink,
+  listPeers,
+  resumePairConversation,
+  setLinkPolicy,
+} from "../services/channels/agent-link-service";
+import {
   actionApprovalDecisionSchema,
   contactPolicySchema,
 } from "../validations/channels";
@@ -488,6 +494,123 @@ export const agentChannelRoutes = () => {
       },
     });
     return c.json(result);
+  });
+
+  // GET /agents/:agentId/links — the agent's peers (PR 5b): every other
+  // hosted agent it may message, with both sides' standing decision and the
+  // pair conversation once they have talked. Workspace-fenced in the service.
+  app.get("/:agentId/links", async (c) => {
+    const workspaceId = requireWorkspaceId(c.get("auth"));
+    const peers = await listPeers({
+      workspaceId,
+      agentId: c.req.param("agentId"),
+    });
+    return c.json({ peers });
+  });
+
+  // PUT /agents/:agentId/links/:peerAgentId — set THIS agent's side of the
+  // relationship. Same three words as a contact (ask / allow / blocked), so
+  // the same body schema; `ask` is the revoke direction here too. The peer
+  // may live in another workspace by design: only `agentId` is fenced.
+  app.put("/:agentId/links/:peerAgentId", async (c) => {
+    const a = c.get("auth");
+    const workspaceId = requireWorkspaceId(a);
+    const body = contactPolicySchema.safeParse(await parseBody(c.req.raw));
+    if (!body.success) {
+      throw new ServiceError(
+        "UNPROCESSABLE",
+        body.error.issues[0]?.message ?? "Invalid body",
+      );
+    }
+    const result = await setLinkPolicy({
+      workspaceId,
+      agentId: c.req.param("agentId"),
+      peerAgentId: c.req.param("peerAgentId"),
+      policy: body.data.policy,
+      deciderUserId: a.userId,
+    });
+    if (!result) {
+      throw new ServiceError("NOT_FOUND", "Agent not found");
+    }
+    await recordAuditEvent({
+      workspaceId,
+      userId: a.userId,
+      userEmail: a.userEmail,
+      action: AUDIT_ACTIONS.UPDATE,
+      service: AUDIT_SERVICES.AGENT,
+      source: AUDIT_SOURCE.API,
+      metadata: {
+        agentId: c.req.param("agentId"),
+        peerAgentId: c.req.param("peerAgentId"),
+        linkId: result.id,
+        linkPolicy: result.policy,
+      },
+    });
+    return c.json(result);
+  });
+
+  // POST /agents/:agentId/links/:peerAgentId/resume — a person continues
+  // THIS agent's pair conversation past the turn cap (the peer row's
+  // Resume). Approves the pending continue card when there is one (same
+  // live gate, same one-round reset, the parked message replays), else
+  // resets the streak. Idempotent on a pair that is not paused. Answers
+  // the row's new state, so the client can settle its cache without a
+  // refetch.
+  app.post("/:agentId/links/:peerAgentId/resume", async (c) => {
+    const a = c.get("auth");
+    const workspaceId = requireWorkspaceId(a);
+    const resumed = await resumePairConversation({
+      workspaceId,
+      agentId: c.req.param("agentId"),
+      peerAgentId: c.req.param("peerAgentId"),
+      deciderUserId: a.userId,
+    });
+    if (!resumed) {
+      throw new ServiceError("NOT_FOUND", "Agent not found");
+    }
+    await recordAuditEvent({
+      workspaceId,
+      userId: a.userId,
+      userEmail: a.userEmail,
+      action: AUDIT_ACTIONS.APPROVE,
+      service: AUDIT_SERVICES.AGENT,
+      source: AUDIT_SOURCE.API,
+      metadata: {
+        agentId: c.req.param("agentId"),
+        peerAgentId: c.req.param("peerAgentId"),
+        resumed: "pair_conversation",
+      },
+    });
+    return c.json({ paused: false });
+  });
+
+  // DELETE /agents/:agentId/links/:peerAgentId — forget the relationship
+  // from THIS agent's side: pair row, this side's pair conversation, and
+  // this side's pending cards about the pair. The peer keeps its own.
+  app.delete("/:agentId/links/:peerAgentId", async (c) => {
+    const a = c.get("auth");
+    const workspaceId = requireWorkspaceId(a);
+    const removed = await forgetLink({
+      workspaceId,
+      agentId: c.req.param("agentId"),
+      peerAgentId: c.req.param("peerAgentId"),
+    });
+    if (!removed) {
+      throw new ServiceError("NOT_FOUND", "Agent not found");
+    }
+    await recordAuditEvent({
+      workspaceId,
+      userId: a.userId,
+      userEmail: a.userEmail,
+      action: AUDIT_ACTIONS.DELETE,
+      service: AUDIT_SERVICES.AGENT,
+      source: AUDIT_SOURCE.API,
+      metadata: {
+        agentId: c.req.param("agentId"),
+        peerAgentId: c.req.param("peerAgentId"),
+      },
+    });
+    return c.body(null, 204);
   });
 
   // DELETE /agents/:agentId/contacts/:contactId — remove the row entirely

@@ -19,7 +19,8 @@ import {
   TooltipTrigger,
 } from "@onecli/ui/components/tooltip";
 import { AppIcon } from "@/lib/components/app-icon";
-import { isSlackConnected, SLACK_ICON_SRC } from "@/lib/agents/slack-presence";
+import { connectedPresences } from "@/lib/agents/channel-providers";
+import { channelProviderUi } from "@/lib/agents/channel-providers/registry";
 import { sidebarMenuButtonActiveStyles } from "@dashboard/nav-main";
 import { defaultAgentSection } from "@/lib/agents/agent-sections";
 import { useAgentsForWorkspace } from "@/hooks/use-agents";
@@ -126,31 +127,38 @@ export const AgentsGroup = ({ workspaceId }: { workspaceId: string }) => {
                         no longer :last-child, which is what the button
                         variant's own truncation targets. */}
                     <span className="truncate">{agent.name}</span>
-                    {isSlackConnected(agent.channels) && (
-                      // Reachable in Slack — the real mark, small and
-                      // trailing. Decorative visual; the label lives in the
-                      // tooltip and one sr-only sentence (the
-                      // credential-avatars pattern), and icon-collapse hides
-                      // it the way SidebarMenuBadge hides itself.
-                      <>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <span
-                              aria-hidden="true"
-                              className="ml-auto flex shrink-0 items-center group-data-[collapsible=icon]:hidden"
-                            >
-                              <AppIcon
-                                icon={SLACK_ICON_SRC}
-                                name="Slack"
-                                size={12}
-                              />
-                            </span>
-                          </TooltipTrigger>
-                          <TooltipContent>Connected to Slack</TooltipContent>
-                        </Tooltip>
-                        <span className="sr-only">Connected to Slack</span>
-                      </>
-                    )}
+                    {connectedPresences(agent.channels)
+                      .map((presence) => channelProviderUi(presence.provider))
+                      .filter((ui) => ui !== null)
+                      .map((ui) => (
+                        // Reachable on the provider — the real mark, small
+                        // and trailing. Decorative visual; the label lives in
+                        // the tooltip and one sr-only sentence (the
+                        // credential-avatars pattern), and icon-collapse hides
+                        // it the way SidebarMenuBadge hides itself.
+                        <span key={ui.id} className="contents">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span
+                                aria-hidden="true"
+                                className="ml-auto flex shrink-0 items-center group-data-[collapsible=icon]:hidden"
+                              >
+                                <AppIcon
+                                  icon={ui.iconSrc}
+                                  name={ui.name}
+                                  size={12}
+                                />
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              Connected to {ui.name}
+                            </TooltipContent>
+                          </Tooltip>
+                          <span className="sr-only">
+                            Connected to {ui.name}
+                          </span>
+                        </span>
+                      ))}
                   </Link>
                 </SidebarMenuButton>
               </SidebarMenuItem>

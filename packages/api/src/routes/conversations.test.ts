@@ -17,6 +17,7 @@ vi.hoisted(() => {
 const services = vi.hoisted(() => ({
   createConversation: vi.fn(),
   ensureDirectConversation: vi.fn(),
+  greetEmptyDirectThread: vi.fn(async () => {}),
   listConversations: vi.fn(),
   getConversation: vi.fn(),
   requireConversation: vi.fn(),
@@ -27,6 +28,8 @@ const services = vi.hoisted(() => ({
   sendConversationMessage: vi.fn(),
   createPendingAttachment: vi.fn(),
   getAttachmentForDownload: vi.fn(),
+  getAttachmentMeta: vi.fn(),
+  getAttachmentDownloadUrl: vi.fn(),
 }));
 
 vi.mock("@onecli/db", () => ({
@@ -67,6 +70,10 @@ vi.mock("../services/conversation-service", () => ({
   requireConversation: services.requireConversation,
 }));
 
+vi.mock("../services/greeting-service", () => ({
+  greetEmptyDirectThread: services.greetEmptyDirectThread,
+}));
+
 vi.mock("../services/turn-service", () => ({
   createTurn: services.createTurn,
   listTurns: services.listTurns,
@@ -81,6 +88,8 @@ vi.mock("../services/follow-up-service", () => ({
 vi.mock("../services/attachment-service", () => ({
   createPendingAttachment: services.createPendingAttachment,
   getAttachmentForDownload: services.getAttachmentForDownload,
+  getAttachmentMeta: services.getAttachmentMeta,
+  getAttachmentDownloadUrl: services.getAttachmentDownloadUrl,
 }));
 
 const { createApiApp } = await import("../app");
@@ -324,6 +333,20 @@ describe("the direct door — PUT /v1/agents/:agentId/conversations/direct", () 
     );
   });
 
+  it("does NOT greet an API-KEY caller — the greeting is a dashboard moment, not an API contract change", async () => {
+    // AUTH above is an org API key. A program that opens the thread and then
+    // POSTs a turn must find the door exactly as it always was: a queued
+    // greeting would occupy the one-active-turn slot and turn that POST into
+    // a 409 (the hosted E2E regression). Session callers are covered by the
+    // acceptance suite (greeting-acceptance.pg.test.ts), which drives the
+    // real session path end to end.
+    await app.request("/v1/agents/ag-1/conversations/direct", {
+      method: "PUT",
+      headers: AUTH,
+    });
+    expect(services.greetEmptyDirectThread).not.toHaveBeenCalled();
+  });
+
   it("refuses a RUNNER token — token families do not cross", async () => {
     const res = await app.request("/v1/agents/ag-1/conversations/direct", {
       method: "PUT",
@@ -544,6 +567,132 @@ describe("attachments", () => {
       "cv-1",
       "att-1",
     );
+  });
+
+  it("serves an attachment's METADATA (never bytes) behind the same conversation fence", async () => {
+    services.getAttachmentMeta.mockResolvedValueOnce({
+      id: "att-1",
+      name: "clip.webm",
+      mimeType: "video/webm",
+      sizeBytes: 1_572_864,
+      status: "bound",
+      direction: "outbound",
+      caption: "the run",
+      createdAt: new Date("2026-09-13T10:00:00.000Z"),
+      conversation: { source: "slack", agent: { id: "ag-1", name: "Donna" } },
+    });
+    const res = await app.request(
+      "/v1/conversations/cv-1/attachments/att-1/meta",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      id: "att-1",
+      name: "clip.webm",
+      mimeType: "video/webm",
+      sizeBytes: 1_572_864,
+      status: "bound",
+      direction: "outbound",
+      caption: "the run",
+      createdAt: "2026-09-13T10:00:00.000Z",
+      conversation: { source: "slack", agent: { id: "ag-1", name: "Donna" } },
+    });
+    expect(services.requireConversation).toHaveBeenCalledWith(
+      "p1",
+      "cv-1",
+      "user-1",
+    );
+    expect(services.getAttachmentMeta).toHaveBeenCalledWith("cv-1", "att-1");
+    expect(services.getAttachmentForDownload).not.toHaveBeenCalled();
+  });
+
+  it("download-url: a presigned URL (no-store) when the backend mints one; 204 when the bytes are inline", async () => {
+    services.getAttachmentDownloadUrl.mockResolvedValueOnce({
+      url: "https://bucket.s3.amazonaws.com/attachments/cv-1/att-1?X-Amz-Signature=abc",
+      expiresAt: new Date("2026-09-14T00:05:00.000Z"),
+    });
+    const res = await app.request(
+      "/v1/conversations/cv-1/attachments/att-1/download-url",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(await res.json()).toEqual({
+      url: "https://bucket.s3.amazonaws.com/attachments/cv-1/att-1?X-Amz-Signature=abc",
+      expiresAt: "2026-09-14T00:05:00.000Z",
+    });
+    expect(services.requireConversation).toHaveBeenCalledWith(
+      "p1",
+      "cv-1",
+      "user-1",
+    );
+
+    services.getAttachmentDownloadUrl.mockResolvedValueOnce(null);
+    const inline = await app.request(
+      "/v1/conversations/cv-1/attachments/att-1/download-url",
+      { headers: AUTH },
+    );
+    expect(inline.status).toBe(204);
+  });
+
+  it("download-url for a foreign conversation is a 404 and nothing is signed", async () => {
+    services.requireConversation.mockRejectedValueOnce(
+      new ServiceError("NOT_FOUND", "Conversation not found"),
+    );
+    const res = await app.request(
+      "/v1/conversations/cv-1/attachments/att-1/download-url",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(404);
+    expect(services.getAttachmentDownloadUrl).not.toHaveBeenCalled();
+  });
+
+  it("an expired attachment: metadata still answers (status says expired), the byte routes are 410 with the retention wording", async () => {
+    services.getAttachmentMeta.mockResolvedValueOnce({
+      id: "att-1",
+      name: "clip.webm",
+      mimeType: "video/webm",
+      sizeBytes: 3,
+      status: "expired",
+      direction: "outbound",
+      caption: null,
+      createdAt: new Date("2026-08-01T00:00:00.000Z"),
+      conversation: { source: "web", agent: { id: "ag-1", name: "Donna" } },
+    });
+    const meta = await app.request(
+      "/v1/conversations/cv-1/attachments/att-1/meta",
+      { headers: AUTH },
+    );
+    expect(meta.status).toBe(200);
+    expect(((await meta.json()) as { status: string }).status).toBe("expired");
+
+    const gone = new ServiceError("GONE", "This file expired after 30 days.");
+    services.getAttachmentDownloadUrl.mockRejectedValueOnce(gone);
+    const url = await app.request(
+      "/v1/conversations/cv-1/attachments/att-1/download-url",
+      { headers: AUTH },
+    );
+    expect(url.status).toBe(410);
+    expect(JSON.stringify(await url.json())).toContain("expired after 30 days");
+
+    services.getAttachmentForDownload.mockRejectedValueOnce(gone);
+    const bytes = await app.request(
+      "/v1/conversations/cv-1/attachments/att-1",
+      { headers: AUTH },
+    );
+    expect(bytes.status).toBe(410);
+  });
+
+  it("metadata for a foreign conversation is a 404 and the row is never read", async () => {
+    services.requireConversation.mockRejectedValueOnce(
+      new ServiceError("NOT_FOUND", "Conversation not found"),
+    );
+    const res = await app.request(
+      "/v1/conversations/cv-1/attachments/att-1/meta",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(404);
+    expect(services.getAttachmentMeta).not.toHaveBeenCalled();
   });
 
   it("a download for a foreign conversation is a 404", async () => {

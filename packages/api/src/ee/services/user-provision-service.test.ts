@@ -68,7 +68,8 @@ vi.mock("@onecli/db", () => {
 });
 
 vi.mock("./user-service", () => ({
-  deletePlaceholderUser: async () => {},
+  // Returns the post-commit gateway flush (a no-op here).
+  deletePlaceholderUser: async () => () => {},
 }));
 
 import { claimProvision } from "./user-provision-service";

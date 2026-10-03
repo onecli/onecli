@@ -61,6 +61,14 @@ export const queryKeys = {
         conversationId,
         attachmentId,
       ] as const,
+    // The row's metadata for the download page — immutable once bound.
+    meta: (conversationId: string, attachmentId: string) =>
+      [
+        ...queryKeys.attachments.all(),
+        "meta",
+        conversationId,
+        attachmentId,
+      ] as const,
   },
   secrets: {
     all: () => ["secrets", ...scope()] as const,
@@ -190,6 +198,13 @@ export const queryKeys = {
     all: () => ["ssh-keys"] as const,
     list: () => [...queryKeys.sshKeys.all(), "list"] as const,
   },
+  // The account is PER-USER too (same reasoning as sshKeys): what deleting
+  // it does to the user's organizations does not depend on which one the
+  // URL happens to name.
+  user: {
+    all: () => ["user"] as const,
+    deletionImpact: () => [...queryKeys.user.all(), "deletion-impact"] as const,
+  },
   installInfo: {
     all: () => ["install-info", ...scope()] as const,
   },
@@ -260,6 +275,9 @@ export const queryKeys = {
     // The agent's one-shot action approvals (the channels page section).
     contacts: (agentId: string) =>
       [...queryKeys.channels.all(), "contacts", agentId] as const,
+    // The agent's peers (PR 5b): other agents and both sides' standing.
+    peers: (agentId: string) =>
+      [...queryKeys.channels.all(), "peers", agentId] as const,
   },
   appBlocklist: {
     all: () => ["appBlocklist", ...scope()] as const,

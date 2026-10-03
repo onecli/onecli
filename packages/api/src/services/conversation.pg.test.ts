@@ -10,6 +10,7 @@ import {
   HARNESS_BUSY_MESSAGE,
   IMAGE_UNAVAILABLE_MESSAGE,
   MODEL_PROVIDER_ERROR_MESSAGE,
+  TRANSCRIPT_REJECTED_MESSAGE,
   TURN_STALLED_MESSAGE,
 } from "../validations/conversation.js";
 
@@ -1561,6 +1562,42 @@ describe.skipIf(!PROOF_URL)("finishTurn and the cold-death revival", () => {
     expect(row?.error).toBe(HARNESS_BUSY_MESSAGE);
     expect(row?.errorCode).toBe("harness_busy");
     expect(row?.error).not.toContain("Already processing");
+  });
+
+  it("closes a transcript_rejected failure with the canonical copy, never the provider's 400", async () => {
+    // #1194: the provider rejected the stored conversation. The raw 400
+    // (tool ids, request id) is operator material; the person gets the
+    // sentence that says what happens next.
+    const { conversationId, sandboxId } = await seedTalkable("fin-transcript");
+    const turn = await turns.createTurn(
+      WORKSPACE,
+      conversationId,
+      "first",
+      WEB_A,
+    );
+    await dueWork.claimDueWork(RUNNER_A, 5);
+    await turns.applyTurnEvents(
+      reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turn.id,
+      [{ type: "turn.started" }],
+    );
+
+    await turns.finishTurn({
+      reporter: reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turnId: turn.id,
+      status: "failed",
+      error:
+        "Anthropic API error (400 Bad Request): messages.814: `tool_use` ids were found without `tool_result` blocks immediately after: toolu_01",
+      errorCode: "transcript_rejected",
+    });
+
+    const row = await db.turn.findUnique({ where: { id: turn.id } });
+    expect(row?.status).toBe("failed");
+    expect(row?.error).toBe(TRANSCRIPT_REJECTED_MESSAGE);
+    expect(row?.errorCode).toBe("transcript_rejected");
+    expect(row?.error).not.toContain("tool_use");
   });
 });
 

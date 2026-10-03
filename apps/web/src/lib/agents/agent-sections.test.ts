@@ -27,6 +27,9 @@ describe("agentSectionsFor", () => {
     // Channels put a HOSTED agent in Slack — a BYO agent has no presence to
     // manage.
     expect(byo).not.toContain("channels");
+    // Contacts govern who may reach a HOSTED agent — a BYO agent is not
+    // reached through the platform at all.
+    expect(byo).not.toContain("contacts");
     // SSH lands in a HOSTED agent's sandbox — a BYO agent has no computer to
     // shell into.
     expect(byo).not.toContain("ssh");
@@ -45,6 +48,7 @@ describe("agentSectionBlocked", () => {
     expect(agentSectionBlocked("chat", "byo")).toBe(true);
     expect(agentSectionBlocked("instructions", "byo")).toBe(true);
     expect(agentSectionBlocked("channels", "byo")).toBe(true);
+    expect(agentSectionBlocked("contacts", "byo")).toBe(true);
     expect(agentSectionBlocked("ssh", "byo")).toBe(true);
     expect(agentSectionBlocked("schedules", "byo")).toBe(true);
     expect(agentSectionBlocked("memory", "byo")).toBe(true);
@@ -84,6 +88,7 @@ describe("the rail's shape (§3.18 as amended)", () => {
       "chat",
       "channels",
       "connections",
+      "contacts",
       "models",
       "ssh",
       "instructions",
@@ -100,10 +105,11 @@ describe("the rail's shape (§3.18 as amended)", () => {
     expect(sections).not.toContain("secrets");
   });
 
-  it("keeps Access to exactly what the agent is GIVEN, plus the ways in: connections, models and ssh", () => {
+  it("keeps Access to exactly what the agent is GIVEN, plus the ways in: connections, contacts, models and ssh", () => {
     const access = AGENT_SECTIONS.filter((s) => s.group === "access");
     expect(access.map((s) => s.section)).toEqual([
       "connections",
+      "contacts",
       "models",
       "ssh",
     ]);
@@ -193,6 +199,20 @@ describe("Slack sits beside Chat (§3.16)", () => {
     expect(agentSectionsFor("byo").map((s) => s.section)).not.toContain(
       "channels",
     );
+  });
+});
+
+describe("Contacts is an Access entry (PR 5b)", () => {
+  it("sits under Access right after Connections: who the agent may talk with is something it is GIVEN, not a place you go to talk", () => {
+    const contacts = AGENT_SECTIONS.find((s) => s.section === "contacts");
+    expect(contacts?.group).toBe("access");
+    expect(
+      AGENT_SECTIONS.filter((s) => s.group === "access").map((s) => s.section),
+    ).toEqual(["connections", "contacts", "models", "ssh"]);
+  });
+
+  it("stays hosted-only: a BYO agent is not reached through the platform", () => {
+    expect(agentSectionBlocked("contacts", "byo")).toBe(true);
   });
 });
 

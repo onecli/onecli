@@ -6,7 +6,7 @@ import { ChangePasswordCard } from "./_components/change-password-card";
 import { DeleteAccountCard } from "./_components/delete-account-card";
 
 export default async function PreferencesPage() {
-  const { email, hasOrgs, hasPassword } = await getAccountPreferencesData();
+  const { email, hasPassword } = await getAccountPreferencesData();
 
   return (
     <div className="flex flex-1 flex-col gap-6">
@@ -22,7 +22,7 @@ export default async function PreferencesPage() {
 
       <section className="space-y-4">
         <h2 className="text-lg font-semibold">Danger zone</h2>
-        <DeleteAccountCard email={email} hasOrgs={hasOrgs} />
+        <DeleteAccountCard email={email} />
       </section>
     </div>
   );

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-// Pins the deploy-workflow contract three ways. (1) All four deploy
+// Pins the deploy-workflow contract five ways. (1) All four deploy
 // workflows share one deploy-<env> concurrency group — the sandbox platform
 // reads live core state at deploy time and relies on that mutual exclusion.
 // (2) Every image-tag context the sandbox cluster stack reads is passed by
@@ -12,7 +12,13 @@ import { fileURLToPath } from "node:url";
 // (3) deploy.yml's subset-run gateway pin and the gateway stack's
 // gatewayAppVersion override exist together — either half alone reverts to
 // rolling the gateway (the sandbox egress data plane) on api-server/app-only
-// deploys.
+// deploys. (4) Every `cdk deploy` is `--exclusively`: a service deploy
+// touches only the stacks it names, never its dependency closure (which
+// holds every foundation stack, re-synthesized from the deploying branch).
+// (5) The account-level stacks (no env in their id) are deployed by
+// deploy-infra.yml's account job alone, under its own global queue — the
+// per-env queue cannot serialize two envs on a stack that belongs to
+// neither (plans/deploy-ownership.md; the 2026-09-17 registry prune).
 
 const path = (rel) => fileURLToPath(new URL(`../${rel}`, import.meta.url));
 const read = (rel) => readFileSync(path(rel), "utf8");
@@ -64,8 +70,44 @@ test(
         ),
       ].map((m) => m[1]),
     );
-    assert.ok(stackKeys.size >= 6, "cluster stack image contexts went missing");
+    assert.ok(stackKeys.size >= 8, "cluster stack image contexts went missing");
     assert.deepEqual(workflowKeys, stackKeys);
+  },
+);
+
+test(
+  "every sandbox component box gates its builds, the nothing-selected guard, and the live-tag fetch",
+  { skip: !inCloudRepo },
+  () => {
+    // A new box wired into its build job but forgotten in either guard
+    // would (a) let an all-unchecked run through as a silent no-op, or (b)
+    // skip the live-template fetch, so resolve() runs against an empty
+    // template and refuses a deploy that should have pinned the live tag.
+    const yml = read(".github/workflows/deploy-sandbox-platform.yml");
+    const inputsBlock = yml.slice(
+      yml.indexOf("    inputs:"),
+      yml.indexOf("\npermissions:"),
+    );
+    const boxes = [...inputsBlock.matchAll(/^ {6}(\w+):\n {8}description:/gm)]
+      .map((m) => m[1])
+      .filter((name) => name !== "environment");
+    assert.ok(boxes.includes("logShipper"), "logShipper box went missing");
+    assert.ok(boxes.length >= 5, `expected >=5 component boxes, got ${boxes}`);
+    for (const box of boxes) {
+      assert.match(
+        yml,
+        new RegExp(`if: inputs\\.${box}\\n`),
+        `${box}: no build job gated on the box`,
+      );
+      const guards = yml.match(
+        new RegExp(`\\[ "\\$\\{\\{ inputs\\.${box} \\}\\}" != "true" \\]`, "g"),
+      );
+      assert.equal(
+        guards?.length,
+        2,
+        `${box}: must appear in BOTH the nothing-selected guard and the live-template fetch`,
+      );
+    }
   },
 );
 
@@ -106,5 +148,106 @@ test(
       /tryGetContext\("gatewayAppVersion"\)/,
       "gateway-stack.ts lost the gatewayAppVersion override the workflow pin depends on",
     );
+  },
+);
+
+const DEPLOY_WORKFLOWS = [
+  "deploy.yml",
+  "deploy-sandbox-platform.yml",
+  "deploy-infra.yml",
+  "deploy-analytics.yml",
+];
+
+/** Every `cdk deploy` invocation line in a workflow (continuation lines of a
+ * backslash-wrapped command are joined first). */
+const cdkDeployLines = (yml) =>
+  yml
+    .replace(/\\\n\s*/g, " ")
+    .split("\n")
+    .filter((line) => /pnpm exec cdk deploy\b/.test(line));
+
+test(
+  "every cdk deploy in every deploy workflow is --exclusively (no closure deploys)",
+  { skip: !inCloudRepo },
+  () => {
+    for (const name of DEPLOY_WORKFLOWS) {
+      const lines = cdkDeployLines(read(`.github/workflows/${name}`));
+      assert.ok(lines.length > 0, `${name}: no cdk deploy line found`);
+      for (const line of lines) {
+        // The flag may sit on the line itself or inside a CDK_ARGS variable
+        // the line expands; either way it must be literally present in the
+        // same run block, which the workflow-wide check below enforces.
+        assert.ok(
+          /--exclusively/.test(line) || /\$\{?CDK_ARGS\}?/.test(line),
+          `${name}: cdk deploy without --exclusively: ${line.trim()}`,
+        );
+      }
+    }
+    // Where the flag rides in CDK_ARGS, every CDK_ARGS *definition* carries it
+    // (appends via CDK_ARGS="${CDK_ARGS} ..." inherit it).
+    for (const name of DEPLOY_WORKFLOWS) {
+      const yml = read(`.github/workflows/${name}`);
+      for (const m of yml.matchAll(/CDK_ARGS="(?!\$\{CDK_ARGS\})([^"]*)"/g)) {
+        assert.match(
+          m[1],
+          /--exclusively/,
+          `${name}: CDK_ARGS defined without --exclusively: ${m[0]}`,
+        );
+      }
+    }
+  },
+);
+
+test(
+  "account-level stacks are deployed only by deploy-infra's account job, under its own global queue",
+  { skip: !inCloudRepo },
+  () => {
+    // Every stack bin/onecli.ts constructs with a literal (env-less) id.
+    const accountStacks = [
+      ...read("packages/infra/bin/onecli.ts").matchAll(
+        /new \w+Stack\(app, "(onecli-[a-z-]+)"/g,
+      ),
+    ].map((m) => m[1]);
+    assert.ok(accountStacks.length >= 4, "expected the four account stacks");
+
+    const infra = read(".github/workflows/deploy-infra.yml");
+    // The account job: its own global group, and every account stack in its
+    // STACKS line (audit joins conditionally, so it appears as an append).
+    assert.match(
+      infra,
+      /^  deploy-account:\n(?:.*\n)*?    concurrency:\n      group: deploy-account\n      cancel-in-progress: false$/m,
+      "deploy-infra.yml lost the deploy-account job or its global concurrency group",
+    );
+    const accountJob = infra.slice(
+      infra.indexOf("  deploy-account:"),
+      infra.indexOf("  deploy-infra:"),
+    );
+    for (const stack of accountStacks) {
+      assert.ok(
+        accountJob.includes(stack),
+        `${stack} is not deployed by the account job`,
+      );
+    }
+    // The env job needs the account job (the env stacks import its exports).
+    assert.match(
+      infra,
+      /^  deploy-infra:\n(?:.*\n)*?    needs: deploy-account$/m,
+    );
+
+    // No other deploy line anywhere names an account stack.
+    for (const name of DEPLOY_WORKFLOWS) {
+      const yml = read(`.github/workflows/${name}`);
+      const body =
+        name === "deploy-infra.yml" ? yml.replace(accountJob, "") : yml;
+      for (const line of body.split("\n")) {
+        if (!/STACKS=|cdk deploy/.test(line) || /^\s*#/.test(line)) continue;
+        for (const stack of accountStacks) {
+          assert.ok(
+            !line.includes(stack),
+            `${name}: ${stack} deployed outside the account job: ${line.trim()}`,
+          );
+        }
+      }
+    }
   },
 );

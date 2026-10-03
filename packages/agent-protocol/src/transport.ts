@@ -8,6 +8,7 @@ import {
   MEMORY_KEY_PATTERN,
   MEMORY_TITLE_MAX_LENGTH,
 } from "./memory-file";
+import { MAX_HOSTNAME_CHARS, isBareHostname } from "./text";
 
 /**
  * The supervisor's transport seam (§3.17 house pattern): how work reaches the
@@ -53,6 +54,8 @@ import {
   ATTACHMENT_CHUNK_BASE64_CHARS,
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENT_NAME_CHARS,
+  MAX_OUTBOUND_ATTACHMENT_BYTES,
+  MAX_OUTBOUND_CAPTION_CHARS,
 } from "./attachments";
 
 /**
@@ -138,6 +141,98 @@ export const homeSyncFileSchema = z.object({
   content: z.string(),
 });
 export type HomeSyncFile = z.infer<typeof homeSyncFileSchema>;
+
+/** Presence statuses the renderer distinguishes. `pending_setup` rows are
+ * never sent: a half-finished attach is not a place the agent can be reached. */
+export const AGENT_CHANNEL_PRESENCE_STATUSES = [
+  "active",
+  "needs_attention",
+  "disabled",
+] as const;
+
+/**
+ * One provider presence the agent holds, as the supervisor's instruction
+ * renderer needs it (the `channels` capability): which platform, the bot's
+ * own handle there, the tenant's display name, and whether it is live. Composed
+ * control-plane-side at dispatch from `AgentChannel` rows and carried on BOTH
+ * the spawn payload and the home-sync final part — the same two doors the
+ * brief and the agent name travel through, so a presence attached or removed
+ * mid-run re-renders the doc the way a brief edit does.
+ *
+ * Display facts only, by design: no provider ids, no credentials, nothing the
+ * model could turn into an API call. The strings are provider/user supplied
+ * and land inside platform voice, so the composer cleans and clamps them
+ * (`cleanLabel`) and the schema caps them again.
+ */
+export const agentChannelPresenceSchema = z.object({
+  /** The provider id ("slack"). */
+  provider: z.string().min(1).max(40),
+  /** `active` | `needs_attention` = reachable; `disabled` = removed on the
+   * provider side (the app was uninstalled or its bot token revoked). */
+  status: z.enum(AGENT_CHANNEL_PRESENCE_STATUSES),
+  /** The bot's own display handle on the provider ("donna"); null where
+   * the platform never learned it. */
+  handle: z.string().max(80).nullable(),
+  /** The provider tenant's display name (Slack: the workspace); null where
+   * unknown. */
+  workspaceName: z.string().max(120).nullable(),
+});
+export type AgentChannelPresenceWire = z.infer<
+  typeof agentChannelPresenceSchema
+>;
+
+/** One presence per provider per agent, so the list stays small by
+ * construction; the cap is a wire brace, not a product limit. */
+export const MAX_AGENT_CHANNEL_PRESENCES = 8;
+
+/**
+ * One peer agent this agent may message (PR 5b): the `agents` capability's
+ * roster. Display facts only - a name to address, never an id the model
+ * could turn into anything (the control plane resolves names itself).
+ */
+export const agentPeerSchema = z.object({
+  /** The peer's display name, cleaned and clamped by the composer. */
+  name: z.string().min(1).max(80),
+});
+export type AgentPeerWire = z.infer<typeof agentPeerSchema>;
+
+/** Same-workspace roster; a wire brace, not a product limit. */
+export const MAX_AGENT_PEERS = 50;
+
+/** Clamps for the display facts of one attached connection: what the
+ * composer cleans to, and what the schema accepts, from one definition. */
+export const MAX_AGENT_CONNECTION_NAME_CHARS = 80;
+export const MAX_AGENT_CONNECTION_LABEL_CHARS = 120;
+
+/**
+ * One app connection attached to this agent, for the supervisor's
+ * `connections` capability: which services the gateway already holds a
+ * credential for, and — for host-bound apps (Salesforce, Snowflake, JFrog) —
+ * the one host that credential is bound to. Display facts only, never a
+ * secret: the agent needs the host to call the right URL (an org's My Domain
+ * or an account host cannot be guessed), and the label to tell two accounts
+ * apart.
+ */
+export const agentConnectionSchema = z.object({
+  /** Catalog provider id ("salesforce"). */
+  provider: z.string().min(1).max(64),
+  /** Catalog display name ("Salesforce"). */
+  name: z.string().min(1).max(MAX_AGENT_CONNECTION_NAME_CHARS),
+  /** Account label (email / username), cleaned; null when unknown. */
+  label: z.string().max(MAX_AGENT_CONNECTION_LABEL_CHARS).nullable(),
+  /** Bound tenant host for host-gated apps; null for every other app. A
+   * bare hostname by construction: it is rendered as `https://<host>` for
+   * the agent to call, so nothing URL-shaped may ride here. */
+  host: z
+    .string()
+    .max(MAX_HOSTNAME_CHARS)
+    .refine(isBareHostname, "expected a bare hostname")
+    .nullable(),
+});
+export type AgentConnectionWire = z.infer<typeof agentConnectionSchema>;
+
+/** Attached connections; a wire brace, not a product limit. */
+export const MAX_AGENT_CONNECTIONS = 100;
 
 /**
  * One user attachment's metadata as the wire speaks it — carried on
@@ -277,6 +372,24 @@ export const workItemSchema = z.discriminatedUnion("kind", [
      * re-renders the instruction docs mid-run (§3.11). */
     instructions: z.string().optional(),
     agentName: z.string().optional(),
+    /** FINAL part only: the agent's current channel presences, so an attach,
+     * detach, or provider-side removal re-renders the `channels` section
+     * mid-run. An empty array means "no presences"; an OMITTED field means
+     * "unchanged" (an older control plane that never sends it leaves the
+     * boot-time value in place). */
+    channels: z
+      .array(agentChannelPresenceSchema)
+      .max(MAX_AGENT_CHANNEL_PRESENCES)
+      .optional(),
+    /** FINAL part only: the peer agents this agent may message, same
+     * empty-vs-omitted rule as `channels`. */
+    peers: z.array(agentPeerSchema).max(MAX_AGENT_PEERS).optional(),
+    /** FINAL part only: the agent's attached app connections, same
+     * empty-vs-omitted rule as `channels`. */
+    connections: z
+      .array(agentConnectionSchema)
+      .max(MAX_AGENT_CONNECTIONS)
+      .optional(),
   }),
   /**
    * The answer to a `memory.write` (the file-harvest upload). Same shape
@@ -298,6 +411,29 @@ export const workItemSchema = z.discriminatedUnion("kind", [
     /** True when the refusal is transient (rate pacing, transport) — retry
      * paced; false/absent refusals (caps, bad key) wait for a content
      * change. */
+    retryable: z.boolean().optional(),
+    error: z.string().max(MAX_TOOL_ERROR_CHARS).optional(),
+  }),
+  /**
+   * The answer to a `file.part` run (`send_file`). Correlated by `uploadId`,
+   * handled inline in the supervisor's reader like the other two results.
+   * Exactly one per upload, in BOTH outcomes — the runner never goes silent
+   * on a file (a silent drop would have the model wait out the correlator
+   * and re-send 25 MB). An OLD supervisor image drops it on validation.
+   */
+  z.object({
+    kind: z.literal("file.result"),
+    uploadId: z.string().min(1),
+    ok: z.boolean(),
+    /** The stored `ConversationAttachment.id` — what the reply's chip and
+     * the Slack upload address. */
+    attachmentId: z.string().min(1).optional(),
+    /** Transient (transport, in-flight ceiling) vs deterministic (caps,
+     * fence, bad bytes). Advisory: the supervisor's tool does NOT retry on
+     * its own — re-streaming up to 25 MB inside its 28 s budget is the wrong
+     * default — it hands the error to the model, whose next call is the
+     * retry. Carried so the wording can say "try again" only when that is
+     * honest, and so a future policy can act on it. */
     retryable: z.boolean().optional(),
     error: z.string().max(MAX_TOOL_ERROR_CHARS).optional(),
   }),
@@ -470,6 +606,40 @@ export const supervisorMessageSchema = z
        * provenance (the tool.call doctrine), verified server-side. */
       conversationId: z.string().min(1).optional(),
       turnId: z.string().min(1).optional(),
+    }),
+    /**
+     * One chunk of a file the agent is sending back (`send_file`, Tier 3) —
+     * the inbound `attachment.part` reversed. Every part carries the whole
+     * header (name, type, size, sha256, caption, calling turn) so the runner's
+     * reassembler needs no state beyond the one in-progress upload it allows
+     * per sandbox: a discontinuity (a different `uploadId` starting, a part
+     * out of order) resets fail-closed and the supervisor's correlator times
+     * out into a model-readable error. Chunked at the inbound law
+     * (ATTACHMENT_CHUNK_RAW_BYTES → ≤192k base64), so a frame is always under
+     * the runner WS's 256KB drop-whole ceiling. `turnId`/`conversationId` are
+     * REQUIRED here (unlike memory.write): a file belongs to the reply that
+     * produced it, and the control plane verifies the turn is live under the
+     * fenced agent before storing a byte. An OLD runner drops the frame on
+     * schema validation; the capability flag keeps an old runner from ever
+     * advertising the tool.
+     */
+    z.object({
+      kind: z.literal("file.part"),
+      uploadId: z.string().min(1).max(100),
+      conversationId: z.string().min(1),
+      turnId: z.string().min(1),
+      name: z.string().min(1).max(MAX_ATTACHMENT_NAME_CHARS),
+      mimeType: z.string().min(1).max(100),
+      sizeBytes: z.number().int().positive().max(MAX_OUTBOUND_ATTACHMENT_BYTES),
+      sha256: z.string().regex(/^[0-9a-f]{64}$/),
+      caption: z.string().max(MAX_OUTBOUND_CAPTION_CHARS).optional(),
+      part: z.number().int().positive(),
+      of: z.number().int().positive(),
+      dataBase64: z
+        .string()
+        .min(1)
+        .max(ATTACHMENT_CHUNK_BASE64_CHARS)
+        .regex(/^[A-Za-z0-9+/]+={0,2}$/),
     }),
     z.object({
       kind: z.literal("unhealthy"),

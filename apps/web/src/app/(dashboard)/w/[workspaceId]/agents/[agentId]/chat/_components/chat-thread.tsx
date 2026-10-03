@@ -11,9 +11,14 @@ import type { Turn } from "@/lib/api/types";
 import type { OutgoingMessage } from "@/hooks/use-conversations";
 import type { RenderedTurn } from "@/lib/chat/transcript";
 import { isFollowUpRow } from "@/lib/chat/turns";
-import { useApprovalCards, type ApprovalCard } from "./use-approval-cards";
+import { ApprovalTimelineSlot } from "./approval-timeline-slot";
+import {
+  useApprovalTimeline,
+  type ApprovalTimelineEntry,
+} from "./approval-timeline";
+import { useApprovalCards } from "./use-approval-cards";
+import { EmptyThreadWelcome } from "./empty-thread-welcome";
 import { FollowingViewport } from "./following-viewport";
-import { InlineApprovalItem } from "./inline-approval-item";
 import { LoadOlderSentinel } from "./load-older-sentinel";
 import { TurnBlock } from "./turn-block";
 import { UserBubble } from "./user-bubble";
@@ -38,6 +43,10 @@ interface ChatThreadProps {
   conversationId: string;
   /** Where a "connect a model key" notice points. */
   modelsHref?: string;
+  /** The agent's display name, for the empty-thread welcome. */
+  agentName?: string;
+  /** The agent whose thread this is — the welcome reads its model state. */
+  agentId?: string;
   /** In-place add-key door for the no_model_key notice. */
   onConnectModelKey?: () => void;
   /** Older windows exist above what's loaded — mount the scroll-up loader. */
@@ -54,6 +63,8 @@ export const ChatThread = ({
   pending,
   conversationId,
   modelsHref,
+  agentName,
+  agentId,
   onConnectModelKey,
   hasOlder = false,
   loadingOlder = false,
@@ -76,11 +87,11 @@ export const ChatThread = ({
   // the last turn that PRECEDES its creation, so the card sits where it
   // fired and stays there as the conversation moves on — exactly the Slack
   // reading. Cards newer than every turn land at the end.
-  const approvalCards = useApprovalCards();
+  const approvals = useApprovalTimeline(useApprovalCards());
   const rows = turns.filter((turn) => !grouped.has(turn.id));
-  const cardsAfterTurn = new Map<string, ApprovalCard[]>();
-  const cardsAtEnd: ApprovalCard[] = [];
-  for (const card of approvalCards) {
+  const cardsAfterTurn = new Map<string, ApprovalTimelineEntry[]>();
+  const cardsAtEnd: ApprovalTimelineEntry[] = [];
+  for (const card of approvals) {
     let homeId: string | undefined;
     for (const turn of rows) {
       if (new Date(turn.createdAt).getTime() <= card.at) homeId = turn.id;
@@ -115,6 +126,20 @@ export const ChatThread = ({
                 onLoadOlder={onLoadOlder}
               />
             )}
+            {/* Nothing has been said here yet — and nothing is on its way
+                either (a greeting in flight is already a row). The agent
+                speaks first only in the thread with the agent onboarding
+                created; every other new thread — an agent made later from
+                the dashboard, or one whose account has no model key yet —
+                opens here, in the product's own voice. */}
+            {rows.length === 0 &&
+              pending === undefined &&
+              agentName !== undefined &&
+              agentId !== undefined && (
+                <MessageScrollerItem messageId="empty-welcome">
+                  <EmptyThreadWelcome agentId={agentId} agentName={agentName} />
+                </MessageScrollerItem>
+              )}
             {rows.map((turn) => (
               <MessageScrollerItem
                 key={turn.id}
@@ -131,13 +156,9 @@ export const ChatThread = ({
                   modelsHref={modelsHref}
                   onConnectModelKey={onConnectModelKey}
                 />
-                {cardsAfterTurn.get(turn.id)?.map(({ approval, settled }) => (
-                  <InlineApprovalItem
-                    key={approval.id}
-                    approval={approval}
-                    settled={settled}
-                  />
-                ))}
+                <ApprovalTimelineSlot
+                  entries={cardsAfterTurn.get(turn.id) ?? []}
+                />
               </MessageScrollerItem>
             ))}
             {pending !== undefined && (
@@ -154,13 +175,7 @@ export const ChatThread = ({
             {cardsAtEnd.length > 0 && (
               <MessageScrollerItem messageId="approvals">
                 <div className="flex flex-col gap-3">
-                  {cardsAtEnd.map(({ approval, settled }) => (
-                    <InlineApprovalItem
-                      key={approval.id}
-                      approval={approval}
-                      settled={settled}
-                    />
-                  ))}
+                  <ApprovalTimelineSlot entries={cardsAtEnd} />
                 </div>
               </MessageScrollerItem>
             )}

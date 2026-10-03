@@ -1,8 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { AdapterWorkItem, AdapterWorkTurn } from "@onecli/agent-protocol";
+import {
+  MAX_OUTBOUND_ATTACHMENT_BYTES,
+  type AdapterWorkItem,
+  type AdapterWorkTurn,
+} from "@onecli/agent-protocol";
 import type { ControlPlaneClient } from "./control-plane";
 import { mirrorFinishedTurn } from "./mirror";
 import { slackMirrorPosts } from "./slack/mirror-posts";
+import { slackAdapterProvider } from "./slack/adapter-provider";
 import {
   createFakeControlPlane,
   startFakeSlackServer,
@@ -74,6 +79,7 @@ const mirror = (input: {
   iconUrl?: string | null;
   modelsUrl?: string;
   chatUrl?: string;
+  attachmentUrl?: (attachmentId: string) => string;
   onLog?: (message: string, detail?: unknown) => void;
 }) =>
   // The REAL Slack posts implementation rides the fake HTTP server — the
@@ -83,11 +89,14 @@ const mirror = (input: {
     credential: "xoxb-bot",
     provider: "slack",
     posts: slackMirrorPosts,
+    removalEventFor: slackAdapterProvider.removalEventFor,
+    threadAddress: slackAdapterProvider.threadAddress,
     iconUrl: input.iconUrl ?? null,
     knownCursor: input.knownCursor ?? "2026-08-05T00:00:00.000Z",
     item: input.workItem ?? item(),
     ...(input.modelsUrl && { modelsUrl: input.modelsUrl }),
     ...(input.chatUrl && { chatUrl: input.chatUrl }),
+    ...(input.attachmentUrl && { attachmentUrl: input.attachmentUrl }),
     onLog: input.onLog ?? (() => {}),
   });
 
@@ -118,6 +127,44 @@ describe("the claim-then-post law", () => {
     ]);
     expect(casArgs).toEqual([
       ["l1", "2026-08-05T00:00:00.000Z", "2026-08-06T10:00:00.000Z"],
+    ]);
+  });
+
+  it("a post Slack refuses with a DEAD-credential code is reported through the ingest door as the provider's removal event; other refusals are not", async () => {
+    // The adapter is the one runtime that posts the agent's ANSWERS with the
+    // presence's token, so an app deleted at api.slack.com (no webhook a
+    // per-agent app can subscribe to) surfaces here first. The adapter cannot
+    // reach the api's services; it relays the event it would have relayed
+    // from the socket, and the control plane flips the presence through the
+    // same door. MUTATION-PROOF: drop the isDeadCredentialError branch and
+    // no ingest happens; widen the table and the ratelimited control ingests.
+    const ingested: unknown[] = [];
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("It is done."),
+      ingest: async (request) => {
+        ingested.push(request);
+        return { outcome: "removed" } as never;
+      },
+    });
+
+    slack.respond("chat.postMessage", () => ({
+      ok: false,
+      error: "ratelimited",
+    }));
+    await mirror({ controlPlane });
+    expect(ingested).toEqual([]);
+
+    slack.respond("chat.postMessage", () => ({
+      ok: false,
+      error: "account_inactive",
+    }));
+    await mirror({ controlPlane, workItem: item({ id: "t2" }) });
+    expect(ingested).toEqual([
+      {
+        presenceId: "p1",
+        eventId: "dead-credential:t2",
+        event: { type: "tokens_revoked", tokens: { bot: ["dead"] } },
+      },
     ]);
   });
 
@@ -923,6 +970,41 @@ describe("what gets posted", () => {
     ]);
   });
 
+  it("posts a peer task's report as ONE captioned message with the speech-balloon icon — the agent's own words, never '(from the web)'", async () => {
+    // A peer task's report is materialized into the person's conversation
+    // under `peer_task` (the PR after 5b): the message is the platform's
+    // caption ("After talking with Ray"), the body the agent's report for
+    // the person. It rides the automation post so the caption says where
+    // the words came from. MUTATION-PROOF: drop "peer_task" from
+    // AUTOMATION_SOURCES and this posts "(from the web)" instead.
+    const controlPlane = createFakeControlPlane(
+      transcriptWith("Ray says <it is> 20:42."),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({
+        source: "peer_task",
+        userId: null,
+        userName: null,
+        message: "After talking with Ray",
+      }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted.map((call) => call.form.text)).toEqual([
+      ":speech_balloon: After talking with Ray\nRay says &lt;it is&gt; 20:42.",
+    ]);
+    const blocks = JSON.parse(posted[0]?.form.blocks ?? "[]") as unknown[];
+    expect(blocks[0]).toEqual({
+      type: "context",
+      elements: [
+        { type: "mrkdwn", text: ":speech_balloon: After talking with Ray" },
+      ],
+    });
+    expect(blocks[1]).toMatchObject({ type: "section" });
+  });
+
   it("posts the turn's WEB-sourced joined follow-ups before the answer — Slack-sourced ones never echo", async () => {
     // Mid-run follow-ups the turn consumed: without the web-sourced lines
     // the Slack thread shows an answer to questions it never saw; WITH the
@@ -1546,5 +1628,426 @@ describe("outbound mentions — the near-miss (plain @name that matched a teamma
       { kind: "unknown", name: "ghost" },
       { kind: "near_miss", name: "guy" },
     ]);
+  });
+});
+
+describe("the agent's files (send_file) — one share after the answer", () => {
+  const withFiles = (
+    attachments: NonNullable<AdapterWorkTurn["attachments"]>,
+    turnOverrides: Partial<AdapterWorkTurn> = {},
+  ): AdapterWorkItem => item({ attachments, ...turnOverrides });
+
+  const bytesByAttachment = (map: Record<string, string>) => ({
+    fetchAttachment: async (id: string) =>
+      id in map ? new Uint8Array(Buffer.from(map[id]!)) : null,
+  });
+
+  it("pulls each file's bytes, uploads them as ONE completion in the thread, after the answer, with the first caption as the share text", async () => {
+    const order: string[] = [];
+    slack.onCall = (call) => order.push(call.method);
+    const fetched: [string, number][] = [];
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("Recorded it."),
+      fetchAttachment: async (id, maxBytes) => {
+        fetched.push([id, maxBytes]);
+        return new Uint8Array(Buffer.from(`bytes-of-${id}`));
+      },
+    });
+
+    const next = await mirror({
+      controlPlane,
+      workItem: withFiles([
+        {
+          id: "a1",
+          name: "clip.webm",
+          mimeType: "video/webm",
+          sizeBytes: 11,
+          caption: "the run <live>",
+        },
+        {
+          id: "a2",
+          name: "report.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: 11,
+          caption: "the numbers",
+        },
+      ]),
+    });
+    expect(next).not.toBeNull();
+
+    // The answer posts FIRST; the share follows it — never the other way.
+    expect(order).toEqual([
+      "chat.postMessage", // web-sourced attribution
+      "chat.postMessage", // the answer
+      "files.getUploadURLExternal",
+      "upload/v1/1",
+      "files.getUploadURLExternal",
+      "upload/v1/2",
+      "files.completeUploadExternal",
+    ]);
+    // Pulled with the platform's per-file belt as the buffer cap.
+    expect(fetched).toEqual([
+      ["a1", MAX_OUTBOUND_ATTACHMENT_BYTES],
+      ["a2", MAX_OUTBOUND_ATTACHMENT_BYTES],
+    ]);
+    const puts = slack.calls.filter((c) => c.method.startsWith("upload/v1/"));
+    expect(puts.map((c) => c.bytes.toString())).toEqual([
+      "bytes-of-a1",
+      "bytes-of-a2",
+    ]);
+    const complete = slack.callsTo("files.completeUploadExternal")[0]!;
+    expect(complete.form.channel_id).toBe("D100");
+    // The first caption is the share text (escaped: model text quoted into
+    // Slack); the second rides as its file's title so nothing is lost.
+    expect(complete.form.initial_comment).toBe("the run &lt;live&gt;");
+    expect(JSON.parse(complete.form.files!)).toEqual([
+      { id: "F0001" },
+      { id: "F0002", title: "the numbers" },
+    ]);
+  });
+
+  it("threads the share where the answer went (a DM thread's sourceThreadId)", async () => {
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("Here."),
+      ...bytesByAttachment({ a1: "x" }),
+    });
+    await mirror({
+      controlPlane,
+      workItem: withFiles(
+        [
+          {
+            id: "a1",
+            name: "a.txt",
+            mimeType: "text/plain",
+            sizeBytes: 1,
+            caption: null,
+          },
+        ],
+        { sourceThreadId: "1700.5000" },
+      ),
+    });
+    const complete = slack.callsTo("files.completeUploadExternal")[0]!;
+    expect(complete.form.thread_ts).toBe("1700.5000");
+    expect(complete.form.channel_id).toBe("D100");
+    expect("initial_comment" in complete.form).toBe(false);
+  });
+
+  it("DEGRADE: a missing files:write posts a named paperclip line pointing at the web, never silence and never a throw", async () => {
+    slack.respond("files.getUploadURLExternal", () => ({
+      ok: false,
+      error: "missing_scope",
+    }));
+    const logs: string[] = [];
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("Done."),
+      ...bytesByAttachment({ a1: "x", a2: "y" }),
+    });
+    const next = await mirror({
+      controlPlane,
+      onLog: (m) => logs.push(m),
+      workItem: withFiles([
+        {
+          id: "a1",
+          name: "clip <1>.webm",
+          mimeType: "video/webm",
+          sizeBytes: 1,
+          caption: null,
+        },
+        {
+          id: "a2",
+          name: "b.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: 1,
+          caption: null,
+        },
+      ]),
+    });
+    expect(next).not.toBeNull();
+    expect(logs).not.toContain("mirror post failed after cursor advance");
+    const posts = slack.callsTo("chat.postMessage");
+    const line = posts.at(-1)!.form.text!;
+    // No web door configured (no APP_URL): names, and where to look in words.
+    expect(line).toBe(
+      ":paperclip: clip &lt;1&gt;.webm\n:paperclip: b.pdf\n_Download from this conversation on the web._",
+    );
+    expect(slack.callsTo("files.completeUploadExternal")).toHaveLength(0);
+  });
+
+  it("DEGRADE: a workspace that forbids this file type at completion takes the same line", async () => {
+    slack.respond("files.completeUploadExternal", () => ({
+      ok: false,
+      error: "file_type_not_allowed",
+    }));
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("Done."),
+      ...bytesByAttachment({ a1: "MZ" }),
+    });
+    await mirror({
+      controlPlane,
+      workItem: withFiles([
+        {
+          id: "a1",
+          name: "tool.exe",
+          mimeType: "application/octet-stream",
+          sizeBytes: 2,
+          caption: null,
+        },
+      ]),
+    });
+    const line = slack.callsTo("chat.postMessage").at(-1)!.form.text!;
+    expect(line).toContain(":paperclip: tool.exe");
+  });
+
+  it("a file whose bytes cannot be fetched becomes a named unavailable line; its siblings still upload", async () => {
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("Done."),
+      fetchAttachment: async (id) =>
+        id === "ok" ? new Uint8Array(Buffer.from("fine")) : null,
+    });
+    await mirror({
+      controlPlane,
+      workItem: withFiles([
+        {
+          id: "ok",
+          name: "fine.txt",
+          mimeType: "text/plain",
+          sizeBytes: 4,
+          caption: null,
+        },
+        {
+          id: "gone",
+          name: "gone.txt",
+          mimeType: "text/plain",
+          sizeBytes: 4,
+          caption: null,
+        },
+      ]),
+    });
+    const complete = slack.callsTo("files.completeUploadExternal");
+    expect(complete).toHaveLength(1);
+    expect(JSON.parse(complete[0]!.form.files!)).toEqual([{ id: "F0001" }]);
+    const line = slack.callsTo("chat.postMessage").at(-1)!.form.text!;
+    expect(line).toContain(":paperclip: gone.txt");
+    expect(line).not.toContain("fine.txt");
+  });
+
+  it("a fetch that THROWS is logged and treated as unavailable — the share still posts", async () => {
+    const logs: string[] = [];
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("Done."),
+      fetchAttachment: async (id) => {
+        if (id === "boom") throw new Error("control plane down");
+        return new Uint8Array(Buffer.from("fine"));
+      },
+    });
+    await mirror({
+      controlPlane,
+      onLog: (m) => logs.push(m),
+      workItem: withFiles([
+        {
+          id: "boom",
+          name: "boom.txt",
+          mimeType: "text/plain",
+          sizeBytes: 4,
+          caption: null,
+        },
+        {
+          id: "ok",
+          name: "fine.txt",
+          mimeType: "text/plain",
+          sizeBytes: 4,
+          caption: null,
+        },
+      ]),
+    });
+    expect(logs).toContain("outbound attachment fetch failed");
+    expect(slack.callsTo("files.completeUploadExternal")).toHaveLength(1);
+    expect(slack.callsTo("chat.postMessage").at(-1)!.form.text).toContain(
+      "boom.txt",
+    );
+  });
+
+  it("a file the control plane claims is over the per-file belt is never fetched", async () => {
+    let fetches = 0;
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("Done."),
+      fetchAttachment: async () => {
+        fetches += 1;
+        return new Uint8Array(1);
+      },
+    });
+    await mirror({
+      controlPlane,
+      workItem: withFiles([
+        {
+          id: "huge",
+          name: "huge.bin",
+          mimeType: "application/octet-stream",
+          sizeBytes: MAX_OUTBOUND_ATTACHMENT_BYTES + 1,
+          caption: null,
+        },
+      ]),
+    });
+    expect(fetches).toBe(0);
+    expect(slack.callsTo("chat.postMessage").at(-1)!.form.text).toContain(
+      "huge.bin",
+    );
+  });
+
+  it("an automated run's files post too (a cron's report with its PDF)", async () => {
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("Weekly numbers attached."),
+      ...bytesByAttachment({ a1: "%PDF" }),
+    });
+    await mirror({
+      controlPlane,
+      workItem: withFiles(
+        [
+          {
+            id: "a1",
+            name: "weekly.pdf",
+            mimeType: "application/pdf",
+            sizeBytes: 4,
+            caption: null,
+          },
+        ],
+        { source: "cron", message: "Weekly report" },
+      ),
+    });
+    expect(slack.callsTo("files.completeUploadExternal")).toHaveLength(1);
+  });
+
+  it("no attachments (or an older control plane that omits the field) → no upload calls at all", async () => {
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("Done."),
+    });
+    await mirror({ controlPlane });
+    await mirror({ controlPlane, workItem: withFiles([]) });
+    expect(slack.callsTo("files.getUploadURLExternal")).toHaveLength(0);
+    expect(slack.callsTo("files.completeUploadExternal")).toHaveLength(0);
+  });
+
+  it("DEGRADE with a web door: each unavailable file is a LINK built by the adapter from config, label escaped, and the tail says what the link does", async () => {
+    slack.respond("files.getUploadURLExternal", () => ({
+      ok: false,
+      error: "missing_scope",
+    }));
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("Done."),
+      ...bytesByAttachment({ a1: "x", a2: "y" }),
+    });
+    const seen: string[] = [];
+    await mirror({
+      controlPlane,
+      attachmentUrl: (id) => {
+        seen.push(id);
+        return `https://app.example/w/ws/files/${encodeURIComponent(id)}?c=cv1`;
+      },
+      workItem: withFiles([
+        {
+          id: "a1",
+          name: "clip <1>.webm",
+          mimeType: "video/webm",
+          sizeBytes: 1,
+          caption: null,
+        },
+        {
+          id: "a2",
+          name: "b.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: 1,
+          caption: null,
+        },
+      ]),
+    });
+    const line = slack.callsTo("chat.postMessage").at(-1)!.form.text!;
+    expect(line).toBe(
+      [
+        ":paperclip: <https://app.example/w/ws/files/a1?c=cv1|clip &lt;1&gt;.webm>",
+        ":paperclip: <https://app.example/w/ws/files/a2?c=cv1|b.pdf>",
+        "_Click a file to download it from OneCLI._",
+      ].join("\n"),
+    );
+    // The mirror hands the door ONLY the platform's attachment ids — never a
+    // name, never model text.
+    expect(seen.sort()).toEqual(["a1", "a2"]);
+  });
+
+  it("a pipe in a file name cannot split the Slack link token (it is the label/URL separator)", async () => {
+    slack.respond("files.getUploadURLExternal", () => ({
+      ok: false,
+      error: "missing_scope",
+    }));
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("Done."),
+      ...bytesByAttachment({ a1: "x" }),
+    });
+    await mirror({
+      controlPlane,
+      attachmentUrl: (id) => `https://app.example/files/${id}`,
+      workItem: withFiles([
+        {
+          id: "a1",
+          name: "https://evil.example|ok.txt",
+          mimeType: "text/plain",
+          sizeBytes: 1,
+          caption: null,
+        },
+      ]),
+    });
+    expect(slack.callsTo("chat.postMessage").at(-1)!.form.text).toBe(
+      ":paperclip: <https://app.example/files/a1|https://evil.exampleok.txt>\n_Click a file to download it from OneCLI._",
+    );
+  });
+
+  it("a file whose bytes could not be fetched gets the same link (the web still has it)", async () => {
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("Done."),
+      fetchAttachment: async () => null,
+    });
+    await mirror({
+      controlPlane,
+      attachmentUrl: (id) => `https://app.example/files/${id}`,
+      workItem: withFiles([
+        {
+          id: "gone",
+          name: "gone.txt",
+          mimeType: "text/plain",
+          sizeBytes: 4,
+          caption: null,
+        },
+      ]),
+    });
+    expect(slack.callsTo("chat.postMessage").at(-1)!.form.text).toBe(
+      ":paperclip: <https://app.example/files/gone|gone.txt>\n_Click a file to download it from OneCLI._",
+    );
+  });
+
+  it("a NON-deterministic upload failure (transport) rides the mirror's loud log — the answer already posted", async () => {
+    slack.respond("upload/v1/1", () => ({ status: 503 }));
+    const logs: string[] = [];
+    const controlPlane = createFakeControlPlane({
+      ...transcriptWith("Done."),
+      ...bytesByAttachment({ a1: "x" }),
+    });
+    const next = await mirror({
+      controlPlane,
+      onLog: (m) => logs.push(m),
+      workItem: withFiles([
+        {
+          id: "a1",
+          name: "a.txt",
+          mimeType: "text/plain",
+          sizeBytes: 1,
+          caption: null,
+        },
+      ]),
+    });
+    expect(next).not.toBeNull();
+    expect(logs).toContain("mirror post failed after cursor advance");
+    // The answer went out before the files were attempted.
+    expect(
+      slack.callsTo("chat.postMessage").some((c) => c.form.text === "Done."),
+    ).toBe(true);
   });
 });

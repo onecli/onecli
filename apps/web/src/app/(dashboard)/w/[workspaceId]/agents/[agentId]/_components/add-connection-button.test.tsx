@@ -16,7 +16,7 @@ vi.mock("next/navigation", () => ({
 // The dialogs bring their own data graphs; the unit here is the button's
 // create-then-attach seam and the deep link it mints. The stubs mimic the
 // real dialogs' contracts: SecretDialog awaits createSecret and calls onSaved
-// only on success; the picker fires onGranted with the fresh connection id.
+// only on success; the picker fires onConnected with the fresh connection id.
 vi.mock(
   "@/app/(dashboard)/w/[workspaceId]/connections/_components/secret-dialog",
   () => ({
@@ -51,15 +51,15 @@ vi.mock(
 );
 vi.mock("./connect-app-picker-dialog", () => ({
   ConnectAppPickerDialog: ({
-    onGranted,
+    onConnected,
   }: {
-    onGranted?: (connectionId: string) => void;
+    onConnected?: (connectionId: string) => void;
   }) => (
     <button
-      data-testid="simulate-granted"
-      onClick={() => onGranted?.("conn-9")}
+      data-testid="simulate-connected"
+      onClick={() => onConnected?.("conn-9")}
     >
-      granted
+      connected
     </button>
   ),
 }));
@@ -175,7 +175,7 @@ describe("AddConnectionButton", () => {
     );
     renderButton();
 
-    await userEvent.click(screen.getByTestId("simulate-granted"));
+    await userEvent.click(screen.getByTestId("simulate-connected"));
     const params = new URLSearchParams(window.location.search);
     expect(params.get("connection")).toBe("conn-9");
     expect(params.get("manage")).toBe("1");

@@ -112,6 +112,47 @@ describe("work items", () => {
     expect(result.success).toBe(false);
   });
 
+  it("carries the agent's channel presences, absent by default (skew: an older control plane sends none)", () => {
+    expect(sandboxStartPayloadSchema.parse(payload).channels).toBeUndefined();
+    const parsed = sandboxStartPayloadSchema.parse({
+      ...payload,
+      channels: [
+        {
+          provider: "slack",
+          status: "active",
+          handle: "donna",
+          workspaceName: "Acme",
+        },
+        {
+          provider: "slack",
+          status: "disabled",
+          handle: null,
+          workspaceName: null,
+        },
+      ],
+    });
+    expect(parsed.channels?.map((c) => c.status)).toEqual([
+      "active",
+      "disabled",
+    ]);
+  });
+
+  it("never carries a pending_setup presence — the renderer has no sentence for a half-attached app", () => {
+    expect(
+      sandboxStartPayloadSchema.safeParse({
+        ...payload,
+        channels: [
+          {
+            provider: "slack",
+            status: "pending_setup",
+            handle: null,
+            workspaceName: null,
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
   it("validates the response envelope", () => {
     const parsed = runnerWorkResponseSchema.parse({ items: [] });
     expect(parsed.items).toEqual([]);
@@ -364,6 +405,37 @@ describe("skills.changed + home.synced (runner wire)", () => {
   it("round-trips a two-part sync item", () => {
     const parsed = runnerWorkItemSchema.parse(syncItem);
     expect(parsed.kind === "skills.changed" && parsed.parts).toHaveLength(2);
+  });
+
+  it("the final part may carry the channel presences; an empty array is a real value (no presences), omission means unchanged", () => {
+    const withChannels = runnerWorkItemSchema.parse({
+      ...syncItem,
+      parts: [
+        syncItem.parts[0],
+        {
+          ...syncItem.parts[1],
+          channels: [
+            {
+              provider: "slack",
+              status: "active",
+              handle: "donna",
+              workspaceName: "Acme",
+            },
+          ],
+        },
+      ],
+    });
+    if (withChannels.kind !== "skills.changed") throw new Error("kind");
+    expect(withChannels.parts[1]?.channels).toHaveLength(1);
+    const cleared = runnerWorkItemSchema.parse({
+      ...syncItem,
+      parts: [syncItem.parts[0], { ...syncItem.parts[1], channels: [] }],
+    });
+    if (cleared.kind !== "skills.changed") throw new Error("kind");
+    expect(cleared.parts[1]?.channels).toEqual([]);
+    const unchanged = runnerWorkItemSchema.parse(syncItem);
+    if (unchanged.kind !== "skills.changed") throw new Error("kind");
+    expect(unchanged.parts[1]?.channels).toBeUndefined();
   });
 
   it("rejects generation zero, empty parts, and too many parts", () => {

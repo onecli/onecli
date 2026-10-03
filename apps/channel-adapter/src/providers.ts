@@ -5,6 +5,7 @@ import type {
 } from "@onecli/agent-protocol";
 import type { ApprovalCardUi } from "./approvals";
 import type { MirrorPosts } from "./mirror";
+import type { ThreadAddressDecoder } from "./targets";
 import { slackAdapterProvider } from "./slack/adapter-provider";
 
 /**
@@ -112,6 +113,22 @@ export interface ChannelAdapterProvider {
   posts: MirrorPosts;
   /** The approvals manager's rendering seam (approvals.ts stays general). */
   cardUi: ApprovalCardUi;
+  /**
+   * Removal detection without a webhook: when an outbound call made with
+   * the presence's own credential (a post, the socket dial) fails, the
+   * provider says whether the failure means the app is GONE — and if so,
+   * hands back its own removal event, in the shape its inbound interpreter
+   * already understands, for the orchestrator to relay through the ingest
+   * door. Null = not a removal (rate limit, transport blip): nothing is
+   * relayed. The orchestrator never learns the provider's error class or
+   * event vocabulary; both stay behind this member. `failure` is either the
+   * thrown error (a post) or the provider's refusal code (the socket dial's
+   * permanent-failure reason).
+   */
+  removalEventFor: (failure: unknown) => unknown | null;
+  /** Decode the provider's own thread address into a post target (see
+   * targets.ts). `externalThreadId` is provider-opaque everywhere else. */
+  threadAddress: ThreadAddressDecoder;
 }
 
 /** Every provider this build ships. A new channel lands here in one line. */

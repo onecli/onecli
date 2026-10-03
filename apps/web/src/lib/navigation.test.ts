@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   AGENT_CREATE_PARAM,
+  workspaceFilePath,
   agentChatPath,
-  agentChatGreetingPath,
-  agentGreetingDraft,
   agentPath,
   agentsCreatePath,
   agentSectionPath,
@@ -157,30 +156,16 @@ describe("agentChatPath", () => {
   });
 });
 
-describe("agentChatGreetingPath", () => {
-  it("carries the greeting flag so the composer opens prefilled", () => {
-    expect(agentChatGreetingPath("w1", "ag-1")).toBe(
-      "/w/w1/agents/ag-1/chat?hello=1",
+describe("workspaceFilePath", () => {
+  it("addresses one file at the workspace level, with the conversation as a query param", () => {
+    expect(workspaceFilePath("w1", "att-1", "cv-1")).toBe(
+      "/w/w1/files/att-1?c=cv-1",
     );
   });
 
-  it("keeps the same encoding guarantees as the plain chat path", () => {
-    expect(agentChatGreetingPath("w/1", "a/b")).toBe(
-      "/w/w%2F1/agents/a%2Fb/chat?hello=1",
-    );
-  });
-});
-
-describe("agentGreetingDraft", () => {
-  it("addresses the agent by name", () => {
-    expect(agentGreetingDraft("Donna")).toBe(
-      "Hey Donna, what can you do for me?",
-    );
-  });
-
-  it("trims the name so a padded value can't read as a typo", () => {
-    expect(agentGreetingDraft("  Donna  ")).toBe(
-      "Hey Donna, what can you do for me?",
+  it("encodes every id — a crafted one cannot splice segments or a second param", () => {
+    expect(workspaceFilePath("w/1", "x/../y", "cv&c=evil")).toBe(
+      "/w/w%2F1/files/x%2F..%2Fy?c=cv%26c%3Devil",
     );
   });
 });

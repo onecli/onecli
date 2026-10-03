@@ -242,7 +242,7 @@ const OPENAI_AUTH_HOST: &str = "auth.openai.com";
 /// Whether a secret's credential is injected on `hostname` — the metadata-aware
 /// pattern match minus the `auth.openai.com` carve-out. The connect-time
 /// injection filter (`connect::resolve_secret_injections`) and the availability
-/// probe (`connect::has_available_credentials`) both go through here, so "would
+/// probe (`connect::restricted_secret_kind`) both go through here, so "would
 /// inject" and "counts as an available credential" can never disagree.
 #[must_use]
 pub fn secret_injects_on_host(

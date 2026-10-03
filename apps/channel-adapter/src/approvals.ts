@@ -1,8 +1,11 @@
-import { packMessageRef, unpackMessageRef } from "@onecli/channels/slack";
 import { z } from "zod";
 import type { AdapterPresence } from "@onecli/agent-protocol";
 import type { ControlPlaneClient } from "./control-plane";
-import { replyTargetForLink, type ChannelPostTarget } from "./targets";
+import {
+  replyTargetForLink,
+  type ChannelPostTarget,
+  type ThreadAddressDecoder,
+} from "./targets";
 
 /**
  * The approvals surface: per presence, long-poll the GATEWAY's pending list
@@ -27,6 +30,15 @@ import { replyTargetForLink, type ChannelPostTarget } from "./targets";
  * gateway is asked anything — the fence is never channel-side.
  */
 
+/** A detail's record link: the gateway builds it (https, the connection's
+ *  own host), and it is re-checked here, once for every channel, so a card
+ *  UI only ever sees an https URL. Anything else is dropped, never fatal: the
+ *  detail still renders as plain text. */
+const recordUrl = z
+  .url({ protocol: /^https$/ })
+  .optional()
+  .catch(undefined);
+
 const pendingResponse = z.object({
   requests: z.array(
     z.object({
@@ -37,8 +49,17 @@ const pendingResponse = z.object({
       summary: z
         .object({
           action: z.string().optional(),
+          // The title's action without its record: grouping keys on it, so
+          // per-record titles ("Delete Contact Ada") still share a card.
+          subject: z.object({ verb: z.string() }).partial().nullish(),
           details: z
-            .array(z.object({ label: z.string(), value: z.string() }))
+            .array(
+              z.object({
+                label: z.string(),
+                value: z.string(),
+                url: recordUrl,
+              }),
+            )
             .optional(),
         })
         .nullish(),
@@ -105,13 +126,28 @@ export interface ApprovalCardUi {
     text: string;
     title: string | null;
   }): Promise<void>;
+  /** The channel-native message ref as ONE opaque string for the ledger
+   * (`externalMessageRef`) — how a posted card is found again after a
+   * restart or by a peer instance. The provider owns the encoding. */
+  packMessageRef(ref: { channel: string; ts: string }): string;
+  /** The inverse; null for an absent or malformed ref (a recovered prompt
+   * degrades to its thread address, never throws). */
+  unpackMessageRef(
+    ref: string | null | undefined,
+  ): { channel: string; ts: string } | null;
 }
 
 interface TrackedPrompt {
   approvalId: string;
   presenceId: string;
-  channel: string;
-  ts: string | null;
+  /**
+   * The posted card's message ref, PACKED (provider-opaque), exactly as the
+   * ledger stores it — decoded by the presence's own card UI at settle time,
+   * which is the only moment the provider is guaranteed known (recovery
+   * runs before the presence is necessarily owned here). Null when the
+   * ledger recorded no message (claimed, never posted).
+   */
+  messageRef: string | null;
   expiresAt: number | null;
   /** The approval's action title, for outcome rewrites ("what was asked").
    * Null for prompts recovered from the ledger (it records no title). */
@@ -127,6 +163,8 @@ export interface ApprovalsManagerDeps {
    * a provider this build cannot serve — its prompts stay tracked untouched,
    * the same way a missing credential parks them. */
   cardUiOf: (presence: AdapterPresence) => ApprovalCardUi | null;
+  /** The presence's provider's thread-address decoder (targets.ts). */
+  threadAddressOf: (presence: AdapterPresence) => ThreadAddressDecoder | null;
   /** Extract the channel credential from a presence (the credential's shape
    * is the channel's business — Slack: slack/credentials.ts). */
   credentialOf: (presence: AdapterPresence) => string | null;
@@ -175,14 +213,15 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
     state: "decided" | "expired",
     text: string,
   ): Promise<void> => {
-    if (prompt.ts) {
+    if (prompt.messageRef) {
       const credential = tokenFor.get(prompt.presenceId);
       const cardUi = cardUiFor.get(prompt.presenceId);
       if (!credential || !cardUi) return;
+      const ref = cardUi.unpackMessageRef(prompt.messageRef);
+      if (!ref) return;
       await cardUi.settle({
         credential,
-        channel: prompt.channel,
-        ts: prompt.ts,
+        ...ref,
         text,
         title: prompt.title,
       });
@@ -216,12 +255,13 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
   ): Promise<void> => {
     const credential = tokenFor.get(prompt.presenceId);
     const cardUi = cardUiFor.get(prompt.presenceId);
-    if (!credential || !cardUi || !prompt.ts) return;
+    if (!credential || !cardUi || !prompt.messageRef) return;
+    const ref = cardUi.unpackMessageRef(prompt.messageRef);
+    if (!ref) return;
     try {
       await cardUi.settle({
         credential,
-        channel: prompt.channel,
-        ts: prompt.ts,
+        ...ref,
         text,
         title: prompt.title,
       });
@@ -259,7 +299,9 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
     const link =
       presence.links.find((l) => l.kind === "direct") ?? presence.links[0];
     if (!link) return;
-    const target = replyTargetForLink(link);
+    const decode = deps.threadAddressOf(presence);
+    if (!decode) return;
+    const target = replyTargetForLink(decode, link);
 
     const claimed = await deps.controlPlane.claimPrompt({
       approvalId: approval.id,
@@ -276,15 +318,12 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
       ...(presence.agent.imageUrl && { iconUrl: presence.agent.imageUrl }),
       approval,
     });
-    await deps.controlPlane.recordPromptMessage(
-      approval.id,
-      packMessageRef(posted.channel, posted.ts),
-    );
+    const messageRef = cardUi.packMessageRef(posted);
+    await deps.controlPlane.recordPromptMessage(approval.id, messageRef);
     prompts.set(approval.id, {
       approvalId: approval.id,
       presenceId,
-      channel: posted.channel,
-      ts: posted.ts,
+      messageRef,
       expiresAt: approval.expiresAt
         ? new Date(approval.expiresAt).getTime()
         : null,
@@ -484,12 +523,15 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
         // record-message would strand looking live). Recovery is for prompts
         // we are NOT tracking — a dead peer's, or our own after a restart.
         if (prompts.has(prompt.approvalId)) continue;
-        const ref = unpackMessageRef(prompt.externalMessageRef);
+        // The ref stays PACKED here: it is provider-opaque, and the
+        // presence's own card UI decodes it at settle time (the only moment
+        // the provider is guaranteed known — this sweep can run before the
+        // presence is owned here). A row with no recorded message has no
+        // card to rewrite; it is tracked for expiry only.
         prompts.set(prompt.approvalId, {
           approvalId: prompt.approvalId,
           presenceId: prompt.agentChannelId,
-          channel: ref ? ref.channel : prompt.externalThreadId,
-          ts: ref ? ref.ts : null,
+          messageRef: prompt.externalMessageRef,
           // The gateway's own recorded deadline, so a fast restart never marks
           // a still-live approval timed-out early. A row with no recorded
           // expiry (older) gets one sweep cycle to settle.

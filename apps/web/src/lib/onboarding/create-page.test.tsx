@@ -5,9 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The unit here is the end of onboarding: the create step's boot screen is
 // the LAST screen, and its "Meet your agent" door must complete into the
-// greeting path — the chat URL carrying `?hello=1` — so the composer opens
-// with the first message already typed. The door must also wait for BOTH the
-// narrative and the created agent: never a claim of "ready" on timers alone.
+// agent's chat, where the agent speaks first (the empty-thread greeting) and
+// the composer opens blank. The door must also wait for BOTH the narrative
+// and the created agent: never a claim of "ready" on timers alone.
 const { handleComplete, prefetch, mutateAsync, recordCreatedAgent } =
   vi.hoisted(() => ({
     handleComplete: vi.fn().mockResolvedValue(undefined),
@@ -46,7 +46,7 @@ vi.mock("./onboarding-context", () => ({
 
 import CreatePage from "./create-page";
 
-const GREETING_DESTINATION = "/w/ws-1/agents/ag-1/chat?hello=1";
+const CHAT_DESTINATION = "/w/ws-1/agents/ag-1/chat";
 
 describe("the create step's hand-off into chat (resume with a created agent)", () => {
   beforeEach(() => {
@@ -65,21 +65,19 @@ describe("the create step's hand-off into chat (resume with a created agent)", (
     ).toBeInTheDocument();
   });
 
-  it("the door completes into the greeting path — the prefilled first message", async () => {
+  it("the door completes into the agent's chat, where the agent greets first", async () => {
     const user = userEvent.setup();
     render(<CreatePage />);
 
     await user.click(screen.getByRole("button", { name: /meet your agent/i }));
 
-    expect(handleComplete).toHaveBeenCalledExactlyOnceWith(
-      GREETING_DESTINATION,
-    );
+    expect(handleComplete).toHaveBeenCalledExactlyOnceWith(CHAT_DESTINATION);
   });
 
-  it("prefetches the greeting destination while the narrative plays", () => {
+  it("prefetches the chat destination while the narrative plays", () => {
     render(<CreatePage />);
 
-    expect(prefetch).toHaveBeenCalledWith(GREETING_DESTINATION);
+    expect(prefetch).toHaveBeenCalledWith(CHAT_DESTINATION);
   });
 });
 

@@ -1,14 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { takeLocalDecision, usePendingApprovals } from "@/hooks/use-approvals";
-import type { PendingApproval } from "@/lib/api/approvals";
+import {
+  gatewayNow,
+  takeLocalDecision,
+  usePendingApprovals,
+} from "@/hooks/use-approvals";
+import type { PendingApproval, SettledOutcome } from "@/lib/api/approvals";
 import { useAgentPageAgentMaybe } from "../../_components/agent-page-frame";
-
-/** How a settled approval ended: this browser's own click ("approved" /
- * "denied"), some other surface's decision ("decided"), or the gateway's
- * auto-deny at the deadline ("expired"). */
-export type SettledOutcome = "approved" | "denied" | "decided" | "expired";
 
 /** One chat-timeline approval row: the approval, when it fired, and how it
  * ended (undefined while still actionable). */
@@ -18,6 +17,9 @@ export interface ApprovalCard {
   at: number;
   /** Present once the approval left the pending set: how it ended. */
   settled?: SettledOutcome;
+  /** When it was seen leaving the pending set, on the gateway's clock (like
+   *  `at`), so a later request can tell it came after. */
+  settledAt?: number;
 }
 
 /**
@@ -49,19 +51,21 @@ export const useApprovalCards = (): ApprovalCard[] => {
     const liveIds = new Set(mine.map((a) => a.id));
     for (const a of mine) seenForAgent.set(a.id, a);
     const departed: ApprovalCard[] = [];
+    const now = gatewayNow();
     for (const [id, approval] of seenForAgent) {
       if (liveIds.has(id)) continue;
       seenForAgent.delete(id);
       departed.push({
         approval,
         at: new Date(approval.createdAt).getTime(),
+        settledAt: now,
         // This browser's own click is recorded precisely (useDecideApproval
         // notes it on mutate, forgets it on rollback). Otherwise: left the
         // set at/near its deadline → the gateway's auto-deny; earlier → a
         // decision from some other surface.
         settled:
           takeLocalDecision(id) ??
-          (new Date(approval.expiresAt).getTime() - 15_000 <= Date.now()
+          (new Date(approval.expiresAt).getTime() - 15_000 <= now
             ? "expired"
             : "decided"),
       });

@@ -357,19 +357,15 @@ export interface ChannelProvider {
    * not squat a person's name. FIRST of the three teardown steps: an
    * uninstalled app can no longer be exported.
    *
-   * ANSWERS WHETHER THE NAME LANDED, which the caller gates the delete on —
-   * providers may apply a rename asynchronously, and deleting before it lands
-   * freezes the agent's name onto the corpse forever. Answers `false` rather
-   * than throwing.
+   * Cosmetic best effort only. Nothing gates on it: the provider applies the
+   * rename asynchronously and cannot guarantee it survives deletion, so the
+   * caller neither waits for propagation nor treats a failure as a reason to
+   * keep the app.
    */
   renameRemotePresence?(input: {
     accessToken: string;
     externalId: string;
-    /** The presence's own credential — the bot token this polls with. */
-    credentialsJson: string | null;
-    /** The bot user to watch (Slack: `U…`), from the presence row. */
-    identityRef: string | null;
-  }): Promise<boolean>;
+  }): Promise<void>;
 
   /**
    * Push the agent's CURRENT name onto the live remote app — the "agent was
@@ -397,18 +393,35 @@ export interface ChannelProvider {
    * Separate from `deleteRemotePresence` because it needs no org config token:
    * an org that never connected one still gets the bot out of its workspace.
    *
-   * Best-effort by contract: answer rather than throw when the credential is
-   * dead, already uninstalled, or the provider is unreachable.
+   * Observable outcome. Only confirmed uninstall permits manifest deletion.
+   * Missing/revoked credentials do not prove that an installation is absent.
    */
   uninstallRemotePresence?(input: {
     credentialsJson: string | null;
-  }): Promise<void>;
+  }): Promise<
+    | { outcome: "uninstalled" }
+    | { outcome: "retry" | "blocked"; reason: string }
+  >;
 
   /**
-   * Best-effort remote app-record deletion at detach (guided orgs that asked).
+   * The provider REMOVED a presence (the workspace uninstalled the agent's
+   * app or revoked its bot token) and the platform just marked it
+   * `disabled` — drop any per-app state that would keep admitting the dead
+   * app's traffic (Slack: the inbound routes' verification cache). Synchronous
+   * and in-process by design; a provider with no such state omits it.
+   */
+  onPresenceRemoved?(input: { externalId: string }): void;
+
+  /**
+   * Remote app-record deletion, the LAST cleanup phase (guided orgs that
+   * asked; only after `uninstallRemotePresence` confirmed).
    *
    * Runs with the ORG's config token, so it is skipped entirely for orgs that
    * have none. `uninstallRemotePresence` is the half that still runs for them.
+   *
+   * Idempotent by contract: the cleanup worker persists completion only after
+   * this resolves, so a crash in between replays the call. An app that is
+   * already gone must resolve, not throw.
    */
   deleteRemotePresence(input: {
     accessToken: string;
@@ -460,6 +473,62 @@ export interface ChannelProvider {
     messageTs: string;
     reaction: string;
   }): Promise<void>;
+
+  /**
+   * Post a message on the agent's own initiative (`send_message`), outside
+   * the current conversation. `to` is the provider's own recipient
+   * address: a person or app id (the provider opens or reuses its DM space),
+   * or a channel id. `text` is the platform's markdown; the provider renders
+   * it natively, resolving `@[Name]` tokens with the FROZEN mention map the
+   * approval card was read with (never re-resolved at execute). Throws the
+   * provider's own API error on refusal — the caller routes a dead-credential
+   * refusal to the presence flip.
+   */
+  sendMessage(input: {
+    credentialsJson: string;
+    to: { kind: "person" | "app" | "channel"; ref: string };
+    text: string;
+    mentions?: ReadonlyMap<string, string>;
+  }): Promise<void>;
+
+  /**
+   * The provider's member roster for `find_recipient`: everyone the presence
+   * can see, RAW and unranked — ranking, verification and the result cap are
+   * the generic service's. Members outside the presence's own tenant (Slack
+   * Connect strangers) and the presence's own bot user are already excluded
+   * here, because only the provider knows how its tenant fence and
+   * self-identity read. Pages internally, bounded; a refusal throws the
+   * provider's error so the caller can note a dead credential.
+   */
+  listMembers(input: {
+    credentialsJson: string;
+    tenantId: string;
+    selfIdentityRef: string | null;
+  }): Promise<{ ref: string; name: string; isApp: boolean }[]>;
+
+  /** The spaces the presence can see (public, plus private ones it joined),
+   * RAW and unranked; archived ones excluded. Same error contract. */
+  listChannels(input: {
+    credentialsJson: string;
+  }): Promise<
+    { ref: string; name: string; member: boolean; private: boolean }[]
+  >;
+
+  /**
+   * Decode the provider's inbound mention/link tokens into text the model
+   * can READ (Slack: `<@U…>`, `<#C…|name>`, `<!here>`, links). The GRAMMAR is
+   * the provider's; the NAMES are the platform's — the generic service
+   * supplies the resolvers (the agent's own id → the agent's name, a linked
+   * user → our name, a stranger → the provider profile, a space id → its
+   * label) and the provider only decides where they apply. Optional: a
+   * provider whose inbound text is already plain needs nothing here. Must
+   * fail open (return the raw text) on any internal error.
+   */
+  decodeInboundText?(input: {
+    text: string;
+    resolveUserName: (externalUserId: string) => Promise<string | null>;
+    resolveChannelName: (externalRef: string) => Promise<string | null>;
+  }): Promise<string>;
 
   /**
    * The provider's NATIVE thread work-status (Slack: the agent-session

@@ -253,7 +253,7 @@ export const startHeldRequest = async (
 ): Promise<HeldRequest> => {
   const inFlight = throughProxy(gatewayOrigin, {
     ...options,
-    timeoutMs: 120_000,
+    timeoutMs: options.timeoutMs ?? 120_000,
   });
   let settled = false;
   // Attach a no-op rejection handler so a later failure is never an unhandled

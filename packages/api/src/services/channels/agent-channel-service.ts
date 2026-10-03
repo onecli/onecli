@@ -1,10 +1,21 @@
-import { randomBytes } from "node:crypto";
+import { isDeadCredentialError } from "@onecli/channels";
+import { randomBytes, randomUUID } from "node:crypto";
 import { db, Prisma } from "@onecli/db";
+import {
+  flattenToLine,
+  MAX_AGENT_CHANNEL_PRESENCES,
+  type AgentChannelPresenceWire,
+} from "@onecli/agent-protocol";
 import { getCrypto, getRoleResolver, ROLE_HIERARCHY } from "../../providers";
-import { signOAuthState, verifyOAuthState } from "../../lib/oauth-state";
+import {
+  signOAuthState,
+  verifyOAuthState,
+  type OAuthStatePayload,
+} from "../../lib/oauth-state";
 import { ServiceError } from "../errors";
 import { createServiceApiKey, revokeServiceApiKey } from "../api-key-service";
-import { channelProvider } from "./registry";
+import { bumpHomeForAgent } from "../home-sync-service";
+import { channelProvider, isChannelProviderId } from "./registry";
 import {
   listPersonGrants,
   listSpaceGrants,
@@ -16,6 +27,17 @@ import {
   publicApiUrl,
   resolveTransport,
 } from "./posture";
+import {
+  assertChannelIdentityAvailable,
+  assertChannelLifecycleHeld,
+  beginChannelReattach,
+  enqueueChannelCleanup,
+  lockAgentRow,
+  lockChannelLifecycle,
+  preserveUnattachedChannelApp,
+  processChannelCleanups,
+  withChannelLifecycle,
+} from "./channel-cleanup-service";
 import { withFreshIntegrationCredentials } from "./channel-integration-service";
 import type {
   ChannelAppMode,
@@ -40,6 +62,87 @@ const log = logger.child({ component: "agent-channel-service" });
 
 /** How long an install link (the signed OAuth state) stays valid. */
 const OAUTH_STATE_TTL_MS = 30 * 60 * 1000;
+
+// ── The renderer's view: what the agent is told about its own presences ─────
+
+/** The wire's own caps, applied after the control-strip so a clamp can never
+ * reveal a stripped byte's worth of extra text. */
+const HANDLE_MAX = 80;
+const WORKSPACE_NAME_MAX = 120;
+
+/** Display text that lands inside platform voice: control-stripped,
+ * single-line, clamped; empty becomes null (the renderer falls back). */
+const renderText = (raw: string | null, max: number): string | null => {
+  if (raw === null) return null;
+  const clean = flattenToLine(raw).slice(0, max);
+  return clean.length > 0 ? clean : null;
+};
+
+/**
+ * The agent's channel presences as the supervisor's `channels` capability
+ * needs them (plans/channel-aware-agents.md): one entry per non-pending
+ * presence with the provider, the bot's own handle, the tenant's display
+ * name, and whether it is live. Read at DISPATCH by the spawn-payload and
+ * home-sync composers (the "current truth" law), so an attach, a detach, or
+ * a provider-side removal is what the agent reads next.
+ *
+ * Display facts only — no ids, no credentials — and every string is
+ * user/provider supplied, so it is cleaned here before it can ride into the
+ * instruction doc. `pending_setup` rows are skipped: a half-finished attach
+ * is not a place the agent can be reached. Ordered by provider so the
+ * rendered doc is stable across dispatches.
+ */
+export const channelPresencesForRender = async (
+  agentId: string,
+): Promise<AgentChannelPresenceWire[]> => {
+  const rows = await db.agentChannel.findMany({
+    where: { agentId, status: { not: "pending_setup" } },
+    select: {
+      provider: true,
+      status: true,
+      identityName: true,
+      integration: { select: { name: true } },
+    },
+    orderBy: { provider: "asc" },
+    // One presence per (agent, provider) by constraint, so this cap is
+    // unreachable today; it pins the wire schema's bound regardless of what
+    // a future provider or constraint change allows.
+    take: MAX_AGENT_CHANNEL_PRESENCES,
+  });
+  const presences: AgentChannelPresenceWire[] = [];
+  for (const row of rows) {
+    // The status vocabulary is ours, but the column is a free string; a
+    // value this build does not know is dropped rather than misdescribed.
+    if (
+      row.status !== "active" &&
+      row.status !== "needs_attention" &&
+      row.status !== "disabled"
+    ) {
+      continue;
+    }
+    presences.push({
+      provider: row.provider,
+      status: row.status,
+      handle: renderText(row.identityName, HANDLE_MAX),
+      workspaceName: renderText(row.integration.name, WORKSPACE_NAME_MAX),
+    });
+  }
+  return presences;
+};
+
+/**
+ * Re-render a live sandbox's instruction doc after a presence changed — the
+ * same bump a brief edit takes (agent-service.ts: "a bump, never a
+ * respawn"). Fire-and-forget from the lifecycle writes: the presence write
+ * already committed, and a bump failure must not turn a successful attach
+ * or detach into an error. A parked sandbox needs no bump; its next boot
+ * composes the payload from current truth.
+ */
+const rerenderAgentHome = (agentId: string): void => {
+  void bumpHomeForAgent(agentId).catch((err: unknown) =>
+    log.warn({ err, agentId }, "home bump after a presence change failed"),
+  );
+};
 
 const presenceSelect = {
   id: true,
@@ -421,12 +524,23 @@ export interface CreatePresenceResult {
 }
 
 /**
+ * A presence row the attach flow may RESUME rather than refuse: a
+ * half-finished attach (`pending_setup`) or an app the workspace removed on
+ * the provider side (`disabled`, see `markPresenceRemoved`). Both keep the
+ * same app id and client credentials, so re-attaching is one consent click
+ * (events) or one token paste (socket) onto the existing app — never a
+ * sibling app. Every other status is a live presence: detach first.
+ */
+const isResumableStatus = (status: string): boolean =>
+  status === "pending_setup" || status === "disabled";
+
+/**
  * The guided arm: create the provider app from the org's automation
  * credential. The presence row is persisted `pending_setup` the moment the
  * remote app exists, so a half-finished attach is tracked, resumable, and
  * never an orphan only Slack knows about.
  */
-export const createPresence = async (
+const createPresenceUnlocked = async (
   workspaceId: string,
   agentId: string,
   provider: ChannelProviderId,
@@ -448,7 +562,7 @@ export const createPresence = async (
       apiKeyId: true,
     },
   });
-  if (existing && existing.status !== "pending_setup") {
+  if (existing && !isResumableStatus(existing.status)) {
     throw new ServiceError(
       "CONFLICT",
       `This agent already has a ${channelProvider(provider).displayName} app. Detach it first.`,
@@ -493,9 +607,13 @@ export const createPresence = async (
 
   // A pending row from an interrupted attach: resume it when it still can
   // finish (same transport as today's posture, and its consent URL still
-  // rebuilds), else SELF-HEAL — discard the stale row (best-effort remote
-  // delete on its own credentials) and mint fresh in this same click. The
-  // user never manages half-finished state; the button always works.
+  // rebuilds), else SELF-HEAL — snapshot the stale row for durable remote
+  // cleanup, delete it, and mint fresh in this same click. The user never
+  // manages half-finished state; the button always works. The remote half is
+  // NOT run here: this is an attach, already inside the lifecycle lock and
+  // about to spend its budget on the provider create; the maintenance pass
+  // picks the snapshot up. The identity lock inside the enqueue fences the
+  // row; the lifecycle lock is held by the wrapper on its own connection.
   if (existing) {
     if (existing.transport === transport) {
       const urls = await rebuildSetupUrls(provider, existing.id, oauthState);
@@ -509,18 +627,10 @@ export const createPresence = async (
       { agentId: agent.id, provider, presenceId: existing.id },
       "discarding a stale pending setup and starting fresh",
     );
-    const staleJson = existing.credentials
-      ? await getCrypto()
-          .decrypt(existing.credentials)
-          .catch(() => null)
-      : null;
-    await channelProvider(provider)
-      .uninstallRemotePresence?.({ credentialsJson: staleJson })
-      .catch(() => {});
-    await db.agentChannel.delete({ where: { id: existing.id } });
-    if (existing.apiKeyId) {
-      await revokeServiceApiKey(existing.apiKeyId).catch(() => {});
-    }
+    await db.$transaction(async (tx) => {
+      await enqueueChannelCleanup(tx, { id: existing.id });
+      await tx.agentChannel.delete({ where: { id: existing.id } });
+    });
   }
 
   return withFreshIntegrationCredentials(
@@ -533,6 +643,12 @@ export const createPresence = async (
         where: { id: actorUserId },
         select: { name: true, email: true },
       });
+      const integrationSnapshot = await db.channelIntegration.findFirstOrThrow({
+        where: { id: integrationId, organizationId, provider },
+        select: { externalId: true },
+      });
+      const presenceId = randomUUID();
+      await assertChannelLifecycleHeld();
       const created = await channelProvider(provider).createManagedPresence({
         accessToken,
         agentName: agent.name,
@@ -542,20 +658,53 @@ export const createPresence = async (
         owner: actor ? { name: actor.name, email: actor.email } : null,
       });
       const encrypted = await getCrypto().encrypt(created.credentialsJson);
-      const row = await db.agentChannel.create({
-        data: {
-          agentId: agent.id,
-          integrationId,
-          provider,
-          externalId: created.externalId,
-          transport,
-          appMode,
-          credentials: encrypted,
-          status: "pending_setup",
-          createdByUserId: actorUserId,
-        },
-        select: { id: true },
-      });
+      const row = await db
+        .$transaction(async (tx) => {
+          await assertChannelLifecycleHeld();
+          await lockAgentRow(tx, agent.id);
+          await assertChannelIdentityAvailable(
+            tx,
+            provider,
+            created.externalId,
+          );
+          return tx.agentChannel.create({
+            data: {
+              id: presenceId,
+              agentId: agent.id,
+              integrationId,
+              provider,
+              externalId: created.externalId,
+              transport,
+              appMode,
+              credentials: encrypted,
+              status: "pending_setup",
+              createdByUserId: actorUserId,
+            },
+            select: { id: true },
+          });
+        })
+        .catch(async (error: unknown) => {
+          // The user's error is the write failure; a compensation that
+          // itself fails (an identity mismatch, a DB blip) is logged, not
+          // surfaced over it. The app is then an orphan Slack knows about
+          // and we do not, which is exactly what the log line is for.
+          await preserveUnattachedChannelApp({
+            organizationId,
+            workspaceId,
+            integrationId,
+            teamId: integrationSnapshot.externalId,
+            sourcePresenceId: presenceId,
+            provider,
+            externalId: created.externalId,
+            credentials: encrypted,
+          }).catch((snapshotError: unknown) =>
+            log.error(
+              { err: snapshotError, provider, appId: created.externalId },
+              "remote app created but its compensation snapshot failed; manual cleanup required",
+            ),
+          );
+          throw error;
+        });
       return {
         presenceId: row.id,
         transport,
@@ -577,12 +726,16 @@ const rebuildSetupUrls = async (
   const row = await db.agentChannel.findUniqueOrThrow({
     where: { id: presenceId },
     select: {
+      id: true,
       externalId: true,
       transport: true,
       appMode: true,
       credentials: true,
     },
   });
+  await db.$transaction((tx) =>
+    beginChannelReattach(tx, provider, row.externalId, row.id),
+  );
   const credentialsJson = row.credentials
     ? await getCrypto().decrypt(row.credentials)
     : null;
@@ -612,6 +765,7 @@ const activatePresence = async (input: {
   credentialsJson: string;
   actorUserId: string;
 }) => {
+  await assertChannelLifecycleHeld();
   const integration = await db.channelIntegration.findUnique({
     where: {
       organizationId_provider: {
@@ -675,21 +829,34 @@ const activatePresence = async (input: {
   };
 
   try {
-    return input.presenceId
-      ? await db.agentChannel.update({
-          where: { id: input.presenceId },
-          data,
-          select: presenceSelect,
-        })
-      : await db.agentChannel.create({
-          data: {
-            ...data,
-            agentId: input.agent.id,
-            provider: input.provider,
-            createdByUserId: input.actorUserId,
-          },
-          select: presenceSelect,
-        });
+    const presence = await db.$transaction(async (tx) => {
+      await assertChannelLifecycleHeld(0);
+      await lockAgentRow(tx, input.agent.id);
+      await assertChannelIdentityAvailable(
+        tx,
+        input.provider,
+        input.externalId,
+        input.presenceId,
+      );
+      return input.presenceId
+        ? await tx.agentChannel.update({
+            where: { id: input.presenceId },
+            data,
+            select: presenceSelect,
+          })
+        : await tx.agentChannel.create({
+            data: {
+              ...data,
+              agentId: input.agent.id,
+              provider: input.provider,
+              createdByUserId: input.actorUserId,
+            },
+            select: presenceSelect,
+          });
+    });
+    // The agent's instruction doc now has a channel to describe.
+    rerenderAgentHome(input.agent.id);
+    return presence;
   } catch (err) {
     // The presence write failed — don't strand the service key we just minted
     // (it is invisible to the personal-key flows and would otherwise be
@@ -716,7 +883,7 @@ const activatePresence = async (input: {
  * inbound routes look presences up by it, and Slack shows it plainly on the
  * app's Basic Information page.
  */
-export const completePresence = async (
+const completePresenceUnlocked = async (
   workspaceId: string,
   agentId: string,
   provider: ChannelProviderId,
@@ -742,7 +909,7 @@ export const completePresence = async (
       credentials: true,
     },
   });
-  if (existing && existing.status !== "pending_setup") {
+  if (existing && !isResumableStatus(existing.status)) {
     throw new ServiceError(
       "CONFLICT",
       `This agent already has a ${channelProvider(provider).displayName} app. Detach it first.`,
@@ -779,6 +946,10 @@ export const completePresence = async (
     ? await getCrypto().decrypt(existing.credentials)
     : null;
 
+  await db.$transaction((tx) =>
+    beginChannelReattach(tx, provider, externalId, existing?.id),
+  );
+  await assertChannelLifecycleHeld();
   const completed = await channelProvider(provider).completePresence({
     pasted: {
       botToken: input.botToken,
@@ -807,19 +978,15 @@ export const completePresence = async (
  * The events arm's completion door — invoked by the OAuth callback route
  * after it verified the signed state. Resolves the pending presence by
  * (agent, provider) from the state payload, never from anything the browser
- * chose.
+ * chose. `payload` is the verified state the lifecycle wrapper already
+ * checked; the TTL and agent checks that need no lock happen here.
  */
-export const completePresenceFromOAuth = async (input: {
-  state: string;
-  code: string;
-  redirectUri: string;
-}) => {
-  const payload = verifyOAuthState(input.state);
+const completePresenceFromOAuthUnlocked = async (
+  input: { code: string; redirectUri: string },
+  payload: OAuthStatePayload & { workspaceId: string },
+) => {
   if (
-    !payload ||
-    payload.kind !== "channel-install" ||
     typeof payload.agentId !== "string" ||
-    typeof payload.workspaceId !== "string" ||
     typeof payload.issuedAt !== "number" ||
     Date.now() - payload.issuedAt > OAUTH_STATE_TTL_MS
   ) {
@@ -832,6 +999,8 @@ export const completePresenceFromOAuth = async (input: {
     where: { agentId_provider: { agentId: agent.id, provider } },
     select: {
       id: true,
+      integrationId: true,
+      integration: { select: { externalId: true } },
       status: true,
       externalId: true,
       transport: true,
@@ -842,7 +1011,7 @@ export const completePresenceFromOAuth = async (input: {
   });
   if (
     !presence ||
-    presence.status !== "pending_setup" ||
+    !isResumableStatus(presence.status) ||
     !presence.credentials
   ) {
     throw new ServiceError("UNPROCESSABLE", "This install link is not valid");
@@ -856,13 +1025,52 @@ export const completePresenceFromOAuth = async (input: {
     throw new ServiceError("UNPROCESSABLE", "This install link is not valid");
   }
 
+  await db.$transaction((tx) =>
+    beginChannelReattach(tx, provider, presence.externalId, presence.id),
+  );
   const credentialsJson = await getCrypto().decrypt(presence.credentials);
+  await assertChannelLifecycleHeld();
   const exchanged = await channelProvider(provider).exchangeOAuthCode({
     code: input.code,
     redirectUri: input.redirectUri,
     credentialsJson,
   });
 
+  if (
+    exchanged.identity.tenant.externalId !== presence.integration.externalId
+  ) {
+    throw new ServiceError(
+      "CONFLICT",
+      `This app belongs to a different ${channelProvider(provider).displayName} workspace than the one connected to your organization.`,
+    );
+  }
+  // Preserve exchanged credentials before any subsequent service-key/activation
+  // failure. Lifecycle serialization means teardown will snapshot this token.
+  const encrypted = await getCrypto().encrypt(exchanged.credentialsJson);
+  const snapshot = {
+    organizationId: agent.workspace.organizationId,
+    workspaceId: payload.workspaceId,
+    integrationId: presence.integrationId,
+    teamId: presence.integration.externalId,
+    sourcePresenceId: presence.id,
+    provider,
+    externalId: presence.externalId,
+    credentials: encrypted,
+  };
+  try {
+    await assertChannelLifecycleHeld(0);
+  } catch (error) {
+    await preserveUnattachedChannelApp({ ...snapshot, retainAttached: true });
+    throw error;
+  }
+  const saved = await db.agentChannel.updateMany({
+    where: { id: presence.id },
+    data: { credentials: encrypted },
+  });
+  if (!saved.count) {
+    await preserveUnattachedChannelApp(snapshot);
+    throw new ServiceError("CONFLICT", "This install is no longer attached");
+  }
   const activated = await activatePresence({
     presenceId: presence.id,
     agent: { id: agent.id, name: agent.name, workspaceId: payload.workspaceId },
@@ -884,47 +1092,6 @@ export const completePresenceFromOAuth = async (input: {
     agentId: agent.id,
     workspaceId: payload.workspaceId,
   };
-};
-
-/**
- * Rename the remote app to a tombstone before it is torn down, so the record it
- * leaves behind does not squat a person's name. Shared because both teardown
- * paths need it in the same position: first, while the app is still installed.
- *
- * ANSWERS WHETHER THE NAME LANDED, and the caller must not delete unless it
- * did — a delete that races the rename freezes the agent's name onto the corpse
- * forever. Never throws.
- */
-const renameRemoteTombstone = async (
-  organizationId: string,
-  provider: ChannelProviderId,
-  presence: {
-    externalId: string;
-    identityRef: string | null;
-    credentialsJson: string | null;
-  },
-): Promise<boolean> => {
-  const rename = channelProvider(provider).renameRemotePresence;
-  if (!rename) return false;
-  try {
-    return await withFreshIntegrationCredentials(
-      organizationId,
-      provider,
-      (accessToken) =>
-        rename({
-          accessToken,
-          externalId: presence.externalId,
-          credentialsJson: presence.credentialsJson,
-          identityRef: presence.identityRef,
-        }),
-    );
-  } catch (err) {
-    log.warn(
-      { err, provider, appId: presence.externalId },
-      "could not rename the remote app before teardown; it keeps its old name",
-    );
-    return false;
-  }
 };
 
 /**
@@ -977,139 +1144,15 @@ export const syncAgentPresenceNames = async (
 };
 
 /**
- * Tear down every channel presence an agent holds — the agent-deletion path.
+ * Detach: snapshot and enqueue the remote teardown, revoke the service key,
+ * and delete or shelve the presence, all in ONE transaction, then run the
+ * cleanup right away (any failure is retried by maintenance).
  *
- * Deleting the agent row alone would cascade `AgentChannel` away and leave the
- * provider-side app alive: a bot still sitting in the customer's workspace,
- * its approvals service key still valid, and nothing left in our database
- * pointing at either. So deletion has to run the same teardown a detach does.
- *
- * Best-effort per presence, like `detachPresence`: a provider that refuses the
- * remote delete must not block the agent's deletion, or a revoked Slack
- * credential would make an agent permanently undeletable. Rows are left for
- * the caller's cascade.
- */
-export const teardownAgentPresences = async (agent: {
-  id: string;
-  organizationId: string;
-}): Promise<void> => {
-  const presences = await db.agentChannel.findMany({
-    where: { agentId: agent.id },
-    select: {
-      provider: true,
-      externalId: true,
-      identityRef: true,
-      apiKeyId: true,
-      credentials: true,
-    },
-  });
-
-  for (const presence of presences) {
-    const provider = presence.provider as ChannelProviderId;
-
-    const credentialsJson = presence.credentials
-      ? await getCrypto()
-          .decrypt(presence.credentials)
-          .catch(() => null)
-      : null;
-
-    // Rename FIRST, while the app is still installed and exportable. Needs the
-    // org config token, so orgs without one keep the old name — the same orgs
-    // that cannot delete the record either.
-    const renamed = await renameRemoteTombstone(
-      agent.organizationId,
-      provider,
-      {
-        externalId: presence.externalId,
-        identityRef: presence.identityRef,
-        credentialsJson,
-      },
-    );
-
-    // Outside the org-credential wrapper ON PURPOSE: it must still happen for
-    // an org that never connected a config token.
-    await channelProvider(provider)
-      .uninstallRemotePresence?.({ credentialsJson })
-      .catch((err: unknown) =>
-        log.warn(
-          { err, agentId: agent.id, provider },
-          "remote app uninstall failed during agent deletion; continuing",
-        ),
-      );
-
-    // Only delete an app we successfully renamed: an app still wearing the
-    // agent's name is left ALIVE (recoverable) rather than frozen forever.
-    if (!renamed) {
-      log.warn(
-        { agentId: agent.id, provider, appId: presence.externalId },
-        "skipping remote app deletion: the tombstone rename did not land, and a deleted app can never be renamed",
-      );
-    } else {
-      try {
-        await withFreshIntegrationCredentials(
-          agent.organizationId,
-          provider,
-          (accessToken) =>
-            channelProvider(provider).deleteRemotePresence({
-              accessToken,
-              externalId: presence.externalId,
-            }),
-        );
-      } catch (err) {
-        log.warn(
-          { err, agentId: agent.id, provider },
-          "remote app deletion failed during agent deletion; continuing",
-        );
-      }
-    }
-    // The service key outlives the cascade (`onDelete: SetNull`), so it must
-    // be revoked explicitly or it stays a live credential with no owner.
-    if (presence.apiKeyId) {
-      await revokeServiceApiKey(presence.apiKeyId).catch((err) =>
-        log.warn(
-          { err, agentId: agent.id, provider },
-          "service key revoke failed during agent deletion; continuing",
-        ),
-      );
-    }
-  }
-};
-
-/**
- * Tear down every channel presence in a whole WORKSPACE — the workspace- and
- * org-deletion paths, and offboarding (removing a member deletes their
- * personal workspaces).
- *
- * Separate from `teardownAgentPresences` because deletion runs inside a
- * transaction and these are network calls: the provider must be told BEFORE
- * the rows go, and no HTTP request belongs inside a `db.$transaction`.
- */
-export const teardownWorkspacePresences = async (
-  workspaceId: string,
-): Promise<void> => {
-  const workspace = await db.workspace.findUnique({
-    where: { id: workspaceId },
-    select: { organizationId: true },
-  });
-  if (!workspace) return;
-
-  const agents = await db.agent.findMany({
-    where: { workspaceId, channels: { some: {} } },
-    select: { id: true },
-  });
-
-  for (const agent of agents) {
-    await teardownAgentPresences({
-      id: agent.id,
-      organizationId: workspace.organizationId,
-    });
-  }
-};
-
-/**
- * Detach: revoke the service key, delete the presence (links cascade;
- * conversations deliberately survive — history is the user's). Remote app
- * deletion is best-effort and only where the org credential allows it.
+ * WITHOUT remote deletion the row stays as a `pending_setup` shell, same
+ * externalId, same client credentials, so the next attach resumes THIS app
+ * instead of minting a sibling; thread links die with the attachment so a
+ * stale link never routes a channel's messages to a detached agent. A
+ * remote-deleted app has nothing to reuse: the row goes.
  */
 export const detachPresence = async (
   workspaceId: string,
@@ -1117,114 +1160,220 @@ export const detachPresence = async (
   provider: ChannelProviderId,
   options: { deleteRemote: boolean },
 ): Promise<void> => {
-  const agent = await requireHostedAgent(workspaceId, agentId);
+  await requireHostedAgent(workspaceId, agentId);
+  const ids = await db.$transaction(async (tx) => {
+    await lockChannelLifecycle(tx, workspaceId);
+    await lockAgentRow(tx, agentId, workspaceId);
+    const presence = await tx.agentChannel.findUnique({
+      where: { agentId_provider: { agentId, provider } },
+      select: { id: true },
+    });
+    if (!presence) {
+      throw new ServiceError(
+        "NOT_FOUND",
+        `No ${channelProvider(provider).displayName} app attached`,
+      );
+    }
+    const ids = await enqueueChannelCleanup(
+      tx,
+      { id: presence.id },
+      options.deleteRemote,
+    );
+    if (options.deleteRemote) {
+      await tx.agentChannel.delete({ where: { id: presence.id } });
+    } else {
+      await tx.agentChannel.update({
+        where: { id: presence.id },
+        data: { status: "pending_setup", apiKeyId: null },
+      });
+      await tx.channelThreadLink.deleteMany({
+        where: { agentChannelId: presence.id },
+      });
+    }
+    return ids;
+  });
+  // The agent's instruction doc loses the channel it described.
+  rerenderAgentHome(agentId);
+  await processChannelCleanups({ ids }).catch(() => undefined);
+};
+
+/**
+ * The provider REMOVED the presence: the workspace uninstalled the agent's
+ * app, or revoked its bot token (Slack: `app_uninstalled`, `tokens_revoked`
+ * with a bot entry — the two arrive in either order, so this is idempotent).
+ * The presence flips to `disabled` rather than vanishing: the dashboard card
+ * stays and says what happened, the agent's instruction doc says its app was
+ * removed and drops the messaging tools, and a re-attach resumes THIS app
+ * (same id, same client credentials) instead of minting a sibling.
+ *
+ * Everything a dead presence must not keep doing is torn down here, on the
+ * detach precedent: thread links (a stale link must never route a channel's
+ * messages to a dead app), the approvals service key (nothing polls on its
+ * behalf anymore), and the inbound route's per-app verification cache, which
+ * would otherwise keep admitting events for the 60s window. `status` is
+ * fenced to the live vocabulary so a presence the owner already detached
+ * (`pending_setup`) is left exactly as it was.
+ */
+export const markPresenceRemoved = async (
+  presenceId: string,
+  reason: "app_uninstalled" | "tokens_revoked" | "dead_credential",
+): Promise<void> => {
   const presence = await db.agentChannel.findUnique({
-    where: { agentId_provider: { agentId: agent.id, provider } },
+    where: { id: presenceId },
     select: {
       id: true,
+      agentId: true,
+      provider: true,
       externalId: true,
-      identityRef: true,
+      status: true,
       apiKeyId: true,
-      credentials: true,
     },
   });
-  if (!presence)
-    throw new ServiceError(
-      "NOT_FOUND",
-      `No ${channelProvider(provider).displayName} app attached`,
-    );
+  if (!presence) return;
 
-  if (options.deleteRemote) {
-    const credentialsJson = presence.credentials
-      ? await getCrypto()
-          .decrypt(presence.credentials)
-          .catch(() => null)
-      : null;
-
-    // Same order as the agent path: rename while the app is still installed,
-    // then uninstall, then delete the record.
-    const renamed = await renameRemoteTombstone(
-      agent.workspace.organizationId,
-      provider,
-      {
-        externalId: presence.externalId,
-        identityRef: presence.identityRef,
-        credentialsJson,
-      },
-    );
-
-    // See teardownAgentPresences: the uninstall runs on the presence's own
-    // credentials, so it survives an org with no config token.
-    await channelProvider(provider)
-      .uninstallRemotePresence?.({ credentialsJson })
-      .catch((err: unknown) =>
-        log.warn(
-          { err, agentId, provider },
-          "remote app uninstall failed; detaching anyway",
-        ),
-      );
-
-    // See teardownAgentPresences: an unrenamed app is left alive.
-    if (!renamed) {
-      log.warn(
-        { agentId, provider, appId: presence.externalId },
-        "skipping remote app deletion: the tombstone rename did not land, and a deleted app can never be renamed",
-      );
-    } else {
-      try {
-        await withFreshIntegrationCredentials(
-          agent.workspace.organizationId,
-          provider,
-          (accessToken) =>
-            channelProvider(provider).deleteRemotePresence({
-              accessToken,
-              externalId: presence.externalId,
-            }),
-        );
-      } catch (err) {
-        // Best-effort by contract: a failed remote delete must never leave the
-        // platform half-detached. The user can remove the app in Slack's UI.
-        log.warn(
-          { err, agentId, provider },
-          "remote app deletion failed; detaching locally anyway",
-        );
-      }
-    }
-  }
-
-  if (presence.apiKeyId) await revokeServiceApiKey(presence.apiKeyId);
-
-  // Detach WITHOUT remote deletion: keep the row as a pending_setup shell —
-  // same externalId, same client credentials — so the next attach resumes
-  // THIS app instead of minting a sibling. The bot is uninstalled from the
-  // workspace (the detach promise: it stops receiving messages); a re-attach
-  // is one consent click that re-mints the bot token. A remote-deleted app
-  // has nothing to reuse: delete the row.
-  if (options.deleteRemote) {
-    await db.agentChannel.delete({ where: { id: presence.id } });
+  // Not already dead or owner-detached: those rows hold no key and no links
+  // (a previous pass, or detach, took them), so there is nothing to tear
+  // down and nothing to re-announce.
+  if (presence.status !== "active" && presence.status !== "needs_attention") {
     return;
   }
-  const credentialsJson = presence.credentials
-    ? await getCrypto()
-        .decrypt(presence.credentials)
-        .catch(() => null)
-    : null;
-  await channelProvider(provider)
-    .uninstallRemotePresence?.({ credentialsJson })
-    .catch((err: unknown) =>
-      log.warn(
-        { err, agentId, provider },
-        "remote app uninstall failed on detach; detaching anyway",
-      ),
-    );
-  await db.agentChannel.update({
-    where: { id: presence.id },
-    data: { status: "pending_setup", apiKeyId: null },
-    select: { id: true },
+
+  // The service key goes FIRST and un-swallowed (the detach precedent): the
+  // row is about to forget the key id, so a revoke that failed after the
+  // write would leave a live key nothing references and no surface can
+  // revoke. Throwing here instead lets Slack's webhook retry redo the whole
+  // door — the flip below has not happened yet, so the retry finds the row
+  // live and takes the same path.
+  if (presence.apiKeyId) await revokeServiceApiKey(presence.apiKeyId);
+
+  const { count } = await db.agentChannel.updateMany({
+    where: {
+      id: presence.id,
+      status: { in: ["active", "needs_attention"] },
+    },
+    data: { status: "disabled", apiKeyId: null },
   });
-  // Thread links die with the attachment: a re-attach starts clean, and a
-  // stale link must never route a channel's messages to a detached agent.
+  // A concurrent pass (Slack's unordered pair landing together) won the
+  // flip between our read and our write: its teardown covers ours.
+  if (count === 0) return;
+
   await db.channelThreadLink.deleteMany({
     where: { agentChannelId: presence.id },
   });
+  // The column is a free string; a row from a build that knew a provider this
+  // one does not has no hook to call (the ingest route's own guard).
+  if (isChannelProviderId(presence.provider)) {
+    channelProvider(presence.provider).onPresenceRemoved?.({
+      externalId: presence.externalId,
+    });
+  }
+  rerenderAgentHome(presence.agentId);
+  log.info(
+    {
+      presenceId: presence.id,
+      agentId: presence.agentId,
+      provider: presence.provider,
+      reason,
+    },
+    "channel presence removed on the provider side; disabled",
+  );
+};
+
+/**
+ * The OUTBOUND half of removal detection. The uninstall webhooks
+ * (`markPresenceRemoved` above) cover the cases Slack tells us about; this
+ * covers the ones it cannot: an app DELETED at api.slack.com (the
+ * `app_deleted` event is org-admin only, and the revocation webhook may
+ * have nowhere to land once the app record is gone), a webhook dropped
+ * while the adapter was offline, or an app minted before the manifest
+ * subscribed to the removal events. Any outbound call made with the
+ * presence's own credential — a reaction, a narration card, a
+ * `send_message`, a recipient search — that the provider refuses with a
+ * DEAD-credential code (per `isDeadCredentialError`: the codes the provider
+ * documents as "this token is for a removed app") flips the presence
+ * through the same door, so the card, the doc and the tools tell the same
+ * story they would after a webhook. Every other error is left to the
+ * caller: a rate limit or a missing scope is not a removal.
+ *
+ * Returns whether the error WAS a dead credential, so a caller can shape
+ * its own message ("your Slack app was removed" beats "invalid_auth").
+ * Never throws: the caller's own error is the one that matters, and the
+ * flip's failure is logged by `markPresenceRemoved` and retried by the next
+ * refused call.
+ */
+/**
+ * The removed-presence fact for the messaging tools: when the agent has NO
+ * live presence but a `disabled` one (its app was uninstalled, revoked, or
+ * deleted), a tool call must say so, not "nobody matching" or "no presence"
+ * (both read as "keep looking" to a model whose tool list still carries the
+ * tool). Null when there is nothing removed to explain (no presence at all,
+ * or a live one that should simply be used).
+ */
+export const removedPresenceNotice = async (
+  agentId: string,
+): Promise<string | null> => {
+  const rows = await db.agentChannel.findMany({
+    where: {
+      agentId,
+      status: { in: ["active", "needs_attention", "disabled"] },
+    },
+    select: { provider: true, status: true },
+  });
+  if (rows.some((r) => r.status !== "disabled")) return null;
+  const removed = rows.filter(
+    (r) => r.status === "disabled" && isChannelProviderId(r.provider),
+  );
+  if (removed.length === 0) return null;
+  const names = [
+    ...new Set(
+      removed.map(
+        (r) => channelProvider(r.provider as ChannelProviderId).displayName,
+      ),
+    ),
+  ].join(" and ");
+  return `Your ${names} app was removed from the workspace (uninstalled, or its access revoked), so this tool no longer works. It needs to be re-attached from your Channels page in the OneCLI dashboard before you can reach ${names} again. Do not retry.`;
+};
+
+export const noteOutboundFailure = async (
+  presenceId: string,
+  error: unknown,
+): Promise<boolean> => {
+  if (!isDeadCredentialError(error)) return false;
+  try {
+    await markPresenceRemoved(presenceId, "dead_credential");
+  } catch (flipError) {
+    log.warn(
+      { presenceId, err: String(flipError) },
+      "dead credential detected on an outbound call, but the presence flip failed",
+    );
+  }
+  return true;
+};
+
+// Remote create/exchange and activation are one lifecycle operation with
+// respect to local teardown. An OAuth code cannot reinstall an app while a
+// concurrent delete snapshots its previous token and uninstalls that token.
+export const createPresence: typeof createPresenceUnlocked = (...args) =>
+  withChannelLifecycle(args[0], () => createPresenceUnlocked(...args));
+export const completePresence: typeof completePresenceUnlocked = (...args) =>
+  withChannelLifecycle(args[0], () => completePresenceUnlocked(...args));
+export const completePresenceFromOAuth = (input: {
+  state: string;
+  code: string;
+  redirectUri: string;
+}): ReturnType<typeof completePresenceFromOAuthUnlocked> => {
+  // Verified ONCE here: the workspace id keys the lifecycle lock, and the
+  // same payload rides into the locked half (never re-parsed from the raw).
+  const payload = verifyOAuthState(input.state);
+  if (
+    !payload ||
+    payload.kind !== "channel-install" ||
+    typeof payload.workspaceId !== "string"
+  ) {
+    throw new ServiceError("UNPROCESSABLE", "This install link is not valid");
+  }
+  const workspaceId = payload.workspaceId;
+  return withChannelLifecycle(workspaceId, () =>
+    completePresenceFromOAuthUnlocked(input, { ...payload, workspaceId }),
+  );
 };

@@ -5,6 +5,11 @@ export {
   isTerminalEvent,
   messageJoinedEventSchema,
   noticeEventSchema,
+  PEER_TASK_OUTCOMES,
+  peerMessageStampSchema,
+  peerTaskStampSchema,
+  readPeerMessageStamp,
+  readPeerTaskStamp,
   textDeltaEventSchema,
   textEventSchema,
   thinkingDeltaEventSchema,
@@ -14,7 +19,14 @@ export {
   turnStartedEventSchema,
   turnUsageSchema,
 } from "./events";
-export type { AgentEvent, AgentEventType, TurnUsage } from "./events";
+export type {
+  AgentEvent,
+  AgentEventType,
+  PeerMessageStamp,
+  PeerTaskOutcome,
+  PeerTaskStamp,
+  TurnUsage,
+} from "./events";
 
 export {
   SANDBOX_START_FAILURE_REASONS,
@@ -51,11 +63,19 @@ export {
   MAX_ATTACHMENT_NAME_CHARS,
   MAX_ATTACHMENT_ROWS_PER_MESSAGE,
   MAX_ATTACHMENTS_PER_MESSAGE,
+  MAX_OUTBOUND_ATTACHMENT_BYTES,
+  MAX_OUTBOUND_ATTACHMENT_BYTES_PER_CONVERSATION_DAY,
+  MAX_OUTBOUND_ATTACHMENTS_PER_TURN,
+  MAX_OUTBOUND_CAPTION_CHARS,
+  ATTACHMENT_RETENTION_DAYS,
   MAX_PENDING_ATTACHMENTS_PER_CONVERSATION,
+  OUTBOUND_ATTACHMENT_SOURCE,
   attachmentSandboxPath,
   dedupeAttachmentNames,
   isInlineableImage,
   isPreviewableImageType,
+  normalizeAttachmentCaption,
+  attachmentDownloadDisposition,
   sanitizeAttachmentName,
 } from "./attachments";
 
@@ -63,6 +83,7 @@ export {
   ACTIVITY_TEXT_MAX,
   activityForReasoning,
   activityForTool,
+  bareToolName,
 } from "./activity";
 
 export {
@@ -84,7 +105,15 @@ export {
 } from "./memory-file";
 export type { MemoryFileFields, ParsedMemoryFile } from "./memory-file";
 
+export { cleanLabel, isBareHostname } from "./text";
+
 export {
+  AGENT_CHANNEL_PRESENCE_STATUSES,
+  MAX_AGENT_CHANNEL_PRESENCES,
+  MAX_AGENT_CONNECTION_LABEL_CHARS,
+  MAX_AGENT_CONNECTION_NAME_CHARS,
+  MAX_AGENT_CONNECTIONS,
+  MAX_AGENT_PEERS,
   MAX_PROCESS_COMMAND_CHARS,
   MAX_PROCESS_NAME_CHARS,
   MAX_PROCESS_TAIL_WIRE_CHARS,
@@ -100,6 +129,9 @@ export {
   MAX_WATCH_PATTERN_CHARS,
   MAX_WATCH_PROMPT_CHARS,
   MAX_WATCHES_PER_PROCESS_WIRE,
+  agentChannelPresenceSchema,
+  agentConnectionSchema,
+  agentPeerSchema,
   attachmentManifestEntrySchema,
   processStateSchema,
   supervisorMessageSchema,
@@ -109,6 +141,9 @@ export {
   homeSyncFileSchema,
 } from "./transport";
 export type {
+  AgentChannelPresenceWire,
+  AgentConnectionWire,
+  AgentPeerWire,
   AttachmentManifestEntry,
   ProcessState,
   HomeSyncFile,
@@ -126,6 +161,9 @@ export {
   runnerEventSchema,
   runnerEventsRequestSchema,
   runnerHeartbeatRequestSchema,
+  RUNNER_ATTACHMENT_HEADERS,
+  runnerAttachmentUploadHeadersSchema,
+  runnerAttachmentUploadResponseSchema,
   runnerMemoryWriteRequestSchema,
   runnerMemoryWriteResponseSchema,
   runnerRegisterRequestSchema,
@@ -146,6 +184,8 @@ export type {
   RunnerEvent,
   RunnerEventsRequest,
   RunnerHeartbeatRequest,
+  RunnerAttachmentUploadHeaders,
+  RunnerAttachmentUploadResponse,
   RunnerMemoryWriteRequest,
   RunnerMemoryWriteResponse,
   RunnerRegisterRequest,

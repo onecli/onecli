@@ -1,6 +1,18 @@
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { HarnessCapabilities } from "@onecli/agent-protocol";
+import type {
+  AgentChannelPresenceWire,
+  AgentConnectionWire,
+  AgentPeerWire,
+  HarnessCapabilities,
+} from "@onecli/agent-protocol";
+import { cleanLabel } from "@onecli/agent-protocol";
+import { agentsFragment } from "../capabilities/agents";
+import { channelsFragment } from "../capabilities/channels";
+import {
+  CONNECTIONS_FRAGMENT_ID,
+  connectedAppsBlock,
+} from "../capabilities/connections";
 
 /**
  * The instruction renderer is a collector, not an author (plan step 2, §3.7):
@@ -32,8 +44,40 @@ export interface RenderInputs {
   /** The agent's display name — the identity it states when asked who it is.
    * Undefined only for a sandbox started without one (dev/stdio). */
   agentName: string | undefined;
+  /**
+   * The agent's channel presences (its own Slack app, later others), from
+   * the spawn payload at boot and the home-sync final part mid-run. A RENDER
+   * input like the two above rather than a static fragment: the channels
+   * section is derived from it on every render, so an attach, a detach, or
+   * a provider-side removal changes the doc without a reboot.
+   */
+  channels: readonly AgentChannelPresenceWire[];
+  /**
+   * The peer agents this agent may message (PR 5b), same render-input
+   * posture as `channels`: the agents section is derived from it on every
+   * render, so a new agent in the workspace changes the doc without a
+   * reboot.
+   */
+  peers: readonly AgentPeerWire[];
+  /**
+   * The agent's attached app connections, same render-input posture: the
+   * "Connected apps" block of the External services section is derived from
+   * it on every render, so an attach, a detach, or a reconnect to another
+   * org changes the doc without a reboot.
+   */
+  connections: readonly AgentConnectionWire[];
   capabilities: HarnessCapabilities;
+  /** The STATIC fragments — each enabled capability's teaching, fixed for
+   * the process. The channels fragment is not among them: it is derived
+   * from `channels` at render time (see `renderInstructionDoc`). */
   fragments: CapabilityFragment[];
+  /**
+   * Where the derived channels section goes, as the id of the static
+   * fragment it should FOLLOW (it reads best right after the standing
+   * knowledge sections and before the machine ones). Absent or unmatched =
+   * after every static fragment.
+   */
+  channelsAfter?: string;
 }
 
 const HEADER =
@@ -43,30 +87,17 @@ const HEADER =
 /**
  * The name is operator-supplied (dashboard, up to 255 free-form characters)
  * and lands INSIDE platform voice, so it gets the same treatment as any other
- * name we splice into a prompt: control characters — newlines included —
- * stripped, then clamped. A name is not a place to open a new markdown
- * heading, and only a line break could make one. Built from char codes rather
- * than a regex range so no literal control byte appears in this source.
+ * name we splice into a prompt (`cleanLabel`): control characters, newlines
+ * and Unicode line separators included, stripped, then clamped. A name is
+ * not a place to open a new markdown heading, and only a line break could
+ * make one.
  *
  * This is document integrity, not a trust boundary: the brief beneath is
  * equally operator-authored, and an operator who wants to confuse their own
  * agent can already do it there.
  */
-const cleanName = (raw: string): string =>
-  [...raw]
-    .filter((ch) => {
-      const code = ch.charCodeAt(0);
-      // Unicode's own line/paragraph separators sit above the control range
-      // and would otherwise slip through the same door newlines use.
-      if (code === 0x2028 || code === 0x2029) return false;
-      return code >= 0x20 && code !== 0x7f;
-    })
-    .join("")
-    .trim()
-    .slice(0, 80);
-
 const preamble = (agentName: string | undefined): string => {
-  const named = cleanName(agentName ?? "");
+  const named = cleanLabel(agentName ?? "");
   return `## Who you are
 
 ${named ? `You are ${named}, a hosted agent` : "You are a hosted agent"} running on OneCLI: a sandboxed
@@ -108,8 +139,39 @@ export const renderInstructionDoc = (inputs: RenderInputs): string => {
     );
   }
 
-  for (const fragment of inputs.fragments) {
-    sections.push(`## ${fragment.title}\n\n${fragment.body.trim()}`);
+  // The channels and agents sections are DERIVED per render from their
+  // lists, and spliced after the named static fragment so the doc reads in
+  // the registry's intended order (channels, then agents - both answer
+  // "who can I reach"); null (an empty list) renders nothing.
+  const derived = [
+    channelsFragment(inputs.channels),
+    agentsFragment(inputs.peers),
+  ].filter((fragment): fragment is CapabilityFragment => fragment !== null);
+  const afterIndex = inputs.channelsAfter
+    ? inputs.fragments.findIndex((f) => f.id === inputs.channelsAfter)
+    : -1;
+  const ordered: CapabilityFragment[] =
+    derived.length === 0
+      ? inputs.fragments
+      : afterIndex === -1
+        ? [...inputs.fragments, ...derived]
+        : [
+            ...inputs.fragments.slice(0, afterIndex + 1),
+            ...derived,
+            ...inputs.fragments.slice(afterIndex + 1),
+          ];
+
+  for (const fragment of ordered) {
+    // The External services fragment is static teaching; the list of what
+    // is actually connected (and where) is derived per render and rides at
+    // its end, so the rules and the facts they apply to read together.
+    const body =
+      fragment.id === CONNECTIONS_FRAGMENT_ID
+        ? [fragment.body.trim(), connectedAppsBlock(inputs.connections)]
+            .filter(Boolean)
+            .join("\n\n")
+        : fragment.body.trim();
+    sections.push(`## ${fragment.title}\n\n${body}`);
   }
 
   return `${sections.join("\n\n")}\n`;

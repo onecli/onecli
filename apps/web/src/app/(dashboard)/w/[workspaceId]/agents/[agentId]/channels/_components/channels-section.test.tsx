@@ -24,11 +24,6 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/hooks/use-channels", () => ({
-  // The contacts section renders nothing on an empty list — inert here;
-  // its own behavior is covered by its own test.
-  useAgentContacts: () => ({ data: { contacts: [] } }),
-  useSetContactPolicy: () => ({ mutate: vi.fn(), isPending: false }),
-  useDeleteContact: () => ({ mutate: vi.fn(), isPending: false }),
   useAgentChannels: () => ({
     data: state.view,
     isPending: state.view === undefined,
@@ -218,6 +213,43 @@ describe("no org credential", () => {
       expect.anything(),
     );
   });
+
+  it("a REMOVED app on the SOCKET floor re-attaches THAT app: no create step, no App ID to retype, the known id goes on the wire", async () => {
+    // Seen on a real-browser walk: after the app was deleted at Slack, the
+    // floor under the removed banner still read "1. Create a Slack app from
+    // this manifest" with an App ID field, as if nothing existed.
+    const user = userEvent.setup();
+    state.view = view({
+      orgIntegrations: [],
+      posture: { transport: "socket" },
+      // The removed presence was stamped socket, so the card resumes on it.
+      presences: [activePresence({ status: "disabled", transport: "socket" })],
+    });
+    renderSection();
+
+    expect(
+      screen.getByText(/@donna was removed from the workspace/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Create a Slack app from this manifest"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("App ID")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Reinstall the app and paste its fresh tokens"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /Open the app on api.slack.com/ }),
+    ).toHaveAttribute("href", "https://api.slack.com/apps/A123/general");
+
+    await user.type(screen.getByLabelText("Bot token"), "xoxb-fresh");
+    await user.type(screen.getByLabelText("App-level token"), "xapp-fresh");
+    await user.click(screen.getByRole("button", { name: "Re-attach" }));
+
+    expect(mocks.complete).toHaveBeenCalledWith(
+      { botToken: "xoxb-fresh", appId: "A123", appToken: "xapp-fresh" },
+      expect.anything(),
+    );
+  });
 });
 
 describe("the attached card", () => {
@@ -271,6 +303,70 @@ describe("the attached card", () => {
     // The rest of the card stays — messaging still works.
     expect(
       screen.getByRole("link", { name: /Open in Slack/ }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("a presence the workspace REMOVED on the Slack side", () => {
+  // plans/channel-aware-agents.md: Slack's app_uninstalled / tokens_revoked
+  // flip the row to `disabled`. The card must SAY so (not vanish, not read
+  // "Connected"), and offer the two honest exits.
+  it("explains the removal by handle and offers Re-attach and Detach — never the connected face", () => {
+    state.view = view({ presences: [activePresence({ status: "disabled" })] });
+    renderSection();
+
+    expect(
+      screen.getByText(/@donna was removed from the workspace/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Messaging is paused/)).toBeInTheDocument();
+    expect(screen.getByText("Re-attach to Slack")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Re-attach" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Detach" })).toBeInTheDocument();
+    expect(screen.queryByText("Connected")).toBeNull();
+    expect(screen.queryByRole("link", { name: /Open in Slack/ })).toBeNull();
+    // Not the half-finished-setup story either.
+    expect(screen.queryByText(/Setup was started but not finished/)).toBeNull();
+  });
+
+  it("Re-attach resumes the SAME app: the create fires on the row's stamped transport", async () => {
+    state.view = view({
+      presences: [activePresence({ status: "disabled", transport: "socket" })],
+      posture: { transport: "events", available: ["events", "socket"] },
+    });
+    renderSection();
+
+    // The row pinned the mode: no picker while resuming.
+    expect(screen.queryByText("Connection mode")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Re-attach" }));
+    expect(mocks.attach).toHaveBeenCalledWith(
+      expect.objectContaining({ transport: "socket" }),
+      expect.anything(),
+    );
+  });
+
+  it("Detach on a removed app asks first — the same confirmation as the attached face, never an immediate click", async () => {
+    state.view = view({ presences: [activePresence({ status: "disabled" })] });
+    renderSection();
+
+    await userEvent.click(screen.getByRole("button", { name: "Detach" }));
+    // Nothing fired yet: the dialog is the destructive-action gate.
+    expect(mocks.detach).not.toHaveBeenCalled();
+    expect(screen.getByText("Detach Slack?")).toBeInTheDocument();
+    // The handle names the app in the delete opt-in, like the attached face.
+    expect(
+      screen.getByLabelText("Also delete the Slack app (@donna)"),
+    ).toBeInTheDocument();
+  });
+
+  it("falls back to a generic subject when the handle is unknown", () => {
+    state.view = view({
+      presences: [activePresence({ status: "disabled", identityName: null })],
+    });
+    renderSection();
+    expect(
+      screen.getByText(/This agent's Slack app was removed from the workspace/),
     ).toBeInTheDocument();
   });
 });

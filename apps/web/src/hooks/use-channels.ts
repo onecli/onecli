@@ -22,6 +22,10 @@ export const useAgentChannels = (agentId: string) =>
   useQuery({
     queryKey: queryKeys.channels.agent(agentId),
     queryFn: () => channels.agentView(agentId),
+    // Callers outside the Channels section (the chat's greeting card) read
+    // this defensively, so an absent id must disable the query rather than
+    // fetch a doomed path.
+    enabled: agentId.length > 0,
     // This page's truth changes in ANOTHER tab (Slack's install/uninstall
     // pages) and the round-trip is often under the global 30s staleTime,
     // which would swallow the focus refetch. Always refetch on return.
@@ -201,6 +205,51 @@ export const useDeleteContact = (agentId: string) => {
       channels.deleteContact(agentId, contactId),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.channels.contacts(agentId) });
+    },
+  });
+};
+
+/** The agent's peers — other hosted agents and both sides' standing. */
+export const useAgentPeers = (agentId: string) =>
+  useQuery({
+    queryKey: queryKeys.channels.peers(agentId),
+    queryFn: () => channels.listPeers(agentId),
+  });
+
+/** Set THIS agent's side of a pair (`ask` revokes the standing permission). */
+export const useSetPeerPolicy = (agentId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: {
+      peerAgentId: string;
+      policy: "ask" | "allow" | "blocked";
+    }) => channels.setPeerPolicy(agentId, input.peerAgentId, input.policy),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.channels.peers(agentId) });
+    },
+  });
+};
+
+/** Continue THIS agent's paused pair conversation (the peer row's Resume). */
+export const useResumePeer = (agentId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (peerAgentId: string) =>
+      channels.resumePeer(agentId, peerAgentId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.channels.peers(agentId) });
+    },
+  });
+};
+
+/** Forget a pair from THIS agent's side (policy, conversation, pending asks). */
+export const useForgetPeer = (agentId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (peerAgentId: string) =>
+      channels.forgetPeer(agentId, peerAgentId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.channels.peers(agentId) });
     },
   });
 };

@@ -18,6 +18,8 @@ export interface RecordedSlackCall {
   token: string | null;
   /** The decoded x-www-form-urlencoded body. */
   form: Record<string, string>;
+  /** The RAW body — what an upload-URL POST carried (file bytes). */
+  bytes: Buffer;
   /** What the fake answered — postMessage responses carry the minted ts. */
   response: Record<string, unknown>;
 }
@@ -43,6 +45,7 @@ export const startFakeSlackServer = async (): Promise<FakeSlackServer> => {
     (form: Record<string, string>) => Record<string, unknown>
   >();
   let tsCounter = 0;
+  let fileCounter = 0;
 
   const defaultResponse = (
     method: string,
@@ -60,27 +63,79 @@ export const startFakeSlackServer = async (): Promise<FakeSlackServer> => {
       };
     }
     if (method === "chat.update") return { ok: true, ts: form.ts ?? "0.0" };
+    // The external-upload handshake: a ticket per file, minted onto THIS
+    // fake's origin (the client's host pin admits the configured base).
+    if (method === "files.getUploadURLExternal") {
+      fileCounter += 1;
+      return {
+        ok: true,
+        upload_url: `${fake.url}/upload/v1/${fileCounter}`,
+        file_id: `F${String(fileCounter).padStart(4, "0")}`,
+      };
+    }
+    if (method === "files.completeUploadExternal") {
+      let files: { id: string }[] = [];
+      try {
+        files = JSON.parse(form.files ?? "[]") as { id: string }[];
+      } catch {
+        // Malformed — an empty share, which the client's schema still parses.
+      }
+      return { ok: true, files: files.map((f) => ({ id: f.id })) };
+    }
     return { ok: true };
   };
 
   const server = createServer((req, res) => {
-    let body = "";
-    req.setEncoding("utf8");
-    req.on("data", (chunk: string) => {
-      body += chunk;
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => {
+      chunks.push(chunk);
     });
     req.on("end", () => {
+      const bytes = Buffer.concat(chunks);
       const method = (req.url ?? "/").replace(/^\//, "");
-      const form = Object.fromEntries(new URLSearchParams(body));
       const auth = req.headers.authorization;
       const token = auth?.startsWith("Bearer ")
         ? auth.slice("Bearer ".length)
         : null;
+      // An upload-URL POST is file bytes, not a Web API call: record it and
+      // answer Slack's bare 200 (its body is not JSON).
+      if (method.startsWith("upload/v1/")) {
+        const record: RecordedSlackCall = {
+          method,
+          token,
+          form: {},
+          bytes,
+          response: {},
+        };
+        calls.push(record);
+        fake.onCall?.(record);
+        const override = overrides.get(method);
+        if (override) {
+          const scripted = override({});
+          res.statusCode = Number(scripted.status ?? 200);
+          if (typeof scripted.location === "string") {
+            res.setHeader("location", scripted.location);
+          }
+          res.end("");
+          return;
+        }
+        res.end("OK - 1");
+        return;
+      }
+      const form = Object.fromEntries(
+        new URLSearchParams(bytes.toString("utf8")),
+      );
       const override = overrides.get(method);
       const response = override
         ? override(form)
         : defaultResponse(method, form);
-      const record: RecordedSlackCall = { method, token, form, response };
+      const record: RecordedSlackCall = {
+        method,
+        token,
+        form,
+        bytes,
+        response,
+      };
       calls.push(record);
       fake.onCall?.(record);
       res.setHeader("content-type", "application/json");

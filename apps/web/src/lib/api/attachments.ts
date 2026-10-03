@@ -1,7 +1,7 @@
 import { apiUpload, apiFetch } from "@/lib/api-fetch";
 import { refusal } from "./client";
 import { conversationPath } from "./conversations";
-import type { AttachmentMeta } from "./types";
+import type { AttachmentMeta, AttachmentPageMeta } from "./types";
 
 /**
  * Attachment upload/read — raw binary, so neither call rides the JSON
@@ -40,4 +40,40 @@ export const fetchAttachmentBlob = async (
   );
   if (!res.ok) throw await refusal(res);
   return res.blob();
+};
+
+/** The row's metadata alone (name, type, size, caption) — what a download
+ * page shows before it asks for the bytes. Same fence as the bytes. */
+export const fetchAttachmentMeta = async (
+  conversationId: string,
+  attachmentId: string,
+): Promise<AttachmentPageMeta> => {
+  const res = await apiFetch(
+    conversationPath(
+      conversationId,
+      `/attachments/${encodeURIComponent(attachmentId)}/meta`,
+    ),
+  );
+  if (!res.ok) throw await refusal(res);
+  return (await res.json()) as AttachmentPageMeta;
+};
+
+/**
+ * Where the browser should download from. `{ url, expiresAt }` when the
+ * backend mints presigned URLs (object storage); `null` when the bytes are
+ * inline and the caller must stream them through `fetchAttachmentBlob`.
+ */
+export const fetchAttachmentDownloadUrl = async (
+  conversationId: string,
+  attachmentId: string,
+): Promise<{ url: string; expiresAt: string } | null> => {
+  const res = await apiFetch(
+    conversationPath(
+      conversationId,
+      `/attachments/${encodeURIComponent(attachmentId)}/download-url`,
+    ),
+  );
+  if (res.status === 204) return null;
+  if (!res.ok) throw await refusal(res);
+  return (await res.json()) as { url: string; expiresAt: string };
 };

@@ -6,14 +6,12 @@ import type { Plan } from "./plans";
  * feature key with its minimum plan and both sides pick it up automatically.
  */
 export type PremiumFeature =
-  | "policy.manual_approval"
   | "policy.rate_limit"
   | "policy.deny_mode"
   | "sso"
   | "groups";
 
 export const PREMIUM_FEATURES: Record<PremiumFeature, Plan> = {
-  "policy.manual_approval": "team",
   "policy.rate_limit": "pro",
   "policy.deny_mode": "team",
   // Verified email domains + SSO.
@@ -33,12 +31,10 @@ export const isPremiumFeature = (value: string): value is PremiumFeature =>
 
 /**
  * The premium feature a policy-rule action maps to, or `null` for ungated
- * actions (`block`/`allow` are always available on every plan).
+ * actions (`block`/`allow` and manual approval are available on every plan).
  */
 export const ruleActionFeature = (action: string): PremiumFeature | null => {
   switch (action) {
-    case "manual_approval":
-      return "policy.manual_approval";
     case "rate_limit":
       return "policy.rate_limit";
     case "identity_directory":

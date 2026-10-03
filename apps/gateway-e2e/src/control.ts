@@ -16,6 +16,20 @@ export interface PendingApproval {
   readonly workspaceId?: string;
   /** Rename compat: dual-emitted for released SDKs; equals `workspaceId`. */
   readonly projectId?: string;
+  readonly bodyPreview?: string;
+  /** The readable card (`summary::ApprovalSummary` on the wire). */
+  readonly summary?: {
+    readonly action: string;
+    readonly details: ReadonlyArray<{ label: string; value: string }>;
+    readonly subject?: {
+      verb: string;
+      lead: string;
+      record: string;
+      row: number;
+    };
+  };
+  /** The agent's batch tag (`X-OneCLI-Batch*`), when it sent one. */
+  readonly batch?: { id: string; label?: string; total?: number };
 }
 
 const authHeaders = (apiKey: string): Record<string, string> => ({

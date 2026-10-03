@@ -1,9 +1,10 @@
 "use client";
 
-import { Bubble, BubbleContent } from "@onecli/ui/components/bubble";
+import { Bubble } from "@onecli/ui/components/bubble";
 import { Message, MessageContent } from "@onecli/ui/components/message";
 import type { AttachmentMeta } from "@/lib/api/types";
 import { AttachmentChips } from "./attachment-chips";
+import { TextBubbleContent } from "./text-bubble-content";
 
 /**
  * The user's side of a turn — one definition, because the optimistic pending
@@ -37,9 +38,7 @@ export const UserBubble = ({
     <MessageContent>
       {text.length > 0 && (
         <Bubble align="end">
-          <BubbleContent className="text-sm break-words whitespace-pre-wrap">
-            {text}
-          </BubbleContent>
+          <TextBubbleContent text={text} />
         </Bubble>
       )}
       {conversationId && attachments && attachments.length > 0 && (

@@ -21,7 +21,6 @@ import type {
   SpeakerKind,
   ThreadLinkKind,
 } from "./types";
-import { decodeSlackTokens } from "@onecli/channels/slack";
 import { normalizeMentionName } from "@onecli/channels";
 import { logger } from "../../lib/logger";
 // Type-only: the runtime import of the reach service stays dynamic (below)
@@ -508,7 +507,7 @@ const meterAppTurn = async (
     conversationId,
     source: presence.provider as ChannelProviderId,
     message: await decodeInboundText(presence, framedText),
-    appExternalRef,
+    speaker: { kind: "app", externalRef: appExternalRef },
   });
   if (verdict === "pause") {
     return { kind: "refused", message: cap.APP_TURN_PAUSE_MESSAGE };
@@ -615,9 +614,10 @@ const cleanName = (raw: string): string =>
     .slice(0, 80);
 
 /**
- * Decode inbound Slack tokens (`<@U…>`, `<#C…|name>`, `<!here>`, links)
- * into text the model can READ - the retrieval-parsing algorithm in
- * @onecli/channels/slack. Without this the model sees `<@U0B0WPLS8MC>`,
+ * Decode the provider's inbound mention/link tokens (Slack: `<@U…>`,
+ * `<#C…|name>`, `<!here>`, links) into text the model can READ — the
+ * grammar is the provider's (`decodeInboundText`), the names are ours.
+ * Without this the model sees `<@U0B0WPLS8MC>`,
  * cannot know who that is (or recognize its OWN name in `<@UBOT>`),
  * pattern-matches the token, and stores broken habits.
  *
@@ -633,9 +633,9 @@ const decodeInboundText = async (
   presence: PresenceRow,
   text: string,
 ): Promise<string> => {
-  if (!text.includes("<")) return text;
   const providerId = presence.provider as ChannelProviderId;
-  if (providerId !== "slack") return text;
+  const provider = channelProvider(providerId);
+  if (!provider.decodeInboundText) return text;
 
   // Lazy per-call credential decrypt, shared across this text's lookups.
   let credentialsJson: string | null | undefined;
@@ -649,10 +649,10 @@ const decodeInboundText = async (
   };
 
   try {
-    const reachFacet = channelProvider(providerId).reach;
-    return await decodeSlackTokens(
+    const reachFacet = provider.reach;
+    return await provider.decodeInboundText({
       text,
-      async (externalUserId) => {
+      resolveUserName: async (externalUserId) => {
         // The agent itself.
         if (presence.identityRef && externalUserId === presence.identityRef) {
           return presence.agent.name;
@@ -673,7 +673,7 @@ const decodeInboundText = async (
         // An unlinked person: the provider profile (best-effort, fail open).
         const creds = await credentials();
         if (!creds) return null;
-        const reach = channelProvider(providerId).reach;
+        const reach = provider.reach;
         if (!reach) return null;
         const probe = await reach
           .resolveGuestSpeaker({
@@ -684,9 +684,9 @@ const decodeInboundText = async (
           .catch(() => null);
         return probe?.displayName ?? null;
       },
-      // Label-less <#C…> refs (live Slack sends these for private
-      // channels): the reach facet's spaceLabel is exactly this lookup.
-      async (channelId) => {
+      // Label-less space refs (Slack sends bare <#C…> for private channels):
+      // the reach facet's spaceLabel is exactly this lookup.
+      resolveChannelName: async (channelId) => {
         if (!reachFacet) return null;
         const creds = await credentials();
         if (!creds) return null;
@@ -694,7 +694,7 @@ const decodeInboundText = async (
           .spaceLabel({ credentialsJson: creds, externalRef: channelId })
           .catch(() => null);
       },
-    );
+    });
   } catch {
     return text;
   }

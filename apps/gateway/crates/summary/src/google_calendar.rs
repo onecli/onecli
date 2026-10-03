@@ -8,7 +8,7 @@
 use serde_json::Value;
 
 use super::{
-    last_segment, parse_json, path_segment_before, ApprovalSummary, RequestSummarizer,
+    last_segment, parse_json, path_segment_before, ApprovalSummary, RequestSummarizer, SummaryKind,
     SummaryRequest,
 };
 
@@ -95,7 +95,8 @@ fn events(m: &str, base: &str, req: &SummaryRequest<'_>) -> Option<ApprovalSumma
             last_segment(base),
         )),
         "PUT" | "PATCH" => {
-            let mut s = id_summary("Update calendar event", "Event", last_segment(base));
+            let mut s = id_summary("Update calendar event", "Event", last_segment(base))
+                .with_kind(SummaryKind::Event);
             if let Some(v) = req.body.and_then(parse_json) {
                 extract_event_fields(&mut s, &v);
             }
@@ -201,7 +202,7 @@ fn id_summary(action: &str, label: &str, id: Option<&str>) -> ApprovalSummary {
 
 /// A summary whose details come from an event JSON body (create/import).
 fn event_with_body(action: &str, req: &SummaryRequest<'_>) -> ApprovalSummary {
-    let mut s = ApprovalSummary::new(action);
+    let mut s = ApprovalSummary::new(action).with_kind(SummaryKind::Event);
     if let Some(v) = req.body.and_then(parse_json) {
         extract_event_fields(&mut s, &v);
     }

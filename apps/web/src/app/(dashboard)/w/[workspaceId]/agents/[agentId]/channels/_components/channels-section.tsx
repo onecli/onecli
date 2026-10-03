@@ -14,15 +14,21 @@ import {
   type AppConnectedEvent,
 } from "@/hooks/use-app-connected";
 import { useAgentPageAgent } from "../../_components/agent-page-frame";
-import { ContactsSection } from "./contacts-section";
-import { SlackAttachCard } from "./slack-attach-card";
-import { SlackPresenceCard } from "./slack-presence-card";
+import {
+  CHANNEL_PROVIDER_UIS,
+  channelProviderUi,
+} from "@/lib/agents/channel-providers/registry";
+import { isPresenceConnected } from "@/lib/agents/channel-providers";
 
 /**
- * The agent's Channels section (step 6): one Slack card whose state follows
- * the presence — unattached (guided or paste floor, by org credential and
- * posture), pending (resume), attached, needs-attention. The frame provides
- * the section shell and guarantees the agent is hosted.
+ * The agent's Channels section (step 6): one card PER PROVIDER the build
+ * ships a UI for, its state following that provider's presence — unattached
+ * (guided or paste floor, by org credential and posture), pending (resume),
+ * removed on the provider's side (re-attach or detach), attached,
+ * needs-attention. Which card, and what it says, is the provider module's
+ * (`lib/agents/channel-providers/<id>`); this section only iterates the
+ * registry. The frame provides the section shell and guarantees the agent
+ * is hosted.
  *
  * Loading renders a skeleton, never "unavailable" — the availability rule the
  * chat surfaces follow.
@@ -41,41 +47,47 @@ export const ChannelsSection = () => {
   // and closes; a same-tab landing consumes the param directly. One-shot per
   // mount, then stripped, so a refresh doesn't re-toast (the app-detail
   // pattern).
+  // A provider this build knows finishes the flow; anything else is left
+  // alone (an older web against a newer control plane).
   const connectedParam = searchParams.get("connected");
+  const connectedProvider = connectedParam
+    ? channelProviderUi(connectedParam)
+    : null;
   const consumedConnectedParam = useRef(false);
   useEffect(() => {
     if (consumedConnectedParam.current) return;
-    if (connectedParam !== "slack") return;
+    if (!connectedProvider) return;
     consumedConnectedParam.current = true;
     if (window.opener) {
       (window.opener as Window).postMessage(
-        { type: "app-connected", provider: "slack" },
+        { type: "app-connected", provider: connectedProvider.id },
         window.location.origin,
       );
       window.close();
       return;
     }
     qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
-    // The sidebar/rail Slack marks read the agent lists — root(), so the
-    // sweep reaches the workspace-keyed sidebar key too.
+    // The sidebar/rail connected marks read the agent lists — root(), so
+    // the sweep reaches the workspace-keyed sidebar key too.
     qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
-    toast.success("Slack connected");
+    toast.success(`${connectedProvider.name} connected`);
     const params = new URLSearchParams(searchParams.toString());
     params.delete("connected");
     const qs = params.toString();
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
-  }, [connectedParam, qc, searchParams, router, pathname]);
+  }, [connectedProvider, qc, searchParams, router, pathname]);
 
   const handleConnected = useCallback(
     ({ provider }: AppConnectedEvent) => {
       // Provider must match: a popup keeps posting to its opener across
       // client-side navigation, so an app-connect popup opened elsewhere can
       // land here too.
-      if (provider !== "slack") return;
+      const ui = provider ? channelProviderUi(provider) : null;
+      if (!ui) return;
       qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
-      // Same sweep as the same-tab landing above — the Slack marks.
+      // Same sweep as the same-tab landing above — the connected marks.
       qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
-      toast.success("Slack connected");
+      toast.success(`${ui.name} connected`);
     },
     [qc],
   );
@@ -104,16 +116,12 @@ export const ChannelsSection = () => {
   }
 
   const data = view.data;
-  const slack = data.presences.find((p) => p.provider === "slack");
-  const orgSlack = data.orgIntegrations.find((i) => i.provider === "slack");
-  const hasOrgCredentials = orgSlack?.hasCredentials ?? false;
   // Offline is a statement about presences that exist — an unattached agent
   // has nothing to be offline (and loading must never read as offline).
   const showOfflineBanner = !data.adapter.online && data.presences.length > 0;
 
   return (
     <div className="space-y-4">
-      <ContactsSection agentId={agent.id} />
       {showOfflineBanner && (
         <div className="flex items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 dark:border-amber-500/40 dark:bg-amber-500/15">
           <AlertTriangle
@@ -126,26 +134,47 @@ export const ChannelsSection = () => {
         </div>
       )}
 
-      {slack && slack.status !== "pending_setup" ? (
-        <SlackPresenceCard
-          agentId={agent.id}
-          agentName={agent.name}
-          presence={slack}
-          hasOrgCredentials={hasOrgCredentials}
-        />
-      ) : (
-        <SlackAttachCard
-          agentId={agent.id}
-          posture={data.posture}
-          // A pending presence resumes on ITS transport (the provider-side app
-          // baked one in); a fresh attach starts from the deployment's posture.
-          pendingTransport={slack?.transport}
-          hasOrgCredentials={hasOrgCredentials}
-          organizationId={data.organizationId}
-          viewerIsOrgAdmin={data.viewerIsOrgAdmin ?? true}
-          resuming={slack?.status === "pending_setup"}
-        />
-      )}
+      {CHANNEL_PROVIDER_UIS.map((ui) => {
+        const presence = data.presences.find((p) => p.provider === ui.id);
+        const orgIntegration = data.orgIntegrations.find(
+          (i) => i.provider === ui.id,
+        );
+        const hasOrgCredentials = orgIntegration?.hasCredentials ?? false;
+        return presence && isPresenceConnected(presence) ? (
+          <ui.PresenceCard
+            key={ui.id}
+            agentId={agent.id}
+            agentName={agent.name}
+            presence={presence}
+            hasOrgCredentials={hasOrgCredentials}
+          />
+        ) : (
+          <ui.AttachCard
+            key={ui.id}
+            agentId={agent.id}
+            posture={data.posture}
+            // A pending presence resumes on ITS transport (the provider-side
+            // app baked one in); a fresh attach starts from the deployment's
+            // posture.
+            pendingTransport={presence?.transport}
+            hasOrgCredentials={hasOrgCredentials}
+            organizationId={data.organizationId}
+            viewerIsOrgAdmin={data.viewerIsOrgAdmin ?? true}
+            // Both a half-finished setup and an app the workspace REMOVED on
+            // the provider's side resume the same row (same app id, same
+            // client credentials); `removed` only changes the story told.
+            resuming={
+              presence?.status === "pending_setup" ||
+              presence?.status === "disabled"
+            }
+            removed={presence?.status === "disabled"}
+            identityName={presence?.identityName ?? null}
+            removedAppId={
+              presence?.status === "disabled" ? presence.externalId : null
+            }
+          />
+        );
+      })}
     </div>
   );
 };

@@ -64,9 +64,10 @@ export const useCreateAgent = () => {
       // A new agent appears in the connection→agents reverse view (app-page
       // connection cards, keyed under connections.*) — refresh it too.
       qc.invalidateQueries({ queryKey: queryKeys.connections.all() });
-      // Creation now WRITES GRANTS (the LLM auto-attach), so the grant and
-      // policy views are stale the moment it returns — same sweep a manual
-      // attach does in use-grants.
+      // Creation now WRITES GRANTS (the LLM auto-attach, plus every workspace
+      // connection and custom secret), so the grant and policy views are
+      // stale the moment it returns. Same sweep a manual attach does in
+      // use-grants.
       qc.invalidateQueries({ queryKey: queryKeys.grants.all() });
       qc.invalidateQueries({ queryKey: queryKeys.policy.all() });
       invalidateGatewayCache();
@@ -105,7 +106,7 @@ export const useCreateHostedAgent = () => {
       qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
       qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
       qc.invalidateQueries({ queryKey: queryKeys.connections.all() });
-      // The LLM auto-attach writes grants here too — see `useCreateAgent`.
+      // Creation writes grants here too (see `useCreateAgent`).
       qc.invalidateQueries({ queryKey: queryKeys.grants.all() });
       qc.invalidateQueries({ queryKey: queryKeys.policy.all() });
       invalidateGatewayCache();

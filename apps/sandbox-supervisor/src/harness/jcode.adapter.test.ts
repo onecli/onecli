@@ -1,6 +1,8 @@
-import { mkdtempSync } from "node:fs";
+import { EventEmitter } from "node:events";
+import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent } from "@onecli/agent-protocol";
 
@@ -53,14 +55,19 @@ const state: {
   busyRefusals: number;
   history: { role: string; content: string }[];
   historyError: Error | null;
-  /** Rejections dealt to getHistory calls one at a time (barrier retries). */
+  /** Rejections dealt to getHistory calls one at a time (baseline retries). */
   historyErrorQueue: Error[];
   /** When set, getHistory records the call, then holds until this resolves —
-   * the deterministic way to keep the spawn barrier standing in a test. */
+   * the deterministic way to keep the reconcile-baseline read pending. */
   historyGate: Promise<void> | null;
+  /** When > 0, a send's `message_accepted` (and everything after it) is
+   * held back this long — the fence stays up, as under a foreign run. */
+  acceptDelayMs: number;
   softInterruptError: Error | null;
   setModelError: Error | null;
   setEffortError: Error | null;
+  /** Every launched bridge process (a real emitter + stderr stream). */
+  bridges: (EventEmitter & { stderr: PassThrough })[];
 } = {
   calls: [],
   launches: [],
@@ -73,9 +80,11 @@ const state: {
   historyError: null,
   historyErrorQueue: [],
   historyGate: null,
+  acceptDelayMs: 0,
   softInterruptError: null,
   setModelError: null,
   setEffortError: null,
+  bridges: [],
 };
 
 vi.mock("@1jehuang/jcode-sdk", () => {
@@ -155,18 +164,33 @@ vi.mock("@1jehuang/jcode-sdk", () => {
     sendMessage(sessionId: string, content: string) {
       record("sendMessage", sessionId, content);
       // Delivery rides a macrotask, matching the wire: the real daemon
-      // never streams a turn's frames inside the send call itself, and the
-      // adapter's spawn barrier (an instant getHistory here) must win the
-      // race exactly as it does live. FIFO within the one timeout.
+      // never streams a turn's frames inside the send call itself. FIFO
+      // within the one timeout. The daemon ACKS the `message` request on
+      // its request loop before dispatching it (the bridge mints
+      // `message_accepted` from that ack), so an accepted send's frames
+      // are always preceded by the ack — that ack IS the adapter's frame
+      // fence. `acceptDelayMs` holds the ack back (our send queued behind
+      // a foreign run holding the request loop); frames a test pushes by
+      // hand in that window model the foreign run. A busy refusal is an
+      // `error` for the same request id, following the ack like any other
+      // outcome of dispatch.
       setTimeout(() => {
-        if (state.busyRefusals > 0) {
-          state.busyRefusals -= 1;
-          // The daemon's refusal: a broadcast error frame, never a rejection
-          // (the SDK's send is fire-and-forget) — exactly the live shape.
-          this.push({ ev: "error", message: "Already processing a message" });
-        } else {
-          for (const frame of state.events) this.push(frame);
-        }
+        const deliver = () => {
+          this.push({ ev: "message_accepted", session_id: sessionId });
+          if (state.busyRefusals > 0) {
+            state.busyRefusals -= 1;
+            // The daemon's refusal: a broadcast error frame, never a
+            // rejection (the SDK's send is fire-and-forget) — the live shape.
+            this.push({
+              ev: "error",
+              message: "Already processing a message",
+            });
+          } else {
+            for (const frame of state.events) this.push(frame);
+          }
+        };
+        if (state.acceptDelayMs > 0) setTimeout(deliver, state.acceptDelayMs);
+        else deliver();
       }, 0);
       return Promise.resolve();
     }
@@ -235,10 +259,16 @@ vi.mock("@1jehuang/jcode-sdk", () => {
     JcodeClient: MockClient,
     launchInstance: (options: Record<string, unknown>) => {
       state.launches.push({ options });
+      // A real emitter with a stderr stream: the adapter subscribes to the
+      // bridge's `exit` (a death signal) and forwards its stderr.
+      const bridge = Object.assign(new EventEmitter(), {
+        stderr: new PassThrough(),
+      });
+      state.bridges.push(bridge);
       return Promise.resolve({
         socketPath: "/tmp/fake-jcode-api.sock",
         jcodeHome: String(options.jcodeHome ?? ""),
-        process: { once: () => undefined },
+        process: bridge,
         shutdown: () => Promise.resolve(),
       });
     },
@@ -247,9 +277,16 @@ vi.mock("@1jehuang/jcode-sdk", () => {
   };
 });
 
-import { BUSY_RESEND_DELAYS_MS, createJcodeHarness } from "./jcode";
+import {
+  ABORT_TERMINAL_GRACE_MS,
+  BUSY_RESEND_DELAYS_MS,
+  POST_ACCEPT_IDLE_MS,
+  createJcodeHarness,
+} from "./jcode";
 
 const ORIGINAL_DELAYS = [...BUSY_RESEND_DELAYS_MS];
+const ORIGINAL_POST_ACCEPT_IDLE_MS = POST_ACCEPT_IDLE_MS.value;
+const ORIGINAL_ABORT_GRACE_MS = ABORT_TERMINAL_GRACE_MS.value;
 
 const collect = async (
   iterable: AsyncIterable<AgentEvent>,
@@ -295,21 +332,26 @@ beforeEach(() => {
   state.historyError = null;
   state.historyErrorQueue = [];
   state.historyGate = null;
+  state.acceptDelayMs = 0;
   state.softInterruptError = null;
   state.setModelError = null;
   state.setEffortError = null;
+  state.bridges = [];
   delete process.env.ONECLI_JCODE_BINARY;
   delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
 });
 
 afterEach(() => {
   // Some suites shorten the heal backoff to keep tests fast; the exported
-  // array is shared module state, so restore it.
+  // array is shared module state, so restore it. Same for the live loop's
+  // two deadlines.
   BUSY_RESEND_DELAYS_MS.splice(
     0,
     BUSY_RESEND_DELAYS_MS.length,
     ...ORIGINAL_DELAYS,
   );
+  POST_ACCEPT_IDLE_MS.value = ORIGINAL_POST_ACCEPT_IDLE_MS;
+  ABORT_TERMINAL_GRACE_MS.value = ORIGINAL_ABORT_GRACE_MS;
 });
 
 describe("the connection model", () => {
@@ -434,6 +476,80 @@ describe("the connection model", () => {
     state.setModelError = null;
     const session = await harness.startSession({ homeDir });
     expect(session.sessionRef).toBe("s-2");
+  });
+});
+
+describe("the daemon's own diagnostics (jcode-log.ts wiring)", () => {
+  let stderr: string[] = [];
+  beforeEach(() => {
+    stderr = [];
+    vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderr.push(String(chunk));
+      return true;
+    });
+  });
+  afterEach(() => {
+    vi.mocked(process.stderr.write).mockRestore();
+  });
+  const lines = () =>
+    stderr.map(
+      (line) =>
+        JSON.parse(line) as {
+          level: string;
+          message: string;
+          [k: string]: unknown;
+        },
+    );
+
+  it("a bridge exit fails the harness with the exit code AND signal in the reason", async () => {
+    let failure: string | undefined;
+    const harness = createJcodeHarness();
+    harness.onFailure((reason) => {
+      failure = reason;
+    });
+    await startSession({ harness });
+    state.bridges[0]?.emit("exit", null, "SIGKILL");
+    expect(failure).toBe("jcode instance exited (code null, signal SIGKILL)");
+  });
+
+  it("forwards the bridge's stderr as jcode-stderr warnings, redacted", async () => {
+    await startSession();
+    state.bridges[0]?.stderr.write(
+      `thread 'main' panicked: proxy aoc_${"ef".repeat(32)} refused\n`,
+    );
+    expect(lines()).toContainEqual(
+      expect.objectContaining({
+        level: "warn",
+        source: "jcode-stderr",
+        message: "thread 'main' panicked: proxy aoc_[REDACTED] refused",
+      }),
+    );
+  });
+
+  it("follows <jcodeHome>/logs from launch and stops on dispose", async () => {
+    const { harness, homeDir } = await startSession();
+    const logsDir = join(homeDir, ".jcode-home", "logs");
+    mkdirSync(logsDir, { recursive: true });
+    const file = join(logsDir, "jcode-2026-10-01.log");
+    writeFileSync(
+      file,
+      "[2026-10-01 13:54:16.105] [ERROR] Anthropic stream error: overloaded\n",
+    );
+    // Dispose drains one final poll: the daemon's last words are kept.
+    await harness.dispose();
+    expect(lines()).toContainEqual(
+      expect.objectContaining({
+        level: "error",
+        source: "jcode",
+        message: "Anthropic stream error: overloaded",
+      }),
+    );
+    // And after dispose the follower is gone: nothing more is read.
+    appendFileSync(file, "[2026-10-01 13:54:17.000] [ERROR] after dispose\n");
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    expect(lines().some((line) => line.message === "after dispose")).toBe(
+      false,
+    );
   });
 });
 
@@ -809,7 +925,7 @@ describe("the jcode steer plumbing", () => {
   });
 });
 
-describe("the spawn barrier", () => {
+describe("the frame fence", () => {
   beforeEach(() => {
     // Keep the heal cycle fast; afterEach restores the real backoff.
     BUSY_RESEND_DELAYS_MS.splice(0, BUSY_RESEND_DELAYS_MS.length, 10, 10, 10);
@@ -830,21 +946,19 @@ describe("the spawn barrier", () => {
   };
 
   it("a self-wake run's frames are quarantined — never yielded, never our terminal", async () => {
-    // Our turn's frames are pushed manually AFTER the gate opens — the wire
-    // truth (our turn cannot stream before it spawned), which the flat
-    // macrotask delivery of state.events cannot express under a held gate.
+    // The wire truth: our send is queued behind a foreign run that holds
+    // the daemon's request loop, so our ACK (the fence) arrives only when
+    // the foreign run ends — and our own frames can only follow it. The
+    // mock delays the ack; the foreign frames are pushed by hand under it.
     state.events = [];
-    let openGate = () => {};
-    state.historyGate = new Promise<void>((resolve) => {
-      openGate = resolve;
-    });
+    state.acceptDelayMs = 40;
     const { session } = await startSession();
     const iterator = session
       .runTurn({ message: "task" })
       [Symbol.asyncIterator]();
     await iterator.next(); // turn.started
 
-    // The wake run streams while the barrier stands: text, a tool, usage,
+    // The wake run streams while the fence stands: text, a tool, usage,
     // a permission prompt, and a FAILURE terminal — every one another run's.
     const client = state.clients[0];
     client?.push({ ev: "text_delta", text: "WAKE-LEAK imagery" });
@@ -857,12 +971,9 @@ describe("the spawn barrier", () => {
       description: "",
     });
     client?.push({ ev: "error", message: "the wake run failed" });
-    await tick(5);
 
-    // Our turn spawns: the barrier reply lands, then our frames.
-    state.historyGate = null;
-    openGate();
-    await tick(5);
+    // Our turn spawns: the ack lands (the mock's 40 ms), then our frames.
+    await tick(60);
     client?.push({ ev: "text_delta", text: "ours" });
     client?.push({ ev: "turn_done" });
 
@@ -894,19 +1005,17 @@ describe("the spawn barrier", () => {
   }, 15_000);
 
   it("a busy refusal stamped foreign still heals — the refusal outranks the quarantine", async () => {
-    // The wire order is fixed: the refusal broadcasts while the daemon
-    // processes our send, i.e. strictly before any barrier reply — so it
-    // ALWAYS arrives under a pending barrier. Quarantining it would kill
-    // the self-heal; this is the pin that it never happens.
-    state.busyRefusals = 1;
+    // The daemon acks our send and then refuses it; the ack and the
+    // refusal ride different daemon-side paths to one socket writer, so
+    // the refusal can land BEFORE the ack and be stamped foreign.
+    // Quarantining it would kill the self-heal; this is the pin that it
+    // never happens. Modelled by pushing the refusal by hand under a held
+    // ack; the resend then streams normally.
+    state.acceptDelayMs = 30;
     state.events = [
       { ev: "text_delta", text: "the real answer" },
       { ev: "turn_done" },
     ];
-    let openGate = () => {};
-    state.historyGate = new Promise<void>((resolve) => {
-      openGate = resolve;
-    });
     const { session } = await startSession();
     const iterator = session
       .runTurn({ message: "task" })
@@ -915,9 +1024,14 @@ describe("the spawn barrier", () => {
     // Orphan residue precedes the refusal — its discard is the heal's,
     // silent, and must never mint the exclusion notice.
     state.clients[0]?.push({ ev: "text_delta", text: "ORPHAN-RESIDUE" });
+    state.clients[0]?.push({
+      ev: "error",
+      message: "Already processing a message",
+    });
+    // The first send's (late) ack must not be mistaken for the resend's
+    // fence, so drop the delay before the heal resends.
     await tick(5);
-    state.historyGate = null;
-    openGate();
+    state.acceptDelayMs = 0;
 
     const events = await drain(iterator);
 
@@ -941,7 +1055,7 @@ describe("the spawn barrier", () => {
   it("frames in the subscribe→send gap are quarantined — the former known residual", async () => {
     // An orphan finishing naturally in the gap used to land its terminal in
     // `held` and read as an instant empty end. Now it is foreign like any
-    // pre-barrier frame, and the accepted send streams normally after it.
+    // pre-fence frame, and the accepted send streams normally after it.
     state.events = [{ ev: "text_delta", text: "ours" }, { ev: "turn_done" }];
     const { session } = await startSession();
     const iterator = session
@@ -967,7 +1081,7 @@ describe("the spawn barrier", () => {
     expect(events.filter((e) => e.type === "notice")).toHaveLength(1);
   }, 15_000);
 
-  it("the barrier retries through SDK timeouts and the turn completes", async () => {
+  it("the baseline read retries through SDK timeouts and the turn completes", async () => {
     const timeoutError = () =>
       Object.assign(new Error("no reply to get_history within 30000ms"), {
         code: "timeout",
@@ -983,13 +1097,14 @@ describe("the spawn barrier", () => {
       events.some((e) => e.type === "text.delta" && e.text === "ours"),
     ).toBe(true);
     // Two timed-out attempts, then the resolving one. No steers, so the
-    // reconcile never reads history — the count is the barrier's alone.
+    // reconcile never reads history — the count is the baseline read's alone.
     expect(callsOf("getHistory")).toHaveLength(3);
   }, 15_000);
 
-  it("a non-timeout barrier failure opens the gate after ONE attempt", async () => {
+  it("a non-timeout baseline failure stops after ONE attempt — the turn is unaffected", async () => {
     // `disconnected`, an unknown session, a closing channel — retrying
-    // cannot help, and quarantining forever would silence a healthy turn.
+    // cannot help; the floor stays null and reconcile takes the content
+    // anchor. The fence is untouched: it never depended on this read.
     state.historyErrorQueue = [new Error("boom")];
     state.events = [{ ev: "text_delta", text: "ours" }, { ev: "turn_done" }];
     const { session } = await startSession();
@@ -1004,7 +1119,7 @@ describe("the spawn barrier", () => {
   }, 15_000);
 
   it("a stale non-error reply (ev history, reply_to) is never a turn event", async () => {
-    // A timed-out barrier attempt's late reply re-enters the stream as an
+    // A timed-out baseline attempt's late reply re-enters the stream as an
     // `ev:"history"` frame carrying reply_to — dropped, never content.
     state.events = [{ ev: "text_delta", text: "working" }, { ev: "turn_done" }];
     const { session } = await startSession();
@@ -1021,12 +1136,13 @@ describe("the spawn barrier", () => {
     expect(events.some((e) => e.type === "notice")).toBe(false);
   }, 15_000);
 
-  it("an abort under a standing barrier ends the turn within the tick", async () => {
-    // While the barrier stands the request loop is frozen daemon-side — the
-    // abort cannot be confirmed by a cancel frame, so the live loop's tick
-    // honors it directly instead of hanging for the foreign run's life.
+  it("an abort under a standing fence ends the turn within the tick", async () => {
+    // The fence never drops (our send is queued behind a foreign run that
+    // holds the daemon's request loop, so no ack and no cancel confirmation
+    // can arrive) — the live loop's tick honors the abort directly instead
+    // of hanging for the foreign run's life.
     state.events = [];
-    state.historyGate = new Promise<void>(() => {}); // never opens
+    state.acceptDelayMs = 60_000; // the ack never lands inside the test
     const { session } = await startSession();
     const iterator = session
       .runTurn({ message: "task" })
@@ -1046,9 +1162,9 @@ describe("the spawn barrier", () => {
     expect(callsOf("sendMessage")).toHaveLength(1);
   }, 15_000);
 
-  it("stream death under a standing barrier fails visibly and still reports the drop", async () => {
+  it("stream death under a standing fence fails visibly and still reports the drop", async () => {
     state.events = [];
-    state.historyGate = new Promise<void>(() => {}); // never opens
+    state.acceptDelayMs = 60_000; // the ack never lands inside the test
     const { session } = await startSession();
     const iterator = session
       .runTurn({ message: "task" })
@@ -1087,6 +1203,193 @@ describe("the spawn barrier", () => {
     ).toBe(true);
     expect(events.some((e) => e.type === "notice")).toBe(false);
   });
+});
+
+describe("issue #1124 — the fence outlives a slow get_history", () => {
+  const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
+  const drain = async (
+    iterator: AsyncIterator<AgentEvent>,
+  ): Promise<AgentEvent[]> => {
+    const events: AgentEvent[] = [];
+    let next = await iterator.next();
+    while (!next.done) {
+      events.push(next.value);
+      next = await iterator.next();
+    }
+    return events;
+  };
+
+  it("the prod race: the whole turn streams before get_history answers — nothing is lost", async () => {
+    // The exact shape from the three live occurrences (jcode#1284): the
+    // daemon acks our message, runs the turn to completion, and only THEN
+    // answers the get_history we issued right after the send. Pre-fix the
+    // reply was the fence, every frame of our own turn was quarantined,
+    // the terminal included, and the loop waited out the 6 h ceiling.
+    state.events = [
+      { ev: "text_delta", text: "the whole answer" },
+      { ev: "token_usage", input: 405, output: 557 },
+      { ev: "turn_done" },
+    ];
+    let answerHistory = () => {};
+    state.historyGate = new Promise<void>((resolve) => {
+      answerHistory = resolve;
+    });
+    const { session } = await startSession();
+
+    const started = Date.now();
+    const events = await collect(session.runTurn({ message: "task" }));
+
+    // Completed WITHOUT the history reply ever arriving.
+    expect(events.at(-1)).toMatchObject({
+      type: "turn.done",
+      usage: expect.objectContaining({ outputTokens: 557 }),
+    });
+    expect(
+      events.some(
+        (e) => e.type === "text.delta" && e.text === "the whole answer",
+      ),
+    ).toBe(true);
+    // Our own output was never mistaken for a background run's.
+    expect(events.some((e) => e.type === "notice")).toBe(false);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    // The late reply is harmless: it lands after the turn, into nothing.
+    answerHistory();
+    await tick(5);
+  }, 15_000);
+
+  it("Stop on a turn whose terminal was lost ends within the abort grace", async () => {
+    // The daemon's turn is over and its terminal never reached us (or was
+    // consumed by something else); the daemon has nothing to cancel, so
+    // `cancel()` answers with no terminal at all. Pre-fix: Stop was a
+    // visible no-op, three times over. Now the grace ends the turn.
+    ABORT_TERMINAL_GRACE_MS.value = 200;
+    state.events = [{ ev: "text_delta", text: "partial" }]; // no terminal
+    const { session } = await startSession();
+    const iterator = session
+      .runTurn({ message: "task" })
+      [Symbol.asyncIterator]();
+    await iterator.next(); // turn.started
+    const drained = drain(iterator);
+    await tick(20); // the ack and the delta have landed; the fence is down
+
+    const abortedAt = Date.now();
+    await session.abort();
+    const events = await drained;
+
+    expect(events.at(-1)?.type).toBe("turn.done");
+    expect(callsOf("cancel")).toHaveLength(1);
+    const elapsed = Date.now() - abortedAt;
+    expect(elapsed).toBeGreaterThanOrEqual(150);
+    expect(elapsed).toBeLessThan(2_000);
+  }, 15_000);
+
+  it("Stop on a healthy turn still ends on the daemon's terminal, not the grace", async () => {
+    ABORT_TERMINAL_GRACE_MS.value = 5_000;
+    state.events = [{ ev: "text_delta", text: "working" }]; // terminal by hand
+    const { session } = await startSession();
+    const iterator = session
+      .runTurn({ message: "task" })
+      [Symbol.asyncIterator]();
+    await iterator.next(); // turn.started
+    const drained = drain(iterator);
+    await tick(20);
+
+    const abortedAt = Date.now();
+    await session.abort();
+    // The daemon honours the cancel and closes the turn.
+    state.clients[0]?.push({ ev: "turn_done" });
+    const events = await drained;
+
+    expect(events.at(-1)?.type).toBe("turn.done");
+    expect(Date.now() - abortedAt).toBeLessThan(1_000);
+  }, 15_000);
+
+  it("silence past the post-accept deadline fails coded harness_no_terminal", async () => {
+    POST_ACCEPT_IDLE_MS.value = 200;
+    state.events = [{ ev: "text_delta", text: "and then nothing" }];
+    const { session } = await startSession();
+
+    const started = Date.now();
+    const events = await collect(session.runTurn({ message: "task" }));
+
+    const terminal = events.at(-1);
+    expect(terminal).toMatchObject({
+      type: "error",
+      code: "harness_no_terminal",
+    });
+    expect((terminal as { message: string }).message).toContain("no frame");
+    expect(Date.now() - started).toBeGreaterThanOrEqual(150);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  }, 15_000);
+
+  it("an open tool call suspends the post-accept deadline — a long wait is not a stall", async () => {
+    POST_ACCEPT_IDLE_MS.value = 100;
+    state.events = [
+      { ev: "tool_start", call_id: "c1", name: "bash" }, // a `bg wait`
+    ];
+    const { session } = await startSession();
+    const iterator = session
+      .runTurn({ message: "task" })
+      [Symbol.asyncIterator]();
+    await iterator.next(); // turn.started
+    const drained = drain(iterator);
+
+    // Four deadlines' worth of silence with the tool open: still alive.
+    await tick(400);
+    state.clients[0]?.push({
+      ev: "tool_done",
+      call_id: "c1",
+      name: "bash",
+      output: "ok",
+    });
+    state.clients[0]?.push({ ev: "turn_done" });
+    const events = await drained;
+
+    expect(events.at(-1)?.type).toBe("turn.done");
+    expect(events.some((e) => e.type === "error")).toBe(false);
+  }, 15_000);
+
+  it("a foreign frame resets the deadline — an alive stream is never a stall", async () => {
+    POST_ACCEPT_IDLE_MS.value = 150;
+    state.events = [{ ev: "text_delta", text: "ours" }];
+    const { session } = await startSession();
+    const iterator = session
+      .runTurn({ message: "task" })
+      [Symbol.asyncIterator]();
+    await iterator.next(); // turn.started
+    const drained = drain(iterator);
+    await tick(20);
+
+    // Keepalive-shaped frames the adapter ignores by content but which
+    // prove the stream is alive (the daemon's 30 s Pong, a phase change).
+    for (let i = 0; i < 4; i += 1) {
+      await tick(100);
+      state.clients[0]?.push({ ev: "connection_phase", phase: "streaming" });
+    }
+    state.clients[0]?.push({ ev: "turn_done" });
+    const events = await drained;
+
+    expect(events.at(-1)?.type).toBe("turn.done");
+    expect(events.some((e) => e.type === "error")).toBe(false);
+  }, 15_000);
+
+  it("the fence is re-armed for a self-heal resend — the orphan's tail stays out", async () => {
+    // After a busy refusal the resend gets its own ack; frames between the
+    // refusal and that ack are the dying orphan's.
+    BUSY_RESEND_DELAYS_MS.splice(0, BUSY_RESEND_DELAYS_MS.length, 10);
+    state.busyRefusals = 1;
+    state.events = [{ ev: "text_delta", text: "ours" }, { ev: "turn_done" }];
+    const { session } = await startSession();
+
+    const events = await collect(session.runTurn({ message: "task" }));
+
+    expect(callsOf("sendMessage")).toHaveLength(2);
+    expect(events.at(-1)?.type).toBe("turn.done");
+    expect(
+      events.some((e) => e.type === "text.delta" && e.text === "ours"),
+    ).toBe(true);
+    expect(events.some((e) => e.type === "notice")).toBe(false);
+  }, 15_000);
 });
 
 describe("the external wake listener", () => {

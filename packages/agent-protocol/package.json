@@ -6,7 +6,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./activity": "./src/activity.ts"
+    "./activity": "./src/activity.ts",
+    "./text": "./src/text.ts"
   },
   "scripts": {
     "check-types": "tsc --noEmit",

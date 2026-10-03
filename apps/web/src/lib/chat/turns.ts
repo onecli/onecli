@@ -2,6 +2,7 @@ import {
   ACTIVE_TURN_STATUSES,
   AUTOMATION_SOURCES,
   UNSETTLED_TURN_STATUSES,
+  isPlatformAuthoredSource,
 } from "@onecli/api/validations/conversation";
 import type { Turn, TurnStatus } from "@/lib/api/types";
 
@@ -39,11 +40,24 @@ export const isFollowUpRow = (turn: Turn): boolean =>
 export type AutomationSource = (typeof AUTOMATION_SOURCES)[number];
 
 /**
+ * A platform-posted turn whose `message` nobody typed — a cron/watch delivery
+ * header, or the greeting instruction. The person never wrote it, so the chat
+ * renders it WITHOUT a user bubble.
+ *
+ * Deliberately broader than `AUTOMATION_SOURCES`: this asks about AUTHORSHIP
+ * (who wrote the message), while the automation set answers a scheduling
+ * question (does this rank behind user-visible work). The greeting is
+ * platform-authored but very much foreground, and conflating the two put the
+ * product's first impression at the back of the wake queue.
+ */
+export const isPlatformAuthoredTurn = (turn: Turn): boolean =>
+  isPlatformAuthoredSource(turn.source);
+
+/**
  * A platform-posted DELIVERY turn — a cron/watch report materialized into the
  * origin thread as a completed turn (`userId` null, `message` the
- * platform-authored header). The person never typed it, so the chat renders it
- * as a system report, never a user bubble. Narrows `source` (a bare `string`
- * on the wire type) to the automation union for the render branch.
+ * platform-authored header). Narrows `source` (a bare `string` on the wire
+ * type) to the automation union for the header's icon lookup.
  */
 export const isAutomationTurn = (
   turn: Turn,

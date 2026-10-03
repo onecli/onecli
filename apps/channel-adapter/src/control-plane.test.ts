@@ -55,6 +55,14 @@ const startFakeControlPlaneServer =
       body: unknown,
     ): void => {
       res.statusCode = status;
+      // A Buffer body is an opaque byte answer (the attachment pull);
+      // anything else is JSON.
+      if (Buffer.isBuffer(body)) {
+        res.setHeader("content-type", "application/octet-stream");
+        res.setHeader("content-length", String(body.byteLength));
+        res.end(body);
+        return;
+      }
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify(body));
     };
@@ -269,5 +277,61 @@ describe("displaced-twin recovery", () => {
     expect(names[0]).toBe("adapter-a");
     expect(names[1]).toMatch(/^adapter-a-[0-9a-f]{4}$/);
     expect(names[2]).toMatch(new RegExp(`^${names[1]!}-[0-9a-f]{4}$`));
+  });
+});
+
+describe("fetchAttachment (the agent's outbound file bytes)", () => {
+  const ATT = "/v1/channel-adapter/attachments/att-1";
+  const ready = async () => {
+    server.respond = (call) =>
+      call.path === REGISTER
+        ? { status: 200, body: { adapterId: "ad-1", token: "cha_minted" } }
+        : { status: 500, body: { error: "unscripted" } };
+    const client = createControlPlane({ baseUrl: server.url, token: ANCHOR });
+    await client.register("adapter-a");
+    return client;
+  };
+
+  it("GETs the bytes with the minted bearer and returns them verbatim", async () => {
+    const client = await ready();
+    const bytes = Buffer.from("webm-bytes");
+    server.respond = (call) =>
+      call.path === ATT
+        ? { status: 200, body: bytes }
+        : { status: 500, body: {} };
+    const got = await client.fetchAttachment("att-1", 1024);
+    expect(got && Buffer.compare(Buffer.from(got), bytes)).toBe(0);
+    const call = server.callsTo(ATT)[0]!;
+    expect(call.method).toBe("GET");
+    expect(call.bearer).toBe("cha_minted");
+  });
+
+  it("a 404 (not this instance's to read, or gone) is null, not a throw", async () => {
+    const client = await ready();
+    server.respond = () => ({ status: 404, body: { error: "Not found" } });
+    expect(await client.fetchAttachment("att-1", 1024)).toBeNull();
+  });
+
+  it("a body over the cap is refused (null) instead of buffered", async () => {
+    const client = await ready();
+    server.respond = () => ({ status: 200, body: Buffer.alloc(2048, 1) });
+    expect(await client.fetchAttachment("att-1", 1024)).toBeNull();
+  });
+
+  it("a 5xx throws a ControlPlaneError — the mirror logs it and posts the file as unavailable", async () => {
+    const client = await ready();
+    server.respond = () => ({ status: 503, body: { error: "down" } });
+    await expect(client.fetchAttachment("att-1", 1024)).rejects.toMatchObject({
+      status: 503,
+    });
+  });
+
+  it("URL-encodes the id: a hostile id cannot walk the path", async () => {
+    const client = await ready();
+    server.respond = () => ({ status: 404, body: {} });
+    await client.fetchAttachment("../work", 1024);
+    expect(server.calls.at(-1)!.path).toBe(
+      "/v1/channel-adapter/attachments/..%2Fwork",
+    );
   });
 });

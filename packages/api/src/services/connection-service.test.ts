@@ -13,6 +13,7 @@ const store = vi.hoisted(() => ({
   createData: null as WriteData | null,
   updateData: null as WriteData | null,
   updateManyArgs: null as { where: unknown; data: WriteData } | null,
+  existingProvider: "prov",
 }));
 
 vi.mock("@onecli/db", () => ({
@@ -23,7 +24,11 @@ vi.mock("@onecli/db", () => ({
         store.createData = data;
         return { id: "new-conn", provider: data.provider, status: "connected" };
       },
-      findFirst: async () => ({ id: "conn-1", label: "old" }),
+      findFirst: async () => ({
+        id: "conn-1",
+        label: "old",
+        provider: store.existingProvider,
+      }),
       update: async ({ data }: { data: WriteData }) => {
         store.updateData = data;
         return { id: "conn-1", provider: "prov", status: "connected" };
@@ -43,6 +48,13 @@ vi.mock("../providers", () => ({
   }),
 }));
 
+const bumps = vi.hoisted(() => ({ workspace: [] as string[] }));
+vi.mock("./home-sync-service", () => ({
+  bumpHomeForScope: async (scope: { workspaceId?: string }) => {
+    if (scope.workspaceId) bumps.workspace.push(scope.workspaceId);
+  },
+}));
+
 import {
   createConnection,
   reconnectConnection,
@@ -53,6 +65,92 @@ beforeEach(() => {
   store.createData = null;
   store.updateData = null;
   store.updateManyArgs = null;
+  store.existingProvider = "prov";
+});
+
+describe("bound_host is recorded from the gated credential field", () => {
+  it("create: every host-bound provider gets metadata.bound_host", async () => {
+    for (const [provider, creds, host] of [
+      [
+        "salesforce",
+        { instance_host: "acme.my.salesforce.com" },
+        "acme.my.salesforce.com",
+      ],
+      [
+        "snowflake",
+        { host: "https://Acme-Prod.snowflakecomputing.com/" },
+        "acme-prod.snowflakecomputing.com",
+      ],
+      ["jfrog-artifactory", { subdomain: "acme.jfrog.io" }, "acme.jfrog.io"],
+    ] as const) {
+      await createConnection({ workspaceId: "p-1" }, provider, creds, {
+        metadata: { name: "x" },
+      });
+      expect(store.createData?.metadata).toEqual({
+        name: "x",
+        bound_host: host,
+      });
+    }
+  });
+
+  it("create: a caller cannot plant a bound_host the credential does not back", async () => {
+    await createConnection(
+      { workspaceId: "p-1" },
+      "snowflake",
+      { host: "acme.snowflakecomputing.com" },
+      { metadata: { bound_host: "evil.snowflakecomputing.com" } },
+    );
+    expect(store.createData?.metadata).toEqual({
+      bound_host: "acme.snowflakecomputing.com",
+    });
+    // No backing credential at all: the planted key is dropped, not kept.
+    await createConnection(
+      { workspaceId: "p-1" },
+      "github",
+      { access_token: "t" },
+      { metadata: { name: "x", bound_host: "evil.snowflakecomputing.com" } },
+    );
+    expect(store.createData?.metadata).toEqual({ name: "x" });
+  });
+
+  it("create: out-of-zone or unknown providers record nothing", async () => {
+    await createConnection(
+      { workspaceId: "p-1" },
+      "snowflake",
+      { host: "evil.test" },
+      { metadata: { name: "x" } },
+    );
+    expect(store.createData?.metadata).toEqual({ name: "x" });
+    await createConnection(
+      { workspaceId: "p-1" },
+      "github",
+      { host: "acme.snowflakecomputing.com" },
+      { metadata: { name: "x" } },
+    );
+    expect(store.createData?.metadata).toEqual({ name: "x" });
+  });
+
+  it("reconnect: a re-auth re-derives it from the stored provider", async () => {
+    store.existingProvider = "salesforce";
+    await reconnectConnection(
+      { workspaceId: "p-1" },
+      "conn-1",
+      { instance_host: "other.my.salesforce.com" },
+      { metadata: { username: "u" } },
+    );
+    expect(store.updateData?.metadata).toEqual({
+      username: "u",
+      bound_host: "other.my.salesforce.com",
+    });
+  });
+
+  it("reconnect: a bare token persist leaves metadata untouched", async () => {
+    store.existingProvider = "salesforce";
+    await reconnectConnection({ workspaceId: "p-1" }, "conn-1", {
+      instance_host: "acme.my.salesforce.com",
+    });
+    expect(store.updateData?.metadata).toBeUndefined();
+  });
 });
 
 describe("createConnection persists provenance", () => {
@@ -71,6 +169,31 @@ describe("createConnection persists provenance", () => {
   it("writes null when no appConfigId is given (env / no-config mint)", async () => {
     await createConnection({ workspaceId: "p-1" }, "prov", { token: "t" });
     expect(store.createData?.appConfigId).toBeNull();
+  });
+
+  it("re-renders the workspace's agent homes (their connected-apps list changed)", async () => {
+    bumps.workspace.length = 0;
+    await createConnection({ workspaceId: "p-1" }, "prov", { token: "t" });
+    expect(bumps.workspace).toEqual(["p-1"]);
+  });
+});
+
+describe("home refresh follows what the agent reads", () => {
+  it("a bare token refresh (no metadata) does NOT re-render homes", async () => {
+    bumps.workspace.length = 0;
+    await reconnectConnection({ workspaceId: "p-1" }, "conn-1", { t: 1 });
+    expect(bumps.workspace).toEqual([]);
+  });
+
+  it("a re-auth carrying metadata (possibly a new bound host) does", async () => {
+    bumps.workspace.length = 0;
+    await reconnectConnection(
+      { workspaceId: "p-1" },
+      "conn-1",
+      { t: 1 },
+      { metadata: { username: "u" } },
+    );
+    expect(bumps.workspace).toEqual(["p-1"]);
   });
 });
 

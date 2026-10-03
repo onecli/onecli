@@ -1,22 +1,29 @@
+import { isDeadCredentialError } from "@onecli/channels";
 import { ServiceError } from "../../../errors";
 import { logger } from "../../../../lib/logger";
 import { DeadIntegrationCredentialError } from "../../errors";
 import type { ChannelProvider, PresenceIdentity } from "../../types";
 import { dispatchSlackEvent } from "./dispatch";
+import { invalidateInboundPresence } from "./inbound-cache";
 import { slackSharedApp } from "./shared-install-service";
 import { slackReach } from "./reach-card";
 import { slackActionApprovalCard } from "./action-approval-card";
 import {
   botScopesFor,
   buildAgentManifest,
-  tombstoneAppName,
   withSyncedAppName,
   withTombstoneName,
 } from "./manifest";
 import {
   agentsSessionsSetStatus,
+  conversationsList,
+  conversationsOpen,
+  decodeSlackTokens,
   deleteMessage,
+  markdownToMrkdwn,
   postBlocksMessage,
+  postMessage,
+  usersList,
   SLACK_TASK_TITLE_MAX,
   updateBlocksMessage,
   authTest,
@@ -64,6 +71,11 @@ const ROTATE_SLACK_SECONDS = 10 * 60;
  * access half's own `exp` settle it: a pair still refused once nothing usable
  * is left is dead (see `rotateIntegrationCredential`).
  */
+/** Roster paging bound for `listRecipients` — Slack pages users.list and
+ * conversations.list at up to 1000 (docs recommend ≤200); 25 pages covers
+ * any workspace that fits a per-agent app. */
+const RECIPIENT_PAGES = 25;
+
 const DEAD_REFRESH_TOKEN_CODES: ReadonlySet<string> = new Set([
   "invalid_refresh_token",
   "token_revoked",
@@ -115,15 +127,15 @@ const mergedJson = (
 ): string => JSON.stringify({ ...existing, ...update });
 
 /**
- * How long to wait for a rename to reach the bot user. Slack applies a
- * manifest update to the app immediately but copies the name onto the bot
- * asynchronously — measured at ~5s. Ten one-second polls leaves headroom
- * without stalling a teardown that must stay responsive.
+ * `apps.uninstall` refusals about the CLIENT credential pair rather than the
+ * bot token. Together with the dead-token codes (`isDeadCredentialError`),
+ * these say "this call can never succeed with what we hold", which is not the
+ * same as "the app is gone": the snapshot stays for manual reconciliation.
  */
-const RENAME_POLL_ATTEMPTS = 10;
-const RENAME_POLL_INTERVAL_MS = 1_000;
-
-const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const UNINSTALL_CLIENT_CREDENTIAL_CODES: ReadonlySet<string> = new Set([
+  "invalid_client_id",
+  "bad_client_secret",
+]);
 
 /** Basic Information — where the app-level token is generated, where
  * "Install to Workspace" lives, and the only place the app's PROFILE icon
@@ -147,6 +159,10 @@ export const slackProvider: ChannelProvider = {
   // The one interpreter for both transports (dispatch.ts) — the neutral
   // dispatch hook the generic ingest door calls by registry lookup.
   dispatchInbound: dispatchSlackEvent,
+
+  // A removed app must stop being admitted by the events route at once, not
+  // after the verification cache's TTL (inbound-cache.ts).
+  onPresenceRemoved: ({ externalId }) => invalidateInboundPresence(externalId),
 
   // The reach facet (reach-card.ts): the space key behind a group-thread
   // address, the guest-speaker probe, and the platform-composed owner-DM
@@ -365,72 +381,68 @@ export const slackProvider: ChannelProvider = {
   },
 
   async uninstallRemotePresence({ credentialsJson }) {
-    // Installation-scoped: runs on the app's OWN credentials and needs no org
-    // config token, which is why it lives outside that wrapper. Skipped on the
-    // paste floor, where we never saw the user's client secret.
-    //
-    // The parse is inside the try because it THROWS on a malformed row, and an
-    // unreadable credential must degrade to "cannot uninstall", never to a
-    // failed deletion.
+    let creds: SlackPresenceCredentials;
     try {
-      const creds = credentialsJson
+      creds = credentialsJson
         ? parseSlackPresenceCredentials(credentialsJson)
-        : null;
-      if (!creds?.botToken || !creds.clientId || !creds.clientSecret) return;
+        : {};
+    } catch {
+      return { outcome: "blocked", reason: "unreadable_credentials" };
+    }
+    if (!creds.botToken || !creds.clientId || !creds.clientSecret) {
+      // Pending setup is not evidence of never having been installed in Slack.
+      return { outcome: "blocked", reason: "missing_uninstall_credentials" };
+    }
+    try {
       await appsUninstall({
         botToken: creds.botToken,
         clientId: creds.clientId,
         clientSecret: creds.clientSecret,
       });
-    } catch {
-      // An already-uninstalled app answers `account_inactive`, which is the
-      // desired end state, not a failure. Everything else is best-effort.
+      return { outcome: "uninstalled" };
+    } catch (error) {
+      // Inactive/revoked authentication is NOT authoritative installation state.
+      // Keep the snapshot for manual reconciliation rather than deleting a bot.
+      if (
+        isDeadCredentialError(error) ||
+        (error instanceof SlackApiError &&
+          UNINSTALL_CLIENT_CREDENTIAL_CODES.has(error.code))
+      ) {
+        return {
+          outcome: "blocked",
+          reason: "uninstall_authorization_required",
+        };
+      }
+      // No raw provider messages: a malformed upstream response may echo secrets.
+      return { outcome: "retry", reason: "uninstall_unavailable" };
     }
   },
 
-  async renameRemotePresence({
-    accessToken,
-    externalId,
-    credentialsJson,
-    identityRef,
-  }) {
+  async renameRemotePresence({ accessToken, externalId }) {
     // Before the uninstall: an uninstalled app answers `app_not_found` here.
+    // Cosmetic best effort: Slack copies the name onto the bot user
+    // asynchronously and does not guarantee it survives deletion, so nothing
+    // waits for propagation.
     const { manifest } = await manifestExport(accessToken, externalId);
     await manifestUpdate(
       accessToken,
       externalId,
       withTombstoneName(manifest, externalId),
     );
-
-    // `ok` means ACCEPTED, not applied — Slack copies the name onto the bot
-    // user asynchronously (~5s, against a teardown that otherwise takes ~1.5s),
-    // so poll until it lands and let the caller gate the delete on the answer.
-    // Parsed defensively: an unreadable row past this point means we cannot
-    // CONFIRM the rename, not that it failed — the caller's warning would
-    // otherwise claim the app kept its old name when it did not.
-    let botToken: string | undefined;
-    try {
-      botToken = credentialsJson
-        ? parseSlackPresenceCredentials(credentialsJson).botToken
-        : undefined;
-    } catch {
-      return false;
-    }
-    if (!botToken || !identityRef) return false;
-
-    const want = tombstoneAppName(externalId);
-    for (let attempt = 0; attempt < RENAME_POLL_ATTEMPTS; attempt++) {
-      await delay(RENAME_POLL_INTERVAL_MS);
-      const seen = await usersInfo(botToken, identityRef)
-        .then((r) => r.user.profile?.real_name)
-        .catch(() => undefined);
-      if (seen === want) return true;
-    }
-    return false;
   },
 
   async deleteRemotePresence({ accessToken, externalId }) {
-    await manifestDelete(accessToken, externalId);
+    // Idempotent by contract: the cleanup worker persists "deleted" only
+    // AFTER this call returns, so a crash in between replays it. An app that
+    // is already gone is the end state this phase wants, not a failure.
+    try {
+      await manifestDelete(accessToken, externalId);
+    } catch (error) {
+      if (error instanceof SlackApiError && error.code === "app_not_found") {
+        return;
+      }
+      throw error;
+    }
   },
 
   presenceSettingsUrl({ externalId }) {
@@ -553,6 +565,94 @@ export const slackProvider: ChannelProvider = {
       timestamp: messageTs,
       name: reaction,
     });
+  },
+
+  async sendMessage({ credentialsJson, to, text, mentions }) {
+    const { botToken } = parseSlackPresenceCredentials(credentialsJson);
+    if (!botToken) throw new Error("presence has no bot token");
+    // People AND apps are addressed via their DM channel (conversations.open
+    // is idempotent — it returns the existing IM; an app's bot user opens an
+    // IM the same way); channels post directly.
+    const channel =
+      to.kind === "channel"
+        ? to.ref
+        : (await conversationsOpen(botToken, to.ref)).channel.id;
+    // The same renderer the mirror trusts, with the map FROZEN at request
+    // time: body @[Name] tokens ping exactly who was resolved when the owner
+    // read the card. Tokens without a map entry degrade to plain text.
+    const rendered = markdownToMrkdwn(
+      text,
+      mentions ? { mentions: new Map(mentions) } : undefined,
+    );
+    await postMessage(botToken, { channel, text: rendered });
+  },
+
+  async listMembers({ credentialsJson, tenantId, selfIdentityRef }) {
+    const { botToken } = parseSlackPresenceCredentials(credentialsJson);
+    if (!botToken) return [];
+    const members: { ref: string; name: string; isApp: boolean }[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < RECIPIENT_PAGES; page += 1) {
+      const response = await usersList(botToken, { cursor });
+      for (const member of response.members) {
+        // Deleted members, Slackbot (is_bot false but never a recipient),
+        // and the presence's OWN bot user (self-mention = self-invocation,
+        // a loop seed) stay invisible. Other bots are APPS — labeled
+        // candidates, not silent holes.
+        if (
+          member.deleted ||
+          member.id === "USLACKBOT" ||
+          member.id === selfIdentityRef
+        ) {
+          continue;
+        }
+        // The tenant fence: same team, never a Slack Connect stranger.
+        if (member.team_id !== tenantId || member.is_stranger === true) {
+          continue;
+        }
+        const name =
+          member.profile?.display_name ||
+          member.profile?.real_name ||
+          member.name ||
+          "";
+        if (!name) continue;
+        members.push({ ref: member.id, name, isApp: member.is_bot === true });
+      }
+      cursor = response.response_metadata?.next_cursor || undefined;
+      if (!cursor) break;
+    }
+    return members;
+  },
+
+  async listChannels({ credentialsJson }) {
+    const { botToken } = parseSlackPresenceCredentials(credentialsJson);
+    if (!botToken) return [];
+    const channels: {
+      ref: string;
+      name: string;
+      member: boolean;
+      private: boolean;
+    }[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < RECIPIENT_PAGES; page += 1) {
+      const response = await conversationsList(botToken, { cursor });
+      for (const channel of response.channels) {
+        if (channel.is_archived || !channel.name) continue;
+        channels.push({
+          ref: channel.id,
+          name: channel.name,
+          member: channel.is_member === true,
+          private: channel.is_private === true,
+        });
+      }
+      cursor = response.response_metadata?.next_cursor || undefined;
+      if (!cursor) break;
+    }
+    return channels;
+  },
+
+  decodeInboundText({ text, resolveUserName, resolveChannelName }) {
+    return decodeSlackTokens(text, resolveUserName, resolveChannelName);
   },
 
   async setThreadWorkStatus({ credentialsJson, channel, threadTs, working }) {

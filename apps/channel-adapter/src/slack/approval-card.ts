@@ -1,4 +1,8 @@
-import { escapeSlackText } from "@onecli/channels/slack";
+import {
+  escapeSlackText,
+  packMessageRef,
+  unpackMessageRef,
+} from "@onecli/channels/slack";
 import type { ApprovalCardUi, PendingApproval } from "../approvals";
 import {
   postBlocksMessage,
@@ -21,6 +25,15 @@ import {
  * invalid_blocks and silence the approval. */
 const DETAILS_BUDGET = 2_800;
 
+/** A detail value as Slack mrkdwn, linked to its record when it has one.
+ *  The URL is already https (checked channel-side in ../approvals); here
+ *  only Slack's own `<url|text>` syntax is guarded: a URL carrying `|`, `<`,
+ *  `>` or whitespace could break out of it, so it stays plain text. */
+const detailValue = (value: string, url: string | undefined): string => {
+  const text = clampLabel(escapeSlackText(normalizeLines(value)));
+  return url && !/[|<>\s]/.test(url) ? `<${url}|${text}>` : text;
+};
+
 /** The card. Template text is OURS; every dynamic field is escaped. */
 export const approvalCardBlocks = (approval: PendingApproval): unknown[] => {
   // Header block is plain_text (Slack cap: 150 chars) — no mrkdwn escaping,
@@ -33,7 +46,7 @@ export const approvalCardBlocks = (approval: PendingApproval): unknown[] => {
     .slice(0, 8)
     .map(
       (d) =>
-        `>*${clampLabel(escapeSlackText(normalizeLines(d.label)))}:* ${clampLabel(escapeSlackText(normalizeLines(d.value))).replace(/\n/g, "\n>")}`,
+        `>*${clampLabel(escapeSlackText(normalizeLines(d.label)))}:* ${detailValue(d.value, d.url).replace(/\n/g, "\n>")}`,
     );
   // Hard section budget: keep whole lines while they fit, and say how many
   // were dropped rather than truncating silently.
@@ -109,6 +122,8 @@ export const approvalCardBlocks = (approval: PendingApproval): unknown[] => {
 };
 
 export const slackApprovalCardUi: ApprovalCardUi = {
+  packMessageRef: (ref) => packMessageRef(ref.channel, ref.ts),
+  unpackMessageRef,
   async post(input) {
     const posted = await postBlocksMessage(input.credential, {
       channel: input.channel,

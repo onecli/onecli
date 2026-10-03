@@ -92,6 +92,19 @@ export type AdapterConfigResponse = z.infer<typeof adapterConfigResponseSchema>;
 
 // ── The batched work poll ───────────────────────────────────────────────────
 
+export const adapterOutboundAttachmentSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  mimeType: z.string().min(1),
+  sizeBytes: z.number().int().positive(),
+  /** The agent's one-line note for the file (Slack: the share's
+   * initial_comment). Null when it gave none. */
+  caption: z.string().nullable(),
+});
+export type AdapterOutboundAttachment = z.infer<
+  typeof adapterOutboundAttachmentSchema
+>;
+
 export const adapterWorkTurnSchema = z.object({
   id: z.string(),
   status: z.string(),
@@ -117,6 +130,14 @@ export const adapterWorkTurnSchema = z.object({
   /** ISO timestamps. */
   createdAt: z.string(),
   finishedAt: z.string().nullable(),
+  /**
+   * Files the AGENT sent back during this turn (send_file), oldest first —
+   * metadata only; the adapter pulls bytes through
+   * `GET /channel-adapter/attachments/:id`, fenced to its ownership slice.
+   * Strictly the outbound rows: what the person attached to the question is
+   * already in the channel. Optional: an older control plane never sends it.
+   */
+  attachments: z.array(adapterOutboundAttachmentSchema).optional(),
 });
 export type AdapterWorkTurn = z.infer<typeof adapterWorkTurnSchema>;
 

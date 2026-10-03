@@ -184,8 +184,9 @@ describe("AppsSection ?connection=&manage=1 deep link", () => {
     // refetch is airborne, not a link present at mount.
     const { rerender, queryClient } = renderSection([conn("conn-1")]);
 
-    // The grant write's invalidation: the grants query refetches over stale
-    // cache. THEN the deep link lands (onGranted fires it right after).
+    // The connect landing's grant invalidation: the grants query refetches
+    // over stale cache. THEN the deep link lands (onConnected fires it right
+    // after).
     await act(async () => {
       void queryClient.invalidateQueries({
         queryKey: queryKeys.grants.agent("agent-1"),

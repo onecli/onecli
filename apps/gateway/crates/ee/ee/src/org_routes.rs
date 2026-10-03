@@ -83,6 +83,9 @@ async fn get_org_pending_approvals(
                 _ = shutdown_signal.wait() => false,
             };
             if got_new {
+                // Same burst coalescing as the workspace poll: a parallel
+                // task arrives as one set, not first-request-then-the-rest.
+                tokio::time::sleep(approval::BURST_COALESCE).await;
                 let mut fresh = state.approval_store.list_pending_for_org(&org_id).await;
                 fresh.retain(|a| !exclude.contains(a.id.as_str()));
                 pending = fresh;

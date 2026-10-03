@@ -19,6 +19,13 @@ interface SlackManifestFloorProps {
   /** The picker's choice, sent on the wire only when the server offers one
    * (undefined on older servers, whose strict schemas reject unknown keys). */
   requestedTransport?: ChannelTransport;
+  /**
+   * Re-attaching an app the platform already knows (it was removed on the
+   * provider's side): the app exists, so there is nothing to create and the
+   * App ID is on file. The floor then asks only for fresh tokens and resumes
+   * the same presence. Null = first-time setup, the full two steps.
+   */
+  reattachAppId?: string | null;
 }
 
 /**
@@ -31,6 +38,7 @@ export const SlackManifestFloor = ({
   agentId,
   transport,
   requestedTransport,
+  reattachAppId = null,
 }: SlackManifestFloorProps) => {
   const manifestQuery = useChannelManifest(
     agentId,
@@ -51,26 +59,112 @@ export const SlackManifestFloor = ({
     : null;
 
   const socket = transport === "socket";
+  const reattaching = reattachAppId !== null;
   const ready =
     botToken.trim().length > 0 &&
-    appId.trim().length > 0 &&
+    (reattaching || appId.trim().length > 0) &&
     (socket ? appToken.trim().length > 0 : signingSecret.trim().length > 0);
 
   const submit = () =>
     complete.mutate(
       {
         botToken: botToken.trim(),
-        appId: appId.trim(),
+        // The service resumes the existing row by (agent, provider) and keeps
+        // its app id; sending the known id makes the intent explicit.
+        appId: reattaching ? reattachAppId : appId.trim(),
         ...(socket
           ? { appToken: appToken.trim() }
           : { signingSecret: signingSecret.trim() }),
         ...(requestedTransport && { transport: requestedTransport }),
       },
       {
-        onSuccess: () => toast.success("Slack connected"),
+        onSuccess: () =>
+          toast.success(reattaching ? "Slack re-attached" : "Slack connected"),
         onError: (err) => toast.error(err.message),
       },
     );
+
+  const tokenFields = (
+    <>
+      <div className="grid max-w-md gap-1.5">
+        <Label htmlFor="slack-floor-bot-token">Bot token</Label>
+        <SecretInput
+          id="slack-floor-bot-token"
+          value={botToken}
+          onChange={(e) => setBotToken(e.target.value)}
+          placeholder="xoxb-…"
+        />
+        <p className="text-muted-foreground text-xs">
+          OAuth &amp; Permissions → Bot User OAuth Token, after installing.
+        </p>
+      </div>
+      {socket ? (
+        <div className="grid max-w-md gap-1.5">
+          <Label htmlFor="slack-floor-app-token">App-level token</Label>
+          <SecretInput
+            id="slack-floor-app-token"
+            value={appToken}
+            onChange={(e) => setAppToken(e.target.value)}
+            placeholder="xapp-…"
+          />
+          <p className="text-muted-foreground text-xs">
+            Basic Information → App-Level Tokens. Create one with the
+            connections:write scope.
+          </p>
+        </div>
+      ) : (
+        <div className="grid max-w-md gap-1.5">
+          <Label htmlFor="slack-floor-signing-secret">Signing secret</Label>
+          <SecretInput
+            id="slack-floor-signing-secret"
+            value={signingSecret}
+            onChange={(e) => setSigningSecret(e.target.value)}
+            placeholder="Signing secret"
+          />
+          <p className="text-muted-foreground text-xs">
+            Basic Information → App Credentials → Signing Secret.
+          </p>
+        </div>
+      )}
+    </>
+  );
+
+  if (reattaching) {
+    // The app exists (the platform holds its id); only its tokens are dead
+    // or unknown. One step: reinstall at Slack if it was uninstalled, then
+    // paste the fresh tokens. No manifest, no App ID to retype.
+    return (
+      <ol>
+        <InstallStep
+          number={1}
+          title="Reinstall the app and paste its fresh tokens"
+          description={`Open the app (${reattachAppId}) on api.slack.com, reinstall it to your workspace if it was uninstalled, then copy the new values below. The same app comes back; nothing else changes.`}
+          last
+        >
+          <div className="space-y-3">
+            <Button variant="outline" size="sm" asChild>
+              <a
+                href={`https://api.slack.com/apps/${encodeURIComponent(reattachAppId)}/general`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Open the app on api.slack.com
+                <ExternalLink className="size-3.5" />
+              </a>
+            </Button>
+            {tokenFields}
+            <Button
+              onClick={submit}
+              disabled={!ready || complete.isPending}
+              loading={complete.isPending}
+            >
+              {complete.isPending ? "Re-attaching…" : "Re-attach"}
+            </Button>
+          </div>
+        </InstallStep>
+      </ol>
+    );
+  }
 
   return (
     <ol>
@@ -121,46 +215,7 @@ export const SlackManifestFloor = ({
         last
       >
         <div className="space-y-3">
-          <div className="grid max-w-md gap-1.5">
-            <Label htmlFor="slack-floor-bot-token">Bot token</Label>
-            <SecretInput
-              id="slack-floor-bot-token"
-              value={botToken}
-              onChange={(e) => setBotToken(e.target.value)}
-              placeholder="xoxb-…"
-            />
-            <p className="text-muted-foreground text-xs">
-              OAuth &amp; Permissions → Bot User OAuth Token, after installing.
-            </p>
-          </div>
-          {socket ? (
-            <div className="grid max-w-md gap-1.5">
-              <Label htmlFor="slack-floor-app-token">App-level token</Label>
-              <SecretInput
-                id="slack-floor-app-token"
-                value={appToken}
-                onChange={(e) => setAppToken(e.target.value)}
-                placeholder="xapp-…"
-              />
-              <p className="text-muted-foreground text-xs">
-                Basic Information → App-Level Tokens. Create one with the
-                connections:write scope.
-              </p>
-            </div>
-          ) : (
-            <div className="grid max-w-md gap-1.5">
-              <Label htmlFor="slack-floor-signing-secret">Signing secret</Label>
-              <SecretInput
-                id="slack-floor-signing-secret"
-                value={signingSecret}
-                onChange={(e) => setSigningSecret(e.target.value)}
-                placeholder="Signing secret"
-              />
-              <p className="text-muted-foreground text-xs">
-                Basic Information → App Credentials → Signing Secret.
-              </p>
-            </div>
-          )}
+          {tokenFields}
           <div className="grid max-w-md gap-1.5">
             <Label htmlFor="slack-floor-app-id">App ID</Label>
             <Input

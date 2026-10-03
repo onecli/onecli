@@ -83,6 +83,9 @@ beforeEach(() => {
   inputs = {
     instructions: "boot brief",
     agentName: "Ada",
+    channels: [],
+    peers: [],
+    connections: [],
     capabilities: {
       resume: true,
       thinking: false,
@@ -90,6 +93,7 @@ beforeEach(() => {
       steer: true,
       skillsDir: ".agents/skills",
       instructionFiles: ["CLAUDE.md", "AGENTS.md"],
+      platformTools: true,
     },
     fragments: [],
   };
@@ -526,6 +530,57 @@ describe("the mid-run re-render", () => {
     expect(inputs.instructions).toBeUndefined();
     expect(readFileSync(join(home, "CLAUDE.md"), "utf8")).not.toContain(
       "You are the NEW brief.",
+    );
+  });
+
+  it("channel presences on the final part re-render the channels section; [] removes it; omission leaves it", async () => {
+    const slack = {
+      provider: "slack",
+      status: "active" as const,
+      handle: "ada",
+      workspaceName: "Acme",
+    };
+
+    // An attach lands mid-run: the section appears without a reboot.
+    await applyHomeSync(home, item({ channels: [slack] }), inputs, send);
+    expect(inputs.channels).toEqual([slack]);
+    expect(readFileSync(join(home, "CLAUDE.md"), "utf8")).toContain(
+      "You are reachable on Slack as @ada",
+    );
+
+    // A part that says nothing about channels leaves them as they were.
+    await applyHomeSync(
+      home,
+      item({ generation: 2, instructions: "Still here." }),
+      inputs,
+      send,
+    );
+    expect(inputs.channels).toEqual([slack]);
+    expect(readFileSync(join(home, "CLAUDE.md"), "utf8")).toContain(
+      "## Where you talk",
+    );
+
+    // The provider removed the app: the same slot now says so.
+    await applyHomeSync(
+      home,
+      item({ generation: 3, channels: [{ ...slack, status: "disabled" }] }),
+      inputs,
+      send,
+    );
+    expect(readFileSync(join(home, "CLAUDE.md"), "utf8")).toContain(
+      "was removed from the workspace",
+    );
+
+    // A detach: the empty array is a real value and the section goes.
+    await applyHomeSync(
+      home,
+      item({ generation: 4, channels: [] }),
+      inputs,
+      send,
+    );
+    expect(inputs.channels).toEqual([]);
+    expect(readFileSync(join(home, "CLAUDE.md"), "utf8")).not.toContain(
+      "## Where you talk",
     );
   });
 

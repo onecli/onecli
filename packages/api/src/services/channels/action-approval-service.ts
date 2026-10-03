@@ -9,8 +9,9 @@ import {
   AUDIT_STATUS,
   recordAuditEvent,
 } from "../audit-service";
-import { getEventBus } from "../../providers/event-bus";
+import { cleanLabel } from "../../lib/format";
 import { logger } from "../../lib/logger";
+import { writeConversationNotice } from "../conversation-notice";
 import { authorizeChannelUser } from "./channel-ingestion-service";
 import { dmReachableOwners, cardRefsOf } from "./agent-reach-service";
 import { channelProvider } from "./registry";
@@ -130,17 +131,6 @@ export const unregisterActionHandler = (action: string): void => {
   handlers.delete(action);
 };
 
-const clamp = (raw: string, max: number): string =>
-  [...raw]
-    .filter((ch) => {
-      const code = ch.charCodeAt(0);
-      return code >= 0x20 && code !== 0x7f;
-    })
-    .join("")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, max);
-
 /**
  * Create the hold and post the owner cards. The caller (a platform tool
  * case, a service) composes `summary` itself — it is the card's one-liner
@@ -173,7 +163,7 @@ export const requestActionApproval = async (input: {
       originTurnId: input.originTurnId ?? null,
       action: input.action,
       payload: input.payload,
-      summary: clamp(input.summary, MAX_SUMMARY_CHARS),
+      summary: cleanLabel(input.summary, MAX_SUMMARY_CHARS),
       expiresAt: new Date(
         Date.now() + (input.expiresInMs ?? APPROVAL_MAX_AGE_MS),
       ),
@@ -322,7 +312,9 @@ export const decideActionApproval = async (input: {
   if (!decider) return { kind: "refused", message: "Unknown decider." };
 
   const reason =
-    input.reason !== undefined ? clamp(input.reason, MAX_REASON_CHARS) : null;
+    input.reason !== undefined
+      ? cleanLabel(input.reason, MAX_REASON_CHARS)
+      : null;
 
   const approves = input.decision !== "reject";
   // THE ATOMIC FLIP (the 4a race lesson, applied from day one): conditioned
@@ -393,7 +385,7 @@ export const decideActionApproval = async (input: {
         finalStatus = "executed";
       } catch (err) {
         finalStatus = "failed";
-        failure = clamp(String(err), MAX_REASON_CHARS);
+        failure = cleanLabel(String(err), MAX_REASON_CHARS);
       }
     }
     await db.actionApproval.update({
@@ -504,6 +496,24 @@ export const expireStaleActionApprovals = async (): Promise<{
 }> => {
   const stale = await db.actionApproval.findMany({
     where: { status: "pending", expiresAt: { lt: new Date() } },
+    select: { id: true },
+    orderBy: { createdAt: "asc" },
+    take: 20,
+  });
+  return { expired: await expireActionApprovals(stale.map((s) => s.id)) };
+};
+
+/**
+ * Expire the named PENDING approvals now, settling cards and notices the
+ * way the sweep does. Used by the sweep (past deadline) and by a subject's
+ * removal (the ask is moot: the contact or link it was about is gone).
+ * Atomic per row: a decide racing this wins or loses cleanly. Returns how
+ * many actually flipped.
+ */
+export const expireActionApprovals = async (ids: string[]): Promise<number> => {
+  if (ids.length === 0) return 0;
+  const rows = await db.actionApproval.findMany({
+    where: { id: { in: ids }, status: "pending" },
     select: {
       id: true,
       status: true,
@@ -515,12 +525,9 @@ export const expireStaleActionApprovals = async (): Promise<{
       cardRefs: true,
       agent: { select: { workspaceId: true, name: true } },
     },
-    orderBy: { createdAt: "asc" },
-    take: 20,
   });
   let expired = 0;
-  for (const approval of stale) {
-    // Atomic per row: a decide racing the sweep wins or loses cleanly.
+  for (const approval of rows) {
     const flipped = await db.actionApproval.updateMany({
       where: { id: approval.id, status: "pending" },
       data: { status: "expired" },
@@ -529,7 +536,7 @@ export const expireStaleActionApprovals = async (): Promise<{
     expired += 1;
     await settleApproval(approval, "expired", null, null);
   }
-  return { expired };
+  return expired;
 };
 
 /** The dashboard list — workspace-fenced by the caller's route. */
@@ -635,45 +642,17 @@ const settleApproval = async (
   // The notice — needs a turn anchor; without one the row is still the
   // durable record and the dashboard shows it.
   if (!approval.conversationId || !approval.originTurnId) return;
-  const text = OUTCOME_LINES[outcome](approval.summary, detail);
   try {
-    const published = await db.$transaction(async (tx) => {
-      const conversation = await tx.conversation.findUnique({
-        where: { id: approval.conversationId! },
-        select: { id: true },
-      });
-      if (!conversation) return null;
-      const { lastSeq } = await tx.conversation.update({
-        where: { id: approval.conversationId! },
-        data: { lastSeq: { increment: 1 } },
-        select: { lastSeq: true },
-      });
-      const event = {
-        type: "notice" as const,
-        level: outcome === "executed" ? ("info" as const) : ("warn" as const),
-        text,
-        /** Structured for the next turn's context note. */
+    await writeConversationNotice({
+      conversationId: approval.conversationId,
+      turnId: approval.originTurnId,
+      level: outcome === "executed" ? "info" : "warn",
+      text: OUTCOME_LINES[outcome](approval.summary, detail),
+      /** Structured for the next turn's context note. */
+      extra: {
         actionApproval: { id: approval.id, action: approval.action, outcome },
-      };
-      await tx.turnEvent.create({
-        data: {
-          conversationId: approval.conversationId!,
-          turnId: approval.originTurnId!,
-          seq: lastSeq,
-          type: "notice",
-          payload: event as unknown as Prisma.InputJsonValue,
-        },
-      });
-      return [
-        {
-          seq: lastSeq,
-          turnId: approval.originTurnId!,
-          type: "notice" as const,
-          event,
-        },
-      ];
+      },
     });
-    if (published) getEventBus().publish(approval.conversationId, published);
   } catch (err) {
     log.warn(
       { approvalId: approval.id, err: String(err) },

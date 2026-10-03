@@ -107,6 +107,7 @@ export const createFakeControlPlane = (
   rotateIntegrations: async () => ({ rotated: 0, failed: 0 }),
   expireReach: async () => ({ expired: 0 }),
   readTranscript: async () => ({ events: [], nextSince: 0, hasMore: false }),
+  fetchAttachment: async () => null,
   ...overrides,
 });
 

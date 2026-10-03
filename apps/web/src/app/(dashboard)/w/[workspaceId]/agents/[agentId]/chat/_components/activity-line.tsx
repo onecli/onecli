@@ -1,5 +1,7 @@
 "use client";
 
+import { cn } from "@onecli/ui/lib/utils";
+
 /**
  * The live activity line — what the agent is doing right now, while it works.
  *
@@ -27,9 +29,21 @@
  * — never markdown, never a link. Do not "improve" this by passing it
  * through the markdown renderer.
  */
-export const ActivityLine = ({ text }: { text: string }) => (
+export const ActivityLine = ({
+  text,
+  visuallyHidden = false,
+}: {
+  text: string;
+  /** Announce without showing: for when the same words are already on
+   *  screen elsewhere (the run header), so sighted readers don't see them
+   *  twice while screen-reader users keep the live cue. */
+  visuallyHidden?: boolean;
+}) => (
   <p
-    className="text-muted-foreground/60 flex items-center gap-2 text-xs italic"
+    className={cn(
+      "text-muted-foreground/60 flex items-center gap-2 text-xs italic",
+      visuallyHidden && "sr-only",
+    )}
     // Polite: a caption that changes every few seconds must never interrupt
     // a screen-reader user mid-sentence.
     aria-live="polite"

@@ -8,9 +8,9 @@ import {
 import { CAPS } from "../lib/env";
 import { ServiceError } from "../services/errors";
 import type { ApiEnv } from "../types";
-import { authenticateApiKey } from "./auth/api-key";
+import { apiKeyBearer, authenticateApiKey } from "./auth/api-key";
 import { hasActiveMembership } from "./auth/resolve";
-import { authenticateSession } from "./auth/session";
+import { authenticateSession, resolveSessionUser } from "./auth/session";
 
 export interface AuthOptions {
   requireWorkspace?: boolean;
@@ -173,6 +173,38 @@ export const auth = (options?: AuthOptions) => {
 };
 
 export const authMiddleware = auth();
+
+/**
+ * Session-only authentication with NO tenancy: sets `c.var.sessionUser` (the
+ * person), never `auth` (the org/workspace). For account-level surfaces a
+ * user must reach even when they belong to no organization — the org-scoped
+ * `auth()` would 401 them, since it can only resolve a session through a
+ * membership. API keys are refused outright: a key acts for a workspace or
+ * an org, and the operations behind this middleware (deleting the account)
+ * belong to the person alone.
+ */
+export const sessionAuth = () =>
+  createMiddleware<ApiEnv>(async (c, next) => {
+    if (apiKeyBearer(c.req.raw)) {
+      return c.json(UNAUTHORIZED, 401);
+    }
+    const resolved = await resolveSessionUser(c.req.raw);
+    if (!resolved) return c.json(UNAUTHORIZED, 401);
+    if ("denied" in resolved) {
+      return c.json(
+        {
+          error: {
+            message: resolved.denied.error,
+            type: "authentication_error",
+            code: resolved.denied.code,
+          },
+        },
+        401,
+      );
+    }
+    c.set("sessionUser", resolved);
+    return next();
+  });
 
 export const requireWorkspaceId = (auth: AuthContext): string => {
   if (!auth.workspaceId)

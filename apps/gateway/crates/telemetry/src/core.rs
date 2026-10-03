@@ -31,7 +31,8 @@ pub enum RequestDecision {
         reason: String,
         triggered_at: String,
         resolved_at: String,
-        /// The user who denied, or `None` for a system auto-deny (timeout).
+        /// The user who denied, or `None` when nobody decided (expiry,
+        /// store failure, restart) or the decision carried no attribution.
         approved_by: Option<String>,
     },
     ApprovalApproved {
@@ -42,6 +43,16 @@ pub enum RequestDecision {
         approved_by: Option<String>,
     },
     BlockedByDefaultPolicy,
+    /// The upstream refused an uncredentialed request and the gateway
+    /// answered with its own guidance (`app_not_connected`,
+    /// `access_restricted`, `credential_not_found`,
+    /// `connection_host_mismatch`). Its own variant — not `Allowed` — so the
+    /// request log keeps the row: an un-injected Allowed event is dropped by
+    /// design, which made these failures invisible in the activity feed.
+    /// `error` is the guidance error code the agent received.
+    NeedsConnection {
+        error: String,
+    },
 }
 
 /// A metered spend charge attached to a request event (cloud budget feature).

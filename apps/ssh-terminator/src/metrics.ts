@@ -15,7 +15,7 @@ const log = logger.child({ component: "terminator-metrics" });
  * PutMetricData turns an auth-failure flood into a metered-API amplification
  * that throttles away exactly the datapoints the ssh-auth-failures alarm
  * needs. Counters accumulate in-process and one flush per pump tick
- * publishes everything; a failed publish restores the counters (parkd's
+ * publishes everything; a failed publish restores the counters (the home daemon's
  * drain law — a flaky CloudWatch must not under-count failures exactly when
  * observability matters). Wake-wait samples ride one Values/Counts array
  * datum (raw values, so percentile stats keep working); sample loss on a
@@ -43,7 +43,7 @@ export interface TerminatorMetrics {
    */
   flush(liveSessions: number): Promise<void>;
   /**
-   * One flush per minute (parkd's cadence — the terminator-silent liveness
+   * One flush per minute (the home daemon's cadence — the terminator-silent liveness
    * alarm reads the SshSessionsLive series this keeps continuous). The
    * returned stop clears the timer and runs (and returns) the FINAL flush,
    * so a rollout's drain-window counters are never lost with the process —

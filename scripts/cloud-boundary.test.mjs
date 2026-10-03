@@ -12,7 +12,15 @@ import { fileURLToPath } from "node:url";
 // package upstream.
 
 /** Workspace packages that must never reach the OSS mirror. */
-const CLOUD_ONLY_PACKAGES = ["packages/infra", "apps/sandbox-manager"];
+const CLOUD_ONLY_PACKAGES = [
+  "packages/infra",
+  "apps/sandbox-manager",
+  "apps/sandbox-home-device",
+  "apps/sandbox-home-daemon",
+  "apps/sandbox-log-shipper",
+  "packages/sandbox-home-device-proto",
+  "packages/sandbox-shared",
+];
 
 const path = (rel) => fileURLToPath(new URL(`../${rel}`, import.meta.url));
 

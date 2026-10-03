@@ -31,6 +31,7 @@ import {
 } from "../services/agent-image-service";
 import { readCappedBinaryBody } from "@onecli/channels";
 import { ensureDirectConversation } from "../services/conversation-service";
+import { greetEmptyDirectThread } from "../services/greeting-service";
 import { getAgentModels } from "../services/agent-models-service";
 import { agentsIncludeSchema } from "../validations/grants";
 import { listAgentsWithGrantsSummary } from "../services/grants-summary-service";
@@ -101,7 +102,7 @@ export const agentRoutes = () => {
         harness: parsed.data.harness,
         instructions: parsed.data.instructions,
       },
-      // The grantor recorded on the LLM keys the service auto-attaches.
+      // The grantor recorded on every grant the service auto-attaches.
       auth.userId,
     );
     invalidateGatewayCache(c.req.raw);
@@ -248,11 +249,34 @@ export const agentRoutes = () => {
   // deliberate posture for conversation writes.
   app.put("/:agentId/conversations/direct", async (c) => {
     const auth = c.get("auth");
+    const workspaceId = requireWorkspaceId(auth);
     const conversation = await ensureDirectConversation(
-      requireWorkspaceId(auth),
+      workspaceId,
       c.req.param("agentId"),
       auth.userId,
     );
+    // The agent speaks first: a thread that has never had a turn gets the
+    // platform's greeting instruction, answered live by the agent. Idempotent
+    // and best-effort inside (see greeting-service) — the door's own answer
+    // is the conversation, greeted or not.
+    //
+    // SESSION CALLERS ONLY — a person in the dashboard, where the greeting is
+    // the product moment. An API-key caller is a program, and the greeting
+    // would be a breaking surprise for it: the queued greeting occupies the
+    // one-active-turn slot, so a client that opens the thread and then POSTs
+    // a turn — the natural first two calls of any integration, and exactly
+    // what the hosted E2E suite does — would 409 where it used to succeed.
+    if (auth.scope === "session") {
+      await greetEmptyDirectThread(
+        workspaceId,
+        {
+          id: conversation.id,
+          agentId: conversation.agentId,
+          direct: conversation.direct,
+        },
+        auth.userId,
+      );
+    }
     return c.json(conversation);
   });
 

@@ -48,7 +48,8 @@
   },
   "pnpm": {
     "overrides": {
-      "openid-client": "6.8.5"
+      "openid-client": "6.8.5",
+      "@smithy/types": "^4.18.0"
     }
   }
 }

@@ -320,6 +320,31 @@ describe("park and wake polling", () => {
       request.path.endsWith("/wake"),
     );
     expect(wakeCalls).toHaveLength(3);
+    // No workspace: no body. An existing home needs no placement.
+    for (const call of wakeCalls) expect(call.body).toBeUndefined();
+  });
+
+  it("a wake given the workspace sends the create body's placement trio on EVERY poll (the manager may birth a brand-new home from it)", async () => {
+    manager.wakeStatuses.splice(
+      0,
+      manager.wakeStatuses.length,
+      "waking",
+      "ready",
+    );
+    const backend = backendFor();
+    backend.identify("rnr-stable");
+    await backend.wakeHome("home-sbx1", "ws1");
+    const wakeCalls = manager.requests.filter((request) =>
+      request.path.endsWith("/wake"),
+    );
+    expect(wakeCalls).toHaveLength(2);
+    for (const call of wakeCalls) {
+      expect(call.body).toEqual({
+        workspaceId: "ws1",
+        runnerId: "rnr-stable",
+        installationId: "aabbccdd",
+      });
+    }
   });
 
   it("wake throws at its ceiling — the caller must never map a half-restored home", async () => {

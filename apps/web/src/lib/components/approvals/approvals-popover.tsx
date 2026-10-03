@@ -1,6 +1,10 @@
 "use client";
 
 import { Inbox } from "lucide-react";
+import {
+  groupApprovals,
+  type ApprovalGroup,
+} from "@onecli/api/lib/approval-groups";
 import { ScrollArea } from "@onecli/ui/components/scroll-area";
 import {
   usePendingApprovals,
@@ -9,6 +13,7 @@ import {
 import type { PendingApproval } from "@/lib/api/approvals";
 import type { PendingChannelApprovalItem } from "@/lib/api/channel-approvals";
 import { ApprovalListItem } from "./approval-list-item";
+import { GroupedApprovalCard } from "./grouped-approval-card";
 import { ActionApprovalRow } from "./action-approval-row";
 import { ReachAskRow } from "./reach-ask-row";
 
@@ -16,9 +21,15 @@ interface ApprovalsPopoverProps {
   onShowDetails: (approval: PendingApproval) => void;
 }
 
-/** One row of the merged inbox, tagged by source. */
+/** One row of the merged inbox, tagged by source. A task's several gateway
+ *  requests fold into one grouped row (shared grouping keys). */
 type BellItem =
   | { kind: "gateway"; sortKey: string; approval: PendingApproval }
+  | {
+      kind: "gateway-group";
+      sortKey: string;
+      group: ApprovalGroup<PendingApproval>;
+    }
   | { kind: "channel"; sortKey: string; item: PendingChannelApprovalItem };
 
 /**
@@ -31,13 +42,13 @@ export const ApprovalsPopover = ({ onShowDetails }: ApprovalsPopoverProps) => {
   const { data: channel = [] } = usePendingChannelApprovals();
 
   const items: BellItem[] = [
-    ...gateway.map(
-      (approval): BellItem => ({
-        kind: "gateway",
-        sortKey: approval.createdAt,
-        approval,
-      }),
-    ),
+    ...groupApprovals(gateway).flatMap((group): BellItem[] => {
+      const [first, second] = group.approvals;
+      if (!first) return [];
+      return second
+        ? [{ kind: "gateway-group", sortKey: first.createdAt, group }]
+        : [{ kind: "gateway", sortKey: first.createdAt, approval: first }];
+    }),
     ...channel.map(
       (item): BellItem => ({ kind: "channel", sortKey: item.createdAt, item }),
     ),
@@ -76,6 +87,10 @@ export const ApprovalsPopover = ({ onShowDetails }: ApprovalsPopoverProps) => {
                   approval={entry.approval}
                   onShowDetails={() => onShowDetails(entry.approval)}
                 />
+              ) : entry.kind === "gateway-group" ? (
+                <div key={`gwg-${entry.group.key}`} className="p-2">
+                  <GroupedApprovalCard group={entry.group} showAgent compact />
+                </div>
               ) : entry.item.kind === "action" ? (
                 <ActionApprovalRow
                   key={`act-${entry.item.id}`}

@@ -7,6 +7,7 @@ import {
   type DirectoryPage,
 } from "./directory-pagination";
 import { AUDIT_SOURCE, type AuditSource } from "../../services/audit-service";
+import { dropPrincipalFromPolicyInTx } from "../../services/policy-service";
 import { reconcileMemberRoles } from "./team-service";
 
 /**
@@ -225,20 +226,32 @@ export const renameGroup = async (
   return renameGroupCore(organizationId, groupId, name);
 };
 
-/** Directory-service entry point — no management-source guard. */
+/** Directory-service entry point: no management-source guard. Both callers
+ * flush the organization's gateway cache after it returns (`withAudit` /
+ * `scimAudit`), which picks up the rules dropped here. */
 export const deleteGroupCore = async (
   organizationId: string,
   groupId: string,
 ): Promise<{ id: string; name: string }> => {
   const group = await requireGroup(organizationId, groupId);
-  // Snapshot members before the cascade: deleting the group drops its
-  // membership rows AND its role mapping (both cascade), so an ex-member still
-  // in another mapped group must be re-resolved (step 15).
-  const members = await db.groupMember.findMany({
-    where: { groupId: group.id },
-    select: { userId: true },
+  const members = await db.$transaction(async (tx) => {
+    // Snapshot members before the cascade: deleting the group drops its
+    // membership rows AND its role mapping (both cascade), so an ex-member
+    // still in another mapped group must be re-resolved (step 15).
+    const members = await tx.groupMember.findMany({
+      where: { groupId: group.id },
+      select: { userId: true },
+    });
+    // Its identity rows cascade too, so a rule naming only this group would
+    // start applying to every user. It goes first, in the same transaction.
+    await dropPrincipalFromPolicyInTx(tx, {
+      kind: "group",
+      id: group.id,
+      organizationId,
+    });
+    await tx.group.delete({ where: { id: group.id } });
+    return members;
   });
-  await db.group.delete({ where: { id: group.id } });
   await reconcileMemberRoles(
     organizationId,
     members.map((m) => m.userId),

@@ -18,6 +18,7 @@ import {
   Download,
   Activity,
   Sparkles,
+  Paperclip,
 } from "lucide-react";
 import type { NavItem } from "@/app/(dashboard)/_components/nav-main";
 import { CAPS } from "@/lib/env";
@@ -97,6 +98,12 @@ export const workspaceNavItems = (
   // they live in that agent's section (§3.18 as amended). The org tier keeps
   // its own page — it is a different promise (every agent, everywhere).
   { title: "Activity", url: `/w/${workspaceId}/activity`, icon: Activity },
+  // Files is a breadcrumb-only section: the download page for a file an
+  // agent sent, reached from a link outside the web (a Slack line). There is
+  // no listing to put in the sidebar — the crumb reads "Files", nothing more.
+  ...(opts?.sidebar
+    ? []
+    : [{ title: "Files", url: `/w/${workspaceId}/files`, icon: Paperclip }]),
   {
     title: "Workspace Settings",
     url: `/w/${workspaceId}/settings`,

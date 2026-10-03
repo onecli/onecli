@@ -1,10 +1,12 @@
 import {
+  bareToolName,
   isInlineableImage,
   isTerminalEvent,
   INLINE_IMAGES_TOTAL_MAX_BYTES,
   MAX_TURN_RESULT_ERROR_CHARS,
   MAX_UNHEALTHY_REASON_CHARS,
   TURN_FAILURE_CODES,
+  type AgentConnectionWire,
   type AttachmentManifestEntry,
   type Harness,
   type HarnessSession,
@@ -15,7 +17,11 @@ import {
 } from "@onecli/agent-protocol";
 import type { SupervisorConfig } from "./config";
 import { log } from "./log";
-import { isProviderRefusal, isTrialCreditExhausted } from "./provider-refusal";
+import {
+  isProviderRefusal,
+  isTranscriptRejected,
+  isTrialCreditExhausted,
+} from "./provider-refusal";
 import { renderHome, type RenderInputs } from "./home/renderer";
 import { applyHomeSync } from "./home/materializer";
 import {
@@ -25,9 +31,14 @@ import {
 } from "./home/attachments";
 import { startPlatformTools } from "./platform-tools";
 import { attachmentsFragment } from "./capabilities/attachments";
+import { agentsTools } from "./capabilities/agents";
+import { channelsChangeNote, channelsTools } from "./capabilities/channels";
 import { connectionsFragment } from "./capabilities/connections";
 import { cronsFragment, cronsTools } from "./capabilities/crons";
-import { recipientsFragment, recipientsTools } from "./capabilities/recipients";
+import {
+  createSendFileTools,
+  sendFileFragment,
+} from "./capabilities/send-file";
 import { machineFragment } from "./capabilities/machine";
 import { memoryFragment, memoryTools } from "./capabilities/memory";
 import { skillsFragment, skillsTools } from "./capabilities/skills";
@@ -79,6 +90,34 @@ export const MAX_ANSWER_CHARS = 256_000;
  * the stall window is the tunable; the heartbeat just has to beat it.
  */
 export const PROGRESS_INTERVAL_MS = 60_000;
+
+/**
+ * How long a first turn waits for its session to take the platform tool
+ * list from our bridge. jcode discovers MCP tools asynchronously and serves
+ * its on-disk cache (`.jcode-home/mcp-schema-cache.json`) until that lands,
+ * so without this wait the first turn after a deploy that CHANGED the tool
+ * set advertises the old one — observed live as `complete_task` reading
+ * "unknown tool". Measured live at 64ms on a cold start and 95ms on a
+ * resume, so the bound is pure headroom for a loaded container; it is paid
+ * once per session start, and only until the listing arrives.
+ *
+ * A ceiling, not a delay: exceeding it logs and proceeds, because a harness
+ * that never asks (no MCP bridge at all) must still be able to answer.
+ */
+const TOOL_LISTING_WAIT_MS = 10_000;
+
+/**
+ * The gap between jcode ASKING this bridge for its tools and that answer
+ * being live in the session. We can observe the request but not the
+ * registration (the SDK exposes no MCP-ready event), so this is the one
+ * unavoidable sleep — deliberately small, paid once per session start.
+ *
+ * Measured live (A/B over a resumed ref across a tool-set change): with no
+ * settle the first turn still carried the on-disk cached list; with 500ms
+ * it carried the new one. 1s keeps margin for a slower container without
+ * being felt — a session start already costs far more than this.
+ */
+const TOOL_REGISTRATION_SETTLE_MS = 1_000;
 
 /**
  * The signal path (index.ts) exits immediately without running the loop's
@@ -171,6 +210,35 @@ interface ConversationRuntime {
    * by both before either removes it would inject the user's words TWICE.
    */
   steerDrain: Promise<void>;
+  /**
+   * Platform tools the active turn's harness session has OPEN right now
+   * (bare name -> open count), fed by `tool.started` / `tool.finished`. The
+   * seam that attributes an MCP call to its conversation when two turns are
+   * in flight: the harness emits `tool_start` on the calling session's
+   * stream before the bridge's socket request arrives, so the one
+   * conversation with that tool open is the caller. Cleared per turn.
+   */
+  openTools: Map<string, number>;
+  /**
+   * Set when the agent's surface changed under a live session — a chat
+   * presence attached or removed while this conversation's session was
+   * already running. jcode captures the instruction doc and the MCP tool
+   * list at session start, so the running session would keep answering from
+   * the OLD doc (an agent attached to Slack mid-run told a Slack user it had
+   * no Slack access — observed on dev, 2026-09-15). The next turn on this
+   * conversation drops the session and starts a fresh one over the same
+   * resume ref, which re-reads the doc and re-lists the tools. Never applied
+   * to an IN-FLIGHT turn: the flag waits for the turn to end.
+   */
+  surfaceStale?: boolean;
+  /**
+   * What changed on the surface since this conversation's last turn, as one
+   * line the NEXT turn carries as context. Set with `surfaceStale`; cleared
+   * when consumed. The re-rendered doc says the new state; this says that
+   * it changed, in the model's most recent input, where two turns of "my
+   * app was removed" would otherwise win over the doc (observed live).
+   */
+  surfaceNote?: string;
 }
 
 export const runSupervisor = async (
@@ -190,6 +258,14 @@ export const runSupervisor = async (
   const renderInputs: RenderInputs = {
     instructions: config.instructions,
     agentName: config.agentName,
+    // The channels section is DERIVED from this on every render (renderer.ts)
+    // rather than registered as a static fragment: the presence list is a
+    // render input like the brief, refreshed by the home sync mid-run.
+    channels: config.channels,
+    // The agents section follows the same law, from the peer roster.
+    peers: config.peers,
+    // And the connected-apps list (with each host-bound app's host).
+    connections: config.connections,
     capabilities: harness.capabilities,
     // The §3.7 registry: each enabled capability contributes its fragment
     // here and its tools below — they arrive together, disappear together.
@@ -203,11 +279,10 @@ export const runSupervisor = async (
       connectionsFragment(harness.capabilities.skillsDir),
       cronsFragment,
       memoryFragment,
-      // Discovery for chat mentions (roadmap PR 3): how to find a person's
-      // exact name and anchor a pick. Unconditional — the tool answers
-      // empty off-channel, and the fragment's rules (verified vs claimed
-      // names, never fake a ping) are good hygiene everywhere.
-      recipientsFragment,
+      // The channels section (where the agent can be talked to, and the
+      // send_message/find_recipient teaching) is spliced in HERE by the
+      // renderer when the agent holds a presence — standing surface truth,
+      // beside memory and ahead of the machine sections.
       processesFragment,
       // Unconditional like connections: what survives sleep/relaunch is a
       // substrate property. Registered AFTER processes — its last bullet
@@ -216,10 +291,15 @@ export const runSupervisor = async (
       // Unconditional like connections: receiving files is a platform
       // property (every harness can read a file), not an adapter capability.
       attachmentsFragment,
+      // SENDING files (Tier 3) needs a runner that relays them; the fragment
+      // and its tool arrive together and only then — an agent must never be
+      // taught a tool it does not have.
+      ...(config.outboundAttachments ? [sendFileFragment] : []),
       ...(harness.capabilities.skillsDir
         ? [skillsFragment(harness.capabilities.skillsDir)]
         : []),
     ],
+    channelsAfter: memoryFragment.id,
   };
   const rendered = renderHome(config.homeDir, renderInputs);
   log("info", "home rendered", { files: rendered.files });
@@ -291,30 +371,71 @@ export const runSupervisor = async (
    * ack is ever sent for an incomplete projection. */
   let poisonedSyncGeneration: number | null = null;
 
-  // Attributes work to the calling turn only when that is unambiguous — one
-  // active turn — because a wrong anchor is worse than none. Shared by the
+  // Attributes work to the calling turn only when that is unambiguous,
+  // because a wrong anchor is worse than none. One active turn: that one.
+  // Several: the ONE whose session has `toolName` open right now (the
+  // harness announces a tool call on the calling session's event stream
+  // before the MCP bridge dials the socket, see `openTools`); with no name,
+  // or with the tool open in none or several, null. Shared by the
   // platform-tool channel and the background-task observer (both anchor
-  // arm-time context the same way).
-  const activeTurn = (): { conversationId: string; turnId: string } | null => {
+  // arm-time context the same way). Observed live (2026-09-16): a person's
+  // question in one conversation and a peer's message in another put two
+  // turns in flight, and the person's `message_agent` lost its origin.
+  const activeTurn = (
+    toolName?: string,
+  ): { conversationId: string; turnId: string } | null => {
     let found: { conversationId: string; turnId: string } | null = null;
+    let ambiguous = false;
     for (const [conversationId, runtime] of conversations) {
       if (!runtime.activeTurnId) continue;
-      if (found) return null; // two turns in flight — ambiguous
+      if (found) {
+        ambiguous = true;
+        break;
+      }
       found = { conversationId, turnId: runtime.activeTurnId };
     }
-    return found;
+    if (!ambiguous) return found;
+    if (!toolName) return null;
+    const bare = bareToolName(toolName);
+    let owner: { conversationId: string; turnId: string } | null = null;
+    for (const [conversationId, runtime] of conversations) {
+      if (!runtime.activeTurnId || !(runtime.openTools.get(bare) ?? 0)) {
+        continue;
+      }
+      if (owner) return null; // the same tool open in two sessions
+      owner = { conversationId, turnId: runtime.activeTurnId };
+    }
+    return owner;
   };
 
   // The platform-tool channel (step 7): the harness's MCP bridge dials the
   // local socket; invocations ride the transport as correlated tool.calls.
   // Started before the ready signal so the socket exists by the time the
   // harness spawns the bridge.
+  // send_file (Tier 3): reads the file HERE and streams it as file.part
+  // frames; the correlated file.result comes back through the reader below.
+  // Offered only when the runner said it can relay (config.outboundAttachments).
+  const sendFile = createSendFileTools({
+    homeDir: config.homeDir,
+    send: (message) => transport.send(message),
+  });
+
   const platformTools = await startPlatformTools({
-    tools: [
+    // Resolved per bridge startup (jcode spawns a bridge per session), so a
+    // session started after a mid-run presence change advertises the tools
+    // that change brought — the doc and the tools move together.
+    tools: () => [
       ...cronsTools,
       ...memoryTools,
-      ...recipientsTools,
+      // The messaging tools follow the channels section's condition: present
+      // exactly when a LIVE presence exists — read from the SAME mutable
+      // render inputs the home sync refreshes, never from boot config, so
+      // the fragment and the tools can never disagree.
+      ...channelsTools(renderInputs.channels),
+      // message_agent follows the agents section's condition the same way.
+      ...agentsTools(renderInputs.peers),
       ...createProcessTools(processes),
+      ...(config.outboundAttachments ? sendFile.tools : []),
       // The skills tools follow their fragment's condition exactly: no
       // skillsDir, no skills capability — teaching and tools arrive together.
       ...(harness.capabilities.skillsDir ? skillsTools : []),
@@ -347,6 +468,57 @@ export const runSupervisor = async (
       })
     : null;
 
+  /**
+   * What the agent's surface looks like to a session: provider + status
+   * per presence (handle/workspace are copy, not capability). Order-free.
+   */
+  const surfaceKey = (
+    channels: readonly { provider: string; status: string }[],
+  ): string =>
+    channels
+      .map((c) => `${c.provider}:${c.status}`)
+      .sort()
+      .join(",");
+  // The peer roster is a surface too: message_agent appears with the first
+  // peer and leaves with the last, and the doc names each one - a session
+  // that captured the old list must restart to see the new one. The wire
+  // carries names only (the exact word the tool takes), so a rename is a
+  // roster change here.
+  const peersKey = (peers: readonly { name: string }[]): string =>
+    peers
+      .map((p) => p.name)
+      .sort()
+      .join(",");
+  // The connected-apps list is doc truth too: which apps, which accounts,
+  // and above all which bound host each one works on.
+  const connectionsKey = (
+    connections: readonly AgentConnectionWire[],
+  ): string =>
+    connections
+      .map((c) => `${c.provider}|${c.label ?? ""}|${c.host ?? ""}`)
+      .sort()
+      .join("\n");
+
+  /**
+   * Every live session captured a doc and a tool list that just went stale.
+   * Flag them; `sessionFor` restarts each on its conversation's NEXT turn.
+   * A conversation with a turn in flight keeps running — the flag is read
+   * only at the next turn's start, so nothing in progress is disturbed.
+   */
+  const markSessionsStale = (reason: string, note: string | null): void => {
+    let count = 0;
+    for (const runtime of conversations.values()) {
+      if (runtime.session) {
+        runtime.surfaceStale = true;
+        if (note) runtime.surfaceNote = note;
+        count += 1;
+      }
+    }
+    if (count > 0) {
+      log("info", "live harness sessions marked stale", { reason, count });
+    }
+  };
+
   const runtimeFor = (conversationId: string): ConversationRuntime => {
     const existing = conversations.get(conversationId);
     if (existing) return existing;
@@ -356,6 +528,7 @@ export const runSupervisor = async (
       steerInbox: [],
       steered: new Map(),
       steerDrain: Promise.resolve(),
+      openTools: new Map(),
     };
     conversations.set(conversationId, created);
     return created;
@@ -437,7 +610,32 @@ export const runSupervisor = async (
     conversationId: string,
     resumeSessionRef: string | undefined,
   ): Promise<HarnessSession> => {
+    if (runtime.session && runtime.surfaceStale) {
+      // The doc and tool list this session captured are out of date. Drop
+      // it and start over on its own ref: resume keeps the transcript, and
+      // jcode rebuilds the prompt and re-spawns the MCP bridge for the new
+      // session (verified live: a fresh session sees the re-rendered doc and
+      // the tools the bridge now advertises; a reused one does not).
+      log("info", "harness session restarted: agent surface changed", {
+        conversationId,
+        sessionRef: runtime.session.sessionRef,
+      });
+      resumeSessionRef = runtime.session.sessionRef ?? resumeSessionRef;
+      // Let the adapter drop its live hold on the ref first, or the resume
+      // below would be refused as a duplicate and mint a memoryless session.
+      await runtime.session.release?.();
+      runtime.session = undefined;
+      runtime.surfaceStale = false;
+    }
     if (runtime.session) return runtime.session;
+    // jcode lists this bridge's tools ASYNCHRONOUSLY after a session
+    // starts, and serves its on-disk cache until that lands — so a turn
+    // taken right after the start can advertise the PREVIOUS boot's tools.
+    // That is what left `complete_task` reading as "unknown tool" for a
+    // conversation resumed across the deploy that added it. Take the marker
+    // BEFORE starting, so a listing that races us still counts.
+    const waitForTools = harness.capabilities.platformTools;
+    const listingMarker = waitForTools ? platformTools.listingMarker() : 0;
     const session = await harness.startSession({
       homeDir: config.homeDir,
       model: config.model,
@@ -455,6 +653,30 @@ export const runSupervisor = async (
       sessionRef: session.sessionRef,
       resumed: Boolean(resumeSessionRef),
     });
+    // Hold the first turn until THIS session has taken its list from us.
+    // Bounded: a harness that never asks proceeds anyway (see
+    // `toolsListedSince`) — a stale tool list beats a stalled turn.
+    if (waitForTools) {
+      const listed = await platformTools.toolsListedSince(
+        listingMarker,
+        TOOL_LISTING_WAIT_MS,
+      );
+      if (!listed) {
+        log("warn", "started a turn before the harness listed platform tools", {
+          conversationId,
+          waitedMs: TOOL_LISTING_WAIT_MS,
+        });
+      } else {
+        // The listing is the REQUEST; jcode registers the answer into the
+        // session just after it. Nothing on our side observes that last step
+        // (the SDK has no MCP-ready event), so give it a brief, bounded
+        // settle — measured live: 0ms still served the cached list, 500ms
+        // already served the new one; 1s is margin on a once-per-session cost.
+        await new Promise((resolve) =>
+          setTimeout(resolve, TOOL_REGISTRATION_SETTLE_MS),
+        );
+      }
+    }
     return session;
   };
 
@@ -488,7 +710,8 @@ export const runSupervisor = async (
     /** The harness's terminal `error` message, kept for failure classing. */
     let terminalError: string | undefined;
     /** The terminal `error` event's protocol code, when the adapter minted
-     * one — today only `harness_busy` (the adapter's self-heal exhausting). */
+     * one — `harness_busy` (the self-heal exhausting) or
+     * `harness_no_terminal` (the post-accept deadline). */
     let terminalErrorCode: string | undefined;
     /** Set on the failure arms: a turn that ended `failed` without a clean
      * terminal may have left the harness still executing its run — the
@@ -505,19 +728,24 @@ export const runSupervisor = async (
      * everything — the death codes carry lifecycle semantics (revival,
      * visibility, the unhealthy recycle) no other code may usurp; a dying
      * harness whose last words mention a rate limit is still a dead harness.
-     * `harness_busy` comes only from the terminal error EVENT's code (the
-     * adapter mints it; the catch arm's raw throw never does), and outranks
-     * the provider-refusal prose match.
+     * `harness_busy` and `harness_no_terminal` come only from the terminal
+     * error EVENT's code (the adapter mints them; the catch arm's raw throw
+     * never does), and outrank the provider-refusal prose match. A rejected
+     * transcript is checked before the refusal shapes too: its 400 must
+     * never read as a key problem (#1194).
      */
     const classify = (raw: string | undefined): string | undefined =>
       failureCode(runtime) ??
-      (terminalErrorCode === TURN_FAILURE_CODES.harnessBusy
-        ? TURN_FAILURE_CODES.harnessBusy
-        : raw && isTrialCreditExhausted(raw)
-          ? TURN_FAILURE_CODES.trialCreditExhausted
-          : raw && isProviderRefusal(raw)
-            ? TURN_FAILURE_CODES.modelProviderError
-            : undefined);
+      (terminalErrorCode === TURN_FAILURE_CODES.harnessBusy ||
+      terminalErrorCode === TURN_FAILURE_CODES.harnessNoTerminal
+        ? terminalErrorCode
+        : raw && isTranscriptRejected(raw)
+          ? TURN_FAILURE_CODES.transcriptRejected
+          : raw && isTrialCreditExhausted(raw)
+            ? TURN_FAILURE_CODES.trialCreditExhausted
+            : raw && isProviderRefusal(raw)
+              ? TURN_FAILURE_CODES.modelProviderError
+              : undefined);
 
     /**
      * The CURRENT message segment — everything the agent has said since its
@@ -650,9 +878,12 @@ export const runSupervisor = async (
       // an empty string, which jcode turns into an empty text block the
       // model API rejects with a 400 (verified in v0.71.1; v0.81.1 still
       // passes the content through verbatim, no filtering).
-      const composed = item.context
-        ? `${item.context}\n\n${item.message}`
-        : item.message;
+      const surfaceNote = runtime.surfaceNote;
+      runtime.surfaceNote = undefined;
+      const context = [surfaceNote, item.context]
+        .filter((part): part is string => Boolean(part))
+        .join("\n\n");
+      const composed = context ? `${context}\n\n${item.message}` : item.message;
       const prompt =
         composed.trim().length > 0
           ? composed
@@ -728,6 +959,15 @@ export const runSupervisor = async (
         if (event.type === "tool.started" || event.type === "tool.finished") {
           if (segment.trim()) previousSegment = segment;
           segment = "";
+          const bare = bareToolName(event.name);
+          const open = runtime.openTools.get(bare) ?? 0;
+          if (event.type === "tool.started") {
+            runtime.openTools.set(bare, open + 1);
+          } else if (open <= 1) {
+            runtime.openTools.delete(bare);
+          } else {
+            runtime.openTools.set(bare, open - 1);
+          }
         }
 
         // The answer goes out BEFORE the terminal event, not after: `seq` is
@@ -778,15 +1018,18 @@ export const runSupervisor = async (
         // The raw refusal rides beside the code — the control plane stores
         // only the canonical copy and keeps this for its server log (and an
         // old control plane's raw passthrough matches the catch arm below).
-        // `harness_busy` attaches it too, as the version-skew guard: an old
-        // control plane that ignores the code then stores visible text
-        // instead of regressing to the silent NULL shape. Uncoded failures
-        // keep today's shape: no error field, the transcript stream's own
-        // error event is the witness. Sliced at the source per the
-        // transport's truncate-at-sender law: this frame must deliver.
+        // `harness_busy` / `harness_no_terminal` / `transcript_rejected`
+        // attach it too, as the version-skew guard: an old control plane
+        // that ignores the code then stores visible text instead of
+        // regressing to the silent NULL shape. Uncoded failures keep
+        // today's shape: no error field, the transcript stream's own error
+        // event is the witness. Sliced at the source per the transport's
+        // truncate-at-sender law: this frame must deliver.
         ...((errorCode === TURN_FAILURE_CODES.modelProviderError ||
           errorCode === TURN_FAILURE_CODES.trialCreditExhausted ||
-          errorCode === TURN_FAILURE_CODES.harnessBusy) &&
+          errorCode === TURN_FAILURE_CODES.harnessBusy ||
+          errorCode === TURN_FAILURE_CODES.harnessNoTerminal ||
+          errorCode === TURN_FAILURE_CODES.transcriptRejected) &&
           terminalError && {
             error: terminalError.slice(0, MAX_TURN_RESULT_ERROR_CHARS),
           }),
@@ -832,6 +1075,7 @@ export const runSupervisor = async (
     } finally {
       clearInterval(progressTimer);
       runtime.activeTurnId = undefined;
+      runtime.openTools.clear();
       runtime.pendingAborts.delete(item.turnId);
       if (runtime.abortedTurnId === item.turnId) {
         runtime.abortedTurnId = undefined;
@@ -1060,6 +1304,14 @@ export const runSupervisor = async (
         continue;
       }
 
+      if (item.kind === "file.result") {
+        // Inline like tool.result: a send_file call inside the running turn
+        // is awaiting exactly this; queued behind that turn it would deadlock
+        // into the tool's timeout.
+        sendFile.handleResult(item);
+        continue;
+      }
+
       if (item.kind === "attachment.part") {
         // Chained like skills.changed (real I/O; awaiting would stall the
         // reader and therefore aborts) but with its OWN catch: an attachment
@@ -1093,15 +1345,36 @@ export const runSupervisor = async (
         // generation instead leaves `applied` behind, and the paced re-push
         // is the retry. A new generation clears it by construction.
         syncQueue = syncQueue
-          .then(() => {
+          .then(async () => {
             if (poisonedSyncGeneration === item.generation) return;
-            return applySync(
+            const before = surfaceKey(renderInputs.channels);
+            const beforePresences = [...renderInputs.channels];
+            const beforePeers = peersKey(renderInputs.peers);
+            const beforeConnections = connectionsKey(renderInputs.connections);
+            await applySync(
               config.homeDir,
               item,
               renderInputs,
               (message) => transport.send(message),
               harvester,
             );
+            if (surfaceKey(renderInputs.channels) !== before) {
+              markSessionsStale(
+                "channels changed",
+                channelsChangeNote(beforePresences, renderInputs.channels),
+              );
+            } else if (peersKey(renderInputs.peers) !== beforePeers) {
+              // No conversation note: nothing here misleads a session the
+              // way a removed-then-restored app did; the re-rendered doc
+              // and tool list are the whole change.
+              markSessionsStale("peers changed", null);
+            } else if (
+              connectionsKey(renderInputs.connections) !== beforeConnections
+            ) {
+              // A live session read the old connected-apps list (or an old
+              // bound host) — restart it so it calls the right place.
+              markSessionsStale("connections changed", null);
+            }
           })
           .catch((error: unknown) => {
             poisonedSyncGeneration = item.generation;
@@ -1168,6 +1441,8 @@ export const runSupervisor = async (
     // await (as timeouts), so nothing below waits on answers that cannot
     // arrive once the transport closes.
     harvester.stop();
+    // Pending send_file waits resolve as timeouts for the same reason.
+    sendFile.close();
     // Background children next: SIGTERM their groups and destroy their pipes
     // (open pipe handles would otherwise hold this process past the loop's
     // end). Sends nothing — once the container stops the control plane's

@@ -4,7 +4,7 @@ import { resolveMetricNamespace } from "./metric-namespace";
 
 /**
  * Terminator boot configuration (step 5 — the SSH front door). Same law as
- * the manager's and parkd's loaders: a SET but unparsable value throws at
+ * the manager's and the home daemon's loaders: a SET but unparsable value throws at
  * boot, never a silent fallback — the terminator is the platform's only
  * public listener, and a mis-fenced knob nobody notices is exactly the
  * failure mode it must never have.

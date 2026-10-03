@@ -247,9 +247,16 @@ export const AppsTab = ({
     e?.stopPropagation();
     const hasCredentials =
       envDefaultProviders.has(app.id) || configuredProviders.has(app.id);
+    // Apps with an API-key alternate (Attio, Apollo, PostHog) can always
+    // connect: the popup offers the key form when OAuth isn't configured or
+    // isn't on the org's plan, so don't dead-end in the OAuth setup dialog.
+    const hasApiKeyAlternate = (app.additionalMethods ?? []).some(
+      (m) => m.type === "api_key",
+    );
     if (
       app.configurable?.fields &&
       !hasCredentials &&
+      !hasApiKeyAlternate &&
       (connectionCounts.get(app.id) ?? 0) === 0
     ) {
       setConfigApp(app);

@@ -63,9 +63,6 @@ vi.mock("@/lib/onboarding/_components/flow-chrome", () => ({
 vi.mock("@/lib/onboarding/_components/onboarding-footer", () => ({
   OnboardingFooter: () => null,
 }));
-vi.mock("@/lib/onboarding/_components/onboarding-escape-hatch", () => ({
-  OnboardingEscapeHatch: () => null,
-}));
 
 import OnboardingLayout from "./onboarding-layout";
 

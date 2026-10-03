@@ -197,6 +197,12 @@ describe("createSandbox", () => {
       NanoCpus: 2e9,
       PidsLimit: 256,
       SecurityOpt: ["no-new-privileges"],
+      // Bounded and rotated: the harness log forwarded onto stderr must
+      // never grow the self-host disk without limit.
+      LogConfig: {
+        Type: "json-file",
+        Config: { "max-size": "10m", "max-file": "5" },
+      },
     });
   });
 

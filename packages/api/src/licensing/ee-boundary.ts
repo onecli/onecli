@@ -58,8 +58,8 @@ export interface Seam {
 export const SEAMS: readonly Seam[] = [
   {
     from: "packages/api/src/edition-defaults.ts",
-    why: "The boot-time injector: the one place that wires cloud provider implementations into the shared seams. Called from server entry points only, never from a client-reachable module.",
-    count: 15,
+    why: "The boot-time injector: the one place that wires cloud provider implementations into the shared seams. Called from server entry points only, never from a client-reachable module. (+1: the S3 attachment blob store, selected by entitlement + bucket config.)",
+    count: 16,
     permanent: true,
   },
   {
@@ -174,6 +174,16 @@ export const DYNAMIC_SEAMS: readonly DynamicSeam[] = [
   {
     from: "apps/web/src/lib/workspaces/workspace-layout.tsx",
     specifiers: ["@/ee/billing/_components/over-quota-banner"],
+  },
+  {
+    // Account deletion tears down the user's organizations on the way out.
+    // Org/team lifecycle stayed licensed; the free account service reaches
+    // it lazily so the free build carries no static coupling.
+    from: "packages/api/src/services/account-deletion-service.ts",
+    specifiers: [
+      "../ee/services/organization-service",
+      "../ee/services/team-service",
+    ],
   },
   {
     from: "packages/api/src/services/policy-onprem-validator.ts",

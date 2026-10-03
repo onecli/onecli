@@ -165,6 +165,49 @@ When a message is accepted you'll see an emoji reaction land on it — the
 message when the agent finishes, and the reaction comes off. (No partial or
 self-editing messages — the answer posts once, complete.)
 
+### What the agent knows about its Slack app
+
+Once an app is attached, the agent's own instructions gain a "Where you talk"
+section: it knows it is reachable on Slack under that handle in that
+workspace, that a person may be writing from the dashboard or from Slack, and
+that Slack is **not** a gateway connection — it never calls the Slack API
+itself and never asks anyone to "connect Slack". Its `send_message` and
+`find_recipient` tools exist exactly when a live app exists. Attaching or
+detaching while the agent is awake takes effect on its **next message**: the
+running conversation quietly restarts its harness session (its memory of the
+conversation is kept), so the agent's instructions and its Slack tools are
+refreshed together. A message the agent is in the middle of answering is
+never interrupted for this.
+
+There is no separate Slack entry in **Connections** for the same reason: an
+agent's Slack access _is_ its app. A Slack connection made through the
+gateway before this change is removed on upgrade, together with any policy
+or availability rule that pointed only at it; nothing is left to disconnect.
+
+If the workspace **uninstalls** the agent's app from Slack (or revokes its
+token), the presence flips to **Disabled**: the agent's Channels card says so
+and offers **Re-attach** (which resumes the same app) or **Detach**, and the
+agent's instructions say its app was removed until then.
+
+Two doors detect the removal. Slack's `app_uninstalled` / `tokens_revoked`
+events are the fast one (apps created before this behavior shipped are not
+subscribed to them until their manifest is updated or they are re-created).
+The second door needs no event at all: the first thing the platform tries to
+do with the app's token afterwards (react to a message, post an answer, run
+`send_message` or `find_recipient`) is refused by Slack with a code that means
+the app is gone (`account_inactive`, `token_revoked`, `invalid_auth`), and
+that refusal flips the presence the same way. This is what covers an app
+**deleted** at api.slack.com (Slack sends no event a per-agent app can
+subscribe to for that), a webhook lost while the channel adapter was offline,
+or an older app that never subscribed. A rate limit or a missing scope never
+counts as removal.
+
+Whichever door found out, the agent hears it from its tools too: while its
+only Slack app is disabled, `send_message` and `find_recipient` answer with
+the removal and the re-attach path instead of an empty result, including on
+the very call that discovered the dead token. A resumed session may still
+list those tools; the answer is what keeps the agent from retrying.
+
 ## Troubleshooting
 
 - **"Channels are offline"** — the adapter isn't running or can't reach the
@@ -197,6 +240,21 @@ self-editing messages — the answer posts once, complete.)
 - **The agent ignores channel chatter** — by design. In channels it answers
   when mentioned, and follows up only inside threads it is already part of.
   Each thread is its own conversation.
+- **The agent says its Slack app was removed** — Slack told the platform the
+  app was uninstalled or its token revoked. The agent's Channels card reads
+  **Disabled**: click **Re-attach** to restore the same app (one consent,
+  or, without an org automation token, one step: reinstall the app at
+  api.slack.com if it was uninstalled and paste its fresh tokens; the app id
+  is already on file), or **Detach** to drop it. A running agent picks the
+  change up on its next message either way.
+- **The agent says it has no Slack access right after you attached it** — it
+  answered from a session that started before the attach. Send it one more
+  message: the next turn restarts the session on the fresh instructions and
+  tools. If it persists, the agent is running an image from before this
+  behavior; a restart refreshes it.
+- **You deleted the app at api.slack.com and the card still says Connected**
+  — nothing has tried the dead token yet. Send the agent a message in Slack
+  or ask it to `send_message`; the first refused call flips the card.
 - **No reaction appears on accepted messages** — an app installed before the
   `reactions:write` scope was added needs a **reinstall** (open the app's
   settings → Install App → Reinstall to Workspace). Answers still arrive

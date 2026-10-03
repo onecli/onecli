@@ -253,9 +253,9 @@ const seed = async (): Promise<void> => {
 
   // The calendar grant stack — authored by the REAL compiler (allow
   // list_events, ask create_event; delete_event lands in the blocked
-  // complement, everything else in the terminal). Its atomic publish snapshots
-  // the ENTIRE draft above into generation 1, so the active published set is
-  // exactly what the service produces in production.
+  // complement, uncatalogued requests on the approval terminal). Its atomic
+  // publish snapshots the ENTIRE draft above into generation 1, so the active
+  // published set is exactly what the service produces in production.
   await setConnectionGrant(
     { workspaceId: FIXTURE.workspace, organizationId: FIXTURE.org },
     FIXTURE.agent,

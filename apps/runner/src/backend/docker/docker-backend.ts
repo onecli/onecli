@@ -378,6 +378,17 @@ export const createDockerBackend = (
               SecurityOpt: ["no-new-privileges"],
               CapDrop: ["ALL"],
               RestartPolicy: { Name: "no" },
+              // A bounded, rotated container log. The supervisor forwards
+              // the harness's own log onto stderr (about 1 MB in a measured
+              // 35-minute session), and Docker's default json-file driver
+              // never rotates: a long-lived agent would grow the host's
+              // disk without limit. 5 x 10 MB is ample for `docker logs`
+              // debugging. Explicit, so a daemon whose default driver
+              // is not json-file (journald, none) still gets `docker logs`.
+              LogConfig: {
+                Type: "json-file",
+                Config: { "max-size": "10m", "max-file": "5" },
+              },
               ...(options.extraHosts &&
                 options.extraHosts.length > 0 && {
                   ExtraHosts: options.extraHosts,

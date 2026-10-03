@@ -131,6 +131,16 @@ export const mapRuleActionToPermission = (
 export interface AppPermissionDefinition {
   provider: string;
   groups: AppToolGroup[];
+  /**
+   * What a CUSTOMIZED grant does with requests this catalog does not describe.
+   * Absent (the norm): they NEED APPROVAL (the grant compiler's terminal
+   * whole-app row is allow + requireApproval). `"block"`: that terminal is a
+   * block instead, so the catalog itself is the boundary. Reserved for
+   * providers whose credential reaches far beyond the catalog (AWS injects
+   * across every `*.amazonaws.com` service), where "custom = S3 read" must not
+   * become "and IAM too, one click away".
+   */
+  unlisted?: "block";
 }
 
 // The public projection of the catalog: tool identity only. The endpoint
@@ -156,6 +166,10 @@ export interface AppToolGroupSummary {
 export interface AppPermissionDefinitionSummary {
   provider: string;
   groups: AppToolGroupSummary[];
+  /** `AppPermissionDefinition.unlisted`: a policy posture, not endpoint
+   * mapping, so it is client-safe. Lets the dialog say what a customization
+   * does with requests outside the list. */
+  unlisted?: "block";
 }
 
 const toToolSummary = ({ id, name, description }: AppTool): AppToolSummary => ({
@@ -178,4 +192,5 @@ export const toAppPermissionDefinitionSummary = (
         }
       : {}),
   })),
+  ...(def.unlisted ? { unlisted: def.unlisted } : {}),
 });

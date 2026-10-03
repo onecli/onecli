@@ -507,9 +507,10 @@ export const SecretDialog = ({
       }
       queryClient.invalidateQueries({ queryKey: queryKeys.secrets.all() });
       queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
-      // Creating an LLM key auto-attaches it to agents that could reach no
-      // key at all (the API's `llm-autoattach-service`), so this is a grant
-      // write too — the attach-list and policy views are stale without this.
+      // Creating a workspace secret auto-attaches it (a custom secret to every
+      // agent, an LLM key to the agents that could reach none), so this is a
+      // grant write too: the attach-list and policy views are stale without
+      // this.
       queryClient.invalidateQueries({ queryKey: queryKeys.grants.all() });
       queryClient.invalidateQueries({ queryKey: queryKeys.policy.all() });
       queryClient.invalidateQueries({ queryKey: queryKeys.agents.all() });

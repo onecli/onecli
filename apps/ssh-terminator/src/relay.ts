@@ -16,7 +16,7 @@ export type { RelayRequest } from "./backend/types";
  * The guest's durable-home contract, duplicated privately (the
  * runner/supervisor precedent): byte-equal with the agent image
  * (docker/agent.Dockerfile, agent-entrypoint.sh) and pinned against
- * apps/sandbox-manager/src/constants.ts by the infra contract test
+ * packages/sandbox-shared/src/constants.ts by the infra contract test
  * (sandbox-manager-contract.test.ts) — change them ONLY in lockstep.
  */
 export const HOME_MOUNT = "/workspace";

@@ -256,6 +256,13 @@ export interface FakeHarness extends Harness {
    * still accepts the turn that triggers the launch.
    */
   failNextStartSession(reason?: string): void;
+  /**
+   * Every `startSession` call so far, in order, with the resume ref it was
+   * handed — the observable for "the supervisor restarted a session" (a
+   * restart on the same ref is otherwise invisible from outside: same ref,
+   * same transcript). Test seam only.
+   */
+  readonly sessionStarts: readonly { resumeSessionRef?: string }[];
 }
 
 const DEFAULT_LAUNCH_FAILURE = "harness launch failed: spawn ENOENT";
@@ -265,6 +272,14 @@ export const createFakeHarness = (options?: {
   store?: FakeSessionStore;
   /** Test seam; production resolves the process's own socket. */
   toolsSocketPath?: () => string;
+  /**
+   * Declare that this harness uses the platform-tools bridge, so the
+   * supervisor holds a starting session's first turn until the bridge is
+   * asked for its tools. Default false: the fake has no MCP bridge and
+   * must never be waited for. Test seam for the WIRING of that wait —
+   * a test that sets it is responsible for dialing the socket.
+   */
+  platformTools?: boolean;
 }): FakeHarness => {
   const store = options?.store ?? createFakeSessionStore();
   const script = options?.script ?? defaultScript;
@@ -273,6 +288,7 @@ export const createFakeHarness = (options?: {
   let counter = 0;
   let onFailure: ((reason: string) => void) | undefined;
   let launchFailure: string | undefined;
+  const sessionStarts: { resumeSessionRef?: string }[] = [];
   const liveness: Liveness = {};
 
   return {
@@ -284,6 +300,10 @@ export const createFakeHarness = (options?: {
       steer: true,
       skillsDir: ".agents/skills",
       instructionFiles: ["CLAUDE.md", "AGENTS.md"],
+      // No MCP bridge by default: the fake serves scripted events, so it
+      // never asks the supervisor for a tool list and must never be waited
+      // for. A test may declare one to exercise the supervisor's wait.
+      platformTools: options?.platformTools ?? false,
     },
     onFailure(listener) {
       onFailure = listener;
@@ -296,7 +316,13 @@ export const createFakeHarness = (options?: {
     failNextStartSession(reason = DEFAULT_LAUNCH_FAILURE) {
       launchFailure = reason;
     },
+    sessionStarts,
     startSession(sessionOptions: StartSessionOptions) {
+      sessionStarts.push({
+        ...(sessionOptions.resumeSessionRef !== undefined && {
+          resumeSessionRef: sessionOptions.resumeSessionRef,
+        }),
+      });
       if (launchFailure) {
         const reason = launchFailure;
         launchFailure = undefined;

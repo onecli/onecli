@@ -201,14 +201,24 @@ export const createCloudBackend = (
      * Wake IS awaited — the caller is about to map the home into a new
      * sandbox, so `ready` is the only acceptable exit. The ceiling is
      * generous by design: a wake may pay a still-finishing park, a fresh
-     * node provision, and a full restore stream.
+     * node provision, and a full restore stream. With a workspace, every
+     * poll carries the placement trio (the create body's), so a brand-new
+     * home is born HERE, carved and device-backed before the pod exists;
+     * the manager ignores it for any home that already exists.
      */
-    async wakeHome(ref: HomeRef) {
+    async wakeHome(ref: HomeRef, workspaceId?: string) {
+      const placement = workspaceId
+        ? {
+            workspaceId,
+            runnerId: owner,
+            installationId: options.installationId,
+          }
+        : undefined;
       const deadline = Date.now() + options.wakeWaitSeconds * 1000;
       let lastNote = "no answer yet";
       for (;;) {
         try {
-          const { status } = await client.wakeHome(ref);
+          const { status } = await client.wakeHome(ref, placement);
           if (status === "ready") return;
           lastNote = `last status: ${status}`;
         } catch (error) {

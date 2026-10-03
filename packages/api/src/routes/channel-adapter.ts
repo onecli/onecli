@@ -37,6 +37,7 @@ import {
   expireStaleActionApprovals,
 } from "../services/channels/action-approval-service";
 import { rotateStaleIntegrations } from "../services/channels/channel-integration-service";
+import { processChannelCleanups } from "../services/channels/channel-cleanup-service";
 import {
   recordMentionFailures,
   resolveMentionNames,
@@ -47,6 +48,7 @@ import {
   isChannelProviderId,
 } from "../services/channels/registry";
 import { readTranscriptEvents } from "../services/turn-service";
+import { getAttachmentBytesForAdapter } from "../services/attachment-service";
 import {
   adapterActionDecisionSchema,
   adapterApprovalHealthSchema,
@@ -433,9 +435,17 @@ export const channelAdapterRoutes = () => {
 
   // POST /channel-adapter/rotate-integrations — the proactive credential
   // sweep (~hourly from the adapter; staleness is decided server-side).
-  app.post("/rotate-integrations", async (c) =>
-    c.json(await rotateStaleIntegrations()),
-  );
+  // The durable channel-cleanup pass rides the same trigger (independent of
+  // presence/config polling, including at adapter boot) but runs DETACHED:
+  // it can spend minutes on bounded provider calls, the adapter's client
+  // aborts at 15s, and its counts are maintenance detail the adapter never
+  // acted on. The answer stays the rotation's counts.
+  app.post("/rotate-integrations", async (c) => {
+    void processChannelCleanups().catch((err: unknown) =>
+      log.warn({ err }, "channel cleanup maintenance failed"),
+    );
+    return c.json(await rotateStaleIntegrations());
+  });
 
   // POST /channel-adapter/expire-reach — the pending-ask expiry sweep
   // (slow loop from the adapter; the window is decided server-side). Parks
@@ -463,6 +473,27 @@ export const channelAdapterRoutes = () => {
   // The adapter's fence is thread-link ownership, not the user privacy fence:
   // it serves every surface bound to a presence, including other users'
   // direct threads, over its own authenticated channel.
+
+  /**
+   * GET /channel-adapter/attachments/:id — the byte pull behind a work item's
+   * `turn.attachments` (the agent's send_file output). Bytes never ride the
+   * work poll (a batch could carry hundreds of MB and one bad parse would
+   * poison every item). Fenced in the service to the caller's ownership
+   * slice; hint-free 404 on any miss.
+   */
+  app.get("/attachments/:attachmentId", async (c) => {
+    const found = await getAttachmentBytesForAdapter(
+      c.req.param("attachmentId"),
+      c.get("channelAdapter").adapterId,
+    );
+    if (!found) return c.json({ error: "Not found" }, 404);
+    return c.body(new Uint8Array(found.bytes), 200, {
+      "Content-Type": "application/octet-stream",
+      "Content-Length": String(found.bytes.byteLength),
+      "X-Content-Type-Options": "nosniff",
+      "Cache-Control": "no-store",
+    });
+  });
 
   app.get("/conversations/:conversationId/events", async (c) => {
     const conversationId = c.req.param("conversationId");

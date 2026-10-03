@@ -35,6 +35,9 @@ const AppDetailPage = async ({ params }: Props) => {
         darkIcon: app.darkIcon,
         description: app.description,
         connectionType: app.connectionMethod.type,
+        hasApiKeyAlternate: (app.additionalMethods ?? []).some(
+          (m) => m.type === "api_key",
+        ),
         blocklist: app.blocklist,
       }}
       configurable={app.configurable}

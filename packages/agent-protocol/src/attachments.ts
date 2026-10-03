@@ -49,6 +49,75 @@ export const INLINE_IMAGES_TOTAL_MAX_BYTES = 10 * 1024 * 1024;
 export const MAX_PENDING_ATTACHMENTS_PER_CONVERSATION = 20;
 
 /**
+ * OUTBOUND attachments — files the AGENT hands back (`send_file`, Tier 3 of
+ * plans/agent-owns-its-machine.md). The inbound caps above size a human's
+ * message; the agent's output is different work — a 30 s 1080p Playwright
+ * recording is 2–5 MB, a rendered report or a CSV export lands in the same
+ * range, and the generation platforms sit far higher (Anthropic Files 500 MB,
+ * OpenAI 512 MB, Slack 1 GB). 25 MB covers the realistic browser/report
+ * cases while keeping an inline-Postgres row a non-issue; the S3 arm of the
+ * blob-store seam is where a bigger cap would go. Enforced at THREE points
+ * (supervisor before it reads, runner before it relays, api before it
+ * stores), because each hop is a different trust boundary.
+ */
+export const MAX_OUTBOUND_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+/** Files one turn may send. Also bounds the model's fan-out per reply. */
+export const MAX_OUTBOUND_ATTACHMENTS_PER_TURN = 10;
+
+/**
+ * Bytes one conversation may send per rolling 24 h — the abuse ceiling a
+ * prompt-injected or looping agent hits before storage does (8 × the
+ * per-turn maximum). Enforced control-plane-side only: it is the one cap
+ * that needs the database's view.
+ */
+export const MAX_OUTBOUND_ATTACHMENT_BYTES_PER_CONVERSATION_DAY =
+  200 * 1024 * 1024;
+
+/** `ConversationAttachment.source` for agent-sent rows (the inbound doors
+ * write "web" or a channel provider id). */
+export const OUTBOUND_ATTACHMENT_SOURCE = "agent";
+
+/** Caption the model may attach to a sent file (Slack's `initial_comment`
+ * carries it; the web renders it under the chip). */
+export const MAX_OUTBOUND_CAPTION_CHARS = 500;
+
+/**
+ * How long an attachment's BYTES stay downloadable after it lands on a
+ * turn, either direction. Past this the row keeps its metadata (name, size,
+ * who sent it) and reads `expired`; the payload is gone from wherever it
+ * lived (the inline column nulled, the object deleted). Stated to the model
+ * so it never promises a file it cannot keep, and enforced by the api's
+ * sweep plus the bucket's lifecycle rule.
+ */
+export const ATTACHMENT_RETENTION_DAYS = 30;
+
+/**
+ * A caption as stored: one line of printable text, or nothing. Control
+ * characters go (a caption is quoted into Slack mrkdwn and a web `<p>`;
+ * neither wants a bell or a carriage return), runs of whitespace collapse
+ * (the model's "note" is a sentence, not a layout), and an empty result is
+ * `null` — the same absence as no caption at all.
+ */
+export const normalizeAttachmentCaption = (
+  raw: string | null | undefined,
+): string | null => {
+  if (raw === null || raw === undefined) return null;
+  // Control characters become spaces first (a newline separates words, it
+  // must not glue them), then whitespace collapses to single spaces.
+  const cleaned = [...raw]
+    .map((ch) => {
+      const code = ch.charCodeAt(0);
+      return code < 0x20 || code === 0x7f ? " " : ch;
+    })
+    .join("")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_OUTBOUND_CAPTION_CHARS);
+  return cleaned.length === 0 ? null : cleaned;
+};
+
+/**
  * Raw bytes per `attachment.part` frame. Base64 inflates 4/3: 144_000 raw →
  * 192_000 base64 chars, keeping the serialized frame under the house
  * MAX_SYNC_PART_BYTES (200_000) and well under the runner WS's 256KB
@@ -111,6 +180,20 @@ export const isInlineableImage = (
  * Extension-preserving truncation: a screenshot with a 150-char name must
  * stay openable by extension-sniffing tools after the cut.
  */
+/**
+ * The `Content-Disposition` for serving an attachment as a DOWNLOAD (RFC
+ * 6266): an ASCII fallback in the quoted-string plus the UTF-8 real name in
+ * `filename*`. The stored name is already sanitized (no controls, no `/` or
+ * `\`); the two quoted-string escapes (`"` and `\`) are stripped here too,
+ * so every serving path is safe on its own — one builder for the api's
+ * bytes route and the S3 store's presigned override, so the two cannot
+ * drift.
+ */
+export const attachmentDownloadDisposition = (name: string): string => {
+  const ascii = name.replace(/[^ -~]/g, "_").replace(/["\\]/g, "'");
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+};
+
 export const sanitizeAttachmentName = (raw: string): string => {
   const cleaned = [...raw]
     .filter((ch) => {

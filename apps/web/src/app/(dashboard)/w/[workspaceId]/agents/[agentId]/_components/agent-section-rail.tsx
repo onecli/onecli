@@ -10,7 +10,8 @@ import {
   AGENT_SECTION_GROUPS,
   type AgentSection,
 } from "@/lib/agents/agent-sections";
-import { isSlackConnected, SLACK_ICON_SRC } from "@/lib/agents/slack-presence";
+import { connectedPresences } from "@/lib/agents/channel-providers";
+import { channelProviderUi } from "@/lib/agents/channel-providers/registry";
 import { AppIcon } from "@/lib/components/app-icon";
 import { useCounts } from "@/hooks/use-counts";
 import { useInstance } from "@/hooks/use-instance";
@@ -125,10 +126,14 @@ export const AgentSectionRail = ({ agent }: { agent: AgentPageAgent }) => {
 
   const hrefFor = (s: AgentSection) => `${base}/${s.section}`;
 
-  // The channels row's glyph becomes the colorful Slack mark once an install
-  // actually COMPLETED — a `pending_setup` row (a clicked-but-unfinished
-  // attach) keeps the grey glyph, the same line the section itself draws.
-  const slackConnected = isSlackConnected(agent.channels);
+  // The channels row's glyph becomes the provider's colorful mark once an
+  // install actually COMPLETED — a `pending_setup` row (a clicked-but-
+  // unfinished attach) keeps the grey glyph, the same line the section
+  // itself draws. The first connected presence whose provider this build
+  // knows supplies the mark.
+  const connectedUi = connectedPresences(agent.channels)
+    .map((presence) => channelProviderUi(presence.provider))
+    .find((ui) => ui !== null);
 
   const renderLink = (s: AgentSection, compact?: boolean) => (
     <RailLink
@@ -140,8 +145,8 @@ export const AgentSectionRail = ({ agent }: { agent: AgentPageAgent }) => {
       compact={compact}
       prominent={s.prominent === true}
       connectedMark={
-        s.section === "channels" && slackConnected
-          ? { src: SLACK_ICON_SRC, provider: "Slack" }
+        s.section === "channels" && connectedUi
+          ? { src: connectedUi.iconSrc, provider: connectedUi.name }
           : undefined
       }
     />

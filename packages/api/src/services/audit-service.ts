@@ -45,6 +45,11 @@ export const AUDIT_ACTIONS = {
 
 export const AUDIT_SERVICES = {
   AGENT: "agent",
+  // A conversation attachment the AGENT sent back (send_file). Inbound
+  // uploads are a person's own act and are not audited; an agent handing
+  // bytes out of its sandbox is the exfiltration-shaped event compliance
+  // wants a row for — metadata (name, size, hash, ids), never content.
+  ATTACHMENT: "attachment",
   SECRET: "secret",
   // Unified policy engine (policy_rules_v2): the priority-ordered rule model.
   // (The legacy `rule` service retired with the old model at step 10; historical

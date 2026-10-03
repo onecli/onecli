@@ -107,6 +107,15 @@ pub enum ClientCredentialMethod {
 pub struct RefreshConfig {
     /// Token endpoint URL (e.g., `https://oauth2.googleapis.com/token`).
     pub token_url: &'static str,
+    /// Additional token endpoints a CONNECTION may select via its stored
+    /// `token_endpoint` credential, for providers whose endpoint depends on
+    /// the account rather than the provider (Salesforce production vs sandbox).
+    ///
+    /// The stored value must match one of these strings EXACTLY; anything else
+    /// falls back to `token_url`. An exact match against a static allowlist is
+    /// deliberate — it keeps a value read from the database from ever steering
+    /// a client-secret-bearing request at an arbitrary host.
+    pub alternate_token_urls: &'static [&'static str],
     /// Env var for the OAuth client ID.
     pub client_id_env: &'static str,
     /// Env var for the OAuth client secret.
@@ -115,6 +124,20 @@ pub struct RefreshConfig {
     pub body_format: TokenBodyFormat,
     /// How client credentials are sent (body vs Basic auth header).
     pub client_auth: ClientCredentialMethod,
+}
+
+impl RefreshConfig {
+    /// Resolve the endpoint for one connection. `stored` comes from the
+    /// connection's credentials and is honored only when allowlisted above.
+    /// The returned URL is always one of this config's own `'static` strings,
+    /// never the caller's bytes, so a database value cannot reach the request.
+    #[must_use]
+    pub fn endpoint_for(&self, stored: Option<&str>) -> &'static str {
+        stored
+            .and_then(|url| self.alternate_token_urls.iter().find(|alt| **alt == url))
+            .copied()
+            .unwrap_or(self.token_url)
+    }
 }
 
 /// Maps a credential JSON field to an HTTP header injected on every request.
@@ -170,6 +193,7 @@ pub struct AppProvider {
 /// Shared refresh config for Atlassian OAuth APIs (Jira, Confluence).
 static ATLASSIAN_REFRESH: RefreshConfig = RefreshConfig {
     token_url: "https://auth.atlassian.com/oauth/token",
+    alternate_token_urls: &[],
     client_id_env: "ATLASSIAN_CLIENT_ID",
     client_secret_env: "ATLASSIAN_CLIENT_SECRET",
     body_format: TokenBodyFormat::Json,
@@ -179,6 +203,7 @@ static ATLASSIAN_REFRESH: RefreshConfig = RefreshConfig {
 /// Refresh config for Todoist OAuth API.
 static TODOIST_REFRESH: RefreshConfig = RefreshConfig {
     token_url: "https://api.todoist.com/oauth/access_token",
+    alternate_token_urls: &[],
     client_id_env: "TODOIST_CLIENT_ID",
     client_secret_env: "TODOIST_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -188,6 +213,7 @@ static TODOIST_REFRESH: RefreshConfig = RefreshConfig {
 /// Shared refresh config for all Google OAuth APIs.
 static GOOGLE_REFRESH: RefreshConfig = RefreshConfig {
     token_url: "https://oauth2.googleapis.com/token",
+    alternate_token_urls: &[],
     client_id_env: "GOOGLE_CLIENT_ID",
     client_secret_env: "GOOGLE_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -197,6 +223,7 @@ static GOOGLE_REFRESH: RefreshConfig = RefreshConfig {
 /// Refresh config for Supabase Management API OAuth (uses Basic auth).
 static SUPABASE_REFRESH: RefreshConfig = RefreshConfig {
     token_url: "https://api.supabase.com/v1/oauth/token",
+    alternate_token_urls: &[],
     client_id_env: "SUPABASE_CLIENT_ID",
     client_secret_env: "SUPABASE_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -206,6 +233,7 @@ static SUPABASE_REFRESH: RefreshConfig = RefreshConfig {
 /// Refresh config for GitLab OAuth API.
 static GITLAB_REFRESH: RefreshConfig = RefreshConfig {
     token_url: "https://gitlab.com/oauth/token",
+    alternate_token_urls: &[],
     client_id_env: "GITLAB_CLIENT_ID",
     client_secret_env: "GITLAB_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -215,6 +243,7 @@ static GITLAB_REFRESH: RefreshConfig = RefreshConfig {
 /// Refresh config for Notion OAuth API (uses Basic auth + token rotation).
 static NOTION_REFRESH: RefreshConfig = RefreshConfig {
     token_url: "https://api.notion.com/v1/oauth/token",
+    alternate_token_urls: &[],
     client_id_env: "NOTION_CLIENT_ID",
     client_secret_env: "NOTION_CLIENT_SECRET",
     body_format: TokenBodyFormat::Json,
@@ -224,6 +253,7 @@ static NOTION_REFRESH: RefreshConfig = RefreshConfig {
 /// Refresh config for Dropbox OAuth API.
 static DROPBOX_REFRESH: RefreshConfig = RefreshConfig {
     token_url: "https://api.dropboxapi.com/oauth2/token",
+    alternate_token_urls: &[],
     client_id_env: "DROPBOX_CLIENT_ID",
     client_secret_env: "DROPBOX_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -233,6 +263,7 @@ static DROPBOX_REFRESH: RefreshConfig = RefreshConfig {
 /// Refresh config for LinkedIn OAuth API.
 static LINKEDIN_REFRESH: RefreshConfig = RefreshConfig {
     token_url: "https://www.linkedin.com/oauth/v2/accessToken",
+    alternate_token_urls: &[],
     client_id_env: "LINKEDIN_CLIENT_ID",
     client_secret_env: "LINKEDIN_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -242,6 +273,7 @@ static LINKEDIN_REFRESH: RefreshConfig = RefreshConfig {
 /// Refresh config for Sentry OAuth API.
 static SENTRY_REFRESH: RefreshConfig = RefreshConfig {
     token_url: "https://sentry.io/oauth/token/",
+    alternate_token_urls: &[],
     client_id_env: "SENTRY_CLIENT_ID",
     client_secret_env: "SENTRY_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -251,6 +283,7 @@ static SENTRY_REFRESH: RefreshConfig = RefreshConfig {
 /// Refresh config for Zoom OAuth API (uses Basic auth for client credentials).
 static ZOOM_REFRESH: RefreshConfig = RefreshConfig {
     token_url: "https://zoom.us/oauth/token",
+    alternate_token_urls: &[],
     client_id_env: "ZOOM_CLIENT_ID",
     client_secret_env: "ZOOM_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -260,6 +293,7 @@ static ZOOM_REFRESH: RefreshConfig = RefreshConfig {
 /// Shared refresh config for all Microsoft 365 OAuth APIs (Outlook Mail, Calendar, Word, OneNote).
 static MICROSOFT_REFRESH: RefreshConfig = RefreshConfig {
     token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+    alternate_token_urls: &[],
     client_id_env: "MICROSOFT_CLIENT_ID",
     client_secret_env: "MICROSOFT_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -269,6 +303,7 @@ static MICROSOFT_REFRESH: RefreshConfig = RefreshConfig {
 /// Refresh config for Linear OAuth API.
 static LINEAR_REFRESH: RefreshConfig = RefreshConfig {
     token_url: "https://api.linear.app/oauth/token",
+    alternate_token_urls: &[],
     client_id_env: "LINEAR_CLIENT_ID",
     client_secret_env: "LINEAR_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -278,6 +313,7 @@ static LINEAR_REFRESH: RefreshConfig = RefreshConfig {
 /// Refresh config for Fathom AI OAuth API.
 static FATHOM_REFRESH: RefreshConfig = RefreshConfig {
     token_url: "https://api.fathom.ai/external/v1/oauth2/token",
+    alternate_token_urls: &[],
     client_id_env: "FATHOM_CLIENT_ID",
     client_secret_env: "FATHOM_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -287,6 +323,7 @@ static FATHOM_REFRESH: RefreshConfig = RefreshConfig {
 /// Refresh config for X (Twitter) OAuth API (uses Basic auth for client credentials).
 static X_REFRESH: RefreshConfig = RefreshConfig {
     token_url: "https://api.x.com/2/oauth2/token",
+    alternate_token_urls: &[],
     client_id_env: "X_CLIENT_ID",
     client_secret_env: "X_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -296,6 +333,7 @@ static X_REFRESH: RefreshConfig = RefreshConfig {
 /// Refresh config for HubSpot OAuth API.
 static HUBSPOT_REFRESH: RefreshConfig = RefreshConfig {
     token_url: "https://api.hubapi.com/oauth/2026-03/token",
+    alternate_token_urls: &[],
     client_id_env: "HUBSPOT_CLIENT_ID",
     client_secret_env: "HUBSPOT_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -306,8 +344,22 @@ static HUBSPOT_REFRESH: RefreshConfig = RefreshConfig {
 /// the definition's envDefaults, so an operator-configured client refreshes).
 static ZOHO_CRM_REFRESH: RefreshConfig = RefreshConfig {
     token_url: "https://accounts.zoho.com/oauth/v2/token",
+    alternate_token_urls: &[],
     client_id_env: "ZOHO_CRM_CLIENT_ID",
     client_secret_env: "ZOHO_CRM_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Form,
+    client_auth: ClientCredentialMethod::Body,
+};
+
+/// Refresh config for Salesforce (BYO External Client App only — there are no
+/// platform credentials, so the env vars exist purely for the shared signature).
+/// A connection stores its own endpoint: sandboxes, Developer Edition and
+/// scratch orgs authenticate against `test.salesforce.com`.
+static SALESFORCE_REFRESH: RefreshConfig = RefreshConfig {
+    token_url: "https://login.salesforce.com/services/oauth2/token",
+    alternate_token_urls: &["https://test.salesforce.com/services/oauth2/token"],
+    client_id_env: "SALESFORCE_CLIENT_ID",
+    client_secret_env: "SALESFORCE_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::Body,
 };
@@ -340,6 +392,29 @@ fn datadog_host_for_site(site: &str, original_host: &str) -> Option<String> {
 // ── Provider registry ──────────────────────────────────────────────────
 
 static APP_PROVIDERS: &[AppProvider] = &[
+    AppProvider {
+        provider: "salesforce",
+        display_name: "Salesforce",
+        // Every org answers on its own My Domain host, so the suffix rule is
+        // broad and `credential_host_field` narrows it to the ONE host this
+        // connection was issued for — no other tenant on the zone sees the
+        // token. Scoped to the REST API path so the gateway never attaches a
+        // credential to Visualforce, Experience Cloud or login traffic.
+        host_rules: &[HostRule {
+            pattern: HostPattern::Suffix(".my.salesforce.com"),
+            path_prefix: Some("/services/data/"),
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: Some("instance_host"),
+        }],
+        refresh: Some(&SALESFORCE_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
     AppProvider {
         provider: "github",
         display_name: "GitHub",
@@ -1667,6 +1742,95 @@ static APP_PROVIDERS: &[AppProvider] = &[
         body_transform: None,
     },
     AppProvider {
+        provider: "apollo-io",
+        display_name: "Apollo.io",
+        // Apollo users authenticate with `x-api-key`; a key presented as a
+        // Bearer token is rejected (docs.apollo.io/reference/authentication).
+        // The strategy is None and the key rides a credential header, exactly
+        // like Datadog and Clay.
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.apollo.io"),
+            path_prefix: None,
+            strategy: AuthStrategy::None,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[CredentialHeader {
+            credential_field: "apiKey",
+            header_name: "x-api-key",
+        }],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "posthog",
+        display_name: "PostHog",
+        // Private REST API, per region. OAuth access tokens (pha_) and
+        // personal API keys (phx_) both authenticate with Bearer. The public
+        // capture hosts (*.i.posthog.com) need no credential and are left
+        // alone on purpose.
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("us.posthog.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("eu.posthog.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            // Legacy US host. Still serves the private API and is what many
+            // agents and SDK examples default to.
+            HostRule {
+                pattern: HostPattern::Exact("app.posthog.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "clay",
+        display_name: "Clay",
+        // Clay's public API reads the key from `clay-api-key`, not
+        // Authorization, so the strategy is None and the key rides a
+        // credential header.
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.clay.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::None,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[CredentialHeader {
+            credential_field: "apiKey",
+            header_name: "clay-api-key",
+        }],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
         provider: "linear",
         display_name: "Linear",
         host_rules: &[HostRule {
@@ -1732,24 +1896,6 @@ static APP_PROVIDERS: &[AppProvider] = &[
             credential_host_field: None,
         }],
         refresh: Some(&X_REFRESH),
-        metadata_headers: &[],
-        credential_headers: &[],
-        credential_params: &[],
-        host_rewrite: None,
-        finalizer: None,
-        body_transform: None,
-    },
-    AppProvider {
-        provider: "slack",
-        display_name: "Slack",
-        host_rules: &[HostRule {
-            pattern: HostPattern::Exact("slack.com"),
-            path_prefix: None,
-            strategy: AuthStrategy::Bearer,
-            intercept: false,
-            credential_host_field: None,
-        }],
-        refresh: None,
         metadata_headers: &[],
         credential_headers: &[],
         credential_params: &[],
@@ -1907,12 +2053,150 @@ pub fn providers_for_host(hostname: &str) -> Vec<&'static str> {
     providers
 }
 
+/// A host that belongs to a host-bound provider but must NEVER receive its
+/// credential: a generic entry point an agent reaches for when it does not
+/// know the tenant's own host.
+#[derive(Debug)]
+pub struct AliasHost {
+    pub host: &'static str,
+    pub provider: &'static str,
+    /// The API surface that only exists on the tenant's bound host. An
+    /// uncredentialed 404 under it on this alias means "wrong host", not
+    /// "no such resource"; 404s elsewhere on the alias stay genuine.
+    pub wrong_host_404_prefix: &'static str,
+}
+
+/// Generic entry points of host-bound providers (see [`AliasHost`]). A
+/// request here is a wrong-host request, not a request for an unknown
+/// service, so the gateway answers it with the provider's own guidance (the
+/// bound host, or the native connect link) instead of the generic "add a
+/// custom credential" nudge.
+///
+/// Deliberately a separate table from `host_rules`: nothing here takes part
+/// in injection, so adding an alias can never widen where a token is sent.
+static ALIAS_HOSTS: &[AliasHost] = &[
+    AliasHost {
+        host: "login.salesforce.com",
+        provider: "salesforce",
+        wrong_host_404_prefix: "/services/data/",
+    },
+    AliasHost {
+        host: "test.salesforce.com",
+        provider: "salesforce",
+        wrong_host_404_prefix: "/services/data/",
+    },
+    AliasHost {
+        host: "api.salesforce.com",
+        provider: "salesforce",
+        wrong_host_404_prefix: "/services/data/",
+    },
+    // Snowflake's marketing/API-docs domain and its Snowsight web app: an
+    // account's SQL API lives only on `<org>-<account>.snowflakecomputing.com`.
+    AliasHost {
+        host: "api.snowflake.com",
+        provider: "snowflake",
+        wrong_host_404_prefix: "/api/v2/",
+    },
+    AliasHost {
+        host: "app.snowflake.com",
+        provider: "snowflake",
+        wrong_host_404_prefix: "/api/v2/",
+    },
+];
+
+/// The alias entry for `hostname`, if it is one.
+#[must_use]
+pub fn alias_host(hostname: &str) -> Option<&'static AliasHost> {
+    let host = normalize_host(hostname);
+    ALIAS_HOSTS.iter().find(|a| a.host == host)
+}
+
+/// The registry entry for a provider id.
+fn provider_by_id(provider: &str) -> Option<&'static AppProvider> {
+    all_providers().find(|p| p.provider == provider)
+}
+
+/// The rule that pins `provider`'s credential to one stored tenant host (its
+/// `credential_host_field` rule): Salesforce, Snowflake, JFrog. `None` for a
+/// provider without a host gate.
+fn host_gate_rule(provider: &str) -> Option<&'static HostRule> {
+    provider_by_id(provider)?
+        .host_rules
+        .iter()
+        .find(|r| r.credential_host_field.is_some())
+}
+
+/// Whether `provider` pins its credential to one stored tenant host.
+#[cfg(test)]
+fn is_host_bound(provider: &str) -> bool {
+    host_gate_rule(provider).is_some()
+}
+
+/// Host-bound providers whose whole host zone is tenant API hosts, so an
+/// uncredentialed 404 on a sibling tenant host there means "wrong host":
+/// every `*.snowflakecomputing.com` is some account's SQL API, and every
+/// `*.my.salesforce.com` some org's My Domain. Deliberately NOT JFrog: its
+/// zone also serves public hosts (`releases.jfrog.io`) whose 404s are real.
+static TENANT_ONLY_ZONES: &[&str] = &["salesforce", "snowflake"];
+
+/// Whether a 404 on a sibling host in `provider`'s zone means the agent
+/// called the wrong tenant (see [`TENANT_ONLY_ZONES`]).
+#[must_use]
+pub fn zone_404_means_wrong_host(provider: &str) -> bool {
+    TENANT_ONLY_ZONES.contains(&provider)
+}
+
+/// The non-secret connection metadata key every host-bound connection
+/// records its bound host under, whatever credential field the provider's
+/// gate reads (`instance_host`, `host`, `subdomain`). Written by the API at
+/// connect time; read here only to TELL an agent where to go — injection
+/// always decides on the decrypted credential field, never on this.
+pub const BOUND_HOST_METADATA_KEY: &str = "bound_host";
+
+/// The app an auth failure on `hostname` + `path` should be explained by, as
+/// (id, display_name): the injecting provider for that host/path, else the
+/// provider owning the host as a non-injecting alias. Used only to pick
+/// guidance, never to inject.
+#[must_use]
+pub fn guidance_provider_for(hostname: &str, path: &str) -> Option<(&'static str, &'static str)> {
+    provider_for_host_and_path(hostname, path).or_else(|| {
+        let alias = alias_host(hostname)?;
+        let provider = provider_by_id(alias.provider)?;
+        Some((provider.provider, provider.display_name))
+    })
+}
+
+/// The path prefix a host-gated provider injects on (e.g. Salesforce's
+/// `/services/data/`), so a wrong-host answer can also correct a wrong path.
+#[must_use]
+pub fn bound_host_path_prefix(provider: &str) -> Option<&'static str> {
+    host_gate_rule(provider)?.path_prefix
+}
+
+/// A bare DNS hostname: dot-separated LDH labels, nothing else. A stored
+/// bound host is echoed to the agent as `https://<host>…`, so a value with a
+/// `?`, `#`, `@` or anything outside the label alphabet (which
+/// `normalize_host` does not strip) must never be vouched for.
+#[must_use]
+pub fn is_bare_hostname(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
 /// Return the path pattern for the first matching host rule of a provider.
 /// For providers with multiple rules on the same host, use `build_app_injection_rules` instead.
 #[cfg(test)]
 pub fn path_pattern_for(provider: &str, hostname: &str) -> String {
-    all_providers()
-        .find(|p| p.provider == provider)
+    provider_by_id(provider)
         .and_then(|app| {
             app.host_rules
                 .iter()
@@ -1926,8 +2210,9 @@ pub fn path_pattern_for(provider: &str, hostname: &str) -> String {
 /// For multi-rule providers (e.g., Google Drive), use `build_app_injection_rules`.
 #[cfg(test)]
 pub fn build_app_injections(provider: &str, hostname: &str, token: &str) -> Vec<Injection> {
-    let app = all_providers().find(|p| p.provider == provider);
-    let Some(app) = app else { return vec![] };
+    let Some(app) = provider_by_id(provider) else {
+        return vec![];
+    };
 
     let rule = app
         .host_rules
@@ -1965,7 +2250,7 @@ pub fn build_app_injection_rules(
     hostname: &str,
     token: &str,
 ) -> Vec<(String, Vec<Injection>)> {
-    let Some(app) = all_providers().find(|p| p.provider == provider) else {
+    let Some(app) = provider_by_id(provider) else {
         return vec![];
     };
 
@@ -2003,14 +2288,11 @@ pub fn build_app_injection_rules(
 /// Check if a specific provider has host rules matching both the hostname and path.
 #[must_use]
 pub fn provider_matches_host_and_path(provider: &str, hostname: &str, path: &str) -> bool {
-    all_providers()
-        .find(|p| p.provider == provider)
-        .is_some_and(|app| {
-            app.host_rules.iter().any(|r| {
-                host_rule_matches(r, hostname)
-                    && r.path_prefix.is_none_or(|pfx| path.starts_with(pfx))
-            })
+    provider_by_id(provider).is_some_and(|app| {
+        app.host_rules.iter().any(|r| {
+            host_rule_matches(r, hostname) && r.path_prefix.is_none_or(|pfx| path.starts_with(pfx))
         })
+    })
 }
 
 /// Like [`provider_matches_host_and_path`], but matches ONLY through a
@@ -2023,14 +2305,11 @@ pub fn provider_matches_host_and_path(provider: &str, hostname: &str, path: &str
 /// across sibling services on the same zone.
 #[must_use]
 pub fn provider_matches_path_scoped(provider: &str, hostname: &str, path: &str) -> bool {
-    all_providers()
-        .find(|p| p.provider == provider)
-        .is_some_and(|app| {
-            app.host_rules.iter().any(|r| {
-                host_rule_matches(r, hostname)
-                    && r.path_prefix.is_some_and(|pfx| path.starts_with(pfx))
-            })
+    provider_by_id(provider).is_some_and(|app| {
+        app.host_rules.iter().any(|r| {
+            host_rule_matches(r, hostname) && r.path_prefix.is_some_and(|pfx| path.starts_with(pfx))
         })
+    })
 }
 
 /// Test helper: a representative `(provider, host, path)` for every host rule
@@ -2070,24 +2349,19 @@ pub fn injection_surface_samples() -> Vec<(&'static str, String, String)> {
 /// Look up the display name for a provider slug (e.g., "jira" -> "Jira").
 #[must_use]
 pub fn display_name_for_provider(provider: &str) -> Option<&'static str> {
-    all_providers()
-        .find(|p| p.provider == provider)
-        .map(|p| p.display_name)
+    provider_by_id(provider).map(|p| p.display_name)
 }
 
 /// Get the refresh config for a provider, if it supports token refresh.
 #[must_use]
 pub fn refresh_config(provider: &str) -> Option<&'static RefreshConfig> {
-    all_providers()
-        .find(|p| p.provider == provider)
-        .and_then(|p| p.refresh)
+    provider_by_id(provider).and_then(|p| p.refresh)
 }
 
 /// Get metadata-to-header mappings for a provider.
 #[must_use]
 pub fn metadata_headers(provider: &str) -> &'static [MetadataHeader] {
-    all_providers()
-        .find(|p| p.provider == provider)
+    provider_by_id(provider)
         .map(|p| p.metadata_headers)
         .unwrap_or(&[])
 }
@@ -2095,8 +2369,7 @@ pub fn metadata_headers(provider: &str) -> &'static [MetadataHeader] {
 /// Get credential-to-header mappings for a provider.
 #[must_use]
 pub fn credential_headers(provider: &str) -> &'static [CredentialHeader] {
-    all_providers()
-        .find(|p| p.provider == provider)
+    provider_by_id(provider)
         .map(|p| p.credential_headers)
         .unwrap_or(&[])
 }
@@ -2104,8 +2377,7 @@ pub fn credential_headers(provider: &str) -> &'static [CredentialHeader] {
 /// Get credential-to-query-param mappings for a provider.
 #[must_use]
 pub fn credential_params(provider: &str) -> &'static [CredentialParam] {
-    all_providers()
-        .find(|p| p.provider == provider)
+    provider_by_id(provider)
         .map(|p| p.credential_params)
         .unwrap_or(&[])
 }
@@ -2118,8 +2390,7 @@ pub fn rewrite_host(
     creds: &serde_json::Value,
     original_host: &str,
 ) -> Option<String> {
-    let app = all_providers().find(|p| p.provider == provider)?;
-    let hw = app.host_rewrite?;
+    let hw = provider_by_id(provider)?.host_rewrite?;
     let field_value = creds.get(hw.credential_field)?.as_str()?;
     (hw.template)(field_value, original_host)
 }
@@ -2127,8 +2398,7 @@ pub fn rewrite_host(
 /// Returns true if the provider has any host rule that injects an Authorization header.
 /// Providers using only credential_headers (e.g., Datadog) return false.
 pub fn needs_access_token(provider: &str) -> bool {
-    all_providers()
-        .find(|p| p.provider == provider)
+    provider_by_id(provider)
         .map(|p| {
             p.host_rules
                 .iter()
@@ -2142,14 +2412,11 @@ pub fn needs_access_token(provider: &str) -> bool {
 /// rule carries a host gate.
 #[must_use]
 pub fn credential_host_field(provider: &str, hostname: &str) -> Option<&'static str> {
-    all_providers()
-        .find(|p| p.provider == provider)
-        .and_then(|p| {
-            p.host_rules
-                .iter()
-                .find(|r| host_rule_matches(r, hostname))
-                .and_then(|r| r.credential_host_field)
-        })
+    provider_by_id(provider)?
+        .host_rules
+        .iter()
+        .find(|r| host_rule_matches(r, hostname))?
+        .credential_host_field
 }
 
 /// Normalize a host for equality comparison: strip any `scheme://` prefix, cut
@@ -2199,11 +2466,15 @@ pub fn is_intercept_target(hostname: &str, path: &str) -> bool {
 /// Client credentials are resolved in order:
 /// 1. Explicit `client_id`/`client_secret` (from BYOC AppConfig)
 /// 2. Env vars from `RefreshConfig` (platform defaults)
+///
+/// `stored_token_url` is the connection's own endpoint, honored only when the
+/// provider allowlists it in `alternate_token_urls` (see `endpoint_for`).
 pub async fn refresh_access_token(
     config: &RefreshConfig,
     refresh_token: &str,
     byoc_client_id: Option<&str>,
     byoc_client_secret: Option<&str>,
+    stored_token_url: Option<&str>,
 ) -> anyhow::Result<(String, i64, Option<String>)> {
     let client_id = match byoc_client_id {
         Some(id) => id.to_string(),
@@ -2216,7 +2487,7 @@ pub async fn refresh_access_token(
             .map_err(|_| anyhow::anyhow!("{} env var not set", config.client_secret_env))?,
     };
 
-    let mut req = reqwest::Client::new().post(config.token_url);
+    let mut req = reqwest::Client::new().post(config.endpoint_for(stored_token_url));
 
     if matches!(config.client_auth, ClientCredentialMethod::BasicAuth) {
         let b64 = base64::engine::general_purpose::STANDARD;
@@ -3457,6 +3728,25 @@ mod tests {
         assert_eq!(provider_for_host("unknown.example.com"), None);
     }
 
+    /// Slack is a channel (the agent's own Slack app), not a gateway app
+    /// (plans/channel-aware-agents.md). The `AppProvider` was removed and
+    /// the purge migration deleted the rows the old integration left, so
+    /// the gateway must know nothing about slack.com: no provider for the
+    /// host, and nothing to inject even when handed a token for it. A
+    /// cached pre-purge connection row can therefore never reach Slack.
+    /// MUTATION-PROOF: re-add a slack `AppProvider` and this fails.
+    #[test]
+    fn slack_is_not_a_gateway_provider() {
+        assert_eq!(provider_for_host("slack.com"), None);
+        assert_eq!(provider_for_host("api.slack.com"), None);
+        assert_eq!(
+            provider_for_host_and_path("slack.com", "/api/chat.postMessage"),
+            None
+        );
+        assert!(build_app_injections("slack", "slack.com", "xoxb-legacy").is_empty());
+        assert!(all_providers().all(|p| p.provider != "slack"));
+    }
+
     #[test]
     fn provider_for_host_returns_first_match_for_shared_host() {
         // www.googleapis.com is shared by Gmail, Calendar, Drive, etc.
@@ -3894,6 +4184,165 @@ mod tests {
         );
     }
 
+    // ── Salesforce ────────────────────────────────────────────────────
+
+    #[test]
+    fn provider_for_salesforce_my_domain_hosts() {
+        // Production, sandbox, and the partitioned non-production domains
+        // (Developer Edition, scratch, patch) all live under the same zone.
+        for host in [
+            "acme.my.salesforce.com",
+            "acme--dev.sandbox.my.salesforce.com",
+            "acme-dev-ed.develop.my.salesforce.com",
+            "acme.scratch.my.salesforce.com",
+        ] {
+            assert_eq!(
+                provider_for_host_and_path(host, "/services/data/v66.0/query"),
+                Some(("salesforce", "Salesforce")),
+                "{host}"
+            );
+        }
+    }
+
+    #[test]
+    fn salesforce_suffix_no_false_positives() {
+        assert!(providers_for_host("my.salesforce.com").is_empty());
+        // Salesforce's own login hosts are NOT org API hosts: a token must
+        // never be injected into an authorization endpoint.
+        assert!(providers_for_host("login.salesforce.com").is_empty());
+        assert!(providers_for_host("test.salesforce.com").is_empty());
+        assert!(providers_for_host("acme.my.salesforce.com.evil.test").is_empty());
+    }
+
+    #[test]
+    fn alias_hosts_map_to_their_provider_but_never_inject() {
+        for (host, expected) in [
+            ("login.salesforce.com", ("salesforce", "Salesforce")),
+            ("test.salesforce.com", ("salesforce", "Salesforce")),
+            ("api.salesforce.com", ("salesforce", "Salesforce")),
+            ("LOGIN.Salesforce.com:443", ("salesforce", "Salesforce")),
+            ("api.snowflake.com", ("snowflake", "Snowflake")),
+            ("app.snowflake.com", ("snowflake", "Snowflake")),
+        ] {
+            assert_eq!(
+                alias_host(host).map(|a| a.provider),
+                Some(expected.0),
+                "{host}"
+            );
+            // Guidance only: an alias must never become an injection host.
+            assert!(providers_for_host(host).is_empty(), "{host}");
+            assert_eq!(guidance_provider_for(host, "/x"), Some(expected), "{host}");
+        }
+        // Neither an alias nor (off the REST prefix) an injecting host: no
+        // provider is named, so the failure falls through to the generic
+        // guidance rather than being pinned on Salesforce.
+        for host in [
+            "acme.my.salesforce.com",
+            "evil.test",
+            "login.salesforce.com.evil.test",
+        ] {
+            assert!(alias_host(host).is_none(), "{host}");
+            assert_eq!(guidance_provider_for(host, "/x"), None, "{host}");
+        }
+    }
+
+    /// Every alias names a real host-bound provider: an alias exists only to
+    /// point an agent at a bound host, so one without a gate is a typo.
+    #[test]
+    fn every_alias_belongs_to_a_host_bound_provider() {
+        for alias in ALIAS_HOSTS {
+            assert!(is_host_bound(alias.provider), "{}", alias.host);
+            assert!(
+                alias.wrong_host_404_prefix.starts_with('/'),
+                "{}",
+                alias.host
+            );
+        }
+        for provider in TENANT_ONLY_ZONES {
+            assert!(is_host_bound(provider), "{provider}");
+        }
+        assert!(!zone_404_means_wrong_host("jfrog-artifactory"));
+        assert!(is_host_bound("jfrog-artifactory"));
+        assert!(!is_host_bound("github"));
+    }
+
+    #[test]
+    fn salesforce_injects_only_on_the_rest_api_path() {
+        // The credential is scoped to the REST API, so Visualforce, Experience
+        // Cloud and other same-host surfaces never receive it.
+        assert!(provider_matches_host_and_path(
+            "salesforce",
+            "acme.my.salesforce.com",
+            "/services/data/v66.0/sobjects/Account"
+        ));
+        for path in ["/services/apexrest/custom", "/apex/MyPage", "/"] {
+            assert!(
+                !provider_matches_host_and_path("salesforce", "acme.my.salesforce.com", path),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn salesforce_uses_bearer() {
+        let injections = build_app_injections("salesforce", "acme.my.salesforce.com", "t");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer t".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn salesforce_has_credential_host_field() {
+        // Any *.my.salesforce.com matches the provider statically; this field
+        // is what pins a connection's token to its own org host.
+        assert_eq!(
+            credential_host_field("salesforce", "acme.my.salesforce.com"),
+            Some("instance_host")
+        );
+    }
+
+    #[test]
+    fn salesforce_refreshes_against_the_connection_s_own_login_host() {
+        let config = refresh_config("salesforce").expect("salesforce refreshes");
+        // Default (production) when nothing is stored or the value is unknown.
+        assert_eq!(
+            config.endpoint_for(None),
+            "https://login.salesforce.com/services/oauth2/token"
+        );
+        assert_eq!(
+            config.endpoint_for(Some("https://test.salesforce.com/services/oauth2/token")),
+            "https://test.salesforce.com/services/oauth2/token"
+        );
+        // A stored endpoint outside the allowlist must never be dialed: the
+        // client secret would otherwise be posted to an attacker's host.
+        for stored in [
+            "https://evil.test/services/oauth2/token",
+            "https://login.salesforce.com.evil.test/services/oauth2/token",
+            "http://test.salesforce.com/services/oauth2/token",
+            "",
+        ] {
+            assert_eq!(
+                config.endpoint_for(Some(stored)),
+                "https://login.salesforce.com/services/oauth2/token",
+                "{stored}"
+            );
+        }
+    }
+
+    #[test]
+    fn providers_without_alternates_ignore_a_stored_endpoint() {
+        let config = refresh_config("google-calendar").expect("google refreshes");
+        assert_eq!(
+            config.endpoint_for(Some("https://evil.test/token")),
+            "https://oauth2.googleapis.com/token"
+        );
+    }
+
     // ── credential_host_field ─────────────────────────────────────────
 
     #[test]
@@ -3938,43 +4387,6 @@ mod tests {
     #[test]
     fn normalize_host_empty() {
         assert_eq!(normalize_host(""), "");
-    }
-
-    // ── Slack ─────────────────────────────────────────────────────
-
-    #[test]
-    fn providers_for_slack_host() {
-        assert_eq!(providers_for_host("slack.com"), vec!["slack"]);
-    }
-
-    #[test]
-    fn provider_for_host_slack() {
-        let result = provider_for_host("slack.com");
-        assert_eq!(result, Some(("slack", "Slack")));
-    }
-
-    #[test]
-    fn slack_api_uses_bearer() {
-        let injections = build_app_injections("slack", "slack.com", "xoxb-test123");
-        assert_eq!(injections.len(), 1);
-        assert_eq!(
-            injections[0],
-            Injection::SetHeader {
-                name: "authorization".to_string(),
-                value: "Bearer xoxb-test123".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn slack_has_no_refresh_config() {
-        assert!(refresh_config("slack").is_none());
-    }
-
-    #[test]
-    fn slack_does_not_match_other_slack_hosts() {
-        assert!(providers_for_host("api.slack.com").is_empty());
-        assert!(providers_for_host("www.slack.com").is_empty());
     }
 
     // ── Zoom ──────────────────────────────────────────────────────
@@ -4696,6 +5108,109 @@ mod tests {
     fn hubspot_refresh_uses_form_body_format() {
         let config = refresh_config("hubspot").expect("hubspot should have refresh config");
         assert!(matches!(config.body_format, TokenBodyFormat::Form));
+    }
+
+    // ── Apollo.io ────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_apollo_host() {
+        assert_eq!(providers_for_host("api.apollo.io"), vec!["apollo-io"]);
+    }
+
+    #[test]
+    fn provider_for_host_apollo() {
+        assert_eq!(
+            provider_for_host("api.apollo.io"),
+            Some(("apollo-io", "Apollo.io"))
+        );
+    }
+
+    #[test]
+    fn apollo_sends_no_authorization_header() {
+        // Apollo rejects an API key presented as a Bearer token, so the key
+        // must ride `x-api-key` alone: no strategy injection, no token
+        // resolution.
+        assert!(build_app_injections("apollo-io", "api.apollo.io", "k").is_empty());
+        assert!(!needs_access_token("apollo-io"));
+    }
+
+    #[test]
+    fn apollo_api_key_maps_to_x_api_key_header() {
+        let headers = credential_headers("apollo-io");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].credential_field, "apiKey");
+        assert_eq!(headers[0].header_name, "x-api-key");
+    }
+
+    #[test]
+    fn apollo_does_not_match_web_app_host() {
+        // The OAuth token endpoint lives on app.apollo.io; agents never call
+        // it, so the gateway must not inject credentials there.
+        assert!(providers_for_host("app.apollo.io").is_empty());
+        assert!(providers_for_host("apollo.io").is_empty());
+    }
+
+    #[test]
+    fn apollo_has_no_refresh_config() {
+        // API-key connections never expire, so there is nothing to refresh.
+        assert!(refresh_config("apollo-io").is_none());
+    }
+
+    // ── PostHog ──────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_posthog_hosts() {
+        assert_eq!(providers_for_host("us.posthog.com"), vec!["posthog"]);
+        assert_eq!(providers_for_host("eu.posthog.com"), vec!["posthog"]);
+        assert_eq!(providers_for_host("app.posthog.com"), vec!["posthog"]);
+    }
+
+    #[test]
+    fn posthog_uses_bearer_in_both_regions() {
+        for host in ["us.posthog.com", "eu.posthog.com", "app.posthog.com"] {
+            assert_eq!(
+                build_app_injections("posthog", host, "phx_abc"),
+                vec![Injection::SetHeader {
+                    name: "authorization".to_string(),
+                    value: "Bearer phx_abc".to_string(),
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn posthog_leaves_public_capture_hosts_alone() {
+        assert!(providers_for_host("us.i.posthog.com").is_empty());
+        assert!(providers_for_host("eu.i.posthog.com").is_empty());
+        assert!(providers_for_host("oauth.posthog.com").is_empty());
+    }
+
+    #[test]
+    fn posthog_has_no_refresh_config() {
+        // API-key connections never expire, so there is nothing to refresh.
+        assert!(refresh_config("posthog").is_none());
+    }
+
+    // ── Clay ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_clay_host() {
+        assert_eq!(providers_for_host("api.clay.com"), vec!["clay"]);
+        assert!(providers_for_host("app.clay.com").is_empty());
+    }
+
+    #[test]
+    fn clay_sends_no_authorization_header() {
+        assert!(build_app_injections("clay", "api.clay.com", "k").is_empty());
+        assert!(!needs_access_token("clay"));
+    }
+
+    #[test]
+    fn clay_key_maps_to_clay_api_key_header() {
+        let headers = credential_headers("clay");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].credential_field, "apiKey");
+        assert_eq!(headers[0].header_name, "clay-api-key");
     }
 
     // ── Linear ───────────────────────────────────────────────────────

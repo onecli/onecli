@@ -1,6 +1,10 @@
 import { db } from "@onecli/db";
 import { listAgents } from "./agent-service";
-import { injectionIdentityMatches } from "./policy-reflect/injection";
+import {
+  grantedConnectionSelection,
+  grantedSecretSelection,
+  providerLevelKey,
+} from "./policy-reflect/injection";
 import { loadInjectionRules } from "./policy-simulate/load-rules";
 import { resolvePrincipalSet } from "./policy-simulate/principal-set";
 
@@ -84,51 +88,32 @@ export const listAgentsWithGrantsSummary = async (
   };
   const connectionPool = { ...secretPool, status: "connected" };
 
-  // Per agent, walk the injection-law rules once, collecting the four target
-  // arms (mirrors effective-credentials' selective walk).
+  // Per agent, the two halves of the injection law (the same selection
+  // helpers the agent's own connected-apps list and the container config
+  // read), each with its named ids and its whole-level grants.
   interface Collected {
     secretIds: Set<string>;
     connectionIds: Set<string>;
     secretLevels: Set<"organization" | "workspace">;
-    /** `${provider}\n${level}` pairs — the level picks org- vs workspace-scoped
+    /** `providerLevelKey` pairs: the level picks org- vs workspace-scoped
      * connections of the provider (inject_select's app_scopes law). */
     providerLevels: Set<string>;
   }
   const perAgent = new Map<string, Collected>();
   let anyScopeGrant = false;
   for (const agent of agents) {
+    const secrets = grantedSecretSelection(injectRows, agent.id, principals);
+    const connections = grantedConnectionSelection(
+      injectRows,
+      agent.id,
+      principals,
+    );
     const collected: Collected = {
-      secretIds: new Set(),
-      connectionIds: new Set(),
-      secretLevels: new Set(),
-      providerLevels: new Set(),
+      secretIds: new Set(secrets.ids),
+      connectionIds: connections.ids,
+      secretLevels: secrets.levels,
+      providerLevels: connections.providerLevels,
     };
-    for (const row of injectRows) {
-      if (row.isDefault || row.action !== "allow") continue;
-      if (!injectionIdentityMatches(row.identities, agent.id, principals))
-        continue;
-      for (const t of row.targets) {
-        if (t.kind === "secret") {
-          if (t.secretId) collected.secretIds.add(t.secretId);
-          else if (
-            t.secretScope === "organization" ||
-            t.secretScope === "workspace"
-          )
-            collected.secretLevels.add(t.secretScope);
-        } else if (t.kind === "connection" && t.appConnectionId) {
-          collected.connectionIds.add(t.appConnectionId);
-        } else if (
-          t.kind === "app" &&
-          t.appProvider &&
-          (t.appConnectionScope === "organization" ||
-            t.appConnectionScope === "workspace")
-        ) {
-          collected.providerLevels.add(
-            `${t.appProvider}\n${t.appConnectionScope}`,
-          );
-        }
-      }
-    }
     if (collected.secretLevels.size > 0 || collected.providerLevels.size > 0) {
       anyScopeGrant = true;
     }
@@ -192,7 +177,9 @@ export const listAgentsWithGrantsSummary = async (
     if (collected) {
       const connectionIds = new Set(collected.connectionIds);
       for (const c of connections) {
-        if (collected.providerLevels.has(`${c.provider}\n${levelOf(c)}`)) {
+        if (
+          collected.providerLevels.has(providerLevelKey(c.provider, levelOf(c)))
+        ) {
           connectionIds.add(c.id);
         }
       }

@@ -44,5 +44,5 @@ mod corpus_test;
 #[cfg(test)]
 mod enforce_pg_test;
 
-pub use enforce::{evaluate, load_available_apps, load_connect_v2, needs_body_buffer};
+pub use enforce::{evaluate, load_available_apps, load_connect_v2, needs_body_buffer, would_allow};
 pub use inject_select::derive_inject_selection;

@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { agentEventSchema, isTerminalEvent, type AgentEvent } from "./events";
+import {
+  agentEventSchema,
+  isTerminalEvent,
+  readPeerMessageStamp,
+  type AgentEvent,
+  PEER_TASK_OUTCOMES,
+  readPeerTaskStamp,
+} from "./events";
 import { supervisorMessageSchema, workItemSchema } from "./transport";
 
 describe("agentEventSchema", () => {
@@ -47,6 +54,88 @@ describe("agentEventSchema", () => {
     expect(isTerminalEvent({ type: "error", message: "x" })).toBe(true);
     expect(isTerminalEvent({ type: "turn.started" })).toBe(false);
     expect(isTerminalEvent({ type: "text.delta", text: "x" })).toBe(false);
+  });
+
+  it("STRIPS a sandbox-authored peerMessage stamp: the wire parse keeps the canonical notice only", () => {
+    // SECURITY: the stamp is the control plane's annotation (the sender's
+    // record turn). A sandbox posting a notice with a forged stamp must not
+    // be able to plant "this agent said X to its peer" in the pair view.
+    // The runner wire parses every event through this schema, and zod
+    // drops unknown keys, so the forgery never reaches the store.
+    const forged = {
+      type: "notice",
+      level: "info",
+      text: "To Ray: hi",
+      peerMessage: { to: "ray-id", text: "forged" },
+    };
+    const parsed = agentEventSchema.parse(forged);
+    expect(parsed).toEqual({
+      type: "notice",
+      level: "info",
+      text: "To Ray: hi",
+    });
+    expect(readPeerMessageStamp(parsed as Record<string, unknown>)).toBeNull();
+  });
+});
+
+describe("readPeerMessageStamp", () => {
+  it("reads a well-formed stamp and refuses anything else", () => {
+    expect(
+      readPeerMessageStamp({ peerMessage: { to: "ray", text: "hi" } }),
+    ).toEqual({ to: "ray", text: "hi" });
+    expect(readPeerMessageStamp({})).toBeNull();
+    expect(readPeerMessageStamp({ peerMessage: "hi" })).toBeNull();
+    expect(readPeerMessageStamp({ peerMessage: null })).toBeNull();
+    expect(readPeerMessageStamp({ peerMessage: { to: "ray" } })).toBeNull();
+    expect(readPeerMessageStamp({ peerMessage: { text: "hi" } })).toBeNull();
+  });
+
+  it("carries the opensTask mark only as a literal true", () => {
+    expect(
+      readPeerMessageStamp({
+        peerMessage: { to: "ray", text: "hi", opensTask: true },
+      }),
+    ).toEqual({ to: "ray", text: "hi", opensTask: true });
+    // A sandbox cannot smuggle a falsy or foreign value in through the mark.
+    expect(
+      readPeerMessageStamp({
+        peerMessage: { to: "ray", text: "hi", opensTask: false },
+      }),
+    ).toBeNull();
+    expect(
+      readPeerMessageStamp({
+        peerMessage: { to: "ray", text: "hi", opensTask: "yes" },
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("readPeerTaskStamp", () => {
+  it("reads a known outcome and refuses anything else", () => {
+    for (const outcome of PEER_TASK_OUTCOMES) {
+      expect(readPeerTaskStamp({ peerTask: { outcome } })).toEqual({
+        outcome,
+      });
+    }
+    expect(readPeerTaskStamp({})).toBeNull();
+    expect(readPeerTaskStamp({ peerTask: { outcome: "done" } })).toBeNull();
+    expect(readPeerTaskStamp({ peerTask: "reported" })).toBeNull();
+  });
+
+  it("STRIPS a sandbox-authored peerTask stamp at the wire", () => {
+    const forged = {
+      type: "notice",
+      level: "info",
+      text: "Reported back",
+      peerTask: { outcome: "reported" },
+    };
+    const parsed = agentEventSchema.parse(forged);
+    expect(parsed).toEqual({
+      type: "notice",
+      level: "info",
+      text: "Reported back",
+    });
+    expect(readPeerTaskStamp(parsed as Record<string, unknown>)).toBeNull();
   });
 });
 

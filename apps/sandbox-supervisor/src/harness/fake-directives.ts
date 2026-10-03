@@ -240,11 +240,29 @@ export async function* runDirective(
   directive: FakeDirective,
   ctx: DirectiveContext,
 ): AsyncGenerator<AgentEvent> {
+  // Tool echoes are DEFERRED: a tool call is a message boundary for the
+  // supervisor (its answer is what the model says after its LAST call), so
+  // an echo emitted right after each result would be demoted to the
+  // fallback slot by the next call and vanish from the answer. Real models
+  // narrate their tool results after the tools; the fake does the same -
+  // every echo lands in the final message, where black-box callers read
+  // it, while the tool events still fire live around each call (the
+  // supervisor's per-conversation attribution depends on that order).
+  const deferred: string[] = [];
+  const flush = (): AgentEvent | null => {
+    if (deferred.length === 0) return null;
+    const text = deferred.join("");
+    deferred.length = 0;
+    return { type: "text.delta", text };
+  };
   for (const step of directive.steps) {
     switch (step.op) {
-      case "text":
+      case "text": {
+        const echoes = flush();
+        if (echoes) yield echoes;
         yield { type: "text.delta", text: step.text };
         break;
+      }
       case "sleep": {
         // Chunked so a dispose/process exit is never held behind one long
         // timer; abort semantics are unchanged (checked at event gaps).
@@ -286,22 +304,39 @@ export async function* runDirective(
         break;
       }
       case "tool": {
+        // The real adapter's shape: the harness announces the call on the
+        // session's event stream (`tool_start`) BEFORE the MCP bridge dials
+        // the socket, and closes it after. The supervisor's per-conversation
+        // attribution (`openTools`) reads exactly that order, so the fake
+        // must produce it too or the two-turns-in-flight proof cannot run
+        // against it. Named as jcode names an MCP tool.
+        const callId = randomUUID();
+        const wireName = `mcp__onecli__${step.name}`;
+        yield { type: "tool.started", callId, name: wireName };
         const outcome = await callPlatformTool(
           ctx.toolsSocketPath(),
           step.name,
           step.args,
         );
+        const summary = outcome.ok
+          ? `[tool ${step.name} ok] ${excerpt(JSON.stringify(outcome.result ?? null))}`
+          : `[tool ${step.name} error] ${excerpt(outcome.error ?? "failed")}`;
         yield {
-          type: "text.delta",
-          text: outcome.ok
-            ? `[tool ${step.name} ok] ${excerpt(JSON.stringify(outcome.result ?? null))}`
-            : `[tool ${step.name} error] ${excerpt(outcome.error ?? "failed")}`,
+          type: "tool.finished",
+          callId,
+          name: wireName,
+          output: summary,
+          ...(outcome.ok ? {} : { isError: true }),
         };
+        deferred.push(summary);
         break;
       }
-      case "error":
+      case "error": {
+        const echoes = flush();
+        if (echoes) yield echoes;
         yield { type: "error", message: step.message };
         return;
+      }
       case "failNextStart":
         ctx.armLaunchFailure(step.reason);
         yield { type: "text.delta", text: "[fake: armed failNextStart]" };
@@ -312,4 +347,6 @@ export async function* runDirective(
       }
     }
   }
+  const echoes = flush();
+  if (echoes) yield echoes;
 }

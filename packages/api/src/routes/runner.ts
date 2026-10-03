@@ -1,5 +1,8 @@
 import { Hono } from "hono";
 import {
+  MAX_OUTBOUND_ATTACHMENT_BYTES,
+  RUNNER_ATTACHMENT_HEADERS,
+  runnerAttachmentUploadHeadersSchema,
   runnerEventsRequestSchema,
   runnerHeartbeatRequestSchema,
   runnerRegisterRequestSchema,
@@ -9,6 +12,8 @@ import {
   runnerWorkRequestSchema,
   type RunnerWorkItem,
 } from "@onecli/agent-protocol";
+import { readCappedBinaryBody } from "@onecli/channels";
+import { attachmentMimeSchema } from "../validations/attachments";
 import { runnerAuth, type RunnerEnv } from "../middleware/runner-auth";
 import { NO_MODEL_KEY_MESSAGE } from "../validations/conversation";
 import {
@@ -34,9 +39,11 @@ import {
 import {
   getAttachmentBytesForRunner,
   planTurnAttachments,
+  sweepExpiredAttachments,
   sweepStalePendingAttachments,
 } from "../services/attachment-service";
 import { sweepSshSessions } from "../services/ssh-service";
+import { sweepPeerTasks } from "../services/channels/agent-link-service";
 import {
   applyRunnerEvent,
   buildSandboxStartPayload,
@@ -56,6 +63,7 @@ import type { AgentEvent } from "@onecli/agent-protocol";
 import { narrateTurnActivity } from "../services/channels/turn-receipt-service";
 import { buildHomeSyncItem } from "../services/home-sync-service";
 import {
+  executeAttachmentUpload,
   executeMemoryFileWrite,
   executePlatformTool,
 } from "../services/platform-tool-service";
@@ -112,6 +120,10 @@ const logClaimWait = createLogClaimWait(logger);
  * keep-alive and cloud's 65s ALB idle timeout, so a poll always returns an
  * answer rather than being cut mid-flight. */
 const MAX_WAIT_SECONDS = 25;
+/** The attachment retention sweep rides the work poll, once per this per
+ * process (module state: one api process, one clock). */
+const RETENTION_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
+let lastRetentionSweepAt = 0;
 const DEFAULT_LIMIT = 5;
 /** Re-check cadence inside a held poll — the floor on wake latency when the
  * in-process signal is missed (a second api instance, a signal thrown away). */
@@ -223,11 +235,26 @@ export const runnerRoutes = () => {
     await expireWedgedFollowUps().catch((err: unknown) =>
       log.warn({ err }, "wedged follow-up sweep failed"),
     );
+    // Peer tasks (the PR after 5b): idle tasks close with their line, and
+    // queued tasks whose pair is free start. Two indexed probes, empty
+    // almost always; same non-fatal posture as the sweeps above.
+    await sweepPeerTasks().catch((err: unknown) =>
+      log.warn({ err }, "peer task sweep failed"),
+    );
     // Uploads nobody ever sent (a closed tab, an abandoned draft). Indexed
     // and empty almost always; same non-fatal posture as the sweeps above.
     await sweepStalePendingAttachments().catch((err: unknown) =>
       log.warn({ err }, "stale attachment sweep failed"),
     );
+    // Retention (30 days, either direction): drops bytes, keeps metadata.
+    // Throttled per process — a day's worth of expiries is a handful of
+    // rows, and the poll runs every second across every runner.
+    if (Date.now() - lastRetentionSweepAt > RETENTION_SWEEP_INTERVAL_MS) {
+      lastRetentionSweepAt = Date.now();
+      await sweepExpiredAttachments().catch((err: unknown) =>
+        log.warn({ err }, "attachment retention sweep failed"),
+      );
+    }
     // SSH sessions a crashed terminator abandoned (sandbox-platform step 5):
     // lease-expired rows are closed here so the per-agent cap and the audit
     // record stay honest — keep-awake already ignores them (the lease is the
@@ -565,6 +592,83 @@ export const runnerRoutes = () => {
       );
     }
     return c.json(await executeMemoryFileWrite(runnerId, parsed.data));
+  });
+
+  /**
+   * POST /runner/attachments — a file the agent is sending back
+   * (`send_file`, Tier 3), relayed by the runner. The body is the RAW bytes
+   * (the web upload door's shape; no multipart anywhere in the repo) and the
+   * metadata rides the named headers. Always 200 with `{ok, …|error}` for a
+   * well-formed request — the fence, the caps and the checksum are all
+   * model-readable refusals, never status-code oracles (the tool-call law).
+   * Two exceptions, both about the REQUEST rather than the file: malformed
+   * headers are a 400 (the runner never sends those; only a bug would), and
+   * an oversized body is cut mid-stream and answered 413 — the api will not
+   * read 25 MB to say no.
+   */
+  app.post("/attachments", async (c) => {
+    const { runnerId } = c.get("runner");
+    const h = (name: string) => c.req.header(name);
+    const decode = (value: string | undefined): string | undefined => {
+      if (value === undefined) return undefined;
+      try {
+        return decodeURIComponent(value);
+      } catch {
+        return "\u0000"; // fails the schema below, as it should
+      }
+    };
+    const parsedHeaders = runnerAttachmentUploadHeadersSchema.safeParse({
+      sandboxId: h(RUNNER_ATTACHMENT_HEADERS.sandboxId),
+      conversationId: h(RUNNER_ATTACHMENT_HEADERS.conversationId),
+      turnId: h(RUNNER_ATTACHMENT_HEADERS.turnId),
+      name: decode(h(RUNNER_ATTACHMENT_HEADERS.name)),
+      sha256: h(RUNNER_ATTACHMENT_HEADERS.sha256),
+      caption: decode(h(RUNNER_ATTACHMENT_HEADERS.caption)),
+    });
+    if (!parsedHeaders.success) {
+      return c.json(
+        {
+          error:
+            parsedHeaders.error.issues[0]?.message ?? "Invalid upload headers",
+        },
+        400,
+      );
+    }
+    // Strip media-type parameters before the shape gate (the web door's
+    // exact handling); anything unusable stores as octet-stream.
+    const rawMime = (c.req.header("content-type") ?? "").split(";")[0]?.trim();
+    const mimeType = attachmentMimeSchema.safeParse(rawMime).success
+      ? (rawMime as string)
+      : "application/octet-stream";
+
+    const body = await readCappedBinaryBody(
+      c.req.raw,
+      MAX_OUTBOUND_ATTACHMENT_BYTES,
+    );
+    if (!body.ok) {
+      if (body.reason === "too_large") {
+        return c.json(
+          {
+            ok: false,
+            error: `Files are capped at ${Math.floor(MAX_OUTBOUND_ATTACHMENT_BYTES / (1024 * 1024))}MB.`,
+          },
+          413,
+        );
+      }
+      return c.json({
+        ok: false,
+        error:
+          body.reason === "empty" ? "The file is empty." : "Unreadable upload.",
+      });
+    }
+    return c.json(
+      await executeAttachmentUpload(
+        runnerId,
+        parsedHeaders.data,
+        mimeType,
+        body.bytes,
+      ),
+    );
   });
 
   app.post("/heartbeat", async (c) => {

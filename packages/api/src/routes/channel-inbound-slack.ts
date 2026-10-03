@@ -11,6 +11,11 @@ import { interpretSlackEvent } from "../services/channels/providers/slack/interp
 import { sharedSlackApp } from "../services/channels/providers/slack/shared-app";
 import { postBlocksMessage, postMessage } from "@onecli/channels/slack";
 import { parseSlackPresenceCredentials } from "../services/channels/providers/slack/types";
+import {
+  getInboundPresence,
+  setInboundPresence,
+  type InboundPresenceEntry,
+} from "../services/channels/providers/slack/inbound-cache";
 import { completePresenceFromOAuth } from "../services/channels/agent-channel-service";
 import {
   completeSharedInstallFromOAuth,
@@ -93,24 +98,10 @@ const timestampInWindow = (headers: Headers): boolean => {
 };
 
 /**
- * Cache the per-app signing secret briefly, keyed by Slack app id. The DB read
- * is cheap; the KMS decrypt behind `getCrypto()` is not, and an unauthenticated
- * webhook must not turn one request into one KMS call. The secret only changes
- * on re-attach, so a short TTL is safe; a wrong/rotated secret simply fails
- * verification and is re-fetched next window.
+ * The per-app verification cache lives in `providers/slack/inbound-cache.ts`
+ * so the presence lifecycle can invalidate it (a removed app must stop being
+ * admitted at once, not after the TTL). This route only reads through it.
  */
-const SIGNING_SECRET_TTL_MS = 60_000;
-const signingSecretCache = new Map<
-  string,
-  {
-    signingSecret: string;
-    botToken: string | null;
-    presenceId: string;
-    identityRef: string | null;
-    iconUrl: string | null;
-    at: number;
-  }
->();
 
 /**
  * Look the presence up by Slack app id and verify the signature over the raw
@@ -125,15 +116,7 @@ const verifyInbound = async (
   // Cheap pre-filter before any DB/KMS work (unauthenticated DoS surface).
   if (!timestampInWindow(headers)) return null;
 
-  const cached = signingSecretCache.get(apiAppId);
-  let entry: {
-    signingSecret: string;
-    botToken: string | null;
-    presenceId: string;
-    identityRef: string | null;
-    iconUrl: string | null;
-  } | null =
-    cached && Date.now() - cached.at < SIGNING_SECRET_TTL_MS ? cached : null;
+  let entry: InboundPresenceEntry | null = getInboundPresence(apiAppId);
 
   if (!entry) {
     // findUnique now: `(provider, externalId)` is unique, so a squatted app id
@@ -157,7 +140,9 @@ const verifyInbound = async (
     // receiving messages" is the detach promise), and a disabled presence is
     // off. Refused rows are never cached, so a re-activation takes effect
     // immediately; a just-detached presence can ride an already-cached entry
-    // for up to the 60s TTL — the same lag rotation already accepts.
+    // for up to the 60s TTL — the same lag rotation already accepts — while a
+    // provider-side removal invalidates the entry outright (the lifecycle
+    // hook), since the app is gone and its events are a stranger's.
     if (presence.status !== "active" && presence.status !== "needs_attention") {
       return null;
     }
@@ -178,7 +163,7 @@ const verifyInbound = async (
             ? agentImageUrlOrNull(presence.agent.id, presence.agent.imageKey)
             : null,
       };
-      signingSecretCache.set(apiAppId, { ...entry, at: Date.now() });
+      setInboundPresence(apiAppId, entry);
     } catch {
       return null;
     }

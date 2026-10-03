@@ -310,68 +310,6 @@ describe("the chat's in-place model-key door", () => {
   });
 });
 
-describe("the onboarding greeting hand-off (?hello=1)", () => {
-  afterEach(() => {
-    vi.mocked(conversations.ensureDirect).mockReset();
-    vi.mocked(conversations.turns).mockReset();
-    window.history.replaceState(null, "", "/w/ws-1/agents/agent-1/chat");
-  });
-
-  const arrange = () => {
-    vi.mocked(conversations.ensureDirect).mockResolvedValue({
-      id: "conv-1",
-    } as never);
-    vi.mocked(conversations.turns).mockResolvedValue({
-      turns: [],
-      hasMore: false,
-      oldestSeq: null,
-    });
-  };
-
-  it("hands the composer the greeting draft and strips the flag from the URL", async () => {
-    arrange();
-    window.history.replaceState(
-      null,
-      "",
-      "/w/ws-1/agents/agent-1/chat?hello=1",
-    );
-    renderSection();
-
-    await waitFor(() =>
-      expect(screen.getByTestId("composer")).toHaveAttribute(
-        "data-initial-draft",
-        "Hey Agent, what can you do for me?",
-      ),
-    );
-    // Consumed: the flag is gone, so a refresh opens a plain empty chat.
-    expect(window.location.search).toBe("");
-  });
-
-  it("stripping the flag leaves the URL's other params alone", async () => {
-    arrange();
-    window.history.replaceState(
-      null,
-      "",
-      "/w/ws-1/agents/agent-1/chat?attach=slack&hello=1",
-    );
-    renderSection();
-
-    await waitFor(() => expect(window.location.search).toBe("?attach=slack"));
-  });
-
-  it("opens empty without the flag — every non-onboarding route is untouched", async () => {
-    arrange();
-    renderSection();
-
-    await waitFor(() =>
-      expect(screen.getByTestId("composer")).toHaveAttribute(
-        "data-initial-draft",
-        "",
-      ),
-    );
-  });
-});
-
 describe("the single reveal", () => {
   afterEach(() => {
     vi.mocked(conversations.ensureDirect).mockReset();
@@ -439,6 +377,53 @@ describe("the single reveal", () => {
     await waitFor(() =>
       expect(screen.getByTestId("connect-key")).toBeInTheDocument(),
     );
+  });
+
+  it("reveals a thread whose ONLY turn is still running — the agent must be watched writing", async () => {
+    // THE ONBOARDING BUG. The agent speaks first: the greeting turn is
+    // created by the thread-open door, so it is already in the window by
+    // the time the section mounts. Gating on `caughtUp` then holds the
+    // skeleton over the entire live run and lifts it once the answer is
+    // finished — which reads as "the agent replied before I got here".
+    //
+    // MUTATION-TESTED: drop the `nothingSettled` escape and this fails.
+    // Nothing has SETTLED, so there is no record to tear — show the live
+    // turn and let the person watch it write.
+    arrangeThread([turn({ status: "running", source: "greeting" })], 1);
+    streamMock.mockImplementation(() => ({
+      events: [],
+      status: "streaming",
+      error: undefined,
+      caughtUp: false,
+    }));
+    renderSection();
+    await waitFor(() =>
+      expect(screen.getByTestId("connect-key")).toBeInTheDocument(),
+    );
+  });
+
+  it("still holds the skeleton when a settled turn sits under the active one", async () => {
+    // The escape is scoped to threads with NOTHING settled. A returning
+    // reader with real history plus a live turn still gets the whole
+    // record at once, which is what the gate is for.
+    arrangeThread(
+      [
+        turn({ id: "t0", status: "done" }),
+        turn({ id: "t1", status: "running" }),
+      ],
+      1,
+    );
+    streamMock.mockImplementation(() => ({
+      events: [],
+      status: "streaming",
+      error: undefined,
+      caughtUp: false,
+    }));
+    renderSection();
+    await waitFor(() =>
+      expect(vi.mocked(conversations.turns)).toHaveBeenCalled(),
+    );
+    expect(screen.queryByTestId("connect-key")).not.toBeInTheDocument();
   });
 
   it("hands the stream the window's replay floor — oldestSeq minus one", async () => {

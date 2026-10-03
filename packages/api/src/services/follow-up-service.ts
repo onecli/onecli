@@ -1,13 +1,10 @@
 import { db } from "@onecli/db";
 import { ServiceError } from "./errors";
 import {
-  requireConversation,
-  requireSystemConversation,
-} from "./conversation-service";
-import {
   createFollowUp,
   createTurn,
   promoteOldestParkedFollowUp,
+  requireConversationFor,
   type TurnOrigin,
 } from "./turn-service";
 import { listConversationsWithParkedFollowUps } from "./due-work";
@@ -60,10 +57,11 @@ export const sendConversationMessage = async (
   // write into a direct thread they could not read, whichever arm serves
   // the message. (`createTurn` below re-runs it — one redundant indexed
   // read on the plain path, in exchange for no arm ever missing it.)
-  const conversation =
-    origin.userId === null
-      ? await requireSystemConversation(workspaceId, conversationId)
-      : await requireConversation(workspaceId, conversationId, origin.userId);
+  const conversation = await requireConversationFor(
+    workspaceId,
+    conversationId,
+    origin,
+  );
 
   for (let attempt = 0; attempt < SEND_ATTEMPTS; attempt += 1) {
     let target = await activeTurnOf(conversation.id);

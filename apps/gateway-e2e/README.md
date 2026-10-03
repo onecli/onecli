@@ -70,6 +70,21 @@ pnpm --filter @onecli/gateway-e2e test:e2e
 
 Teardown: `docker rm -f gwe2e-db gwe2e-redis`.
 
+### Real approval expiration
+
+The normal approval suite covers explicit review decisions. To also exercise the
+shipped 180-second approval deadline and verify a subsequent request needs fresh
+approval, run the opt-in slow test with the same database/Redis environment:
+
+```bash
+E2E_APPROVAL_EXPIRATION=1 pnpm --filter @onecli/gateway-e2e test:e2e:no-build tests/approval-expiration.test.ts
+```
+
+This runs both Redis and in-memory approval stores, taking just over six minutes
+when run serially. Neither lane shortens the gateway timer. The HTTP client's
+deadline is longer than the approval deadline so the tests observe the gateway's
+expiration response rather than a client-side timeout.
+
 ## Isolation
 
 Two mechanisms, and both are required.
@@ -124,7 +139,8 @@ Known gaps, all deliberate:
   override — so asserting an OAuth credential _arrived_ would need real egress. The
   resolution outcomes (ambiguity, not-found) are covered instead, since they answer before any
   socket opens.
-- **No approval timeout.** It is 180 seconds.
+- **No approval timeout in the default run.** The opt-in expiration suite above
+  exercises the real 180-second deadline on both approval backends.
 - **No live KMS decryption.** The KMS backend is hosted-cloud plumbing; its envelope format
   is unit-pinned cross-language (see above), and the live AWS round-trip is proven by cloud
   deploys, not this suite.

@@ -33,9 +33,13 @@ const config = (homeDir: string) => ({
   effort: undefined,
   instructions: "You are the test agent.",
   agentName: "Ada",
+  channels: [],
+  peers: [],
+  connections: [],
   harness: "fake",
   runnerWsUrl: undefined,
   bootstrapToken: undefined,
+  outboundAttachments: false,
 });
 
 const home = (prefix: string) => mkdtempSync(join(tmpdir(), prefix));
@@ -498,6 +502,110 @@ describe("scheduling", () => {
     expect(order.lastIndexOf("t1")).toBeGreaterThan(order.indexOf("t2"));
   });
 
+  it("attributes a platform-tool call to the ONE conversation that has that tool open when two turns are in flight", async () => {
+    // Observed live (2026-09-16): a person's question in one conversation
+    // and a peer's message in another put two turns in flight, and the
+    // person's message_agent lost its origin (no conversationId on the
+    // tool.call), so the platform could not tell a person was behind it.
+    // The harness announces a tool call on the calling session's stream
+    // before the bridge dials the socket; the supervisor reads that.
+    const t = createTestTransport();
+    const run = runSupervisor(
+      config(home("sup-attrib-")),
+      createFakeHarness(),
+      t.transport,
+    );
+    await t.until(() => t.of("ready").length === 1, "ready");
+
+    // Two directive turns, both held open by a sleep, each then calling a
+    // DIFFERENT platform tool (memory_list is always advertised).
+    const directive = (tool: string, ms: number) =>
+      `@fake:v1 ${JSON.stringify({
+        steps: [
+          { op: "sleep", ms },
+          { op: "tool", name: tool, args: {} },
+          { op: "text", text: "done" },
+        ],
+      })}`;
+    t.push(deliver("t-a", "cv-a", { message: directive("memory_list", 200) }));
+    t.push(deliver("t-b", "cv-b", { message: directive("list_tasks", 300) }));
+    // Answer every forwarded tool.call so the turns can finish.
+    const answered = new Set<string>();
+    const answer = () => {
+      for (const call of t.of("tool.call")) {
+        if (answered.has(call.callId)) continue;
+        answered.add(call.callId);
+        t.push({
+          kind: "tool.result",
+          callId: call.callId,
+          ok: true,
+          result: {},
+        });
+      }
+    };
+    await t.until(() => {
+      answer();
+      return t.of("turn.result").length === 2;
+    }, "both turns");
+    await t.finish(run);
+
+    const calls = t.of("tool.call");
+    expect(calls).toHaveLength(2);
+    // Both turns were in flight when each call was made (the sleeps overlap),
+    // yet each call carries ITS conversation, not none.
+    expect(calls.find((c) => c.tool === "memory_list")).toMatchObject({
+      conversationId: "cv-a",
+      turnId: "t-a",
+    });
+    expect(calls.find((c) => c.tool === "list_tasks")).toMatchObject({
+      conversationId: "cv-b",
+      turnId: "t-b",
+    });
+  });
+
+  it("omits the origin when the SAME tool is open in two in-flight turns (a wrong anchor is worse than none)", async () => {
+    const t = createTestTransport();
+    const run = runSupervisor(
+      config(home("sup-attrib-same-")),
+      createFakeHarness(),
+      t.transport,
+    );
+    await t.until(() => t.of("ready").length === 1, "ready");
+    const directive = `@fake:v1 ${JSON.stringify({
+      steps: [
+        { op: "sleep", ms: 200 },
+        { op: "tool", name: "memory_list", args: {} },
+        { op: "text", text: "done" },
+      ],
+    })}`;
+    t.push(deliver("t-a", "cv-a", { message: directive }));
+    t.push(deliver("t-b", "cv-b", { message: directive }));
+    // Hold both calls open until BOTH have arrived, so each was made while
+    // the other's tool was open too; then answer.
+    await t.until(() => t.of("tool.call").length === 2, "both calls");
+    for (const call of t.of("tool.call")) {
+      t.push({
+        kind: "tool.result",
+        callId: call.callId,
+        ok: true,
+        result: {},
+      });
+    }
+    await t.until(() => t.of("turn.result").length === 2, "both turns");
+    await t.finish(run);
+
+    // At least the second call saw the same tool open in two sessions and
+    // must carry no origin; the first may have been unambiguous still.
+    const calls = t.of("tool.call");
+    expect(calls).toHaveLength(2);
+    expect(calls.some((c) => c.conversationId === undefined)).toBe(true);
+    // And no call was attributed to the WRONG conversation.
+    for (const call of calls) {
+      if (!call.conversationId) continue;
+      expect(["cv-a", "cv-b"]).toContain(call.conversationId);
+    }
+  });
+
   it("keeps serving a conversation after a transport write throws", async () => {
     // The per-conversation chain is a promise tail. A rejection poisons it:
     // every later `.then` short-circuits, so the conversation silently stops
@@ -934,6 +1042,34 @@ describe("a model-provider refusal on a live harness", () => {
     expect(failed?.errorCode).toBe("model_provider_error");
     expect(failed?.error).toBe(REFUSAL);
     // A refusal is one turn's problem, never a dead harness.
+    expect(t.of("unhealthy")).toHaveLength(0);
+  });
+
+  it("codes a rejected transcript transcript_rejected, never as a key problem", async () => {
+    // #1194: the provider rejects the stored conversation itself. That 400
+    // carries no key-problem token, but it must not fall through to the
+    // raw passthrough either: it repeats on every turn until the transcript
+    // is repaired, and the person needs to hear that, not a vendor blob.
+    const REJECTED =
+      'Anthropic API error (400 Bad Request): {"type":"error","error":{"type":"invalid_request_error","message":"messages.814: `tool_use` ids were found without `tool_result` blocks immediately after: toolu_01. Each `tool_use` block must have a corresponding `tool_result` block in the next message."}}';
+    const t = createTestTransport();
+    const harness = createFakeHarness({
+      script: () => [{ type: "error", message: REJECTED }],
+    });
+    const run = runSupervisor(
+      config(home("sup-transcript-")),
+      harness,
+      t.transport,
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the failed turn");
+    await t.finish(run);
+
+    const [failed] = t.of("turn.result");
+    expect(failed?.status).toBe("failed");
+    expect(failed?.errorCode).toBe("transcript_rejected");
+    expect(failed?.error).toBe(REJECTED);
     expect(t.of("unhealthy")).toHaveLength(0);
   });
 

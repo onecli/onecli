@@ -23,13 +23,14 @@ import { useAppMessages } from "@/hooks/use-app-connected";
 import { useAgentDetail } from "@/hooks/use-agents";
 import { useAvailableApps } from "@/hooks/use-available-apps";
 import { useConnections } from "@/hooks/use-connections";
-import { useSetConnectionGrant } from "@/hooks/use-grants";
+import { useInvalidateGrants } from "@/hooks/use-grants";
 
 /**
  * The agent-scoped app picker: search the catalog, Connect opens the OAuth
- * popup in place (the shared `openConnectPopup`), and the fresh connection is
- * granted to THIS agent automatically the moment the popup lands (full
- * access — Manage is the scoping-down door). The catalog honors the org
+ * popup in place (the shared `openConnectPopup`). A new account lands already
+ * attached, with full access, to every agent of the workspace, this one
+ * included (the API's workspace auto-attach), so there is no grant to write
+ * here; Manage is the scoping-down door. The catalog honors the org
  * app-availability restriction exactly like the connections page's picker.
  * Shared by the agent Connections section's Add button and the chat's
  * connector card, so both doors keep one contract.
@@ -38,27 +39,27 @@ export const ConnectAppPickerDialog = ({
   agentId,
   open,
   onOpenChange,
-  onGranted,
+  onConnected,
 }: {
   agentId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** Fires after the fresh connection's grant to this agent committed —
-   *  the caller decides what "next" looks like (the section opens its
+  /** Fires when a connect this dialog started CREATED an account. The
+   *  caller decides what "next" looks like (the section opens its
    *  permissions sheet; the chat card toasts). */
-  onGranted?: (connectionId: string) => void;
+  onConnected?: (connectionId: string) => void;
 }) => {
   const [query, setQuery] = useState("");
   const pathname = usePathname();
   const router = useRouter();
   const queryClient = useQueryClient();
+  const invalidateGrants = useInvalidateGrants();
   const { data: connections = [] } = useConnections("workspace");
   const { data: availableApps } = useAvailableApps("workspace");
   // For the popup's success screen ("Go back to <agent>…") — cached from the
   // agent page's own detail read.
   const { data: agent } = useAgentDetail(agentId);
-  const setGrant = useSetConnectionGrant();
-  // Auto-grant only what THIS dialog initiated — a global message listener
+  // React only to what THIS dialog initiated: a global message listener
   // also hears popups opened elsewhere (another tab, another surface).
   const initiated = useRef(new Set<string>());
 
@@ -72,23 +73,13 @@ export const ConnectAppPickerDialog = ({
     onConnected: ({ provider, connectionId }) => {
       if (!provider || !initiated.current.has(provider)) return;
       initiated.current.delete(provider);
-      // The pool changed whether or not the grant leg runs (a fresh account,
-      // or a reconnect the callback deduped onto an existing one) — refresh
-      // the list and the count badges unconditionally, the same sweep the
-      // connections page's listener does.
-      void queryClient.invalidateQueries({
-        queryKey: queryKeys.connections.all(),
-      });
+      // The pool changed (a fresh account, or a reconnect the callback deduped
+      // onto an existing one), and a fresh account arrives with its grants:
+      // refresh the list, the grant views and the count badges.
+      invalidateGrants();
       void queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
-      // Fresh connection from this agent's surface: attach it to THIS agent
-      // with full access — scoping down afterwards is what Manage is for.
       // Reconnects carry no connectionId and keep their grants.
-      if (connectionId) {
-        setGrant.mutate(
-          { agentId, connectionId, input: { access: "full" } },
-          { onSuccess: () => onGranted?.(connectionId) },
-        );
-      }
+      if (connectionId) onConnected?.(connectionId);
       onOpenChange(false);
     },
     // The popup reports an app that needs credentials configured before it
@@ -150,8 +141,8 @@ export const ConnectAppPickerDialog = ({
         <DialogHeader>
           <DialogTitle>Connect an app</DialogTitle>
           <DialogDescription>
-            Connecting gives this agent full access. Adjust it anytime under
-            Manage.
+            A new account is on for every agent in this workspace, with full
+            access. Adjust it anytime under Manage.
           </DialogDescription>
         </DialogHeader>
         <div className="relative">

@@ -1,4 +1,3 @@
-import { unpackThreadAddress } from "@onecli/channels/slack";
 import type { AdapterLink } from "@onecli/agent-protocol";
 
 /**
@@ -24,9 +23,21 @@ export interface ChannelPostTarget {
 /** `direct` links address the IM channel; `group` links pack
  * `<channel>:<threadRootTs>` into the external thread id — the codec lives
  * in @onecli/channels/slack so both runtimes decode the one format. */
+/**
+ * A provider's decoding of its own thread address (`externalThreadId` is
+ * provider-opaque to everything in this directory): which space to post in
+ * and, for a group thread, the thread key. Supplied by the provider module
+ * (`ChannelAdapterProvider.threadAddress`), never assumed here.
+ */
+export type ThreadAddressDecoder = (
+  kind: "direct" | "group",
+  externalThreadId: string,
+) => ReplyTarget;
+
 export const replyTargetForLink = (
+  decode: ThreadAddressDecoder,
   link: Pick<AdapterLink, "kind" | "externalThreadId">,
-): ReplyTarget => unpackThreadAddress(link.kind, link.externalThreadId);
+): ReplyTarget => decode(link.kind, link.externalThreadId);
 
 /**
  * Where ONE TURN's answer belongs — the link's address, narrowed to the
@@ -44,10 +55,11 @@ export const replyTargetForLink = (
  * already belongs to, and can never redirect it into another one.
  */
 export const replyTargetForTurn = (
+  decode: ThreadAddressDecoder,
   link: Pick<AdapterLink, "kind" | "externalThreadId">,
   turn: { sourceThreadId?: string | null },
 ): ReplyTarget => {
-  const target = replyTargetForLink(link);
+  const target = replyTargetForLink(decode, link);
   // Absent (an older control plane, or a turn that arrived at the link's own
   // address) keeps the link's target verbatim — the pre-existing behavior.
   return turn.sourceThreadId

@@ -149,9 +149,10 @@ const feedControlPlane = (
 
 const startAdapter = async (
   controlPlane: ControlPlaneClient,
+  configOverrides: Partial<AdapterConfig> = {},
 ): Promise<void> => {
   const adapter = createAdapter({
-    config: adapterConfig(),
+    config: { ...adapterConfig(), ...configOverrides },
     controlPlane,
     log: () => {},
   });
@@ -177,6 +178,56 @@ describe("the config feed owns connections", () => {
     expect(opens[0]?.token).toBe("xapp-app");
     // …and the socket was built from the URL Slack answered.
     expect(sockets[0]?.url).toBe("wss://fake.slack/link");
+  });
+
+  it("a dial Slack refuses with a DEAD-credential code is reported through the ingest door as the provider's removal event; a transient refusal is not", async () => {
+    // Socket mode has no webhook: the socket IS the webhook. An app
+    // uninstalled or deleted while this adapter was offline can therefore
+    // only be learned from the dial itself — apps.connections.open with the
+    // presence's app-level token answering invalid_auth. Reporting it as the
+    // removal event lets the control plane flip the presence (card, doc,
+    // tools), drop it from the config feed, and stop the redials.
+    // MUTATION-PROOF: drop the isDeadCredentialError branch in
+    // onPermanentFailure and no ingest happens.
+    const ingested: unknown[] = [];
+    slack.respond("apps.connections.open", () => ({
+      ok: false,
+      error: "invalid_auth",
+    }));
+    const { controlPlane } = feedControlPlane([presence()], {
+      ingest: async (request) => {
+        ingested.push(request);
+        return { outcome: "removed" } as never;
+      },
+    });
+    await startAdapter(controlPlane);
+
+    await vi.waitFor(() => expect(ingested).toHaveLength(1));
+    expect(ingested[0]).toMatchObject({
+      presenceId: "p1",
+      event: { type: "tokens_revoked", tokens: { bot: ["dead"] } },
+    });
+    expect(sockets).toHaveLength(0);
+  });
+
+  it("a transient dial failure (a 5xx transport error) reports nothing and just reconnects later", async () => {
+    const ingested: unknown[] = [];
+    // `internal_error` is Slack ANSWERING with a transient code — a
+    // permanent failure for the socket owner (no redial loop), but not a
+    // removal: nothing is reported.
+    slack.respond("apps.connections.open", () => ({
+      ok: false,
+      error: "internal_error",
+    }));
+    const { controlPlane } = feedControlPlane([presence()], {
+      ingest: async (request) => {
+        ingested.push(request);
+        return { outcome: "ignored" } as never;
+      },
+    });
+    await startAdapter(controlPlane);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(ingested).toEqual([]);
   });
 
   it("closes the socket when the presence disappears from the feed", async () => {
@@ -507,6 +558,115 @@ describe("the completion pass posts once", () => {
         turnId: "t1",
       },
     ]);
+  });
+
+  it("a file the workspace refuses is posted as a LINK to the web door, built from APP_URL + the agent's ids + the item's conversation — every id encoded", async () => {
+    // The install predates files:write: Slack refuses the ticket, and the
+    // degrade line must carry a real door. Its URL is the adapter's own
+    // construction; the only inputs are config and ids the control plane
+    // served — the hostile-shaped ones below prove the encoding.
+    slack.respond("files.getUploadURLExternal", () => ({
+      ok: false,
+      error: "missing_scope",
+    }));
+    let phase: "finished" | "done" = "finished";
+    const hostile = presence({
+      agent: { id: "ag/1?x", name: "Deploy Agent", workspaceId: "ws 1" },
+    });
+    const { controlPlane } = feedControlPlane([hostile], {
+      getWork: async () =>
+        phase === "finished"
+          ? {
+              finished: [
+                {
+                  ...workItem({
+                    status: "done",
+                    finishedAt: "2026-08-06T10:00:05.000Z",
+                    attachments: [
+                      {
+                        id: "att&1",
+                        name: "clip.webm",
+                        mimeType: "video/webm",
+                        sizeBytes: 1,
+                        caption: null,
+                      },
+                    ],
+                  }),
+                  conversationId: "cv#1",
+                },
+              ],
+            }
+          : { finished: [] },
+      readTranscript: async () => ({
+        events: [
+          { seq: 1, turnId: "t1", type: "text", payload: { text: "Here." } },
+        ],
+        nextSince: 1,
+        hasMore: false,
+      }),
+      fetchAttachment: async () => new Uint8Array(Buffer.from("x")),
+      advanceCursor: async () => {
+        phase = "done";
+        return true;
+      },
+    });
+    await startAdapter(controlPlane);
+    await vi.waitFor(() =>
+      expect(slack.callsTo("chat.postMessage")).toHaveLength(2),
+    );
+    const line = slack.callsTo("chat.postMessage")[1]!.form.text!;
+    expect(line).toBe(
+      ":paperclip: <https://app.example.com/w/ws%201/files/att%261?c=cv%231|clip.webm>\n_Click a file to download it from OneCLI._",
+    );
+  });
+
+  it("without APP_URL there is no door: the degrade line names the file and points at the web in words", async () => {
+    slack.respond("files.getUploadURLExternal", () => ({
+      ok: false,
+      error: "missing_scope",
+    }));
+    let phase: "finished" | "done" = "finished";
+    const { controlPlane } = feedControlPlane([presence()], {
+      getWork: async () =>
+        phase === "finished"
+          ? {
+              finished: [
+                workItem({
+                  status: "done",
+                  finishedAt: "2026-08-06T10:00:05.000Z",
+                  attachments: [
+                    {
+                      id: "a1",
+                      name: "clip.webm",
+                      mimeType: "video/webm",
+                      sizeBytes: 1,
+                      caption: null,
+                    },
+                  ],
+                }),
+              ],
+            }
+          : { finished: [] },
+      readTranscript: async () => ({
+        events: [
+          { seq: 1, turnId: "t1", type: "text", payload: { text: "Here." } },
+        ],
+        nextSince: 1,
+        hasMore: false,
+      }),
+      fetchAttachment: async () => new Uint8Array(Buffer.from("x")),
+      advanceCursor: async () => {
+        phase = "done";
+        return true;
+      },
+    });
+    await startAdapter(controlPlane, { appUrl: "" });
+    await vi.waitFor(() =>
+      expect(slack.callsTo("chat.postMessage")).toHaveLength(2),
+    );
+    expect(slack.callsTo("chat.postMessage")[1]!.form.text).toBe(
+      ":paperclip: clip.webm\n_Download from this conversation on the web._",
+    );
   });
 
   it("posts NOTHING when the CAS is lost, and drops the local cursor for re-seed", async () => {

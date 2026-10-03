@@ -3,6 +3,9 @@ import {
   ACTIVITY_TEXT_MAX,
   activityForReasoning,
   activityForTool,
+  bareToolName,
+  finishedActivityForTool,
+  toolKind,
 } from "./activity";
 
 /**
@@ -84,6 +87,21 @@ describe("activityForTool", () => {
     expect(activityForTool("bash")).toBe("Running a command");
     expect(activityForTool("read")).toBe("Reading a file");
     expect(activityForTool("webfetch")).toBe("Fetching a page");
+    expect(activityForTool("mcp__onecli__message_agent")).toBe(
+      "Messaging another agent",
+    );
+    expect(activityForTool("mcp__onecli__complete_task")).toBe(
+      "Reporting back",
+    );
+  });
+
+  it("bareToolName strips exactly the harness MCP prefix", () => {
+    expect(bareToolName("mcp__onecli__process_status")).toBe("process_status");
+    expect(bareToolName("mcp__other__x_y")).toBe("x_y");
+    expect(bareToolName("bash")).toBe("bash");
+    // Only a leading prefix: a bare name that happens to contain the shape
+    // is left alone.
+    expect(bareToolName("foo_mcp__onecli__bar")).toBe("foo_mcp__onecli__bar");
   });
 
   it("sees through the platform's MCP prefix", () => {
@@ -106,5 +124,49 @@ describe("activityForTool", () => {
     expect(activityForTool("mcp__evil__" + "x".repeat(500))).toBe(
       "Using a tool",
     );
+  });
+});
+
+describe("finishedActivityForTool", () => {
+  it("is the past tense of the same phrase", () => {
+    expect(finishedActivityForTool("bash")).toBe("Ran a command");
+    expect(finishedActivityForTool("read")).toBe("Read a file");
+    expect(finishedActivityForTool("mcp__onecli__websearch")).toBe(
+      "Searched the web",
+    );
+    expect(finishedActivityForTool("mcp__onecli__swarm")).toBe(
+      "Coordinated helpers",
+    );
+    // The platform's channel tools, seen in real agent turns.
+    expect(finishedActivityForTool("mcp__onecli__find_recipient")).toBe(
+      "Looked someone up",
+    );
+    expect(activityForTool("mcp__onecli__send_message")).toBe(
+      "Sending a message",
+    );
+    expect(finishedActivityForTool("mcp__onecli__send_file")).toBe(
+      "Sent a file",
+    );
+  });
+
+  it("NEVER echoes an unknown tool's raw name", () => {
+    expect(finishedActivityForTool("<img src=x onerror=alert(1)>")).toBe(
+      "Used a tool",
+    );
+  });
+});
+
+describe("toolKind", () => {
+  it("names what a countable tool works on, through the MCP prefix", () => {
+    expect(toolKind("bash")).toBe("command");
+    expect(toolKind("READ")).toBe("read");
+    expect(toolKind("apply_patch")).toBe("edit");
+    expect(toolKind("mcp__onecli__webfetch")).toBe("fetch");
+    expect(toolKind("agentgrep")).toBe("search");
+  });
+
+  it("is undefined for a tool that is not one countable kind", () => {
+    expect(toolKind("todo")).toBeUndefined();
+    expect(toolKind("some_third_party_tool")).toBeUndefined();
   });
 });

@@ -60,6 +60,21 @@ describe("parseConnectLink — the access_restricted (attach) shape", () => {
       parseConnectLink("https://app.onecli.sh/connections/apps/gmail/extra"),
     ).toBeNull();
   });
+
+  it.each([
+    ["a custom secret", "/w/abc/agents/agent-1/connections?tab=custom"],
+    ["an LLM key", "/w/abc/agents/agent-1/models"],
+    ["an app path with no registered app", "/w/abc/agents/agent-1/connections"],
+  ])(
+    "leaves the attach link for %s as plain prose (no card)",
+    (_kind, path) => {
+      // Only an app connection has an app to card; the gateway links every
+      // other restricted credential to the agent page that attaches it.
+      const href = `https://app.onecli.sh${path}`;
+      expect(parseConnectLink(href)).toBeNull();
+      expect(isCardConnectLink(href)).toBe(false);
+    },
+  );
 });
 
 describe("isCardConnectLink — the suppression predicate", () => {

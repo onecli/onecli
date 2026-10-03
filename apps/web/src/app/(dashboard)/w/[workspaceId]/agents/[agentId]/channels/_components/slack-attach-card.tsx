@@ -4,7 +4,10 @@ import Link from "next/link";
 import { useState } from "react";
 import { ExternalLink } from "lucide-react";
 import { AppIcon } from "@/lib/components/app-icon";
-import { slack as slackApp } from "@onecli/api/apps/slack";
+import {
+  SLACK_DISPLAY_NAME,
+  SLACK_ICON_SRC,
+} from "@/lib/agents/slack-presence";
 import { toast } from "sonner";
 import { Button } from "@onecli/ui/components/button";
 import {
@@ -16,6 +19,7 @@ import {
 } from "@onecli/ui/components/card";
 import type { ChannelTransport } from "@/lib/api";
 import { useAttachChannel, useDetachChannel } from "@/hooks/use-channels";
+import { SlackDetachDialog } from "./slack-detach-dialog";
 import { SlackGuidedSocketSteps } from "./slack-guided-socket-steps";
 import { SlackManifestFloor } from "./slack-manifest-floor";
 import { SlackTransportPicker } from "./slack-transport-picker";
@@ -35,6 +39,21 @@ interface SlackAttachCardProps {
   viewerIsOrgAdmin: boolean;
   /** A `pending_setup` presence exists: re-running create returns fresh URLs. */
   resuming: boolean;
+  /**
+   * The presence is `disabled`: the workspace REMOVED the app on the Slack
+   * side (uninstalled it, or revoked its token). Same resume mechanics as
+   * `resuming` (the row keeps its app id and client credentials), different
+   * story: the copy says what happened and offers re-attach or detach.
+   */
+  removed?: boolean;
+  /** The bot's handle, for the removed copy ("@donna"), where known. */
+  identityName?: string | null;
+  /**
+   * The removed app's own id (`A0…`). The manual floor uses it to re-attach
+   * THAT app: no "create a new app" step, no App ID field to retype. Null
+   * when nothing is removed.
+   */
+  removedAppId?: string | null;
 }
 
 /**
@@ -74,6 +93,9 @@ export const SlackAttachCard = ({
   organizationId,
   viewerIsOrgAdmin,
   resuming,
+  removed = false,
+  identityName = null,
+  removedAppId = null,
 }: SlackAttachCardProps) => {
   const attach = useAttachChannel(agentId, "slack");
   const detach = useDetachChannel(agentId, "slack");
@@ -86,6 +108,10 @@ export const SlackAttachCard = ({
   const [blockedInstallUrl, setBlockedInstallUrl] = useState<string | null>(
     null,
   );
+  // The removed face's Detach is a real teardown of a real (if dead) app, so
+  // it takes the same confirmation the attached face's Detach does — never
+  // an immediate click (the destructive-action rule).
+  const [detachOpen, setDetachOpen] = useState(false);
 
   // The picker renders only when the server offers a real choice (older
   // servers send no `available`) and nothing is pinned by a pending row.
@@ -169,7 +195,41 @@ export const SlackAttachCard = ({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        {resuming && (
+        {removed && (
+          <div className="space-y-1 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 dark:border-amber-500/40 dark:bg-amber-500/15">
+            <p className="text-sm">
+              {identityName ? `@${identityName}` : "This agent's Slack app"} was
+              removed from the workspace: it was uninstalled, or its token was
+              revoked. Messaging is paused and the agent knows it.
+            </p>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-muted-foreground text-xs">
+                Re-attach restores the same app. Detach removes it from this
+                agent.
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setDetachOpen(true)}
+              >
+                Detach
+              </Button>
+            </div>
+          </div>
+        )}
+        {removed && (
+          <SlackDetachDialog
+            agentId={agentId}
+            open={detachOpen}
+            onOpenChange={setDetachOpen}
+            // The app is already gone from Slack; the record delete is the
+            // only remote act left, and it needs the org credential like
+            // every remote delete.
+            canDeleteRemote={hasOrgCredentials}
+            identityName={identityName}
+          />
+        )}
+        {resuming && !removed && (
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-muted-foreground text-sm">
               Setup was started but not finished. Pick up where it left off.
@@ -201,7 +261,11 @@ export const SlackAttachCard = ({
         {!hasOrgCredentials && transport === "events" ? (
           <div className="flex flex-col items-center gap-1.5 rounded-xl border border-dashed px-6 py-10 text-center">
             <span className="bg-card mb-2 flex size-12 items-center justify-center rounded-2xl border shadow-sm">
-              <AppIcon icon={slackApp.icon} name={slackApp.name} size={26} />
+              <AppIcon
+                icon={SLACK_ICON_SRC}
+                name={SLACK_DISPLAY_NAME}
+                size={26}
+              />
             </span>
             <p className="text-sm font-medium">
               Connect Slack for your organization first
@@ -233,6 +297,7 @@ export const SlackAttachCard = ({
             agentId={agentId}
             transport={transport}
             requestedTransport={requestedTransport}
+            reattachAppId={removed ? removedAppId : null}
           />
         ) : attach.data?.transport === "socket" ? (
           <SlackGuidedSocketSteps
@@ -242,10 +307,18 @@ export const SlackAttachCard = ({
         ) : (
           <div className="flex flex-col items-center gap-1.5 rounded-xl border border-dashed px-6 py-10 text-center">
             <span className="bg-card mb-2 flex size-12 items-center justify-center rounded-2xl border shadow-sm">
-              <AppIcon icon={slackApp.icon} name={slackApp.name} size={26} />
+              <AppIcon
+                icon={SLACK_ICON_SRC}
+                name={SLACK_DISPLAY_NAME}
+                size={26}
+              />
             </span>
             <p className="text-sm font-medium">
-              {resuming ? "Finish adding to Slack" : "Not in Slack yet"}
+              {removed
+                ? "Re-attach to Slack"
+                : resuming
+                  ? "Finish adding to Slack"
+                  : "Not in Slack yet"}
             </p>
             <p className="text-muted-foreground max-w-sm text-sm">
               {transport === "events"
@@ -262,11 +335,13 @@ export const SlackAttachCard = ({
                 ? transport === "events"
                   ? "Adding…"
                   : "Creating…"
-                : resuming
-                  ? "Resume setup"
-                  : transport === "events"
-                    ? "Add to Slack"
-                    : "Create app"}
+                : removed
+                  ? "Re-attach"
+                  : resuming
+                    ? "Resume setup"
+                    : transport === "events"
+                      ? "Add to Slack"
+                      : "Create app"}
             </Button>
             {blockedInstallUrl && (
               <Button variant="outline" size="sm" className="mt-1" asChild>

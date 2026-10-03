@@ -4,6 +4,7 @@ import { channelProvider } from "./registry";
 import { chooseReaction } from "./reaction-chooser";
 import { ChannelProviderApiError } from "./errors";
 import type { ChannelProvider, ChannelProviderId } from "./types";
+import { noteOutboundFailure } from "./agent-channel-service";
 import { logger } from "../../lib/logger";
 
 const log = logger.child({ component: "turn-receipts" });
@@ -164,7 +165,8 @@ export const attachTurnReceipt = async (
             });
           } catch (err) {
             // Decoration on top of the card: a refused emoji costs the mark,
-            // never the turn.
+            // never the turn. A dead credential still flips the presence.
+            void noteOutboundFailure(input.presenceId, err);
             log.info(
               { err: String(err), turnId: input.turnId },
               "seen mark skipped; the card stands",
@@ -270,6 +272,11 @@ export const attachTurnReceipt = async (
     });
     await selfClearIfTurnFinished(input.turnId);
   } catch (err) {
+    // The receipt is the FIRST outbound call an inbound message triggers, so
+    // it is where a removed app (deleted at api.slack.com, a missed webhook)
+    // is most likely to surface: a dead-credential refusal flips the presence
+    // here. Everything else is still best-effort decoration.
+    void noteOutboundFailure(input.presenceId, err);
     log.warn({ err: String(err), turnId: input.turnId }, "receipt add skipped");
   }
 };
@@ -312,14 +319,26 @@ const selfClearIfTurnFinished = async (turnId: string): Promise<void> => {
  * `running` are live. */
 const TERMINAL_TURN_STATUSES = new Set(["done", "failed", "aborted"]);
 
-/** A session loader older than this is presumed leaked (a real turn's clear
- * lands in seconds; long runs re-signal by finishing). Well under Slack's 1h
- * session timeout — the sweep's whole point is beating it. */
+/** A session loader older than this with no LIVE turn behind it is presumed
+ * leaked (a real turn's clear lands in seconds of its close). Well under
+ * Slack's 1h session timeout — the sweep's whole point is beating it. */
 const STALE_SESSION_MS = 10 * 60 * 1000;
 
 /** Bounded per pass: the sweep rides a hot poll path; a pathological backlog
  * drains over successive passes instead of stalling one. */
 const STALE_SESSION_SWEEP_LIMIT = 20;
+
+/**
+ * The turn statuses that hold a conversation's active slot — a loader on one
+ * of these is a LIVE loader, never a leak. Mirrors the turn model's own
+ * definition (`joining` is parked behind a live turn and counts as live for
+ * this purpose: its loader will move or clear with the exchange). A
+ * function, not a module-level const, so unit lanes with a mocked
+ * `@onecli/db` (whose `Prisma` carries no `sql`) can import this module
+ * without ever touching the real tagged-template helper.
+ */
+const liveTurnStatuses = () =>
+  Prisma.join(["queued", "dispatched", "running", "joining"]);
 
 /**
  * The guarantee behind the recheck: any session loader that slipped every
@@ -329,21 +348,55 @@ const STALE_SESSION_SWEEP_LIMIT = 20;
  * session-only — stale REACTION rows are cosmetic and the 24h prune owns
  * them. Best-effort per row: a failed provider call keeps the row for the
  * next pass; the delete happens only after the provider acknowledged.
+ *
+ * STATUS-AWARE, not age-only (live 2026-09-15): a loader whose turn is still
+ * live is not leaked, whatever its age — a long turn is legitimate, and
+ * yanking its card and seen mark at ten minutes made the agent look
+ * abandoned mid-run (the user pinged "?" seconds before the answer landed).
+ * A turn is live while it holds the conversation's active slot, or is a
+ * `joined` follow-up whose parent still does; every other shape — no turn
+ * row at all (a deleted agent's cascade), a terminal turn, a `joined` row
+ * under a terminal or missing parent — is exactly the leak this exists for.
+ *
+ * Liveness is STATUS only, by design. The stall clock (`last_progress_at`)
+ * is `failStalledTurns`' business: a wedged turn is failed there, that
+ * terminal status flows through the ordinary cursor-advance clear, and a
+ * second copy of the stall rule here would only drift from the first.
+ *
+ * The exclusion lives IN the query rather than after it: with a post-filter,
+ * twenty old receipts on live long turns would fill the batch on every pass
+ * and a real leak behind them would never be reached.
  */
 export const sweepStaleSessionReceipts = async (): Promise<void> => {
   try {
-    const stale = await db.channelTurnReceipt.findMany({
-      where: {
-        kind: "session",
-        createdAt: { lt: new Date(Date.now() - STALE_SESSION_MS) },
-      },
-      orderBy: { createdAt: "asc" },
-      take: STALE_SESSION_SWEEP_LIMIT,
-      select: { turnId: true },
-    });
+    const before = new Date(Date.now() - STALE_SESSION_MS);
+    const live = liveTurnStatuses();
+    const stale = await db.$queryRaw<{ turn_id: string }[]>`
+      SELECT r.turn_id
+      FROM channel_turn_receipts r
+      WHERE r.kind = 'session'
+        AND r.created_at < ${before}
+        AND NOT EXISTS (
+          SELECT 1 FROM turns t
+          WHERE t.id = r.turn_id
+            AND (
+              t.status IN (${live})
+              OR (
+                t.status = 'joined'
+                AND EXISTS (
+                  SELECT 1 FROM turns p
+                  WHERE p.id = t.follow_up_of_turn_id
+                    AND p.status IN (${live})
+                )
+              )
+            )
+        )
+      ORDER BY r.created_at ASC
+      LIMIT ${STALE_SESSION_SWEEP_LIMIT}
+    `;
     for (const row of stale) {
-      log.warn({ turnId: row.turnId }, "stale session loader; sweeping clear");
-      await clearTurnReceipt(row.turnId);
+      log.warn({ turnId: row.turn_id }, "stale session loader; sweeping clear");
+      await clearTurnReceipt(row.turn_id);
     }
   } catch (err) {
     log.warn({ err: String(err) }, "stale-session sweep skipped");

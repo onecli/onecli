@@ -31,6 +31,7 @@ import * as crons from "./crons";
 import * as memories from "./memories";
 import * as skills from "./skills";
 import * as sshKeys from "./ssh-keys";
+import * as user from "./user";
 
 export {
   agents,
@@ -66,6 +67,7 @@ export {
   memories,
   skills,
   sshKeys,
+  user,
 };
 export type {
   Agent,
@@ -140,6 +142,7 @@ export type {
   AgentChannelsView,
   ActionApprovalStatus,
   AgentContact,
+  AgentPeer,
   ChannelPresenceStatus,
   ChannelProvider,
   ChannelSetupMaterial,
@@ -175,6 +178,7 @@ export type { PageScope } from "./scope";
 export type { AppConfigStatus } from "./app-config";
 export type { AvailableApps } from "./app-availability";
 export type { VaultConnection } from "./vaults";
+export type { AccountDeletionOrgImpact } from "./user";
 export type {
   AppToolSummary,
   AppToolGroupSummary,

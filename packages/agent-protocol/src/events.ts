@@ -122,6 +122,71 @@ export const noticeEventSchema = z.object({
 });
 
 /**
+ * The control plane's stamp on a notice that records a message THIS agent
+ * sent to a peer agent (agent-to-agent, PR 5b): the sender's own words, in
+ * the structured shape the dashboard's pair-conversation view reads as this
+ * agent's bubble - never parsed back out of `text`. Written by the control
+ * plane only (the sender's record turn); a sandbox never authors it, and a
+ * reader takes it only from a `notice`. Kept beside the notice schema so the
+ * writer (api) and the reader (web) agree on one shape; the notice schema
+ * itself stays canonical and does not carry it, because a stamp is the
+ * platform's annotation on the event, not part of the sandbox wire.
+ */
+export const peerMessageStampSchema = z.object({
+  /** The peer agent's id. */
+  to: z.string(),
+  text: z.string(),
+  /** This message OPENED a peer task: a person asked for it, and the
+   * agent will report back to that person (the pair view marks the bubble).
+   * Absent on every agent-driven message. */
+  opensTask: z.literal(true).optional(),
+});
+export type PeerMessageStamp = z.infer<typeof peerMessageStampSchema>;
+
+/** Read the stamp off a notice payload; `null` when absent or malformed. */
+export const readPeerMessageStamp = (
+  payload: Record<string, unknown>,
+): PeerMessageStamp | null => {
+  const parsed = peerMessageStampSchema.safeParse(payload.peerMessage);
+  return parsed.success ? parsed.data : null;
+};
+
+/**
+ * Why a peer task ended. `reported` is the one the agent chose
+ * (`complete_task`); the rest are the platform's backstops, each of which
+ * still hands the person a close line in their conversation.
+ */
+export const PEER_TASK_OUTCOMES = [
+  "reported",
+  "budget",
+  "expired",
+  "blocked",
+  "removed",
+  "undeliverable",
+] as const;
+export type PeerTaskOutcome = (typeof PEER_TASK_OUTCOMES)[number];
+
+/**
+ * The control plane's stamp on a notice that records a peer task CLOSING
+ * on the pair conversation (the PR after 5b): the pair view shows the
+ * dialog's end ("Reported back", or why it ended without a report). Same
+ * posture as `peerMessage`: platform-authored, read only off a `notice`,
+ * stripped at the wire when a sandbox forges it.
+ */
+export const peerTaskStampSchema = z.object({
+  outcome: z.enum(PEER_TASK_OUTCOMES),
+});
+export type PeerTaskStamp = z.infer<typeof peerTaskStampSchema>;
+
+/** Read the stamp off a notice payload; `null` when absent or malformed. */
+export const readPeerTaskStamp = (
+  payload: Record<string, unknown>,
+): PeerTaskStamp | null => {
+  const parsed = peerTaskStampSchema.safeParse(payload.peerTask);
+  return parsed.success ? parsed.data : null;
+};
+
+/**
  * A steered follow-up message was CONSUMED by this turn — the adapter
  * confirmed the harness injected it into the live run. Emitted just before
  * the terminal event, one per confirmed follow-up. `followUpId` is the

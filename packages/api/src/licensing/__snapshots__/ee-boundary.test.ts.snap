@@ -135,6 +135,8 @@ exports[`enterprise-license boundary > the licensed file set changes only by del
   ],
   "packages/api/src/ee": [
     "apps/app-availability-provider.ts",
+    "attachments/s3-blob-store.test.ts",
+    "attachments/s3-blob-store.ts",
     "auth/cognito-identity.test.ts",
     "auth/cognito-identity.ts",
     "auth/session-hooks.test.ts",
@@ -522,6 +524,13 @@ exports[`enterprise-license boundary > the licensed symbol set changes only by d
     "redis_url_from_env",
   ],
   "apps/gateway/crates/ee/ee/src/ha/approval.rs": [
+    "blpop_disconnect_is_not_expiry",
+    "blpop_malformed_payload_is_not_expiry",
+    "blpop_nil_is_expiry",
+    "blpop_server_error_is_not_expiry",
+    "connection_failure_is_not_expiry",
+    "decision_payloads_preserve_json_and_legacy_attribution_contracts",
+    "decode_wait_result",
     "get_pending",
     "list_pending",
     "list_pending_for_org",
@@ -538,6 +547,7 @@ exports[`enterprise-license boundary > the licensed symbol set changes only by d
     "wait_for_new",
     "wait_for_new_for_org",
     "wait_redis",
+    "wait_with_reply",
   ],
   "apps/gateway/crates/ee/ee/src/ha/cache.rs": [
     "del",
@@ -967,6 +977,13 @@ exports[`enterprise-license boundary > the licensed symbol set changes only by d
   ],
   "packages/api/src/ee/apps/app-availability-provider.ts": [
     "appAvailability",
+  ],
+  "packages/api/src/ee/attachments/s3-blob-store.ts": [
+    "ATTACHMENT_PRESIGN_TTL_SECONDS",
+    "attachmentObjectKey",
+    "hasAttachmentBucketConfigured",
+    "initS3ClientForTests",
+    "s3AttachmentBlobStore",
   ],
   "packages/api/src/ee/auth/cognito-identity.ts": [
     "CognitoIdentityClaims",

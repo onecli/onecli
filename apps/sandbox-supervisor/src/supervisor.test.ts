@@ -7,9 +7,37 @@ import {
   supervisorMessageSchema,
   type SupervisorMessage,
 } from "@onecli/agent-protocol";
-import { createFakeHarness, type FakeScript } from "./harness/fake";
+import { createConnection } from "node:net";
+import {
+  createFakeHarness,
+  createFakeSessionStore,
+  type FakeScript,
+} from "./harness/fake";
+import { platformToolsSocketPath } from "./platform-tools";
 import { createStdioTransport } from "./transport/stdio";
 import { runSupervisor } from "./supervisor";
+
+/** Dial the platform-tools socket exactly as the MCP bridge does and ask
+ * for the advertised tool list — the interface the harness consumes. */
+const advertisedTools = (): Promise<string[]> =>
+  new Promise((resolve, reject) => {
+    const socket = createConnection(platformToolsSocketPath(), () => {
+      socket.write(`${JSON.stringify({ id: "t", op: "tools" })}\n`);
+    });
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newline = buffer.indexOf("\n");
+      if (newline === -1) return;
+      const reply = JSON.parse(buffer.slice(0, newline)) as {
+        tools?: { name: string }[];
+      };
+      socket.end();
+      resolve((reply.tools ?? []).map((t) => t.name));
+    });
+    socket.on("error", reject);
+  });
 
 describe("supervisor loop end-to-end (fake harness, stdio transport)", () => {
   it("renders the home, serves a turn, and reports the result", async () => {
@@ -24,9 +52,13 @@ describe("supervisor loop end-to-end (fake harness, stdio transport)", () => {
         effort: undefined,
         instructions: "You are the smoke-test agent.",
         agentName: "Ada",
+        channels: [],
+        peers: [],
+        connections: [],
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        outboundAttachments: false,
       },
       createFakeHarness(),
       createStdioTransport(input, output),
@@ -80,6 +112,533 @@ describe("supervisor loop end-to-end (fake harness, stdio transport)", () => {
     expect(doc).toContain("/etc/containers/README.onecli");
   });
 
+  it("a Slack presence at boot: the doc says where the agent talks and the bridge sees the messaging tools; none of either without one", async () => {
+    // The channels capability end-to-end through the REAL boot: config →
+    // renderer → on-disk CLAUDE.md, and config → platform-tools socket →
+    // the tool list the MCP bridge (and so the model) is handed.
+    const bootAndInspect = async (
+      channels: {
+        provider: string;
+        status: "active" | "needs_attention" | "disabled";
+        handle: string | null;
+        workspaceName: string | null;
+      }[],
+    ) => {
+      const homeDir = mkdtempSync(join(tmpdir(), "supervisor-channels-"));
+      const input = new PassThrough();
+      const output = new PassThrough();
+      const run = runSupervisor(
+        {
+          homeDir,
+          model: undefined,
+          effort: undefined,
+          instructions: undefined,
+          agentName: "Ada",
+          channels,
+          peers: [],
+          connections: [],
+          harness: "fake",
+          runnerWsUrl: undefined,
+          bootstrapToken: undefined,
+          outboundAttachments: false,
+        },
+        createFakeHarness(),
+        createStdioTransport(input, output),
+      );
+      // Wait for `ready` (the socket exists by then), read the tool list
+      // over the bridge's own door, then shut down cleanly.
+      await new Promise<void>((resolve) => {
+        const onData = () => {
+          if (output.read()?.toString().includes('"kind":"ready"')) {
+            output.off("readable", onData);
+            resolve();
+          }
+        };
+        output.on("readable", onData);
+      });
+      const tools = await advertisedTools();
+      input.write('{"kind":"shutdown"}\n');
+      input.end();
+      await run;
+      const doc = readFileSync(join(homeDir, "CLAUDE.md"), "utf8").replace(
+        /\s+/g,
+        " ",
+      );
+      return { tools, doc };
+    };
+
+    const live = await bootAndInspect([
+      {
+        provider: "slack",
+        status: "active",
+        handle: "ada",
+        workspaceName: "Acme",
+      },
+    ]);
+    expect(live.doc).toContain("## Where you talk");
+    expect(live.doc).toContain(
+      "You are reachable on Slack as @ada in the Acme workspace",
+    );
+    expect(live.doc).toContain("never ask anyone to connect Slack");
+    expect(live.tools).toEqual(
+      expect.arrayContaining(["send_message", "find_recipient"]),
+    );
+
+    const removed = await bootAndInspect([
+      {
+        provider: "slack",
+        status: "disabled",
+        handle: "ada",
+        workspaceName: "Acme",
+      },
+    ]);
+    expect(removed.doc).toContain("was removed from the workspace");
+    expect(removed.tools).not.toContain("send_message");
+    expect(removed.tools).not.toContain("find_recipient");
+
+    const none = await bootAndInspect([]);
+    expect(none.doc).not.toContain("## Where you talk");
+    expect(none.doc).not.toContain("Slack");
+    expect(none.tools).not.toContain("send_message");
+    // The other capabilities are untouched by the channels condition.
+    expect(none.tools).toEqual(
+      expect.arrayContaining(["schedule_task", "memory_save"]),
+    );
+  });
+
+  it("a presence attached MID-RUN reaches the live conversation: the next turn restarts its session on the same ref and the bridge advertises the messaging tools", async () => {
+    // The dev incident (2026-09-15): an agent whose session was already
+    // awake had Slack attached; the home sync re-rendered CLAUDE.md on disk,
+    // but jcode captures the doc and the MCP tool list at session start, so
+    // the running session kept telling a Slack user it had no Slack access.
+    // The law: a changed surface marks live sessions stale; the NEXT turn on
+    // that conversation drops the session and resumes it fresh (same ref —
+    // the transcript survives), and the tools socket answers with the tools
+    // the change brought. MUTATION-PROOF: drop `markSessionsStale` from the
+    // sync path and the ref stays put / send_message never appears; make
+    // `tools` a static array again and the second read misses send_message.
+    const homeDir = mkdtempSync(join(tmpdir(), "supervisor-midrun-"));
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const store = createFakeSessionStore();
+    const fake = createFakeHarness({ store });
+    const run = runSupervisor(
+      {
+        homeDir,
+        model: undefined,
+        effort: undefined,
+        instructions: undefined,
+        agentName: "Ada",
+        channels: [],
+        peers: [],
+        connections: [],
+        harness: "fake",
+        runnerWsUrl: undefined,
+        bootstrapToken: undefined,
+        outboundAttachments: false,
+      },
+      fake,
+      createStdioTransport(input, output),
+    );
+    const messages: SupervisorMessage[] = [];
+    const readAll = () => {
+      for (;;) {
+        const chunk = output.read()?.toString();
+        if (!chunk) return;
+        for (const line of chunk.trim().split("\n")) {
+          if (line)
+            messages.push(supervisorMessageSchema.parse(JSON.parse(line)));
+        }
+      }
+    };
+    const until = async (predicate: () => boolean, label: string) => {
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        readAll();
+        if (predicate()) return;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      throw new Error(`timed out waiting for ${label}`);
+    };
+    const resultOf = (turnId: string) =>
+      messages.find(
+        (m): m is Extract<SupervisorMessage, { kind: "turn.result" }> =>
+          m.kind === "turn.result" && m.turnId === turnId,
+      );
+
+    await until(() => messages.some((m) => m.kind === "ready"), "ready");
+    expect(await advertisedTools()).not.toContain("send_message");
+
+    // Turn 1: no presence. The session starts here.
+    input.write(
+      `${JSON.stringify({ kind: "turn.deliver", turnId: "t1", conversationId: "cv", message: "hello" })}\n`,
+    );
+    await until(() => resultOf("t1") !== undefined, "t1");
+    const ref1 = resultOf("t1")!.sessionRef;
+    expect(ref1).toBeTruthy();
+
+    // Mid-run: Slack attached (the home sync's final part).
+    input.write(
+      `${JSON.stringify({
+        kind: "skills.changed",
+        generation: 2,
+        part: 1,
+        of: 1,
+        files: [],
+        prune: [],
+        channels: [
+          {
+            provider: "slack",
+            status: "active",
+            handle: "ada",
+            workspaceName: "Acme",
+          },
+        ],
+      })}\n`,
+    );
+    await until(
+      () => messages.some((m) => m.kind === "home.synced"),
+      "home.synced",
+    );
+    // The bridge door now advertises the messaging tools — what a session
+    // started from here on will list.
+    expect(await advertisedTools()).toEqual(
+      expect.arrayContaining(["send_message", "find_recipient"]),
+    );
+
+    // Turn 2 on the SAME conversation: the stale session is restarted on
+    // its own ref (the transcript lives on), so its doc and tools are fresh.
+    input.write(
+      `${JSON.stringify({ kind: "turn.deliver", turnId: "t2", conversationId: "cv", message: "do you have access to slack?" })}\n`,
+    );
+    await until(() => resultOf("t2") !== undefined, "t2");
+    expect(resultOf("t2")!.sessionRef).toBe(ref1);
+    expect(store.get(ref1!)?.turnsRun).toBe(2);
+    // Exactly two starts: the original, and the restart RESUMING its ref.
+    expect(fake.sessionStarts).toEqual([{}, { resumeSessionRef: ref1 }]);
+    // The turn ITSELF carries the change as context (the fake echoes its
+    // prompt): the transcript learns Slack is live now, not only the doc.
+    // Observed on a real container: after two turns of "my app was removed",
+    // a re-attach refreshed the doc yet the model kept answering from the
+    // recent turns until the conversation itself said otherwise.
+    const promptOf = (turnId: string) =>
+      messages
+        .filter(
+          (m): m is Extract<SupervisorMessage, { kind: "event" }> =>
+            m.kind === "event" &&
+            m.turnId === turnId &&
+            m.event.type === "text.delta",
+        )
+        .map((m) => (m.event as { text: string }).text)
+        .join("");
+    expect(promptOf("t2")).toContain("[Platform notice]");
+    expect(promptOf("t2")).toContain(
+      "Your Slack app as @ada in the Acme workspace is attached and live again as of now",
+    );
+    expect(promptOf("t2")).toContain("do you have access to slack?");
+
+    // Turn 3, same conversation, NO further change: the fresh session is
+    // reused, not restarted again (the flag is one-shot), and the note is
+    // one-shot too: it does not repeat.
+    input.write(
+      `${JSON.stringify({ kind: "turn.deliver", turnId: "t3", conversationId: "cv", message: "and now?" })}\n`,
+    );
+    await until(() => resultOf("t3") !== undefined, "t3");
+    expect(store.get(ref1!)?.turnsRun).toBe(3);
+    expect(fake.sessionStarts).toHaveLength(2);
+    expect(promptOf("t3")).not.toContain("[Platform notice]");
+
+    // An UNCHANGED channels list on a later sync marks nothing stale.
+    input.write(
+      `${JSON.stringify({
+        kind: "skills.changed",
+        generation: 3,
+        part: 1,
+        of: 1,
+        files: [],
+        prune: [],
+        channels: [
+          {
+            provider: "slack",
+            status: "active",
+            handle: "ada",
+            workspaceName: "Acme",
+          },
+        ],
+      })}\n`,
+    );
+    await until(
+      () => messages.filter((m) => m.kind === "home.synced").length === 2,
+      "second home.synced",
+    );
+    // ...and a turn after it still runs on the same session: no restart.
+    input.write(
+      `${JSON.stringify({ kind: "turn.deliver", turnId: "t4", conversationId: "cv", message: "still here?" })}\n`,
+    );
+    await until(() => resultOf("t4") !== undefined, "t4");
+    expect(fake.sessionStarts).toHaveLength(2);
+    expect(promptOf("t4")).not.toContain("[Platform notice]");
+
+    // The app is REMOVED on the provider side: the next turn's context says
+    // so in the removal's own words, and the session restarts once more.
+    input.write(
+      `${JSON.stringify({
+        kind: "skills.changed",
+        generation: 4,
+        part: 1,
+        of: 1,
+        files: [],
+        prune: [],
+        channels: [
+          {
+            provider: "slack",
+            status: "disabled",
+            handle: "ada",
+            workspaceName: "Acme",
+          },
+        ],
+      })}\n`,
+    );
+    await until(
+      () => messages.filter((m) => m.kind === "home.synced").length === 3,
+      "third home.synced",
+    );
+    input.write(
+      `${JSON.stringify({ kind: "turn.deliver", turnId: "t5", conversationId: "cv", message: "can you message me on slack?" })}\n`,
+    );
+    await until(() => resultOf("t5") !== undefined, "t5");
+    expect(fake.sessionStarts).toHaveLength(3);
+    expect(promptOf("t5")).toContain(
+      "Your Slack app was just removed from the workspace",
+    );
+    expect(promptOf("t5")).toContain("do not call them");
+
+    input.write('{"kind":"shutdown"}\n');
+    input.end();
+    await run;
+    readAll();
+    const doc = readFileSync(join(homeDir, "CLAUDE.md"), "utf8").replace(
+      /\s+/g,
+      " ",
+    );
+    expect(doc).toContain(
+      "Your Slack app as @ada in the Acme workspace was removed from the workspace",
+    );
+  });
+
+  it("a peer agent appearing MID-RUN follows the same law: message_agent is advertised, the live session restarts once, and an unchanged roster restarts nothing", async () => {
+    // PR 5b: the peer roster is a surface exactly like the presence list.
+    // MUTATION-PROOF: drop the `peersKey` branch from the sync path and the
+    // second turn reuses the stale session (sessionStarts stays at 1).
+    const homeDir = mkdtempSync(join(tmpdir(), "supervisor-peers-"));
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const store = createFakeSessionStore();
+    const fake = createFakeHarness({ store });
+    const run = runSupervisor(
+      {
+        homeDir,
+        model: undefined,
+        effort: undefined,
+        instructions: undefined,
+        agentName: "Ada",
+        channels: [],
+        peers: [],
+        connections: [],
+        harness: "fake",
+        runnerWsUrl: undefined,
+        bootstrapToken: undefined,
+        outboundAttachments: false,
+      },
+      fake,
+      createStdioTransport(input, output),
+    );
+    const messages: SupervisorMessage[] = [];
+    const readAll = () => {
+      for (;;) {
+        const chunk = output.read()?.toString();
+        if (!chunk) return;
+        for (const line of chunk.trim().split("\n")) {
+          if (line)
+            messages.push(supervisorMessageSchema.parse(JSON.parse(line)));
+        }
+      }
+    };
+    const until = async (predicate: () => boolean, label: string) => {
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        readAll();
+        if (predicate()) return;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      throw new Error(`timed out waiting for ${label}`);
+    };
+    const resultOf = (turnId: string) =>
+      messages.find(
+        (m): m is Extract<SupervisorMessage, { kind: "turn.result" }> =>
+          m.kind === "turn.result" && m.turnId === turnId,
+      );
+    const syncPeers = (generation: number, peers: unknown[]) =>
+      input.write(
+        `${JSON.stringify({ kind: "skills.changed", generation, part: 1, of: 1, files: [], prune: [], peers })}\n`,
+      );
+    const synced = (n: number) =>
+      messages.filter((m) => m.kind === "home.synced").length === n;
+
+    await until(() => messages.some((m) => m.kind === "ready"), "ready");
+    expect(await advertisedTools()).not.toContain("message_agent");
+
+    input.write(
+      `${JSON.stringify({ kind: "turn.deliver", turnId: "t1", conversationId: "cv", message: "hello" })}\n`,
+    );
+    await until(() => resultOf("t1") !== undefined, "t1");
+    const ref1 = resultOf("t1")!.sessionRef;
+
+    // A peer appears. The tool follows; the doc names the peer.
+    syncPeers(2, [{ name: "Ray" }]);
+    await until(() => synced(1), "home.synced");
+    expect(await advertisedTools()).toContain("message_agent");
+    expect(readFileSync(join(homeDir, "CLAUDE.md"), "utf8")).toContain(
+      "Other OneCLI agents you can message: Ray.",
+    );
+
+    input.write(
+      `${JSON.stringify({ kind: "turn.deliver", turnId: "t2", conversationId: "cv", message: "who can you message?" })}\n`,
+    );
+    await until(() => resultOf("t2") !== undefined, "t2");
+    expect(resultOf("t2")!.sessionRef).toBe(ref1);
+    expect(fake.sessionStarts).toEqual([{}, { resumeSessionRef: ref1 }]);
+
+    // The same roster again: nothing is stale, the session is reused.
+    syncPeers(3, [{ name: "Ray" }]);
+    await until(() => synced(2), "second home.synced");
+    input.write(
+      `${JSON.stringify({ kind: "turn.deliver", turnId: "t3", conversationId: "cv", message: "still?" })}\n`,
+    );
+    await until(() => resultOf("t3") !== undefined, "t3");
+    expect(fake.sessionStarts).toHaveLength(2);
+
+    // The last peer leaves: the tool leaves with it.
+    syncPeers(4, []);
+    await until(() => synced(3), "third home.synced");
+    expect(await advertisedTools()).not.toContain("message_agent");
+    expect(readFileSync(join(homeDir, "CLAUDE.md"), "utf8")).not.toContain(
+      "Other agents",
+    );
+
+    input.write('{"kind":"shutdown"}\n');
+    input.end();
+    await run;
+  });
+
+  it("a presence change landing DURING a turn never disturbs it: the running session finishes, and the restart waits for the next turn", async () => {
+    // The doctrine half of the law: a forced respawn would kill in-flight
+    // work for a text change. So the stale flag is read only at a turn's
+    // START. MUTATION-PROOF: restart eagerly inside markSessionsStale (drop
+    // `runtime.session` there) and the in-flight turn's result changes
+    // session or fails.
+    const homeDir = mkdtempSync(join(tmpdir(), "supervisor-inflight-"));
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const fake = createFakeHarness({ store: createFakeSessionStore() });
+    const run = runSupervisor(
+      {
+        homeDir,
+        model: undefined,
+        effort: undefined,
+        instructions: undefined,
+        agentName: "Ada",
+        channels: [],
+        peers: [],
+        connections: [],
+        harness: "fake",
+        runnerWsUrl: undefined,
+        bootstrapToken: undefined,
+        outboundAttachments: false,
+      },
+      fake,
+      createStdioTransport(input, output),
+    );
+    const messages: SupervisorMessage[] = [];
+    const readAll = () => {
+      for (;;) {
+        const chunk = output.read()?.toString();
+        if (!chunk) return;
+        for (const line of chunk.trim().split("\n")) {
+          if (line)
+            messages.push(supervisorMessageSchema.parse(JSON.parse(line)));
+        }
+      }
+    };
+    const until = async (predicate: () => boolean, label: string) => {
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        readAll();
+        if (predicate()) return;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      throw new Error(`timed out waiting for ${label}`);
+    };
+    const resultOf = (turnId: string) =>
+      messages.find(
+        (m): m is Extract<SupervisorMessage, { kind: "turn.result" }> =>
+          m.kind === "turn.result" && m.turnId === turnId,
+      );
+    await until(() => messages.some((m) => m.kind === "ready"), "ready");
+
+    // A long turn: the fake sleeps 400ms, then answers.
+    const directive = JSON.stringify({
+      steps: [
+        { op: "sleep", ms: 400 },
+        { op: "text", text: "slow answer" },
+      ],
+    });
+    input.write(
+      `${JSON.stringify({ kind: "turn.deliver", turnId: "slow", conversationId: "cv", message: `@fake:v1 ${directive}` })}\n`,
+    );
+    await until(
+      () => messages.some((m) => m.kind === "event" && m.turnId === "slow"),
+      "slow turn streaming",
+    );
+    // Mid-turn: Slack attached.
+    input.write(
+      `${JSON.stringify({
+        kind: "skills.changed",
+        generation: 2,
+        part: 1,
+        of: 1,
+        files: [],
+        prune: [],
+        channels: [
+          {
+            provider: "slack",
+            status: "active",
+            handle: "ada",
+            workspaceName: "Acme",
+          },
+        ],
+      })}\n`,
+    );
+    await until(() => messages.some((m) => m.kind === "home.synced"), "synced");
+    // The in-flight turn completes normally, on the session it started with.
+    await until(() => resultOf("slow") !== undefined, "slow result");
+    expect(resultOf("slow")!.status).toBe("done");
+    expect(fake.sessionStarts).toHaveLength(1);
+    const ref = resultOf("slow")!.sessionRef;
+
+    // The NEXT turn is where the restart happens — same ref, fresh session.
+    input.write(
+      `${JSON.stringify({ kind: "turn.deliver", turnId: "next", conversationId: "cv", message: "hi" })}\n`,
+    );
+    await until(() => resultOf("next") !== undefined, "next");
+    expect(resultOf("next")!.sessionRef).toBe(ref);
+    expect(fake.sessionStarts).toEqual([{}, { resumeSessionRef: ref }]);
+
+    input.write('{"kind":"shutdown"}\n');
+    input.end();
+    await run;
+  });
+
   it("prepends delivery-only context to the harness prompt — and only when present", async () => {
     const homeDir = mkdtempSync(join(tmpdir(), "supervisor-"));
     const input = new PassThrough();
@@ -92,9 +651,13 @@ describe("supervisor loop end-to-end (fake harness, stdio transport)", () => {
         effort: undefined,
         instructions: undefined,
         agentName: undefined,
+        channels: [],
+        peers: [],
+        connections: [],
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        outboundAttachments: false,
       },
       // The fake's default script echoes the prompt it was handed, so the
       // deltas ARE the proof of what reached the harness.
@@ -154,9 +717,13 @@ describe("home sync in the loop", () => {
         effort: undefined,
         instructions: undefined,
         agentName: undefined,
+        channels: [],
+        peers: [],
+        connections: [],
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        outboundAttachments: false,
       },
       createFakeHarness(),
       createStdioTransport(input, output),
@@ -183,6 +750,8 @@ describe("home sync in the loop", () => {
         prune: [".agents/skills/deploy/SKILL.md", "memory/index.md"],
         instructions: "Synced brief.",
         agentName: "Ada",
+        channels: [],
+        peers: [],
       }) + "\n",
     );
     input.write('{"kind":"shutdown"}\n');
@@ -232,9 +801,13 @@ describe("home sync in the loop", () => {
         effort: undefined,
         instructions: undefined,
         agentName: undefined,
+        channels: [],
+        peers: [],
+        connections: [],
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        outboundAttachments: false,
       },
       // A slow fake turn gives the abort something real to stop.
       createFakeHarness(),
@@ -315,9 +888,13 @@ describe("home sync in the loop", () => {
         effort: undefined,
         instructions: undefined,
         agentName: undefined,
+        channels: [],
+        peers: [],
+        connections: [],
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        outboundAttachments: false,
       },
       wrapped,
       createStdioTransport(input, output),
@@ -422,9 +999,13 @@ describe("home sync in the loop", () => {
         effort: undefined,
         instructions: undefined,
         agentName: undefined,
+        channels: [],
+        peers: [],
+        connections: [],
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        outboundAttachments: false,
       },
       wrapped,
       createStdioTransport(input, output),
@@ -491,9 +1072,13 @@ describe("home sync in the loop", () => {
         effort: undefined,
         instructions: undefined,
         agentName: undefined,
+        channels: [],
+        peers: [],
+        connections: [],
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        outboundAttachments: false,
       },
       createFakeHarness(),
       createStdioTransport(input, output),
@@ -551,9 +1136,13 @@ describe("home sync in the loop", () => {
         effort: undefined,
         instructions: undefined,
         agentName: undefined,
+        channels: [],
+        peers: [],
+        connections: [],
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        outboundAttachments: false,
       },
       createFakeHarness(),
       createStdioTransport(input, output),
@@ -629,9 +1218,13 @@ describe("the harvester is wired into the sync apply", () => {
         effort: undefined,
         instructions: undefined,
         agentName: undefined,
+        channels: [],
+        peers: [],
+        connections: [],
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        outboundAttachments: false,
       },
       createFakeHarness(),
       createStdioTransport(input, output),
@@ -695,9 +1288,13 @@ describe("the answer is the agent's last message, not its whole turn", () => {
         effort: undefined,
         instructions: undefined,
         agentName: undefined,
+        channels: [],
+        peers: [],
+        connections: [],
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        outboundAttachments: false,
       },
       createFakeHarness({ script }),
       createStdioTransport(input, output),
@@ -798,5 +1395,69 @@ describe("the answer is the agent's last message, not its whole turn", () => {
     ]);
 
     expect(answerOf(messages)).toBeNull();
+  });
+});
+
+/**
+ * THE WIRING of the tool-surface fix. The primitive is unit-tested in
+ * `platform-tools.test.ts`; what matters here is that the supervisor
+ * actually WAITS on it — jcode serves its on-disk tool cache until MCP
+ * discovery lands, so a first turn that starts before the bridge is asked
+ * carries the previous boot's tools (live: `complete_task` read as
+ * "unknown tool" in a conversation resumed across the deploy that added
+ * it). Only reachable with a harness that declares the bridge.
+ */
+describe("a first turn waits for the harness to take the tool list", () => {
+  it("does not start the turn before the bridge is asked for tools", async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), "supervisor-toolwait-"));
+    const input = new PassThrough();
+    const output = new PassThrough();
+    // Ask for the tools only AFTER the supervisor is up, and record the
+    // order: the listing must precede any turn event.
+    const order: string[] = [];
+    const run = runSupervisor(
+      {
+        homeDir,
+        model: undefined,
+        effort: undefined,
+        instructions: "You are the smoke-test agent.",
+        agentName: "Ada",
+        channels: [],
+        peers: [],
+        connections: [],
+        harness: "fake",
+        runnerWsUrl: undefined,
+        bootstrapToken: undefined,
+        outboundAttachments: false,
+      },
+      // Declares the bridge, so the supervisor must hold the first turn.
+      createFakeHarness({ platformTools: true }),
+      createStdioTransport(input, output),
+    );
+
+    output.on("data", (chunk: Buffer) => {
+      for (const line of chunk.toString().trim().split("\n")) {
+        if (!line) continue;
+        const message = JSON.parse(line) as SupervisorMessage;
+        if (message.kind === "event") order.push("turn-event");
+      }
+    });
+
+    input.write(
+      '{"kind":"turn.deliver","turnId":"t1","conversationId":"cv1","message":"hello"}\n',
+    );
+    // Let the turn sit unanswered for a beat. Without the wait it races
+    // ahead and emits its events here, BEFORE the listing below.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    order.push("tools-listed");
+    await advertisedTools();
+    input.write('{"kind":"shutdown"}\n');
+    input.end();
+    await run;
+
+    // MUTATION-PROOF: drop the await in `sessionFor` and "turn-event"
+    // lands first — the turn ran on whatever list the harness had cached.
+    expect(order[0]).toBe("tools-listed");
+    expect(order).toContain("turn-event");
   });
 });

@@ -7,13 +7,18 @@ import type { AppDefinition } from "@onecli/api/apps/types";
 import { Plug, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@onecli/ui/components/button";
+import { cn } from "@onecli/ui/lib/utils";
 import { AppIcon } from "@/lib/components/app-icon";
 import { extractConnectSuggestions } from "@/lib/chat/connect-links";
-import { WORKSPACE_PATH_RE, connectionsPath } from "@/lib/navigation";
+import {
+  WORKSPACE_PATH_RE,
+  agentSectionPath,
+  connectionsPath,
+} from "@/lib/navigation";
 import { connectPopupHeight, openConnectPopup } from "@/lib/connect-popup";
 import { queryKeys } from "@/lib/api/keys";
 import { useConnections } from "@/hooks/use-connections";
-import { useAgentGrants, useSetConnectionGrant } from "@/hooks/use-grants";
+import { useAgentGrants, useInvalidateGrants } from "@/hooks/use-grants";
 import { useManageConnectionState } from "@/hooks/use-manage-connection-state";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import { useEffectiveCredentials } from "@/lib/api/policy-visibility";
@@ -35,10 +40,10 @@ import { ConnectAppPickerDialog } from "../../_components/connect-app-picker-dia
  * The card is STATE-AWARE: once the provider has a connection it flips to
  * "Connected" with Reconnect and Manage (the agent page's own permissions
  * dialog, opened in place, under the same read-only law —
- * `useManageConnectionState`). A connect initiated FROM this card also
- * grants the current agent full access to the new connection automatically —
- * the user asked from this agent's chat, so wiring the agent up is the whole
- * point; scoping down afterwards is exactly what Manage is for.
+ * `useManageConnectionState`). A connect started FROM this card lands already
+ * attached, with full access, to every agent of the workspace, this one
+ * included (the API's workspace auto-attach); scoping down afterwards is
+ * exactly what Manage is for.
  */
 
 /** The card under an agent answer that carried connect links. Memoized on
@@ -54,21 +59,44 @@ export const ConnectorSuggestions = memo(({ text }: { text: string }) => {
 });
 ConnectorSuggestions.displayName = "ConnectorSuggestions";
 
-const ConnectorSuggestionsCard = ({
+/** The card itself, for callers that already know which apps to offer (the
+ * empty-thread greeting). Same buttons, same popup. */
+export interface ChannelSuggestion {
+  id: string;
+  name: string;
+  icon: string;
+  label: string;
+}
+
+/** Hoisted so the default is one stable identity — a fresh `[]` per render
+ * is the classic way to defeat a memo on a caller. */
+const NO_CHANNEL_SUGGESTIONS: ChannelSuggestion[] = [];
+
+export const ConnectorSuggestionsCard = ({
   suggestions,
+  channels = NO_CHANNEL_SUGGESTIONS,
+  hideHeader = false,
 }: {
   suggestions: {
     app: AppDefinition;
     agentName?: string;
     kind: "connect" | "attach";
   }[];
+  /** Chat-app rows ("talk to this agent on Slack"). A channel is a bot
+   * install on the agent's Channels page, not an OAuth credential (Slack is
+   * no longer in the app registry at all), so these rows carry their own
+   * name/icon and link there instead of opening the connect popup. */
+  channels?: ChannelSuggestion[];
+  /** Drop the "Apps that could help" header. The greeting already says why
+   * the card is there, so the header would repeat it. */
+  hideHeader?: boolean;
 }) => {
   const pathname = usePathname();
   const router = useRouter();
   const workspaceId = pathname.match(WORKSPACE_PATH_RE)?.[1];
-  // The agent whose chat this is — the auto-grant target. The chat only
-  // renders inside /agents/[agentId], but stay defensive (tests render
-  // without a router): no id, no grant.
+  // The agent whose chat this is, whose attach state the rows show. The chat
+  // only renders inside /agents/[agentId], but stay defensive (tests render
+  // without a router): no id, no agent-scoped dialogs.
   const params = useParams<{ agentId?: string }>();
   const agentId = params?.agentId ?? "";
   const { data: connections = [] } = useConnections("workspace");
@@ -91,7 +119,6 @@ const ConnectorSuggestionsCard = ({
       .filter((c) => c.provenance.some((p) => p.scope === "organization"))
       .map((c) => c.id),
   );
-  const setGrant = useSetConnectionGrant();
   const [manageConnection, setManageConnection] = useState<Connection | null>(
     null,
   );
@@ -115,10 +142,11 @@ const ConnectorSuggestionsCard = ({
     readOnlyReason: manageReadOnlyReason,
     ready: grantsReady,
   } = useManageConnectionState(agentId, manageConnection);
-  // Auto-grant only what THIS card initiated: a global message listener also
+  // React only to what THIS card initiated: a global message listener also
   // hears popups opened elsewhere (another tab, the connections page).
   const initiated = useRef(new Set<string>());
   const queryClient = useQueryClient();
+  const invalidateGrants = useInvalidateGrants();
 
   // Every popup this card opens goes through here: a blocked popup means no
   // message will ever land, so the claim is released and the user told —
@@ -135,25 +163,15 @@ const ConnectorSuggestionsCard = ({
   };
 
   useAppMessages({
-    onConnected: ({ provider, connectionId }) => {
+    onConnected: ({ provider }) => {
       if (!provider || !initiated.current.has(provider)) return;
       initiated.current.delete(provider);
       // The pool changed even without a fresh id (the callback dedupes a
-      // repeat connect onto the existing account) — refresh the list and the
-      // count badges unconditionally, like the picker and connections tabs.
-      void queryClient.invalidateQueries({
-        queryKey: queryKeys.connections.all(),
-      });
+      // repeat connect onto the existing account), and a fresh account
+      // arrives already granted to every agent: refresh the list, the grant
+      // views (this card's Attach/Manage state) and the count badges.
+      invalidateGrants();
       void queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
-      // Fresh connection from this chat: wire the current agent up with full
-      // access. Reconnects carry no connectionId and keep their grants.
-      if (connectionId && agentId) {
-        setGrant.mutate({
-          agentId,
-          connectionId,
-          input: { access: "full" },
-        });
-      }
     },
     // The popup reports an app that needs credentials configured before it
     // can connect (no platform defaults). The chat has no config surface, so
@@ -181,21 +199,35 @@ const ConnectorSuggestionsCard = ({
   return (
     <>
       <div className="bg-card max-w-md rounded-xl border">
-        <div className="border-b px-4 py-2.5">
-          <div className="flex items-center gap-2">
-            <Plug className="text-muted-foreground size-4" aria-hidden />
-            <span className="text-sm font-medium">Apps that could help</span>
+        {/* The TITLE is what `hideHeader` drops (the greeting's own words
+            already say why the card is there). The CONSENT LINE is not part
+            of that trade: a new account is on for every agent of the
+            workspace with full access, and that has to be said where the
+            click happens. Most of all on the greeting card, which is the
+            first connect UI a new user ever meets. */}
+        {(!hideHeader || hasUnconnected) && (
+          <div className="border-b px-4 py-2.5">
+            {!hideHeader && (
+              <div className="flex items-center gap-2">
+                <Plug className="text-muted-foreground size-4" aria-hidden />
+                <span className="text-sm font-medium">
+                  Apps that could help
+                </span>
+              </div>
+            )}
+            {hasUnconnected && (
+              <p
+                className={cn(
+                  "text-muted-foreground text-xs",
+                  !hideHeader && "mt-0.5",
+                )}
+              >
+                A new account is on for every agent in this workspace, with full
+                access. Adjust it anytime under Manage.
+              </p>
+            )}
           </div>
-          {/* The consent line: connecting from here also wires this agent up
-              with full access (the auto-grant above) — said where the click
-              happens, not after. */}
-          {hasUnconnected && (
-            <p className="text-muted-foreground mt-0.5 text-xs">
-              Connecting gives this agent full access. Adjust it anytime under
-              Manage.
-            </p>
-          )}
-        </div>
+        )}
         {suggestions.map(({ app, agentName, kind }) => {
           const connection = connectionFor(app.id);
           // Any of this app's accounts already granted to this agent → the
@@ -352,6 +384,32 @@ const ConnectorSuggestionsCard = ({
             </div>
           );
         })}
+        {channels.map(({ id, name, icon, label }) => (
+          <div
+            key={`channel-${id}`}
+            className="flex items-center gap-3 border-b px-4 py-3 last:border-b-0"
+          >
+            <div className="bg-muted flex size-9 shrink-0 items-center justify-center rounded-lg border dark:bg-white/10 dark:border-white/10">
+              <AppIcon icon={icon} name={name} size={18} />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium">{name}</p>
+              <p className="text-muted-foreground truncate text-xs">{label}</p>
+            </div>
+            {agentId && (
+              <Button
+                size="xs"
+                className="shrink-0"
+                aria-label={`Set up ${name} for this agent`}
+                onClick={() =>
+                  router.push(agentSectionPath(pathname, agentId, "channels"))
+                }
+              >
+                Set up
+              </Button>
+            )}
+          </div>
+        ))}
         {/* Fenced like the dialog below: without an agent there is no
             auto-grant contract to offer, so no door either. */}
         {agentId && (
@@ -372,17 +430,16 @@ const ConnectorSuggestionsCard = ({
       </div>
 
       {/* The same agent-scoped picker the Connections section's Add button
-          opens — connect any catalog app without leaving the chat; the new
-          account is granted to this agent automatically. The card's rows only
-          re-render for SUGGESTED providers, so the grant's landing is
-          confirmed with a toast instead. */}
+          opens, to connect any catalog app without leaving the chat. The
+          card's rows only re-render for SUGGESTED providers, so the landing
+          is confirmed with a toast instead. */}
       {agentId && pickerMounted && (
         <ConnectAppPickerDialog
           agentId={agentId}
           open={pickerOpen}
           onOpenChange={setPickerOpen}
-          onGranted={() =>
-            toast.success("Connected. This agent now has full access.")
+          onConnected={() =>
+            toast.success("Connected. Every agent now has full access.")
           }
         />
       )}
@@ -413,7 +470,7 @@ const ConnectorSuggestionsCard = ({
           onConnectNew={() => {
             // Same claim + popup path as the card's Connect button — same
             // options too (agentName rides to the landing page's copy) — so
-            // the landing auto-grants this agent and refreshes the pool.
+            // the landing refreshes the pool and this agent's grants.
             const suggestion = suggestions.find(
               (s) => s.app.id === attachProvider,
             );

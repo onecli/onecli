@@ -6,6 +6,8 @@ use hyper::header::HeaderValue;
 use hyper::{Response, StatusCode};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
+use crate::connect::RestrictedCredential;
+
 /// 407 Proxy Authentication Required — agent token is missing or invalid.
 pub fn proxy_auth_required() -> Response<axum::body::Body> {
     let mut resp = Response::new(axum::body::Body::empty());
@@ -19,6 +21,46 @@ pub fn proxy_auth_required() -> Response<axum::body::Body> {
 
 /// Response body type used by [`super::forward::forward_request`].
 pub type ForwardBody<S> = Either<Full<Bytes>, S>;
+
+/// Shared by this crate's test modules: the body type the pre-built
+/// responses are instantiated with in tests (the stream arm is never
+/// produced by them), and the one way to read such a response back as JSON.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::{Either, ForwardBody};
+    use hyper::body::{Bytes, Frame};
+    use hyper::Response;
+
+    pub(crate) type TestBody =
+        ForwardBody<futures_util::stream::Empty<Result<Frame<Bytes>, reqwest::Error>>>;
+
+    pub(crate) async fn body_json(resp: Response<TestBody>) -> serde_json::Value {
+        use http_body_util::BodyExt;
+        let body = match resp.into_body() {
+            Either::Left(full) => full.collect().await.expect("collect").to_bytes(),
+            Either::Right(_) => panic!("expected a buffered body"),
+        };
+        serde_json::from_slice(&body).expect("valid JSON")
+    }
+}
+
+// ── Guidance error codes ────────────────────────────────────────────────
+//
+// The stable `error` identifiers of the answers the gateway substitutes for
+// an upstream auth failure on an uncredentialed request. Agents match on
+// them, the gateway skill documents them, and the request log records which
+// one a request received (`RequestDecision::NeedsConnection`), so the code in
+// the body and the code in the log come from one definition.
+
+/// A known app's host (or a provider's generic alias host) with no connection
+/// attached: the agent is pointed at the native connect link.
+pub const ERROR_APP_NOT_CONNECTED: &str = "app_not_connected";
+/// Credentials exist, but this agent was not granted them.
+pub const ERROR_ACCESS_RESTRICTED: &str = "access_restricted";
+/// No credential of any kind for this host: the custom-secret nudge.
+pub const ERROR_CREDENTIAL_NOT_FOUND: &str = "credential_not_found";
+/// A host-bound connection exists, but the request went to another host.
+pub const ERROR_CONNECTION_HOST_MISMATCH: &str = "connection_host_mismatch";
 
 // The dashboard-URL resolution lives in `crate::context` (shared with `main`'s
 // startup warnings and the ee agent-facing responses); re-exported so existing
@@ -122,7 +164,7 @@ pub fn app_not_connected<S>(
     with_no_retry(json_error(
         status,
         serde_json::json!({
-            "error": "app_not_connected",
+            "error": ERROR_APP_NOT_CONNECTED,
             "message": format!("{display_name} is not connected in OneCLI. Ask the user to open this URL to connect it: {connect_url}"),
             "provider": provider,
             "connect_url": connect_url,
@@ -152,7 +194,7 @@ pub fn app_not_connected_unknown_provider<S>(
     with_no_retry(json_error(
         status,
         serde_json::json!({
-            "error": "app_not_connected",
+            "error": ERROR_APP_NOT_CONNECTED,
             "message": format!(
                 "No app is connected for this API on {hostname}. \
                  A pre-built link is provided in the `connect_url` field. \
@@ -167,28 +209,50 @@ pub fn app_not_connected_unknown_provider<S>(
 }
 
 /// JSON error response when credentials exist for a host but the agent lacks access (selective mode).
-/// Covers both manual secrets and app connections.
+///
+/// `credential` is the kind the workspace holds for the host, and it alone
+/// decides the link, because each kind is attached to an agent on a different
+/// page. The host never does: a custom secret on a host a registered app also
+/// serves (`app.posthog.com`) has no account on that app's page to attach.
+/// Without an agent id, each kind falls back to its workspace list.
 pub fn access_restricted<S>(
     status: StatusCode,
-    provider: &str,
-    display_name: &str,
+    credential: RestrictedCredential,
+    hostname: &str,
+    path: &str,
     workspace_id: Option<&str>,
+    agent_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    // Point at the app's connections page: since attach-model step 6 the
-    // workspace policy console is gone, and each account card there carries the
-    // "Agent access" dialog — the surface that actually attaches a credential
-    // to an agent. (Before step 6 this pointed at the policy console, which
-    // was then the only place a grant could be authored.)
-    let manage_url = scoped_url(
-        dashboard_url(),
-        &format!("/connections/apps/{provider}"),
-        workspace_id,
-    );
+    let app = apps::guidance_provider_for(hostname, path);
+    let (provider, display_name) = app.unwrap_or((hostname, hostname));
+    let agent_page = |section: &str, workspace_list: &str| match agent_id {
+        Some(agent) => format!("/agents/{agent}{section}"),
+        None => workspace_list.to_string(),
+    };
+    let (page, noun) = match (credential, app) {
+        // The app's page: its account cards carry the "Agent access" dialog
+        // (the attach surface since attach-model step 6), and it is the one
+        // shape the chat renders as a connect card.
+        (RestrictedCredential::AppConnection, Some((app_id, _))) => {
+            (format!("/connections/apps/{app_id}"), "account")
+        }
+        // A connected app whose path names no app (an unregistered API on a
+        // shared host): the agent's Apps tab.
+        (RestrictedCredential::AppConnection, None) => {
+            (agent_page("/connections", "/connections"), "account")
+        }
+        (RestrictedCredential::CustomSecret, _) => (
+            agent_page("/connections?tab=custom", "/connections/custom"),
+            "secret",
+        ),
+        (RestrictedCredential::LlmKey, _) => (agent_page("/models", "/connections/llms"), "key"),
+    };
+    let manage_url = scoped_url(dashboard_url(), &page, workspace_id);
     with_no_retry(json_error(
         status,
         serde_json::json!({
-            "error": "access_restricted",
-            "message": format!("{display_name} credentials exist in OneCLI but this agent does not have access. Ask the user to attach the account to this agent: {manage_url}"),
+            "error": ERROR_ACCESS_RESTRICTED,
+            "message": format!("{display_name} credentials exist in OneCLI but this agent does not have access. Ask the user to attach the {noun} to this agent: {manage_url}"),
             "provider": provider,
             "manage_url": manage_url,
         }),
@@ -213,7 +277,7 @@ pub fn credential_not_found<S>(
     with_no_retry(json_error(
         status,
         serde_json::json!({
-            "error": "credential_not_found",
+            "error": ERROR_CREDENTIAL_NOT_FOUND,
             "message": format!(
                 "No credentials configured for {hostname} in OneCLI.\n\
                  A pre-built link is provided in the `secret_url` field. \
@@ -313,6 +377,110 @@ pub fn connection_not_found_axum(
     ))
 }
 
+/// Build the shared JSON body for a host-gated connection mismatch.
+///
+/// `connections` are the agent's OWN granted connections that refused the
+/// request because it went to a host other than the one each credential is
+/// bound to (`ConnectionChoice::host`). The message is written for the agent
+/// that will read it: it names the bound host and, when there is exactly one,
+/// spells out the corrected URL so the fix is a copy-paste. A connection with
+/// no bound host at all (fail-closed) is told to reconnect rather than guess.
+///
+/// Every choice is of ONE provider: a host-gated suffix (`*.my.salesforce.com`,
+/// `*.snowflakecomputing.com`, `*.jfrog.io`) belongs to exactly one provider
+/// in the registry, and only connections matching the request host's suffix
+/// reach resolution. `provider`/`display` are therefore taken from the first
+/// choice and describe the whole set.
+fn connection_host_mismatch_json(
+    requested_host: &str,
+    path: &str,
+    connections: &[crate::connect::ConnectionChoice],
+) -> serde_json::Value {
+    let hdr = crate::connect::CONNECTION_ID_HEADER;
+    let provider = connections.first().map(|c| c.provider.as_str());
+    let display = connections
+        .first()
+        .and_then(|c| c.display_name)
+        .or(provider)
+        .unwrap_or("This app");
+    // Distinct bound hosts, first-seen order: two accounts on the same org
+    // (e.g. two Salesforce users of one instance) share a host, and the fix
+    // for the agent is the same URL either way.
+    let mut bound: Vec<&str> = Vec::new();
+    for host in connections.iter().filter_map(|c| c.host.as_deref()) {
+        if !bound.contains(&host) {
+            bound.push(host);
+        }
+    }
+
+    // A request to an alias host often carries a path the bound host does not
+    // inject on either (login.salesforce.com/services/oauth2/userinfo): say
+    // which API surface carries the credential so the retry is not a second
+    // uncredentialed miss.
+    let path_note = provider
+        .and_then(apps::bound_host_path_prefix)
+        .filter(|prefix| !path.starts_with(prefix))
+        .map(|prefix| format!(" Credentials are only injected on {prefix}* paths."))
+        .unwrap_or_default();
+
+    let message = match bound.as_slice() {
+        [] => format!(
+            "{display} is connected, but the connection stores no bound host, so credentials cannot be injected for {requested_host}. \
+             Ask the user to reconnect {display} in OneCLI, then retry."
+        ),
+        [host] if !path_note.is_empty() => format!(
+            "Your {display} connection is bound to {host}, but this request went to {requested_host}. \
+             Send your API requests to https://{host} instead.{path_note}"
+        ),
+        [host] => format!(
+            "Your {display} connection is bound to {host}, but this request went to {requested_host}. \
+             Credentials are only injected on the bound host. Re-send the same request to https://{host}{path}"
+        ),
+        many => format!(
+            "Your {display} connections are bound to {}, but this request went to {requested_host}. \
+             Credentials are only injected on a connection's bound host. Re-send the same request to the host of the account you mean, \
+             and name that account with the {hdr} header.{path_note}",
+            many.join(", ")
+        ),
+    };
+
+    serde_json::json!({
+        "error": ERROR_CONNECTION_HOST_MISMATCH,
+        "message": message,
+        "requested_host": requested_host,
+        "provider": provider,
+        "connections": connections,
+        "header": hdr,
+    })
+}
+
+/// 421 Misdirected Request — the request went to a host none of the agent's
+/// granted connections is bound to. Same code as the deprecated-host hint
+/// (`hints.rs`): the URL is wrong for this credential, not the credential for
+/// this URL. Non-retryable: an unchanged retry cannot succeed.
+pub fn connection_host_mismatch<S>(
+    requested_host: &str,
+    path: &str,
+    connections: &[crate::connect::ConnectionChoice],
+) -> Response<ForwardBody<S>> {
+    with_no_retry(json_error(
+        StatusCode::MISDIRECTED_REQUEST,
+        connection_host_mismatch_json(requested_host, path, connections),
+    ))
+}
+
+/// 421 Misdirected Request — host-gated connection mismatch (axum body).
+pub fn connection_host_mismatch_axum(
+    requested_host: &str,
+    path: &str,
+    connections: &[crate::connect::ConnectionChoice],
+) -> Response<axum::body::Body> {
+    with_no_retry(json_error_axum(
+        StatusCode::MISDIRECTED_REQUEST,
+        connection_host_mismatch_json(requested_host, path, connections),
+    ))
+}
+
 /// 502 Bad Gateway — rule resolution failed mid-session.
 pub fn resolution_failed<S>() -> Response<ForwardBody<S>> {
     json_error(
@@ -320,6 +488,24 @@ pub fn resolution_failed<S>() -> Response<ForwardBody<S>> {
         serde_json::json!({
             "error": "resolution_failed",
             "message": "OneCLI gateway failed to resolve rules for this request.",
+        }),
+    )
+}
+
+/// 502 Bad Gateway — the request never reached the upstream (DNS, connect,
+/// or TLS failure). Named for what happened, so an agent that called a host
+/// that does not exist (`api.snowflake.com`) learns THAT, instead of reading
+/// a rule-resolution failure as "the gateway is broken" or "not connected".
+pub fn upstream_unreachable<S>(host: &str) -> Response<ForwardBody<S>> {
+    json_error(
+        StatusCode::BAD_GATEWAY,
+        serde_json::json!({
+            "error": "upstream_unreachable",
+            "message": format!(
+                "Could not reach {host} (DNS, connection, or TLS failure). Check the hostname: \
+                 it may not exist. This is not a credential or connection problem."
+            ),
+            "host": host,
         }),
     )
 }
@@ -346,13 +532,37 @@ pub fn upstream_timeout<S>() -> Response<ForwardBody<S>> {
     ))
 }
 
-/// 403 Forbidden — manual approval denied or timed out.
-pub fn manual_approval_denied<S>(approval_id: &str, reason: &str) -> Response<ForwardBody<S>> {
+/// The outcome applies only to the held request, not future user-directed requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalRejection {
+    Declined,
+    Expired,
+}
+
+/// 403 Forbidden with automatic retries disabled; a new user request needs fresh approval.
+pub fn manual_approval_denied<S>(
+    approval_id: &str,
+    outcome: ApprovalRejection,
+) -> Response<ForwardBody<S>> {
+    let (reason, description) = match outcome {
+        ApprovalRejection::Declined => ("declined", "The reviewer declined this approval request."),
+        ApprovalRejection::Expired => {
+            ("expired", "This approval request expired without approval.")
+        }
+    };
     with_no_retry(json_error(
         StatusCode::FORBIDDEN,
         serde_json::json!({
             "error": "manual_approval_denied",
-            "message": format!("This request was {reason} by an OneCLI manual approval policy."),
+            "reason": reason,
+            "message": format!(
+                "{description} The request was not forwarded to the service. \
+                 This outcome applies only to this request, not a permanent policy block. \
+                 Do not automatically retry or bypass approval. If the user asks for edits, \
+                 revise the draft without sending. When the user explicitly asks to send or \
+                 try again, submit a new request through the same gateway, even if the content \
+                 is unchanged. The new request requires fresh approval before it can execute."
+            ),
             "approval_id": approval_id,
         }),
     ))
@@ -457,7 +667,20 @@ pub fn rate_limited<S>(
     resp
 }
 
-/// 502 Bad Gateway — approval store unavailable.
+/// A held request could not receive a trustworthy approval decision.
+/// Unlike a pre-hold failure, never invite an automatic retry of this attempt.
+pub fn approval_wait_unavailable<S>(approval_id: &str) -> Response<ForwardBody<S>> {
+    with_no_retry(json_error(
+        StatusCode::BAD_GATEWAY,
+        serde_json::json!({
+            "error": "approval_store_unavailable",
+            "message": "OneCLI could not obtain an approval decision because the manual approval service is temporarily unavailable. The request was not forwarded. Do not retry automatically. A new attempt requires an explicit user request and must go through the same gateway policy and approval checks.",
+            "approval_id": approval_id,
+        }),
+    ))
+}
+
+/// 502 Bad Gateway — approval store unavailable before a hold is established.
 pub fn approval_store_unavailable<S>() -> Response<ForwardBody<S>> {
     json_error(
         StatusCode::BAD_GATEWAY,
@@ -470,10 +693,8 @@ pub fn approval_store_unavailable<S>() -> Response<ForwardBody<S>> {
 
 #[cfg(test)]
 mod tests {
+    use super::test_support::{body_json, TestBody};
     use super::*;
-
-    type TestBody =
-        ForwardBody<futures_util::stream::Empty<Result<hyper::body::Frame<Bytes>, reqwest::Error>>>;
 
     // House copy style: no em dashes in user-facing text (the web app pins
     // the same rule in ui-copy-guard.test.ts). Gateway refusal messages are
@@ -684,8 +905,14 @@ mod tests {
 
     #[test]
     fn access_restricted_preserves_status() {
-        let resp: Response<TestBody> =
-            access_restricted(StatusCode::FORBIDDEN, "resend", "Resend", None);
+        let resp: Response<TestBody> = access_restricted(
+            StatusCode::FORBIDDEN,
+            RestrictedCredential::AppConnection,
+            "api.resend.com",
+            "/emails",
+            None,
+            None,
+        );
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
@@ -696,20 +923,21 @@ mod tests {
 
     #[tokio::test]
     async fn access_restricted_body_points_at_the_attach_surface() {
-        let resp: Response<TestBody> =
-            access_restricted(StatusCode::UNAUTHORIZED, "resend", "Resend", None);
-        use http_body_util::BodyExt;
-        let body = match resp.into_body() {
-            Either::Left(full) => full.collect().await.expect("collect full body").to_bytes(),
-            Either::Right(_) => panic!("expected Left"),
-        };
-        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        let resp: Response<TestBody> = access_restricted(
+            StatusCode::UNAUTHORIZED,
+            RestrictedCredential::AppConnection,
+            "api.resend.com",
+            "/emails",
+            None,
+            Some("agent-1"),
+        );
+        let json = body_json(resp).await;
         assert_eq!(json["error"], "access_restricted");
         assert_eq!(json["provider"], "resend");
         assert!(json["message"]
             .as_str()
             .unwrap()
-            .contains("does not have access"));
+            .contains("does not have access. Ask the user to attach the account"));
         // Since attach-model step 6 the workspace policy console does not exist,
         // so the remediation link must reach a surface that can actually grant
         // the credential: the app's connections page, whose account cards carry
@@ -717,6 +945,100 @@ mod tests {
         let manage_url = json["manage_url"].as_str().unwrap();
         assert!(manage_url.ends_with("/connections/apps/resend"));
         assert!(!manage_url.contains("/policy"));
+    }
+
+    /// The `access_restricted` body for `credential` on `url` (host + path) in
+    /// workspace `ws1`, as (`manage_url` minus the dashboard origin, message).
+    async fn restricted_link(
+        credential: RestrictedCredential,
+        url: &str,
+        agent: Option<&str>,
+    ) -> (String, String) {
+        let (host, path) = url.split_at(url.find('/').unwrap_or(url.len()));
+        let resp: Response<TestBody> = access_restricted(
+            StatusCode::FORBIDDEN,
+            credential,
+            host,
+            path,
+            Some("ws1"),
+            agent,
+        );
+        let json = body_json(resp).await;
+        let manage_url = json["manage_url"].as_str().unwrap();
+        let message = json["message"].as_str().unwrap();
+        assert!(message.ends_with(manage_url), "{message}");
+        (
+            manage_url
+                .strip_prefix(dashboard_url())
+                .unwrap()
+                .to_string(),
+            message.to_string(),
+        )
+    }
+
+    /// The link follows the denied credential's KIND, never the host. The prod
+    /// incident: a custom PostHog secret, on a host that is also a registered
+    /// app. Linking by host sent the user to the PostHog app page, which has no
+    /// account to attach. Custom secrets and LLM keys are attached on the
+    /// agent's own pages, and each falls back to its workspace list.
+    #[tokio::test]
+    async fn access_restricted_links_the_page_that_attaches_the_denied_credential() {
+        use RestrictedCredential::{AppConnection, CustomSecret, LlmKey};
+        let agent = Some("ag-1");
+        let posthog = "app.posthog.com/api/projects";
+
+        let (custom, message) = restricted_link(CustomSecret, posthog, agent).await;
+        assert_eq!(custom, "/w/ws1/agents/ag-1/connections?tab=custom");
+        assert!(
+            message.contains("attach the secret to this agent"),
+            "{message}"
+        );
+        let (custom, _) = restricted_link(CustomSecret, posthog, None).await;
+        assert_eq!(custom, "/w/ws1/connections/custom");
+
+        let anthropic = "api.anthropic.com/v1/messages";
+        let (key, message) = restricted_link(LlmKey, anthropic, agent).await;
+        assert_eq!(key, "/w/ws1/agents/ag-1/models");
+        assert!(
+            message.contains("attach the key to this agent"),
+            "{message}"
+        );
+        let (key, _) = restricted_link(LlmKey, anthropic, None).await;
+        assert_eq!(key, "/w/ws1/connections/llms");
+
+        let (app, message) = restricted_link(AppConnection, posthog, agent).await;
+        assert_eq!(app, "/w/ws1/connections/apps/posthog");
+        assert!(
+            message.contains("attach the account to this agent"),
+            "{message}"
+        );
+        // An alias host names its owning app, as app_not_connected does.
+        let alias = "login.salesforce.com/services/oauth2/userinfo";
+        let (app, _) = restricted_link(AppConnection, alias, agent).await;
+        assert_eq!(app, "/w/ws1/connections/apps/salesforce");
+        // A shared host whose path names no app: the agent's Apps tab.
+        let shared = "www.googleapis.com/unregistered/v1/x";
+        let (app, _) = restricted_link(AppConnection, shared, agent).await;
+        assert_eq!(app, "/w/ws1/agents/ag-1/connections");
+        let (app, _) = restricted_link(AppConnection, shared, None).await;
+        assert_eq!(app, "/w/ws1/connections");
+    }
+
+    /// `provider` keeps naming what the host is, whatever the kind: the app
+    /// id where a registered app serves the host, else the host itself.
+    #[tokio::test]
+    async fn access_restricted_provider_names_the_app_or_the_host() {
+        for (host, provider) in [("app.posthog.com", "posthog"), ("127.0.0.1", "127.0.0.1")] {
+            let resp: Response<TestBody> = access_restricted(
+                StatusCode::FORBIDDEN,
+                RestrictedCredential::CustomSecret,
+                host,
+                "/",
+                None,
+                None,
+            );
+            assert_eq!(body_json(resp).await["provider"], provider, "{host}");
+        }
     }
 
     #[tokio::test]
@@ -785,12 +1107,14 @@ mod tests {
                 label: Some("alice@gmail.com".to_string()),
                 provider: "gmail".to_string(),
                 display_name: Some("Gmail"),
+                host: None,
             },
             crate::connect::ConnectionChoice {
                 id: "conn_2".to_string(),
                 label: Some("alice.work@company.com".to_string()),
                 provider: "gmail".to_string(),
                 display_name: Some("Gmail"),
+                host: None,
             },
         ];
         let resp: Response<TestBody> = multiple_connections(&connections);
@@ -834,12 +1158,14 @@ mod tests {
                 label: Some("dev@company.com".to_string()),
                 provider: "jira".to_string(),
                 display_name: Some("Jira"),
+                host: None,
             },
             crate::connect::ConnectionChoice {
                 id: "conn_confluence".to_string(),
                 label: Some("dev@company.com".to_string()),
                 provider: "confluence".to_string(),
                 display_name: Some("Confluence"),
+                host: None,
             },
         ];
         let resp: Response<TestBody> = multiple_providers(&connections);
@@ -871,6 +1197,7 @@ mod tests {
             label: Some("alice@gmail.com".to_string()),
             provider: "gmail".to_string(),
             display_name: Some("Gmail"),
+            host: None,
         }];
         let resp: Response<TestBody> = multiple_connections(&connections);
         use http_body_util::BodyExt;
@@ -896,13 +1223,86 @@ mod tests {
 
     #[test]
     fn manual_approval_denied_has_correct_status_and_headers() {
-        let resp: Response<TestBody> = manual_approval_denied("approval-123", "denied");
+        let resp: Response<TestBody> =
+            manual_approval_denied("approval-123", ApprovalRejection::Declined);
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
             "application/json"
         );
         assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
+    }
+
+    #[tokio::test]
+    async fn approval_rejection_scopes_outcome_to_one_request() {
+        use http_body_util::BodyExt;
+        for (outcome, reason, description) in [
+            (
+                ApprovalRejection::Declined,
+                "declined",
+                "The reviewer declined this approval request.",
+            ),
+            (
+                ApprovalRejection::Expired,
+                "expired",
+                "This approval request expired without approval.",
+            ),
+        ] {
+            let resp: Response<TestBody> = manual_approval_denied("approval-123", outcome);
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
+            let bytes = match resp.into_body() {
+                Either::Left(full) => full.collect().await.expect("collect body").to_bytes(),
+                Either::Right(_) => panic!("expected full response"),
+            };
+            let body: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+            assert_eq!(body["error"], "manual_approval_denied");
+            assert_eq!(body["approval_id"], "approval-123");
+            assert_eq!(body["reason"], reason);
+            let message = body["message"].as_str().expect("message");
+            assert!(message.starts_with(description));
+            for guidance in [
+                "not forwarded to the service",
+                "Do not automatically retry or bypass approval",
+                "revise the draft without sending",
+                "When the user explicitly asks to send or try again",
+                "even if the content is unchanged",
+                "requires fresh approval",
+            ] {
+                assert!(message.contains(guidance), "missing guidance: {guidance}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_wait_failure_is_not_a_decline_or_expiry() {
+        use http_body_util::BodyExt;
+        let resp: Response<TestBody> = approval_wait_unavailable("approval-123");
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        let bytes = match resp.into_body() {
+            Either::Left(full) => full.collect().await.unwrap().to_bytes(),
+            Either::Right(_) => panic!("expected full response"),
+        };
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "approval_store_unavailable");
+        assert_eq!(body["approval_id"], "approval-123");
+        assert!(body.get("reason").is_none());
+        let message = body["message"].as_str().unwrap();
+        for guidance in [
+            "request was not forwarded",
+            "Do not retry automatically",
+            "explicit user request",
+            "same gateway policy and approval checks",
+        ] {
+            assert!(message.contains(guidance), "missing guidance: {guidance}");
+        }
+        assert!(!message.contains("expired"));
+        assert!(!message.contains("declined"));
     }
 
     #[test]
@@ -957,5 +1357,202 @@ mod tests {
                 "timeout body must not expose {leak:?}: {rendered}",
             );
         }
+    }
+
+    // ── connection_host_mismatch ─────────────────────────────────────────
+
+    fn choice(id: &str, provider: &str, host: Option<&str>) -> crate::connect::ConnectionChoice {
+        crate::connect::ConnectionChoice {
+            id: id.to_string(),
+            label: Some(format!("{id}@example.com")),
+            provider: provider.to_string(),
+            display_name: apps::display_name_for_provider(provider),
+            host: host.map(str::to_string),
+        }
+    }
+
+    /// The prod incident shape: the agent went to `login.salesforce.com` with
+    /// an OAuth path. The answer names the bound host AND the API surface
+    /// that actually carries the credential, so the retry is not another miss.
+    #[tokio::test]
+    async fn connection_host_mismatch_on_off_api_path_names_the_api_prefix() {
+        let connections = vec![choice(
+            "conn_sf",
+            "salesforce",
+            Some("acme.my.salesforce.com"),
+        )];
+        let resp: Response<TestBody> = connection_host_mismatch(
+            "login.salesforce.com",
+            "/services/oauth2/userinfo",
+            &connections,
+        );
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+        let json = body_json(resp).await;
+        let message = json["message"].as_str().unwrap();
+        assert!(
+            message.contains("https://acme.my.salesforce.com"),
+            "{message}"
+        );
+        assert!(message.contains("/services/data/* paths"), "{message}");
+        assert!(
+            !message.contains("acme.my.salesforce.com/services/oauth2"),
+            "must not suggest re-sending to a path that never injects: {message}"
+        );
+    }
+
+    /// The #1137 shape: one Salesforce connection, request to the docs'
+    /// placeholder host. The agent must get a 421 it can act on alone: the
+    /// bound host, and the exact corrected URL to re-send to.
+    #[tokio::test]
+    async fn connection_host_mismatch_single_connection_names_corrected_url() {
+        let connections = vec![choice(
+            "conn_sf",
+            "salesforce",
+            Some("acme.my.salesforce.com"),
+        )];
+        let resp: Response<TestBody> = connection_host_mismatch(
+            "your-domain.my.salesforce.com",
+            "/services/data/v60.0/sobjects/Opportunity",
+            &connections,
+        );
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+        assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+
+        let json = body_json(resp).await;
+        assert_eq!(json["error"], "connection_host_mismatch");
+        assert_eq!(json["requested_host"], "your-domain.my.salesforce.com");
+        assert_eq!(json["provider"], "salesforce");
+        assert_eq!(json["header"], crate::connect::CONNECTION_ID_HEADER);
+        let conns = json["connections"].as_array().unwrap();
+        assert_eq!(conns.len(), 1);
+        assert_eq!(conns[0]["id"], "conn_sf");
+        assert_eq!(conns[0]["host"], "acme.my.salesforce.com");
+        let message = json["message"].as_str().unwrap();
+        assert!(
+            message.contains("bound to acme.my.salesforce.com"),
+            "{message}"
+        );
+        assert!(
+            message.contains("went to your-domain.my.salesforce.com"),
+            "{message}"
+        );
+        assert!(
+            message.contains(
+                "https://acme.my.salesforce.com/services/data/v60.0/sobjects/Opportunity"
+            ),
+            "the fix must be a copy-pasteable URL: {message}"
+        );
+    }
+
+    /// Several bound hosts: list them all and point at the account header,
+    /// rather than guessing one URL.
+    #[tokio::test]
+    async fn connection_host_mismatch_many_connections_lists_hosts_and_header() {
+        let connections = vec![
+            choice("conn_prod", "salesforce", Some("acme.my.salesforce.com")),
+            choice(
+                "conn_sandbox",
+                "salesforce",
+                Some("acme--dev.sandbox.my.salesforce.com"),
+            ),
+        ];
+        let resp: Response<TestBody> =
+            connection_host_mismatch("wrong.my.salesforce.com", "/services/data/", &connections);
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+        let json = body_json(resp).await;
+        let message = json["message"].as_str().unwrap();
+        assert!(message.contains("acme.my.salesforce.com"), "{message}");
+        assert!(
+            message.contains("acme--dev.sandbox.my.salesforce.com"),
+            "{message}"
+        );
+        assert!(
+            message.contains(crate::connect::CONNECTION_ID_HEADER),
+            "{message}"
+        );
+        assert_eq!(json["connections"].as_array().unwrap().len(), 2);
+    }
+
+    /// Two accounts of the SAME org share a bound host. The agent's fix is one
+    /// URL either way, so the message must collapse to the single-host form
+    /// (and not read "bound to acme, acme").
+    #[tokio::test]
+    async fn connection_host_mismatch_dedupes_a_shared_bound_host() {
+        let connections = vec![
+            choice("conn_jane", "salesforce", Some("acme.my.salesforce.com")),
+            choice("conn_bob", "salesforce", Some("acme.my.salesforce.com")),
+        ];
+        let resp: Response<TestBody> = connection_host_mismatch(
+            "wrong.my.salesforce.com",
+            "/services/data/v60.0/query",
+            &connections,
+        );
+        let json = body_json(resp).await;
+        let message = json["message"].as_str().unwrap();
+        assert!(
+            message.contains("https://acme.my.salesforce.com/services/data/v60.0/query"),
+            "{message}"
+        );
+        assert_eq!(
+            message.matches("acme.my.salesforce.com").count(),
+            2,
+            "named once as the bound host and once in the URL, never listed twice: {message}"
+        );
+        // Both accounts still ride along for the header-pinning protocol.
+        assert_eq!(json["connections"].as_array().unwrap().len(), 2);
+    }
+
+    /// A fail-closed connection (no stored host) must not be handed a guess:
+    /// the guidance is to reconnect, and the choice carries no `host` key.
+    #[tokio::test]
+    async fn connection_host_mismatch_without_bound_host_asks_to_reconnect() {
+        let connections = vec![choice("conn_jf", "jfrog-artifactory", None)];
+        let resp: Response<TestBody> =
+            connection_host_mismatch("other.jfrog.io", "/artifactory/api/npm/npm/", &connections);
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+        let json = body_json(resp).await;
+        let message = json["message"].as_str().unwrap();
+        assert!(message.contains("reconnect"), "{message}");
+        assert!(!message.contains("https://"), "no URL to copy: {message}");
+        assert!(
+            json["connections"][0].get("host").is_none(),
+            "an absent host must be absent from the wire, not null"
+        );
+    }
+
+    /// The `host` field is opt-in on the wire: choices without one serialize
+    /// exactly as before, so the existing 409/404 bodies and the
+    /// `x-onecli-connections` header are unchanged for non-gated providers.
+    #[test]
+    fn connection_choice_without_host_serializes_as_before() {
+        let json = serde_json::to_value(choice("conn_1", "gmail", None)).unwrap();
+        let mut keys: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["display_name", "id", "label", "provider"]);
+    }
+
+    #[test]
+    fn connection_host_mismatch_axum_matches_forward_variant() {
+        let connections = vec![choice(
+            "conn_sf",
+            "salesforce",
+            Some("acme.my.salesforce.com"),
+        )];
+        let resp = connection_host_mismatch_axum("wrong.my.salesforce.com", "/", &connections);
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+        assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/json"
+        );
     }
 }

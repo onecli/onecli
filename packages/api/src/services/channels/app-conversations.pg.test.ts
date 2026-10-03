@@ -924,7 +924,9 @@ describe.skipIf(!PROOF_URL)("app conversations (5a) — the app-turn cap", () =>
     const hold = await db.actionApproval.findFirstOrThrow({
       where: { agentId: stage.agentId, action: cap.APP_TURN_CONTINUE_ACTION },
     });
-    expect(hold.payload).toMatchObject({ appExternalRef: APP_USER });
+    expect(hold.payload).toMatchObject({
+      speaker: { kind: "app", externalRef: APP_USER },
+    });
     await reach.ensurePersonGrant({
       agentId: stage.agentId,
       integrationId: stage.integrationId,

@@ -25,6 +25,7 @@ export {
   CHANNEL_PROVIDER_IDS,
   ChannelProviderApiError,
   isChannelProviderId,
+  isDeadCredentialError,
   type ChannelProviderId,
 } from "./errors";
 

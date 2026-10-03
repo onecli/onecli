@@ -9,10 +9,17 @@ import {
   MEMORY_KEY_PATTERN,
   MEMORY_TITLE_MAX_LENGTH,
 } from "./memory-file";
+import { MAX_OUTBOUND_CAPTION_CHARS } from "./attachments";
 import {
+  MAX_AGENT_CHANNEL_PRESENCES,
+  MAX_AGENT_CONNECTIONS,
+  MAX_AGENT_PEERS,
   MAX_SYNC_PART_BYTES,
   MAX_SYNC_PARTS,
   MAX_TURN_CONTEXT_CHARS,
+  agentChannelPresenceSchema,
+  agentConnectionSchema,
+  agentPeerSchema,
   attachmentManifestEntrySchema,
   processStateSchema,
   syncFrameByteLength,
@@ -60,6 +67,14 @@ export const runnerCapabilitiesSchema = z.object({
    * about files that cannot arrive. Absent = false.
    */
   attachments: z.boolean().optional(),
+  /**
+   * This runner relays files the agent sends back (`file.part` reassembly →
+   * `POST /v1/runner/attachments`). The spawn env advertises the send_file
+   * tool to the supervisor ONLY for capable runners — an older runner would
+   * drop the frames on validation and the model would wait out a timeout for
+   * a file that never left. Absent = false.
+   */
+  outboundAttachments: z.boolean().optional(),
 });
 export type RunnerCapabilities = z.infer<typeof runnerCapabilitiesSchema>;
 
@@ -122,6 +137,28 @@ export const sandboxStartPayloadSchema = z.object({
   /** The agent's display name — the identity the rendered instructions give
    * it, so it never falls back on the harness's own self-description. */
   agentName: z.string().optional(),
+  /**
+   * The agent's channel presences (its own Slack app, later others) for the
+   * supervisor's `channels` capability — the section that tells the agent
+   * where it can be reached and gates the messaging tools. Composed at
+   * dispatch from current truth like everything else here. Optional so an
+   * older control plane keeps working against a newer runner; absent reads
+   * as "no presences".
+   */
+  channels: z
+    .array(agentChannelPresenceSchema)
+    .max(MAX_AGENT_CHANNEL_PRESENCES)
+    .optional(),
+  /** The peer agents this agent may message (PR 5b), for the supervisor's
+   * `agents` capability. Same optionality rule as `channels`. */
+  peers: z.array(agentPeerSchema).max(MAX_AGENT_PEERS).optional(),
+  /** The agent's attached app connections (and each host-bound app's bound
+   * host), for the supervisor's `connections` capability. Same optionality
+   * rule as `channels`. */
+  connections: z
+    .array(agentConnectionSchema)
+    .max(MAX_AGENT_CONNECTIONS)
+    .optional(),
   /** Provision-time warnings (§7 invariant 5) — surfaced, never swallowed. */
   warnings: z.array(z.string()),
 });
@@ -223,6 +260,17 @@ export const runnerWorkItemSchema = z
             prune: z.array(homeRelativePathSchema).optional(),
             instructions: z.string().optional(),
             agentName: z.string().optional(),
+            /** Final part only, like the two above — see the transport frame
+             * for the empty-vs-omitted rule. */
+            channels: z
+              .array(agentChannelPresenceSchema)
+              .max(MAX_AGENT_CHANNEL_PRESENCES)
+              .optional(),
+            peers: z.array(agentPeerSchema).max(MAX_AGENT_PEERS).optional(),
+            connections: z
+              .array(agentConnectionSchema)
+              .max(MAX_AGENT_CONNECTIONS)
+              .optional(),
           }),
         )
         .min(1)
@@ -544,4 +592,54 @@ export const runnerMemoryWriteResponseSchema = z.object({
 });
 export type RunnerMemoryWriteResponse = z.infer<
   typeof runnerMemoryWriteResponseSchema
+>;
+
+/**
+ * POST /v1/runner/attachments — the runner relaying a file the agent is
+ * sending back (`send_file`, Tier 3). The BODY is the raw bytes (the web
+ * upload door's precedent: this repo has no multipart anywhere, and a raw
+ * body lets the api stream-cap with `readCappedBinaryBody` instead of
+ * buffering a form). The metadata rides HEADERS, named here so both ends
+ * spell them once. `sandboxId` follows the tool-call law: stamped by the
+ * runner from the AUTHENTICATED channel, never the supervisor's payload,
+ * re-fenced against the runner token server-side; the turn must be live
+ * under the fenced agent's conversation. Caps live in attachments.ts and are
+ * enforced by the api regardless of what the headers claim.
+ */
+export const RUNNER_ATTACHMENT_HEADERS = {
+  sandboxId: "x-onecli-sandbox-id",
+  conversationId: "x-onecli-conversation-id",
+  turnId: "x-onecli-turn-id",
+  name: "x-onecli-file-name",
+  sha256: "x-onecli-file-sha256",
+  caption: "x-onecli-file-caption",
+} as const;
+
+/** The header set, parsed. `name` and `caption` are percent-encoded on the
+ * wire (HTTP header values are Latin-1; a file name is not). */
+export const runnerAttachmentUploadHeadersSchema = z.object({
+  sandboxId: z.string().min(1),
+  conversationId: z.string().min(1),
+  turnId: z.string().min(1),
+  name: z.string().min(1).max(255),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  caption: z.string().max(MAX_OUTBOUND_CAPTION_CHARS).optional(),
+});
+export type RunnerAttachmentUploadHeaders = z.infer<
+  typeof runnerAttachmentUploadHeadersSchema
+>;
+
+/** Mirrors the supervisor-facing `file.result` (minus the correlation id). A
+ * parseable request ALWAYS answers this shape with 200 — caps, fence misses
+ * and bad bytes are `ok:false` the model reads, never status-code oracles.
+ * The one exception is the body cap: an oversized body is cut mid-stream and
+ * answered 413, because the api will not read 25 MB to say no. */
+export const runnerAttachmentUploadResponseSchema = z.object({
+  ok: z.boolean(),
+  attachmentId: z.string().min(1).optional(),
+  retryable: z.boolean().optional(),
+  error: z.string().optional(),
+});
+export type RunnerAttachmentUploadResponse = z.infer<
+  typeof runnerAttachmentUploadResponseSchema
 >;

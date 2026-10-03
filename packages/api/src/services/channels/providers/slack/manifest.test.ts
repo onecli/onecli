@@ -39,6 +39,7 @@ describe("BOT_SCOPES", () => {
       "groups:read",
       "reactions:write",
       "files:read",
+      "files:write",
       "users:read",
       "users:read.email",
     ]);
@@ -292,5 +293,20 @@ describe("agentAppDescriptionWithOwner", () => {
     expect(long.length).toBeLessThanOrEqual(140);
     expect(long).toContain("a OneCLI hosted agent");
     expect(long).not.toContain("Managed by");
+  });
+});
+
+describe("the manifest subscribes the app to its own removal", () => {
+  it("declares app_uninstalled and tokens_revoked on BOTH transports — without them a workspace uninstall is invisible to the platform", () => {
+    for (const transport of ["socket", "events"] as const) {
+      const manifest = buildAgentManifest({
+        agentName: "Deploy Agent",
+        transport,
+        publicApiUrl: transport === "events" ? "https://api.example" : null,
+      }) as { settings: { event_subscriptions: { bot_events: string[] } } };
+      const events = manifest.settings.event_subscriptions.bot_events;
+      expect(events, transport).toContain("app_uninstalled");
+      expect(events, transport).toContain("tokens_revoked");
+    }
   });
 });

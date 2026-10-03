@@ -56,8 +56,24 @@ const renderDoor = () => {
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );
-  return render(<AttachParamDialog />, { wrapper });
+  const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+  return { ...render(<AttachParamDialog />, { wrapper }), invalidateSpy };
 };
+
+/** A connect popup's landing message, as the callback page posts it. */
+const landing = (provider: string, connectionId: string) =>
+  act(() => {
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        origin: window.location.origin,
+        data: { type: "app-connected", provider, connectionId },
+      }),
+    );
+  });
+
+/** The landing's tell: this door refreshed the count badges. A thunk: query
+ * keys carry the URL's workspace scope, resolved at call time. */
+const refreshedCounts = () => ({ queryKey: queryKeys.counts.all() });
 
 describe("AttachParamDialog (?attach= deep link)", () => {
   let openSpy: MockInstance<typeof window.open>;
@@ -116,99 +132,61 @@ describe("AttachParamDialog (?attach= deep link)", () => {
     expect(pushMock).not.toHaveBeenCalled();
   });
 
-  it("auto-grants ONLY a connect this door initiated — keyed by provider, surviving the dialog's close", async () => {
+  it("refreshes the grant views ONLY for a connect this door initiated: keyed by provider, surviving the dialog's close", async () => {
     attachParam = "gmail";
-    renderDoor();
+    const { invalidateSpy } = renderDoor();
 
-    // An event nobody here claimed: no grant.
-    act(() => {
-      window.dispatchEvent(
-        new MessageEvent("message", {
-          origin: window.location.origin,
-          data: {
-            type: "app-connected",
-            provider: "gmail",
-            connectionId: "conn-9",
-          },
-        }),
-      );
-    });
+    // An event nobody here claimed: nothing happens.
+    landing("gmail", "conn-9");
     await act(async () => {});
-    expect(grants.setConnectionGrant).not.toHaveBeenCalled();
+    expect(invalidateSpy).not.toHaveBeenCalled();
 
     // Claim it, close the dialog mid-flight, then the popup lands: the
-    // grant the Slack button promised must still happen.
+    // refresh that shows the new account attached must still happen. The
+    // grant itself is the API's (workspace auto-attach), never written here.
     await userEvent.click(
       screen.getByRole("button", { name: "Connect an account" }),
     );
     expect(openSpy).toHaveBeenCalledTimes(1);
     await userEvent.click(screen.getByRole("button", { name: "Done" }));
-    act(() => {
-      window.dispatchEvent(
-        new MessageEvent("message", {
-          origin: window.location.origin,
-          data: {
-            type: "app-connected",
-            provider: "gmail",
-            connectionId: "conn-9",
-          },
-        }),
-      );
-    });
+    landing("gmail", "conn-9");
     await waitFor(() =>
-      expect(grants.setConnectionGrant).toHaveBeenCalledWith(
-        "agent-1",
-        "conn-9",
-        { access: "full" },
-      ),
+      expect(invalidateSpy).toHaveBeenCalledWith({
+        queryKey: queryKeys.grants.all(),
+      }),
     );
-    expect(grants.setConnectionGrant).toHaveBeenCalledTimes(1);
+    expect(invalidateSpy).toHaveBeenCalledWith(refreshedCounts());
+    expect(grants.setConnectionGrant).not.toHaveBeenCalled();
   });
 
   it("releases the claim when the popup is blocked", async () => {
     openSpy.mockReturnValue(null);
     attachParam = "gmail";
-    renderDoor();
+    const { invalidateSpy } = renderDoor();
 
     await userEvent.click(
       screen.getByRole("button", { name: "Connect an account" }),
     );
-    act(() => {
-      window.dispatchEvent(
-        new MessageEvent("message", {
-          origin: window.location.origin,
-          data: {
-            type: "app-connected",
-            provider: "gmail",
-            connectionId: "conn-9",
-          },
-        }),
-      );
-    });
+    landing("gmail", "conn-9");
     await act(async () => {});
-    expect(grants.setConnectionGrant).not.toHaveBeenCalled();
+    expect(invalidateSpy).not.toHaveBeenCalledWith(refreshedCounts());
   });
 
   it("a different provider's landing never consumes this door's claim", async () => {
     attachParam = "gmail";
-    renderDoor();
+    const { invalidateSpy } = renderDoor();
 
     await userEvent.click(
       screen.getByRole("button", { name: "Connect an account" }),
     );
-    act(() => {
-      window.dispatchEvent(
-        new MessageEvent("message", {
-          origin: window.location.origin,
-          data: {
-            type: "app-connected",
-            provider: "slack",
-            connectionId: "conn-3",
-          },
-        }),
-      );
-    });
+    landing("github", "conn-3");
     await act(async () => {});
-    expect(grants.setConnectionGrant).not.toHaveBeenCalled();
+    expect(invalidateSpy).not.toHaveBeenCalledWith(refreshedCounts());
+
+    // The gmail claim is still live: its own landing is handled.
+    landing("gmail", "conn-9");
+    await waitFor(() =>
+      expect(invalidateSpy).toHaveBeenCalledWith(refreshedCounts()),
+    );
   });
 });

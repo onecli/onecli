@@ -53,15 +53,19 @@ import { granola } from "./granola";
 import { hubspot } from "./hubspot";
 import { linear } from "./linear";
 import { attio } from "./attio";
+import { apolloIo } from "./apollo-io";
+import { posthog } from "./posthog";
+import { clay } from "./clay";
 import { x } from "./x";
 import { fathom } from "./fathom";
-import { slack } from "./slack";
 import { fireflies } from "./fireflies";
 import { zohoCrm } from "./zoho-crm";
 import { snowflake } from "./snowflake";
 import { stripe } from "./stripe";
+import { salesforce } from "./salesforce";
 
 const staticApps: AppDefinition[] = [
+  salesforce,
   gmail,
   github,
   githubApp,
@@ -113,9 +117,11 @@ const staticApps: AppDefinition[] = [
   granola,
   linear,
   attio,
+  apolloIo,
+  posthog,
+  clay,
   x,
   fathom,
-  slack,
   fireflies,
   zohoCrm,
   snowflake,

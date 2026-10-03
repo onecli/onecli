@@ -73,6 +73,10 @@ const MEMBER = `${P}member`;
 const OUTSIDER = `${P}outsider`;
 /** A member with status "suspended" — treated as a non-member everywhere. */
 const SUSPENDED = `${P}suspended`;
+/** A runner row for the sandbox the provider-side-removal suite parks under
+ * an agent (the home bump needs a sandbox to move). Sandboxes cascade from
+ * their agent; the runner is reaped by `reset`. */
+const RUNNER = `${P}runner`;
 /** Name carries control chars on purpose — the cleanName test's subject. */
 const CTRL_NAME_USER = `${P}ctrl`;
 
@@ -282,6 +286,11 @@ const startGatewayFake = (): Promise<string> =>
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
 const reset = async () => {
+  // No FK: include the deleted-organization fixture, whose snapshot survives
+  // its parent cascade and must not reserve the next test run's app identity.
+  await db.channelCleanup.deleteMany({
+    where: { organizationId: { startsWith: P } },
+  });
   // Prefix-fenced: the proof database is shared with the other pg suites.
   await db.auditLog.deleteMany({ where: { userId: { startsWith: P } } });
   await db.channelAdapter.deleteMany({
@@ -295,6 +304,7 @@ const reset = async () => {
   // Presences, thread links, ingested events and approval prompts cascade
   // from the agents; user links cascade from the integrations.
   await db.agent.deleteMany({ where: { identifier: { startsWith: P } } });
+  await db.runner.deleteMany({ where: { id: RUNNER } });
   await db.channelIntegration.deleteMany({
     where: { organizationId: { in: [ORG, OTHER_ORG] } },
   });
@@ -682,6 +692,9 @@ beforeAll(async () => {
 beforeEach(async () => {
   if (!PROOF_URL) return;
   await reset();
+  await db.runner.create({
+    data: { id: RUNNER, name: `${P}runner`, token: `rnr_${P}runner` },
+  });
   // Ciphertexts repeat across tests (deterministic fake crypto), so a stale
   // cache entry would make decrypt-count assertions vacuous.
   decryptCache.resetDecryptCacheForTests();
@@ -2337,11 +2350,18 @@ describe.skipIf(!PROOF_URL)("createPresence (the guided arm)", () => {
       expect(
         await db.apiKey.findUnique({ where: { id: staleKey.id } }),
       ).toBeNull();
-      // ...and the remote uninstall was ATTEMPTED on the stale row's own
-      // decrypted credentials (HTTP no-op here — see the wrap comment above).
-      expect(uninstallCalls).toEqual([
-        { credentialsJson: staleCredentialsJson },
-      ]);
+      // ...and remote cleanup is queued with the stale row's encrypted
+      // credentials, without provider HTTP during this replacement.
+      expect(uninstallCalls).toEqual([]);
+      const queued = await db.channelCleanup.findUniqueOrThrow({
+        where: {
+          provider_externalId: { provider: "slack", externalId: "A-STALE" },
+        },
+      });
+      expect(queued.state).toBe("pending");
+      expect(await getCrypto().decrypt(queued.credentials!)).toBe(
+        staleCredentialsJson,
+      );
       expect(slackCallsFor("apps.uninstall")).toHaveLength(0);
 
       // Exactly ONE presence remains: the fresh pending_setup row.
@@ -2851,6 +2871,19 @@ describe.skipIf(!PROOF_URL)("detachPresence", () => {
       { botToken: "xoxb-d", appToken: "xapp-d", appId: `A-${suffix}` },
       ADMIN,
     );
+    await db.agentChannel.update({
+      where: { id: presence.id },
+      data: {
+        credentials: await getCrypto().encrypt(
+          JSON.stringify({
+            botToken: "xoxb-d",
+            clientId: "client-1",
+            clientSecret: "client-secret-1",
+          }),
+        ),
+      },
+    });
+    slackHandlers["apps.uninstall"] = () => ({ ok: true });
     return { agentId, presence };
   };
 
@@ -3077,9 +3110,9 @@ describe.skipIf(!PROOF_URL)("detachPresence", () => {
       ]);
     });
 
-    // Left ALIVE on purpose: better a live app the customer can remove than a
-    // permanent look-alike of a real person.
-    it("REFUSES to delete an app it could not rename", async () => {
+    // Rename is cosmetic. Confirmed uninstall still permits app deletion when
+    // Slack cannot rename the bot.
+    it("deletes after confirmed uninstall even if rename fails", async () => {
       const { agentId, presence } = await seedWithClientCreds("detach-tsfail");
       slackHandlers["apps.uninstall"] = () => ({ ok: true });
       slackHandlers["apps.manifest.export"] = () => ({
@@ -3093,17 +3126,16 @@ describe.skipIf(!PROOF_URL)("detachPresence", () => {
       });
 
       expect(slackCallsFor("apps.manifest.update")).toHaveLength(0);
-      expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
+      expect(slackCallsFor("apps.manifest.delete")).toHaveLength(1);
       // The local detach still completes: the platform never stays half-attached.
       expect(
         await db.agentChannel.findUnique({ where: { id: presence.id } }),
       ).toBeNull();
     });
 
-    // Slack accepts the rename but applies it asynchronously (~5s), so a
-    // teardown that raced ahead deleted before it landed. The give-up path
-    // polls its full window, hence the longer timeout.
-    it("REFUSES to delete when the rename never reaches the bot user", async () => {
+    // Slack may apply an accepted rename asynchronously. Cleanup does not poll
+    // for cosmetic propagation before uninstalling and deleting the app.
+    it("does not gate deletion on asynchronous rename propagation", async () => {
       const { agentId, presence } = await seedWithClientCreds("detach-tsslow");
       slackHandlers["apps.uninstall"] = () => ({ ok: true });
       slackHandlers["apps.manifest.export"] = () => ({
@@ -3126,13 +3158,13 @@ describe.skipIf(!PROOF_URL)("detachPresence", () => {
       });
 
       expect(slackCallsFor("apps.manifest.update")).toHaveLength(1);
-      expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
+      expect(slackCallsFor("apps.manifest.delete")).toHaveLength(1);
       expect(
         await db.agentChannel.findUnique({ where: { id: presence.id } }),
       ).toBeNull();
     }, 20_000);
 
-    it("a REFUSED uninstall still deletes the app", async () => {
+    it("a refused uninstall retains a blocked job and never deletes the app", async () => {
       const { agentId, presence } =
         await seedWithClientCreds("detach-unrefuse");
       scriptRenameLands(presence.externalId);
@@ -3147,7 +3179,21 @@ describe.skipIf(!PROOF_URL)("detachPresence", () => {
       });
 
       expect(slackCallsFor("apps.uninstall")).toHaveLength(1);
-      expect(slackCallsFor("apps.manifest.delete")).toHaveLength(1);
+      expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
+      expect(
+        await db.channelCleanup.findUnique({
+          where: {
+            provider_externalId: {
+              provider: "slack",
+              externalId: presence.externalId,
+            },
+          },
+        }),
+      ).toMatchObject({
+        state: "blocked",
+        stage: "uninstall",
+        reason: "uninstall_authorization_required",
+      });
       expect(
         await db.agentChannel.findUnique({ where: { id: presence.id } }),
       ).toBeNull();
@@ -3156,6 +3202,14 @@ describe.skipIf(!PROOF_URL)("detachPresence", () => {
     it("skips the uninstall when we hold no client credentials", async () => {
       // The paste floor: the user made the app, so we never saw its secret.
       const { agentId, presence } = await seedActivated("detach-nocreds");
+      await db.agentChannel.update({
+        where: { id: presence.id },
+        data: {
+          credentials: await getCrypto().encrypt(
+            JSON.stringify({ botToken: "xoxb-d" }),
+          ),
+        },
+      });
       scriptRenameLands(presence.externalId);
       await db.channelIntegration.updateMany({
         where: { organizationId: ORG, provider: "slack" },
@@ -3171,7 +3225,7 @@ describe.skipIf(!PROOF_URL)("detachPresence", () => {
       });
 
       expect(slackCallsFor("apps.uninstall")).toHaveLength(0);
-      expect(slackCallsFor("apps.manifest.delete")).toHaveLength(1);
+      expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
     });
 
     // The regression that shipped: the uninstall used to sit INSIDE the
@@ -3206,6 +3260,311 @@ describe.skipIf(!PROOF_URL)("detachPresence", () => {
     });
   });
 });
+
+describe.skipIf(!PROOF_URL)(
+  "a presence REMOVED on the provider side (app_uninstalled / tokens_revoked)",
+  () => {
+    const seedActivated = async (suffix: string) => {
+      const agentId = await seedAgent(suffix);
+      scriptAuthTest();
+      const presence = await agentChannels.completePresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        { botToken: "xoxb-d", appToken: "xapp-d", appId: `A-${suffix}` },
+        ADMIN,
+      );
+      // A RUNNING sandbox, so the home bump has something to move: the
+      // generation counter is how a live agent learns its doc changed.
+      await db.sandbox.create({
+        data: {
+          agentId,
+          runnerId: RUNNER,
+          status: "running",
+          homeDesiredGeneration: 1,
+        },
+      });
+      return { agentId, presence };
+    };
+
+    const generationOf = async (agentId: string) =>
+      (
+        await db.sandbox.findFirst({
+          where: { agentId },
+          select: { homeDesiredGeneration: true },
+        })
+      )?.homeDesiredGeneration;
+
+    it("ATTACHING to an agent whose sandbox is RUNNING re-renders its home — the attach-while-awake path (dev incident, 2026-09-15)", async () => {
+      // The user's dev walk: the agent's session was awake first, Slack was
+      // attached second. The live sandbox learns its doc changed only if
+      // the ACTIVATION bumps the home generation (the same bump removal
+      // takes below) — without it the supervisor never sees the new
+      // presence and the session keeps its stale "no Slack" doc, whatever
+      // the supervisor's restart law does next. The render view after the
+      // bump must list the new presence, since that is what rides the
+      // sync's final part to the supervisor.
+      // MUTATION-PROOF: drop `rerenderAgentHome` from `activatePresence`
+      // and the generation stays put.
+      const agentId = await seedAgent("attach-awake");
+      await db.sandbox.create({
+        data: {
+          agentId,
+          runnerId: RUNNER,
+          status: "running",
+          homeDesiredGeneration: 1,
+        },
+      });
+      const before = await generationOf(agentId);
+      expect(await agentChannels.channelPresencesForRender(agentId)).toEqual(
+        [],
+      );
+
+      scriptAuthTest();
+      const presence = await agentChannels.completePresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        { botToken: "xoxb-a", appToken: "xapp-a", appId: "A-attach-awake" },
+        ADMIN,
+      );
+      expect(presence.status).toBe("active");
+
+      await vi.waitFor(async () =>
+        expect(await generationOf(agentId)).toBe((before ?? 0) + 1),
+      );
+      // What the supervisor will receive on that sync's final part.
+      expect(await agentChannels.channelPresencesForRender(agentId)).toEqual([
+        expect.objectContaining({ provider: "slack", status: "active" }),
+      ]);
+    });
+
+    it("app_uninstalled flips the presence to disabled, drops links + the service key, and re-renders the agent's home", async () => {
+      const { agentId, presence } = await seedActivated("removed-uninstall");
+      const conversation = await db.conversation.create({
+        data: { agentId, source: "slack", direct: true, userId: MEMBER },
+        select: { id: true },
+      });
+      await db.channelThreadLink.create({
+        data: {
+          agentChannelId: presence.id,
+          conversationId: conversation.id,
+          externalThreadId: "D777",
+          kind: "direct",
+          externalUserId: "U111",
+        },
+      });
+      const before = await generationOf(agentId);
+
+      const result = await dispatch.dispatchSlackEvent({
+        presenceId: presence.id,
+        identityRef: "UBOT",
+        event: { type: "app_uninstalled" },
+        eventId: "Ev-uninstall-1",
+      });
+      expect(result).toEqual({
+        kind: "ignored",
+        reason: "presence-removed:app_uninstalled",
+      });
+
+      const row = await db.agentChannel.findUnique({
+        where: { id: presence.id },
+        select: { status: true, externalId: true, apiKeyId: true },
+      });
+      // Disabled, NOT deleted: the card stays and says what happened, and
+      // the app id survives so a re-attach resumes THIS app.
+      expect(row?.status).toBe("disabled");
+      expect(row?.externalId).toBe(presence.externalId);
+      expect(row?.apiKeyId).toBeNull();
+      expect(
+        await db.apiKey.findUnique({ where: { id: presence.apiKeyId! } }),
+      ).toBeNull();
+      expect(
+        await db.channelThreadLink.count({
+          where: { agentChannelId: presence.id },
+        }),
+      ).toBe(0);
+      // The conversation is the user's history; it outlives the app.
+      expect(
+        await db.conversation.findUnique({ where: { id: conversation.id } }),
+      ).not.toBeNull();
+      // The live sandbox was told to re-render (fire-and-forget: settle it).
+      await vi.waitFor(async () =>
+        expect(await generationOf(agentId)).toBe((before ?? 0) + 1),
+      );
+    });
+
+    it("tokens_revoked with a BOT entry removes the presence; user-token-only revocation is ignored", async () => {
+      const { presence } = await seedActivated("removed-tokens");
+
+      const userOnly = await dispatch.dispatchSlackEvent({
+        presenceId: presence.id,
+        identityRef: "UBOT",
+        event: { type: "tokens_revoked", tokens: { oauth: ["U999"] } },
+        eventId: "Ev-revoked-user",
+      });
+      expect(userOnly.kind).toBe("ignored");
+      expect(
+        (
+          await db.agentChannel.findUnique({
+            where: { id: presence.id },
+            select: { status: true },
+          })
+        )?.status,
+      ).toBe("active");
+
+      const botGone = await dispatch.dispatchSlackEvent({
+        presenceId: presence.id,
+        identityRef: "UBOT",
+        event: { type: "tokens_revoked", tokens: { bot: ["UBOT"] } },
+        eventId: "Ev-revoked-bot",
+      });
+      expect(botGone).toEqual({
+        kind: "ignored",
+        reason: "presence-removed:tokens_revoked",
+      });
+      expect(
+        (
+          await db.agentChannel.findUnique({
+            where: { id: presence.id },
+            select: { status: true },
+          })
+        )?.status,
+      ).toBe("disabled");
+    });
+
+    it("is idempotent across Slack's unordered pair, and never touches a presence the owner already detached", async () => {
+      const { agentId, presence } = await seedActivated("removed-twice");
+      await agentChannels.markPresenceRemoved(presence.id, "tokens_revoked");
+      const generationAfterFirst = await vi.waitFor(async () => {
+        const generation = await generationOf(agentId);
+        expect(generation).toBe(2);
+        return generation;
+      });
+      // The second arrival changes nothing: no second bump, no throw.
+      await agentChannels.markPresenceRemoved(presence.id, "app_uninstalled");
+      expect(await generationOf(agentId)).toBe(generationAfterFirst);
+
+      // A detached shell is the OWNER's decision; a late provider event
+      // must not rewrite it into "disabled".
+      const { agentId: otherAgent, presence: detached } =
+        await seedActivated("removed-detached");
+      await agentChannels.detachPresence(WORKSPACE, otherAgent, "slack", {
+        deleteRemote: false,
+      });
+      await agentChannels.markPresenceRemoved(detached.id, "app_uninstalled");
+      expect(
+        (
+          await db.agentChannel.findUnique({
+            where: { id: detached.id },
+            select: { status: true },
+          })
+        )?.status,
+      ).toBe("pending_setup");
+    });
+
+    it("a disabled presence RESUMES through the GUIDED door too (the dashboard's Re-attach) — no second Slack app, and a foreign agent cannot claim it", async () => {
+      initSelfUrl(EVENTS_SELF_URL);
+      await seedIntegration({
+        credentials: await integrationCredentials(12 * 3600),
+      });
+      const agentId = await seedAgent("removed-guided");
+      scriptManifestCreate();
+      const first = await agentChannels.createPresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        ADMIN,
+      );
+      // Finish the attach the events way is a real OAuth round-trip; the
+      // paste door lands the same `active` row for this proof's purposes.
+      scriptAuthTest();
+      await agentChannels.completePresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        { botToken: "xoxb-g", signingSecret: "s3", transport: "events" },
+        ADMIN,
+      );
+      await agentChannels.markPresenceRemoved(
+        first.presenceId,
+        "app_uninstalled",
+      );
+
+      const creates = slackCallsFor("apps.manifest.create").length;
+      const resumed = await agentChannels.createPresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        ADMIN,
+      );
+      expect(resumed.presenceId).toBe(first.presenceId);
+      expect(slackCallsFor("apps.manifest.create")).toHaveLength(creates);
+      expect(resumed.installUrl).toContain("client_id=");
+
+      // The tenant fence is unchanged by the new status: another workspace's
+      // agent never sees this row, disabled or not.
+      const foreign = await db.agent.create({
+        data: {
+          workspaceId: OTHER_WORKSPACE,
+          name: "foreign",
+          identifier: `${P}foreign-removed`,
+          accessToken: `aoc_${P}foreign-removed`,
+          kind: "hosted",
+          harness: "fake",
+        },
+        select: { id: true },
+      });
+      expect(await agentChannels.channelPresencesForRender(foreign.id)).toEqual(
+        [],
+      );
+    });
+
+    it("a disabled presence RESUMES through the paste door — same row, same app id", async () => {
+      const { agentId, presence } = await seedActivated("removed-resume");
+      await agentChannels.markPresenceRemoved(presence.id, "app_uninstalled");
+
+      scriptAuthTest();
+      const resumed = await agentChannels.completePresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        { botToken: "xoxb-new", appToken: "xapp-new" },
+        ADMIN,
+      );
+      expect(resumed.id).toBe(presence.id);
+      expect(resumed.status).toBe("active");
+      expect(resumed.externalId).toBe(presence.externalId);
+      expect(resumed.apiKeyId).not.toBeNull();
+    });
+
+    it("channelPresencesForRender tells the agent what it holds: live and disabled presences, never pending ones, display facts only", async () => {
+      const { agentId, presence } = await seedActivated("render-view");
+      expect(await agentChannels.channelPresencesForRender(agentId)).toEqual([
+        {
+          provider: "slack",
+          status: "active",
+          handle: "donna",
+          workspaceName: "Acme",
+        },
+      ]);
+
+      await agentChannels.markPresenceRemoved(presence.id, "app_uninstalled");
+      expect(
+        (await agentChannels.channelPresencesForRender(agentId)).map(
+          (p) => p.status,
+        ),
+      ).toEqual(["disabled"]);
+
+      await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+        deleteRemote: false,
+      });
+      expect(await agentChannels.channelPresencesForRender(agentId)).toEqual(
+        [],
+      );
+    });
+  },
+);
 
 describe.skipIf(!PROOF_URL)("the app's own handle", () => {
   // The delete confirmation names the app a human would recognize in Slack
@@ -3309,6 +3668,19 @@ describe.skipIf(!PROOF_URL)(
           credentialsRotatedAt: new Date(),
         },
       });
+      await db.agentChannel.update({
+        where: { id: presence.id },
+        data: {
+          credentials: await getCrypto().encrypt(
+            JSON.stringify({
+              botToken: "xoxb-d",
+              clientId: "client-1",
+              clientSecret: "client-secret-1",
+            }),
+          ),
+        },
+      });
+      slackHandlers["apps.uninstall"] = () => ({ ok: true });
       return { agentId, presence };
     };
 
@@ -3417,11 +3789,31 @@ describe.skipIf(!PROOF_URL)(
           credentialsRotatedAt: new Date(),
         },
       });
+      await db.agentChannel.update({
+        where: { id: presence.id },
+        data: {
+          credentials: await getCrypto().encrypt(
+            JSON.stringify({
+              botToken: "xoxb-d",
+              clientId: "client-1",
+              clientSecret: "client-secret-1",
+            }),
+          ),
+        },
+      });
+      slackHandlers["apps.uninstall"] = () => ({ ok: true });
       scriptRenameLands(presence.externalId);
       slackHandlers["apps.manifest.delete"] = () => ({ ok: true });
 
-      const channels = await import("./agent-channel-service");
-      await channels.teardownWorkspacePresences(WORKSPACE);
+      const cleanup = await import("./channel-cleanup-service");
+      const ids = await db.$transaction(async (tx) => {
+        const ids = await cleanup.enqueueWorkspaceCleanup(tx, WORKSPACE);
+        await tx.agentChannel.deleteMany({
+          where: { agent: { workspaceId: WORKSPACE } },
+        });
+        return ids;
+      });
+      await cleanup.processChannelCleanups({ ids });
 
       const [deleteCall] = slackCallsFor("apps.manifest.delete");
       expect(deleteCall?.form.get("app_id")).toBe(presence.externalId);
@@ -3436,8 +3828,15 @@ describe.skipIf(!PROOF_URL)(
       const agentId = await seedAgent("proj-noapps");
       const before = slackCallsFor("apps.manifest.delete").length;
 
-      const channels = await import("./agent-channel-service");
-      await channels.teardownWorkspacePresences(WORKSPACE);
+      const cleanup = await import("./channel-cleanup-service");
+      const ids = await db.$transaction(async (tx) => {
+        const ids = await cleanup.enqueueWorkspaceCleanup(tx, WORKSPACE);
+        await tx.agentChannel.deleteMany({
+          where: { agent: { workspaceId: WORKSPACE } },
+        });
+        return ids;
+      });
+      await cleanup.processChannelCleanups({ ids });
 
       expect(slackCallsFor("apps.manifest.delete")).toHaveLength(before);
       await db.agent.delete({ where: { id: agentId } });
@@ -3476,8 +3875,15 @@ describe.skipIf(!PROOF_URL)(
       slackHandlers["apps.uninstall"] = () => ({ ok: true });
       const deletesBefore = slackCallsFor("apps.manifest.delete").length;
 
-      const channels = await import("./agent-channel-service");
-      await channels.teardownWorkspacePresences(WORKSPACE);
+      const cleanup = await import("./channel-cleanup-service");
+      const ids = await db.$transaction(async (tx) => {
+        const ids = await cleanup.enqueueWorkspaceCleanup(tx, WORKSPACE);
+        await tx.agentChannel.deleteMany({
+          where: { agent: { workspaceId: WORKSPACE } },
+        });
+        return ids;
+      });
+      await cleanup.processChannelCleanups({ ids });
 
       // The employee's bot leaves the workspace...
       const [uninstall] = slackCallsFor("apps.uninstall");
@@ -6200,8 +6606,9 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
             conversationId: conversation.id,
             message,
             // Terminal on purpose, twice over: the one-active-turn unique
-            // allows a single live turn per conversation, and the sweep is
-            // age-gated, not status-gated — a leaked loader's turn is done.
+            // allows a single live turn per conversation, and a leaked
+            // loader's turn is done — the sweep only ever touches those
+            // (the live-turn cases are the next test's).
             status: "done",
             source: "slack",
           },
@@ -6264,6 +6671,231 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
         where: { turnId: oldReaction },
       }),
     ).not.toBeNull();
+  });
+
+  it("REGRESSION (live 2026-09-15): the stale-session sweep never yanks a LIVE turn's loader", async () => {
+    // A Slack DM turn that legitimately ran 11.5 minutes had its progress
+    // card and seen mark deleted at 10:55 by the age-only sweep. The user,
+    // seeing every "working" signal vanish, pinged "?" 39 seconds before the
+    // answer landed. Liveness is the turn's STATUS, whatever its age.
+    //
+    // MUTATION-PROOF: drop the NOT EXISTS anti-join from the sweep and the
+    // four live rows below are cleared.
+    const { agentId, presenceId } = await seedChannelAgent(
+      "receipt-sweep-live",
+      {
+        appMode: "agent",
+        presenceCredentials: await getCrypto().encrypt(
+          JSON.stringify({ botToken: "xoxb-sweep-live" }),
+        ),
+      },
+    );
+    slackHandlers["agents.sessions.setStatus"] = () => ({ ok: true });
+    slackHandlers["reactions.remove"] = () => ({ ok: true });
+    // One active turn per conversation (the partial unique), so each live
+    // shape gets its own.
+    const mkConversation = async (ref: string) =>
+      (
+        await db.conversation.create({
+          data: { agentId, source: "slack", externalRef: ref },
+          select: { id: true },
+        })
+      ).id;
+    const mkTurn = async (
+      conversationId: string,
+      data: {
+        status: string;
+        lastProgressAt?: Date | null;
+        followUpOfTurnId?: string;
+      },
+    ) =>
+      (
+        await db.turn.create({
+          data: {
+            conversationId,
+            message: data.status,
+            source: "slack",
+            ...data,
+          },
+          select: { id: true },
+        })
+      ).id;
+
+    // Running with a fresh heartbeat: the ordinary long turn.
+    const runningFresh = await mkTurn(await mkConversation("C915:1"), {
+      status: "running",
+      lastProgressAt: new Date(),
+    });
+    // Running with NO heartbeat: an agent image that predates the clock.
+    // Kept — same skew fence `failStalledTurns` honors; only the ceiling
+    // applies to it, and its loader should last as long as its turn does.
+    const runningNoHeartbeat = await mkTurn(await mkConversation("C915:2"), {
+      status: "running",
+      lastProgressAt: null,
+    });
+    // Running with a STALE heartbeat: kept here on purpose. Stall detection
+    // is `failStalledTurns`' job — it fails the turn, and that terminal
+    // status takes the loader down through the ordinary clear. Sweeping on
+    // the clock here would be a second copy of the stall rule.
+    const runningStale = await mkTurn(await mkConversation("C915:3"), {
+      status: "running",
+      lastProgressAt: new Date(Date.now() - 20 * 60 * 1000),
+    });
+    // A joined follow-up under a RUNNING parent: the exchange is live.
+    const liveParentConversation = await mkConversation("C915:4");
+    const liveParent = await mkTurn(liveParentConversation, {
+      status: "running",
+    });
+    const joinedUnderLive = await mkTurn(liveParentConversation, {
+      status: "joined",
+      followUpOfTurnId: liveParent,
+    });
+    // A joined follow-up under a DONE parent: the exchange is over, and a
+    // row still here is the leak.
+    const doneParentConversation = await mkConversation("C915:5");
+    const doneParent = await mkTurn(doneParentConversation, {
+      status: "done",
+    });
+    const joinedUnderDone = await mkTurn(doneParentConversation, {
+      status: "joined",
+      followUpOfTurnId: doneParent,
+    });
+
+    const before = new Date(Date.now() - 11 * 60 * 1000);
+    await db.channelTurnReceipt.createMany({
+      data: [
+        runningFresh,
+        runningNoHeartbeat,
+        runningStale,
+        joinedUnderLive,
+        joinedUnderDone,
+      ].map((turnId, index) => ({
+        turnId,
+        agentChannelId: presenceId,
+        channel: "C915",
+        messageTs: `915.000${index}`,
+        kind: "session",
+        workStatusSet: true,
+        createdAt: before,
+      })),
+    });
+
+    await receipts.sweepStaleSessionReceipts();
+
+    const remaining = new Set(
+      (
+        await db.channelTurnReceipt.findMany({
+          where: { agentChannelId: presenceId },
+          select: { turnId: true },
+        })
+      ).map((row) => row.turnId),
+    );
+    expect(remaining).toEqual(
+      new Set([
+        runningFresh,
+        runningNoHeartbeat,
+        runningStale,
+        joinedUnderLive,
+      ]),
+    );
+    // Exactly one clear went to the provider — the leaked row's.
+    const cleared = slackCallsFor("agents.sessions.setStatus");
+    expect(cleared).toHaveLength(1);
+    expect(cleared[0]!.form.get("thread_ts")).toBe("915.0004");
+  });
+
+  it("the stale-session sweep is not STARVED by live turns ahead of a leak", async () => {
+    // The exclusion must live in the query, not after it: a post-filter over
+    // a `take: 20` batch that happens to be twenty old receipts on live long
+    // turns would return nothing to sweep on every pass, and a real leak
+    // just behind them would never be reached.
+    //
+    // MUTATION-PROOF: move the liveness check to a post-filter over the
+    // first 20 rows and the leaked row below survives the pass.
+    const { agentId, presenceId } = await seedChannelAgent(
+      "receipt-sweep-starve",
+      {
+        appMode: "agent",
+        presenceCredentials: await getCrypto().encrypt(
+          JSON.stringify({ botToken: "xoxb-sweep-starve" }),
+        ),
+      },
+    );
+    slackHandlers["agents.sessions.setStatus"] = () => ({ ok: true });
+    const liveTurnIds: string[] = [];
+    for (let index = 0; index < 20; index += 1) {
+      const conversation = await db.conversation.create({
+        data: { agentId, source: "slack", externalRef: `C916:${index}` },
+        select: { id: true },
+      });
+      liveTurnIds.push(
+        (
+          await db.turn.create({
+            data: {
+              conversationId: conversation.id,
+              message: `live ${index}`,
+              status: "running",
+              source: "slack",
+            },
+            select: { id: true },
+          })
+        ).id,
+      );
+    }
+    const leakedConversation = await db.conversation.create({
+      data: { agentId, source: "slack", externalRef: "C916:leak" },
+      select: { id: true },
+    });
+    const leakedTurnId = (
+      await db.turn.create({
+        data: {
+          conversationId: leakedConversation.id,
+          message: "leaked",
+          status: "done",
+          source: "slack",
+        },
+        select: { id: true },
+      })
+    ).id;
+    // The live rows are OLDER than the leak, so an age-ordered batch of 20
+    // is exactly them.
+    const olderStill = new Date(Date.now() - 30 * 60 * 1000);
+    const older = new Date(Date.now() - 11 * 60 * 1000);
+    await db.channelTurnReceipt.createMany({
+      data: [
+        ...liveTurnIds.map((turnId, index) => ({
+          turnId,
+          agentChannelId: presenceId,
+          channel: "C916",
+          messageTs: `916.${String(index).padStart(4, "0")}`,
+          kind: "session",
+          workStatusSet: true,
+          createdAt: olderStill,
+        })),
+        {
+          turnId: leakedTurnId,
+          agentChannelId: presenceId,
+          channel: "C916",
+          messageTs: "916.9999",
+          kind: "session",
+          workStatusSet: true,
+          createdAt: older,
+        },
+      ],
+    });
+
+    await receipts.sweepStaleSessionReceipts();
+
+    expect(
+      await db.channelTurnReceipt.findUnique({
+        where: { turnId: leakedTurnId },
+      }),
+    ).toBeNull();
+    expect(
+      await db.channelTurnReceipt.count({
+        where: { turnId: { in: liveTurnIds } },
+      }),
+    ).toBe(20);
   });
 
   /** A conversation with a done target turn and a joining follow-up — the
@@ -7575,5 +8207,1071 @@ describe.skipIf(!PROOF_URL)("decideApprovalFromChannel", () => {
 
     expect(result.kind).toBe("unavailable");
     expect(gatewayCalls).toHaveLength(0);
+  });
+});
+
+describe.skipIf(!PROOF_URL)("durable channel cleanup outbox", () => {
+  const seedCleanup = async (
+    suffix: string,
+    options: { enqueue?: boolean; deleteRemote?: boolean } = {},
+  ) => {
+    const integration = await seedIntegration({
+      credentials: await integrationCredentials(12 * 3600),
+    });
+    const agentId = await seedAgent(`cleanup-${suffix}`);
+    const key = await apiKeys.createServiceApiKey(
+      ADMIN,
+      { workspaceId: WORKSPACE },
+      "cleanup-key",
+    );
+    const ciphertext = await getCrypto().encrypt(
+      JSON.stringify({
+        botToken: "xoxb-cleanup-secret",
+        clientId: "cleanup-client",
+        clientSecret: "cleanup-secret",
+      }),
+    );
+    const presence = await seedPresence(agentId, integration.id, {
+      credentials: ciphertext,
+      apiKeyId: key.id,
+      externalId: `A-cleanup-${suffix}`,
+    });
+    const cleanup = await import("./channel-cleanup-service");
+    let ids: string[] = [];
+    if (options.enqueue !== false) {
+      ids = await db.$transaction(async (tx) => {
+        const ids = await cleanup.enqueueChannelCleanup(
+          tx,
+          { id: presence.id },
+          options.deleteRemote ?? true,
+        );
+        await tx.agentChannel.delete({ where: { id: presence.id } });
+        return ids;
+      });
+    }
+    return { cleanup, integration, agentId, key, ciphertext, presence, ids };
+  };
+  const unblock = async (id: string) =>
+    db.channelCleanup.update({
+      where: { id },
+      data: { nextAttemptAt: new Date(0) },
+    });
+  const barrier = () => {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { promise, release };
+  };
+
+  it.each([
+    ["America/Los_Angeles", false],
+    ["America/Los_Angeles", true],
+    ["Asia/Tokyo", false],
+    ["Asia/Tokyo", true],
+  ] as const)(
+    "claims due cleanup and stores a UTC lease in a non-UTC session (%s, expired lease %s)",
+    async (zone, expiredLease) => {
+      const priorLease = expiredLease ? new Date(Date.now() - 60_000) : null;
+      const { cleanup, ids } = await seedCleanup("timezone");
+      await db.channelCleanup.update({
+        where: { id: ids[0] },
+        data: {
+          nextAttemptAt: new Date(Date.now() - 60_000),
+          claimToken: priorLease ? "crashed-worker" : null,
+          claimExpiresAt: priorLease,
+          expiresAt: new Date(Date.now() + 60 * 60_000),
+        },
+      });
+      slackHandlers["apps.uninstall"] = () => ({ ok: true });
+      slackHandlers["apps.manifest.delete"] = () => ({ ok: true });
+      const observed: { lease: Date | null } = { lease: null };
+      // Execute the real processor SQL on one transaction-pinned connection.
+      // SET LOCAL cannot leak into other tests or depend on pool scheduling.
+      // Read the initial lease before ORM renewal can hide a bad CTE timestamp.
+      const originalQuery = db.$queryRaw;
+      const query = vi.fn((...args: Parameters<Db["$queryRaw"]>) => {
+        const [sql, ...values] = args;
+        // Prisma transaction clients inherit root overrides. Restore the real
+        // method before constructing the transaction, avoiding recursive spies.
+        db.$queryRaw = originalQuery;
+        return db.$transaction(async (tx) => {
+          await tx.$queryRaw`SELECT set_config('TimeZone', ${zone}, true)`;
+          expect(
+            await tx.$queryRaw`SELECT current_setting('TimeZone') AS zone`,
+          ).toEqual([{ zone }]);
+          const result = await tx.$queryRaw(sql, ...values);
+          observed.lease = (
+            await tx.channelCleanup.findUniqueOrThrow({
+              where: { id: ids[0] },
+            })
+          ).claimExpiresAt;
+          return result;
+        });
+      });
+      db.$queryRaw = query as typeof db.$queryRaw;
+      const started = Date.now();
+      try {
+        expect(await cleanup.processChannelCleanups({ ids, limit: 1 })).toEqual(
+          {
+            completed: 1,
+            retained: 0,
+          },
+        );
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(observed.lease).not.toBeNull();
+        expect(observed.lease!.getTime()).toBeGreaterThanOrEqual(
+          started + 10 * 60_000,
+        );
+        expect(observed.lease!.getTime()).toBeLessThanOrEqual(
+          Date.now() + 10 * 60_000,
+        );
+        expect(slackCallsFor("apps.uninstall")).toHaveLength(1);
+        expect(slackCallsFor("apps.manifest.delete")).toHaveLength(1);
+      } finally {
+        db.$queryRaw = originalQuery;
+      }
+    },
+  );
+
+  it.each(["completed", "blocked"])(
+    "gives fresh compensation a bounded retention and retry budget over an expired %s tombstone",
+    async (state) => {
+      const { cleanup, ids, presence, integration } = await seedCleanup(
+        `fresh-${state}`,
+      );
+      await db.channelCleanup.update({
+        where: { id: ids[0] },
+        data: {
+          state,
+          stage: state === "completed" ? "completed" : "uninstall",
+          credentials: null,
+          attempts: 30,
+          expiresAt: new Date(0),
+          reason: "retention_expired_manual_cleanup_required",
+        },
+      });
+      const credentials = await getCrypto().encrypt(
+        JSON.stringify({
+          botToken: "xoxb-fresh-compensation",
+          clientId: "fresh-client",
+          clientSecret: "fresh-secret",
+        }),
+      );
+      const started = Date.now();
+      await cleanup.preserveUnattachedChannelApp({
+        organizationId: ORG,
+        workspaceId: WORKSPACE,
+        integrationId: integration.id,
+        teamId: integration.externalId,
+        sourcePresenceId: presence.id,
+        provider: "slack",
+        externalId: presence.externalId,
+        credentials,
+      });
+      const fresh = await db.channelCleanup.findUniqueOrThrow({
+        where: { id: ids[0] },
+      });
+      expect(fresh).toMatchObject({
+        credentials,
+        attempts: 0,
+        state: "pending",
+        stage: "uninstall",
+        reason: null,
+        claimToken: null,
+        claimExpiresAt: null,
+        deleteRemote: true,
+      });
+      const retention = 30 * 24 * 60 * 60_000;
+      expect(fresh.expiresAt.getTime()).toBeGreaterThanOrEqual(
+        started + retention,
+      );
+      expect(fresh.expiresAt.getTime()).toBeLessThanOrEqual(
+        Date.now() + retention,
+      );
+      slackHandlers["apps.uninstall"] = () => ({
+        ok: false,
+        error: "temporary_failure",
+      });
+      expect(await cleanup.processChannelCleanups({ ids, limit: 1 })).toEqual({
+        completed: 0,
+        retained: 1,
+      });
+      expect(
+        await db.channelCleanup.findUniqueOrThrow({ where: { id: ids[0] } }),
+      ).toMatchObject({
+        credentials,
+        state: "retry",
+        attempts: 1,
+        expiresAt: fresh.expiresAt,
+      });
+      expect(slackCallsFor("apps.uninstall")).toHaveLength(1);
+      // Maintenance/retry never extends the new snapshot's 30-day deadline.
+      await db.channelCleanup.update({
+        where: { id: ids[0] },
+        data: { expiresAt: new Date(0) },
+      });
+      await cleanup.processChannelCleanups({ ids, limit: 1 });
+      expect(
+        await db.channelCleanup.findUniqueOrThrow({ where: { id: ids[0] } }),
+      ).toMatchObject({
+        credentials: null,
+        state: "blocked",
+        reason: "retention_expired_manual_cleanup_required",
+      });
+      expect(slackCallsFor("apps.uninstall")).toHaveLength(1);
+    },
+  );
+
+  it("rolls back snapshot, key revocation and local delete together without HTTP", async () => {
+    const { cleanup, presence, key, ciphertext } = await seedCleanup(
+      "rollback",
+      { enqueue: false },
+    );
+    await expect(
+      db.$transaction(async (tx) => {
+        await cleanup.enqueueChannelCleanup(tx, { id: presence.id });
+        await tx.agentChannel.delete({ where: { id: presence.id } });
+        throw new Error("rollback proof");
+      }),
+    ).rejects.toThrow("rollback proof");
+    expect(
+      await db.channelCleanup.count({
+        where: { externalId: presence.externalId },
+      }),
+    ).toBe(0);
+    expect(
+      await db.agentChannel.findUnique({ where: { id: presence.id } }),
+    ).toMatchObject({ credentials: ciphertext });
+    expect(
+      await db.apiKey.findUnique({ where: { id: key.id } }),
+    ).not.toBeNull();
+    expect(slackCalls).toHaveLength(0);
+  });
+
+  it("retains encrypted transient failures and resumes manifest phase without a second uninstall", async () => {
+    const { cleanup, ids, ciphertext } = await seedCleanup("retry");
+    slackHandlers["apps.uninstall"] = () => ({
+      ok: false,
+      error: "transient-secret-canary",
+    });
+    expect(await cleanup.processChannelCleanups({ ids })).toEqual({
+      completed: 0,
+      retained: 1,
+    });
+    expect(
+      await db.channelCleanup.findUnique({ where: { id: ids[0] } }),
+    ).toMatchObject({
+      stage: "uninstall",
+      state: "retry",
+      credentials: ciphertext,
+      reason: "uninstall_unavailable",
+    });
+    expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
+    await unblock(ids[0]!);
+    slackHandlers["apps.uninstall"] = () => ({ ok: true });
+    slackHandlers["apps.manifest.delete"] = () => ({
+      ok: false,
+      error: "temporary_failure",
+    });
+    await cleanup.processChannelCleanups({ ids });
+    expect(
+      await db.channelCleanup.findUnique({ where: { id: ids[0] } }),
+    ).toMatchObject({
+      stage: "manifest",
+      state: "retry",
+      credentials: ciphertext,
+    });
+    await unblock(ids[0]!);
+    slackHandlers["apps.manifest.delete"] = () => ({ ok: true });
+    const result = await cleanup.processChannelCleanups({ ids });
+    expect(result).toEqual({ completed: 1, retained: 0 });
+    expect(JSON.stringify(result)).not.toContain("secret");
+    expect(slackCallsFor("apps.uninstall")).toHaveLength(2);
+    expect(
+      await db.channelCleanup.findUnique({ where: { id: ids[0] } }),
+    ).toMatchObject({ stage: "completed", credentials: null });
+  });
+
+  it("excludes concurrent processors and blocks reattachment before any remote auth", async () => {
+    const { cleanup, ids, agentId, presence } = await seedCleanup("concurrent");
+    const entered = barrier();
+    const finish = barrier();
+    slackHandlers["apps.uninstall"] = async () => {
+      entered.release();
+      await finish.promise;
+      return { ok: true };
+    };
+    slackHandlers["apps.manifest.delete"] = () => ({ ok: true });
+    const first = cleanup.processChannelCleanups({ ids });
+    await entered.promise;
+    try {
+      expect(await cleanup.processChannelCleanups({ ids })).toEqual({
+        completed: 0,
+        retained: 0,
+      });
+      await expect(
+        agentChannels.completePresence(
+          WORKSPACE,
+          agentId,
+          "slack",
+          {
+            botToken: "xoxb-new",
+            appToken: "xapp-new",
+            appId: presence.externalId,
+          },
+          ADMIN,
+        ),
+      ).rejects.toThrow("reserved for remote cleanup");
+      expect(slackCallsFor("auth.test")).toHaveLength(0);
+      expect(slackCallsFor("apps.uninstall")).toHaveLength(1);
+    } finally {
+      finish.release();
+    }
+    await first;
+  });
+
+  it("a stale worker cannot advance the durable stage or erase ciphertext", async () => {
+    const { cleanup, ids, ciphertext } = await seedCleanup("stale");
+    const entered = barrier();
+    const finish = barrier();
+    slackHandlers["apps.uninstall"] = async () => {
+      entered.release();
+      await finish.promise;
+      return { ok: true };
+    };
+    const first = cleanup.processChannelCleanups({ ids });
+    await entered.promise;
+    await db.channelCleanup.update({
+      where: { id: ids[0] },
+      data: {
+        claimToken: "new-owner",
+        claimExpiresAt: new Date(Date.now() + 600_000),
+      },
+    });
+    finish.release();
+    await first;
+    expect(
+      await db.channelCleanup.findUnique({ where: { id: ids[0] } }),
+    ).toMatchObject({
+      claimToken: "new-owner",
+      stage: "uninstall",
+      credentials: ciphertext,
+    });
+    expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
+  });
+
+  it("renews a full phase lease after rename consumed the previous budget", async () => {
+    const { cleanup, ids } = await seedCleanup("renew");
+    slackHandlers["apps.manifest.export"] = async () => {
+      await db.channelCleanup.update({
+        where: { id: ids[0] },
+        data: { claimExpiresAt: new Date(Date.now() + 5000) },
+      });
+      return { ok: false, error: "cannot_rename" };
+    };
+    let remaining = 0;
+    slackHandlers["apps.uninstall"] = async () => {
+      const row = await db.channelCleanup.findUniqueOrThrow({
+        where: { id: ids[0] },
+      });
+      remaining = row.claimExpiresAt!.getTime() - Date.now();
+      return { ok: true };
+    };
+    slackHandlers["apps.manifest.delete"] = () => ({ ok: true });
+    await cleanup.processChannelCleanups({ ids });
+    expect(remaining).toBeGreaterThan(5 * 60_000);
+  });
+
+  it("upgrades an already-uninstalled detached shell without using its revoked token again", async () => {
+    const { agentId, presence } = await seedCleanup("upgrade", {
+      enqueue: false,
+    });
+    slackHandlers["apps.uninstall"] = () => ({ ok: true });
+    slackHandlers["apps.manifest.delete"] = () => ({ ok: true });
+    await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+      deleteRemote: false,
+    });
+    expect(
+      await db.channelCleanup.findUnique({
+        where: {
+          provider_externalId: {
+            provider: "slack",
+            externalId: presence.externalId,
+          },
+        },
+      }),
+    ).toMatchObject({ state: "completed", deleteRemote: false });
+    await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+      deleteRemote: true,
+    });
+    expect(slackCallsFor("apps.uninstall")).toHaveLength(1);
+    expect(slackCallsFor("apps.manifest.delete")).toHaveLength(1);
+  });
+
+  it("retains an in-flight uninstall-only action upgrade until manifest deletion finishes", async () => {
+    const { agentId, presence } = await seedCleanup("upgrade-race", {
+      enqueue: false,
+    });
+    const entered = barrier();
+    const finish = barrier();
+    slackHandlers["apps.uninstall"] = async () => {
+      entered.release();
+      await finish.promise;
+      return { ok: true };
+    };
+    slackHandlers["apps.manifest.delete"] = () => ({ ok: true });
+    const first = agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+      deleteRemote: false,
+    });
+    await entered.promise;
+    try {
+      await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+        deleteRemote: true,
+      });
+    } finally {
+      finish.release();
+    }
+    await first;
+    expect(slackCallsFor("apps.manifest.delete")).toHaveLength(1);
+    expect(
+      await db.channelCleanup.findUnique({
+        where: {
+          provider_externalId: {
+            provider: "slack",
+            externalId: presence.externalId,
+          },
+        },
+      }),
+    ).toMatchObject({ state: "completed", deleteRemote: true });
+  });
+
+  it("blocks a planted foreign-org live app and the deployment shared app without HTTP", async () => {
+    const { cleanup, ids, presence } = await seedCleanup("foreign");
+    const integration = await seedIntegration({
+      organizationId: OTHER_ORG,
+      externalId: "TOTHER",
+    });
+    const foreign = await db.agent.create({
+      data: {
+        workspaceId: OTHER_WORKSPACE,
+        name: "foreign",
+        identifier: `${P}foreign-cleanup`,
+        accessToken: `aoc_${P}foreign-cleanup`,
+        kind: "hosted",
+        harness: "fake",
+      },
+    });
+    await seedPresence(foreign.id, integration.id, {
+      externalId: presence.externalId,
+    });
+    await cleanup.processChannelCleanups({ ids });
+    expect(slackCalls).toHaveLength(0);
+    expect(
+      await db.channelCleanup.findUnique({ where: { id: ids[0] } }),
+    ).toMatchObject({ state: "blocked", reason: "app_still_attached" });
+    await db.agentChannel.deleteMany({ where: { agentId: foreign.id } });
+    await db.channelInstallation.create({
+      data: {
+        integrationId: integration.id,
+        provider: "slack",
+        externalId: "TOTHER",
+        appId: presence.externalId,
+        credentials: "encrypted-shared",
+      },
+    });
+    await db.channelCleanup.update({
+      where: { id: ids[0] },
+      data: { state: "pending", nextAttemptAt: new Date(0) },
+    });
+    await cleanup.processChannelCleanups({ ids });
+    expect(slackCalls).toHaveLength(0);
+  });
+
+  it("retains missing bot-token ambiguity and purges blocked ciphertext on next maintenance after 30d", async () => {
+    const { cleanup, ids } = await seedCleanup("retention");
+    const ciphertext = await getCrypto().encrypt(
+      JSON.stringify({ clientId: "id", clientSecret: "secret" }),
+    );
+    await db.channelCleanup.update({
+      where: { id: ids[0] },
+      data: { credentials: ciphertext },
+    });
+    await cleanup.processChannelCleanups({ ids });
+    expect(
+      await db.channelCleanup.findUnique({ where: { id: ids[0] } }),
+    ).toMatchObject({
+      state: "blocked",
+      stage: "uninstall",
+      credentials: ciphertext,
+      reason: "missing_uninstall_credentials",
+    });
+    expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
+    await db.channelCleanup.update({
+      where: { id: ids[0] },
+      data: { expiresAt: new Date(0) },
+    });
+    await cleanup.processChannelCleanups({ ids });
+    expect(
+      await db.channelCleanup.findUnique({ where: { id: ids[0] } }),
+    ).toMatchObject({
+      state: "blocked",
+      credentials: null,
+      reason: "retention_expired_manual_cleanup_required",
+    });
+    await db.channelCleanup.update({
+      where: { id: ids[0] },
+      data: { state: "pending", reason: null },
+    });
+    await cleanup.processChannelCleanups({ ids });
+    expect(
+      await db.channelCleanup.findUnique({ where: { id: ids[0] } }),
+    ).toMatchObject({
+      state: "blocked",
+      credentials: null,
+      reason: "retention_expired_manual_cleanup_required",
+    });
+  });
+
+  it("exhausted crashed claims become explicitly blocked instead of pending forever", async () => {
+    const { cleanup, ids } = await seedCleanup("exhausted");
+    await db.channelCleanup.update({
+      where: { id: ids[0] },
+      data: {
+        attempts: 30,
+        claimToken: "crashed",
+        claimExpiresAt: new Date(0),
+      },
+    });
+    await cleanup.processChannelCleanups({ ids });
+    expect(
+      await db.channelCleanup.findUnique({ where: { id: ids[0] } }),
+    ).toMatchObject({
+      state: "blocked",
+      reason: "retry_limit_manual_cleanup_required",
+      claimToken: null,
+    });
+    expect(slackCalls).toHaveLength(0);
+  });
+
+  it("the low-level workspace deletion snapshots transactionally and survives the organization cascade", async () => {
+    const organizationId = `${P}cleanup-gone`;
+    const workspaceId = `${P}cleanup-gone-workspace`;
+    await db.organization.create({
+      data: { id: organizationId, name: "Gone", slug: organizationId },
+    });
+    await db.workspace.create({
+      data: {
+        id: workspaceId,
+        organizationId,
+        name: "Gone",
+        slug: workspaceId,
+      },
+    });
+    const agent = await db.agent.create({
+      data: {
+        workspaceId,
+        name: "gone",
+        identifier: `${P}cleanup-gone-agent`,
+        accessToken: `aoc_${P}gone`,
+        kind: "hosted",
+        harness: "fake",
+      },
+    });
+    const integration = await seedIntegration({ organizationId });
+    const ciphertext = await getCrypto().encrypt(
+      JSON.stringify({
+        botToken: "xoxb-gone",
+        clientId: "gone-client",
+        clientSecret: "gone-secret",
+      }),
+    );
+    await seedPresence(agent.id, integration.id, {
+      credentials: ciphertext,
+      externalId: "A-cleanup-gone",
+    });
+    const { deleteWorkspaceContent } =
+      await import("../../ee/services/workspace-service");
+    await db.$transaction(async (tx) => {
+      await deleteWorkspaceContent(workspaceId, tx);
+      expect(slackCalls).toHaveLength(0);
+      await tx.organization.delete({ where: { id: organizationId } });
+    });
+    const job = await db.channelCleanup.findUniqueOrThrow({
+      where: {
+        provider_externalId: {
+          provider: "slack",
+          externalId: "A-cleanup-gone",
+        },
+      },
+    });
+    expect(job).toMatchObject({
+      organizationId,
+      workspaceId,
+      integrationId: integration.id,
+      teamId: "T111",
+      credentials: ciphertext,
+    });
+    slackHandlers["apps.uninstall"] = () => ({ ok: true });
+    const cleanup = await import("./channel-cleanup-service");
+    await cleanup.processChannelCleanups({ ids: [job.id] });
+    expect(slackCallsFor("apps.uninstall")[0]?.token).toBe("xoxb-gone");
+    expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
+    expect(
+      await db.channelCleanup.findUnique({ where: { id: job.id } }),
+    ).toMatchObject({
+      stage: "manifest",
+      state: "blocked",
+      credentials: ciphertext,
+      reason: "integration_gone_manual_manifest_cleanup_required",
+    });
+    await db.channelCleanup.delete({ where: { id: job.id } });
+  });
+  it("refuses deletion during an in-flight OAuth exchange and later snapshots the newly issued bot token", async () => {
+    const { agentId, presence } = await seedCleanup("oauth-race", {
+      enqueue: false,
+    });
+    slackHandlers["apps.uninstall"] = () => ({ ok: true });
+    slackHandlers["apps.manifest.delete"] = () => ({ ok: true });
+    await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+      deleteRemote: false,
+    });
+    await db.agentChannel.update({
+      where: { id: presence.id },
+      data: { transport: "events" },
+    });
+    const { signOAuthState } = await import("../../lib/oauth-state");
+    const state = signOAuthState({
+      provider: "slack",
+      nonce: "proof",
+      kind: "channel-install",
+      agentId,
+      workspaceId: WORKSPACE,
+      issuedAt: Date.now(),
+    });
+    const entered = barrier();
+    const finish = barrier();
+    scriptAuthTest();
+    slackHandlers["oauth.v2.access"] = async () => {
+      entered.release();
+      await finish.promise;
+      return {
+        ok: true,
+        access_token: "xoxb-new-install",
+        bot_user_id: "UBOT",
+        team: { id: "T111", name: "Acme" },
+      };
+    };
+    const attaching = agentChannels.completePresenceFromOAuth({
+      state,
+      code: "new-code",
+      redirectUri: EVENTS_SELF_URL,
+    });
+    await entered.promise;
+    const { deleteAgent } = await import("../agent-service");
+    try {
+      await expect(deleteAgent(WORKSPACE, agentId)).rejects.toMatchObject({
+        code: "CONFLICT",
+      });
+      expect(
+        await db.agent.findUnique({ where: { id: agentId } }),
+      ).not.toBeNull();
+      expect(slackCallsFor("apps.uninstall")).toHaveLength(1);
+    } finally {
+      finish.release();
+    }
+    await attaching;
+    await deleteAgent(WORKSPACE, agentId);
+    expect(slackCallsFor("apps.uninstall")).toHaveLength(2);
+    expect(slackCallsFor("apps.uninstall")[1]?.token).toBe("xoxb-new-install");
+    expect(slackCallsFor("apps.manifest.delete")).toHaveLength(1);
+  });
+
+  it.each(["key-write", "late-activation"])(
+    "invalidates old uninstall proof when OAuth succeeds but activation fails (%s)",
+    async (failure) => {
+      const { agentId, presence } = await seedCleanup("oauth-key-failure", {
+        enqueue: false,
+      });
+      slackHandlers["apps.uninstall"] = () => ({ ok: true });
+      slackHandlers["apps.manifest.delete"] = () => ({ ok: true });
+      await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+        deleteRemote: false,
+      });
+      await db.agentChannel.update({
+        where: { id: presence.id },
+        data: { transport: "events" },
+      });
+      const { signOAuthState } = await import("../../lib/oauth-state");
+      const state = signOAuthState({
+        provider: "slack",
+        nonce: "proof-failure",
+        kind: "channel-install",
+        agentId,
+        workspaceId: WORKSPACE,
+        issuedAt: Date.now(),
+      });
+      scriptAuthTest();
+      slackHandlers["oauth.v2.access"] = () => ({
+        ok: true,
+        access_token: "xoxb-new-failed-activation",
+        bot_user_id: "UBOT",
+        team: { id: "T111", name: "Acme" },
+      });
+      const realCreateKey = apiKeys.createServiceApiKey;
+      const future = Date.now() + 10 * 60_000;
+      let clock: ReturnType<typeof vi.spyOn> | undefined;
+      const failKey = vi.spyOn(apiKeys, "createServiceApiKey");
+      if (failure === "key-write") {
+        failKey.mockRejectedValueOnce(new Error("key write failed"));
+      } else {
+        failKey.mockImplementationOnce(async (...args) => {
+          const key = await realCreateKey(...args);
+          clock = vi.spyOn(Date, "now").mockReturnValue(future);
+          return key;
+        });
+      }
+      try {
+        await expect(
+          agentChannels.completePresenceFromOAuth({
+            state,
+            code: "new-code",
+            redirectUri: EVENTS_SELF_URL,
+          }),
+        ).rejects.toThrow(
+          failure === "key-write"
+            ? "key write failed"
+            : "Channel setup timed out",
+        );
+      } finally {
+        clock?.mockRestore();
+        failKey.mockRestore();
+      }
+      expect(
+        await db.agentChannel.findUnique({ where: { id: presence.id } }),
+      ).toMatchObject({ status: "pending_setup", apiKeyId: null });
+      const { deleteAgent } = await import("../agent-service");
+      await deleteAgent(WORKSPACE, agentId);
+      expect(slackCallsFor("apps.uninstall")).toHaveLength(2);
+      expect(slackCallsFor("apps.uninstall")[1]?.token).toBe(
+        "xoxb-new-failed-activation",
+      );
+      expect(slackCallsFor("apps.manifest.delete")).toHaveLength(1);
+    },
+  );
+
+  it("compensates a remote create whose local FK disappears with an independent encrypted snapshot", async () => {
+    const integration = await seedIntegration({
+      credentials: await integrationCredentials(12 * 3600),
+    });
+    const agentId = await seedAgent("cleanup-create-failure");
+    scriptManifestCreate();
+    const create = slackHandlers["apps.manifest.create"]!;
+    slackHandlers["apps.manifest.create"] = async (call) => {
+      await db.channelIntegration.delete({ where: { id: integration.id } });
+      return create(call);
+    };
+    await expect(
+      agentChannels.createPresence(WORKSPACE, agentId, "slack", ADMIN),
+    ).rejects.toThrow();
+    expect(await db.agentChannel.count({ where: { agentId } })).toBe(0);
+    const job = await db.channelCleanup.findUniqueOrThrow({
+      where: { provider_externalId: { provider: "slack", externalId: "A100" } },
+    });
+    expect(job).toMatchObject({
+      integrationId: integration.id,
+      organizationId: ORG,
+      workspaceId: WORKSPACE,
+      teamId: "T111",
+      stage: "uninstall",
+      state: "pending",
+    });
+    expect(job.credentials).not.toContain("client-secret-1");
+    expect(
+      JSON.parse(await getCrypto().decrypt(job.credentials!)),
+    ).toMatchObject({ clientId: "client-1", clientSecret: "client-secret-1" });
+  });
+  it("refuses a new provider phase when the lifecycle deadline lacks a full HTTP budget", async () => {
+    const cleanup = await import("./channel-cleanup-service");
+    await cleanup.withChannelLifecycle(WORKSPACE, async () => {
+      const future = Date.now() + 8 * 60_000;
+      const clock = vi.spyOn(Date, "now").mockReturnValue(future);
+      try {
+        await expect(
+          cleanup.assertChannelLifecycleHeld(),
+        ).rejects.toMatchObject({ code: "CONFLICT" });
+      } finally {
+        clock.mockRestore();
+      }
+    });
+    expect(slackCalls).toHaveLength(0);
+  });
+
+  it("retains a late OAuth response as a blocked ciphertext snapshot without activating it", async () => {
+    const { cleanup, agentId, presence } = await seedCleanup("oauth-late", {
+      enqueue: false,
+    });
+    slackHandlers["apps.uninstall"] = () => ({ ok: true });
+    await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+      deleteRemote: false,
+    });
+    // A completed uninstall-only tombstone may legitimately be reattached long
+    // after its previous credential-retention window has ended.
+    await db.channelCleanup.update({
+      where: {
+        provider_externalId: {
+          provider: "slack",
+          externalId: presence.externalId,
+        },
+      },
+      data: { expiresAt: new Date(0), attempts: 30 },
+    });
+    await db.agentChannel.update({
+      where: { id: presence.id },
+      data: { transport: "events" },
+    });
+    const { signOAuthState } = await import("../../lib/oauth-state");
+    const state = signOAuthState({
+      provider: "slack",
+      nonce: "late-proof",
+      kind: "channel-install",
+      agentId,
+      workspaceId: WORKSPACE,
+      issuedAt: Date.now(),
+    });
+    scriptAuthTest();
+    const now = Date.now();
+    let clock: ReturnType<typeof vi.spyOn> | undefined;
+    slackHandlers["oauth.v2.access"] = () => {
+      clock = vi.spyOn(Date, "now").mockReturnValue(now + 10 * 60_000);
+      return {
+        ok: true,
+        access_token: "xoxb-late-secret",
+        bot_user_id: "UBOT",
+        team: { id: "T111", name: "Acme" },
+      };
+    };
+    try {
+      await expect(
+        agentChannels.completePresenceFromOAuth({
+          state,
+          code: "late-code",
+          redirectUri: EVENTS_SELF_URL,
+        }),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
+    } finally {
+      clock?.mockRestore();
+    }
+    const job = await db.channelCleanup.findUniqueOrThrow({
+      where: {
+        provider_externalId: {
+          provider: "slack",
+          externalId: presence.externalId,
+        },
+      },
+    });
+    expect(job).toMatchObject({
+      state: "blocked",
+      stage: "uninstall",
+      reason: "lifecycle_expired_manual_cleanup_required",
+    });
+    expect(
+      JSON.parse(await getCrypto().decrypt(job.credentials!)).botToken,
+    ).toBe("xoxb-late-secret");
+    expect(job.attempts).toBe(0);
+    expect(job.expiresAt.getTime()).toBe(
+      now + 10 * 60_000 + 30 * 24 * 60 * 60_000,
+    );
+    await cleanup.processChannelCleanups({ ids: [job.id] });
+    expect(
+      await db.channelCleanup.findUniqueOrThrow({ where: { id: job.id } }),
+    ).toMatchObject({
+      credentials: job.credentials,
+      expiresAt: job.expiresAt,
+      state: "blocked",
+      reason: "lifecycle_expired_manual_cleanup_required",
+    });
+    expect(
+      await db.agentChannel.findUnique({ where: { id: presence.id } }),
+    ).toMatchObject({ status: "pending_setup", apiKeyId: null });
+    expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
+  });
+
+  // ── Interaction with provider-side removal (`disabled`, #1096) ──────────
+
+  /** An active presence the WORKSPACE removed on the Slack side: the
+   * `app_uninstalled` webhook flipped it to `disabled`, revoked its service
+   * key, and left the row (same app id) so a re-attach resumes THIS app. */
+  const seedDisabled = async (suffix: string) => {
+    const integration = await seedIntegration({
+      credentials: await integrationCredentials(12 * 3600),
+    });
+    const agentId = await seedAgent(`disabled-${suffix}`);
+    const key = await apiKeys.createServiceApiKey(
+      ADMIN,
+      { workspaceId: WORKSPACE },
+      "disabled-key",
+    );
+    const presence = await seedPresence(agentId, integration.id, {
+      externalId: `A-disabled-${suffix}`,
+      apiKeyId: key.id,
+      credentials: await getCrypto().encrypt(
+        JSON.stringify({
+          botToken: "xoxb-revoked",
+          clientId: "disabled-client",
+          clientSecret: "disabled-secret",
+        }),
+      ),
+    });
+    await agentChannels.markPresenceRemoved(presence.id, "app_uninstalled");
+    expect(
+      await db.agentChannel.findUniqueOrThrow({ where: { id: presence.id } }),
+    ).toMatchObject({ status: "disabled", apiKeyId: null });
+    return { integration, agentId, presence, key };
+  };
+
+  it("detaching a provider-removed (disabled) presence WITHOUT remote deletion enqueues no uninstall, so the same app can be re-attached", async () => {
+    // Before this fence the detach enqueued an uninstall with the revoked
+    // token, Slack refused it, the job went `blocked` and RESERVED the app
+    // id, and the re-attach that `disabled` exists to allow answered 409.
+    const { presence, agentId } = await seedDisabled("keep");
+    slackHandlers["apps.uninstall"] = () => {
+      throw new Error("must not be called");
+    };
+
+    await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+      deleteRemote: false,
+    });
+
+    expect(
+      await db.channelCleanup.count({
+        where: { externalId: presence.externalId },
+      }),
+    ).toBe(0);
+    expect(slackCallsFor("apps.uninstall")).toHaveLength(0);
+    expect(
+      await db.agentChannel.findUniqueOrThrow({ where: { id: presence.id } }),
+    ).toMatchObject({ status: "pending_setup", apiKeyId: null });
+
+    // The resume door stays open: the identity is not reserved.
+    const cleanup = await import("./channel-cleanup-service");
+    await db.$transaction((tx) =>
+      cleanup.assertChannelIdentityAvailable(
+        tx,
+        "slack",
+        presence.externalId,
+        presence.id,
+      ),
+    );
+  });
+
+  it("detaching a disabled presence WITH remote deletion still walks the confirmed-uninstall gate and blocks rather than deleting the record blind", async () => {
+    // `disabled` does not record WHICH removal signal fired (a webhook, or a
+    // dead-credential inference from the same codes the uninstall treats as
+    // non-authoritative), so it is not proof the installation is gone.
+    const { presence, agentId, integration } = await seedDisabled("delete");
+    slackHandlers["apps.uninstall"] = () => ({
+      ok: false,
+      error: "token_revoked",
+    });
+    slackHandlers["apps.manifest.delete"] = () => {
+      throw new Error("must not be called");
+    };
+
+    await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+      deleteRemote: true,
+    });
+
+    expect(
+      await db.channelCleanup.findUniqueOrThrow({
+        where: {
+          provider_externalId: {
+            provider: "slack",
+            externalId: presence.externalId,
+          },
+        },
+      }),
+    ).toMatchObject({
+      integrationId: integration.id,
+      stage: "uninstall",
+      state: "blocked",
+      reason: "uninstall_authorization_required",
+      deleteRemote: true,
+    });
+    expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
+    expect(
+      await db.agentChannel.findUnique({ where: { id: presence.id } }),
+    ).toBeNull();
+  });
+
+  it("disconnecting the org credential keeps the integration row while a cleanup job still needs it", async () => {
+    // The job is fenced to the integration id it was minted under. Deleting
+    // the row would strand it blocked, and a later reconnect would mint a
+    // new id the fence rejects. Same disconnect, credential cleared, row kept.
+    const { ids, integration } = await seedCleanup("disconnect");
+    expect(ids).toHaveLength(1);
+
+    await integrations.disconnectIntegration(ORG, "slack");
+
+    expect(
+      await db.channelIntegration.findUnique({
+        where: { id: integration.id },
+      }),
+    ).toMatchObject({ credentials: null, credentialsRotatedAt: null });
+
+    // Once the job lets go, the next disconnect removes the row as before.
+    await db.channelCleanup.update({
+      where: { id: ids[0] },
+      data: { state: "completed", stage: "completed" },
+    });
+    await integrations.disconnectIntegration(ORG, "slack");
+    expect(
+      await db.channelIntegration.findUnique({
+        where: { id: integration.id },
+      }),
+    ).toBeNull();
+  });
+
+  it("a job for a provider this build does not know is blocked at once, never retried", async () => {
+    // The column is a free string. `channelProvider("teams")` would be
+    // undefined; the old cast let the TypeError surface as a transient
+    // failure and burn all 30 attempts.
+    const { cleanup, ids } = await seedCleanup("unknown-provider");
+    await db.channelCleanup.update({
+      where: { id: ids[0] },
+      data: { provider: "teams", externalId: "A-teams" },
+    });
+
+    expect(await cleanup.processChannelCleanups({ ids, limit: 1 })).toEqual({
+      completed: 0,
+      retained: 1,
+    });
+    expect(
+      await db.channelCleanup.findUniqueOrThrow({ where: { id: ids[0] } }),
+    ).toMatchObject({
+      state: "blocked",
+      reason: "unknown_provider",
+      attempts: 1,
+    });
+    expect(slackCallsFor("apps.uninstall")).toHaveLength(0);
+  });
+
+  it("processing an EMPTY id list is a no-op (no sweeps, no claims)", async () => {
+    // Every deletion path passes the ids it enqueued; an agent with no
+    // presences passes []. That must not fall through to a full pass.
+    const { cleanup, ids } = await seedCleanup("empty-ids");
+    await db.channelCleanup.update({
+      where: { id: ids[0] },
+      data: { expiresAt: new Date(Date.now() - 1) },
+    });
+
+    expect(await cleanup.processChannelCleanups({ ids: [] })).toEqual({
+      completed: 0,
+      retained: 0,
+    });
+    // The retention sweep did NOT run: the expired job is untouched.
+    expect(
+      await db.channelCleanup.findUniqueOrThrow({ where: { id: ids[0] } }),
+    ).toMatchObject({ state: "pending" });
   });
 });

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { supervisorMessageSchema, workItemSchema } from "./transport";
+import {
+  ATTACHMENT_CHUNK_BASE64_CHARS,
+  MAX_OUTBOUND_ATTACHMENT_BYTES,
+  MAX_OUTBOUND_CAPTION_CHARS,
+} from "./attachments";
 
 /**
  * The tool-channel wire pair (step 7). The compat law matters more than the
@@ -162,8 +167,17 @@ describe("skills.changed + home.synced (supervisor wire)", () => {
       prune: [".agents/skills/deploy/SKILL.md"],
       instructions: "brief",
       agentName: "andy",
+      channels: [
+        {
+          provider: "slack",
+          status: "needs_attention",
+          handle: "andy",
+          workspaceName: null,
+        },
+      ],
     });
     expect(final.kind === "skills.changed" && final.prune).toHaveLength(1);
+    expect(final.kind === "skills.changed" && final.channels).toHaveLength(1);
   });
 
   it("rejects traversal paths and non-positive part numbers", () => {
@@ -245,5 +259,104 @@ describe("process.state (supervisor wire, step 10)", () => {
     const fired = structuredClone(full);
     (fired.process.watches[0] as { status: string }).status = "fired";
     expect(supervisorMessageSchema.safeParse(fired).success).toBe(false);
+  });
+});
+
+/**
+ * Outbound files (`send_file`, Tier 3): the supervisor's chunk frame and the
+ * runner's one-per-upload answer. The belts here are what keep a 25 MB file
+ * from ever producing a frame the runner WS drops whole.
+ */
+describe("file.part + file.result (send_file wire)", () => {
+  const part = {
+    kind: "file.part",
+    uploadId: "up-1",
+    conversationId: "cv-1",
+    turnId: "t-1",
+    name: "report.pdf",
+    mimeType: "application/pdf",
+    sizeBytes: 3 * 144_000 + 7,
+    sha256: "a".repeat(64),
+    caption: "The quarterly report",
+    part: 1,
+    of: 4,
+    dataBase64: "QUJD",
+  };
+
+  it("round-trips a part with and without a caption", () => {
+    expect(supervisorMessageSchema.parse(part).kind).toBe("file.part");
+    const bare: Record<string, unknown> = { ...part };
+    delete bare.caption;
+    expect(supervisorMessageSchema.parse(bare).kind).toBe("file.part");
+  });
+
+  it("requires the calling turn: a file belongs to the reply that made it", () => {
+    const noTurn: Record<string, unknown> = { ...part };
+    delete noTurn.turnId;
+    expect(supervisorMessageSchema.safeParse(noTurn).success).toBe(false);
+    const noConversation: Record<string, unknown> = { ...part };
+    delete noConversation.conversationId;
+    expect(supervisorMessageSchema.safeParse(noConversation).success).toBe(
+      false,
+    );
+  });
+
+  it("refuses the outbound size cap, an oversized chunk, and a bad sha", () => {
+    expect(
+      supervisorMessageSchema.safeParse({
+        ...part,
+        sizeBytes: MAX_OUTBOUND_ATTACHMENT_BYTES + 1,
+      }).success,
+    ).toBe(false);
+    expect(
+      supervisorMessageSchema.safeParse({
+        ...part,
+        dataBase64: "A".repeat(ATTACHMENT_CHUNK_BASE64_CHARS + 4),
+      }).success,
+    ).toBe(false);
+    expect(
+      supervisorMessageSchema.safeParse({ ...part, sha256: "not-hex" }).success,
+    ).toBe(false);
+    expect(
+      supervisorMessageSchema.safeParse({
+        ...part,
+        caption: "c".repeat(MAX_OUTBOUND_CAPTION_CHARS + 1),
+      }).success,
+    ).toBe(false);
+    expect(
+      supervisorMessageSchema.safeParse({ ...part, part: 0 }).success,
+    ).toBe(false);
+  });
+
+  it("a legal chunk frame stays under the runner WS's 256KB ceiling", () => {
+    const maxFrame = {
+      ...part,
+      name: "n".repeat(100),
+      caption: "c".repeat(MAX_OUTBOUND_CAPTION_CHARS),
+      dataBase64: "A".repeat(ATTACHMENT_CHUNK_BASE64_CHARS),
+    };
+    expect(supervisorMessageSchema.safeParse(maxFrame).success).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(maxFrame))).toBeLessThan(
+      256 * 1024,
+    );
+  });
+
+  it("round-trips both file.result outcomes", () => {
+    expect(
+      workItemSchema.parse({
+        kind: "file.result",
+        uploadId: "up-1",
+        ok: true,
+        attachmentId: "att-1",
+      }).kind,
+    ).toBe("file.result");
+    const refused = workItemSchema.parse({
+      kind: "file.result",
+      uploadId: "up-1",
+      ok: false,
+      retryable: true,
+      error: "Too many uploads in flight — retry shortly.",
+    });
+    expect(refused.kind === "file.result" && refused.retryable).toBe(true);
   });
 });

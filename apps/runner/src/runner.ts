@@ -93,6 +93,7 @@ export const payloadHash = (payload: SandboxStartPayload): string =>
         effort: payload.effort ?? null,
         harness: payload.harness ?? null,
         instructions: payload.instructions ?? null,
+        channels: payload.channels ?? null,
       }),
     )
     .digest("hex");
@@ -359,6 +360,11 @@ export const createRunner = ({
     // Dispatch composes the manifest + context note only when this is
     // advertised, so an older runner's turns simply ship bare.
     attachments: true,
+    // This build reassembles `file.part` runs and relays them to
+    // POST /v1/runner/attachments (send_file). The control plane hands the
+    // supervisor the tool only when its runner advertises this, so an agent
+    // is never offered a send_file that cannot land.
+    outboundAttachments: true,
   });
 
   const report = async (events: RunnerEvent[]): Promise<void> => {
@@ -432,8 +438,6 @@ export const createRunner = ({
         homeRef,
       });
 
-      let containerRef = existing?.containerRef;
-
       // Recreate on ANY start of an existing container, not only when the
       // payload changed. The control-channel bootstrap token is single-use and
       // baked into the container's environment, so a container that has
@@ -446,44 +450,61 @@ export const createRunner = ({
         await backend.stopSandbox(existing.containerRef, item.sandboxId);
         await backend.removeSandbox(existing.containerRef, item.sandboxId);
         sandboxContainers.delete(item.sandboxId);
-        containerRef = undefined;
       }
 
-      if (!containerRef) {
-        await backend.wakeHome(homeRef);
-        const bootstrapToken = wsServer.issueToken(item.sandboxId);
-        containerRef = await backend.createSandbox({
-          sandboxId: item.sandboxId,
-          ...(item.payload.workspaceId && {
-            workspaceId: item.payload.workspaceId,
+      // The workspace is the wake's placement for a home it has to BIRTH
+      // (a brand-new agent on a snapshot backend: disk and device come up
+      // before the sandbox exists); an existing home ignores it.
+      await backend.wakeHome(homeRef, item.payload.workspaceId);
+      const bootstrapToken = wsServer.issueToken(item.sandboxId);
+      const containerRef = await backend.createSandbox({
+        sandboxId: item.sandboxId,
+        ...(item.payload.workspaceId && {
+          workspaceId: item.payload.workspaceId,
+        }),
+        image: config.agentImage,
+        env: {
+          ...item.payload.env,
+          ...noProxyForRunner(config.advertisedHost, item.payload.env),
+          ...(item.payload.model && { AGENT_MODEL: item.payload.model }),
+          ...(item.payload.effort && { AGENT_EFFORT: item.payload.effort }),
+          ...(item.payload.harness && {
+            AGENT_HARNESS: item.payload.harness,
           }),
-          image: config.agentImage,
-          env: {
-            ...item.payload.env,
-            ...noProxyForRunner(config.advertisedHost, item.payload.env),
-            ...(item.payload.model && { AGENT_MODEL: item.payload.model }),
-            ...(item.payload.effort && { AGENT_EFFORT: item.payload.effort }),
-            ...(item.payload.harness && {
-              AGENT_HARNESS: item.payload.harness,
-            }),
-            ...(item.payload.instructions && {
-              AGENT_INSTRUCTIONS: item.payload.instructions,
-            }),
-            ...(item.payload.agentName && {
-              AGENT_NAME: item.payload.agentName,
-            }),
-            SANDBOX_ID: item.sandboxId,
-            RUNNER_WS_URL: `ws://${config.advertisedHost}:${config.wsPort}`,
-            SANDBOX_WS_TOKEN: bootstrapToken,
-          },
-          files: item.payload.files,
-          homeRef,
-          limits: config.limits,
-          payloadHash: hash,
-        });
-      } else {
-        await backend.wakeHome(homeRef);
-      }
+          ...(item.payload.instructions && {
+            AGENT_INSTRUCTIONS: item.payload.instructions,
+          }),
+          ...(item.payload.agentName && {
+            AGENT_NAME: item.payload.agentName,
+          }),
+          // The channels section's boot input (the supervisor parses it with
+          // the wire schema). Sent only when the control plane composed one;
+          // absent reads as "no presences" there.
+          ...(item.payload.channels && {
+            AGENT_CHANNELS: JSON.stringify(item.payload.channels),
+          }),
+          // The `agents` capability's roster (PR 5b), same rule.
+          ...(item.payload.peers && {
+            AGENT_PEERS: JSON.stringify(item.payload.peers),
+          }),
+          // The `connections` capability's attached-apps list, same rule.
+          ...(item.payload.connections && {
+            AGENT_CONNECTIONS: JSON.stringify(item.payload.connections),
+          }),
+          SANDBOX_ID: item.sandboxId,
+          RUNNER_WS_URL: `ws://${config.advertisedHost}:${config.wsPort}`,
+          SANDBOX_WS_TOKEN: bootstrapToken,
+          // The supervisor offers send_file only when THIS runner can
+          // relay the bytes (capabilities.outboundAttachments) — a runner
+          // that predates the frame would drop it on validation and the
+          // model would wait out a timeout for a file that never left.
+          RUNNER_OUTBOUND_ATTACHMENTS: "1",
+        },
+        files: item.payload.files,
+        homeRef,
+        limits: config.limits,
+        payloadHash: hash,
+      });
 
       // Record the container BEFORE start: the supervisor cannot connect (and
       // so cannot emit a process.state frame) until it boots inside this
@@ -857,6 +878,14 @@ export const createRunner = ({
           instructions: part.instructions,
         }),
         ...(part.agentName !== undefined && { agentName: part.agentName }),
+        ...(part.channels !== undefined && { channels: part.channels }),
+        // Every final-part render input must be relayed: a field dropped
+        // here reads as "unchanged" at the supervisor, so the doc would
+        // only catch up at the next boot.
+        ...(part.peers !== undefined && { peers: part.peers }),
+        ...(part.connections !== undefined && {
+          connections: part.connections,
+        }),
       });
     });
     return [];

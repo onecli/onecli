@@ -69,8 +69,8 @@ export interface EndpointPattern {
  * A rule on a git pack service (`POST …/git-receive-pack` or
  * `…/git-upload-pack`) also matches its preceding
  * `GET …/info/refs?service=<service>` discovery request - so a push BLOCK
- * kills the discovery too, and a clone/pull ALLOW under a deny-by-default
- * grant stack lets the discovery through.
+ * kills the discovery too, and a clone/pull ALLOW in a customized grant
+ * stack lets the discovery through instead of leaving it to the terminal.
  */
 export const endpointMatches = (
   request: PolicyRequest,

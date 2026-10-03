@@ -14,7 +14,7 @@ import { queryKeys } from "@/lib/api/keys";
 import { useConnections, useVaultConnections } from "@/hooks/use-connections";
 import { getApp } from "@onecli/api/apps/registry";
 import { useAppMessages } from "@/hooks/use-app-connected";
-import { extractLabel } from "@onecli/api/services/connection-service";
+import { extractLabel } from "@onecli/api/lib/connection-display";
 import { AppIcon } from "@/lib/components/app-icon";
 import { SecretDialog } from "./secret-dialog";
 import type { SecretActions } from "./types";

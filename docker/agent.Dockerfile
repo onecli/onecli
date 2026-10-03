@@ -58,15 +58,15 @@ RUN pnpm install --frozen-lockfile
 # own updater verified only opportunistically, and it is disabled anyway).
 FROM base AS jcode-runtime
 ARG TARGETARCH
-ARG JCODE_VERSION=v0.81.1
+ARG JCODE_VERSION=v0.90.0
 RUN apt-get update \
   && apt-get install -y --no-install-recommends curl ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 RUN case "$TARGETARCH" in \
     arm64) ASSET="jcode-linux-aarch64"; \
-      SHA="89712dd36de31905a23850f4af0af18081bcf26088c7c359c53d9dbdec897919";; \
+      SHA="8b44b717e1085950cf1fc5b1a5005e087c9e38c1e0293b6009fee1ab0b2c451f";; \
     amd64) ASSET="jcode-linux-x86_64"; \
-      SHA="ddfd6b8f7d6fe15284d78785eda1130a6e2ecd8d3352f20628822a1eb7aa2549";; \
+      SHA="b963b7cd53ec0dc39c805c4549e9752ab194d4e1bd338b536d587c9bf8851516";; \
     *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1;; \
   esac \
   && curl -fsSL -o /tmp/jcode.tar.gz \

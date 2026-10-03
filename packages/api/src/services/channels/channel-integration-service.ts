@@ -187,7 +187,15 @@ export const disconnectIntegration = async (
     // A live shared-app install rides this row too — deleting it would
     // cascade the installation away as a side effect of dropping a mere
     // automation credential.
-    existing._count.installations === 0
+    existing._count.installations === 0 &&
+    // A deferred remote cleanup (channel-cleanup-service) is fenced to THIS
+    // integration id: the app it tears down was minted under it. Deleting
+    // the row would strand the job as blocked, and a reconnect would mint a
+    // new id the fence rejects. Only a completed job has let go of the row;
+    // until then the row stays, credential-less.
+    (await db.channelCleanup.count({
+      where: { integrationId: existing.id, state: { not: "completed" } },
+    })) === 0
   ) {
     await withIntegrationRotateLock(existing.id, (tx) =>
       tx.channelIntegration.delete({ where: { id: existing.id } }),
@@ -406,7 +414,38 @@ export const withFreshIntegrationCredentials = async <T>(
   organizationId: string,
   provider: ChannelProviderId,
   fn: (accessToken: string, integrationId: string) => Promise<T>,
+  expectedIdentity?: { integrationId: string; externalId: string },
 ): Promise<T> => {
+  // Deferred cleanup must never borrow a credential from a replacement
+  // integration or a reconnected tenant. Re-check at the callback boundary:
+  // resolving/rotating a credential can yield while the org reconnects.
+  const assertExpectedIdentity = async (actualIntegrationId?: string) => {
+    if (!expectedIdentity) return;
+    const current = await db.channelIntegration.findUnique({
+      where: { organizationId_provider: { organizationId, provider } },
+      select: { id: true, externalId: true },
+    });
+    if (
+      current?.id !== expectedIdentity.integrationId ||
+      current.externalId !== expectedIdentity.externalId ||
+      (actualIntegrationId !== undefined &&
+        actualIntegrationId !== expectedIdentity.integrationId)
+    ) {
+      throw new ServiceError(
+        "CONFLICT",
+        "The channel integration no longer matches the original workspace. Remote cleanup was not attempted.",
+      );
+    }
+  };
+  await assertExpectedIdentity();
+  const withExpectedIdentity = async (
+    accessToken: string,
+    integrationId: string,
+  ): Promise<T> => {
+    await assertExpectedIdentity(integrationId);
+    return fn(accessToken, integrationId);
+  };
+
   // FAST PATH (managed-apps arm): the provider's shared workspace install
   // may carry a credential that can mint agent apps — the same manifest API
   // the automation credential drives, minus the paste and the rotation.
@@ -415,7 +454,10 @@ export const withFreshIntegrationCredentials = async <T>(
   // real `fn` error propagates — it must never run twice.
   const sharedApp = channelProvider(provider).sharedApp;
   if (sharedApp?.configured()) {
-    const minted = await sharedApp.tryMintWith({ organizationId, fn });
+    const minted = await sharedApp.tryMintWith({
+      organizationId,
+      fn: withExpectedIdentity,
+    });
     if (minted) return minted.result;
   }
 
@@ -460,7 +502,7 @@ export const withFreshIntegrationCredentials = async <T>(
   const { accessToken } = JSON.parse(result.credentialsJson) as {
     accessToken: string;
   };
-  return fn(accessToken, row.id);
+  return withExpectedIdentity(accessToken, row.id);
 };
 
 /** Proactively rotate anything not rotated for this long. Half the 12h

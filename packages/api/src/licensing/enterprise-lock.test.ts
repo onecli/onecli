@@ -20,6 +20,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.hoisted(() => {
   process.env.SECRET_ENCRYPTION_KEY ??= "test-secret";
   process.env.OAUTH_STATE_SECRET ??= "test-secret";
+  // The S3 attachment probe: with a bucket configured, the ONLY thing that
+  // can refuse the write is the license gate — so "stands down licensed"
+  // proves the write actually proceeds, not that config bailed first.
+  process.env.ATTACHMENTS_S3_BUCKET ??= "onecli-attachments-lock-test";
 });
 
 // Minimal db double: the service probes below assert BEFORE any query except
@@ -324,6 +328,35 @@ const scimDataPlaneProbe = {
     return { refused: res.status === 401 };
   },
 };
+
+/** The object-storage attachment arm: every write and every presign goes
+ * through the bucket gate, which asserts the entitlement. A GET for an
+ * INLINE row is the one call that must not (it delegates to the free
+ * Postgres arm) — proven in the store's own suite; here the probe is the
+ * write, the shape an unlicensed process must never complete. */
+PROBES.push({
+  feature: "attachments_s3",
+  name: "S3 blob store write",
+  run: probeService("attachments_s3", async () => {
+    const { s3AttachmentBlobStore, initS3ClientForTests } =
+      await import("../ee/attachments/s3-blob-store");
+    const { S3Client } = await import("@aws-sdk/client-s3");
+    const fake = new S3Client({
+      region: "us-east-1",
+      credentials: { accessKeyId: "AKIATEST", secretAccessKey: "secret" },
+    });
+    vi.spyOn(fake, "send").mockResolvedValue({} as never);
+    initS3ClientForTests(fake);
+    try {
+      await s3AttachmentBlobStore.put(
+        { id: "att-lock", conversationId: "cv-lock" },
+        Buffer.from("x"),
+      );
+    } finally {
+      initS3ClientForTests(null);
+    }
+  }),
+});
 
 const GATEWAY_COVERED: GatewayCovered[] = [
   {

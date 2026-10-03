@@ -79,7 +79,7 @@ export const PLANS: PlanConfig[] = [
       "1 workspace",
       "10 secrets",
       "3 OAuth app connections",
-      "Block rules",
+      "Block + approval rules",
       "1-day audit logs",
       "Community support",
     ],
@@ -132,7 +132,6 @@ export const PLANS: PlanConfig[] = [
     features: [
       "Everything in Free",
       "Shared workspaces",
-      "Approval workflows",
       "30-day audit logs",
       "Priority support",
     ],
@@ -160,7 +159,6 @@ export const PLANS: PlanConfig[] = [
     features: [
       "Everything in Free",
       "Shared workspaces",
-      "Approval workflows",
       "30-day audit logs",
       "Priority support",
     ],

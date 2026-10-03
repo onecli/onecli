@@ -18,7 +18,7 @@ description: >-
   OneCLI Gateway: credential manager for external API access. MUST load this
   skill when you encounter NOT_AUTHENTICATED, missing tokens, credential
   errors, or 401 responses from any tool. Also load when accessing external
-  services (email, calendar, GitHub, Slack, APIs). Provides credential stub
+  services (email, calendar, GitHub, APIs). Provides credential stub
   creation that overrides service-specific auth flows (google-workspace, etc.).
 compatibility: Only active when HTTPS_PROXY contains aoc_ (automatic when launched via \`onecli run\`)
 metadata:
@@ -139,9 +139,57 @@ If an MCP server won't start due to missing credentials, create stubs
 secret values, with file permissions \`0600\`. See the guide at:
 https://onecli.sh/docs/guides/credential-stubs/general-app
 
+## Many Similar Writes
+
+Importing, creating or updating a list of records can mean one approval per
+request. Make that one card for the reviewer:
+
+- Tell the user the count up front ("I'll create 39 contacts; you'll get one
+  approval card").
+- Tag every request of the task with the same headers (the gateway strips
+  them before forwarding):
+  \`X-OneCLI-Batch: <id>\` (1-64 of letters, digits, \`-\`, \`_\`),
+  \`X-OneCLI-Batch-Label: <what the task is>\` (up to 120 characters),
+  \`X-OneCLI-Batch-Total: <how many requests>\`.
+- Send the requests in parallel, at most 10 at a time. Don't send them one
+  after another waiting on each approval, and don't fold them into one bulk
+  call (Salesforce sObject Collections, composite): the reviewer then gets
+  a single card for every record at once and can't decide them one by one.
+- At the end, summarize what succeeded and what was denied. Never re-send a
+  denied request unless the user asks.
+- When a write belongs to a record, say so in the same request, so the
+  reviewer's card names it ("Upload file to Account Acme"). For a Salesforce
+  file, upload with \`FirstPublishLocationId\` set to that record's id: one
+  request, one approval, instead of an upload plus a separate link.
+
 ## When a Request Fails
 
-If you get a 401, 403, or a gateway error (e.g., \`app_not_connected\`):
+First classify the gateway error code, not just its HTTP status:
+
+- \`manual_approval_denied\` ends only that approval request. The request
+  was not forwarded. \`reason=declined\` means the reviewer declined it;
+  \`reason=expired\` means approval expired without a decision. Older
+  responses may omit reason; neither outcome is a permanent policy block.
+  Do not automatically retry or bypass approval. If the user asks for edits,
+  revise the draft without sending. When the user explicitly asks to send or
+  try again, submit a new request through the same gateway, even if the
+  content is unchanged. Each new request requires fresh approval for its
+  exact method, URL, and body. Never reuse a previous approval or treat a chat
+  message as approval. Do not tell the user to change policy or reconnect
+  merely because one approval request was declined or expired.
+- \`blocked_by_policy\` and \`blocked_by_default_policy\` are actual policy
+  blocks. Report the restriction and stop. Do not retry or circumvent it.
+- \`connection_host_mismatch\` (421) means the request went to a host the
+  connected account is not bound to (for example a placeholder such as
+  \`your-domain.my.salesforce.com\` copied from documentation). The body's
+  \`connections[].host\` is the real host: re-send the identical request to
+  that host. Never invent or copy an example hostname; the gateway tells you
+  the correct one.
+- \`x-should-retry: false\` disables automatic retries. It does not prohibit
+  a new, explicitly user-requested submission after an approval rejection.
+
+For other authentication or connection failures (401, 403, or a gateway
+error such as \`app_not_connected\`):
 
 **Step 1 — Show the user a connect link.** Use the \`connect_url\` from the
 error response:
@@ -187,7 +235,7 @@ user can connect the service in OneCLI.
   Create a credential stub and let the proxy handle real auth.
 - **Never** use an MCP server's native OAuth or credential flow. Configure
   it with no auth and let the gateway inject credentials.
-- If the gateway returns a policy error (403 with a JSON body), respect
+- If the gateway returns \`blocked_by_policy\` or \`blocked_by_default_policy\`, respect
   the block. Do not retry or circumvent it.
 `;
 

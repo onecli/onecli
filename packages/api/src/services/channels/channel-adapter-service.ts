@@ -10,6 +10,10 @@ import type { ChannelProviderId, ChannelTransport } from "./types";
 import { publicApiUrl } from "./posture";
 import { sweepStaleSessionReceipts } from "./turn-receipt-service";
 import { agentImageUrlOrNull } from "../agent-image-service";
+import { bumpHomeForAgent } from "../home-sync-service";
+import { logger } from "../../lib/logger";
+
+const log = logger.child({ component: "channel-adapter-service" });
 
 /**
  * The channel adapter's control-plane service: registration and liveness
@@ -539,6 +543,15 @@ export interface AdapterWorkItem {
     sourceThreadId: string | null;
     createdAt: Date;
     finishedAt: Date | null;
+    /** The agent's OUTBOUND files for this turn (send_file), oldest first.
+     * Metadata only — the adapter pulls bytes through its fenced route. */
+    attachments: {
+      id: string;
+      name: string;
+      mimeType: string;
+      sizeBytes: number;
+      caption: string | null;
+    }[];
   };
   /** Mid-run follow-ups this turn consumed, oldest first — the mirror posts
    * the web-sourced ones so both surfaces show the same exchange. Each
@@ -688,7 +701,9 @@ export const getAdapterWork = async (
   // COPY of a message gains a "📎 name" line so an attachment-only web
   // message never mirrors as a dangling attribution — the stored
   // `turn.message` stays verbatim (the attribution law), only this
-  // adapter-facing copy is decorated.
+  // adapter-facing copy is decorated. INBOUND rows only: the agent's own
+  // send_file rows hang off the same turn, and they belong under the
+  // answer (below), never in the person's mouth.
   const mirroredTurnIds = [
     ...finishedTurns.map((turn) => turn.id),
     ...joinedFollowUps.map((row) => row.id),
@@ -697,7 +712,7 @@ export const getAdapterWork = async (
     mirroredTurnIds.length === 0
       ? []
       : await db.conversationAttachment.findMany({
-          where: { turnId: { in: mirroredTurnIds } },
+          where: { turnId: { in: mirroredTurnIds }, direction: "inbound" },
           select: { turnId: true, name: true },
           orderBy: { createdAt: "asc" },
         });
@@ -707,6 +722,45 @@ export const getAdapterWork = async (
     const list = attachmentNamesByTurn.get(row.turnId) ?? [];
     list.push(row.name);
     attachmentNamesByTurn.set(row.turnId, list);
+  }
+
+  // The agent's OUTBOUND files (send_file), batched for the finished turns:
+  // the mirror posts them into the thread after the answer. Bound rows only
+  // (an outbound row is created bound; the filter is the law, not a guess).
+  const outboundRows =
+    finishedTurns.length === 0
+      ? []
+      : await db.conversationAttachment.findMany({
+          where: {
+            turnId: { in: finishedTurns.map((turn) => turn.id) },
+            direction: "outbound",
+            status: "bound",
+          },
+          select: {
+            id: true,
+            turnId: true,
+            name: true,
+            mimeType: true,
+            sizeBytes: true,
+            caption: true,
+          },
+          orderBy: { createdAt: "asc" },
+        });
+  const outboundByTurn = new Map<
+    string,
+    AdapterWorkItem["turn"]["attachments"]
+  >();
+  for (const row of outboundRows) {
+    if (!row.turnId) continue;
+    const list = outboundByTurn.get(row.turnId) ?? [];
+    list.push({
+      id: row.id,
+      name: row.name,
+      mimeType: row.mimeType,
+      sizeBytes: row.sizeBytes,
+      caption: row.caption,
+    });
+    outboundByTurn.set(row.turnId, list);
   }
   const withAttachmentLine = (turnId: string, message: string): string => {
     const names = attachmentNamesByTurn.get(turnId);
@@ -751,6 +805,7 @@ export const getAdapterWork = async (
         userName: rest.userId ? (userNameById.get(rest.userId) ?? null) : null,
         message: withAttachmentLine(turn.id, rest.message),
         createdAt: timelineOf(turn),
+        attachments: outboundByTurn.get(turn.id) ?? [],
       },
       followUps: followUpsByTarget.get(turn.id) ?? [],
       linkMirrorCursor: link.mirrorCursor,
@@ -773,17 +828,32 @@ export const reportApprovalAuth = async (
   presenceId: string,
   healthy: boolean,
 ): Promise<void> => {
-  if (healthy) {
-    await db.agentChannel.updateMany({
-      where: { id: presenceId, status: "needs_attention" },
-      data: { status: "active" },
-    });
-    return;
-  }
-  await db.agentChannel.updateMany({
-    where: { id: presenceId, status: "active" },
-    data: { status: "needs_attention" },
+  const flipped = healthy
+    ? await db.agentChannel.updateMany({
+        where: { id: presenceId, status: "needs_attention" },
+        data: { status: "active" },
+      })
+    : await db.agentChannel.updateMany({
+        where: { id: presenceId, status: "active" },
+        data: { status: "needs_attention" },
+      });
+  // A flip is a render input for the agent's `channels` section (it says
+  // whether approvals from the channel currently work). Only when the row
+  // actually MOVED: the health report arrives every poll, and a bump per
+  // poll would re-render the doc for nothing.
+  if (flipped.count === 0) return;
+  const presence = await db.agentChannel.findUnique({
+    where: { id: presenceId },
+    select: { agentId: true },
   });
+  if (presence) {
+    void bumpHomeForAgent(presence.agentId).catch((err: unknown) =>
+      log.warn(
+        { err, presenceId },
+        "home bump after an approval-health flip failed",
+      ),
+    );
+  }
 };
 
 // ── Tool-approval cards: dedupe + the update handle, restart-safe ───────────

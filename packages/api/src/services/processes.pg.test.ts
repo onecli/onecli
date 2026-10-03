@@ -1179,6 +1179,21 @@ describe.skipIf(!PROOF_URL)("the fire", () => {
     expect(String((text?.payload as { text?: unknown })?.text ?? "")).toContain(
       "could not start",
     );
+    // The born-done shape: text then turn.done, consecutive seqs, and the
+    // conversation's cursor moved exactly that far (the shared primitive
+    // under cron/watch deliveries and the agent-to-agent sender record).
+    const events = await db.turnEvent.findMany({
+      where: { turnId: delivery!.id },
+      orderBy: { seq: "asc" },
+      select: { type: true, seq: true },
+    });
+    expect(events.map((e) => e.type)).toEqual(["text", "turn.done"]);
+    expect(events[1]!.seq).toBe(events[0]!.seq + 1);
+    const { lastSeq } = await db.conversation.findUniqueOrThrow({
+      where: { id: origin.id },
+      select: { lastSeq: true },
+    });
+    expect(lastSeq).toBe(events[1]!.seq);
   });
 
   it("honors the fire-claim lease: a fresh claim is not re-taken within the window, a stale one is", async () => {

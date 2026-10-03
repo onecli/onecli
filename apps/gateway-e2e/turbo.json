@@ -17,6 +17,7 @@
         "E2E_TEMPLATE_DB",
         "E2E_REDIS_HOST",
         "E2E_REDIS_PORT",
+        "E2E_APPROVAL_EXPIRATION",
         "AWS_ENDPOINT_URL_KMS",
         "AWS_REGION",
         "AWS_ACCESS_KEY_ID",

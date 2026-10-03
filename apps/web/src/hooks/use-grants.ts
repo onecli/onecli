@@ -1,5 +1,6 @@
 "use client";
 
+import { useCallback } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { grants } from "@/lib/api";
@@ -33,9 +34,12 @@ export const useGrantsSummary = () =>
     queryFn: grants.summary,
   });
 
-const useInvalidateGrants = () => {
+/** Refresh every view a grant write makes stale. Also for writes the SERVER
+ * makes on the client's behalf: a newly created workspace connection arrives
+ * already granted to every agent (the API's workspace auto-attach). */
+export const useInvalidateGrants = () => {
   const qc = useQueryClient();
-  return () => {
+  return useCallback(() => {
     void qc.invalidateQueries({ queryKey: queryKeys.grants.all() });
     // A grant IS a policy write (source-tagged rules + an atomic publish), and
     // the reflections/summary key under these shared namespaces — the same
@@ -44,7 +48,7 @@ const useInvalidateGrants = () => {
     void qc.invalidateQueries({ queryKey: queryKeys.policy.all() });
     void qc.invalidateQueries({ queryKey: queryKeys.agents.all() });
     void qc.invalidateQueries({ queryKey: queryKeys.connections.all() });
-  };
+  }, [qc]);
 };
 
 export const useSetConnectionGrant = () => {

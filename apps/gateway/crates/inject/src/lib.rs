@@ -451,6 +451,8 @@ fn apply_replace_path_regex(
 /// Supported patterns (checked in order):
 /// - `"*"` — matches any path
 /// - `"/a/*/b"` — segment wildcard (`*` matches one segment, e.g. `/repos/*/issues`)
+/// - `"/a/*/b/"` — segment wildcard ending in `/`: also matches `/a/x/b` (same
+///   depth, never deeper; see `segment_wildcard_matches`)
 /// - `"/a/*/b/*:action"` — segment wildcard with in-segment glob (`*:predict` matches `ep123:predict`)
 /// - `"/foo/*/bar/*"` — mixed (segment globs + trailing wildcard matches 1+ segments)
 /// - `"/prefix/*"` — prefix with path boundary (`/v1/*` matches `/v1/foo` but not `/v1beta`)
@@ -487,9 +489,27 @@ fn has_mid_path_wildcard(pattern: &str) -> bool {
 /// - `*` as a full segment matches any segment
 /// - `*:predict` matches `abc:predict` (glob within a segment)
 /// - trailing `*` matches 1+ remaining segments
+/// - a pattern ending in `/` matches with OR without that trailing slash, at
+///   the SAME depth: `/sobjects/*/` matches `/sobjects/Contact/` and
+///   `/sobjects/Contact`, never `/sobjects/Contact/003xx`. The trailing slash
+///   exists to pin depth (a terminal `*` would otherwise take 1+ segments),
+///   and APIs such as Salesforce and Sentry accept both spellings of the same
+///   endpoint. Mirrored in `packages/api/src/lib/path-match.ts`.
 fn segment_wildcard_matches(path: &str, pattern: &str) -> bool {
-    let path_segs: Vec<&str> = path.split('/').collect();
+    let mut path_segs: Vec<&str> = path.split('/').collect();
     let pat_segs: Vec<&str> = pattern.split('/').collect();
+
+    // Slash-optional: a pattern ending in `/` (last segment empty) also
+    // accepts the same path without its trailing slash, by matching as if the
+    // empty last segment were there. The depth check below stays exact, so
+    // this never lets the pattern reach one segment deeper.
+    if pat_segs.len() > 1
+        && pat_segs.last() == Some(&"")
+        && path_segs.last() != Some(&"")
+        && path_segs.len() + 1 == pat_segs.len()
+    {
+        path_segs.push("");
+    }
 
     let trailing_wild = pat_segs.last() == Some(&"*");
     let fixed_pats = if trailing_wild {
@@ -721,6 +741,77 @@ mod tests {
             "/repos/myrepo/issues?state=open",
             "/repos/*/issues"
         ));
+    }
+
+    #[test]
+    fn path_matches_shared_parity_corpus() {
+        // The SAME cases the TS port asserts (packages/api/src/lib/
+        // path-match-parity.test.ts). `include_str!` resolves relative to this
+        // file (apps/gateway/crates/inject/src/), so five `..` reach the repo
+        // root. A divergence means the gateway enforces something other than
+        // what the API believes it granted.
+        const CORPUS: &str =
+            include_str!("../../../../../packages/api/src/lib/path-match-cases.json");
+        #[derive(serde::Deserialize)]
+        struct Case {
+            path: String,
+            pattern: String,
+            want: bool,
+        }
+        #[derive(serde::Deserialize)]
+        struct Corpus {
+            cases: Vec<Case>,
+        }
+        let corpus: Corpus = serde_json::from_str(CORPUS).expect("parse path-match corpus");
+        assert!(corpus.cases.len() > 20, "corpus unexpectedly small");
+        for case in corpus.cases {
+            assert_eq!(
+                path_matches(&case.path, &case.pattern),
+                case.want,
+                "{} vs {}",
+                case.path,
+                case.pattern
+            );
+        }
+    }
+
+    #[test]
+    fn path_segment_wildcard_trailing_slash_is_optional_at_the_same_depth() {
+        let create = "/services/data/v*/sobjects/*/";
+        // Both spellings of Salesforce's create URL.
+        assert!(path_matches(
+            "/services/data/v59.0/sobjects/Contact/",
+            create
+        ));
+        assert!(path_matches(
+            "/services/data/v59.0/sobjects/Contact",
+            create
+        ));
+        assert!(path_matches(
+            "/services/data/v59.0/sobjects/Contact?x=1",
+            create
+        ));
+        // Never one segment deeper: a record id stays out of a create grant.
+        assert!(!path_matches(
+            "/services/data/v59.0/sobjects/Contact/003xx",
+            create
+        ));
+        assert!(!path_matches(
+            "/services/data/v59.0/sobjects/Contact/003xx/",
+            create
+        ));
+        assert!(!path_matches("/services/data/v59.0/sobjects", create));
+        // Sentry's slash-terminated endpoints accept the slashless spelling.
+        assert!(path_matches(
+            "/api/0/projects/acme/web/issues",
+            "/api/0/projects/*/*/issues/"
+        ));
+        assert!(!path_matches(
+            "/api/0/projects/acme/issues",
+            "/api/0/projects/*/*/issues/"
+        ));
+        // Patterns without a trailing slash are unchanged.
+        assert!(!path_matches("/repos/r/issues/", "/repos/*/issues"));
     }
 
     #[test]

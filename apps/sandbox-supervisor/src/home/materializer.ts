@@ -311,6 +311,17 @@ export const applyHomeSync = async (
   if (item.agentName !== undefined) {
     renderInputs.agentName = item.agentName === "" ? undefined : item.agentName;
   }
+  // Same empty-vs-omitted law: `[]` means "no presences" (a detached app
+  // must leave the doc), an omitted field means "unchanged".
+  if (item.channels !== undefined) {
+    renderInputs.channels = item.channels;
+  }
+  if (item.peers !== undefined) {
+    renderInputs.peers = item.peers;
+  }
+  if (item.connections !== undefined) {
+    renderInputs.connections = item.connections;
+  }
   renderHome(homeDir, renderInputs);
 
   // ALWAYS ack — even a no-op repeat: the previous ack may be exactly what

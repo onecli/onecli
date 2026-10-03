@@ -7,7 +7,9 @@
 
 use serde_json::Value;
 
-use crate::{last_segment, parse_json, ApprovalSummary, RequestSummarizer, SummaryRequest};
+use crate::{
+    last_segment, parse_json, ApprovalSummary, RequestSummarizer, SummaryKind, SummaryRequest,
+};
 
 pub(super) struct OutlookCalendar;
 
@@ -21,17 +23,16 @@ impl RequestSummarizer for OutlookCalendar {
         let action = match m.as_str() {
             "POST" => "Create calendar event",
             "PUT" | "PATCH" => "Update calendar event",
-            "DELETE" => "Delete calendar event",
+            "DELETE" => {
+                let mut s = ApprovalSummary::new("Delete calendar event");
+                if let Some(id) = last_segment(base) {
+                    s.push("Event", id);
+                }
+                return Some(s);
+            }
             _ => return None,
         };
-        let mut s = ApprovalSummary::new(action);
-
-        if m == "DELETE" {
-            if let Some(id) = last_segment(base) {
-                s.push("Event", id);
-            }
-            return Some(s);
-        }
+        let mut s = ApprovalSummary::new(action).with_kind(SummaryKind::Event);
 
         if let Some(v) = req.body.and_then(parse_json) {
             if let Some(title) = v.get("subject").and_then(|x| x.as_str()) {

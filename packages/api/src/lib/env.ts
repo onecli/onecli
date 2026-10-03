@@ -150,6 +150,17 @@ export const RUNNER_TOKEN = process.env.RUNNER_TOKEN ?? "";
  */
 export const CHANNEL_ADAPTER_TOKEN = process.env.CHANNEL_ADAPTER_TOKEN ?? "";
 
+/**
+ * The object-storage arm of the attachment blob store (an ENTERPRISE feature:
+ * `ee/attachments/s3-blob-store.ts`). Set to a bucket name and, on an
+ * entitled deployment, NEW attachment bytes go to S3 and downloads become
+ * presigned URLs; unset (or unlicensed) keeps the inline-Postgres arm, which
+ * self-host runs by default. Credentials come from the SDK's default chain
+ * (the task role on cloud), never from env. Rows already written inline keep
+ * reading from Postgres — the two arms coexist per row (`storageRef`).
+ */
+export const ATTACHMENTS_S3_BUCKET = process.env.ATTACHMENTS_S3_BUCKET ?? "";
+
 // ── SSH front door (plans/sandbox-platform.md step 5) ─────────────────────
 
 /**

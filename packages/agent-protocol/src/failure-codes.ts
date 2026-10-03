@@ -45,6 +45,23 @@
  *   to `turn.result.errorCode` by the supervisor. The raw refusal rides
  *   beside it as `error` so an old control plane that ignores the code still
  *   stores visible text instead of a silent NULL.
+ * - `harness_no_terminal`: the harness accepted the turn's message and then
+ *   went silent past the adapter's post-accept deadline without ever
+ *   delivering a terminal frame. Minted by the ADAPTER (issue #1124: a frame
+ *   fence that lost a race inside the daemon quarantined the turn's own
+ *   terminal, and the loop then waited out the whole ceiling). The deadline
+ *   sits above the harness's own provider idle timeout, so a byte-dead
+ *   provider stream fails first with its own error; this code means the
+ *   ADAPTER's loop was the thing that stalled. Same version-skew posture as
+ *   `harness_busy`: the raw message rides beside it.
+ * - `transcript_rejected`: the harness lived and the key was fine, but the
+ *   model provider rejected the CONVERSATION as malformed (a `tool_use` not
+ *   answered by its `tool_result`). The stored transcript is replayed whole
+ *   on every turn, so every resend fails identically until it is repaired
+ *   (issue #1194: a container stop tore the harness's checkpoint and doubled
+ *   the history; the jcode adapter repairs that shape at its next boot).
+ *   Classified by the supervisor from the provider's wording; same
+ *   version-skew posture as `harness_busy`: the raw message rides beside it.
  */
 export const TURN_FAILURE_CODES = {
   agentRestarted: "agent_restarted",
@@ -52,6 +69,8 @@ export const TURN_FAILURE_CODES = {
   modelProviderError: "model_provider_error",
   trialCreditExhausted: "trial_credit_exhausted",
   harnessBusy: "harness_busy",
+  harnessNoTerminal: "harness_no_terminal",
+  transcriptRejected: "transcript_rejected",
 } as const;
 export type TurnFailureCode =
   (typeof TURN_FAILURE_CODES)[keyof typeof TURN_FAILURE_CODES];

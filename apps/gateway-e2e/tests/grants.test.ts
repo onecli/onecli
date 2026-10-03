@@ -122,15 +122,48 @@ describe("grant-driven injection (attach-model step 7)", () => {
       expect(body.error).toBe("access_restricted");
       // 127.0.0.1 maps to no registry provider — the hostname is the fallback.
       expect(body.provider).toBe("127.0.0.1");
-      expect(body.manage_url).toContain(GATEWAY_APP_URL);
-      expect(body.manage_url).toContain(
-        `/w/${cx.ids.workspace}/connections/apps/127.0.0.1`,
+      // A custom secret is attached on the agent's Custom tab: the link is
+      // chosen by the credential's kind, never derived from the host.
+      expect(body.manage_url).toBe(
+        `${GATEWAY_APP_URL}/w/${cx.ids.workspace}/agents/${cx.ids.agent}/connections?tab=custom`,
       );
       // This arm rewrites the upstream's verdict — it does not block egress:
       // exactly one, uncredentialed, request reached the stub.
       const seen = await upstream.waitForRequests(1);
       expect(seen).toHaveLength(1);
       expect(seen[0]?.header("x-test-key")).toBeUndefined();
+    },
+  );
+
+  scenario(
+    "points an ungranted LLM key at the agent's Models page",
+    async (cx) => {
+      // The link is chosen by the KIND of the ungranted credential, which the
+      // gateway reads from the database at connect time: a typed LLM key is
+      // attached on the agent's Models page, never the Custom tab (which
+      // lists only generic secrets).
+      const upstream = await cx.upstream();
+      upstream.respond({ status: 401, body: '{"error":"missing api key"}' });
+      await cx.seed({
+        secrets: [
+          { type: "anthropic", hostPattern: "127.0.0.1", value: "sk-ant-e2e" },
+        ],
+      });
+      const gw = await cx.startGateway();
+
+      const res = await throughProxy(gw.origin, {
+        url: upstream.url("/v1/messages"),
+        token: cx.ids.agentToken,
+      });
+
+      expect(res.status).toBe(401);
+      const body = res.json() as { error: string; manage_url: string };
+      expect(body.error).toBe("access_restricted");
+      expect(body.manage_url).toBe(
+        `${GATEWAY_APP_URL}/w/${cx.ids.workspace}/agents/${cx.ids.agent}/models`,
+      );
+      const seen = await upstream.waitForRequests(1);
+      expect(seen[0]?.header("x-api-key")).toBeUndefined();
     },
   );
 

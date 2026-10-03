@@ -7,6 +7,7 @@ import {
 } from "../lib/memory-index";
 import { AUTOMATION_SOURCES } from "../validations/conversation";
 import { searchMemories } from "./agent-memory-service";
+import { buildPeerContext } from "./channels/agent-peer-roster";
 import { buildMentionContext } from "./channels/mention-resolution-service";
 import { buildContinuityBridge, buildOpenPromiseNote } from "./turn-service";
 
@@ -169,23 +170,28 @@ export const buildTurnContext = async (
   // referring to. A WAKE needs the opposite — it arrives with the
   // platform's instruction and no conversation at all, so it gets the
   // agent's own last reply, which is where an unfinished promise lives.
-  const [memory, mentions, bridge, promise] = await Promise.all([
+  const [memory, mentions, peer, bridge, promise] = await Promise.all([
     buildMemoryContext(agentId, message),
     // Channel conversations only (the builder returns null elsewhere): how
     // to ping people, who is mentionable, and what failed last turn.
     turn === null ? null : buildMentionContext(conversationId, turn.createdAt),
+    // Pair conversations (PR 5b): who the other agent is and how to answer
+    // it, plus the open peer task's block for this side; or, in a person's
+    // conversation, the standing line while a task opened here is running.
+    // The same standing-surface slot as the mention note.
+    buildPeerContext(conversationId),
     isHuman ? buildContinuityBridge(conversationId, turn.createdAt) : null,
     isHuman || turn === null
       ? null
       : buildOpenPromiseNote(conversationId, turn.createdAt),
   ]);
-  if (!memory && !mentions && !bridge && !promise) return null;
+  if (!memory && !mentions && !peer && !bridge && !promise) return null;
 
-  // Memory first (standing knowledge); the mention note is standing surface
-  // truth too, so it rides next; the bridge or the promise note sits
+  // Memory first (standing knowledge); the mention/peer note is standing
+  // surface truth too, so it rides next; the bridge or the promise note sits
   // NEAREST the message — it is the immediate "what just landed" the person
   // is most likely referring to, or the commitment the wake must honor.
-  return [memory, mentions, bridge, promise]
+  return [memory, mentions, peer, bridge, promise]
     .filter((block): block is string => block !== null)
     .join("\n\n")
     .slice(0, MAX_TURN_CONTEXT_CHARS);

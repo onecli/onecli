@@ -10,7 +10,7 @@
 
 use super::{
     last_segment, mime, parse_json, path_segment_before, ApprovalSummary, RequestSummarizer,
-    SummaryRequest, MAX_SNIPPET_LEN,
+    SummaryKind, SummaryRequest, MAX_SNIPPET_LEN,
 };
 
 pub(super) struct Gmail;
@@ -28,7 +28,8 @@ impl RequestSummarizer for Gmail {
                 "Send email"
             } else {
                 "Create draft"
-            });
+            })
+            .with_kind(SummaryKind::Email);
             // `threadId` sits alongside `raw` (top-level for a send, nested under
             // `message` for a draft); the substring scan finds it either way.
             let has_thread_id = req
@@ -265,8 +266,23 @@ iVBORw0KGgoAAAANSUhEUg==\r\n\
             Some(body.as_bytes()),
         );
         assert_eq!(s.action, "Send email");
+        assert_eq!(s.kind, Some(SummaryKind::Email));
         assert_eq!(detail(&s, "To"), Some("a@b.com"));
         assert_eq!(detail(&s, "Subject"), Some("Hello there"));
+    }
+
+    #[test]
+    fn non_send_actions_carry_no_kind() {
+        let s = super::super::summarize_request(
+            "gmail",
+            "POST",
+            "/gmail/v1/users/me/messages/abc/trash",
+            None,
+            None,
+        );
+        assert_eq!(s.kind, None);
+        // The kind is omitted from the wire when absent.
+        assert!(serde_json::to_value(&s).unwrap().get("kind").is_none());
     }
 
     #[test]

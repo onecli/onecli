@@ -161,7 +161,7 @@ describe("assertTargetsValid — level scope + secret XOR (step 8)", () => {
     await expect(
       assertTargetsValid(orgScope, [
         { kind: "app", provider: "gmail", connectionScope: "organization" },
-        { kind: "app", provider: "slack", connectionScope: "workspace" },
+        { kind: "app", provider: "github", connectionScope: "workspace" },
         { kind: "secret", secretScope: "organization" },
         { kind: "secret", secretScope: "workspace" },
       ]),

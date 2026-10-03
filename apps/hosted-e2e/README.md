@@ -47,6 +47,12 @@ E2E_AGENT_IMAGE=onecli-agent:he2e \
 Unset variables **skip locally and throw in CI** — the gateway-e2e law: a
 silently-skipping proof suite is exactly the rot this package replaces.
 
+One scenario is opt-in in BOTH places: `tests/send-file-scale.test.ts` pushes
+100 concurrent 25 MB uploads through the api child (2.5 GB over loopback,
+about half a minute) and runs only with `HOSTED_E2E_SCALE=1`; otherwise it
+registers as skipped. Run it after touching the attachment door, the blob
+store, or the pool.
+
 ## The three laws worth knowing before writing a scenario
 
 1. **Door 2 is seeded from day one.** A sandbox will not start without a

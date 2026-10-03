@@ -23,7 +23,7 @@ import {
 import { useCreateHostedAgent } from "@/hooks/use-agents";
 import { hostedCreateRefusalCopy } from "@/lib/agents/availability";
 import { nameToIdentifier } from "@/lib/agents/agent-identifier";
-import { agentChatGreetingPath } from "@/lib/navigation";
+import { agentChatPath } from "@/lib/navigation";
 import { useOnboarding } from "./onboarding-context";
 import { WelcomeVisual } from "./_components/welcome-visual";
 
@@ -91,7 +91,7 @@ export default function CreatePage() {
 
   const chatDestination =
     createdAgentId && workspaceId
-      ? agentChatGreetingPath(workspaceId, createdAgentId)
+      ? agentChatPath(workspaceId, createdAgentId)
       : undefined;
 
   // The chat page is a heavy surface and it is where the door leads — have it

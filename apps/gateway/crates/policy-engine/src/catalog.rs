@@ -665,6 +665,137 @@ mod tests {
         ));
     }
 
+    // Gateway-side twin of `salesforce-path-scope.test.ts`. The TS catalog is
+    // authored and this JSON is derived from it, but the GATEWAY is what
+    // enforces a grant — so the exclusion is pinned on both sides of the
+    // generated artifact, not just where it is written.
+    #[test]
+    fn salesforce_tools_never_reach_the_surfaces_the_catalog_excludes() {
+        let host = "acme.my.salesforce.com";
+        let all = &[
+            "list_versions",
+            "list_resources",
+            "list_objects",
+            "describe_object",
+            "get_record",
+            "query",
+            "query_more",
+            "query_all",
+            "query_all_more",
+            "search",
+            "create_record",
+            "update_record",
+            "delete_record",
+        ];
+        // Composite/Bulk/GraphQL/Apex express arbitrary multi-object work that
+        // no tool here describes. A slashless `v*` pattern would swallow them.
+        for path in [
+            "/services/data/v66.0/composite",
+            "/services/data/v66.0/composite/batch",
+            "/services/data/v66.0/composite/tree/Account",
+            "/services/data/v66.0/jobs/query",
+            "/services/data/v66.0/jobs/ingest",
+            "/services/data/v66.0/graphql",
+            "/services/data/v66.0/tooling/query",
+            "/services/apexrest/custom",
+        ] {
+            for method in ["GET", "POST", "PATCH", "DELETE"] {
+                assert!(
+                    !matches("salesforce", all, host, method, path),
+                    "{method} {path} reached a tool"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn salesforce_each_tool_keeps_its_own_endpoint_and_method() {
+        let host = "acme.my.salesforce.com";
+        for (tool, method, path) in [
+            ("list_versions", "GET", "/services/data"),
+            ("list_versions", "GET", "/services/data/"),
+            ("list_resources", "GET", "/services/data/v66.0/"),
+            ("list_objects", "GET", "/services/data/v66.0/sobjects"),
+            (
+                "describe_object",
+                "GET",
+                "/services/data/v66.0/sobjects/Account/describe",
+            ),
+            (
+                "get_record",
+                "GET",
+                "/services/data/v66.0/sobjects/Account/001000000000001",
+            ),
+            ("query", "GET", "/services/data/v66.0/query"),
+            (
+                "query_more",
+                "GET",
+                "/services/data/v66.0/query/01g000000000000-2000",
+            ),
+            ("query_all", "GET", "/services/data/v66.0/queryAll"),
+            ("search", "GET", "/services/data/v66.0/search"),
+            (
+                "create_record",
+                "POST",
+                "/services/data/v66.0/sobjects/Account/",
+            ),
+            // Salesforce also accepts the slashless create URL.
+            (
+                "create_record",
+                "POST",
+                "/services/data/v59.0/sobjects/Contact",
+            ),
+            (
+                "update_record",
+                "PATCH",
+                "/services/data/v66.0/sobjects/Account/001000000000001",
+            ),
+            (
+                "delete_record",
+                "DELETE",
+                "/services/data/v66.0/sobjects/Account/001000000000001",
+            ),
+        ] {
+            assert!(
+                matches("salesforce", &[tool], host, method, path),
+                "{tool} lost {method} {path}"
+            );
+            // The method split is the read/write boundary: a GET tool must not
+            // answer a mutation on the same path, and vice versa.
+            for other in ["GET", "POST", "PATCH", "DELETE"] {
+                if other != method {
+                    assert!(
+                        !matches("salesforce", &[tool], host, other, path),
+                        "{tool} accepted {other} {path}"
+                    );
+                }
+            }
+        }
+        // A create grant must not reach an existing record's path, or a
+        // `_HttpMethod` override could turn it into an update or a delete.
+        for path in [
+            "/services/data/v66.0/sobjects/Account/001000000000001",
+            "/services/data/v66.0/sobjects/Account/001000000000001/",
+            "/services/data/v66.0/sobjects",
+            "/services/data/v66.0/sobjects/",
+        ] {
+            assert!(
+                !matches("salesforce", &["create_record"], host, "POST", path),
+                "create_record reached {path}"
+            );
+        }
+        // Salesforce's login hosts are never org API hosts.
+        for other_host in ["login.salesforce.com", "acme.my.salesforce.com.evil.test"] {
+            assert!(!matches(
+                "salesforce",
+                &["query"],
+                other_host,
+                "GET",
+                "/services/data/v66.0/query"
+            ));
+        }
+    }
+
     #[test]
     fn app_target_matches_its_tool_endpoint_and_nothing_else() {
         // create_issue = POST api.github.com /repos/*/*/issues
@@ -800,6 +931,197 @@ mod tests {
             "www.googleapis.com",
             "POST",
             probe
+        ));
+    }
+
+    // ── Apollo.io / PostHog / Clay (API-key apps) ─────────────────────
+    // Endpoint shapes verified against each provider's published OpenAPI.
+
+    #[test]
+    fn posthog_get_project_covers_the_current_project_probe() {
+        // Every project-scoped PostHog tool needs a project id, and
+        // `/api/projects/@current/` is how agents discover it. `get_project`
+        // must cover it on all three hosts, and stay fenced to one segment:
+        // it must never widen into `/api/projects/{id}/<resource>/`.
+        for host in ["us.posthog.com", "eu.posthog.com", "app.posthog.com"] {
+            assert!(matches(
+                "posthog",
+                &["get_project"],
+                host,
+                "GET",
+                "/api/projects/@current/"
+            ));
+            assert!(matches(
+                "posthog",
+                &["get_project"],
+                host,
+                "GET",
+                "/api/projects/12345/"
+            ));
+        }
+        assert!(!matches(
+            "posthog",
+            &["get_project"],
+            "us.posthog.com",
+            "GET",
+            "/api/projects/12345/feature_flags/"
+        ));
+        assert!(!matches(
+            "posthog",
+            &["get_project"],
+            "us.posthog.com",
+            "PATCH",
+            "/api/projects/12345/"
+        ));
+        // Org discovery rides `list_projects`; `@current` included.
+        assert!(matches(
+            "posthog",
+            &["list_projects"],
+            "eu.posthog.com",
+            "GET",
+            "/api/organizations/@current/"
+        ));
+        assert!(matches(
+            "posthog",
+            &["list_projects"],
+            "eu.posthog.com",
+            "GET",
+            "/api/organizations/"
+        ));
+    }
+
+    #[test]
+    fn apollo_bulk_and_task_state_endpoints_are_their_own_tools() {
+        // Bulk updates are POSTs on a fixed sub-path. They live in dedicated
+        // tools rather than as aliases of the PATCH `update_*` tools, so that
+        // granting "update one contact" never widens to "update every
+        // contact" — and vice versa.
+        assert!(matches(
+            "apollo-io",
+            &["bulk_update_contacts"],
+            "api.apollo.io",
+            "POST",
+            "/api/v1/contacts/bulk_update"
+        ));
+        assert!(matches(
+            "apollo-io",
+            &["bulk_update_contacts"],
+            "api.apollo.io",
+            "POST",
+            "/api/v1/contacts/update_owners"
+        ));
+        assert!(!matches(
+            "apollo-io",
+            &["update_contact"],
+            "api.apollo.io",
+            "POST",
+            "/api/v1/contacts/bulk_update"
+        ));
+        assert!(!matches(
+            "apollo-io",
+            &["bulk_update_contacts"],
+            "api.apollo.io",
+            "PATCH",
+            "/api/v1/contacts/abc123"
+        ));
+        // `bulk_update_contacts` must not swallow the create/search POSTs.
+        assert!(!matches(
+            "apollo-io",
+            &["bulk_update_contacts"],
+            "api.apollo.io",
+            "POST",
+            "/api/v1/contacts"
+        ));
+        assert!(!matches(
+            "apollo-io",
+            &["bulk_update_contacts"],
+            "api.apollo.io",
+            "POST",
+            "/api/v1/contacts/search"
+        ));
+        // Complete/skip are POSTs under a task id; `update_task` (PATCH on the
+        // id) does not cover them and they do not cover it.
+        assert!(matches(
+            "apollo-io",
+            &["complete_task"],
+            "api.apollo.io",
+            "POST",
+            "/api/v1/tasks/t1/skip"
+        ));
+        assert!(!matches(
+            "apollo-io",
+            &["update_task"],
+            "api.apollo.io",
+            "POST",
+            "/api/v1/tasks/t1/complete"
+        ));
+        assert!(!matches(
+            "apollo-io",
+            &["complete_task"],
+            "api.apollo.io",
+            "PATCH",
+            "/api/v1/tasks/t1"
+        ));
+    }
+
+    #[test]
+    fn apollo_enrich_tools_cover_the_credit_spending_lookups() {
+        // "Get complete person/organization info" spend credits exactly like
+        // enrichment, so they ride the enrich tools; the credit-free search
+        // and job-postings endpoints stay outside them.
+        assert!(matches(
+            "apollo-io",
+            &["enrich_person"],
+            "api.apollo.io",
+            "GET",
+            "/api/v1/people/66c8db577ed7f201b25c0eef"
+        ));
+        assert!(matches(
+            "apollo-io",
+            &["enrich_company"],
+            "api.apollo.io",
+            "GET",
+            "/api/v1/organizations/5e66b6381e05b4008c8331b8"
+        ));
+        assert!(!matches(
+            "apollo-io",
+            &["enrich_company"],
+            "api.apollo.io",
+            "GET",
+            "/api/v1/organizations/5e66b6381e05b4008c8331b8/job_postings"
+        ));
+        assert!(!matches(
+            "apollo-io",
+            &["enrich_person"],
+            "api.apollo.io",
+            "POST",
+            "/api/v1/mixed_people/api_search"
+        ));
+    }
+
+    #[test]
+    fn clay_search_reference_covers_both_query_grammars() {
+        assert!(matches(
+            "clay",
+            &["search_reference"],
+            "api.clay.com",
+            "GET",
+            "/public/v0/workflows/runs/query/reference"
+        ));
+        // The reference is read-only; running the query is a separate tool.
+        assert!(!matches(
+            "clay",
+            &["search_reference"],
+            "api.clay.com",
+            "POST",
+            "/public/v0/workflows/runs/query"
+        ));
+        assert!(matches(
+            "clay",
+            &["search_workflow_runs"],
+            "api.clay.com",
+            "POST",
+            "/public/v0/workflows/runs/query"
         ));
     }
 
@@ -977,8 +1299,8 @@ mod tests {
     #[test]
     fn stripe_read_only_grant_never_authorizes_a_write() {
         // A read-scoped grant must not match a mutating request: read_all is
-        // GET-only, so the money-moving calls fall through to the compiled
-        // stack's terminal block (fail-closed).
+        // GET-only, so the money-moving calls fall through to the rest of the
+        // compiled stack and are never admitted by the read allow.
         for (method, path) in [
             ("POST", "/v1/refunds"),
             ("POST", "/v1/payouts"),

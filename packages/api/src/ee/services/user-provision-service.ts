@@ -10,6 +10,7 @@ import { assertCanInviteMember } from "./quota-service";
 import { deleteWorkspaceContent } from "./workspace-service";
 import { deletePlaceholderUser } from "./user-service";
 import { invalidateGatewayCacheForKeys } from "../../lib/gateway-invalidate";
+import { processChannelCleanups } from "../../services/channels/channel-cleanup-service";
 import { logger } from "../../lib/logger";
 
 const PROVISION_EXPIRY_DAYS = 7;
@@ -256,7 +257,7 @@ export const claimProvision = async (
       },
     });
 
-    await db.$transaction(async (tx) => {
+    const flushPolicy = await db.$transaction(async (tx) => {
       // Atomic claim-of-the-claim (compare-and-set): only one transaction can
       // move the row out of "pending" — a concurrent duplicate blocks on the
       // row lock here and then matches nothing. A plain re-read would let two
@@ -339,8 +340,9 @@ export const claimProvision = async (
       }
 
       await tx.userProvision.delete({ where: { id: provision.id } });
-      await deletePlaceholderUser(provision.userId, tx);
+      return deletePlaceholderUser(provision.userId, tx);
     });
+    flushPolicy();
   } else {
     const authIdConflict = await db.user.findFirst({
       where: { externalAuthId: realExternalAuthId },
@@ -484,7 +486,7 @@ const deleteProvisionResources = async (
   userId: string,
   workspaceId: string,
 ): Promise<void> => {
-  const keys = await db.$transaction(async (tx) => {
+  const reaped = await db.$transaction(async (tx) => {
     // Capture the workspace's API keys before deleting them so they can be
     // flushed from the gateway cache after the transaction commits — otherwise
     // a deleted key keeps being served from the cache until its TTL.
@@ -496,20 +498,27 @@ const deleteProvisionResources = async (
       where: { id: workspaceId },
       select: { id: true },
     });
-    let apiKeys: { key: string }[] = [];
+    let keys: { key: string }[] = [];
+    let cleanupIds: string[] = [];
     if (workspace) {
-      apiKeys = await tx.apiKey.findMany({
+      keys = await tx.apiKey.findMany({
         where: { workspaceId },
         select: { key: true },
       });
-      await deleteWorkspaceContent(workspaceId, tx);
+      ({ cleanupIds } = await deleteWorkspaceContent(workspaceId, tx));
     }
     await tx.organizationMember.deleteMany({ where: { userId } });
     await tx.userProvision.delete({ where: { id: provisionId } });
-    await deletePlaceholderUser(userId, tx);
-    return apiKeys;
+    const flushPolicy = await deletePlaceholderUser(userId, tx);
+    return { keys, cleanupIds, flushPolicy };
   });
-  invalidateGatewayCacheForKeys(keys.map((k) => k.key));
+  invalidateGatewayCacheForKeys(reaped.keys.map((k) => k.key));
+  reaped.flushPolicy();
+  // The departing member's channel apps: same post-commit kick every other
+  // deletion path gives, so offboarding does not wait for the hourly sweep.
+  await processChannelCleanups({ ids: reaped.cleanupIds }).catch(
+    () => undefined,
+  );
 };
 
 export const cleanupExpiredProvisions = async (

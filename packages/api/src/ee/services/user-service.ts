@@ -1,4 +1,6 @@
 import { db } from "@onecli/db";
+import { invalidateGatewayCacheForOrg } from "../../lib/gateway-invalidate";
+import { dropPrincipalFromPolicyInTx } from "../../services/policy-service";
 
 /**
  * Delete a now-defunct placeholder user and the per-user rows that are NEVER
@@ -11,14 +13,23 @@ import { db } from "@onecli/db";
  * TRANSFERABLE per-user `RESTRICT` children first — `organizationMember`,
  * `apiKey`, `userProvision` (and the `SET NULL` `workspace.createdByUserId`).
  * This helper handles only the rows that always die with the user
- * (`onboarding_surveys`, `audit_logs`), so it must NOT touch the transferable
- * ones — the claim flow hands those to the real user.
+ * (`onboarding_surveys`, `audit_logs`, and the policy rules naming only this
+ * user), so it must NOT touch the transferable ones: the claim flow hands
+ * those to the real user.
+ *
+ * Returns a post-commit hook: call it once the caller's transaction commits,
+ * to flush the gateway cache of every organization whose rules changed.
  */
 export const deletePlaceholderUser = async (
   userId: string,
   tx: Parameters<Parameters<typeof db.$transaction>[0]>[0],
-) => {
+): Promise<() => void> => {
   await tx.onboardingSurvey.deleteMany({ where: { userId } });
   await tx.auditLog.deleteMany({ where: { userId } });
+  const organizationIds = await dropPrincipalFromPolicyInTx(tx, {
+    kind: "user",
+    id: userId,
+  });
   await tx.user.delete({ where: { id: userId } });
+  return () => organizationIds.forEach(invalidateGatewayCacheForOrg);
 };

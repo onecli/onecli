@@ -557,6 +557,10 @@ async fn get_pending_approvals(
                 _ = shutdown_signal.wait() => false,
             };
             if got_new {
+                // Parallel requests land a beat apart. Answer with the whole
+                // burst, not its first request, so every surface sees one
+                // task at once instead of a card that grows after it shows.
+                tokio::time::sleep(approval::BURST_COALESCE).await;
                 let mut fresh = state
                     .approval_store
                     .list_pending(&org_id, &auth.workspace_id)
@@ -1031,6 +1035,11 @@ async fn handle_http_proxy(
     };
 
     let connection_id = connect::extract_connection_id(req.headers());
+    // Owned: `req` is moved into forwarding below, and the transport-failure
+    // answer still needs the path and method (and the start, for its row).
+    let req_path = req.uri().path_and_query().map(|pq| pq.to_string());
+    let req_method = req.method().clone();
+    let start = std::time::Instant::now();
 
     let mut resolved = match connect::resolve(
         &agent_token,
@@ -1066,10 +1075,13 @@ async fn handle_http_proxy(
     let mut resolved_connection_id: Option<String> = None;
     // Connections whose credential is minted only after the request is allowed.
     let mut pending_injections: Vec<proxy::connect::PendingInjection> = Vec::new();
+    // Host-gated connections that refused this request (wrong host) — see
+    // `ResolvedRules::host_mismatch`.
+    let mut host_mismatch: Option<Vec<proxy::connect::ConnectionChoice>> = None;
     if !resolved.app_connections.is_empty() {
         let oid = resolved.organization_id.as_deref().unwrap_or("");
         let pid = resolved.workspace_id.as_deref().unwrap_or("");
-        let request_path = req.uri().path_and_query().map(|pq| pq.as_str());
+        let request_path = req_path.as_deref();
         let secret_rules = std::mem::take(&mut resolved.injection_rules);
         let secrets_serve = inject::rules_serve_path(&secret_rules, request_path);
         let mut app_rules: Vec<inject::InjectionRule> = Vec::new();
@@ -1125,6 +1137,11 @@ async fn handle_http_proxy(
                 debug!(host = %authority, "requested connection not found; secret rules serve this path");
             }
             Ok(AppConnectionResult::NoConnections) => {}
+            // Nothing injects, exactly as `NoConnections`; the choices ride
+            // along so a downstream failure can be explained (#1137).
+            Ok(AppConnectionResult::HostMismatch { connections }) => {
+                host_mismatch = Some(connections);
+            }
             Err(e) => {
                 if !secrets_serve {
                     warn!(peer = %peer_addr, host = %authority, error = ?e, "HTTP proxy: app connection resolution failed");
@@ -1176,6 +1193,10 @@ async fn handle_http_proxy(
         agent_token,
     };
 
+    // Non-injecting alias host: report the bound host (see mitm::resolve_rules).
+    let host_mismatch =
+        host_mismatch.or_else(|| proxy::connect::alias_host_choices(&resolved.alias_connections));
+
     let rules = proxy::mitm::ResolvedRules {
         injection_rules: resolved.injection_rules,
         pending_injections,
@@ -1191,6 +1212,7 @@ async fn handle_http_proxy(
         session_policy: resolved_session_policy,
         winning_connection_id: resolved_connection_id,
         budget_bindings: resolved.budget_bindings,
+        host_mismatch,
     };
 
     let http_client =
@@ -1200,7 +1222,7 @@ async fn handle_http_proxy(
             state.http_client.clone()
         };
 
-    let mut resp = async {
+    let forwarded = async {
         proxy::forward::forward_request(
             req,
             &authority, // forward target (the HTTP-proxy path never host-rewrites)
@@ -1216,7 +1238,34 @@ async fn handle_http_proxy(
         .await
     }
     .instrument(session_span)
-    .await?;
+    .await;
+
+    let mut resp = match forwarded {
+        Ok(resp) => resp,
+        // Same law as the MITM path (`mitm::transport_failure_response`): a
+        // request that could not be delivered because it went to a host none
+        // of the agent's host-gated connections is bound to is answered with
+        // the bound host, not an opaque failure (#1137).
+        Err(e) => {
+            if let Some(connections) = rules.host_mismatch.as_deref() {
+                warn!(peer = %peer_addr, host = %authority, error = ?e, "HTTP proxy: forwarding failed on a mismatched connection host");
+                let path = req_path.as_deref().unwrap_or("/");
+                proxy::hooks::record_host_mismatch_failure(
+                    &proxy_ctx,
+                    &hostname,
+                    req_method.as_str(),
+                    path,
+                    start,
+                );
+                return Ok(proxy::response::connection_host_mismatch_axum(
+                    &hostname,
+                    path,
+                    connections,
+                ));
+            }
+            return Err(e);
+        }
+    };
 
     connect::inject_connections_header(&mut resp, &resolved.app_connections);
 
@@ -1442,6 +1491,9 @@ mod tests {
             headers: Default::default(),
             body_preview: None,
             summary: None,
+            raw_body: None,
+            app: None,
+            batch: None,
             created_at: 0,
             expires_at: u64::MAX,
         }

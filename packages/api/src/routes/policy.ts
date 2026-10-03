@@ -4,6 +4,8 @@ import type { ApiEnv } from "../types";
 import type { AuthContext } from "../providers";
 import type { ResourceScope } from "../services/resource-scope";
 import { ServiceError } from "../services/errors";
+import { bumpHomeForScope } from "../services/home-sync-service";
+import { logger } from "../lib/logger";
 import {
   listPolicyRules,
   getPolicyRule,
@@ -170,14 +172,23 @@ export const registerPolicyRoutes = (
 
   app.post("/publish", async (c) => {
     const auth = c.get("auth");
+    const scope = cfg.resolveScope(auth);
     const result = await withAudit(
-      () => publishPolicy(cfg.resolveScope(auth), auth.userId),
+      () => publishPolicy(scope, auth.userId),
       (r) => ({
         ...auditBase(auth),
         action: AUDIT_ACTIONS.PUBLISH,
         metadata: { generation: r.generation, ruleCount: r.ruleCount },
       }),
     );
+    // A publish can attach or detach connections (provider-level grants):
+    // re-render the affected agents' connected-apps list. Best-effort — a
+    // missed bump self-heals at the next boot. Lives here rather than in
+    // publishPolicy: home-sync-service already reaches policy-service through
+    // the rule loader, so the service cannot import the bump without a cycle.
+    await bumpHomeForScope(scope).catch((err: unknown) => {
+      logger.warn({ err }, "policy publish: agent home refresh failed");
+    });
     return c.json(result);
   });
 

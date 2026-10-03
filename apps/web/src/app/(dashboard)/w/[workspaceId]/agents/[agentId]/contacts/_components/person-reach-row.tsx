@@ -1,0 +1,253 @@
+"use client";
+
+import { useState } from "react";
+import {
+  Check,
+  ChevronDown,
+  Clock,
+  Loader2,
+  Slash,
+  UserCheck,
+} from "lucide-react";
+import { toast } from "sonner";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@onecli/ui/components/alert-dialog";
+import { Badge } from "@onecli/ui/components/badge";
+import { Button, buttonVariants } from "@onecli/ui/components/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@onecli/ui/components/dropdown-menu";
+import type { ChannelPersonReach, ChannelProvider } from "@/lib/api";
+import {
+  useDismissPersonReach,
+  useSetPersonReachState,
+} from "@/hooks/use-channels";
+import { ContactRowFrame } from "./contact-row-frame";
+
+interface PersonReachRowProps {
+  agentId: string;
+  provider: ChannelProvider;
+  person: ChannelPersonReach;
+}
+
+/**
+ * One person's reach row - someone who messaged the agent directly but has
+ * no OneCLI account to match.
+ *
+ * TWO settlements, not the channel's three: "OneCLI users only" describes a
+ * population, and this row is about one human. Sibling of SpaceReachRow by
+ * design (same badge-as-trigger pattern, same dismiss affordance) but
+ * deliberately its own component - the vocabularies differ, and collapsing
+ * them into one polymorphic row would mean a menu whose options change
+ * shape based on a kind flag.
+ */
+export const PersonReachRow = ({
+  agentId,
+  provider,
+  person,
+}: PersonReachRowProps) => {
+  const setState = useSetPersonReachState(agentId, provider);
+  const dismiss = useDismissPersonReach(agentId, provider);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const label = person.label ?? person.externalRef;
+  const busy = setState.isPending || dismiss.isPending;
+
+  const choose = (state: "approved" | "blocked") => {
+    if (state === person.state) return;
+    setState.mutate(
+      { externalRef: person.externalRef, state },
+      {
+        onSuccess: () =>
+          toast.success(
+            state === "approved"
+              ? `${label}: allowed`
+              : `${label}: not allowed`,
+          ),
+        onError: (err) =>
+          toast.error(err instanceof Error ? err.message : "Update failed"),
+      },
+    );
+  };
+
+  const confirmDismiss = () => {
+    dismiss.mutate(
+      { externalRef: person.externalRef },
+      {
+        onSuccess: () => {
+          setConfirmOpen(false);
+          toast.success(`${label} removed`);
+        },
+        onError: (err) => {
+          setConfirmOpen(false);
+          toast.error(err instanceof Error ? err.message : "Remove failed");
+        },
+      },
+    );
+  };
+
+  const approved = person.state === "approved";
+  const pending = person.state === "pending";
+  const StatusIcon = approved ? UserCheck : pending ? Clock : Slash;
+
+  // A PENDING person is not a setting yet - deciding lives in the
+  // approvals bell (4d), the one inbox.
+  if (pending) {
+    return (
+      <ContactRowFrame
+        label={label}
+        status={
+          <Badge
+            variant="secondary"
+            className="border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+          >
+            <Clock className="size-3" aria-hidden />
+            Waiting in the approvals bell
+          </Badge>
+        }
+      />
+    );
+  }
+
+  return (
+    <>
+      <ContactRowFrame
+        label={label}
+        disabled={busy}
+        onRemove={() => setConfirmOpen(true)}
+        status={
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild disabled={busy}>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="gap-1.5 px-2"
+                aria-label={`Whether ${label} can message this agent: ${
+                  approved
+                    ? "allowed"
+                    : pending
+                      ? "waiting for approval"
+                      : "not allowed"
+                }. Change`}
+              >
+                {setState.isPending ? (
+                  <Loader2
+                    className="size-3.5 animate-spin motion-reduce:hidden"
+                    aria-hidden
+                  />
+                ) : null}
+                <Badge
+                  variant="secondary"
+                  className={
+                    approved
+                      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                      : pending
+                        ? "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                        : "border-destructive/30 bg-destructive/10 text-destructive dark:text-red-400"
+                  }
+                >
+                  <StatusIcon className="size-3" aria-hidden />
+                  {approved
+                    ? "Allowed"
+                    : pending
+                      ? "Asked, pending"
+                      : "Not allowed"}
+                </Badge>
+                <ChevronDown
+                  className="text-muted-foreground size-3.5"
+                  aria-hidden
+                />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-72">
+              <DropdownMenuLabel className="font-normal text-pretty">
+                Can <span translate="no">{label}</span> message the agent
+              </DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onSelect={() => choose("approved")}
+                className="items-start gap-2"
+              >
+                <Check
+                  className={`mt-0.5 size-3.5 shrink-0 ${approved ? "" : "invisible"}`}
+                  aria-hidden
+                />
+                <span className="min-w-0">
+                  <span className="block text-sm">Allowed</span>
+                  <span className="text-muted-foreground block text-xs text-pretty">
+                    The agent answers them.
+                  </span>
+                </span>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onSelect={() => choose("blocked")}
+                className="items-start gap-2"
+              >
+                <Check
+                  className={`mt-0.5 size-3.5 shrink-0 ${person.state === "blocked" ? "" : "invisible"}`}
+                  aria-hidden
+                />
+                <span className="min-w-0">
+                  <span className="block text-sm">Not allowed</span>
+                  <span className="text-muted-foreground block text-xs text-pretty">
+                    Silent here and in channels.
+                  </span>
+                </span>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        }
+      />
+
+      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-pretty">
+              Remove <span translate="no">{label}</span>?
+            </AlertDialogTitle>
+            <AlertDialogDescription className="text-pretty">
+              If they message again, you will be asked again.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={dismiss.isPending}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(event) => {
+                event.preventDefault();
+                confirmDismiss();
+              }}
+              disabled={dismiss.isPending}
+              className={buttonVariants({ variant: "destructive" })}
+            >
+              {dismiss.isPending ? (
+                <>
+                  <Loader2
+                    className="size-3.5 animate-spin motion-reduce:hidden"
+                    aria-hidden
+                  />
+                  Removing…
+                </>
+              ) : (
+                "Remove"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  );
+};

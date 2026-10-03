@@ -1,4 +1,7 @@
-import type { AdapterWorkItem } from "@onecli/agent-protocol";
+import {
+  MAX_OUTBOUND_ATTACHMENT_BYTES,
+  type AdapterWorkItem,
+} from "@onecli/agent-protocol";
 // The client-safe app catalog (pure data, no Node builtins at import) — the
 // card gate below must agree with the web's isCardConnectLink.
 import { getApp } from "@onecli/api/apps/registry";
@@ -6,14 +9,20 @@ import { getApp } from "@onecli/api/apps/registry";
 // continuity bridge, so a new automation source lands in both in one edit.
 import {
   AUTOMATION_SOURCES,
+  GREETING_SOURCE,
   TURN_FAILED_PARTIAL_MESSAGE,
   TURN_FAILED_SILENT_MESSAGE,
   TURN_STOPPED_MESSAGE,
+  type AutomationSource,
 } from "@onecli/api/validations/conversation";
 import { mentionNamesOf, plainMentionCandidatesOf } from "@onecli/channels";
 import type { AdapterMentionReportRequest } from "@onecli/agent-protocol";
 import type { ControlPlaneClient } from "./control-plane";
-import { replyTargetForTurn, type ChannelPostTarget } from "./targets";
+import {
+  replyTargetForTurn,
+  type ChannelPostTarget,
+  type ThreadAddressDecoder,
+} from "./targets";
 
 /**
  * The gateway's "connect this app" dashboard links, recognized in an answer
@@ -236,6 +245,37 @@ const transcriptOutcome = async (
 };
 
 /**
+ * A file the channel could not carry (bytes unreachable, or the upload
+ * refused): its name, and the web door for it when the mirror has one (built
+ * from the adapter's OWN config, never from anything the model or the
+ * provider said). No `url` → the channel names the file and points at the web
+ * in words.
+ */
+export interface UnavailableFile {
+  name: string;
+  url?: string;
+}
+
+/** One outbound file with its bytes in hand, ready for the channel. */
+export interface OutboundFile {
+  /** The platform's attachment id — what the web door is keyed by. */
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  caption: string | null;
+  bytes: Uint8Array;
+}
+
+/**
+ * The largest file the mirror will pull for a channel post — the platform's
+ * own per-file cap, so the two can never disagree. Slack's ceiling is 1 GB;
+ * this is the belt the control plane enforced at send time, re-stated here
+ * so a control plane bug can never make the adapter buffer a gigabyte.
+ */
+export const MAX_MIRRORED_FILE_BYTES = MAX_OUTBOUND_ATTACHMENT_BYTES;
+
+/**
  * What a channel must provide to carry the mirror's posts. Each operation is
  * semantic — the implementation owns the channel-native rendering (Slack:
  * slack/mirror-posts.ts); a second channel implements the same seam. The
@@ -248,11 +288,12 @@ export interface MirrorPosts {
   webSourced(
     input: ChannelPostTarget & { userName: string | null; message: string },
   ): Promise<void>;
-  /** An automated run's report: the run's title as a caption, plus the body
-   * (model markdown) when one exists. */
+  /** An automated run's report, or a peer task's report to the person (the
+   * agent's own words after talking with another agent): the turn's title
+   * as a caption, plus the body (model markdown) when one exists. */
   automation(
     input: ChannelPostTarget & {
-      source: "watch" | "cron";
+      source: AutomationSource;
       title: string;
       body: string | null;
     },
@@ -295,6 +336,25 @@ export interface MirrorPosts {
   trialCreditExhausted(
     input: ChannelPostTarget & { modelsUrl: string; answer: string },
   ): Promise<void>;
+  /**
+   * The agent's files for this turn (send_file), posted AFTER the answer as
+   * ONE share: `files` carry bytes the mirror already pulled; `unavailable`
+   * are files whose bytes could not be fetched (name only). The channel
+   * decides how to say what it cannot carry — a missing upload scope, a
+   * workspace that forbids uploads, a refused type — but it must always say
+   * SOMETHING: a file the agent believes it sent must never vanish silently
+   * (the web remains the complete record; `webLabel` names it).
+   */
+  files(
+    input: ChannelPostTarget & {
+      files: OutboundFile[];
+      unavailable: UnavailableFile[];
+      /** The web door by attachment id, for files the channel REFUSES after
+       * the mirror handed it their bytes (missing scope, uploads disabled).
+       * Same provenance rule as `unavailable[].url`. */
+      attachmentUrl?: (attachmentId: string) => string;
+    },
+  ): Promise<void>;
   /** Platform chrome for a turn that ended without a normal answer — a
    * failure line, or the quiet "Stopped." after an abort. Rendered so it
    * cannot be mistaken for the agent's own voice. `warn` picks the failure
@@ -310,6 +370,11 @@ export interface MirrorDeps {
   credential: string;
   provider: string;
   posts: MirrorPosts;
+  /** The provider's removal-detection seam (see ChannelAdapterProvider):
+   * a post failure in → the provider's removal event, or null. */
+  removalEventFor: (failure: unknown) => unknown | null;
+  /** The provider's thread-address decoder (see targets.ts). */
+  threadAddress: ThreadAddressDecoder;
   /** The agent's public avatar URL, threaded to every post when set. */
   iconUrl?: string | null;
   /** The link's cursor as this adapter last knew it (the CAS expectation). */
@@ -325,6 +390,12 @@ export interface MirrorDeps {
    * never carry a model-authored URL; the answer posts unchanged with the
    * raw gateway link visible in the prose. */
   chatUrl?: string;
+  /** The web download page for one of this turn's files, by attachment id —
+   * the degrade line's link when the channel cannot carry the bytes. Built
+   * by the adapter from `appUrl` + the agent's ids + this item's
+   * conversation; the mirror only ever hands it an id. Omitted → the line
+   * names the file and points at the web in words. */
+  attachmentUrl?: (attachmentId: string) => string;
   onLog: (message: string, detail?: unknown) => void;
 }
 
@@ -339,7 +410,7 @@ export const mirrorFinishedTurn = async (
   const { item } = deps;
   // The turn's own address when it has one (a DM thread), else the link's —
   // so an answer lands in the thread its question was asked in.
-  const link = replyTargetForTurn(item, item.turn);
+  const link = replyTargetForTurn(deps.threadAddress, item, item.turn);
   const target: ChannelPostTarget = {
     credential: deps.credential,
     channel: link.channel,
@@ -374,7 +445,9 @@ export const mirrorFinishedTurn = async (
   // automation source lands in both places in one edit.
   const automated = (AUTOMATION_SOURCES as readonly string[]).includes(
     item.turn.source,
-  );
+  )
+    ? (item.turn.source as AutomationSource)
+    : null;
 
   try {
     const outcome = await transcriptOutcome(
@@ -462,38 +535,109 @@ export const mirrorFinishedTurn = async (
     const failedWithPartialText =
       item.turn.status === "failed" && outcome.text !== null;
 
-    if (automated) {
-      await deps.posts.automation({
+    // THE AGENT'S FILES (send_file): after the answer, as one share. Bytes
+    // are pulled here (the work poll carries metadata only) and each pull
+    // is independent — one unreadable file becomes a named "unavailable"
+    // line, never a reason to drop its siblings. Declared here so BOTH the
+    // automation report and the conversational answer post them: a cron's
+    // report with its PDF is the whole point of the feature.
+    const postOutboundFiles = async (): Promise<void> => {
+      const outbound = item.turn.attachments ?? [];
+      if (outbound.length === 0) return;
+      const files: OutboundFile[] = [];
+      const unavailable: UnavailableFile[] = [];
+      const doorFor = (id: string): { url?: string } =>
+        deps.attachmentUrl ? { url: deps.attachmentUrl(id) } : {};
+      for (const meta of outbound) {
+        const bytes =
+          meta.sizeBytes <= MAX_MIRRORED_FILE_BYTES
+            ? await deps.controlPlane
+                .fetchAttachment(meta.id, MAX_MIRRORED_FILE_BYTES)
+                .catch((err: unknown) => {
+                  deps.onLog("outbound attachment fetch failed", {
+                    err: String(err),
+                    attachmentId: meta.id,
+                  });
+                  return null;
+                })
+            : null;
+        if (bytes) {
+          files.push({
+            id: meta.id,
+            name: meta.name,
+            mimeType: meta.mimeType,
+            sizeBytes: meta.sizeBytes,
+            caption: meta.caption,
+            bytes,
+          });
+        } else {
+          unavailable.push({ name: meta.name, ...doorFor(meta.id) });
+        }
+      }
+      await deps.posts.files({
         ...target,
-        source: item.turn.source === "watch" ? "watch" : "cron",
-        title: item.turn.message,
-        body: answer,
+        files,
+        unavailable,
+        ...(deps.attachmentUrl && { attachmentUrl: deps.attachmentUrl }),
       });
+    };
+
+    if (item.turn.source === GREETING_SOURCE) {
+      // The agent's first words on a brand-new thread. The instruction the
+      // platform posted is not a person's question (no "(from the web)"),
+      // and it is not a run report either (no header): on Slack the person
+      // simply sees their agent say hello. A greeting with no answer (the
+      // instruction failed) posts nothing — there is no failure to report
+      // to someone who has not asked anything yet.
+      if (answer && outcome.text) {
+        await deps.posts.answer({ ...target, markdown: answer, mentions });
+      }
       return item.turn.createdAt;
     }
 
-    if (!fromProvider) {
-      // The question came from elsewhere (the web): show it, attributed —
-      // by name when the control plane resolved one.
+    if (automated) {
+      await deps.posts.automation({
+        ...target,
+        source: automated,
+        title: item.turn.message,
+        body: answer,
+      });
+      await postOutboundFiles();
+      return item.turn.createdAt;
+    }
+
+    // Words the provider thread has not seen: the turn's own message when
+    // it came from elsewhere, and the mid-run follow-ups the turn consumed
+    // (the answer below covers them, so without these lines the thread
+    // shows an answer to questions it never saw). Provider-sourced ones are
+    // already in the channel — posting them again would echo the user.
+    // (A peer agent's words never reach a person's thread since peer
+    // tasks: the exchange stays on the pair conversations, and only the
+    // agent's own report comes home, as an automation post above.)
+    const postSourced = async (line: {
+      userName: string | null;
+      message: string;
+    }) => {
       await deps.posts.webSourced({
         ...target,
+        userName: line.userName,
+        message: line.message,
+      });
+    };
+    if (!fromProvider) {
+      await postSourced({
+        // By name when the control plane resolved one.
         userName: item.turn.userName ?? null,
         message: item.turn.message,
       });
     }
-
-    // Mid-run follow-ups the turn consumed: the answer below covers them, so
-    // the provider thread must show the web-sourced ones or it reads as an
-    // answer to questions it never saw. Provider-sourced follow-ups are
-    // already in the channel — posting them again would echo the user.
     for (const followUp of item.followUps ?? []) {
       if (followUp.source === deps.provider) continue;
       // Attributed by the follow-up's OWN author. An older control plane
       // sends no per-follow-up name (field absent) — fall back to the turn's
       // asker, the pre-field behavior, exact on direct threads. Null means
       // the control plane resolved and found nothing (deleted user): unnamed.
-      await deps.posts.webSourced({
-        ...target,
+      await postSourced({
         userName:
           followUp.userName === undefined
             ? (item.turn.userName ?? null)
@@ -593,6 +737,8 @@ export const mirrorFinishedTurn = async (
         warn: false,
       });
     }
+    await postOutboundFiles();
+
     // LOUD FAILURE, second half: the answer posted with degraded mentions —
     // record which, so the next turn's context tells the model instead of
     // letting it believe the ping happened. After the posts (the answer
@@ -613,6 +759,28 @@ export const mirrorFinishedTurn = async (
       err: String(err),
       turnId: item.turn.id,
     });
+    // A refusal that means the app itself is gone (deleted on the provider's
+    // side, an uninstall whose webhook never reached us) is relayed through
+    // the ingest door as the PROVIDER's own removal event — the control
+    // plane flips the presence exactly as it would for the real webhook, so
+    // the dashboard card, the agent's doc and its tools stop claiming the
+    // channel. Which failures count, and the event's shape, are the
+    // provider's (removalEventFor); this file stays channel-neutral.
+    const removal = deps.removalEventFor(err);
+    if (removal !== null) {
+      await deps.controlPlane
+        .ingest({
+          presenceId: item.presenceId,
+          eventId: `dead-credential:${item.turn.id}`,
+          event: removal,
+        })
+        .catch((reportErr: unknown) =>
+          deps.onLog("dead credential report failed", {
+            err: String(reportErr),
+            presenceId: item.presenceId,
+          }),
+        );
+    }
   }
 
   return item.turn.createdAt;

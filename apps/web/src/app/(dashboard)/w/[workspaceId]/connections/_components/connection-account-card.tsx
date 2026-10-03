@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import {
   Building2,
   ChevronRight,
+  Globe,
   Loader2,
   MoreVertical,
   Pencil,
@@ -49,7 +50,10 @@ import {
   useRenameConnection,
 } from "@/hooks/use-connections";
 import type { PageScope } from "@/lib/api";
-import { extractLabel } from "@onecli/api/services/connection-service";
+import {
+  extractBoundHost,
+  extractLabel,
+} from "@onecli/api/lib/connection-display";
 // The read-only agent-access reflection, which reads the v2 policy engine.
 // Shared since step 10 — every edition renders it.
 import { ConnectionAgentsReflection } from "@/lib/components/policy-reflect";
@@ -92,6 +96,7 @@ export const ConnectionAccountCard = ({
   const avatarUrl = connection.metadata?.avatarUrl as string | undefined;
   const accountType = connection.metadata?.accountType as string | undefined;
   const tags = (connection.metadata?.tags as string[] | undefined) ?? [];
+  const boundHost = extractBoundHost(connection.metadata);
 
   const handleRename = () => {
     const trimmed = renameValue.trim();
@@ -140,6 +145,20 @@ export const ConnectionAccountCard = ({
             )}
             <div className="min-w-0">
               <p className="text-sm font-medium truncate">{displayName}</p>
+              {boundHost && (
+                <a
+                  href={`https://${boundHost}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={boundHost}
+                  className="flex items-center gap-1 rounded-sm text-xs font-mono text-muted-foreground truncate hover:text-foreground hover:underline focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none"
+                >
+                  <Globe className="size-3 shrink-0" aria-hidden="true" />
+                  <span className="truncate" translate="no">
+                    {boundHost}
+                  </span>
+                </a>
+              )}
               <p className="text-xs text-muted-foreground">
                 {accountType ?? "Connected"}{" "}
                 <span className="text-muted-foreground/60">

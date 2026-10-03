@@ -172,9 +172,13 @@ const supervisorConfig = (homeDir: string) => ({
   effort: "low" as const,
   instructions: "self-wake regression agent",
   agentName: "Donna",
+  channels: [],
+  peers: [],
+  connections: [],
   harness: "jcode",
   runnerWsUrl: undefined,
   bootstrapToken: undefined,
+  outboundAttachments: false,
 });
 
 const deliver = (

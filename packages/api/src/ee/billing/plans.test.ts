@@ -11,7 +11,11 @@ import {
   offeredPlans,
   planRank,
 } from "./plans";
-import { requiredPlanFor } from "./plan-features";
+import {
+  isPremiumFeature,
+  requiredPlanFor,
+  ruleActionFeature,
+} from "./plan-features";
 
 describe("normalizePlan", () => {
   it("maps every known status to itself", () => {
@@ -163,9 +167,13 @@ describe("premium feature gating", () => {
     // assertFeatureAllowed, so a regression of these map values would otherwise
     // go uncaught.
     expect(requiredPlanFor("sso")).toBe("enterprise"); // moved Scale -> Enterprise (July 2026)
-    expect(requiredPlanFor("policy.manual_approval")).toBe("team"); // moved Pro -> Team
     expect(requiredPlanFor("policy.rate_limit")).toBe("pro");
     expect(requiredPlanFor("policy.deny_mode")).toBe("team");
     expect(requiredPlanFor("groups")).toBe("enterprise");
+  });
+
+  it("manual approval is free on every plan (no premium feature, no rule-action gate)", () => {
+    expect(isPremiumFeature("policy.manual_approval")).toBe(false);
+    expect(ruleActionFeature("manual_approval")).toBeNull();
   });
 });

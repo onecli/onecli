@@ -616,3 +616,50 @@ describe("threaded DM edge cases", () => {
     ).toEqual({ door: "ignore", reason: "self" });
   });
 });
+
+describe("the app's own removal (app_uninstalled / tokens_revoked)", () => {
+  // docs.slack.dev/reference/events/app_uninstalled: sent on COMPLETE
+  // uninstall; tokens_revoked may arrive before or after it.
+  it("app_uninstalled is the removed door, whoever we are", () => {
+    expect(interpretSlackEvent({ type: "app_uninstalled" }, CTX)).toEqual({
+      door: "removed",
+      reason: "app_uninstalled",
+    });
+    // Our own identity being unknown changes nothing: the event names the
+    // app by envelope, not by user.
+    expect(
+      interpretSlackEvent({ type: "app_uninstalled" }, { botUserId: null }),
+    ).toEqual({ door: "removed", reason: "app_uninstalled" });
+  });
+
+  it("tokens_revoked with a BOT entry is the removed door — the bot token is what the presence runs on", () => {
+    expect(
+      interpretSlackEvent(
+        { type: "tokens_revoked", tokens: { bot: [BOT] } },
+        CTX,
+      ),
+    ).toEqual({ door: "removed", reason: "tokens_revoked" });
+    expect(
+      interpretSlackEvent(
+        { type: "tokens_revoked", tokens: { oauth: ["U1"], bot: [BOT] } },
+        CTX,
+      ),
+    ).toEqual({ door: "removed", reason: "tokens_revoked" });
+  });
+
+  it("tokens_revoked naming only USER tokens is ignored — a per-agent app never held one", () => {
+    expect(
+      interpretSlackEvent(
+        { type: "tokens_revoked", tokens: { oauth: ["U1"] } },
+        CTX,
+      ),
+    ).toEqual({ door: "ignore", reason: "tokens_revoked:user-only" });
+    expect(
+      interpretSlackEvent({ type: "tokens_revoked", tokens: { bot: [] } }, CTX),
+    ).toEqual({ door: "ignore", reason: "tokens_revoked:user-only" });
+    expect(interpretSlackEvent({ type: "tokens_revoked" }, CTX)).toEqual({
+      door: "ignore",
+      reason: "tokens_revoked:user-only",
+    });
+  });
+});

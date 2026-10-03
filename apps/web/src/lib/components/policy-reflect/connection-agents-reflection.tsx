@@ -73,8 +73,8 @@ export const ConnectionAgentsReflection = ({
                 </DialogTitle>
               </div>
               <DialogDescription className="text-xs leading-relaxed">
-                Turn on the agents that should be able to use this connection.
-                Changes apply immediately. You can adjust them any time.
+                Every agent in this workspace can use this connection now. Turn
+                off the ones that shouldn&apos;t. Changes apply immediately.
               </DialogDescription>
             </>
           ) : (

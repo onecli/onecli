@@ -6,8 +6,17 @@ import type {
 } from "@onecli/agent-protocol";
 import {
   createSupervisorMessageHandler,
+  FILE_UPLOAD_STALE_MS,
+  MAX_INFLIGHT_FILE_UPLOADS_PER_SANDBOX,
   MAX_INFLIGHT_MEMORY_WRITES_PER_SANDBOX,
+  type OutboundFile,
 } from "./supervisor-messages";
+import { createHash } from "node:crypto";
+import {
+  ATTACHMENT_CHUNK_RAW_BYTES,
+  MAX_OUTBOUND_ATTACHMENT_BYTES,
+  type RunnerAttachmentUploadResponse,
+} from "@onecli/agent-protocol";
 
 /**
  * The supervisor→control-plane mapping. Its interesting cases are the ones a
@@ -25,6 +34,11 @@ interface DriveOptions {
   ) => Promise<RunnerMemoryWriteResponse>;
   /** Step 10: the runner's container map (undefined ⇒ "no record"). */
   containerRefOf?: (sandboxId: string) => string | undefined;
+  uploadAttachment?: (
+    sandboxId: string,
+    file: OutboundFile,
+  ) => Promise<RunnerAttachmentUploadResponse>;
+  now?: () => number;
 }
 
 const drive = (messages: SupervisorMessage[], options: DriveOptions = {}) => {
@@ -40,14 +54,18 @@ const drive = (messages: SupervisorMessage[], options: DriveOptions = {}) => {
     },
     toolCall: options.toolCall ?? (async () => ({ ok: true, result: null })),
     memoryWrite: options.memoryWrite ?? (async () => ({ ok: true })),
+    uploadAttachment:
+      options.uploadAttachment ??
+      (async () => ({ ok: true, attachmentId: "att-1" })),
     sendToSandbox: (sandboxId, item) => {
       sent.push({ sandboxId, item });
       return true;
     },
     containerRefOf: options.containerRefOf ?? (() => "cont-default"),
+    ...(options.now && { now: options.now }),
   });
   for (const message of messages) handle("sb-1", message);
-  return { reported, added, flushed, sent };
+  return { reported, added, flushed, sent, handle };
 };
 
 describe("supervisor message handler", () => {
@@ -385,5 +403,265 @@ describe("process.state forwarding (step 10)", () => {
   it("DROPS a frame when the container is unknown — no unstamped fact ships", () => {
     const { reported } = drive([frame], { containerRefOf: () => undefined });
     expect(reported).toEqual([]);
+  });
+});
+
+/**
+ * The send_file arm: chunk-run reassembly (one in-progress run per sandbox,
+ * fail-closed on any discontinuity), the checksum/size belts, the in-flight
+ * relay ceiling, the stale sweep — and the law that EVERY run gets exactly
+ * one file.result, so the supervisor's correlator never waits out a timeout.
+ */
+describe("the file.part arm (send_file)", () => {
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+  const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
+
+  /** Split bytes into legal file.part frames for one upload. */
+  const partsFor = (
+    uploadId: string,
+    bytes: Buffer,
+    overrides: Partial<Extract<SupervisorMessage, { kind: "file.part" }>> = {},
+  ): Extract<SupervisorMessage, { kind: "file.part" }>[] => {
+    const chunks: Buffer[] = [];
+    for (let i = 0; i < bytes.byteLength; i += ATTACHMENT_CHUNK_RAW_BYTES) {
+      chunks.push(bytes.subarray(i, i + ATTACHMENT_CHUNK_RAW_BYTES));
+    }
+    if (chunks.length === 0) chunks.push(Buffer.alloc(0));
+    return chunks.map((chunk, i) => ({
+      kind: "file.part" as const,
+      uploadId,
+      conversationId: "cv-1",
+      turnId: "t-1",
+      name: "report.pdf",
+      mimeType: "application/pdf",
+      sizeBytes: bytes.byteLength,
+      sha256: sha(bytes),
+      part: i + 1,
+      of: chunks.length,
+      dataBase64: chunk.toString("base64"),
+      ...overrides,
+    }));
+  };
+
+  const results = (sent: { item: unknown }[]) =>
+    sent
+      .map((s) => s.item as { kind: string })
+      .filter((i) => i.kind === "file.result") as Extract<
+      WorkItemLike,
+      { kind: "file.result" }
+    >[];
+  type WorkItemLike = {
+    kind: "file.result";
+    uploadId: string;
+    ok: boolean;
+    attachmentId?: string;
+    retryable?: boolean;
+    error?: string;
+  };
+
+  it("reassembles a multi-part run byte-exactly, relays it once, and answers ok with the attachment id", async () => {
+    const bytes = Buffer.alloc(ATTACHMENT_CHUNK_RAW_BYTES * 2 + 5, 7);
+    const uploaded: OutboundFile[] = [];
+    const { sent } = drive(partsFor("up-1", bytes), {
+      uploadAttachment: async (_sb, file) => {
+        uploaded.push(file);
+        return { ok: true, attachmentId: "att-9" };
+      },
+    });
+    await settle();
+    expect(uploaded).toHaveLength(1);
+    expect(Buffer.compare(uploaded[0]!.bytes, bytes)).toBe(0);
+    expect(uploaded[0]).toMatchObject({
+      uploadId: "up-1",
+      conversationId: "cv-1",
+      turnId: "t-1",
+      name: "report.pdf",
+      sha256: sha(bytes),
+    });
+    expect(results(sent)).toEqual([
+      {
+        kind: "file.result",
+        uploadId: "up-1",
+        ok: true,
+        attachmentId: "att-9",
+      },
+    ]);
+  });
+
+  it("carries the caption through when present, and omits it when absent", async () => {
+    const bytes = Buffer.from("x");
+    const uploaded: OutboundFile[] = [];
+    drive(partsFor("up-c", bytes, { caption: "look" }), {
+      uploadAttachment: async (_sb, file) => {
+        uploaded.push(file);
+        return { ok: true, attachmentId: "a" };
+      },
+    });
+    await settle();
+    expect(uploaded[0]?.caption).toBe("look");
+    drive(partsFor("up-d", bytes), {
+      uploadAttachment: async (_sb, file) => {
+        uploaded.push(file);
+        return { ok: true, attachmentId: "a" };
+      },
+    });
+    await settle();
+    expect("caption" in uploaded[1]!).toBe(false);
+  });
+
+  it("CHECKSUM: a run whose bytes do not hash to the declared sha is refused and never relayed", async () => {
+    const bytes = Buffer.from("real bytes");
+    const relayed = vi.fn(async () => ({ ok: true, attachmentId: "a" }));
+    const { sent } = drive(
+      partsFor("up-2", bytes, { sha256: sha(Buffer.from("other")) }),
+      { uploadAttachment: relayed },
+    );
+    await settle();
+    expect(relayed).not.toHaveBeenCalled();
+    expect(results(sent)).toEqual([
+      expect.objectContaining({ uploadId: "up-2", ok: false }),
+    ]);
+    expect(results(sent)[0]!.error).toMatch(/checksum/);
+  });
+
+  it("SIZE: a declared size over the cap is refused on part 1 before any byte is buffered", async () => {
+    const relayed = vi.fn(async () => ({ ok: true, attachmentId: "a" }));
+    const { sent } = drive(
+      partsFor("up-3", Buffer.from("x"), {
+        sizeBytes: MAX_OUTBOUND_ATTACHMENT_BYTES + 1,
+      }),
+      { uploadAttachment: relayed },
+    );
+    await settle();
+    expect(relayed).not.toHaveBeenCalled();
+    expect(results(sent)[0]).toMatchObject({ uploadId: "up-3", ok: false });
+    expect(results(sent)[0]!.error).toMatch(/capped/);
+  });
+
+  it("SIZE: more bytes than declared abandons the run; fewer is refused at the end", async () => {
+    const bytes = Buffer.alloc(ATTACHMENT_CHUNK_RAW_BYTES + 10, 1);
+    const relayed = vi.fn(async () => ({ ok: true, attachmentId: "a" }));
+    // Lie small: declared size is one chunk, but two arrive.
+    const over = partsFor("up-4", bytes, {
+      sizeBytes: ATTACHMENT_CHUNK_RAW_BYTES,
+    });
+    const { sent: s1 } = drive(over, { uploadAttachment: relayed });
+    await settle();
+    expect(results(s1)[0]).toMatchObject({ uploadId: "up-4", ok: false });
+    expect(results(s1)[0]!.error).toMatch(/exceeded/);
+    // Lie big: declared larger than what arrives.
+    const under = partsFor("up-5", Buffer.from("abc"), { sizeBytes: 999 });
+    const { sent: s2 } = drive(under, { uploadAttachment: relayed });
+    await settle();
+    expect(results(s2)[0]).toMatchObject({ uploadId: "up-5", ok: false });
+    expect(results(s2)[0]!.error).toMatch(/shorter/);
+    expect(relayed).not.toHaveBeenCalled();
+  });
+
+  it("DISCONTINUITY: an out-of-order part abandons the run fail-closed, answering it", async () => {
+    const bytes = Buffer.alloc(ATTACHMENT_CHUNK_RAW_BYTES * 3, 2);
+    const [p1, , p3] = partsFor("up-6", bytes);
+    const relayed = vi.fn(async () => ({ ok: true, attachmentId: "a" }));
+    const { sent } = drive([p1!, p3!], { uploadAttachment: relayed });
+    await settle();
+    expect(relayed).not.toHaveBeenCalled();
+    expect(results(sent)).toEqual([
+      expect.objectContaining({ uploadId: "up-6", ok: false }),
+    ]);
+    expect(results(sent)[0]!.error).toMatch(/out of order/);
+  });
+
+  it("DISCONTINUITY: a new run starting mid-run abandons the old one (answered) and proceeds with the new", async () => {
+    const big = Buffer.alloc(ATTACHMENT_CHUNK_RAW_BYTES * 2, 3);
+    const small = Buffer.from("small");
+    const [first] = partsFor("up-7", big);
+    const relayed = vi.fn(async () => ({ ok: true, attachmentId: "a" }));
+    const { sent } = drive([first!, ...partsFor("up-8", small)], {
+      uploadAttachment: relayed,
+    });
+    await settle();
+    const r = results(sent);
+    expect(r.map((x) => [x.uploadId, x.ok])).toEqual([
+      ["up-7", false],
+      ["up-8", true],
+    ]);
+    expect(relayed).toHaveBeenCalledTimes(1);
+  });
+
+  it("IN-FLIGHT CEILING: past MAX_INFLIGHT_FILE_UPLOADS_PER_SANDBOX, a complete run is refused retryable without a round-trip", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const relayed = vi.fn(async () => {
+      await gate;
+      return { ok: true, attachmentId: "a" };
+    });
+    const runs = Array.from(
+      { length: MAX_INFLIGHT_FILE_UPLOADS_PER_SANDBOX + 1 },
+      (_, i) => partsFor(`up-f${i}`, Buffer.from(`f${i}`)),
+    ).flat();
+    const { sent } = drive(runs, { uploadAttachment: relayed });
+    await settle();
+    expect(relayed).toHaveBeenCalledTimes(
+      MAX_INFLIGHT_FILE_UPLOADS_PER_SANDBOX,
+    );
+    const refused = results(sent).filter((x) => !x.ok);
+    expect(refused).toHaveLength(1);
+    expect(refused[0]).toMatchObject({ retryable: true });
+    release();
+    await settle();
+    expect(results(sent).filter((x) => x.ok)).toHaveLength(
+      MAX_INFLIGHT_FILE_UPLOADS_PER_SANDBOX,
+    );
+  });
+
+  it("TRANSPORT: a relay that throws is answered retryable, never silently", async () => {
+    const { sent } = drive(partsFor("up-9", Buffer.from("x")), {
+      uploadAttachment: async () => {
+        throw new Error("ECONNRESET");
+      },
+    });
+    await settle();
+    expect(results(sent)[0]).toMatchObject({
+      uploadId: "up-9",
+      ok: false,
+      retryable: true,
+    });
+    expect(results(sent)[0]!.error).toMatch(/could not be reached/);
+  });
+
+  it("STALE SWEEP: a run with no part for FILE_UPLOAD_STALE_MS is dropped and answered when the next frame arrives", async () => {
+    let clock = 1_000_000;
+    const big = Buffer.alloc(ATTACHMENT_CHUNK_RAW_BYTES * 2, 4);
+    const [first] = partsFor("up-stale", big);
+    const { sent, handle } = drive([first!], { now: () => clock });
+    clock += FILE_UPLOAD_STALE_MS + 1;
+    // Any frame from another sandbox triggers the sweep.
+    handle("sb-2", partsFor("up-other", Buffer.from("y"))[0]!);
+    await settle();
+    expect(results(sent).map((x) => [x.uploadId, x.ok])).toContainEqual([
+      "up-stale",
+      false,
+    ]);
+    expect(results(sent).find((x) => x.uploadId === "up-stale")!.error).toMatch(
+      /stalled/,
+    );
+  });
+
+  it("answers the api's refusal verbatim (caps, fence) with the ok:false shape", async () => {
+    const { sent } = drive(partsFor("up-10", Buffer.from("x")), {
+      uploadAttachment: async () => ({
+        ok: false,
+        error: "You can send at most 10 files per reply.",
+      }),
+    });
+    await settle();
+    expect(results(sent)[0]).toEqual({
+      kind: "file.result",
+      uploadId: "up-10",
+      ok: false,
+      error: "You can send at most 10 files per reply.",
+    });
   });
 });

@@ -8,7 +8,7 @@ use std::borrow::Cow;
 #[cfg(test)]
 use std::sync::Arc;
 
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use cache::CacheStore;
 use inject::secret_inject;
@@ -70,6 +70,55 @@ pub fn plan_for_subscription_status(status: &str) -> &str {
 
 // ── Data types ──────────────────────────────────────────────────────────
 
+/// The kind of credential a workspace holds for a host that the connecting
+/// agent was not granted. Each kind is attached to an agent on a different
+/// dashboard page, so `access_restricted` links by kind, never by host: a
+/// custom secret on a host a registered app also serves must not be sent to
+/// that app's page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestrictedCredential {
+    /// A `generic` secret: the agent's Connections page, Custom tab.
+    CustomSecret,
+    /// A typed LLM key (any other secret type: `anthropic`, `openai`): the
+    /// agent's Models page.
+    LlmKey,
+    /// An app connection: the app's page, whose account cards carry the
+    /// "Agent access" dialog.
+    AppConnection,
+}
+
+/// The secret half of [`PolicyEngineExt::restricted_credential`]: the kind of
+/// secret in `secrets` that would inject on `hostname`. Same predicate as
+/// injection (`secret_injects_on_host`), so a host no secret would ever inject
+/// on (e.g. auth.openai.com) can't surface as a bogus `access_restricted`.
+/// Split like the dashboard (`type === "generic"` is the Custom tab, every
+/// other type an LLM key). When one host has both, the custom secret wins: it
+/// was scoped to this host on purpose, while a key's host follows from its type.
+fn restricted_secret_kind(
+    secrets: &[db::SecretRow],
+    hostname: &str,
+) -> Option<RestrictedCredential> {
+    secrets
+        .iter()
+        .filter(|s| {
+            secret_inject::secret_injects_on_host(
+                &s.type_,
+                &s.host_pattern,
+                s.metadata.as_ref(),
+                hostname,
+            )
+        })
+        .map(|s| {
+            if s.type_ == "generic" {
+                RestrictedCredential::CustomSecret
+            } else {
+                RestrictedCredential::LlmKey
+            }
+        })
+        .max_by_key(|kind| *kind == RestrictedCredential::CustomSecret)
+}
+
 /// Result of policy resolution for a CONNECT request.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ConnectResponse {
@@ -82,11 +131,15 @@ pub struct ConnectResponse {
     pub agent_id: Option<String>,
     pub agent_name: Option<String>,
     pub agent_identifier: Option<String>,
-    /// True when the workspace has credentials (secrets or app connections) for
-    /// this host but the agent can't access them (selective mode). Used to show
-    /// a more helpful error ("grant access") instead of "connect the app".
+    /// Set when the workspace has a credential (secret or app connection) for
+    /// this host that the agent can't access (selective mode): its kind, so an
+    /// upstream auth failure is answered with `access_restricted` pointing at
+    /// the page where that credential is attached, instead of "connect the app".
+    /// Same field name as when it was a bare bool, on purpose: during a rolling
+    /// deploy an entry written by the other version fails to parse, which reads
+    /// as a cache miss and re-resolves, rather than defaulting to "not restricted".
     #[serde(default)]
-    pub access_restricted: bool,
+    pub access_restricted: Option<RestrictedCredential>,
     /// Normalized plan name for quota enforcement ("free", "pro", "team",
     /// "enterprise").
     #[serde(default)]
@@ -107,6 +160,13 @@ pub struct ConnectResponse {
     /// org's availability mode is "open", or when enforcement is off.
     #[serde(default)]
     pub available_apps: db::AvailableApps,
+    /// On a non-injecting alias host (`apps::alias_host`, e.g.
+    /// `login.salesforce.com`): the agent's connections of the provider that
+    /// owns the alias, credentials stripped. Never injected — they exist so a
+    /// failed request can be answered with the host the connection IS bound
+    /// to, instead of a generic "no credentials" nudge. Empty elsewhere.
+    #[serde(default)]
+    pub alias_connections: Vec<db::AppConnectionRow>,
 }
 
 /// Result of per-request app connection resolution.
@@ -152,6 +212,15 @@ pub enum AppConnectionResult {
     MultipleProviders { connections: Vec<ConnectionChoice> },
     /// The requested connection ID was not found — return the valid options.
     NotFound { connections: Vec<ConnectionChoice> },
+    /// Every connection that could serve this request is bound to a DIFFERENT
+    /// host than the one requested (a host-gated provider such as Salesforce,
+    /// Snowflake or JFrog: `credential_host_field`). Nothing was injected — the
+    /// gate refused, exactly as before — but the caller now knows WHY, and each
+    /// choice carries the host the agent should have used. Informational: the
+    /// request still proceeds uncredentialed (bare-suffix providers carry
+    /// legitimate public traffic), and the choices are surfaced only when it
+    /// then fails in a way the mismatch explains.
+    HostMismatch { connections: Vec<ConnectionChoice> },
 }
 
 /// Whether a session policy asks for a resource-scoped credential — a non-empty
@@ -162,6 +231,54 @@ fn granular_scoping_requested(session_policy: Option<&serde_json::Value>) -> boo
     session_policy
         .and_then(|sp| sp.as_object())
         .is_some_and(|obj| !obj.is_empty())
+}
+
+/// Every app connection the agent's v2 allow rules select, regardless of
+/// host: the shared pool behind `resolve_app_connections` (which keeps the
+/// providers that inject on the host) and `resolve_alias_connections` (which
+/// keeps the provider owning a non-injecting alias host).
+async fn selected_app_connections(
+    engine: &PolicyEngine,
+    agent: &db::AgentRow,
+    selection: &db::InjectSelection,
+) -> Result<Vec<db::AppConnectionRow>, ConnectError> {
+    let connections = match connection_pool(selection) {
+        InjectionPool::RuleSelected => {
+            // Rule-driven: the agent's allow rules name SPECIFIC connections
+            // (`kind=connection`) and/or ALL connections of a provider at a
+            // level (`kind=app` + `connection_scope`). Fetch the
+            // ORG/WORKSPACE-fenced pool and keep the connections a rule
+            // selects: a named id, or a (provider, scope) match. Attach the
+            // scope each one may reach below. Org-fence on the FETCH → a
+            // foreign id/scope can't pull a foreign connection.
+            let (org_result, workspace_result) = tokio::join!(
+                db::find_app_connections_by_org(&engine.pool, &agent.organization_id),
+                db::find_app_connections_by_workspace(&engine.pool, &agent.workspace_id),
+            );
+            let mut merged = org_result.map_err(db_err)?;
+            merged.extend(workspace_result.map_err(db_err)?);
+            merged.retain(|c| {
+                selection.connections.contains_key(&c.id)
+                    || selection
+                        .app_scopes
+                        .iter()
+                        .any(|(provider, scope)| *provider == c.provider && *scope == c.scope)
+            });
+            // Org-scoped credentials inject on every tier; only the
+            // resource-scope stamping stays licensed (#39/#40) —
+            // unlicensed, org connections inject UNSCOPED.
+            let entitled = common::edition::entitled();
+            stamp_resource_scopes(&mut merged, selection, entitled);
+            merged
+        }
+        // An agent with no rule-driven selection reaches no app connections
+        // → none injected. As with secrets, WHICH connections an agent gets
+        // comes solely from its v2 allow rules — the legacy per-agent
+        // grant tables are dropped, and there has been no all-mode
+        // fallback since step 7.
+        InjectionPool::Empty => Vec::new(),
+    };
+    Ok(connections)
 }
 
 /// Stamp what each connection may reach: its own selected scope narrowed to
@@ -233,6 +350,12 @@ pub struct ConnectionChoice {
     pub label: Option<String>,
     pub provider: String,
     pub display_name: Option<&'static str>,
+    /// The host this connection's credential is bound to (host-gated providers
+    /// only). Absent — and absent from the wire — everywhere else, so the
+    /// existing 409/404 bodies and the `x-onecli-connections` header are
+    /// unchanged for every provider that has no host gate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
 impl ConnectionChoice {
@@ -242,7 +365,15 @@ impl ConnectionChoice {
             label: row.label.clone(),
             provider: row.provider.clone(),
             display_name: apps::display_name_for_provider(&row.provider),
+            host: None,
         }
+    }
+
+    /// The same choice, annotated with the host its credential is bound to.
+    #[must_use]
+    pub fn with_host(mut self, host: Option<String>) -> Self {
+        self.host = host;
+        self
     }
 }
 
@@ -344,6 +475,17 @@ pub trait PolicyEngineExt {
         selection: &db::InjectSelection,
     ) -> Result<Vec<db::AppConnectionRow>, ConnectError>;
 
+    /// For a non-injecting alias host (`apps::alias_host`, e.g.
+    /// `login.salesforce.com`), the agent's connections of the owning
+    /// provider, credentials stripped. Used only to tell the agent which host
+    /// its connection is actually bound to.
+    async fn resolve_alias_connections(
+        &self,
+        agent: &db::AgentRow,
+        hostname: &str,
+        selection: &db::InjectSelection,
+    ) -> Result<Vec<db::AppConnectionRow>, ConnectError>;
+
     #[expect(clippy::too_many_arguments)]
     async fn resolve_app_injection_for_request(
         &self,
@@ -391,10 +533,17 @@ pub trait PolicyEngineExt {
         cache: &dyn CacheStore,
     ) -> Option<(Vec<InjectionRule>, Option<String>, Option<i64>)>;
 
-    /// Check if the workspace or org has any credentials (secrets or app connections) for this
-    /// host that the agent can't access. Used to distinguish "not connected" from
-    /// "connected but agent lacks access" in selective mode.
-    async fn has_available_credentials(&self, agent: &db::AgentRow, hostname: &str) -> bool;
+    /// The kind of credential (secret or app connection) the workspace or org
+    /// holds for this host, regardless of what the agent was granted. Probed
+    /// only when no secret injects for this agent, so an uncredentialed auth
+    /// failure reads as "connected, but this agent lacks access" rather than
+    /// "not connected", and the kind names the page that fixes it. Secrets are
+    /// checked before app connections, so a host with both reports the secret.
+    async fn restricted_credential(
+        &self,
+        agent: &db::AgentRow,
+        hostname: &str,
+    ) -> Option<RestrictedCredential>;
 
     /// Extract access token from decrypted credentials JSON, refreshing if expired.
     /// Resolves BYOC client credentials from AppConfig if available, falls back to env vars.
@@ -496,6 +645,9 @@ impl PolicyEngineExt for PolicyEngine {
         let app_connections = self
             .resolve_app_connections(agent, hostname, &inject_selection)
             .await?;
+        let alias_connections = self
+            .resolve_alias_connections(agent, hostname, &inject_selection)
+            .await?;
         // Intercept when this host has a credential to inject. Enforcement does
         // NOT depend on this: `gateway.rs` forces MITM for every authenticated
         // agent, so a block / rate-limit / approval rule on an uncredentialed host
@@ -509,8 +661,11 @@ impl PolicyEngineExt for PolicyEngine {
         // this host that the agent's grants don't attach — surfaced as an
         // `access_restricted` error pointing at the attach surface instead of a
         // generic credential-not-found.
-        let access_restricted =
-            injection_rules.is_empty() && self.has_available_credentials(agent, hostname).await;
+        let access_restricted = if injection_rules.is_empty() {
+            self.restricted_credential(agent, hostname).await
+        } else {
+            None
+        };
 
         let plan = plan_for_subscription_status(&agent.subscription_status).to_string();
 
@@ -527,7 +682,7 @@ impl PolicyEngineExt for PolicyEngine {
         .await;
 
         Ok(ConnectResponse {
-            intercept: has_credentials || access_restricted,
+            intercept: has_credentials || access_restricted.is_some(),
             injection_rules,
             app_connections,
             workspace_id: Some(agent.workspace_id.clone()),
@@ -540,6 +695,7 @@ impl PolicyEngineExt for PolicyEngine {
             budget_bindings,
             policy_rules_v2,
             available_apps,
+            alias_connections,
         })
     }
     /// Build injection rules from secrets matching this host.
@@ -768,50 +924,36 @@ impl PolicyEngineExt for PolicyEngine {
         }
         debug!(host = %hostname, providers = ?providers, "app_connections: matched providers");
 
-        let connections = match connection_pool(selection) {
-            InjectionPool::RuleSelected => {
-                // Rule-driven: the agent's allow rules name SPECIFIC connections
-                // (`kind=connection`) and/or ALL connections of a provider at a
-                // level (`kind=app` + `connection_scope`). Fetch the
-                // ORG/WORKSPACE-fenced pool and keep the connections a rule
-                // selects: a named id, or a (provider, scope) match. Attach the
-                // scope each one may reach below. Org-fence on the FETCH → a
-                // foreign id/scope can't pull a foreign connection.
-                let (org_result, workspace_result) = tokio::join!(
-                    db::find_app_connections_by_org(&self.pool, &agent.organization_id),
-                    db::find_app_connections_by_workspace(&self.pool, &agent.workspace_id),
-                );
-                let mut merged = org_result.map_err(db_err)?;
-                merged.extend(workspace_result.map_err(db_err)?);
-                merged.retain(|c| {
-                    selection.connections.contains_key(&c.id)
-                        || selection
-                            .app_scopes
-                            .iter()
-                            .any(|(provider, scope)| *provider == c.provider && *scope == c.scope)
-                });
-                // Org-scoped credentials inject on every tier; only the
-                // resource-scope stamping stays licensed (#39/#40) —
-                // unlicensed, org connections inject UNSCOPED.
-                let entitled = common::edition::entitled();
-                stamp_resource_scopes(&mut merged, selection, entitled);
-                merged
-            }
-            // An agent with no rule-driven selection reaches no app connections
-            // → none injected. As with secrets, WHICH connections an agent gets
-            // comes solely from its v2 allow rules — the legacy per-agent
-            // grant tables are dropped, and there has been no all-mode
-            // fallback since step 7.
-            InjectionPool::Empty => Vec::new(),
-        };
-
-        let matching: Vec<db::AppConnectionRow> = connections
+        let matching: Vec<db::AppConnectionRow> = selected_app_connections(self, agent, selection)
+            .await?
             .into_iter()
             .filter(|c| providers.contains(&c.provider.as_str()))
             .collect();
 
         debug!(host = %hostname, count = matching.len(), "app_connections: deferred connections");
         Ok(matching)
+    }
+
+    async fn resolve_alias_connections(
+        &self,
+        agent: &db::AgentRow,
+        hostname: &str,
+        selection: &db::InjectSelection,
+    ) -> Result<Vec<db::AppConnectionRow>, ConnectError> {
+        let Some(alias) = apps::alias_host(hostname) else {
+            return Ok(Vec::new());
+        };
+        Ok(selected_app_connections(self, agent, selection)
+            .await?
+            .into_iter()
+            .filter(|c| c.provider == alias.provider)
+            .map(|mut c| {
+                // Guidance only — never injected, so the credential has no
+                // business riding along in the cached response.
+                c.credentials = None;
+                c
+            })
+            .collect())
     }
 
     async fn resolve_app_injection_for_request(
@@ -959,19 +1101,13 @@ impl PolicyEngineExt for PolicyEngine {
             let mut resolved_session_policy: Option<serde_json::Value> = None;
             let mut resolved_connection_id: Option<String> = None;
             let mut all_pending: Vec<PendingInjection> = Vec::new();
+            // Host-gated connections that refused this request. Reported only
+            // when NO connection injects: a serving sibling makes the mismatch
+            // irrelevant to this request (the credential in play is the
+            // sibling's), and surfacing it would mislead.
+            let mut host_mismatches: Vec<ConnectionChoice> = Vec::new();
             for conn in app_connections {
-                if let AppConnectionResult::Rules {
-                    rules: r,
-                    token_expires_at,
-                    rewrite_host,
-                    connection_label,
-                    finalizer,
-                    body_transform,
-                    provider,
-                    session_policy,
-                    connection_id,
-                    pending,
-                } = self
+                match self
                     .resolve_connection_injections(
                         conn,
                         hostname,
@@ -981,39 +1117,65 @@ impl PolicyEngineExt for PolicyEngine {
                     )
                     .await?
                 {
-                    rules.extend(r);
-                    all_pending.extend(pending);
-                    // Tie ALL winner metadata to the connection that actually
-                    // serves THIS request — not merely the first to yield
-                    // rules. A non-serving connection (e.g. a GitHub
-                    // connection on a Dropbox request) still returns `Rules`
-                    // carrying its own policy/finalizer/rewrite, and adopting
-                    // those would mis-apply them to a request it doesn't own.
-                    if provider_serves_request(&provider, hostname, request_path) {
-                        if rewrite_host.is_some() {
-                            resolved_rewrite_host = rewrite_host;
+                    AppConnectionResult::Rules {
+                        rules: r,
+                        token_expires_at,
+                        rewrite_host,
+                        connection_label,
+                        finalizer,
+                        body_transform,
+                        provider,
+                        session_policy,
+                        connection_id,
+                        pending,
+                    } => {
+                        rules.extend(r);
+                        all_pending.extend(pending);
+                        // Tie ALL winner metadata to the connection that actually
+                        // serves THIS request — not merely the first to yield
+                        // rules. A non-serving connection (e.g. a GitHub
+                        // connection on a Dropbox request) still returns `Rules`
+                        // carrying its own policy/finalizer/rewrite, and adopting
+                        // those would mis-apply them to a request it doesn't own.
+                        if provider_serves_request(&provider, hostname, request_path) {
+                            if rewrite_host.is_some() {
+                                resolved_rewrite_host = rewrite_host;
+                            }
+                            if resolved_label.is_none() {
+                                resolved_label = connection_label;
+                            }
+                            if finalizer.is_some() {
+                                resolved_finalizer = finalizer;
+                            }
+                            if body_transform.is_some() {
+                                resolved_body_transform = body_transform;
+                            }
+                            resolved_session_policy = session_policy;
+                            resolved_connection_id = connection_id;
                         }
-                        if resolved_label.is_none() {
-                            resolved_label = connection_label;
+                        if resolved_provider.is_none() {
+                            resolved_provider = Some(provider);
                         }
-                        if finalizer.is_some() {
-                            resolved_finalizer = finalizer;
+                        match (earliest_expires_at, token_expires_at) {
+                            (None, exp) => earliest_expires_at = exp,
+                            (Some(cur), Some(exp)) if exp < cur => earliest_expires_at = Some(exp),
+                            _ => {}
                         }
-                        if body_transform.is_some() {
-                            resolved_body_transform = body_transform;
-                        }
-                        resolved_session_policy = session_policy;
-                        resolved_connection_id = connection_id;
                     }
-                    if resolved_provider.is_none() {
-                        resolved_provider = Some(provider);
+                    AppConnectionResult::HostMismatch { connections } => {
+                        host_mismatches.extend(connections);
                     }
-                    match (earliest_expires_at, token_expires_at) {
-                        (None, exp) => earliest_expires_at = exp,
-                        (Some(cur), Some(exp)) if exp < cur => earliest_expires_at = Some(exp),
-                        _ => {}
-                    }
+                    // Nothing to merge from this connection.
+                    AppConnectionResult::NoConnections
+                    | AppConnectionResult::Ambiguous { .. }
+                    | AppConnectionResult::MultipleProviders { .. }
+                    | AppConnectionResult::NotFound { .. } => {}
                 }
+            }
+            if rules.is_empty() && all_pending.is_empty() && !host_mismatches.is_empty() {
+                return Ok(AppConnectionResult::HostMismatch {
+                    connections: host_mismatches,
+                });
             }
             return Ok(AppConnectionResult::Rules {
                 rules,
@@ -1103,25 +1265,16 @@ impl PolicyEngineExt for PolicyEngine {
             })
             .ok();
 
-        // For rules with `credential_host_field` (e.g. JFrog's wildcard
-        // `*.jfrog.io`), inject ONLY when the request host equals the
-        // connection's exact stored host. This runs BEFORE token resolution,
-        // rule building, and caching, so a mismatch yields no injection and
-        // writes no cache entry — the token can never leak to another tenant.
-        if credential_host_mismatch(&conn.provider, creds.as_ref(), hostname) {
-            debug!(
-                connection_id = %conn.id,
-                provider = %conn.provider,
-                "credential host mismatch: request host does not match stored host; no injection"
-            );
-            return Ok(AppConnectionResult::NoConnections);
-        }
-
         // A scope that reaches nothing needs no credential at all — resolving
         // one could only produce access it may not use. Return early WITH the
         // scope, so the request is refused for it (`hooks::refuse_empty_scope`)
         // rather than quietly proceeding uncredentialed, which would read as
         // unmanaged traffic and escape the deny-defaults.
+        //
+        // Ordered BEFORE the host gate on purpose: a deny-all scope must refuse
+        // the request whatever host it went to, and the gate's soft
+        // `HostMismatch` (which lets the request proceed uncredentialed) would
+        // otherwise let a wrong-host request slip past an explicit deny.
         if ee::granular_access::denies_everything(conn.session_policy.as_ref()) {
             return Ok(AppConnectionResult::Rules {
                 rules: Vec::new(),
@@ -1134,6 +1287,31 @@ impl PolicyEngineExt for PolicyEngine {
                 session_policy: conn.session_policy.clone(),
                 connection_id: Some(conn.id.clone()),
                 pending: Vec::new(),
+            });
+        }
+
+        // For rules with `credential_host_field` (e.g. JFrog's wildcard
+        // `*.jfrog.io`), inject ONLY when the request host equals the
+        // connection's exact stored host. This runs BEFORE token resolution,
+        // rule building, and caching, so a mismatch yields no injection and
+        // writes no cache entry — the token can never leak to another tenant.
+        //
+        // The refusal itself is unchanged; what changed is that the caller
+        // learns it happened and which host WOULD have been served. Logged at
+        // info (not debug) so the failure class is visible in production —
+        // before this, a mismatched agent left no trace at all (#1137).
+        if let HostGate::Mismatch { bound_host } =
+            credential_host_gate(&conn.provider, creds.as_ref(), hostname)
+        {
+            info!(
+                connection_id = %conn.id,
+                provider = %conn.provider,
+                requested_host = %hostname,
+                bound_host = bound_host.as_deref().unwrap_or("-"),
+                "credential host mismatch: request host does not match the connection's bound host; no injection"
+            );
+            return Ok(AppConnectionResult::HostMismatch {
+                connections: vec![ConnectionChoice::from_row(conn).with_host(bound_host)],
             });
         }
 
@@ -1349,55 +1527,40 @@ impl PolicyEngineExt for PolicyEngine {
 
         Some((rules, rewrite_host, expires_at))
     }
-    /// Check if the workspace or org has any credentials (secrets or app connections) for this
-    /// host that the agent can't access. Used to distinguish "not connected" from
-    /// "connected but agent lacks access" in selective mode.
-    async fn has_available_credentials(&self, agent: &db::AgentRow, hostname: &str) -> bool {
-        // Check 1: workspace or org has manual secrets matching this host.
-        // Same predicate as injection (`secret_injects_on_host`), so a host no
-        // secret would ever inject on (e.g. auth.openai.com) can't surface as
-        // a bogus `access_restricted`.
-        match db::find_secrets_by_workspace(&self.pool, &agent.workspace_id).await {
-            Ok(secrets) => {
-                if secrets.iter().any(|s| {
-                    secret_inject::secret_injects_on_host(
-                        &s.type_,
-                        &s.host_pattern,
-                        s.metadata.as_ref(),
-                        hostname,
-                    )
-                }) {
-                    return true;
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "has_available_credentials: secrets query failed");
-            }
+    async fn restricted_credential(
+        &self,
+        agent: &db::AgentRow,
+        hostname: &str,
+    ) -> Option<RestrictedCredential> {
+        // Check 1: workspace or org secrets matching this host. A failed query
+        // is logged and contributes nothing, as before: this only picks which
+        // guidance an already-uncredentialed request gets.
+        let (workspace_secrets, org_secrets) = tokio::join!(
+            db::find_secrets_by_workspace(&self.pool, &agent.workspace_id),
+            db::find_secrets_by_org(&self.pool, &agent.organization_id),
+        );
+        let secrets: Vec<db::SecretRow> = [("workspace", workspace_secrets), ("org", org_secrets)]
+            .into_iter()
+            .flat_map(|(tier, result)| {
+                result.unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, tier, "restricted_credential: secrets query failed");
+                    Vec::new()
+                })
+            })
+            .collect();
+        if let Some(kind) = restricted_secret_kind(&secrets, hostname) {
+            return Some(kind);
         }
 
-        // Also check org-level secrets
-        match db::find_secrets_by_org(&self.pool, &agent.organization_id).await {
-            Ok(secrets) => {
-                if secrets.iter().any(|s| {
-                    secret_inject::secret_injects_on_host(
-                        &s.type_,
-                        &s.host_pattern,
-                        s.metadata.as_ref(),
-                        hostname,
-                    )
-                }) {
-                    return true;
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "has_available_credentials: org secrets query failed");
-            }
+        // Check 2: workspace or org has app connections for this host. An
+        // alias host (login.salesforce.com) counts for its owning provider, so
+        // an ungranted agent is sent to the grant surface, not told to connect.
+        let mut providers = apps::providers_for_host(hostname);
+        if let Some(alias) = apps::alias_host(hostname) {
+            providers.push(alias.provider);
         }
-
-        // Check 2: workspace or org has app connections for this host
-        let providers = apps::providers_for_host(hostname);
         if providers.is_empty() {
-            return false;
+            return None;
         }
 
         let has_workspace_conns = match db::find_app_connections_by_workspace(
@@ -1410,23 +1573,29 @@ impl PolicyEngineExt for PolicyEngine {
                 .iter()
                 .any(|c| providers.contains(&c.provider.as_str())),
             Err(e) => {
-                tracing::warn!(error = %e, "has_available_credentials: app connections query failed");
+                tracing::warn!(error = %e, "restricted_credential: app connections query failed");
                 false
             }
         };
         if has_workspace_conns {
-            return true;
+            return Some(RestrictedCredential::AppConnection);
         }
 
-        match db::find_app_connections_by_org(&self.pool, &agent.organization_id).await {
+        let has_org_conns = match db::find_app_connections_by_org(
+            &self.pool,
+            &agent.organization_id,
+        )
+        .await
+        {
             Ok(conns) => conns
                 .iter()
                 .any(|c| providers.contains(&c.provider.as_str())),
             Err(e) => {
-                tracing::warn!(error = %e, "has_available_credentials: org app connections query failed");
+                tracing::warn!(error = %e, "restricted_credential: org app connections query failed");
                 false
             }
-        }
+        };
+        has_org_conns.then_some(RestrictedCredential::AppConnection)
     }
     /// Extract access token from decrypted credentials JSON, refreshing if expired.
     /// Resolves BYOC client credentials from AppConfig if available, falls back to env vars.
@@ -1535,6 +1704,7 @@ impl PolicyEngineExt for PolicyEngine {
                             refresh_token,
                             byoc_id,
                             byoc_secret,
+                            creds.get("token_endpoint").and_then(|v| v.as_str()),
                         )
                         .await
                         {
@@ -1880,30 +2050,104 @@ pub async fn seed_app_injection_cache(
 
 // ── Host matching ───────────────────────────────────────────────────────
 
-/// Returns `true` when the credential's stored host does not match the
-/// request host, meaning injection must be skipped.
+/// The verdict of the per-tenant host gate for one connection on one request.
+#[derive(Debug, PartialEq, Eq)]
+enum HostGate {
+    /// Not a host-gated rule, or the request host equals the bound host:
+    /// injection may proceed.
+    Pass,
+    /// A host-gated rule whose bound host is NOT the request host (or is
+    /// missing altogether — fail-closed). `bound_host` is the normalized host
+    /// the credential is bound to, `None` when the connection stores none.
+    Mismatch { bound_host: Option<String> },
+}
+
+/// Host-mismatch choices for a request to a non-injecting alias host: one per
+/// connection of the owning provider, each annotated with the host it is
+/// bound to. The bound host is read from the connection's non-secret
+/// `metadata.bound_host` (one key for every host-bound provider) and vouched
+/// for only when it sits inside the provider's own injecting zone (the same
+/// rule [`credential_host_gate`] applies), so a malformed value is reported
+/// as "no bound host" (reconnect) rather than handed to the agent as a
+/// destination. `None` when there is nothing to report.
+pub fn alias_host_choices(rows: &[db::AppConnectionRow]) -> Option<Vec<ConnectionChoice>> {
+    if rows.is_empty() {
+        return None;
+    }
+    Some(
+        rows.iter()
+            .map(|row| {
+                let bound = row
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.get(apps::BOUND_HOST_METADATA_KEY))
+                    .and_then(|v| v.as_str())
+                    .map(apps::normalize_host)
+                    .filter(|h| vouched_bound_host(&row.provider, h));
+                ConnectionChoice::from_row(row).with_host(bound)
+            })
+            .collect(),
+    )
+}
+
+/// Whether a stored bound host may be echoed to the agent as "go here": a
+/// bare hostname inside `provider`'s own injecting zone. A typo'd, foreign,
+/// or URL-shaped value is never handed out as a destination.
+fn vouched_bound_host(provider: &str, host: &str) -> bool {
+    apps::is_bare_hostname(host) && apps::providers_for_host(host).contains(&provider)
+}
+
+/// Evaluate the host gate for `provider` on `hostname`.
 ///
 /// For rules with `credential_host_field` (e.g. JFrog's `*.jfrog.io`),
 /// injection is allowed ONLY when the request host equals the stored host.
-/// Returns `false` for rules without `credential_host_field` (no check
-/// needed) and for rules whose stored host matches the request host.
+/// Rules without `credential_host_field` always pass (no check needed).
 ///
 /// The comparison is on the FULL normalized host — never a single DNS label —
-/// so `mycompany.jfrog.io` does not match `evil.jfrog.io`.
-fn credential_host_mismatch(
+/// so `mycompany.jfrog.io` does not match `evil.jfrog.io`. A missing or empty
+/// stored host fails closed: the gate refuses AND reports no bound host, so
+/// the agent is told to reconnect rather than handed a guess.
+fn credential_host_gate(
     provider: &str,
     creds: Option<&serde_json::Value>,
     hostname: &str,
-) -> bool {
+) -> HostGate {
     let Some(field) = apps::credential_host_field(provider, hostname) else {
-        return false; // not a host-gated rule — injection always allowed
+        return HostGate::Pass; // not a host-gated rule — injection always allowed
     };
     let stored = creds
         .and_then(|c| c.get(field))
         .and_then(|v| v.as_str())
         .map(apps::normalize_host)
-        .unwrap_or_default();
-    stored.is_empty() || apps::normalize_host(hostname) != stored
+        .filter(|s| !s.is_empty());
+    match stored {
+        Some(bound) if bound == apps::normalize_host(hostname) => HostGate::Pass,
+        // The bound host is echoed back to the agent as "re-send to THIS
+        // host". It was typed by a user at connect time and only normalized,
+        // so vouch for it ONLY when it sits inside the provider's own host
+        // zone (the same suffix rule that gates it): a malformed or foreign
+        // value still refuses injection, but is reported as "no bound host"
+        // (reconnect) rather than handed to the agent as a destination.
+        Some(bound) if vouched_bound_host(provider, &bound) => HostGate::Mismatch {
+            bound_host: Some(bound),
+        },
+        _ => HostGate::Mismatch { bound_host: None },
+    }
+}
+
+/// `true` when the gate refuses injection — the predicate form of
+/// [`credential_host_gate`], kept for the tenant-isolation tests whose
+/// question is only "does the token stay put?".
+#[cfg(test)]
+fn credential_host_mismatch(
+    provider: &str,
+    creds: Option<&serde_json::Value>,
+    hostname: &str,
+) -> bool {
+    matches!(
+        credential_host_gate(provider, creds, hostname),
+        HostGate::Mismatch { .. }
+    )
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -2008,11 +2252,12 @@ mod tests {
             agent_id: None,
             agent_name: None,
             agent_identifier: None,
-            access_restricted: false,
+            access_restricted: None,
             plan: "pro".to_string(),
             budget_bindings: vec![],
             policy_rules_v2: db::PolicyV2Rules::default(),
             available_apps: db::AvailableApps::default(),
+            alias_connections: Vec::new(),
         };
 
         store
@@ -2053,11 +2298,12 @@ mod tests {
             agent_id: Some("agent_1".to_string()),
             agent_name: Some("Test".to_string()),
             agent_identifier: None,
-            access_restricted: false,
+            access_restricted: None,
             plan: "pro".to_string(),
             budget_bindings: vec![],
             policy_rules_v2: db::PolicyV2Rules::default(),
             available_apps: db::AvailableApps::default(),
+            alias_connections: Vec::new(),
         };
 
         // Pre-populate cache with the key format that resolve() uses
@@ -2094,11 +2340,12 @@ mod tests {
             agent_id: Some("agent_selective".to_string()),
             agent_name: Some("Selective Agent".to_string()),
             agent_identifier: None,
-            access_restricted: true,
+            access_restricted: Some(RestrictedCredential::CustomSecret),
             plan: "pro".to_string(),
             budget_bindings: vec![],
             policy_rules_v2: db::PolicyV2Rules::default(),
             available_apps: db::AvailableApps::default(),
+            alias_connections: Vec::new(),
         };
 
         store
@@ -2113,8 +2360,83 @@ mod tests {
             .get("connect:org_restricted:proj_restricted:aoc_t:api.resend.com")
             .await;
         let cached = cached.expect("should be cached");
-        assert!(cached.access_restricted);
+        assert_eq!(
+            cached.access_restricted,
+            Some(RestrictedCredential::CustomSecret)
+        );
         assert_eq!(cached.workspace_id.as_deref(), Some("proj_restricted"));
+    }
+
+    /// A rolling deploy shares the connect cache between versions. An entry
+    /// from the gateway that cached `access_restricted` as a bare bool must
+    /// read as a miss (re-resolve) here, never as "not restricted".
+    #[tokio::test]
+    async fn cached_bool_access_restricted_reads_as_a_miss() {
+        let store = new_store().await;
+        let mut legacy = serde_json::to_value(ConnectResponse::default()).unwrap();
+        legacy["access_restricted"] = serde_json::Value::Bool(true);
+        store.set("connect:legacy", &legacy, 60).await;
+
+        let cached: Option<ConnectResponse> = store.get("connect:legacy").await;
+        assert!(cached.is_none());
+    }
+
+    fn secret_row(type_: &str, host_pattern: &str) -> db::SecretRow {
+        db::SecretRow {
+            id: format!("{type_}-{host_pattern}"),
+            scope: "workspace".to_string(),
+            type_: type_.to_string(),
+            value_source: "inline".to_string(),
+            encrypted_value: None,
+            op_ref: None,
+            host_pattern: host_pattern.to_string(),
+            path_pattern: None,
+            injection_config: None,
+            metadata: None,
+        }
+    }
+
+    /// The prod incident: a custom PostHog secret on a host the app registry
+    /// also serves. The kind comes from the secret, not from the host, so it
+    /// is a custom secret even though `app.posthog.com` belongs to an app.
+    #[test]
+    fn restricted_secret_kind_follows_the_secret_not_the_host() {
+        let secrets = [secret_row("generic", "app.posthog.com")];
+        assert_eq!(
+            restricted_secret_kind(&secrets, "app.posthog.com"),
+            Some(RestrictedCredential::CustomSecret)
+        );
+        assert_eq!(restricted_secret_kind(&secrets, "eu.posthog.com"), None);
+    }
+
+    #[test]
+    fn restricted_secret_kind_splits_llm_keys_from_custom_secrets() {
+        let key = || secret_row("anthropic", "api.anthropic.com");
+        let custom = || secret_row("generic", "api.anthropic.com");
+        assert_eq!(
+            restricted_secret_kind(&[key()], "api.anthropic.com"),
+            Some(RestrictedCredential::LlmKey)
+        );
+        // Both on one host: the custom secret was scoped there on purpose, so
+        // its page wins whichever row the query returns first.
+        for secrets in [[key(), custom()], [custom(), key()]] {
+            assert_eq!(
+                restricted_secret_kind(&secrets, "api.anthropic.com"),
+                Some(RestrictedCredential::CustomSecret)
+            );
+        }
+    }
+
+    /// The injection predicate decides, carve-outs included: an OpenAI key
+    /// never injects on its OAuth token host, so it restricts nothing there.
+    #[test]
+    fn restricted_secret_kind_ignores_secrets_that_would_not_inject() {
+        let secrets = [secret_row("openai", "*.openai.com")];
+        assert_eq!(restricted_secret_kind(&secrets, "auth.openai.com"), None);
+        assert_eq!(
+            restricted_secret_kind(&secrets, "api.openai.com"),
+            Some(RestrictedCredential::LlmKey)
+        );
     }
 
     // ── credential_host_mismatch ─────────────────────────────────────────
@@ -2232,6 +2554,404 @@ mod tests {
             Some(&creds),
             "mycompany-clone.jfrog.io"
         ));
+    }
+
+    // ── credential_host_gate (the bound host the mismatch reports) ────────
+
+    #[test]
+    fn credential_host_gate_reports_the_normalized_bound_host() {
+        // The verdict carries the host the agent SHOULD have used, normalized
+        // the same way the comparison is — so the 421 can name it verbatim.
+        let creds = serde_json::json!({ "instance_host": "https://Acme.My.Salesforce.com/" });
+        assert_eq!(
+            credential_host_gate("salesforce", Some(&creds), "your-domain.my.salesforce.com"),
+            HostGate::Mismatch {
+                bound_host: Some("acme.my.salesforce.com".to_string())
+            }
+        );
+        assert_eq!(
+            credential_host_gate("salesforce", Some(&creds), "acme.my.salesforce.com"),
+            HostGate::Pass
+        );
+    }
+
+    #[test]
+    fn credential_host_gate_fail_closed_reports_no_bound_host() {
+        // A missing or empty stored host still refuses (unchanged), and says
+        // so honestly: `None`, never a guess — the agent is told to reconnect.
+        let missing = serde_json::json!({ "access_token": "pat" });
+        assert_eq!(
+            credential_host_gate("snowflake", Some(&missing), "x.snowflakecomputing.com"),
+            HostGate::Mismatch { bound_host: None }
+        );
+        let empty = serde_json::json!({ "host": "" });
+        assert_eq!(
+            credential_host_gate("snowflake", Some(&empty), "x.snowflakecomputing.com"),
+            HostGate::Mismatch { bound_host: None }
+        );
+        assert_eq!(
+            credential_host_gate("snowflake", None, "x.snowflakecomputing.com"),
+            HostGate::Mismatch { bound_host: None }
+        );
+    }
+
+    #[test]
+    fn credential_host_gate_passes_ungated_providers() {
+        assert_eq!(
+            credential_host_gate("github", Some(&serde_json::json!({})), "api.github.com"),
+            HostGate::Pass
+        );
+        assert_eq!(
+            credential_host_gate("resend", None, "api.resend.com"),
+            HostGate::Pass
+        );
+    }
+
+    /// Security negative control: the bound host is echoed to the agent as a
+    /// destination, so a stored value OUTSIDE the provider's own zone (typo,
+    /// pasted URL of another site, a hostile value in the row) must still
+    /// refuse injection AND must not be vouched for — it reads as "no bound
+    /// host" and the agent is told to reconnect, never to go there.
+    #[test]
+    fn credential_host_gate_never_vouches_for_an_out_of_zone_bound_host() {
+        for stored in [
+            "evil.example.com",
+            "https://attacker.test/",
+            "acme.jfrog.io.evil.test",
+            "jfrog.io", // the bare suffix — not a tenant host
+        ] {
+            let creds = serde_json::json!({ "subdomain": stored });
+            assert_eq!(
+                credential_host_gate("jfrog-artifactory", Some(&creds), "other.jfrog.io"),
+                HostGate::Mismatch { bound_host: None },
+                "stored {stored:?} must not be echoed as a destination"
+            );
+        }
+        // And a Salesforce connection cannot be made to point at a JFrog host.
+        let creds = serde_json::json!({ "instance_host": "acme.jfrog.io" });
+        assert_eq!(
+            credential_host_gate("salesforce", Some(&creds), "wrong.my.salesforce.com"),
+            HostGate::Mismatch { bound_host: None }
+        );
+    }
+
+    // ── HostMismatch resolution (#1137) ───────────────────────────────────
+
+    /// A stored host that normalizes to something other than a bare
+    /// hostname (a `?`/`#`/`@` survives `normalize_host`) is never echoed to
+    /// the agent as a destination, on either the gated or the alias path.
+    #[test]
+    fn bound_host_with_url_syntax_is_never_vouched_for() {
+        for raw in [
+            "acme.my.salesforce.com?x=.evil.test",
+            "acme.my.salesforce.com#frag",
+            "user@acme.my.salesforce.com",
+        ] {
+            let creds = serde_json::json!({ "instance_host": raw });
+            assert!(
+                matches!(
+                    credential_host_gate("salesforce", Some(&creds), "other.my.salesforce.com"),
+                    HostGate::Mismatch { bound_host: None }
+                ),
+                "{raw}"
+            );
+            let row = db::AppConnectionRow {
+                id: "c".into(),
+                provider: "salesforce".into(),
+                scope: "workspace".into(),
+                credentials: None,
+                label: None,
+                metadata: Some(serde_json::json!({ "bound_host": raw })),
+                session_policy: None,
+            };
+            let choices = alias_host_choices(&[row]).expect("one choice");
+            assert_eq!(choices[0].host, None, "{raw}");
+        }
+    }
+
+    /// A connection row with REAL encrypted credentials, so resolution walks
+    /// the decrypt → parse → host-gate path exactly as production does.
+    async fn gated_conn(
+        engine: &PolicyEngine,
+        id: &str,
+        provider: &str,
+        creds: serde_json::Value,
+    ) -> db::AppConnectionRow {
+        db::AppConnectionRow {
+            id: id.into(),
+            provider: provider.into(),
+            scope: "workspace".into(),
+            credentials: Some(
+                engine
+                    .crypto
+                    .encrypt(&creds.to_string())
+                    .await
+                    .expect("encrypt"),
+            ),
+            label: Some(format!("{id}-label")),
+            metadata: None,
+            session_policy: None,
+        }
+    }
+
+    /// The #1137 request: a granted Salesforce connection bound to one org,
+    /// a request to the docs' placeholder host. Before: `NoConnections`, and
+    /// the agent got a bare DNS 502. Now: the mismatch is reported with the
+    /// bound host, and still nothing is injected or cached.
+    #[tokio::test]
+    async fn single_gated_connection_on_wrong_host_reports_mismatch_with_bound_host() {
+        let engine = PolicyEngine::test_stub();
+        let store = new_store().await;
+        let c = gated_conn(
+            &engine,
+            "sf1",
+            "salesforce",
+            serde_json::json!({
+                "access_token": "t",
+                "instance_host": "acme.my.salesforce.com",
+            }),
+        )
+        .await;
+
+        let res = engine
+            .resolve_app_injection_for_request(
+                std::slice::from_ref(&c),
+                "your-domain.my.salesforce.com",
+                Some("/services/data/v60.0/sobjects/Opportunity"),
+                None,
+                "o1",
+                "p1",
+                &*store,
+            )
+            .await
+            .unwrap();
+        match res {
+            AppConnectionResult::HostMismatch { connections } => {
+                assert_eq!(connections.len(), 1);
+                assert_eq!(connections[0].id, "sf1");
+                assert_eq!(connections[0].provider, "salesforce");
+                assert_eq!(connections[0].label.as_deref(), Some("sf1-label"));
+                assert_eq!(
+                    connections[0].host.as_deref(),
+                    Some("acme.my.salesforce.com")
+                );
+            }
+            _ => panic!("expected HostMismatch"),
+        }
+        // The refusal still writes no cache entry: the token never enters the
+        // cache under the wrong host.
+        let key = "app_injection:o1:p1:sf1:your-domain.my.salesforce.com";
+        assert!(store.get::<CachedAppInjection>(key).await.is_none());
+    }
+
+    /// The explicit-id branch (the agent already pinned the account) reports
+    /// the same mismatch: a pin decides WHICH account, not which host.
+    #[tokio::test]
+    async fn pinned_gated_connection_on_wrong_host_reports_mismatch() {
+        let engine = PolicyEngine::test_stub();
+        let store = new_store().await;
+        let c = gated_conn(
+            &engine,
+            "jf1",
+            "jfrog-artifactory",
+            serde_json::json!({ "access_token": "t", "subdomain": "acme.jfrog.io" }),
+        )
+        .await;
+
+        let res = engine
+            .resolve_app_injection_for_request(
+                std::slice::from_ref(&c),
+                "other.jfrog.io",
+                Some("/artifactory/api/npm/npm/"),
+                Some("jf1"),
+                "o1",
+                "p1",
+                &*store,
+            )
+            .await
+            .unwrap();
+        match res {
+            AppConnectionResult::HostMismatch { connections } => {
+                assert_eq!(connections[0].host.as_deref(), Some("acme.jfrog.io"));
+            }
+            _ => panic!("expected HostMismatch"),
+        }
+    }
+
+    /// Multi-provider merge: a mismatching connection beside one that SERVES
+    /// the request is irrelevant to it — the serving sibling's rules win and
+    /// no mismatch surfaces. (Two providers with one connection each is the
+    /// no-ambiguity merge branch.)
+    #[tokio::test]
+    async fn mismatch_is_swallowed_when_a_sibling_connection_injects() {
+        let engine = PolicyEngine::test_stub();
+        let store = new_store().await;
+        // A Snowflake connection bound elsewhere...
+        let gated = gated_conn(
+            &engine,
+            "snow1",
+            "snowflake",
+            serde_json::json!({ "access_token": "pat", "host": "acme.snowflakecomputing.com" }),
+        )
+        .await;
+        // ...and an unrelated provider whose rules are pre-seeded for this host
+        // (the cache path, so no decrypt/refresh is attempted for it).
+        let sibling = conn("gh1", "github");
+        seed_app_injection(
+            &store,
+            &sibling,
+            "other.snowflakecomputing.com",
+            vec![bearer_rule("/*", "gh")],
+            None,
+            None,
+        )
+        .await;
+
+        let res = engine
+            .resolve_app_injection_for_request(
+                &[gated, sibling],
+                "other.snowflakecomputing.com",
+                Some("/api/v2/statements"),
+                None,
+                "o1",
+                "p1",
+                &*store,
+            )
+            .await
+            .unwrap();
+        match res {
+            AppConnectionResult::Rules { rules, .. } => assert_eq!(rules.len(), 1),
+            _ => panic!("expected the sibling's Rules"),
+        }
+    }
+
+    /// Multi-connection merge where the ONLY gated connection mismatches and
+    /// its sibling contributes nothing: the mismatch surfaces (with its bound
+    /// host) instead of an empty `Rules`. A genuine two-mismatch merge cannot
+    /// be built here because each gated suffix belongs to a single provider,
+    /// so the loop's accumulation is exercised through the empty-sibling arm.
+    #[tokio::test]
+    async fn mismatch_surfaces_when_the_sibling_contributes_nothing() {
+        let engine = PolicyEngine::test_stub();
+        let store = new_store().await;
+        let a = gated_conn(
+            &engine,
+            "snow1",
+            "snowflake",
+            serde_json::json!({ "access_token": "pat", "host": "acme.snowflakecomputing.com" }),
+        )
+        .await;
+        // A non-gated provider with no credentials: `NoConnections`, merges
+        // nothing, so the accumulated rules stay empty.
+        let b = conn("gh1", "github");
+
+        let res = engine
+            .resolve_app_injection_for_request(
+                &[a, b],
+                "other.snowflakecomputing.com",
+                Some("/api/v2/statements"),
+                None,
+                "o1",
+                "p1",
+                &*store,
+            )
+            .await
+            .unwrap();
+        match res {
+            AppConnectionResult::HostMismatch { connections } => {
+                assert_eq!(connections.len(), 1);
+                assert_eq!(connections[0].id, "snow1");
+                assert_eq!(
+                    connections[0].host.as_deref(),
+                    Some("acme.snowflakecomputing.com")
+                );
+            }
+            _ => panic!("expected HostMismatch"),
+        }
+    }
+
+    /// Precedence negative control: an explicit deny-all scope on the
+    /// connection refuses the request WHATEVER host it went to. The soft
+    /// mismatch must not turn a denied wrong-host request into uncredentialed
+    /// pass-through (which would read as unmanaged traffic and escape the
+    /// deny-defaults).
+    #[tokio::test]
+    async fn deny_all_scope_wins_over_host_mismatch() {
+        let engine = PolicyEngine::test_stub();
+        let store = new_store().await;
+        let mut c = gated_conn(
+            &engine,
+            "jf1",
+            "jfrog-artifactory",
+            serde_json::json!({ "access_token": "t", "subdomain": "acme.jfrog.io" }),
+        )
+        .await;
+        // An empty allowlist on a resource axis: denies everything.
+        c.session_policy = Some(serde_json::json!({ "repositories": [] }));
+
+        let res = engine
+            .resolve_app_injection_for_request(
+                std::slice::from_ref(&c),
+                "other.jfrog.io",
+                Some("/artifactory/api/npm/npm/"),
+                None,
+                "o1",
+                "p1",
+                &*store,
+            )
+            .await
+            .unwrap();
+        match res {
+            AppConnectionResult::Rules {
+                rules,
+                session_policy,
+                connection_id,
+                ..
+            } => {
+                assert!(rules.is_empty());
+                assert!(
+                    ee::granular_access::denies_everything(session_policy.as_ref()),
+                    "the deny-all scope must ride out so the request is refused for it"
+                );
+                assert_eq!(connection_id.as_deref(), Some("jf1"));
+            }
+            _ => panic!("expected the deny-all Rules, not HostMismatch"),
+        }
+    }
+
+    /// The matching host is untouched by all of this: same connection, the
+    /// bound host, and resolution proceeds past the gate (here into token
+    /// resolution, which for a plain api_key connection yields rules).
+    #[tokio::test]
+    async fn gated_connection_on_bound_host_still_injects() {
+        let engine = PolicyEngine::test_stub();
+        let store = new_store().await;
+        let c = gated_conn(
+            &engine,
+            "jf1",
+            "jfrog-artifactory",
+            serde_json::json!({ "access_token": "t", "subdomain": "acme.jfrog.io" }),
+        )
+        .await;
+
+        let res = engine
+            .resolve_app_injection_for_request(
+                std::slice::from_ref(&c),
+                "acme.jfrog.io",
+                Some("/artifactory/api/npm/npm/"),
+                None,
+                "o1",
+                "p1",
+                &*store,
+            )
+            .await
+            .unwrap();
+        match res {
+            AppConnectionResult::Rules { rules, .. } => {
+                assert!(!rules.is_empty(), "the bound host must inject");
+            }
+            _ => panic!("expected Rules"),
+        }
     }
 
     // ── narrow_connections_by_path ────────────────────────────────────────

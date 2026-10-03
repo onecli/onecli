@@ -189,7 +189,7 @@ describe("AttachConnectionDialog", () => {
         gmailConnection("conn-1"),
         gmailConnection("conn-2", "Work inbox"),
         { ...gmailConnection("conn-3"), status: "expired" } as Connection,
-        { ...gmailConnection("conn-4"), provider: "slack" } as Connection,
+        { ...gmailConnection("conn-4"), provider: "github" } as Connection,
       ],
     });
     expect(screen.getAllByRole("switch")).toHaveLength(2);

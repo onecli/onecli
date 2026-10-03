@@ -92,8 +92,27 @@ const renderCard = (
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );
-  return render(<ConnectorSuggestions text={text} />, { wrapper });
+  const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+  return {
+    ...render(<ConnectorSuggestions text={text} />, { wrapper }),
+    invalidateSpy,
+  };
 };
+
+/** A popup's landing message, as the callback page posts it (same origin). */
+const landing = (data: Record<string, unknown>) =>
+  act(() => {
+    window.dispatchEvent(
+      new MessageEvent("message", { origin: window.location.origin, data }),
+    );
+  });
+
+/** A landing's tell: the grant views refreshed so a new account (already
+ * granted to every agent by the API's workspace auto-attach) shows attached.
+ * A thunk, because query keys carry the URL's workspace scope, resolved at
+ * call time: a module-level constant would capture "default" and make the
+ * negative assertions vacuous. */
+const refreshedGrants = () => ({ queryKey: queryKeys.grants.all() });
 
 describe("ConnectorSuggestions card", () => {
   let openSpy: MockInstance<typeof window.open>;
@@ -135,10 +154,12 @@ describe("ConnectorSuggestions card", () => {
     expect(windowName).toBe("connect-gmail-new");
   });
 
-  it("discloses the auto-grant at the point of consent for unconnected rows", () => {
+  it("discloses the workspace-wide auto-grant at the point of consent for unconnected rows", () => {
     renderCard(GMAIL_CONNECT_URL);
     expect(
-      screen.getByText(/Connecting gives this agent full access/),
+      screen.getByText(
+        /on for every agent in this workspace, with full access/,
+      ),
     ).toBeInTheDocument();
   });
 
@@ -195,66 +216,47 @@ describe("ConnectorSuggestions card", () => {
     expect(screen.queryByRole("button", { name: "Connect Gmail" })).toBeNull();
   });
 
-  it("auto-grants the agent full access ONLY for a connect this card initiated", async () => {
-    renderCard(GMAIL_CONNECT_URL);
+  it("refreshes the grant views ONLY for a connect this card initiated, and never writes a grant", async () => {
+    const { invalidateSpy } = renderCard(GMAIL_CONNECT_URL);
 
     // A popup someone else opened (same origin) reports a new connection:
-    // the card must not grant.
-    act(() => {
-      window.dispatchEvent(
-        new MessageEvent("message", {
-          origin: window.location.origin,
-          data: {
-            type: "app-connected",
-            provider: "gmail",
-            connectionId: "conn-9",
-          },
-        }),
-      );
+    // the card must not react.
+    landing({
+      type: "app-connected",
+      provider: "gmail",
+      connectionId: "conn-9",
     });
     await act(async () => {});
-    expect(grants.setConnectionGrant).not.toHaveBeenCalled();
+    expect(invalidateSpy).not.toHaveBeenCalled();
 
-    // Initiated from this card → the same message now grants full access.
+    // Initiated from this card → the same message refreshes the grant views
+    // (the API already granted the new account to every agent) and counts.
     await userEvent.click(
       screen.getByRole("button", { name: "Connect Gmail" }),
     );
-    act(() => {
-      window.dispatchEvent(
-        new MessageEvent("message", {
-          origin: window.location.origin,
-          data: {
-            type: "app-connected",
-            provider: "gmail",
-            connectionId: "conn-9",
-          },
-        }),
-      );
+    landing({
+      type: "app-connected",
+      provider: "gmail",
+      connectionId: "conn-9",
     });
     await waitFor(() =>
-      expect(grants.setConnectionGrant).toHaveBeenCalledWith(
-        "agent-1",
-        "conn-9",
-        { access: "full" },
-      ),
+      expect(invalidateSpy).toHaveBeenCalledWith(refreshedGrants()),
     );
-    expect(grants.setConnectionGrant).toHaveBeenCalledTimes(1);
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: queryKeys.counts.all(),
+    });
+    expect(grants.setConnectionGrant).not.toHaveBeenCalled();
   });
 
-  it("never grants on a reconnect — no connectionId in the message", async () => {
-    renderCard(GMAIL_CONNECT_URL);
+  it("refreshes on a reconnect too: no connectionId, the pool still changed", async () => {
+    const { invalidateSpy } = renderCard(GMAIL_CONNECT_URL);
     await userEvent.click(
       screen.getByRole("button", { name: "Connect Gmail" }),
     );
-    act(() => {
-      window.dispatchEvent(
-        new MessageEvent("message", {
-          origin: window.location.origin,
-          data: { type: "app-connected", provider: "gmail" },
-        }),
-      );
-    });
-    await act(async () => {});
+    landing({ type: "app-connected", provider: "gmail" });
+    await waitFor(() =>
+      expect(invalidateSpy).toHaveBeenCalledWith(refreshedGrants()),
+    );
     expect(grants.setConnectionGrant).not.toHaveBeenCalled();
   });
 
@@ -280,31 +282,24 @@ describe("ConnectorSuggestions card", () => {
   it("hides the consent line when every suggested app is already connected", () => {
     renderCard(GMAIL_CONNECT_URL, { connections: [connectedGmail] });
     expect(
-      screen.queryByText(/Connecting gives this agent full access/),
+      screen.queryByText(/on for every agent in this workspace/),
     ).toBeNull();
   });
 
-  it("releases the claim when the popup is blocked — a later landing must not grant", async () => {
+  it("releases the claim when the popup is blocked: a later landing is not this card's", async () => {
     openSpy.mockReturnValue(null);
-    renderCard(GMAIL_CONNECT_URL);
+    const { invalidateSpy } = renderCard(GMAIL_CONNECT_URL);
 
     await userEvent.click(
       screen.getByRole("button", { name: "Connect Gmail" }),
     );
-    act(() => {
-      window.dispatchEvent(
-        new MessageEvent("message", {
-          origin: window.location.origin,
-          data: {
-            type: "app-connected",
-            provider: "gmail",
-            connectionId: "conn-9",
-          },
-        }),
-      );
+    landing({
+      type: "app-connected",
+      provider: "gmail",
+      connectionId: "conn-9",
     });
     await act(async () => {});
-    expect(grants.setConnectionGrant).not.toHaveBeenCalled();
+    expect(invalidateSpy).not.toHaveBeenCalledWith(refreshedGrants());
   });
 
   it("routes a configure landing ONLY for a connect this card initiated", async () => {
@@ -433,8 +428,10 @@ describe("ConnectorSuggestions card", () => {
       ).toBeInTheDocument();
     });
 
-    it("stakes the claim for the dialog's connect-new — the landing auto-grants", async () => {
-      renderCard(GMAIL_ATTACH_URL, { connections: [connectedGmail] });
+    it("stakes the claim for the dialog's connect-new: the landing refreshes the grants", async () => {
+      const { invalidateSpy } = renderCard(GMAIL_ATTACH_URL, {
+        connections: [connectedGmail],
+      });
       await userEvent.click(
         screen.getByRole("button", { name: "Attach Gmail for this agent" }),
       );
@@ -447,59 +444,40 @@ describe("ConnectorSuggestions card", () => {
       expect(url).toContain("workspaceId=ws-1");
       expect(windowName).toBe("connect-gmail-new");
 
-      act(() => {
-        window.dispatchEvent(
-          new MessageEvent("message", {
-            origin: window.location.origin,
-            data: {
-              type: "app-connected",
-              provider: "gmail",
-              connectionId: "conn-9",
-            },
-          }),
-        );
+      landing({
+        type: "app-connected",
+        provider: "gmail",
+        connectionId: "conn-9",
       });
       await waitFor(() =>
-        expect(grants.setConnectionGrant).toHaveBeenCalledWith(
-          "agent-1",
-          "conn-9",
-          { access: "full" },
-        ),
+        expect(invalidateSpy).toHaveBeenCalledWith(refreshedGrants()),
       );
+      expect(grants.setConnectionGrant).not.toHaveBeenCalled();
     });
   });
 
-  it("keeps the picker's listener alive after it closes — an in-flight popup still grants", async () => {
-    renderCard(GMAIL_CONNECT_URL);
+  it("keeps the picker's listener alive after it closes: an in-flight popup still lands", async () => {
+    const { invalidateSpy } = renderCard(GMAIL_CONNECT_URL);
     await userEvent.click(
       screen.getByRole("button", { name: "Browse all apps" }),
     );
     // Initiate from the PICKER (its row), then close it without finishing.
-    await userEvent.click(screen.getByRole("button", { name: /^Slack/ }));
+    await userEvent.click(screen.getByRole("button", { name: /^Linear/ }));
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByText("Connect an app")).toBeNull();
 
     // The popup lands after the close: the latched (still-mounted) picker
-    // must catch it and grant.
-    act(() => {
-      window.dispatchEvent(
-        new MessageEvent("message", {
-          origin: window.location.origin,
-          data: {
-            type: "app-connected",
-            provider: "slack",
-            connectionId: "conn-7",
-          },
-        }),
-      );
+    // must catch it and refresh. The card never claimed linear, so the
+    // refresh can only be the picker's.
+    landing({
+      type: "app-connected",
+      provider: "linear",
+      connectionId: "conn-7",
     });
     await waitFor(() =>
-      expect(grants.setConnectionGrant).toHaveBeenCalledWith(
-        "agent-1",
-        "conn-7",
-        { access: "full" },
-      ),
+      expect(invalidateSpy).toHaveBeenCalledWith(refreshedGrants()),
     );
+    expect(grants.setConnectionGrant).not.toHaveBeenCalled();
   });
 });
 

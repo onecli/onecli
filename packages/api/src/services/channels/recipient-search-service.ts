@@ -1,8 +1,12 @@
 import { db } from "@onecli/db";
 import { normalizeMentionName } from "@onecli/channels";
-import { usersList, conversationsList } from "@onecli/channels/slack";
 import { getCrypto } from "../../providers";
+import { cleanLabel } from "../../lib/format";
 import { mentionDirectoryOf } from "./mention-resolution-service";
+import { ServiceError } from "../errors";
+import { noteOutboundFailure } from "./agent-channel-service";
+import { channelProvider, isChannelProviderId } from "./registry";
+import type { ChannelProvider } from "./types";
 
 /**
  * The find_recipient search — the DISCOVERY half of the mention design.
@@ -25,21 +29,6 @@ import { mentionDirectoryOf } from "./mention-resolution-service";
 
 /** Result caps — a discovery answer, not a roster dump. */
 const MAX_RESULTS = 8;
-/** Page budget for the cursor loops: 200 per page × 25 pages = 5000 members
- * scanned worst-case, far past any workspace this serves today — the budget
- * exists so a pathological cursor can never spin forever. */
-const MAX_PAGES = 25;
-
-const cleanName = (raw: string): string =>
-  [...raw]
-    .filter((ch) => {
-      const code = ch.charCodeAt(0);
-      return code >= 0x20 && code !== 0x7f;
-    })
-    .join("")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 80);
 
 export interface RecipientCandidate {
   /** "person" = a human member; "app" = another Slack app's bot user —
@@ -82,9 +71,10 @@ const searchKeyOf = (raw: string): string =>
 
 const presenceOf = async (agentId: string) => {
   const presence = await db.agentChannel.findFirst({
-    where: { agentId, provider: "slack", status: "active" },
+    where: { agentId, status: "active" },
     select: {
       id: true,
+      provider: true,
       integrationId: true,
       credentials: true,
       // The presence's own bot user id — the agent must never discover
@@ -96,20 +86,46 @@ const presenceOf = async (agentId: string) => {
   return presence;
 };
 
-const botTokenOf = async (
-  credentials: string | null,
-): Promise<string | null> => {
-  if (!credentials) return null;
+type Presence = {
+  id: string;
+  provider: string;
+  credentials: string | null;
+  identityRef: string | null;
+  integration: { externalId: string };
+};
+
+/**
+ * Ask the presence's provider for one half of its roster. Null when the
+ * presence holds no credential, names a provider this build does not know,
+ * or the provider refused transiently (fails open: the linked directory
+ * answers regardless). A DEAD credential is different: it flips the
+ * presence, and the call that discovered it must say so rather than answer
+ * "nobody matching" over a roster it could not read — the same message the
+ * send path gives, so the model hears one story whichever tool found out.
+ */
+const fromProvider = async <T>(
+  presence: Presence,
+  ask: (provider: ChannelProvider, credentialsJson: string) => Promise<T>,
+): Promise<T | null> => {
+  if (!presence.credentials || !isChannelProviderId(presence.provider)) {
+    return null;
+  }
   try {
-    const parsed = JSON.parse(await getCrypto().decrypt(credentials)) as {
-      botToken?: string;
-    };
-    return parsed.botToken ?? null;
-  } catch {
+    return await ask(
+      channelProvider(presence.provider),
+      await getCrypto().decrypt(presence.credentials),
+    );
+  } catch (err) {
+    if (await noteOutboundFailure(presence.id, err)) {
+      const platform = channelProvider(presence.provider).displayName;
+      throw new ServiceError(
+        "UNPROCESSABLE",
+        `Your ${platform} app was removed from the workspace, so this tool no longer works. It needs to be re-attached from your Channels page in the OneCLI dashboard before you can reach ${platform} again. Do not retry.`,
+      );
+    }
     return null;
   }
 };
-
 /**
  * People search over the connected tenant: the linked directory (verified
  * names) unioned with the workspace roster (unverified profile names).
@@ -146,56 +162,31 @@ export const findPeople = async (
     }
   }
 
-  const token = await botTokenOf(presence.credentials);
-  const tenantId = presence.integration.externalId;
-  if (token) {
-    let cursor: string | undefined;
-    for (let page = 0; page < MAX_PAGES; page += 1) {
-      let response;
-      try {
-        response = await usersList(token, { cursor });
-      } catch {
-        break; // fail open: linked results still answer
-      }
-      for (const member of response.members) {
-        // Deleted members, Slackbot (Slack's own special case: is_bot
-        // false but never a real recipient), and the agent's OWN bot user
-        // (self-mention = self-invocation, a loop seed) stay invisible.
-        // Other bots are APPS — labeled candidates since 4e, not silent
-        // holes (the "Shuf" lesson: an empty answer makes the model invent
-        // wrong reasons).
-        if (
-          member.deleted ||
-          member.id === "USLACKBOT" ||
-          member.id === presence.identityRef
-        ) {
-          continue;
-        }
-        // The tenant fence: same team, never a Slack Connect stranger.
-        if (member.team_id !== tenantId || member.is_stranger === true) {
-          continue;
-        }
-        if (linkedByExternalId.has(member.id)) continue; // already verified
-        const name = cleanName(
-          member.profile?.display_name ||
-            member.profile?.real_name ||
-            member.name ||
-            "",
-        );
-        if (!name) continue;
-        const rank = rankOf(searchKeyOf(name), normalized);
-        if (rank < 3) {
-          results.push({
-            kind: member.is_bot ? "app" : "person",
-            ref: member.id,
-            name,
-            verified: false,
-            rank,
-          });
-        }
-      }
-      cursor = response.response_metadata?.next_cursor || undefined;
-      if (!cursor) break;
+  // The provider's roster (tenant-fenced and self-excluded by the provider,
+  // which alone knows how its tenant and its own bot user read); ranking,
+  // the verified-name precedence and the cap are ours. Other bots are APPS
+  // — labeled candidates, not silent holes (the "Shuf" lesson: an empty
+  // answer makes the model invent wrong reasons).
+  const members = await fromProvider(presence, (provider, credentialsJson) =>
+    provider.listMembers({
+      credentialsJson,
+      tenantId: presence.integration.externalId,
+      selfIdentityRef: presence.identityRef,
+    }),
+  );
+  for (const member of members ?? []) {
+    if (linkedByExternalId.has(member.ref)) continue; // already verified
+    const name = cleanLabel(member.name);
+    if (!name) continue;
+    const rank = rankOf(searchKeyOf(name), normalized);
+    if (rank < 3) {
+      results.push({
+        kind: member.isApp ? "app" : "person",
+        ref: member.ref,
+        name,
+        verified: false,
+        rank,
+      });
     }
   }
 
@@ -221,38 +212,27 @@ export const findChannels = async (
 ): Promise<ChannelCandidate[]> => {
   const presence = await presenceOf(agentId);
   if (!presence) return [];
-  const token = await botTokenOf(presence.credentials);
-  if (!token) return [];
   const normalized = searchKeyOf(query.replace(/^#/, ""));
   if (!normalized) return [];
 
   const results: (ChannelCandidate & { rank: number })[] = [];
-  let cursor: string | undefined;
-  for (let page = 0; page < MAX_PAGES; page += 1) {
-    let response;
-    try {
-      response = await conversationsList(token, { cursor });
-    } catch {
-      break;
+  const channels = await fromProvider(presence, (provider, credentialsJson) =>
+    provider.listChannels({ credentialsJson }),
+  );
+  for (const channel of channels ?? []) {
+    const name = cleanLabel(channel.name);
+    if (!name) continue;
+    const rank = rankOf(searchKeyOf(name), normalized);
+    if (rank < 3) {
+      results.push({
+        kind: "channel",
+        ref: channel.ref,
+        name: `#${name}`,
+        member: channel.member,
+        private: channel.private,
+        rank,
+      });
     }
-    for (const channel of response.channels) {
-      if (channel.is_archived) continue;
-      const name = cleanName(channel.name ?? "");
-      if (!name) continue;
-      const rank = rankOf(searchKeyOf(name), normalized);
-      if (rank < 3) {
-        results.push({
-          kind: "channel",
-          ref: channel.id,
-          name: `#${name}`,
-          member: channel.is_member === true,
-          private: channel.is_private === true,
-          rank,
-        });
-      }
-    }
-    cursor = response.response_metadata?.next_cursor || undefined;
-    if (!cursor) break;
   }
 
   return results
@@ -275,7 +255,7 @@ export const anchorRecipient = async (input: {
   kind?: "person" | "app" | "channel";
 }): Promise<void> => {
   const name = normalizeMentionName(input.name);
-  const displayName = cleanName(input.name);
+  const displayName = cleanLabel(input.name);
   if (!name || !displayName) return;
   const kind = input.kind ?? "person";
   await db.mentionAnchor.upsert({

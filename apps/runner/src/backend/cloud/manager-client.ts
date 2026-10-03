@@ -59,6 +59,16 @@ export interface ManagerManagedObject {
 export type ParkStatus = "pending" | "parking" | "parked";
 export type WakeStatus = "waking" | "ready";
 
+/** Where a brand-new home is born when the wake has to create it: the
+ * create body's ownership trio, sent on the wake. The manager uses it only
+ * for a home with no PVC and no archive; anything that exists is placed by
+ * its own truth. */
+export interface ManagerWakePlacement {
+  workspaceId: string;
+  runnerId: string;
+  installationId: string;
+}
+
 export interface ManagerCreateSandboxRequest {
   sandboxId: string;
   workspaceId: string;
@@ -93,7 +103,10 @@ export interface ManagerClient {
     runnerId: string,
   ): Promise<Array<{ sandboxId: string; ref: string }>>;
   parkHome(ref: string): Promise<{ status: ParkStatus }>;
-  wakeHome(ref: string): Promise<{ status: WakeStatus }>;
+  wakeHome(
+    ref: string,
+    placement?: ManagerWakePlacement,
+  ): Promise<{ status: WakeStatus }>;
   listManaged(): Promise<ManagerManagedObject[]>;
 }
 
@@ -277,9 +290,13 @@ export const createManagerClient = (
       );
     },
 
-    async wakeHome(ref) {
+    async wakeHome(ref, placement) {
       return expectStatus(
-        await call("POST", `/v1/homes/${encodeURIComponent(ref)}/wake`),
+        await call(
+          "POST",
+          `/v1/homes/${encodeURIComponent(ref)}/wake`,
+          placement,
+        ),
         ["waking", "ready"] as const,
         "wake",
       );

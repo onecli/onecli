@@ -377,6 +377,7 @@ export const Composer = ({
         </Button>
         <Textarea
           ref={textareaRef}
+          dir="auto"
           value={message}
           onChange={(e) => setMessage(e.target.value)}
           onKeyDown={(e) => {

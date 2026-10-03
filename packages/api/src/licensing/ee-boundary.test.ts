@@ -613,7 +613,7 @@ describe("enterprise-license boundary", () => {
       );
       // "employee" must not read as "ee/"
       expect(isUnderLicensedPath("apps/web/src/lib/employee.ts")).toBe(false);
-      expect(seamFor("packages/api/src/edition-defaults.ts")?.count).toBe(15);
+      expect(seamFor("packages/api/src/edition-defaults.ts")?.count).toBe(16);
       expect(seamFor("apps/web/src/app/auth/cli/page.tsx")).toBeDefined();
       // No seam covers the API's shared code or the web's hooks — a crossing
       // from either is a hard failure, not a counted one.

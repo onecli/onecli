@@ -7,6 +7,7 @@ import {
   type IngestOutcome,
   type GroupInviteOutcome,
 } from "../../channel-ingestion-service";
+import { markPresenceRemoved } from "../../agent-channel-service";
 import { attachTurnReceipt, moveTurnReceipt } from "../../turn-receipt-service";
 import { interpretSlackEvent, type SlackDoorCall } from "./interpret";
 
@@ -69,6 +70,16 @@ export const dispatchSlackEvent = async (input: {
       eventId: input.eventId,
     });
     return { kind: "ignored", reason: "left-channel-cleaned" };
+  }
+
+  if (call.door === "removed") {
+    // The APP was removed from the workspace: the presence flips to disabled
+    // (dashboard says so, the agent's doc says so, a re-attach resumes it).
+    // Ignored-shaped on the wire like `leave` - the bot token is dead, so
+    // there is nothing the adapter could post. Idempotent: Slack sends
+    // app_uninstalled and tokens_revoked in either order.
+    await markPresenceRemoved(input.presenceId, call.reason);
+    return { kind: "ignored", reason: `presence-removed:${call.reason}` };
   }
 
   if (call.door === "direct") {

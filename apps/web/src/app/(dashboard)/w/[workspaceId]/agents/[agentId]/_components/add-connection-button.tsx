@@ -9,10 +9,12 @@ import { ConnectAppPickerDialog } from "./connect-app-picker-dialog";
 
 /**
  * The agent section's own "Add connection" door: connect an app (or mint a
- * custom secret) WITHOUT leaving the agent, and wire this agent up to it the
- * moment it lands. The workspace Connections page keeps the full management
- * surface; this is the shortest path from "my agent needs X" to "it has X" —
- * the same auto-grant contract the chat's connector card makes.
+ * custom secret) WITHOUT leaving the agent. The workspace Connections page
+ * keeps the full management surface; this is the shortest path from "my agent
+ * needs X" to "it has X". A new app account lands already attached to every
+ * agent of the workspace (the API's workspace auto-attach); a secret minted
+ * here is also attached to THIS agent explicitly, because the dialog can mint
+ * an LLM key, which the API only hands to agents that have none.
  *
  * The open state is the section's (controlled), so the tabs' empty states can
  * open the same dialogs — one owner for the door, many triggers.
@@ -54,13 +56,12 @@ export const AddConnectionButton = ({
       </Button>
 
       {/* Apps: the shared catalog picker. Connect opens the OAuth popup; on
-          landing the new account is granted to this agent automatically, then
-          the permissions sheet opens for exactly that account. */}
+          landing the permissions sheet opens for exactly the new account. */}
       <ConnectAppPickerDialog
         agentId={agentId}
         open={pickerOpen}
         onOpenChange={onPickerOpenChange}
-        onGranted={(connectionId) => {
+        onConnected={(connectionId) => {
           // Land the user in the permissions sheet for what they just
           // added — the apps section's own `?connection=&manage=1` deep
           // link, so this stays one mechanism with one owner. Shallow (the

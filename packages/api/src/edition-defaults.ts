@@ -22,6 +22,10 @@ import { eeNewOrgPolicySeeder } from "./ee/services/new-org-policy-seeder";
 import { eePlatformLlm } from "./ee/services/platform-llm";
 import { onpremNewWorkspacePolicySeeder } from "./services/policy-onprem-seeder";
 import { pgAttachmentBlobStore } from "./services/attachments/pg-blob-store";
+import {
+  hasAttachmentBucketConfigured,
+  s3AttachmentBlobStore,
+} from "./ee/attachments/s3-blob-store";
 import { setDefaultAttachmentStore } from "./providers/attachment-store";
 import { isEntitled } from "./lib/entitlements";
 import { setDefaultCrypto } from "./providers/crypto";
@@ -83,14 +87,22 @@ export const ensureEditionDefaults = (): void => {
   if (applied) return;
   applied = true;
 
-  // Attachment BYTES (free feature — deliberately outside the ee/ block
-  // below): the inline-Postgres store serves both editions today. Like the
-  // policy seeder, both arms ride the DB client, so the impl is injected
-  // here rather than resolved as a static onprem default. Cloud's future
-  // scalable arm (S3) replaces this line behind config presence (bucket env
-  // set), never an edition branch — rows dispatch per `storageRef`, so mixed
-  // backends coexist.
-  setDefaultAttachmentStore(pgAttachmentBlobStore);
+  // Attachment BYTES. The seam and the inline-Postgres arm are FREE (a
+  // self-hoster runs them with no license); the object-storage arm is
+  // enterprise (`ee/attachments/s3-blob-store.ts`). Selected by config
+  // presence AND entitlement: `ATTACHMENTS_S3_BUCKET` set on an entitled
+  // deployment (cloud is always entitled; self-host via ENTERPRISE_ENABLED)
+  // sends NEW bytes to S3 and mints presigned downloads; otherwise Postgres.
+  // The env alone never flips it ("flag off ⇒ no EE behavior"). Rows
+  // dispatch per `storageRef`, so the two arms coexist with no migration —
+  // the S3 arm reads legacy inline rows through the pg arm. Both arms ride
+  // the DB client, so both are injected here rather than resolved as a
+  // static default (the providers barrel is client-reachable).
+  setDefaultAttachmentStore(
+    isEntitled() && hasAttachmentBucketConfigured()
+      ? s3AttachmentBlobStore
+      : pgAttachmentBlobStore,
+  );
 
   // Org-scoped OAuth interception and the org app-config tier are shared
   // features (both editions serve /org/apps + /org/connections), but their

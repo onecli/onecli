@@ -5,6 +5,7 @@ import { logger } from "../../lib/logger";
 import { CONVERSATION_SOURCES } from "../../validations/conversation";
 import { sendConversationMessage } from "../follow-up-service";
 import {
+  decideActionApproval,
   registerActionHandler,
   requestActionApproval,
 } from "./action-approval-service";
@@ -44,6 +45,13 @@ const log = logger.child({ service: "app-turn-cap" });
  *    first (channel still open to everyone, app not blocked since the
  *    card): a card may sit for a day, and approving it must not admit what
  *    the room has since closed - the 4a/4e verify-at-approve lesson.
+ *  - A PAIR conversation (PR 5b, two agents) has no human turn of its own,
+ *    so "since the last human turn" needs a second reading of "a person is
+ *    in the loop": a person driving one of the agents (`resetPairStreaks`,
+ *    called by the agent link service when a `message_agent` comes from a
+ *    running human-authored turn), or the owner resuming from the dashboard
+ *    (`resumeAppTurns`, the peer row's Resume). The dashboard reads the
+ *    pause (`isPastAppTurnCap`) so a paused pair is never a silent one.
  */
 
 /** The house rule, not config: enough for a real back-and-forth, cheap to
@@ -62,16 +70,23 @@ export const APP_TURN_PAUSE_MESSAGE = "Paused until a person replies here.";
 
 /**
  * The frozen hold: the row is the single truth (the 4b contract). `message`
- * is the framed, decoded text that hit the cap; `source` is the provider the
- * replayed turn is attributed to; `appExternalRef` is the app's bot user id
- * the replay re-checks against the person ledger (a block after the card
- * must still win).
+ * is the framed, decoded text that hit the cap; `source` is where the
+ * replayed turn is attributed to; `speaker` is who hit the cap - a Slack
+ * APP (its bot user id, re-checked against the person ledger at replay) or
+ * a PEER AGENT (its agent id, re-checked against the agent link). Either
+ * way a block after the card must still win.
  */
+const capSpeakerSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("app"), externalRef: z.string().min(1) }),
+  z.object({ kind: z.literal("agent"), agentId: z.string().min(1) }),
+]);
+export type CapSpeaker = z.infer<typeof capSpeakerSchema>;
+
 const continuePayloadSchema = z.object({
   conversationId: z.string().min(1),
   message: z.string(),
   source: z.enum(CONVERSATION_SOURCES),
-  appExternalRef: z.string().min(1),
+  speaker: capSpeakerSchema,
 });
 type ContinuePayload = z.infer<typeof continuePayloadSchema>;
 
@@ -86,11 +101,13 @@ const CARD_TITLE_CHARS = 60;
  * "<agent> asks: *<summary>*". Plain words, no counts: the owner should
  * understand they are letting the conversation go on for a while longer.
  */
-const continueSummary = (title: string | null): string => {
+const continueSummary = (title: string | null, speaker: CapSpeaker): string => {
   const where = title
     ? `"${title.length > CARD_TITLE_CHARS ? `${title.slice(0, CARD_TITLE_CHARS)}…` : title}"`
     : "this thread";
-  return `continue the conversation with other apps in ${where}`;
+  return speaker.kind === "agent"
+    ? `continue the conversation with ${where}`
+    : `continue the conversation with other apps in ${where}`;
 };
 
 /**
@@ -105,7 +122,7 @@ export const admitAppTurn = async (input: {
   conversationId: string;
   source: ContinuePayload["source"];
   message: string;
-  appExternalRef: string;
+  speaker: CapSpeaker;
 }): Promise<AppTurnVerdict> => {
   const { appTurnStreak, title } = await db.conversation.findUniqueOrThrow({
     where: { id: input.conversationId },
@@ -128,7 +145,7 @@ export const admitAppTurn = async (input: {
     conversationId: input.conversationId,
     message: input.message,
     source: input.source,
-    appExternalRef: input.appExternalRef,
+    speaker: input.speaker,
   };
   try {
     await requestActionApproval({
@@ -138,7 +155,7 @@ export const admitAppTurn = async (input: {
       // Structurally JSON (four strings) — the cast bridges TS's nominal
       // InputJsonValue only.
       payload: payload as unknown as Prisma.InputJsonValue,
-      summary: continueSummary(title),
+      summary: continueSummary(title, input.speaker),
     });
   } catch (err) {
     // The pause still stands (the counter did) — only the card is owed and
@@ -177,6 +194,85 @@ export const resetAppTurnStreak = async (
 };
 
 /**
+ * Past the crossing: the conversation is paused and every app message to
+ * it is silence until a person continues it. AT the cap is still open (the
+ * next message is the one that crosses). The one place the threshold is
+ * read for display, so the dashboard and the door agree.
+ */
+export const isPastAppTurnCap = (appTurnStreak: number): boolean =>
+  appTurnStreak > APP_TURN_CAP;
+
+/**
+ * The dashboard's RESUME (PR 5b, the peer row): a person continues a paused
+ * conversation from the web, with no card in hand. If the crossing's
+ * continue card is still pending, this IS its approve - the same live gate,
+ * the same one-round reset, the parked message replays, the bell and any
+ * Slack cards settle - so the two doors can never disagree. Otherwise (the
+ * card was rejected or expired, or the pause is older than the card) the
+ * streak simply resets and the next message is admitted. Fenced on the
+ * caller's agent owning the conversation. `false` = not-found.
+ */
+export const resumeAppTurns = async (input: {
+  agentId: string;
+  conversationId: string;
+  deciderUserId: string;
+}): Promise<boolean> => {
+  const conversation = await db.conversation.findFirst({
+    where: { id: input.conversationId, agentId: input.agentId },
+    select: { id: true },
+  });
+  if (!conversation) return false;
+  const card = await db.actionApproval.findFirst({
+    where: {
+      agentId: input.agentId,
+      action: APP_TURN_CONTINUE_ACTION,
+      status: "pending",
+      payload: { path: ["conversationId"], equals: input.conversationId },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { id: true },
+  });
+  if (card) {
+    const decided = await decideActionApproval({
+      approvalId: card.id,
+      decision: "approve",
+      deciderUserId: input.deciderUserId,
+    });
+    // `decided` covers executed AND failed (the live gate refused): a
+    // failed approve leaves the pause standing on purpose, and the card
+    // says why. Only a card that vanished under us falls through to the
+    // bare reset.
+    if (decided.kind === "decided") return true;
+  }
+  await resetAppTurnStreak(input.conversationId);
+  return true;
+};
+
+/**
+ * A PERSON is driving one of the two agents in a pair (PR 5b): the chain
+ * of unattended agent turns is broken on BOTH sides of the pair, exactly as
+ * a human turn in a Slack thread breaks it there. Called by the agent link
+ * service before a delivery whose origin is a running, human-authored turn;
+ * the delivered message then counts as the first of a fresh chain.
+ */
+export const resetPairStreaks = async (
+  agentAId: string,
+  agentBId: string,
+): Promise<void> => {
+  await db.conversation.updateMany({
+    where: {
+      source: "agent",
+      appTurnStreak: { gt: 0 },
+      OR: [
+        { agentId: agentAId, externalRef: agentBId },
+        { agentId: agentBId, externalRef: agentAId },
+      ],
+    },
+    data: { appTurnStreak: 0 },
+  });
+};
+
+/**
  * The live gate, re-asked at approve time. The card may have waited a day;
  * the room may have closed since. Throws the honest reason - the approval
  * then settles `failed` ("Approved but FAILED: ...") and nothing resumes.
@@ -186,8 +282,16 @@ export const resetAppTurnStreak = async (
 const verifyContinueStillAllowed = async (
   agentId: string,
   conversationId: string,
-  appExternalRef: string,
+  speaker: CapSpeaker,
 ): Promise<void> => {
+  if (speaker.kind === "agent") {
+    // A peer agent's thread: the live gate is the agent link, both sides.
+    const { isLinkBlocked } = await import("./agent-link-service");
+    if (await isLinkBlocked(agentId, speaker.agentId)) {
+      throw new Error("one side has blocked this conversation since");
+    }
+    return;
+  }
   const link = await db.channelThreadLink.findFirst({
     where: { conversationId, conversation: { agentId } },
     select: {
@@ -213,7 +317,7 @@ const verifyContinueStillAllowed = async (
   }
   const person = await resolvePersonReach({
     ...scope,
-    externalRef: appExternalRef,
+    externalRef: speaker.externalRef,
   });
   if (person === "blocked" || person === "members_only") {
     throw new Error("the workspace owner has blocked this app");
@@ -235,7 +339,7 @@ registerActionHandler(APP_TURN_CONTINUE_ACTION, async (approval) => {
   await verifyContinueStillAllowed(
     approval.agentId,
     payload.conversationId,
-    payload.appExternalRef,
+    payload.speaker,
   );
   const { count } = await db.conversation.updateMany({
     where: { id: payload.conversationId, agentId: approval.agentId },

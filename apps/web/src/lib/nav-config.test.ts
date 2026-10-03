@@ -106,6 +106,18 @@ describe("Agents moves into the sidebar's own group", () => {
   });
 });
 
+describe("Files is a breadcrumb-only section", () => {
+  it("never renders in the sidebar (there is no listing to open)", () => {
+    expect(workspaceTitles({ sidebar: true })).not.toContain("Files");
+  });
+
+  it("stays in the table so the file page's crumb reads Files", () => {
+    expect(
+      workspaceNavItems("p1").find((item) => item.title === "Files")?.url,
+    ).toBe("/w/p1/files");
+  });
+});
+
 describe("Install moved into Workspace Settings", () => {
   it("is no longer a top-level workspace nav entry", () => {
     expect(workspaceTitles()).not.toContain("Install");

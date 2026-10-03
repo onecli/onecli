@@ -1,4 +1,5 @@
 import { cryptoService } from "@onecli/api/lib/crypto";
+import { compileConnectionStack } from "@onecli/api/services/grants-compile";
 import type { Prisma, PrismaClient } from "@prisma/client";
 
 import type { TestIds } from "./ids.js";
@@ -171,6 +172,18 @@ export interface AppConnectionSpec {
    * in the pool). Defaults to `workspace`.
    */
   readonly scope?: "workspace" | "organization";
+  /**
+   * The plaintext credential payload to encrypt and store. Defaults to a
+   * bare OAuth shape; a host-gated provider (Salesforce, Snowflake, JFrog)
+   * sets it to carry the bound host its `credential_host_field` names.
+   */
+  readonly credentials?: Readonly<Record<string, unknown>>;
+  /**
+   * Non-secret connection metadata, stored as-is — e.g. the `bound_host` the
+   * API records for a host-gated provider, which the gateway echoes to an
+   * agent that called one of the provider's generic hosts.
+   */
+  readonly metadata?: Prisma.InputJsonObject;
 }
 
 export interface WorldSpec {
@@ -387,6 +400,30 @@ export const grantSecret = async (
 };
 
 /**
+ * The stack the REAL grant compiler emits for "custom access, `allow` only" on
+ * the world's first app connection, as spec rules bound to the main agent and
+ * named `Grant: e2e · <provider>…`. Production-shaped by construction, so a
+ * suite asserting on a grant row (its action, approval modifier, or name) can
+ * never drift from what a customized grant actually writes.
+ */
+export const compiledGrantStack = (
+  provider: string,
+  allow: string[],
+): RuleSpec[] =>
+  compileConnectionStack(`Grant: e2e · ${provider}`, provider, {
+    access: "custom",
+    allow,
+    ask: [],
+  }).map((rule) => ({
+    name: rule.name,
+    action: rule.action,
+    requireApproval: rule.requireApproval,
+    source: "grant",
+    identities: ["agent"],
+    targets: [{ kind: "connection", connectionIndex: 0, tools: rule.tools }],
+  }));
+
+/**
  * Write one secret row.
  *
  * Separate from `seedWorld` so a test can add a credential *after* the gateway
@@ -502,8 +539,13 @@ export const seedWorld = async (
         provider: connection.provider,
         label: connection.label ?? `${connection.provider}-${String(i)}`,
         status: "connected",
+        ...(connection.metadata ? { metadata: connection.metadata } : {}),
         credentials: await cryptoService.encrypt(
-          JSON.stringify({ access_token: `e2e-oauth-${String(i)}` }),
+          JSON.stringify(
+            connection.credentials ?? {
+              access_token: `e2e-oauth-${String(i)}`,
+            },
+          ),
         ),
       },
     });

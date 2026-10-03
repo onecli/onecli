@@ -54,7 +54,7 @@ describe("foldTranscript", () => {
     expect(turns[0]?.ended).toBe(false);
   });
 
-  it("builds the work log live, then collapses to the answer alone", () => {
+  it("keeps the opening sentence live, then collapses to the answer alone", () => {
     // The reader's half of "the answer is the last message" (supervisor,
     // 2026-08-31). Mid-turn narration is PROGRESS: it streams as deltas so
     // the person sees work happening, and the durable `text` — which
@@ -72,16 +72,12 @@ describe("foldTranscript", () => {
       event("t1", "text.delta", { text: "CI passed; nothing to do." }),
     ];
 
-    // Mid-turn: the closed segment sits in the work log IN STREAM ORDER
-    // (narration, then the tool that closed it), and the open segment is
-    // the live tail.
+    // Mid-turn: the segment the first tool closed is the lead, and the
+    // open segment is the live tail.
     const live = foldTranscript(streaming);
-    expect(live[0]?.work).toEqual([
-      { kind: "narration", text: "Let me check the logs." },
-      {
-        kind: "tool",
-        tool: { callId: "c1", name: "bash", output: "ok" },
-      },
+    expect(live[0]?.lead).toBe("Let me check the logs.");
+    expect(live[0]?.tools).toEqual([
+      { callId: "c1", name: "bash", output: "ok" },
     ]);
     expect(live[0]?.liveText).toBe("CI passed; nothing to do.");
     expect(live[0]?.text).toBe("");
@@ -101,39 +97,53 @@ describe("foldTranscript", () => {
     expect(settled[0]?.ended).toBe(true);
   });
 
-  it("never pushes a blank segment on back-to-back tool calls", () => {
-    // The supervisor's own guard, mirrored: consecutive tools with nothing
-    // said between them must not litter the log with empty rows.
+  it("keeps only the opening sentence, never the narration between tools", () => {
     const turns = foldTranscript([
+      event("t1", "text.delta", { text: "I'll fetch the docs." }),
       event("t1", "tool.started", { callId: "c1", name: "bash" }),
-      event("t1", "text.delta", { text: "   " }),
-      event("t1", "tool.started", { callId: "c2", name: "read" }),
+      event("t1", "text.delta", { text: "Good, got the first one." }),
+      event("t1", "tool.started", { callId: "c2", name: "bash" }),
     ]);
-    expect(turns[0]?.work.map((item) => item.kind)).toEqual(["tool", "tool"]);
+    expect(turns[0]?.lead).toBe("I'll fetch the docs.");
+    expect(turns[0]?.liveText).toBe("");
+    expect(turns[0]?.tools.map((tool) => tool.callId)).toEqual(["c1", "c2"]);
   });
 
-  it("keeps the work log's tool entry in sync with its finish", () => {
-    // The log holds the SAME object as `tools`, so a finish folding onto
-    // its start updates both views — a stale "running" row in one of them
-    // would contradict the other on screen.
+  it("has no lead when the agent opens with a tool call", () => {
+    // A blank segment is not an opening sentence, and narration after the
+    // first tool never becomes one.
+    const turns = foldTranscript([
+      event("t1", "text.delta", { text: "   " }),
+      event("t1", "tool.started", { callId: "c1", name: "bash" }),
+      event("t1", "text.delta", { text: "Now the config." }),
+      event("t1", "tool.started", { callId: "c2", name: "read" }),
+    ]);
+    expect(turns[0]?.lead).toBe("");
+    expect(turns[0]?.tools).toHaveLength(2);
+  });
+
+  it("folds a finish onto its start", () => {
     const turns = foldTranscript([
       event("t1", "tool.started", { callId: "c1", name: "bash" }),
       event("t1", "tool.finished", {
         callId: "c1",
         name: "bash",
         output: "hi",
+        isError: true,
       }),
     ]);
-    const logged = turns[0]?.work[0];
-    expect(logged?.kind === "tool" && logged.tool.output).toBe("hi");
+    expect(turns[0]?.tools).toEqual([
+      { callId: "c1", name: "bash", output: "hi", isError: true },
+    ]);
   });
 
   it("logs an orphaned finish so late-started work is never invisible", () => {
     const turns = foldTranscript([
       event("t1", "tool.finished", { callId: "c9", name: "curl", output: "x" }),
     ]);
-    expect(turns[0]?.work).toHaveLength(1);
-    expect(turns[0]?.work[0]?.kind).toBe("tool");
+    expect(turns[0]?.tools).toEqual([
+      { callId: "c9", name: "curl", output: "x" },
+    ]);
   });
 
   it("tracks the live activity, and drops it when the turn ends", () => {
@@ -231,6 +241,74 @@ describe("foldTranscript", () => {
     ]);
     expect(turns.map((t) => t.turnId)).toEqual(["t1", "t2"]);
     expect(turns.map((t) => t.text)).toEqual(["first", "second"]);
+  });
+
+  it("keeps a peer message beside its notice, and only when it is structured", () => {
+    // The sender's record of an agent-to-agent message is a notice ("To
+    // Ray: …") stamped with the structured `peerMessage`. The pair view
+    // renders the structured field as this agent's own bubble; a plain
+    // notice (a degraded preference, an approval outcome) and a malformed
+    // stamp contribute nothing to it. The notice line itself is kept in
+    // every case: the regular chat still shows it.
+    const turns = foldTranscript([
+      event("t1", "notice", {
+        level: "info",
+        text: "To Ray: what is 2+2?",
+        peerMessage: { to: "ray-id", text: "what is 2+2?" },
+      }),
+      event("t1", "notice", { level: "warn", text: "Model fell back." }),
+      event("t1", "notice", { level: "info", text: "junk", peerMessage: "x" }),
+      event("t1", "notice", { level: "info", text: "junk", peerMessage: null }),
+      event("t1", "notice", {
+        level: "info",
+        text: "junk",
+        peerMessage: { to: "ray-id" },
+      }),
+      event("t1", "turn.done"),
+    ]);
+    expect(turns[0]?.peerMessages).toEqual(["what is 2+2?"]);
+    expect(turns[0]?.peerMessagesOpeningTask.size).toBe(0);
+    expect(turns[0]?.peerTaskClosed).toBeUndefined();
+    expect(turns[0]?.notices).toHaveLength(5);
+    expect(turns[0]?.ended).toBe(true);
+  });
+
+  it("reads the peer-task marks: which own message opened a task, and the task's close", () => {
+    const turns = foldTranscript([
+      event("t1", "notice", {
+        level: "info",
+        text: "To Ray: can you ship by Friday?",
+        peerMessage: {
+          to: "ray-id",
+          text: "can you ship by Friday?",
+          opensTask: true,
+        },
+      }),
+      event("t1", "notice", {
+        level: "info",
+        text: "To Ray: and the API?",
+        peerMessage: { to: "ray-id", text: "and the API?" },
+      }),
+      event("t1", "turn.done"),
+      event("t2", "notice", {
+        level: "info",
+        text: "Reported back to the person.",
+        peerTask: { outcome: "reported" },
+      }),
+      // A malformed close stamp contributes nothing.
+      event("t2", "notice", {
+        level: "info",
+        text: "junk",
+        peerTask: { outcome: "done" },
+      }),
+      event("t2", "turn.done"),
+    ]);
+    expect(turns[0]?.peerMessages).toEqual([
+      "can you ship by Friday?",
+      "and the API?",
+    ]);
+    expect([...(turns[0]?.peerMessagesOpeningTask ?? [])]).toEqual([0]);
+    expect(turns[1]?.peerTaskClosed).toBe("reported");
   });
 });
 

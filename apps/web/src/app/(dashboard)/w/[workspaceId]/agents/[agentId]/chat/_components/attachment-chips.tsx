@@ -1,7 +1,17 @@
 "use client";
 
-import { Download, FileText, FileWarning, Loader2 } from "lucide-react";
-import { isPreviewableImageType } from "@onecli/api/validations/attachments";
+import {
+  Download,
+  FileClock,
+  FileText,
+  FileWarning,
+  Loader2,
+} from "lucide-react";
+import {
+  ATTACHMENT_RETENTION_DAYS,
+  isPreviewableImageType,
+} from "@onecli/api/validations/attachments";
+import { cn } from "@onecli/ui/lib/utils";
 import type { AttachmentMeta } from "@/lib/api/types";
 import { useDownloadAttachment } from "@/hooks/use-attachments";
 import { AttachmentThumb } from "./attachment-thumb";
@@ -9,7 +19,8 @@ import { AttachmentThumb } from "./attachment-thumb";
 /**
  * A message's attachments, under its bubble: raster images as thumbnails,
  * everything else as name+size chips, failed channel fetches as an honest
- * destructive chip. Clicking any of them SAVES the file (never navigates —
+ * destructive chip, expired ones (retention took the bytes) as a quiet
+ * inert chip. Clicking any live one SAVES the file (never navigates —
  * see `useDownloadAttachment`). Shared by the optimistic pending row (local
  * object URLs) and settled rows (authenticated blob fetch) — the same
  * no-drift rule as UserBubble itself.
@@ -17,9 +28,13 @@ import { AttachmentThumb } from "./attachment-thumb";
 export const AttachmentChips = ({
   conversationId,
   attachments,
+  align = "end",
 }: {
   conversationId: string;
   attachments: (AttachmentMeta & { objectUrl?: string })[];
+  /** `end` under the person's bubble (the default), `start` under the
+   * agent's answer — the same chips, mirrored to their speaker's side. */
+  align?: "start" | "end";
 }) => {
   const download = useDownloadAttachment(conversationId);
   if (attachments.length === 0) return null;
@@ -30,7 +45,12 @@ export const AttachmentChips = ({
       : `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 
   return (
-    <div className="flex max-w-full flex-wrap justify-end gap-2">
+    <div
+      className={cn(
+        "flex max-w-full flex-wrap gap-2",
+        align === "end" ? "justify-end" : "justify-start",
+      )}
+    >
       {attachments.map((attachment) => {
         const busy =
           download.isPending && download.variables?.id === attachment.id;
@@ -45,6 +65,22 @@ export const AttachmentChips = ({
               <FileWarning className="size-3.5" aria-hidden />
               <span className="max-w-48 truncate">{attachment.name}</span>
               <span>couldn&apos;t be retrieved</span>
+            </div>
+          );
+        }
+
+        if (attachment.status === "expired") {
+          return (
+            <div
+              key={attachment.id}
+              className="text-muted-foreground flex items-center gap-1.5 rounded-md border border-dashed px-2 py-1 text-xs"
+              title={`This file expired after ${ATTACHMENT_RETENTION_DAYS} days`}
+            >
+              <FileClock className="size-3.5" aria-hidden />
+              <span className="max-w-48 truncate line-through">
+                {attachment.name}
+              </span>
+              <span>expired</span>
             </div>
           );
         }
@@ -82,6 +118,7 @@ export const AttachmentChips = ({
             disabled={busy}
             className="bg-muted/50 hover:bg-muted focus-visible:ring-ring flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs focus-visible:ring-2 focus-visible:outline-none"
             aria-label={`Save ${attachment.name}`}
+            {...(attachment.caption && { title: attachment.caption })}
           >
             {busy ? (
               <Loader2 className="size-3.5 animate-spin" aria-hidden />

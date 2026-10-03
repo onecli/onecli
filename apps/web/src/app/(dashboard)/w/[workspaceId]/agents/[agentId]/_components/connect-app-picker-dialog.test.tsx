@@ -50,7 +50,7 @@ const renderPicker = ({
   connections = [] as Connection[],
   availability = { restricted: false, providers: [] as string[] },
   onOpenChange = vi.fn(),
-  onGranted = undefined as ((connectionId: string) => void) | undefined,
+  onConnected = undefined as ((connectionId: string) => void) | undefined,
   open = true,
 } = {}) => {
   const queryClient = new QueryClient({
@@ -73,7 +73,7 @@ const renderPicker = ({
       agentId="agent-1"
       open={open}
       onOpenChange={onOpenChange}
-      onGranted={onGranted}
+      onConnected={onConnected}
     />,
     { wrapper },
   );
@@ -106,13 +106,21 @@ describe("ConnectAppPickerDialog", () => {
   it("honors the org app-availability restriction — only allowed providers listed", () => {
     renderPicker({ availability: { restricted: true, providers: ["gmail"] } });
     expect(screen.getByText("Gmail")).toBeInTheDocument();
-    expect(screen.queryByText("Slack")).toBeNull();
+    expect(screen.queryByText("GitHub")).toBeNull();
   });
 
   it("lists the whole catalog when the org is open (restricted:false)", () => {
     renderPicker();
     expect(screen.getByText("Gmail")).toBeInTheDocument();
-    expect(screen.getByText("Slack")).toBeInTheDocument();
+    expect(screen.getByText("GitHub")).toBeInTheDocument();
+  });
+
+  it("never offers Slack — it is a channel (the agent's own app), not a gateway connection", () => {
+    // plans/channel-aware-agents.md: the Slack gateway app was removed so
+    // the agent stops reaching for slack.com through the proxy. The picker
+    // reads the real registry, so this pins the removal end to end.
+    renderPicker();
+    expect(screen.queryByText("Slack")).toBeNull();
   });
 
   it("opens the shared popup with agent name, workspace, and dedupe window name", async () => {
@@ -133,34 +141,36 @@ describe("ConnectAppPickerDialog", () => {
     expect(features).toContain("height=820");
   });
 
-  it("auto-grants full access ONLY for a connect this dialog initiated", async () => {
-    const onGranted = vi.fn();
-    renderPicker({ onGranted });
+  it("hands a connect this dialog initiated to onConnected, and writes no grant", async () => {
+    // The API's workspace auto-attach already granted the new account to every
+    // agent of the workspace, so a client grant would be a second, redundant
+    // write (and a second audit row).
+    const onConnected = vi.fn();
+    const { queryClient } = renderPicker({ onConnected });
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
-    // A popup someone else opened reports a new connection: no grant.
+    // A popup someone else opened reports a new connection: ignored.
     postAppMessage({
       type: "app-connected",
       provider: "gmail",
       connectionId: "conn-9",
     });
     await act(async () => {});
-    expect(grants.setConnectionGrant).not.toHaveBeenCalled();
+    expect(onConnected).not.toHaveBeenCalled();
 
-    // Initiated here → the same message grants and reports back.
+    // Initiated here → the same message lands: the grant views refresh so the
+    // new account shows attached, and the caller gets the fresh id.
     await userEvent.click(screen.getByRole("button", { name: /^Gmail/ }));
     postAppMessage({
       type: "app-connected",
       provider: "gmail",
       connectionId: "conn-9",
     });
-    await waitFor(() =>
-      expect(grants.setConnectionGrant).toHaveBeenCalledWith(
-        "agent-1",
-        "conn-9",
-        { access: "full" },
-      ),
-    );
-    await waitFor(() => expect(onGranted).toHaveBeenCalledWith("conn-9"));
+    await waitFor(() => expect(onConnected).toHaveBeenCalledWith("conn-9"));
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: queryKeys.grants.all(),
+    });
+    expect(grants.setConnectionGrant).not.toHaveBeenCalled();
   });
 
   it("refreshes connections + counts even when the popup lands without a connectionId", async () => {
@@ -249,7 +259,7 @@ describe("ConnectAppPickerDialog", () => {
     renderPicker();
     await userEvent.type(screen.getByLabelText("Search apps"), "gmail");
     expect(screen.getByText("Gmail")).toBeInTheDocument();
-    expect(screen.queryByText("Slack")).toBeNull();
+    expect(screen.queryByText("GitHub")).toBeNull();
 
     await userEvent.clear(screen.getByLabelText("Search apps"));
     await userEvent.type(screen.getByLabelText("Search apps"), "zzz-no-app");

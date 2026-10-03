@@ -11,27 +11,96 @@ import { CHANNEL_PROVIDER_IDS } from "../services/channels/types";
 /**
  * Where a conversation comes from. `web` is a person in the dashboard; the
  * rest arrive with their own steps (channels §3.16, crons step 7, watches
- * step 10). Channel ingestion stamps `source: presence.provider`, so the
- * provider ids ARE sources — composed from the one provider list, a new
- * provider cannot forget this union.
+ * step 10, agent-to-agent PR 5b). Channel ingestion stamps
+ * `source: presence.provider`, so the provider ids ARE sources — composed
+ * from the one provider list, a new provider cannot forget this union.
+ * `agent` is a peer OneCLI agent: the conversation's `externalRef` is the
+ * peer's agent id, one continuous thread per pair per side.
  */
 export const CONVERSATION_SOURCES = [
   "web",
   ...CHANNEL_PROVIDER_IDS,
   "cron",
   "watch",
+  "agent",
 ] as const;
 export type ConversationSource = (typeof CONVERSATION_SOURCES)[number];
+
+/**
+ * A PEER TASK's report (the PR after 5b): the turn `complete_task`
+ * materializes into the person's conversation after this agent talked with
+ * another agent on the person's behalf, or the platform's own close line
+ * when the task ended without a report. The agent's OWN words for the person
+ * (never the peer's), so it renders as the agent speaking under a caption
+ * that says where it came from, and it goes through every automation door:
+ * the continuity bridge relays it into the person's next message, the
+ * channel mirror posts it once with its caption, due-work ranks it behind
+ * user-visible work (harmless: it is born done).
+ *
+ * A TURN source only, like the greeting: no client may mint a "peer_task"
+ * conversation, and the pair conversations the task runs on keep their
+ * `agent` source.
+ */
+export const PEER_TASK_SOURCE = "peer_task";
 
 /** The non-human sources: a turn born from an automation, not a person
  * typing. The continuity bridge (turn-service) branches on this constant, and
  * the channel mirror (`apps/channel-adapter/src/mirror.ts`) imports it for
  * the same test — one definition, so a future automation source is ONE edit
- * here and both surfaces follow. */
+ * here and both surfaces follow. `peer_task` is turn-only (above); the other
+ * two are conversation sources too (a cron/watch RUN has its own
+ * conversation, a task's report lands in the person's). */
 export const AUTOMATION_SOURCES = [
   "cron",
   "watch",
-] as const satisfies readonly ConversationSource[];
+  PEER_TASK_SOURCE,
+] as const satisfies readonly TurnSource[];
+export type AutomationSource = (typeof AUTOMATION_SOURCES)[number];
+
+/**
+ * The platform's hello on a brand-new direct thread: an instruction posted
+ * with no user, which the agent answers live so the person is greeted by
+ * their agent rather than by a sign the web hung up beforehand.
+ *
+ * A TURN source only — deliberately NOT a conversation source (the
+ * client-facing create schema enumerates `CONVERSATION_SOURCES`, so no client
+ * may mint a "greeting" conversation) and deliberately NOT an automation
+ * source. It is USER-VISIBLE, FOREGROUND work, and `AUTOMATION_SOURCES` means
+ * the opposite everywhere it is read:
+ *
+ *   - `due-work` ranks automations BEHIND user-visible turns (up to
+ *     `WAKE_PRIORITY_AGE_SECONDS`) — the first thing a new user ever sees
+ *     must never queue behind the 9:00 cron cohort.
+ *   - `buildContinuityBridge` relays automation deliveries into the next
+ *     human turn as "[Context from your automated runs]" — the greeting is
+ *     already in the thread the model can see; relaying it would narrate the
+ *     hello back to the agent on the user's FIRST message.
+ *   - `buildOpenPromiseNote` gives automation wakes the agent's own last
+ *     reply, which a first-contact greeting has no use for.
+ *
+ * What the greeting DOES share with an automation is its render shape: no
+ * user typed it, so it wears no user bubble and gets no "(from the web)"
+ * attribution. That is `isPlatformAuthoredSource` below, which is what the
+ * render paths test — never `AUTOMATION_SOURCES`.
+ */
+export const GREETING_SOURCE = "greeting";
+
+/** Every source a TURN may carry: conversation sources plus the turn-only
+ * ones (the greeting, a peer task's report). */
+export type TurnSource =
+  | ConversationSource
+  | typeof GREETING_SOURCE
+  | typeof PEER_TASK_SOURCE;
+
+/**
+ * Nobody typed this turn's message — the platform authored it (an automation
+ * header, or the greeting instruction). The render surfaces branch on THIS,
+ * not on `AUTOMATION_SOURCES`: the question they are asking is "does this get
+ * a user bubble", which is about authorship, not about scheduling priority.
+ */
+export const isPlatformAuthoredSource = (source: string): boolean =>
+  source === GREETING_SOURCE ||
+  (AUTOMATION_SOURCES as readonly string[]).includes(source);
 
 /** A turn's lifecycle. The first three are the ACTIVE set the partial unique
  * index fences — at most one of them per conversation. `joining`/`joined` are
@@ -106,7 +175,9 @@ export const LIFECYCLE_TURN_ERROR_CODES = [
   "agent_start_failed",
   "at_capacity",
   "harness_busy",
+  "harness_no_terminal",
   "image_unavailable",
+  "transcript_rejected",
   "turn_stalled",
   "turn_time_limit",
 ] as const;
@@ -213,6 +284,24 @@ export const TRIAL_CREDIT_EXHAUSTED_MESSAGE =
 export const HARNESS_BUSY_MESSAGE =
   "The agent was still busy with earlier work and couldn't take this message. Send it again in a moment.";
 
+/** The harness took the message and then never delivered a closing frame
+ * within the adapter's deadline (issue #1124). The work the agent did is
+ * saved in its session either way, so the tone is the lifecycle family's:
+ * what survived, and that one message resumes. */
+export const HARNESS_NO_TERMINAL_MESSAGE =
+  "The agent went quiet before finishing this turn, so it was ended. Finished work is saved. Send a message to keep going.";
+
+/** The model provider rejected the conversation itself as malformed. Its
+ * stored history is replayed whole on every turn, so resending as-is fails
+ * the same way. The known cause (#1194: a stop interrupted the agent mid
+ * save and left its history duplicated) is repaired the next time the agent
+ * starts, which an idle stop brings about on its own; any other cause needs
+ * whoever operates the agent. The copy promises neither outcome: it says
+ * the problem is the conversation's saved history, not the person's
+ * message, and what to try. */
+export const TRANSCRIPT_REJECTED_MESSAGE =
+  "The agent couldn't continue because this conversation's saved history is damaged. It tries to repair it the next time it restarts, so send your message again in a little while. If this keeps happening, contact whoever operates this agent.";
+
 /** The Slack mirror's last-resort line for a FAILED turn that produced no
  * answer text and no error anywhere — silence would read as the agent
  * ignoring the person (the seen-reaction is already stripped by the time the
@@ -262,6 +351,14 @@ export const TURN_FAILURE_COPY: Partial<
   harness_busy: {
     code: "harness_busy",
     message: HARNESS_BUSY_MESSAGE,
+  },
+  harness_no_terminal: {
+    code: "harness_no_terminal",
+    message: HARNESS_NO_TERMINAL_MESSAGE,
+  },
+  transcript_rejected: {
+    code: "transcript_rejected",
+    message: TRANSCRIPT_REJECTED_MESSAGE,
   },
 };
 

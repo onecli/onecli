@@ -3,8 +3,8 @@ import type { Context } from "hono";
 import { resolveOrgAppCredentials } from "./resolve-org-credentials";
 import { saveAppConfigWithoutDisconnect } from "../services/app-config-service";
 import { getApp } from "./registry";
+import { extractLabel } from "../lib/connection-display";
 import {
-  extractLabel,
   createConnection,
   reconnectConnection,
   linkConnectionToAppConfig,

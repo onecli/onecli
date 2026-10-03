@@ -3,17 +3,34 @@ import { getCrypto } from "../providers";
 import { ServiceError } from "./errors";
 import type { ResourceScope } from "./resource-scope";
 import { scopeWhere, scopeCreate, scopeOwnership } from "./resource-scope";
+import {
+  BOUND_HOST_METADATA_KEY,
+  deriveBoundHost,
+  extractLabel,
+} from "../lib/connection-display";
+import { bumpHomeForScope } from "./home-sync-service";
+import { logger } from "../lib/logger";
 
-export const extractLabel = (
-  metadata?: Record<string, unknown>,
-): string | null => {
-  const email = metadata?.email;
-  const username = metadata?.username;
-  const name = metadata?.name;
-  if (typeof email === "string" && email) return email;
-  if (typeof username === "string" && username) return username;
-  if (typeof name === "string" && name) return name;
-  return null;
+/**
+ * The metadata to persist: the caller's, with `bound_host` set ONLY from the
+ * credential field the gateway gates injection on (never taken from the
+ * caller — a supplied key is dropped). The one write point for that key, so
+ * every connect path (OAuth callback, API key, credentials import) records it
+ * the same way, and no provider's own metadata can steer an agent elsewhere.
+ */
+const withBoundHost = (
+  provider: string,
+  credentials: Record<string, unknown>,
+  metadata: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined => {
+  const boundHost = deriveBoundHost(provider, credentials);
+  if (!metadata && !boundHost) return undefined;
+  const rest = Object.fromEntries(
+    Object.entries(metadata ?? {}).filter(
+      ([key]) => key !== BOUND_HOST_METADATA_KEY,
+    ),
+  );
+  return boundHost ? { ...rest, [BOUND_HOST_METADATA_KEY]: boundHost } : rest;
 };
 
 const CONNECTION_SELECT = {
@@ -46,6 +63,18 @@ export const listConnectionsByProvider = async (
   });
 };
 
+/**
+ * Re-render the instructions of every agent that could see this scope's
+ * connections: their "connected apps" list (with each host-bound app's host)
+ * just changed. Best-effort: the connection write already succeeded, and a
+ * missed bump self-heals at the agent's next boot (dispatch composes current
+ * truth).
+ */
+const refreshAgentHomes = (scope: ResourceScope): Promise<void> =>
+  bumpHomeForScope(scope).catch((err: unknown) => {
+    logger.warn({ err }, "connection change: agent home refresh failed");
+  });
+
 export const createConnection = async (
   scope: ResourceScope,
   provider: string,
@@ -62,7 +91,7 @@ export const createConnection = async (
     JSON.stringify(credentials),
   );
 
-  return db.appConnection.create({
+  const created = await db.appConnection.create({
     data: {
       ...scopeCreate(scope),
       provider,
@@ -70,11 +99,15 @@ export const createConnection = async (
       label: options?.label || extractLabel(options?.metadata),
       credentials: encryptedCredentials,
       scopes: options?.scopes ?? [],
-      metadata: (options?.metadata as Prisma.InputJsonValue) ?? undefined,
+      metadata: withBoundHost(provider, credentials, options?.metadata) as
+        | Prisma.InputJsonValue
+        | undefined,
       appConfigId: options?.appConfigId ?? null,
     },
     select: { id: true, provider: true, status: true, label: true },
   });
+  await refreshAgentHomes(scope);
+  return created;
 };
 
 export const reconnectConnection = async (
@@ -91,7 +124,7 @@ export const reconnectConnection = async (
 ) => {
   const existing = await db.appConnection.findFirst({
     where: scopeOwnership(scope, connectionId),
-    select: { id: true, label: true },
+    select: { id: true, label: true, provider: true },
   });
 
   if (!existing) {
@@ -111,7 +144,13 @@ export const reconnectConnection = async (
       ? { appConfigId: options.appConfigId ?? null }
       : {};
 
-  return db.appConnection.update({
+  // Metadata is replaced only when the caller sends it (a re-auth); a bare
+  // token persist leaves it — and its recorded bound host — untouched.
+  const metadata = options?.metadata
+    ? withBoundHost(existing.provider, credentials, options.metadata)
+    : undefined;
+
+  const updated = await db.appConnection.update({
     where: { id: existing.id },
     data: {
       status: "connected",
@@ -119,11 +158,15 @@ export const reconnectConnection = async (
         options?.label || (extractLabel(options?.metadata) ?? existing.label),
       credentials: encryptedCredentials,
       scopes: options?.scopes ?? undefined,
-      metadata: (options?.metadata as Prisma.InputJsonValue) ?? undefined,
+      metadata: metadata as Prisma.InputJsonValue | undefined,
       ...provenanceUpdate,
     },
     select: { id: true, provider: true, status: true, label: true },
   });
+  // A re-auth can move the bound host (a different org); a bare token
+  // persist carries no metadata and changes nothing the agent reads.
+  if (options?.metadata) await refreshAgentHomes(scope);
+  return updated;
 };
 
 /**
@@ -156,11 +199,14 @@ export const updateConnectionLabel = async (
     throw new ServiceError("NOT_FOUND", "Connection not found");
   }
 
-  return db.appConnection.update({
+  const updated = await db.appConnection.update({
     where: { id: existing.id },
     data: { label },
     select: { id: true, provider: true, status: true, label: true },
   });
+  // The label is what the agent's connected-apps list names the account by.
+  await refreshAgentHomes(scope);
+  return updated;
 };
 
 export const deleteConnection = async (
@@ -179,4 +225,5 @@ export const deleteConnection = async (
   await db.appConnection.delete({
     where: { id: connection.id },
   });
+  await refreshAgentHomes(scope);
 };

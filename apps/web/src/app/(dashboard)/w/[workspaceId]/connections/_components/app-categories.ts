@@ -50,6 +50,7 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   flyio: "development",
   sentry: "development",
   linear: "development",
+  posthog: "development",
 
   // Project Management
   jira: "project-management",
@@ -71,12 +72,13 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
 
   // Communication
   resend: "communication",
-  slack: "communication",
   linkedin: "communication",
   zoom: "communication",
   hubspot: "communication",
   affinity: "communication",
   attio: "communication",
+  "apollo-io": "communication",
+  clay: "communication",
   "zoho-crm": "communication",
   granola: "communication",
   fathom: "communication",

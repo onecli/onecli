@@ -1,5 +1,7 @@
 "use client";
 
+import { messageDirection } from "@/lib/markdown/text-direction";
+
 /**
  * One narration segment of the live work log — what the agent SAID between
  * tool calls while the turn still runs ("Let me check the logs.").
@@ -28,7 +30,10 @@ export const NarrationText = ({
   text: string;
   live?: boolean;
 }) => (
-  <p className="text-muted-foreground/80 text-[0.8125rem] leading-relaxed break-words whitespace-pre-wrap">
+  <p
+    dir={messageDirection(text)}
+    className="text-muted-foreground/80 text-[0.8125rem] leading-relaxed break-words whitespace-pre-wrap"
+  >
     {text}
     {live && (
       <span

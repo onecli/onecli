@@ -31,8 +31,9 @@ export const useCreateSecret = () => {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.secrets.all() });
       qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
-      // Creating an LLM key auto-attaches it to keyless agents, so this is a
-      // grant write as well as a secret write — refresh both views.
+      // Creating a workspace secret auto-attaches it (a custom secret to every
+      // agent, an LLM key to the keyless ones), so this is a grant write as
+      // well as a secret write: refresh both views.
       qc.invalidateQueries({ queryKey: queryKeys.grants.all() });
       qc.invalidateQueries({ queryKey: queryKeys.policy.all() });
       qc.invalidateQueries({ queryKey: queryKeys.agents.all() });

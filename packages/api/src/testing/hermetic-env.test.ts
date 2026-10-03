@@ -49,7 +49,7 @@ describe("normalizeTestEnv", () => {
       "REDIS_HOST",
       "ENTERPRISE_ENABLED",
       "STRIPE_TEAM_BASE_PRICE_ID",
-      "SLACK_CLIENT_ID",
+      "SENTRY_CLIENT_ID",
       "MICROSOFT_CLIENT_ID",
       "RESEND_API_KEY",
       "DEV_TRUST_ANY_AUTH_ORIGIN",

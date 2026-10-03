@@ -121,22 +121,25 @@ export const agentChatPath = (workspaceId: string, agentId: string): string =>
   `/w/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/chat`;
 
 /**
- * Marks an arrival that should open with a prefilled first message ("Hey
- * <Agent>, what can you do for me?"). A param, not local state, because the
- * onboarding flow navigates to a fresh page — and the chat strips it once
- * consumed so a refresh doesn't refill a draft the user cleared.
+ * The workspace's Files section — the download page for one file an agent
+ * sent (send_file), addressed for a link that lives OUTSIDE the web (a Slack
+ * degrade line, an email). Workspace and attachment in the path, the
+ * conversation as a query param: the chat only renders direct threads, so
+ * this page is the one web door a channel thread's file has. It sits at the
+ * WORKSPACE level, not inside the agent frame — the person arrives from a
+ * link, and a file is a thing in its own right; the page names the agent
+ * that sent it. Every id percent-encoded; the channel adapter builds the same
+ * shape from its own config (channel-adapter/src/adapter.ts).
  */
-export const CHAT_GREETING_PARAM = "hello";
-
-/** The agent's chat, opened with the greeting draft prefilled. */
-export const agentChatGreetingPath = (
+export const ATTACHMENT_CONVERSATION_PARAM = "c";
+export const workspaceFilesPath = (workspaceId: string): string =>
+  `/w/${encodeURIComponent(workspaceId)}/files`;
+export const workspaceFilePath = (
   workspaceId: string,
-  agentId: string,
-): string => `${agentChatPath(workspaceId, agentId)}?${CHAT_GREETING_PARAM}=1`;
-
-/** The prefilled first message. One definition so the copy can't drift. */
-export const agentGreetingDraft = (agentName: string): string =>
-  `Hey ${agentName.trim()}, what can you do for me?`;
+  attachmentId: string,
+  conversationId: string,
+): string =>
+  `${workspaceFilesPath(workspaceId)}/${encodeURIComponent(attachmentId)}?${ATTACHMENT_CONVERSATION_PARAM}=${encodeURIComponent(conversationId)}`;
 
 /** The last-visited org, written client-side on org pages and read by the
  * Get Started button on account routes (which belong to no org). One

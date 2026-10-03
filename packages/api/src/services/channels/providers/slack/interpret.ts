@@ -99,12 +99,40 @@ const memberLeftEvent = z.object({
   user: z.string().min(1),
 });
 
+/**
+ * The app's own removal from the workspace (docs.slack.dev/reference/events/
+ * app_uninstalled, checked 2026-09-14): sent when the app is COMPLETELY
+ * uninstalled. Slack also sends `tokens_revoked`, in no guaranteed order
+ * relative to this one, so both doors converge on one idempotent handler.
+ */
+const appUninstalledEvent = z.object({
+  type: z.literal("app_uninstalled"),
+});
+
+/**
+ * Token revocation (docs.slack.dev/reference/events/tokens_revoked): `tokens`
+ * is keyed by token kind, each an array of USER IDS (never token strings).
+ * `bot` non-empty = the bot token is dead = the presence is gone; `oauth`
+ * alone names user tokens, which a per-agent app never holds.
+ */
+const tokensRevokedEvent = z.object({
+  type: z.literal("tokens_revoked"),
+  tokens: z
+    .object({
+      oauth: z.array(z.string()).optional(),
+      bot: z.array(z.string()).optional(),
+    })
+    .optional(),
+});
+
 /** One event as it arrives — from the HTTP envelope or the socket payload. */
 export const slackEventSchema = z.union([
   messageEvent,
   appMentionEvent,
   memberJoinedEvent,
   memberLeftEvent,
+  appUninstalledEvent,
+  tokensRevokedEvent,
   // Anything else classifies as ignore below; parse it loosely so an unknown
   // event type is a non-event, never a 500.
   z.object({ type: z.string() }).passthrough(),
@@ -168,6 +196,12 @@ export type SlackDoorCall =
       /** The bot was removed from a group surface - presence cleanup. */
       door: "leave";
       channel: string;
+    }
+  | {
+      /** The app itself was removed from the workspace (uninstalled, or its
+       * bot token revoked) - the presence is dead until re-attached. */
+      door: "removed";
+      reason: "app_uninstalled" | "tokens_revoked";
     }
   | { door: "ignore"; reason: string };
 
@@ -236,6 +270,20 @@ export const interpretSlackEvent = (
       return { door: "ignore", reason: "someone-else-left" };
     }
     return { door: "leave", channel: left.channel };
+  }
+
+  if (event.type === "app_uninstalled") {
+    return { door: "removed", reason: "app_uninstalled" };
+  }
+
+  if (event.type === "tokens_revoked") {
+    const revoked = event as z.infer<typeof tokensRevokedEvent>;
+    // Only the BOT token dying kills the presence; user-token revocations
+    // (the `oauth` list) name grants a per-agent app never held.
+    if ((revoked.tokens?.bot?.length ?? 0) > 0) {
+      return { door: "removed", reason: "tokens_revoked" };
+    }
+    return { door: "ignore", reason: "tokens_revoked:user-only" };
   }
 
   if (event.type === "app_mention") {

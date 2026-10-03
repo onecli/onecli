@@ -10,6 +10,7 @@ import {
 } from "./approvals";
 import { approvalCardBlocks, slackApprovalCardUi } from "./slack/approval-card";
 import { botTokenOf } from "./slack/credentials";
+import { unpackThreadAddress } from "@onecli/channels/slack";
 import {
   createFakeControlPlane,
   settle,
@@ -110,6 +111,7 @@ const makeManager = (
     gatewayUrl: gateway.url,
     approvalsPollSeconds: 1,
     cardUiOf: () => slackApprovalCardUi,
+    threadAddressOf: () => unpackThreadAddress,
     credentialOf: botTokenOf,
     // Real pacing is 3s; tests pace in tens of ms like the other cadences.
     pacingMs: overrides.pacingMs ?? 25,
@@ -182,6 +184,48 @@ describe("fetchPendingApprovals", () => {
     expect(error).toBeInstanceOf(Error);
     expect(error).not.toBeInstanceOf(ApprovalsAuthError);
   });
+
+  it("keeps a detail's record link only when it is https, for every channel", async () => {
+    const urls = [
+      "https://acme.my.salesforce.com/001QO000010eH0cYAF",
+      "javascript:alert(1)",
+      "http://acme.my.salesforce.com/x",
+      "not a url",
+    ];
+    gateway.script.push({
+      status: 200,
+      body: {
+        requests: [
+          {
+            id: "app-1",
+            summary: {
+              action: "Create Contact",
+              details: urls.map((url) => ({
+                label: "Account",
+                value: "Initech",
+                url,
+              })),
+            },
+          },
+        ],
+      },
+    });
+
+    const [pending] = await fetchPendingApprovals({
+      gatewayUrl: gateway.url,
+      serviceKey: "svc-key-1",
+      excludeIds: [],
+      timeoutMs: 5_000,
+    });
+
+    // An unsafe link is dropped, never fatal: the row still renders.
+    expect(pending?.summary?.details?.map((d) => d.url)).toEqual([
+      urls[0],
+      undefined,
+      undefined,
+      undefined,
+    ]);
+  });
 });
 
 describe("the approval card", () => {
@@ -226,6 +270,33 @@ describe("the approval card", () => {
     const header = blocks[0] as { type: string; text: { type: string } };
     expect(header.type).toBe("header");
     expect(header.text.type).toBe("plain_text");
+  });
+
+  it("links a detail to its record page, unless the URL could break Slack's link syntax", () => {
+    const withLinks = (url: string) =>
+      JSON.stringify(
+        approvalCardBlocks({
+          ...approval,
+          summary: {
+            action: "Create Contact",
+            details: [{ label: "Account", value: "Initech (001QO…)", url }],
+          },
+        }),
+      );
+    expect(
+      withLinks("https://acme.my.salesforce.com/001QO000010eH0cYAF"),
+    ).toContain(
+      "<https://acme.my.salesforce.com/001QO000010eH0cYAF|Initech (001QO…)>",
+    );
+    for (const bad of [
+      "https://a.test/x|<!here>",
+      "https://a.test/x>y",
+      "https://a.test/x y",
+    ]) {
+      const rendered = withLinks(bad);
+      expect(rendered, bad).not.toContain("<https");
+      expect(rendered, bad).toContain("Initech (001QO…)");
+    }
   });
 
   it("falls back to method/host/path when the gateway sent no summary", () => {
@@ -730,6 +801,7 @@ describe("poll pacing", () => {
       gatewayUrl: gateway.url,
       approvalsPollSeconds: 1,
       cardUiOf: () => slackApprovalCardUi,
+      threadAddressOf: () => unpackThreadAddress,
       credentialOf: botTokenOf,
       // Long pacing: the loop must park after ONE answered poll.
       pacingMs: 60_000,

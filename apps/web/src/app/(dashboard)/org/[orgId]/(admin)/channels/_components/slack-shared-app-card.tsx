@@ -25,7 +25,10 @@ import {
 } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { AppIcon } from "@/lib/components/app-icon";
-import { slack as slackApp } from "@onecli/api/apps/slack";
+import {
+  SLACK_DISPLAY_NAME,
+  SLACK_ICON_SRC,
+} from "@/lib/agents/slack-presence";
 import {
   useDisconnectSharedInstall,
   useOrgChannels,
@@ -117,7 +120,11 @@ export const SlackSharedAppCard = ({ choice }: SlackSharedAppCardProps) => {
         <CardHeader>
           <div className="flex items-start gap-3">
             <span className="bg-card flex size-10 shrink-0 items-center justify-center rounded-xl border shadow-sm">
-              <AppIcon icon={slackApp.icon} name={slackApp.name} size={22} />
+              <AppIcon
+                icon={SLACK_ICON_SRC}
+                name={SLACK_DISPLAY_NAME}
+                size={22}
+              />
             </span>
             <div className="min-w-0 flex-1">
               <div className="flex items-center justify-between gap-2">

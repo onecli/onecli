@@ -7,6 +7,7 @@ import {
   ScrollText,
   Sparkles,
   Terminal,
+  Users,
   type LucideIcon,
   CalendarClock,
 } from "lucide-react";
@@ -98,6 +99,19 @@ export const AGENT_SECTIONS: readonly AgentSection[] = [
   // amended). Apps and custom secrets were two rail entries asking the same
   // question — they are now the two tabs of Connections.
   { section: "connections", title: "Connections", icon: Plug, group: "access" },
+  {
+    // WHO the agent may talk with (PR 5b): the people, channels, other
+    // agents and apps it may reach or be reached by, each with its standing
+    // decision, plus the asks awaiting one. An ACCESS entry: every row is
+    // something the agent is GIVEN (a person's permission, a room, a peer),
+    // the social twin of Connections' credentials. Not Work: Chat and Slack
+    // are where you go to talk; Contacts is where you set who may.
+    section: "contacts",
+    title: "Contacts",
+    icon: Users,
+    group: "access",
+    hostedOnly: true,
+  },
   // The model sits under Access too: it is the other thing the agent is
   // GIVEN, beside the connections it can reach.
   { section: "models", title: "Models", icon: Cpu, group: "access" },

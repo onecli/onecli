@@ -13,11 +13,12 @@ import {
   CardTitle,
 } from "@onecli/ui/components/card";
 import { AppIcon } from "@/lib/components/app-icon";
-import { slack as slackApp } from "@onecli/api/apps/slack";
+import {
+  SLACK_DISPLAY_NAME,
+  SLACK_ICON_SRC,
+} from "@/lib/agents/slack-presence";
 import type { AgentChannelPresence } from "@/lib/api";
 import { SlackDetachDialog } from "./slack-detach-dialog";
-import { PersonReachRow } from "./person-reach-row";
-import { SpaceReachRow } from "./space-reach-row";
 
 interface SlackPresenceCardProps {
   agentId: string;
@@ -30,7 +31,8 @@ interface SlackPresenceCardProps {
  * The attached face of the Slack card: who the bot is, how its events arrive,
  * where to open it, and the detach door. `needs_attention` keeps the whole
  * card — messaging still works; only the approval bridge is broken — plus the
- * amber fix.
+ * amber fix. A `disabled` presence (removed on the Slack side) is NOT this
+ * card's business: the section routes it to the attach card's removed face.
  */
 export const SlackPresenceCard = ({
   agentId,
@@ -40,11 +42,6 @@ export const SlackPresenceCard = ({
 }: SlackPresenceCardProps) => {
   const [detachOpen, setDetachOpen] = useState(false);
   const workspace = presence.tenant.name ?? presence.tenant.externalId;
-  const threadCount = presence.groupThreads.length;
-  // Channels, not threads: several threads can live in one channel, so the
-  // raw thread count reads as "2 group threads" for what a person sees as
-  // one room. `spaces` is already the deduped per-channel list.
-  const channelCount = presence.spaces?.length ?? 0;
   const attention = presence.status === "needs_attention";
 
   return (
@@ -54,7 +51,11 @@ export const SlackPresenceCard = ({
           <div className="flex items-start justify-between gap-3">
             <div className="flex min-w-0 items-center gap-3">
               <span className="bg-card flex size-10 shrink-0 items-center justify-center rounded-xl border shadow-sm">
-                <AppIcon icon={slackApp.icon} name={slackApp.name} size={22} />
+                <AppIcon
+                  icon={SLACK_ICON_SRC}
+                  name={SLACK_DISPLAY_NAME}
+                  size={22}
+                />
               </span>
               <div className="min-w-0 space-y-0.5">
                 <CardTitle className="truncate leading-tight">
@@ -73,9 +74,7 @@ export const SlackPresenceCard = ({
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-1.5">
-              {presence.status === "disabled" ? (
-                <Badge variant="secondary">Disabled</Badge>
-              ) : attention ? (
+              {attention ? (
                 <Badge
                   variant="secondary"
                   className="border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400"
@@ -109,62 +108,14 @@ export const SlackPresenceCard = ({
             </div>
           )}
 
+          {/* This card is the APP: its identity, health, and the detach
+              door. Where the agent is reachable (channels, people) and who
+              it answers there live on the agent's Contacts page (PR 5b),
+              including the room counts that used to sit here. */}
           <p className="text-muted-foreground text-sm">
-            {threadCount === 0
-              ? "Message the bot directly, or mention it in a channel to start a group thread."
-              : channelCount > 0
-                ? `Active in ${channelCount === 1 ? "1 channel" : `${channelCount} channels`} · ${threadCount === 1 ? "1 thread" : `${threadCount} threads`}.`
-                : `Active in ${threadCount === 1 ? "1 group thread" : `${threadCount} group threads`}.`}
+            Message the bot directly, or mention it in a channel to start a
+            group thread.
           </p>
-
-          {(presence.spaces?.length ?? 0) > 0 && (
-            <div className="mt-3 border-t pt-3">
-              <p className="mb-0.5 text-xs font-medium">
-                Channels · who the agent answers
-              </p>
-              <p className="text-muted-foreground mb-1 text-xs">
-                Open a channel so the agent answers people without OneCLI
-                accounts.
-              </p>
-              <div className="divide-y">
-                {(presence.spaces ?? []).map((space) => (
-                  <SpaceReachRow
-                    key={space.externalRef}
-                    agentId={agentId}
-                    provider={presence.provider}
-                    space={space}
-                  />
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* People, in their own section rather than mixed into Channels:
-              the two ask different questions (a room's policy vs one
-              person's standing), offer different answers (three vs two),
-              and the person list grows with every stranger who writes. One
-              heading states the kind once, which beats a per-row badge
-              beside a badge that is already the menu trigger. */}
-          {(presence.people?.length ?? 0) > 0 && (
-            <div className="mt-3 border-t pt-3">
-              <p className="mb-0.5 text-xs font-medium">
-                People · direct messages
-              </p>
-              <p className="text-muted-foreground mb-1 text-xs">
-                People without OneCLI accounts who messaged this agent directly.
-              </p>
-              <div className="divide-y">
-                {(presence.people ?? []).map((person) => (
-                  <PersonReachRow
-                    key={person.externalRef}
-                    agentId={agentId}
-                    provider={presence.provider}
-                    person={person}
-                  />
-                ))}
-              </div>
-            </div>
-          )}
         </CardContent>
         <CardFooter className="justify-between gap-2 border-t [.border-t]:pt-4">
           <Button variant="outline" size="sm" asChild>

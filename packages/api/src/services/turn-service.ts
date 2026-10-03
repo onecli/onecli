@@ -25,9 +25,11 @@ import {
   AGENT_START_FAILED_MESSAGE,
   AUTOMATION_SOURCES,
   TURN_FAILURE_COPY,
+  PEER_TASK_SOURCE,
   TURNS_PAGE_DEFAULT,
   TURNS_PAGE_MAX,
   type ConversationSource,
+  type TurnSource,
   type TurnStatus,
 } from "../validations/conversation";
 import { logger } from "../lib/logger";
@@ -232,6 +234,31 @@ export interface TurnOrigin {
 }
 
 /**
+ * THE ONE FENCE for who may write into a conversation, keyed on the origin:
+ * a person must be able to read it (`requireConversation`); the platform
+ * (`userId: null`) may write only into sourced conversations
+ * (`requireSystemConversation`, refuses direct threads) - unless it is the
+ * sanctioned `directWake`, which admits ONLY the named agent's own direct
+ * thread. Shared by `createTurn` and the send door's follow-up arm, so the
+ * two arms can never disagree about the same origin (a follow-up landing in
+ * a busy direct thread is fenced exactly like the turn it joins).
+ */
+export const requireConversationFor = (
+  workspaceId: string,
+  conversationId: string,
+  origin: TurnOrigin,
+) =>
+  origin.userId === null
+    ? origin.directWake
+      ? requireDirectWakeConversation(
+          workspaceId,
+          conversationId,
+          origin.directWake.agentId,
+        )
+      : requireSystemConversation(workspaceId, conversationId)
+    : requireConversation(workspaceId, conversationId, origin.userId);
+
+/**
  * Create a turn row, binding its attachments in the SAME transaction when the
  * message carries any. The plain path (no attachments — every turn today,
  * every automation turn always) stays a single insert; the attachment path
@@ -287,16 +314,11 @@ export const createTurn = async (
   origin: TurnOrigin,
   attachmentIds?: string[],
 ) => {
-  const conversation =
-    origin.userId === null
-      ? origin.directWake
-        ? await requireDirectWakeConversation(
-            workspaceId,
-            conversationId,
-            origin.directWake.agentId,
-          )
-        : await requireSystemConversation(workspaceId, conversationId)
-      : await requireConversation(workspaceId, conversationId, origin.userId);
+  const conversation = await requireConversationFor(
+    workspaceId,
+    conversationId,
+    origin,
+  );
 
   try {
     // The turn row and its attachment binds commit TOGETHER: `signalWork()`
@@ -579,6 +601,13 @@ export const createFollowUp = async (
 
 /** How much of a delivered report the continuity bridge repeats. */
 const BRIDGE_EXCERPT_MAX_CHARS = 500;
+/**
+ * A peer task's report is the agent's OWN words for the person, written to
+ * be read whole: the next human message ("what did she mean by the API
+ * part?") needs all of it, not a headline. Bounded by what `complete_task`
+ * accepts, so the bridge can never grow past one report's size.
+ */
+const BRIDGE_REPORT_MAX_CHARS = 4000;
 /** How many recent reports one bridge note may carry. */
 const BRIDGE_MAX_REPORTS = 3;
 /**
@@ -663,7 +692,7 @@ export const buildContinuityBridge = async (
     },
     orderBy: { createdAt: "desc" },
     take: BRIDGE_MAX_REPORTS,
-    select: { id: true, message: true },
+    select: { id: true, message: true, source: true },
   });
   if (deliveries.length === 0) return null;
 
@@ -689,10 +718,11 @@ export const buildContinuityBridge = async (
     // the status filter above exists to keep out.
     .filter(({ body }) => body !== "")
     .map(({ delivery, body }) => {
-      const excerpt =
-        body.length > BRIDGE_EXCERPT_MAX_CHARS
-          ? `${body.slice(0, BRIDGE_EXCERPT_MAX_CHARS)}…`
-          : body;
+      const max =
+        delivery.source === PEER_TASK_SOURCE
+          ? BRIDGE_REPORT_MAX_CHARS
+          : BRIDGE_EXCERPT_MAX_CHARS;
+      const excerpt = body.length > max ? `${body.slice(0, max)}…` : body;
       // The delivery's message NAMES the automation — but only its first,
       // bounded line: an in-origin wake stores its whole prompt there. See
       // `bridgeLabel`. Still platform-authored either way, so nothing the
@@ -703,7 +733,7 @@ export const buildContinuityBridge = async (
   // Every delivery in the window was silent — nothing to bridge.
   if (!notes) return null;
 
-  return `[Context from your automated runs — delivered to this chat since the last message; the person may be referring to it:]\n${notes}\n[End of automated-run context]`;
+  return `[Context from your automated runs and tasks — delivered to this chat since the last message; the person may be referring to it. A report headed "After talking with …" is your own report to this person after a task with another agent:]\n${notes}\n[End of automated-run context]`;
 };
 
 /** How much of the agent's own last reply the wake reminder repeats. */
@@ -1429,7 +1459,8 @@ export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
   }
 
   // Step 7: a finished SCHEDULED run settles its cron (outcome bookkeeping,
-  // auto-disable) and delivers its report. After the close-out transaction,
+  // auto-disable) and delivers its report; a finished PAIR turn asks the
+  // peer-task budget backstop. After the close-out transaction,
   // deliberately: the session-ref write above must never hinge on delivery,
   // and the fenced status transition already guarantees this runs at most
   // once per turn. The residue is honest at-most-once delivery — a crash in
@@ -1522,15 +1553,27 @@ const runReport = async (input: AutomationSettleInput): Promise<string> => {
 
 /** A finished non-human run settles its automation source. Dispatches on the
  * conversation's `source`: crons carry outcome bookkeeping + auto-disable;
- * watches are one-shot (status already `fired`), so they only deliver. */
+ * watches are one-shot (status already `fired`), so they only deliver; a
+ * pair conversation asks the peer-task budget backstop. One conversation
+ * read serves all three. */
 const settleAutomationRun = async (
   input: AutomationSettleInput,
 ): Promise<void> => {
   const conversation = await db.conversation.findUnique({
     where: { id: input.conversationId },
-    select: { source: true, externalRef: true },
+    select: { agentId: true, source: true, externalRef: true },
   });
   if (!conversation?.externalRef) return;
+  if (conversation.source === "agent") {
+    // A PAIR conversation (agent-to-agent): the peer-task budget backstop
+    // (the PR after 5b) - the owner had the peer's last word, a side is out
+    // of messages, and no report came, so the task closes with its line.
+    // Dynamic import: the agent link service imports this module
+    // (materializeBornDoneTurn), so a static edge back would be a cycle.
+    const { settlePairTurn } = await import("./channels/agent-link-service");
+    await settlePairTurn(conversation);
+    return;
+  }
   if (conversation.source === "watch") {
     await settleWatchRun(input, conversation.externalRef);
     return;
@@ -1638,30 +1681,78 @@ export const materializeAutomationDelivery = async (
   /** The delivery turn's source — the mirror keys its per-run shape on it. */
   source: "cron" | "watch",
 ): Promise<void> => {
+  await materializeBornDoneTurn(originConversationId, {
+    message: header,
+    source,
+    events: [{ type: "text", text: report }],
+  });
+};
+
+/**
+ * THE BORN-DONE TURN: a turn row that records something that already
+ * happened, created `done` with its events in one transaction. It is never
+ * dispatchable work, so it can neither trip the one-active-turn index nor
+ * reach a sandbox. Three doors ride it: the automation delivery above (a
+ * cron/watch report, `source` cron|watch, the report as a `text` event), a
+ * peer task's close into the person's conversation (`source: "peer_task"`,
+ * the agent's report or the platform's close line as a `text` event), and
+ * the agent-to-agent pair record (`source: "agent"`, the words on a
+ * `notice` event — see `recordSentMessage` in the agent link service).
+ *
+ * The caller's `events` are written in order, then `turn.done` — the
+ * terminal is what tells every live consumer "a turn row exists and is
+ * finished". Without it the open web thread never learns the row landed
+ * (its new-turn signal is the boundary set turn.started|turn.done|error),
+ * and the transcript records a turn that never ends. Same seq discipline as
+ * `applyTurnEvents`: all rows under the one row-lock increment, so seq order
+ * is commit order, and the publish happens after the commit. A conversation
+ * that no longer exists is a silent no-op: the thing being recorded already
+ * happened, and its owner deleted the place it would be shown.
+ */
+export const materializeBornDoneTurn = async (
+  conversationId: string,
+  input: {
+    message: string;
+    /** A TURN source: a conversation source, or one of the turn-only ones
+     * (a peer task's report lands in a person's conversation under
+     * `peer_task`). */
+    source: TurnSource;
+    /**
+     * The turn's events, in order, before the `turn.done` this adds. A
+     * canonical `text` or `notice`, optionally carrying a platform stamp
+     * beside the canonical fields (the notice's `peerMessage`, the
+     * approval outcome's `actionApproval`): the stamp rides the stored
+     * payload for structured readers and is ignored by the canonical shape.
+     */
+    events: readonly ((
+      | Extract<AgentEvent, { type: "text" }>
+      | Extract<AgentEvent, { type: "notice" }>
+    ) &
+      Record<string, unknown>)[];
+  },
+): Promise<void> => {
   const now = new Date();
+  const count = input.events.length + 1;
   const published = await db.$transaction(async (tx) => {
-    const origin = await tx.conversation.findUnique({
-      where: { id: originConversationId },
+    const conversation = await tx.conversation.findUnique({
+      where: { id: conversationId },
       select: { id: true },
     });
-    if (!origin) return null; // origin deleted — the schedule outlives it
+    if (!conversation) return null;
 
     const { lastSeq } = await tx.conversation.update({
-      where: { id: originConversationId },
-      data: { lastSeq: { increment: 2 } },
+      where: { id: conversationId },
+      data: { lastSeq: { increment: count } },
       select: { lastSeq: true },
     });
-    const textSeq = lastSeq - 1;
+    const firstSeq = lastSeq - count + 1;
 
     const turn = await tx.turn.create({
       data: {
-        conversationId: originConversationId,
-        message: header,
-        // Born terminal: a delivery is a record of something that already
-        // happened, never dispatchable work — so it can never trip the
-        // one-active-turn index or reach a sandbox.
+        conversationId,
+        message: input.message,
         status: "done",
-        source,
+        source: input.source,
         userId: null,
         startedAt: now,
         finishedAt: now,
@@ -1669,40 +1760,28 @@ export const materializeAutomationDelivery = async (
       select: { id: true },
     });
 
-    // TWO events, text then turn.done — the terminal is what tells every
-    // live consumer "a turn row exists and is finished". Without it the
-    // open web thread never learns the delivery landed (its new-turn signal
-    // is the boundary set turn.started|turn.done|error), and the delivery's
-    // transcript records a turn that never ends. Same seq discipline: both
-    // rows under the one row-lock increment, published together.
-    const textEvent = { type: "text" as const, text: report };
-    const doneEvent = { type: "turn.done" as const };
+    const events: PublishedEvent[] = [
+      ...input.events,
+      { type: "turn.done" as const },
+    ].map((event, index) => ({
+      seq: firstSeq + index,
+      turnId: turn.id,
+      type: event.type,
+      event,
+    }));
     await tx.turnEvent.createMany({
-      data: [
-        {
-          conversationId: originConversationId,
-          turnId: turn.id,
-          seq: textSeq,
-          type: "text",
-          payload: textEvent as unknown as Prisma.InputJsonValue,
-        },
-        {
-          conversationId: originConversationId,
-          turnId: turn.id,
-          seq: lastSeq,
-          type: "turn.done",
-          payload: doneEvent as unknown as Prisma.InputJsonValue,
-        },
-      ],
+      data: events.map((row) => ({
+        conversationId,
+        turnId: turn.id,
+        seq: row.seq,
+        type: row.type,
+        payload: row.event as unknown as Prisma.InputJsonValue,
+      })),
     });
-
-    return [
-      { seq: textSeq, turnId: turn.id, type: "text", event: textEvent },
-      { seq: lastSeq, turnId: turn.id, type: "turn.done", event: doneEvent },
-    ] satisfies PublishedEvent[];
+    return events;
   });
 
-  if (published) getEventBus().publish(originConversationId, published);
+  if (published) getEventBus().publish(conversationId, published);
 };
 
 /**

@@ -23,7 +23,6 @@ import {
   useEffectiveAppPermissions,
   type EffectiveToolResult,
 } from "@/lib/api/policy-visibility";
-import { usePlanGate } from "@/lib/plan-gate";
 // Edition seam: EE aliases to the real granular resource editor, OSS keeps the
 // locked hint. Alias key on purpose — a relative import would bypass turbopack
 // resolveAlias in EE builds.
@@ -100,7 +99,6 @@ export const ManagePermissionsDialog = ({
   readOnlyReason = "org-granted",
   onClose,
 }: ManagePermissionsDialogProps) => {
-  const planGate = usePlanGate();
   const save = useSetConnectionGrant();
   const { data: definitions = [], isPending: definitionsPending } =
     useAppPermissionDefinitions();
@@ -156,14 +154,10 @@ export const ManagePermissionsDialog = ({
     return map;
   }, [reflection.data]);
 
-  const askLocked = planGate.isLocked("policy.manual_approval");
-
   const setTool = (toolId: string, choice: ToolChoice) => {
-    if (choice === "ask" && planGate.guard("policy.manual_approval")) return;
     setChoices((prev) => ({ ...prev, [toolId]: choice }));
   };
   const setGroup = (ids: string[], choice: ToolChoice) => {
-    if (choice === "ask" && planGate.guard("policy.manual_approval")) return;
     setChoices((prev) => {
       const next = { ...prev };
       for (const id of ids) {
@@ -186,8 +180,8 @@ export const ManagePermissionsDialog = ({
   const resourcesUnchanged =
     JSON.stringify(resources) === JSON.stringify(initialResources);
   // Presentational only: whether the grant is full as STORED, used for the
-  // "customizing pins the tool list" notice. It must NOT gate what `handleSave`
-  // writes — see `grantIntentFromChoices`.
+  // notice about requests outside the list. It must NOT gate what
+  // `handleSave` writes (see `grantIntentFromChoices`).
   const wasFull = grant === undefined || grant.access === "full";
 
   const handleSave = () => {
@@ -250,8 +244,11 @@ export const ManagePermissionsDialog = ({
               {!readOnly && wasFull && (
                 <p className="text-muted-foreground text-xs">
                   This agent currently has full access. Saving a customization
-                  pins the tool list, so tools added to the catalog later arrive
-                  as Never until enabled.
+                  applies your choices to the tools listed here. Requests
+                  outside this list, including tools added later,{" "}
+                  {definition.unlisted === "block"
+                    ? "are blocked."
+                    : "need approval."}
                 </p>
               )}
               {reflection.isError && (
@@ -281,7 +278,6 @@ export const ManagePermissionsDialog = ({
                   ceilings={ceilings}
                   effective={effective}
                   readOnly={readOnly || save.isPending}
-                  askLocked={askLocked}
                   onToolSelect={setTool}
                   onGroupSelect={setGroup}
                 />

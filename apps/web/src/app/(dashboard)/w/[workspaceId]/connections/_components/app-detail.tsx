@@ -15,6 +15,7 @@ import {
   type AppConnectedEvent,
 } from "@/hooks/use-app-connected";
 import { useConnections } from "@/hooks/use-connections";
+import { useInvalidateGrants } from "@/hooks/use-grants";
 import { useAppConfigStatus } from "@/hooks/use-app-config";
 import {
   WORKSPACE_PATH_RE,
@@ -37,6 +38,9 @@ interface AppDetailProps {
     darkIcon?: string;
     description: string;
     connectionType: "oauth" | "api_key" | "credentials_import";
+    /** Offers an API-key method besides OAuth; connecting never requires
+     *  OAuth setup first. */
+    hasApiKeyAlternate?: boolean;
     blocklist?: { id: string; name: string; hostPattern: string }[];
   };
   configurable?: {
@@ -72,6 +76,7 @@ export const AppDetail = ({
   const router = useRouter();
   const searchParams = useSearchParams();
   const queryClient = useQueryClient();
+  const invalidateGrants = useInvalidateGrants();
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
   const configFormRef = useRef<AppConfigFormHandle>(null);
 
@@ -92,10 +97,11 @@ export const AppDetail = ({
     };
   }, [allConnections, app.id, pageScope]);
 
-  // A brand-new account is useless until an agent is attached to it, and this
-  // is the moment the user is thinking about it — so a successful connect opens
-  // the account's agent-access dialog right here, where there is room for it.
-  // The `open` flag outlives the id so closing keeps the exit animation.
+  // A successful connect opens the account's agent-access dialog right here:
+  // the API has already attached a new account to every agent of the
+  // workspace, and this is where the user turns off the ones that shouldn't
+  // have it. The `open` flag outlives the id so closing keeps the exit
+  // animation.
   const [justConnectedId, setJustConnectedId] = useState<string | null>(null);
   const [justConnectedOpen, setJustConnectedOpen] = useState(false);
   // Agents are workspace-scoped, so this only means anything on a workspace page.
@@ -107,8 +113,10 @@ export const AppDetail = ({
 
   const handleConnected = useCallback(
     ({ provider, connectionId }: AppConnectedEvent) => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.connections.all() });
       queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
+      // The connection list, plus every grant view: a created connection
+      // arrives already granted to every agent of the workspace.
+      invalidateGrants();
       // Only a CREATED connection carries an id — a reconnect refreshed
       // credentials an agent already had, and needs no setup step. The
       // provider has to match too: a popup keeps posting to its opener across
@@ -118,7 +126,7 @@ export const AppDetail = ({
       if (connectionId && provider === app.id && canAttachAgents)
         openJustConnected(connectionId);
     },
-    [queryClient, app.id, canAttachAgents, openJustConnected],
+    [queryClient, invalidateGrants, app.id, canAttachAgents, openJustConnected],
   );
 
   useAppMessages({ onConnected: handleConnected });
@@ -172,7 +180,7 @@ export const AppDetail = ({
     app.connectionType === "credentials_import" ? { height: 820 } : undefined;
 
   const handleConnect = () => {
-    if (!hasCredentials && configurable?.fields) {
+    if (!hasCredentials && configurable?.fields && !app.hasApiKeyAlternate) {
       setConfigDialogOpen(true);
       return;
     }

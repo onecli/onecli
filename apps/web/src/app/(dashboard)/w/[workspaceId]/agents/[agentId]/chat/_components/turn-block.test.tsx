@@ -40,9 +40,11 @@ const turn = (overrides: Partial<Turn> = {}): Turn => ({
 const rendered = (overrides: Partial<RenderedTurn> = {}): RenderedTurn => ({
   turnId: "t1",
   text: "",
-  work: [],
+  lead: "",
   liveText: "",
   notices: [],
+  peerMessages: [],
+  peerMessagesOpeningTask: new Set<number>(),
   tools: [],
   ended: true,
   ...overrides,
@@ -58,6 +60,39 @@ describe("TurnBlock", () => {
     );
     expect(screen.getByText("run the report")).toBeInTheDocument();
     expect(screen.getByText("the answer")).toHaveProperty("tagName", "STRONG");
+  });
+
+  it("reads a Hebrew exchange right-to-left: the question, the narration and the answer", () => {
+    // The person's bubble, the live narration and the settled answer are
+    // three different renderers; each must decide its own direction from
+    // its own text, or one of them ends up with its bullets on the left.
+    const { rerender } = render(
+      <TurnBlock
+        turn={turn({ status: "running", message: "תבדוק את ה-deploy בבקשה" })}
+        rendered={rendered({
+          ended: false,
+          lead: "בודק את הלוגים של Cloudflare.",
+        })}
+      />,
+    );
+    expect(screen.getByText("תבדוק את ה-deploy בבקשה")).toHaveAttribute(
+      "dir",
+      "rtl",
+    );
+    expect(screen.getByText("בודק את הלוגים של Cloudflare.")).toHaveAttribute(
+      "dir",
+      "rtl",
+    );
+
+    rerender(
+      <TurnBlock
+        turn={turn({ message: "תבדוק את ה-deploy בבקשה" })}
+        rendered={rendered({
+          text: "הכל תקין:\n\n- Worker פעיל\n- אין שגיאות",
+        })}
+      />,
+    );
+    expect(screen.getByRole("list")).toHaveAttribute("dir", "rtl");
   });
 
   it("renders follow-ups BETWEEN the question and the answer — the answer stays last", () => {
@@ -117,37 +152,37 @@ describe("TurnBlock", () => {
           tools: [
             {
               callId: "call1",
-              name: "web_search",
+              name: "acme_lookup",
               output: "<script>alert(1)</script> results",
             },
           ],
         })}
       />,
     );
-    expect(screen.getByText("web_search")).toBeInTheDocument();
-    await user.click(screen.getByText("web_search"));
+    // Tool steps are grouped: open the group, then the step. An unknown tool
+    // reads "Used a tool" (header and row alike); its raw name shows only
+    // inside, above the output.
+    await user.click(screen.getByRole("button", { name: /Used a tool/ }));
+    const [, step] = screen.getAllByRole("button", { name: /Used a tool/ });
+    await user.click(step!);
+    expect(screen.getByText("acme_lookup")).toBeInTheDocument();
     const output = screen.getByText(/results/);
     expect(output.textContent).toContain("<script>alert(1)</script>");
     expect(document.querySelector("script")).toBeNull();
   });
 
-  it("renders the running turn as a work log, in stream order, as plain text", () => {
-    // The live view is a chronological log: narration, the tool that closed
-    // it, then the still-streaming tail. Narration is UNTRUSTED mid-turn
-    // model text and must render as TEXT — markdown syntax stays literal
-    // (the answer bubble is the only markdown surface).
+  it("renders the running turn as a work log, in order, as plain text", () => {
+    // The live view: the agent's opening sentence, the run header for its
+    // tool calls, then the still-streaming tail. Narration is UNTRUSTED
+    // mid-turn model text and must render as TEXT: markdown syntax stays
+    // literal (the answer bubble is the only markdown surface).
     const { container } = render(
       <TurnBlock
         turn={turn({ status: "running" })}
         rendered={rendered({
           ended: false,
-          work: [
-            { kind: "narration", text: "Let me **check** the logs." },
-            {
-              kind: "tool",
-              tool: { callId: "c1", name: "bash", output: "ok" },
-            },
-          ],
+          lead: "Let me **check** the logs.",
+          tools: [{ callId: "c1", name: "bash", output: "ok" }],
           liveText: "Now the config.",
         })}
       />,
@@ -156,10 +191,10 @@ describe("TurnBlock", () => {
     const narration = screen.getByText("Let me **check** the logs.");
     expect(narration).toBeInTheDocument();
     expect(container.querySelector("strong")).toBeNull();
-    expect(screen.getByText("bash")).toBeInTheDocument();
     expect(screen.getByText(/Now the config\./)).toBeInTheDocument();
-    // Stream order: narration precedes the tool row, which precedes the tail.
-    const tool = screen.getByText("bash");
+    // Order: the lead precedes the run header, which precedes the tail.
+    // The header stays live ("Running…") until the answer arrives.
+    const tool = screen.getByText("Running a command");
     const tail = screen.getByText(/Now the config\./);
     expect(
       narration.compareDocumentPosition(tool) &
@@ -168,6 +203,26 @@ describe("TurnBlock", () => {
     expect(
       tool.compareDocumentPosition(tail) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+
+  it("lists every tool call as a step under one live header", async () => {
+    const user = userEvent.setup();
+    render(
+      <TurnBlock
+        turn={turn({ status: "running" })}
+        rendered={rendered({
+          ended: false,
+          lead: "I'll fetch the docs.",
+          tools: [
+            { callId: "a", name: "bash", output: "x" },
+            { callId: "b", name: "bash", output: "y" },
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByText("I'll fetch the docs.")).toBeInTheDocument();
+    await user.click(screen.getByText("Running 2 commands"));
+    expect(screen.getAllByText("Ran a command")).toHaveLength(2);
   });
 
   it("silences the caption while narration streams — the words are the signal", () => {
@@ -198,6 +253,39 @@ describe("TurnBlock", () => {
     expect(screen.getByText("Running a command")).toBeInTheDocument();
   });
 
+  it("shows the run header's tool phrase once, but still announces it", () => {
+    // The header already says "Running a command"; a visible caption would
+    // echo it word for word. It stays in the polite live region (sr-only),
+    // the screen reader's progress cue. The agent's own words still show.
+    const { container, rerender } = render(
+      <TurnBlock
+        turn={turn({ status: "running" })}
+        rendered={rendered({
+          ended: false,
+          tools: [{ callId: "c1", name: "bash" }],
+          activity: "Running a command",
+        })}
+      />,
+    );
+    const live = container.querySelector('[aria-live="polite"]');
+    expect(live).toHaveTextContent("Running a command");
+    expect(live).toHaveClass("sr-only");
+
+    rerender(
+      <TurnBlock
+        turn={turn({ status: "running" })}
+        rendered={rendered({
+          ended: false,
+          tools: [{ callId: "c1", name: "bash", output: "ok" }],
+          activity: "Checking the CI logs",
+        })}
+      />,
+    );
+    expect(
+      screen.getByText("Checking the CI logs").closest("p"),
+    ).not.toHaveClass("sr-only");
+  });
+
   it("drops the narration and promotes only the answer when the turn settles", () => {
     // The fade-away decision (1a): the work log is transient by design —
     // history carries no deltas, so what a refresh shows and what the live
@@ -207,13 +295,8 @@ describe("TurnBlock", () => {
         turn={turn({ status: "running" })}
         rendered={rendered({
           ended: false,
-          work: [
-            { kind: "narration", text: "Let me check the logs." },
-            {
-              kind: "tool",
-              tool: { callId: "c1", name: "bash", output: "ok" },
-            },
-          ],
+          lead: "Let me check the logs.",
+          tools: [{ callId: "c1", name: "bash", output: "ok" }],
           liveText: "CI passed",
         })}
       />,
@@ -226,13 +309,7 @@ describe("TurnBlock", () => {
         rendered={rendered({
           ended: true,
           text: "CI passed; nothing to do.",
-          work: [
-            { kind: "narration", text: "Let me check the logs." },
-            {
-              kind: "tool",
-              tool: { callId: "c1", name: "bash", output: "ok" },
-            },
-          ],
+          lead: "Let me check the logs.",
           tools: [{ callId: "c1", name: "bash", output: "ok" }],
         })}
       />,
@@ -242,7 +319,7 @@ describe("TurnBlock", () => {
     ).not.toBeInTheDocument();
     expect(screen.getByText("CI passed; nothing to do.")).toBeInTheDocument();
     // The tool record survives the settle — only narration is transient.
-    expect(screen.getByText("bash")).toBeInTheDocument();
+    expect(screen.getByText("Ran a command")).toBeInTheDocument();
   });
 
   it("prefers the turn row's error — the one witness when no event arrived", () => {
@@ -621,5 +698,141 @@ describe("a turn that could not run for a reason the reader can fix", () => {
       screen.getByRole("button", { name: "Connect Gmail" }),
     ).toBeInTheDocument();
     expect(container.textContent).not.toContain("connections?connect");
+  });
+
+  describe("the agent's files (send_file)", () => {
+    const withQuery = (ui: React.ReactElement) =>
+      render(
+        <QueryClientProvider
+          client={
+            new QueryClient({
+              defaultOptions: { queries: { retry: false } },
+            })
+          }
+        >
+          {ui}
+        </QueryClientProvider>,
+      );
+
+    it("renders outbound files under the AGENT's answer and inbound files under the PERSON's bubble — never mixed", () => {
+      const { container } = withQuery(
+        <TurnBlock
+          turn={turn({
+            attachments: [
+              {
+                id: "in-1",
+                name: "brief.txt",
+                mimeType: "text/plain",
+                sizeBytes: 2048,
+                status: "bound",
+                direction: "inbound",
+              },
+              {
+                id: "out-1",
+                name: "clip.webm",
+                mimeType: "video/webm",
+                sizeBytes: 3 * 1024 * 1024,
+                status: "bound",
+                direction: "outbound",
+                caption: "the run, recorded",
+              },
+            ],
+          })}
+          rendered={rendered({ text: "Recorded it." })}
+        />,
+      );
+      const personSide = container.querySelector('[data-align="end"]');
+      const agentSide = container.querySelector('[data-align="start"]');
+      expect(personSide?.textContent).toContain("brief.txt");
+      expect(personSide?.textContent).not.toContain("clip.webm");
+      expect(agentSide?.textContent).toContain("Recorded it.");
+      expect(agentSide?.textContent).toContain("clip.webm");
+      expect(agentSide?.textContent).toContain("3.0MB");
+      expect(agentSide?.textContent).toContain("the run, recorded");
+      expect(agentSide?.textContent).not.toContain("brief.txt");
+      expect(
+        screen.getByRole("button", { name: "Save clip.webm" }),
+      ).toBeInTheDocument();
+    });
+
+    it("an older API's rows (no direction) all belong to the person", () => {
+      const { container } = withQuery(
+        <TurnBlock
+          turn={turn({
+            attachments: [
+              {
+                id: "in-1",
+                name: "legacy.pdf",
+                mimeType: "application/pdf",
+                sizeBytes: 10,
+                status: "bound",
+              },
+            ],
+          })}
+          rendered={rendered({ text: "ok" })}
+        />,
+      );
+      expect(
+        container.querySelector('[data-align="end"]')?.textContent,
+      ).toContain("legacy.pdf");
+      expect(
+        container.querySelector('[data-align="start"]')?.textContent,
+      ).not.toContain("legacy.pdf");
+    });
+
+    it("an expired file (retention took the bytes) is a quiet inert chip: named, struck, not a button, never previewed", () => {
+      const { container } = withQuery(
+        <TurnBlock
+          turn={turn({
+            attachments: [
+              {
+                id: "out-old",
+                // An IMAGE type: the expired branch must win over the
+                // thumbnail branch, or the thumb would fetch a 410.
+                name: "shot.png",
+                mimeType: "image/png",
+                sizeBytes: 10,
+                status: "expired",
+                direction: "outbound",
+              },
+            ],
+          })}
+          rendered={rendered({ text: "Here." })}
+        />,
+      );
+      const agentSide = container.querySelector('[data-align="start"]');
+      expect(agentSide?.textContent).toContain("shot.png");
+      expect(agentSide?.textContent).toContain("expired");
+      expect(
+        screen.queryByRole("button", { name: "Save shot.png" }),
+      ).toBeNull();
+      expect(container.querySelector("img")).toBeNull();
+      expect(
+        screen.getByTitle("This file expired after 30 days"),
+      ).toBeInTheDocument();
+    });
+
+    it("a turn whose only output is a file still renders the agent block (no answer text)", () => {
+      withQuery(
+        <TurnBlock
+          turn={turn({
+            attachments: [
+              {
+                id: "out-1",
+                name: "report.pdf",
+                mimeType: "application/pdf",
+                sizeBytes: 10,
+                status: "bound",
+                direction: "outbound",
+              },
+            ],
+          })}
+          rendered={undefined}
+        />,
+      );
+      expect(
+        screen.getByRole("button", { name: "Save report.pdf" }),
+      ).toBeInTheDocument();
+    });
   });
 });

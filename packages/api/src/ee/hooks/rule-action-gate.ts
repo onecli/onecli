@@ -21,9 +21,9 @@ const resolveOrganizationId = async (
 };
 
 /**
- * Cloud: gate paid-only policy-rule actions (`manual_approval`, `rate_limit`)
- * behind their required plan. `block`/`allow` map to no feature and pass
- * through. Resolves the org from workspace or org scope.
+ * Cloud: gate paid-only policy-rule actions (`rate_limit`) behind their
+ * required plan. `block`/`allow` and `manual_approval` map to no feature and
+ * pass through. Resolves the org from workspace or org scope.
  */
 export const eeRuleActionGate: RuleActionGate = {
   async assertAllowed(scope, actions) {

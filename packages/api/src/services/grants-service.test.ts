@@ -173,7 +173,7 @@ describe("setConnectionGrant", () => {
     expect(gate.assertAllowed).not.toHaveBeenCalled();
   });
 
-  it("custom compiles the ordered stack: allow → ask → blocked-complement → terminal", async () => {
+  it("custom compiles the ordered stack: allow → ask → blocked-complement → approval terminal", async () => {
     await setConnectionGrant(
       SCOPE,
       "agent-1",
@@ -182,13 +182,16 @@ describe("setConnectionGrant", () => {
       "user-1",
     );
     const creates = draftCreates();
+    // The terminal "everything else" row NEEDS APPROVAL: requests the catalog
+    // does not describe are held for a human, never silently allowed.
     expect(creates).toHaveLength(4);
     expect(creates.map((c) => [c.action, c.requireApproval])).toEqual([
       ["allow", false],
       ["allow", true],
       ["block", false],
-      ["block", false],
+      ["allow", true],
     ]);
+    expect(creates[3]?.name).toMatch(/: everything else$/);
     const tools = creates.map(
       (c) =>
         (c.targets as { create: { appTools: string[] }[] }).create[0]?.appTools,
@@ -200,7 +203,21 @@ describe("setConnectionGrant", () => {
     expect(tools[3]).toEqual([]);
     // Priorities append contiguously at the tail band (aggregate max 4 → 5..8).
     expect(creates.map((c) => c.priority)).toEqual([5, 6, 7, 8]);
-    // ask ≠ ∅ routes through the plan gate with the manual_approval action.
+    // The approval rows route through the plan gate as manual_approval.
+    expect(gate.assertAllowed).toHaveBeenCalledWith(
+      { scope: "workspace", workspaceId: "p1" },
+      ["manual_approval"],
+    );
+  });
+
+  it("plan-gates an allow-only custom grant too: its terminal needs approval", async () => {
+    await setConnectionGrant(
+      SCOPE,
+      "agent-1",
+      "conn-1",
+      { access: "custom", allow: ["t-read"], ask: [] },
+      "user-1",
+    );
     expect(gate.assertAllowed).toHaveBeenCalledWith(
       { scope: "workspace", workspaceId: "p1" },
       ["manual_approval"],

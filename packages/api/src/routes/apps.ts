@@ -34,13 +34,13 @@ import {
   invalidateGatewayCache,
   invalidateGatewayCacheForAccount,
 } from "../lib/gateway-invalidate";
+import { extractLabel } from "../lib/connection-display";
 import {
   listConnections,
   createConnection,
   reconnectConnection,
   linkConnectionToAppConfig,
   listConnectionsByProvider,
-  extractLabel,
 } from "../services/connection-service";
 import {
   disconnectOwnedConnection,
@@ -70,6 +70,7 @@ import {
   removeBlocklistRule,
 } from "../services/app-blocklist-service";
 import { logger } from "../lib/logger";
+import { attachNewConnectionToAllAgents } from "../services/workspace-autoattach-service";
 
 const docsBaseURL = "https://onecli.sh/docs/guides/credential-stubs";
 
@@ -425,6 +426,10 @@ export const appRoutes = () => {
         origin: getAppOrigin(c.req.raw),
         ...(connectionId ? { connectionId } : {}),
         ...(agentName ? { agentName } : {}),
+        // Who started the connect: the callback is unauthenticated, so this is
+        // the only way the auto-attach grants it makes can be attributed in
+        // the audit log. Signed with the rest of the state, so not forgeable.
+        ...(auth.userId ? { userId: auth.userId } : {}),
       });
 
       const resolved = await resolveAppCredentials(
@@ -644,6 +649,15 @@ export const appRoutes = () => {
           },
         );
         createdId = fresh.id;
+        // New workspace connection: on for every agent right away; the
+        // post-connect dialog is where the user turns agents off.
+        // (The callback is unauthenticated: the actor comes from the signed
+        // state, so the grants are attributable in the audit log.)
+        await attachNewConnectionToAllAgents(
+          state.workspaceId,
+          fresh.id,
+          typeof state.userId === "string" ? state.userId : null,
+        );
       }
 
       if (appDef.blocklist?.length) {
@@ -818,6 +832,11 @@ export const appRoutes = () => {
           );
           connection = fresh;
           created = { id: fresh.id, label: fresh.label };
+          await attachNewConnectionToAllAgents(
+            workspaceId,
+            fresh.id,
+            auth.userId,
+          );
         }
       }
 

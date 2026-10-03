@@ -3,9 +3,11 @@ import {
   JCODE_DISABLED_TOOLS_VALUE,
   JCODE_EFFORT,
   JCODE_SWARM_ENV,
+  JCODE_WEBSEARCH_ENV,
   managedConfigToml,
   SWARM_LIGHT_PROMPT,
   SWARM_WORKER_CAP,
+  WEBSEARCH_NATIVE_MAX_USES,
 } from "./jcode";
 
 /**
@@ -93,6 +95,21 @@ describe("the swarm posture: always on, fenced by env", () => {
       JCODE_SWARM_SPAWN_MODE: "headless",
     });
     expect(SWARM_WORKER_CAP).toBe(8);
+  });
+
+  it("pins provider-native web search on, with a usable per-request cap", () => {
+    // Scraped search (DDG/Bing/Google) from sandbox egress gets CAPTCHA'd
+    // after a handful of requests (prod, 2026-09-29). Native search runs on
+    // the provider's side. Env, not config.toml: env overrides re-apply on
+    // every config reload, so an agent cannot switch scraping back on.
+    expect(JCODE_WEBSEARCH_ENV).toEqual({
+      JCODE_WEBSEARCH_PREFER_NATIVE: "1",
+      JCODE_WEBSEARCH_NATIVE_MAX_USES: String(WEBSEARCH_NATIVE_MAX_USES),
+    });
+    // Upstream's default of 5 stops a single enrichment turn mid-list.
+    expect(WEBSEARCH_NATIVE_MAX_USES).toBeGreaterThan(5);
+    // Native search is attached only when the session offers `websearch`.
+    expect(JCODE_DISABLED_TOOLS_VALUE.split(",")).not.toContain("websearch");
   });
 
   it("the effort map can never hand jcode a swarm sentinel", () => {

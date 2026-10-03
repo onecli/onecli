@@ -34,6 +34,7 @@ const TENANT = "T-SMP";
 
 let db: typeof import("@onecli/db").db;
 let send: typeof import("./send-message-service");
+let platformTools: typeof import("../platform-tool-service");
 let approvals: typeof import("./action-approval-service");
 let search: typeof import("./recipient-search-service");
 
@@ -205,6 +206,7 @@ beforeAll(async () => {
 
   ({ db } = await import("@onecli/db"));
   send = await import("./send-message-service");
+  platformTools = await import("../platform-tool-service");
   approvals = await import("./action-approval-service");
   search = await import("./recipient-search-service");
 
@@ -478,5 +480,177 @@ describe.skipIf(!PROOF_URL)("send_message (4c)", () => {
     const posts = slackCallsFor("chat.postMessage").slice(before);
     expect(posts).toHaveLength(1);
     expect(posts[0]!.form.get("channel")).toBe("C-PROJ");
+  });
+
+  it("a send Slack refuses with a DEAD-credential code flips the presence to disabled and tells the agent why; a rate limit flips nothing", async () => {
+    // The outbound half of removal detection (plans/channel-aware-agents.md):
+    // an app DELETED at api.slack.com sends us no webhook a per-agent app
+    // can subscribe to, so the first call made with its dead token is where
+    // the platform learns. `account_inactive` is what Slack documents for
+    // "token is for a deleted user or workspace when using a bot token".
+    // MUTATION-PROOF: drop `noteOutboundFailure` from executeSend and the
+    // presence stays active / the error is the raw Slack code; widen
+    // isDeadCredentialError to any code and the rate-limit control flips.
+    const stage = await seedStage("dead");
+    scriptSlack();
+    slackHandlers["conversations.list"] = () => ({
+      channels: [{ id: "C-DEAD", name: "dead-proj", is_member: true }],
+    });
+    await send.allowContact({
+      agentId: stage.agentId,
+      recipient: { kind: "channel", ref: "C-DEAD", label: "#dead-proj" },
+      deciderUserId: OWNER,
+    });
+
+    // Control first: a transient refusal is the caller's error, not a removal.
+    slackHandlers["chat.postMessage"] = () => ({
+      ok: false,
+      error: "ratelimited",
+    });
+    await expect(
+      send.requestSend({
+        agentId: stage.agentId,
+        to: "#dead-proj",
+        text: "first try",
+        originConversationId: stage.conversationId,
+        originTurnId: stage.turnId,
+      }),
+    ).rejects.toMatchObject({ code: "ratelimited" });
+    expect(
+      (
+        await db.agentChannel.findUniqueOrThrow({
+          where: { id: stage.presenceId },
+          select: { status: true },
+        })
+      ).status,
+    ).toBe("active");
+
+    // The app is gone on Slack's side.
+    slackHandlers["chat.postMessage"] = () => ({
+      ok: false,
+      error: "account_inactive",
+    });
+    await expect(
+      send.requestSend({
+        agentId: stage.agentId,
+        to: "#dead-proj",
+        text: "second try",
+        originConversationId: stage.conversationId,
+        originTurnId: stage.turnId,
+      }),
+    ).rejects.toMatchObject({
+      code: "UNPROCESSABLE",
+      message: expect.stringContaining("Slack app was removed"),
+    });
+    const after = await db.agentChannel.findUniqueOrThrow({
+      where: { id: stage.presenceId },
+      select: { status: true, apiKeyId: true },
+    });
+    expect(after.status).toBe("disabled");
+    expect(after.apiKeyId).toBeNull();
+
+    // With the presence disabled there is nothing to send FROM: the next
+    // request fails before reaching Slack at all.
+    const postsBefore = slackCallsFor("chat.postMessage").length;
+    await expect(
+      send.requestSend({
+        agentId: stage.agentId,
+        to: "#dead-proj",
+        text: "third try",
+        originConversationId: stage.conversationId,
+        originTurnId: stage.turnId,
+      }),
+    ).rejects.toThrow();
+    expect(slackCallsFor("chat.postMessage").length).toBe(postsBefore);
+  });
+
+  it("through the REAL tool door, a removed app answers every messaging tool with the removal, never 'nobody matching' or 'no presence' — and a live twin restores the normal answers", async () => {
+    // Found on a real api-server walk: after the app was deleted at Slack
+    // and the presence flipped to `disabled`, a resumed session still lists
+    // send_message/find_recipient (jcode unions tools), and the agent heard
+    // "Nobody matching in the connected workspace." / "no active channel
+    // presence" — both read as "keep looking". The removal must be named.
+    const stage = await seedStage("removed-tools");
+    const RUNNER = `${P}runner-removed-tools`;
+    await db.runner.deleteMany({ where: { id: RUNNER } });
+    await db.runner.create({
+      data: { id: RUNNER, name: "runner", token: `rnr_${P}removed-tools` },
+    });
+    await db.sandbox.create({
+      data: {
+        id: `${P}sb-removed-tools`,
+        agentId: stage.agentId,
+        runnerId: RUNNER,
+        status: "running",
+      },
+    });
+    const call = (tool: string, args: unknown) =>
+      platformTools.executePlatformTool(RUNNER, {
+        sandboxId: `${P}sb-removed-tools`,
+        tool,
+        args,
+        conversationId: stage.conversationId,
+        turnId: stage.turnId,
+      });
+
+    // Control: alive → the ordinary answers (empty search, unknown person).
+    slackHandlers["users.list"] = () => ({
+      ok: true,
+      members: [],
+      response_metadata: { next_cursor: "" },
+    });
+    const aliveSearch = await call("find_recipient", { query: "moshe" });
+    expect(aliveSearch.ok).toBe(true);
+    const aliveSend = await call("send_message", { to: "Moshe", text: "hi" });
+    expect(aliveSend.ok).toBe(false);
+    expect(String((aliveSend as { error: string }).error)).not.toMatch(
+      /removed from the workspace/,
+    );
+
+    // The app is gone: the presence reads disabled (the removal doors did
+    // their work elsewhere; here we set the fact directly).
+    await db.agentChannel.update({
+      where: { id: stage.presenceId },
+      data: { status: "disabled" },
+    });
+    const removedCopy =
+      /Slack app was removed from the workspace.*re-attached.*Do not retry/s;
+    for (const [tool, args] of [
+      ["find_recipient", { query: "moshe" }],
+      ["find_recipient", { query: "#general" }],
+      ["send_message", { to: "Moshe", text: "hi" }],
+      ["send_message", { to: "#general", text: "deploy done" }],
+    ] as const) {
+      const before = slackCalls.length;
+      const result = await call(tool, args);
+      expect(result.ok, `${tool} ${JSON.stringify(args)}`).toBe(false);
+      expect((result as { error: string }).error).toMatch(removedCopy);
+      // Nothing was asked of Slack: the dead token is never presented.
+      expect(slackCalls.length).toBe(before);
+    }
+
+    // A LIVE presence NEXT TO the removed one wins: the removal is not
+    // mentioned (there is a working app to use). (agentId, provider) is
+    // unique, so the live twin is a second provider row — the shape a
+    // Teams-and-Slack agent would have with one of the two uninstalled.
+    const { getCrypto } = await import("../../providers");
+    await db.agentChannel.create({
+      data: {
+        agentId: stage.agentId,
+        integrationId: stage.integrationId,
+        provider: "teams-e2e-twin",
+        externalId: `${P}twin-app`,
+        identityRef: `${P}twin-identity`,
+        transport: "socket",
+        status: "active",
+        credentials: await getCrypto().encrypt(
+          JSON.stringify({ botToken: "xoxb-twin" }),
+        ),
+      },
+    });
+    const withTwin = await call("send_message", { to: "Moshe", text: "hi" });
+    expect(String((withTwin as { error?: string }).error ?? "")).not.toMatch(
+      /removed from the workspace/,
+    );
   });
 });

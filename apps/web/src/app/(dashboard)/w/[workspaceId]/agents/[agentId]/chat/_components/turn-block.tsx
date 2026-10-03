@@ -1,6 +1,7 @@
 "use client";
 
 import { LIFECYCLE_TURN_ERROR_CODES } from "@onecli/api/validations/conversation";
+import { activityForTool } from "@onecli/agent-protocol/activity";
 import { Bubble, BubbleContent } from "@onecli/ui/components/bubble";
 import { Message, MessageContent } from "@onecli/ui/components/message";
 import type { Turn } from "@/lib/api/types";
@@ -9,13 +10,16 @@ import {
   isActiveTurn,
   isAutomationTurn,
   isJoiningTurn,
+  isPlatformAuthoredTurn,
 } from "@/lib/chat/turns";
 import { AutomationTurnHeader } from "./automation-turn";
 import { ActivityLine } from "./activity-line";
 import { ChatMarkdown } from "./chat-markdown";
 import { ConnectorSuggestions } from "./connect-suggestions";
+import { GreetingConnectCard } from "./greeting-connect-card";
 import { NarrationText } from "./narration-text";
-import { ToolCallRow } from "./tool-call-row";
+import { AttachmentChips } from "./attachment-chips";
+import { ToolGroup } from "./tool-group";
 import { TurnNotice } from "./turn-notice";
 import { UserBubble } from "./user-bubble";
 
@@ -34,7 +38,12 @@ const waitingCopy = (turn: Turn): string =>
 
 /** Named doors get a proper label; an unrecognized one still says where it
  *  came from rather than nothing. "web" is home — no chip. */
-const ORIGIN_LABELS: Record<string, string> = { slack: "via Slack" };
+const ORIGIN_LABELS: Record<string, string> = {
+  slack: "via Slack",
+  // A peer agent's words on the pair conversation (PR 5b); the bubble's
+  // text already names which agent, in its `Name (agent):` frame.
+  agent: "from another agent",
+};
 
 /** Turn.errorCode values that mean "a platform hiccup, not agent output" —
  *  rendered as the quiet TurnNotice, never the red failure box (the copy
@@ -81,6 +90,16 @@ export const TurnBlock = ({
   onConnectModelKey?: () => void;
 }) => {
   const active = isActiveTurn(turn);
+  // One turn, two speakers' files: what the person attached rides under
+  // their bubble; what the agent sent back (send_file) rides under its
+  // answer. Split on `direction` — an older API omits it, and every such
+  // row is the person's.
+  const inboundAttachments = turn.attachments.filter(
+    (attachment) => attachment.direction !== "outbound",
+  );
+  const outboundAttachments = turn.attachments.filter(
+    (attachment) => attachment.direction === "outbound",
+  );
   // The transcript stream's raw `error` event lands a beat before the turns
   // poll flips the status and delivers the canonical error + errorCode. While
   // the poll still says ACTIVE, showing the stream's raw text would flash the
@@ -88,13 +107,17 @@ export const TurnBlock = ({
   // its waiting state and the error renders only from the settled poll view.
   const errorText = turn.error ?? (active ? undefined : rendered?.error);
   // WORKING vs SETTLED. While the turn runs and no durable answer exists,
-  // the agent block is a live WORK LOG: narration segments and tool calls in
-  // true stream order, deliberately styled as transient (they will not
-  // survive the turn — history carries no deltas, so a refresh never shows
-  // them either). The moment the answer lands, the block SETTLES to the
-  // record: the tool rows and the markdown answer, exactly what a late
-  // joiner gets.
+  // the agent block is a live WORK LOG, Claude-style: the agent's opening
+  // sentence (its plan, written for the reader), then every tool call folded
+  // into ONE collapsible run header, then the sentence still being written.
+  // The narration and the tail are deliberately styled as transient: they
+  // will not survive the turn (history carries no deltas, so a refresh
+  // never shows them either). The moment the answer lands, the block
+  // SETTLES to the record: the run header and the markdown answer, exactly
+  // what a late joiner gets.
   const working = active && !rendered?.text;
+  // The run header times the whole turn, from when it started to the answer.
+  const startedAt = turn.startedAt ?? turn.createdAt;
   // The live caption: what the agent is doing right now. Shown while it is
   // NOT talking — when narration is streaming, the words themselves are the
   // better signal, and a caption above a growing sentence reads as clutter.
@@ -107,6 +130,13 @@ export const TurnBlock = ({
   // newline before its first tool call must not blank the caption row.
   const liveTail = rendered?.liveText.trim() ? rendered.liveText : "";
   const showActivity = Boolean(activityText) && !liveTail;
+  // Once the run header is on screen it already says which tool is running
+  // ("Running a command · 12s"), so a caption naming that same tool would
+  // repeat it on screen. The caption still SPEAKS it (sr-only): its polite
+  // announcer is the one live progress cue a screen-reader user gets.
+  const lastTool = rendered?.tools.at(-1);
+  const captionRepeatsHeader =
+    lastTool !== undefined && activityText === activityForTool(lastTool.name);
   // A turn the reader can fix from the Models page — no key yet, or a key
   // the provider refused. Rendered as guidance with the fix attached, rather
   // than as a failure.
@@ -117,18 +147,21 @@ export const TurnBlock = ({
 
   return (
     <>
-      {isAutomationTurn(turn) ? (
-        // A platform-posted cron/watch report — `turn.message` is the
-        // platform's header, not the person's words, so it gets a system label
-        // (the report body renders in the agent-side block below), never a
-        // user bubble.
-        <AutomationTurnHeader source={turn.source} title={turn.message} />
+      {isPlatformAuthoredTurn(turn) ? (
+        // A platform-posted row — `turn.message` is the platform's own text
+        // (a cron/watch header, or the greeting instruction), not the
+        // person's words, so it never gets a user bubble. Only automations
+        // get a HEADER: the greeting's instruction is plumbing, and a
+        // caption over the agent's first words would give the trick away.
+        isAutomationTurn(turn) ? (
+          <AutomationTurnHeader source={turn.source} title={turn.message} />
+        ) : null
       ) : (
         <UserBubble
           text={turn.message}
           origin={originLabel(turn.source)}
           conversationId={turn.conversationId}
-          attachments={turn.attachments}
+          attachments={inboundAttachments}
           // Only reachable standalone as the orphan fallback (a follow-up
           // whose target left the list) — grouped follow-ups render below.
           {...(isJoiningTurn(turn) && { hint: "Received, folding it in" })}
@@ -151,7 +184,11 @@ export const TurnBlock = ({
         />
       ))}
 
-      {(rendered || active || errorText || turn.status === "aborted") && (
+      {(rendered ||
+        active ||
+        errorText ||
+        turn.status === "aborted" ||
+        outboundAttachments.length > 0) && (
         <Message align="start">
           <MessageContent className="min-w-0">
             {working ? (
@@ -162,45 +199,33 @@ export const TurnBlock = ({
               // screen-reader user token by token (the ActivityLine below
               // keeps its own polite announcer).
               <div className="flex flex-col gap-1.5">
-                {rendered?.work.map((item, index) =>
-                  item.kind === "tool" ? (
-                    <ToolCallRow
-                      // callId can be empty on an orphaned finish — fall
-                      // back to the position so keys stay unique.
-                      key={item.tool.callId || `tool-${index}`}
-                      tool={item.tool}
-                      turnEnded={false}
-                    />
-                  ) : (
-                    // Positional keys are safe here: the log is append-only
-                    // within a turn (segments only ever close, never
-                    // reorder), so an index never changes meaning.
-                    <NarrationText
-                      key={`narration-${index}`}
-                      text={item.text}
-                    />
-                  ),
+                {rendered?.lead ? <NarrationText text={rendered.lead} /> : null}
+                {rendered && rendered.tools.length > 0 && (
+                  <ToolGroup
+                    tools={rendered.tools}
+                    turnEnded={false}
+                    startedAt={startedAt}
+                  />
                 )}
                 {liveTail ? <NarrationText text={liveTail} live /> : null}
                 {showActivity && activityText && (
-                  <ActivityLine text={activityText} />
+                  <ActivityLine
+                    text={activityText}
+                    visuallyHidden={captionRepeatsHeader}
+                  />
                 )}
               </div>
             ) : (
-              // SETTLED: the record. Tool rows grouped first, then the
-              // answer — the same shape a reader who joined late gets from
+              // SETTLED: the record. The run header first, then the answer:
+              // the same shape a reader who joined late gets from
               // history, so what you watched and what you reload agree.
               <>
                 {rendered && rendered.tools.length > 0 && (
-                  <div className="flex flex-col">
-                    {rendered.tools.map((tool, index) => (
-                      <ToolCallRow
-                        key={tool.callId || `${tool.name}-${index}`}
-                        tool={tool}
-                        turnEnded={!active}
-                      />
-                    ))}
-                  </div>
+                  <ToolGroup
+                    tools={rendered.tools}
+                    turnEnded={!active}
+                    startedAt={startedAt}
+                  />
                 )}
                 {rendered?.text ? (
                   <>
@@ -225,9 +250,39 @@ export const TurnBlock = ({
                         action. Reads the ANSWER only — never the streamed
                         narration, which is untrusted progress text. */}
                     <ConnectorSuggestions text={rendered.text} />
+                    {/* Under the agent's greeting, the first-connection
+                        picks it just named — the same card a connect link
+                        would render, one click each. Only on a finished
+                        greeting: the text lands first, the card follows. */}
+                    {turn.source === "greeting" && !active && (
+                      <GreetingConnectCard />
+                    )}
                   </>
                 ) : null}
               </>
+            )}
+            {/* THE AGENT'S FILES (send_file), under its answer: the same
+                chips the person's files get, mirrored to the agent's side.
+                They come from the turns poll (refetched at turn.done), not
+                the stream — bytes never ride a transcript. Rendered while
+                the turn is still working too: a file sent mid-turn is
+                already downloadable. */}
+            {outboundAttachments.length > 0 && (
+              <div className="flex flex-col gap-1">
+                {outboundAttachments.some((a) => a.caption) && (
+                  <p className="text-muted-foreground text-xs">
+                    {outboundAttachments
+                      .map((a) => a.caption)
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </p>
+                )}
+                <AttachmentChips
+                  conversationId={turn.conversationId}
+                  attachments={outboundAttachments}
+                  align="start"
+                />
+              </div>
             )}
             {rendered?.notices.map((notice, index) => (
               <TurnNotice key={`${index}-${notice}`} message={notice} />

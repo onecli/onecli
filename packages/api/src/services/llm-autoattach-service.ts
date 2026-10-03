@@ -28,9 +28,11 @@ import {
  * separate copies of it.
  *
  * Two laws hold across both directions:
- *  - **Typed LLM keys only.** Generic secrets stay an explicit, per-agent
- *    decision — "every new agent gets every credential" would invert the
- *    fail-closed default the whole grants model rests on.
+ *  - **Typed LLM keys only.** Everything else (connections, custom secrets)
+ *    belongs to `workspace-autoattach-service`, which gives a workspace's new
+ *    resources to every agent. LLM keys are the exception because one is
+ *    what an agent RUNS on: granting a second key re-points the agent's
+ *    provider and respawns its sandbox.
  *  - **Widen only into emptiness.** Nothing here ever re-points an agent
  *    someone deliberately configured; it only turns "cannot run" into
  *    "can run".
@@ -50,18 +52,21 @@ const poolWhere = (scope: GrantScope) => ({
   ],
 });
 
+const log = logger.child({ component: "llm-autoattach" });
+
 /**
  * Resolve the grant scope from the workspace ALONE.
  *
- * Both entry points take a workspace id rather than a `GrantScope`, and the
- * org is read from the workspace row here. That is a fencing decision, not a
- * convenience: a caller cannot pass an organization that disagrees with the
- * workspace, so the attach pool can never be widened by a mismatched pair.
- * Null (a workspace that vanished mid-request) means "attach nothing".
+ * Every auto-attach entry point (here and `workspace-autoattach-service`)
+ * takes a workspace id rather than a `GrantScope`, and the org is read from
+ * the workspace row here. That is a fencing decision, not a convenience: a
+ * caller cannot pass an organization that disagrees with the workspace, so the
+ * attach pool can never be widened by a mismatched pair. Null (a workspace
+ * that vanished mid-request) means "attach nothing".
  */
-const log = logger.child({ component: "llm-autoattach" });
-
-const scopeFor = async (workspaceId: string): Promise<GrantScope | null> => {
+export const autoAttachScope = async (
+  workspaceId: string,
+): Promise<GrantScope | null> => {
   const workspace = await db.workspace.findUnique({
     where: { id: workspaceId },
     select: { organizationId: true },
@@ -72,22 +77,23 @@ const scopeFor = async (workspaceId: string): Promise<GrantScope | null> => {
 };
 
 /**
- * Record the grants this module made.
+ * Record the grants an auto-attach made.
  *
  * Every OTHER grant write in the product is audited (`grants.ts` wraps each
  * route in `withAudit`), and an automatic grant is exactly the kind a
  * compliance reader must be able to find later — "who gave this agent that
  * key?" cannot answer "nobody, silently". Attributed to the acting user when
- * there is one; a keyless caller (an org API key with no user) records
- * nothing rather than inventing an actor, matching the precedent in
- * `platform-tool-service`.
+ * there is one; a caller with no user records nothing rather than inventing
+ * an actor, matching the precedent in `platform-tool-service`. `auto` names
+ * the rule that made them.
  *
  * `recordAuditEvent` never throws, so this cannot turn a successful create
  * into a failed request.
  */
-const auditAutoGrants = async (
+export const auditAutoGrants = async (
   scope: GrantScope,
   userId: string | null,
+  auto: "llm-autoattach" | "workspace-autoattach",
   metadata: Record<string, string | string[]>,
 ): Promise<void> => {
   if (!userId) return;
@@ -104,7 +110,7 @@ const auditAutoGrants = async (
     service: AUDIT_SERVICES.GRANT,
     source: AUDIT_SOURCE.API,
     // Ids and names only — never a credential value (§4).
-    metadata: { ...metadata, auto: "llm-autoattach" },
+    metadata: { ...metadata, auto },
   });
 };
 
@@ -122,7 +128,7 @@ export const autoAttachLlmKeys = async (
   agentId: string,
   userId: string | null,
 ): Promise<{ secretIds: string[] }> => {
-  const scope = await scopeFor(workspaceId);
+  const scope = await autoAttachScope(workspaceId);
   if (!scope) return { secretIds: [] };
 
   const keys = await db.secret.findMany({
@@ -149,7 +155,10 @@ export const autoAttachLlmKeys = async (
     }
   }
   if (secretIds.length > 0) {
-    await auditAutoGrants(scope, userId, { agentId, secretIds });
+    await auditAutoGrants(scope, userId, "llm-autoattach", {
+      agentId,
+      secretIds,
+    });
   }
   return { secretIds };
 };
@@ -172,7 +181,7 @@ export const attachLlmKeyToKeylessAgents = async (
   secretId: string,
   userId: string | null,
 ): Promise<{ agentIds: string[] }> => {
-  const scope = await scopeFor(workspaceId);
+  const scope = await autoAttachScope(workspaceId);
   if (!scope) return { agentIds: [] };
 
   const secret = await db.secret.findFirst({
@@ -212,7 +221,10 @@ export const attachLlmKeyToKeylessAgents = async (
     }
   }
   if (agentIds.length > 0) {
-    await auditAutoGrants(scope, userId, { secretId: secret.id, agentIds });
+    await auditAutoGrants(scope, userId, "llm-autoattach", {
+      secretId: secret.id,
+      agentIds,
+    });
   }
   return { agentIds };
 };

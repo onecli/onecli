@@ -7,7 +7,12 @@ import type {
   ProviderTransportHandlers,
 } from "../providers";
 import { slackApprovalCardUi } from "./approval-card";
-import { postMessage } from "@onecli/channels/slack";
+import { isDeadCredentialError } from "@onecli/channels";
+import {
+  postMessage,
+  SlackApiError,
+  unpackThreadAddress,
+} from "@onecli/channels/slack";
 import { botTokenOf } from "./credentials";
 import { slackMirrorPosts } from "./mirror-posts";
 import { openSocketMode } from "./socket-mode";
@@ -264,6 +269,26 @@ const decisionSettledText: ChannelAdapterProvider["decisionSettledText"] = ({
       ? "This request was already decided."
       : escapeSlackText(result.message);
 
+/**
+ * Slack's answer to "does this failure mean the app is gone?": a refusal
+ * carrying one of the codes Slack documents as terminal for a bot or app
+ * token (`isDeadCredentialError`'s table). The relayed event is
+ * `tokens_revoked` with a non-empty `bot` list — the exact shape the api's
+ * Slack interpreter routes to its `removed` door (a `tokens.bot` entry is
+ * the bot-token-died signal; the ids inside are never read). A bare code
+ * string (the socket dial's permanent-failure reason) is wrapped so the
+ * same table answers it.
+ */
+const removalEventFor = (failure: unknown): unknown | null => {
+  const error =
+    typeof failure === "string"
+      ? new SlackApiError("apps.connections.open", failure)
+      : failure;
+  return isDeadCredentialError(error)
+    ? { type: "tokens_revoked", tokens: { bot: ["dead"] } }
+    : null;
+};
+
 export const slackAdapterProvider: ChannelAdapterProvider = {
   credentialOf: botTokenOf,
   openTransport,
@@ -271,4 +296,6 @@ export const slackAdapterProvider: ChannelAdapterProvider = {
   decisionSettledText,
   posts: slackMirrorPosts,
   cardUi: slackApprovalCardUi,
+  removalEventFor,
+  threadAddress: unpackThreadAddress,
 };

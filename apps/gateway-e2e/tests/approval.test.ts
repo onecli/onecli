@@ -1,3 +1,4 @@
+import { connect as netConnect } from "node:net";
 import { describe, expect } from "vitest";
 
 import {
@@ -23,6 +24,38 @@ const APPROVAL_WORLD = {
     },
   ],
 };
+
+/** Inject only into this scenario's decision key. Never stop or flush Redis. */
+const pushDecisionPayload = (
+  host: string,
+  port: string,
+  key: string,
+  payload: string,
+): Promise<void> =>
+  new Promise((resolve, reject) => {
+    const socket = netConnect({ host, port: Number(port) });
+    let reply = "";
+    socket.setTimeout(5_000, () =>
+      socket.destroy(new Error("Redis LPUSH timed out")),
+    );
+    socket.on("error", reject);
+    socket.on("close", () =>
+      reject(new Error("Redis closed before acknowledging LPUSH")),
+    );
+    socket.on("connect", () => {
+      const args = ["LPUSH", key, payload];
+      socket.write(
+        `*${String(args.length)}\r\n${args.map((arg) => `$${String(Buffer.byteLength(arg))}\r\n${arg}\r\n`).join("")}`,
+      );
+    });
+    socket.on("data", (chunk: Buffer) => {
+      reply += chunk.toString("utf8");
+      if (!reply.includes("\r\n")) return;
+      if (/^:\d+\r\n$/.test(reply)) resolve();
+      else reject(new Error("Redis did not acknowledge the scoped LPUSH"));
+      socket.end();
+    });
+  });
 
 describe("manual approval", () => {
   scenario("holds the request and surfaces it for review", async (cx) => {
@@ -52,6 +85,49 @@ describe("manual approval", () => {
     await decideApproval(gw, cx.ids.apiKey, approval.id, "deny");
     await held.response;
   });
+
+  scenario(
+    "an agent's batch tag groups the card and never reaches the upstream",
+    async (cx) => {
+      const upstream = await cx.upstream();
+      upstream.respond({ status: 200, body: "{}" });
+      await cx.seed(APPROVAL_WORLD);
+      const gw = await cx.startGateway();
+
+      const held = await startHeldRequest(
+        gw.origin,
+        {
+          method: "POST",
+          url: upstream.url("/v1/contacts"),
+          token: cx.ids.agentToken,
+          headers: {
+            "X-OneCLI-Batch": "import-7",
+            "X-OneCLI-Batch-Label": " Add 3\tcontacts ",
+            "X-OneCLI-Batch-Total": "3",
+          },
+          body: "{}",
+        },
+        HOLD_MS,
+      );
+      const approval = await waitForApproval(gw, cx.ids.apiKey);
+      // Parsed and sanitized onto the card (the label is one line)...
+      expect(approval.batch).toEqual({
+        id: "import-7",
+        label: "Add 3 contacts",
+        total: 3,
+      });
+
+      await decideApproval(gw, cx.ids.apiKey, approval.id, "approve");
+      expect((await held.response).status).toBe(200);
+      // ...and stripped before forwarding: they are for OneCLI only.
+      const [forwarded] = await upstream.waitForRequests(1);
+      expect(
+        Object.keys(forwarded?.headers ?? {}).filter((h) =>
+          h.startsWith("x-onecli-batch"),
+        ),
+      ).toEqual([]);
+    },
+  );
 
   scenario("resumes the original request when approved", async (cx) => {
     const upstream = await cx.upstream();
@@ -188,10 +264,112 @@ describe("manual approval", () => {
     expect(res.header("x-should-retry")).toBe("false");
     expect(res.json()).toMatchObject({
       error: "manual_approval_denied",
+      reason: "declined",
       approval_id: approval.id,
     });
     expect(upstream.requests()).toHaveLength(0);
   });
+
+  scenario(
+    "fails closed on a malformed Redis decision and allows a fresh approval",
+    async (cx) => {
+      const upstream = await cx.upstream();
+      await cx.seed(APPROVAL_WORLD);
+      const gw = await cx.startGateway();
+      const request = {
+        method: "POST",
+        url: upstream.url("/v1/send"),
+        token: cx.ids.agentToken,
+        body: JSON.stringify({ text: "Review me" }),
+      };
+      const held = await startHeldRequest(gw.origin, request, HOLD_MS);
+      const original = await waitForApproval(gw, cx.ids.apiKey);
+      const sentinel = "invalid-decision-must-not-be-logged";
+      await pushDecisionPayload(
+        cx.config.redisHost,
+        cx.config.redisPort,
+        `approval:decision:${cx.ids.org}:${cx.ids.workspace}:${original.id}`,
+        JSON.stringify({ decision: "invalid", sensitive: sentinel }),
+      );
+      const failed = await held.response;
+      expect(failed.status).toBe(502);
+      expect(failed.header("x-should-retry")).toBe("false");
+      expect(failed.json()).toMatchObject({
+        error: "approval_store_unavailable",
+        approval_id: original.id,
+        message: expect.stringContaining("request was not forwarded"),
+      });
+      expect(failed.json()).not.toHaveProperty("reason");
+      expect(failed.body).not.toContain(sentinel);
+      expect(gw.logs()).not.toContain(sentinel);
+      expect(upstream.requests()).toHaveLength(0);
+      expect(
+        (await decideApproval(gw, cx.ids.apiKey, original.id, "approve"))
+          .status,
+      ).toBe(404);
+
+      // A new user-directed request is a new hold, not a replay of this decision.
+      const again = await startHeldRequest(gw.origin, request, HOLD_MS);
+      const fresh = await waitForApproval(gw, cx.ids.apiKey);
+      expect(fresh.id).not.toBe(original.id);
+      expect(upstream.requests()).toHaveLength(0);
+      expect(
+        (await decideApproval(gw, cx.ids.apiKey, fresh.id, "approve")).status,
+      ).toBe(200);
+      expect((await again.response).status).toBe(200);
+      const seen = await upstream.waitForRequests(1);
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.body).toBe(request.body);
+    },
+  );
+
+  for (const revised of [false, true]) {
+    scenario(
+      `requires fresh approval after decline (${revised ? "revised" : "unchanged"} body)`,
+      async (cx) => {
+        const upstream = await cx.upstream();
+        await cx.seed(APPROVAL_WORLD);
+        const gw = await cx.startGateway();
+        const original = JSON.stringify({ text: "Hello, David!" });
+        const body = revised ? JSON.stringify({ text: "Hi David." }) : original;
+        const request = {
+          method: "POST",
+          url: upstream.url("/v1/send"),
+          token: cx.ids.agentToken,
+          body: original,
+        };
+        const first = await startHeldRequest(gw.origin, request, HOLD_MS);
+        const declined = await waitForApproval(gw, cx.ids.apiKey);
+        await decideApproval(gw, cx.ids.apiKey, declined.id, "deny");
+        expect((await first.response).status).toBe(403);
+        expect(upstream.requests()).toHaveLength(0);
+
+        // Simulates a new user-directed send, not an automatic HTTP retry.
+        const second = await startHeldRequest(
+          gw.origin,
+          { ...request, body },
+          HOLD_MS,
+        );
+        const pending = await waitForApproval(gw, cx.ids.apiKey);
+        expect(pending.id).not.toBe(declined.id);
+        expect(upstream.requests()).toHaveLength(0);
+        const stale = await decideApproval(
+          gw,
+          cx.ids.apiKey,
+          declined.id,
+          "approve",
+        );
+        expect(stale.status).toBe(404);
+        expect(upstream.requests()).toHaveLength(0);
+
+        await decideApproval(gw, cx.ids.apiKey, pending.id, "approve");
+        expect((await second.response).status).toBe(200);
+        const seen = await upstream.waitForRequests(1);
+        expect(seen).toHaveLength(1);
+        expect(seen[0]?.body).toBe(body);
+      },
+    );
+  }
 
   scenario("rejects a decision on an unknown approval id", async (cx) => {
     await cx.seed({ withApiKey: true });

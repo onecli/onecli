@@ -46,3 +46,8 @@ export const catalogToolIds = (provider: string): string[] => {
   if (!def) return [];
   return def.groups.flatMap((g) => g.tools.map((t) => t.id));
 };
+
+/** Whether a customized grant of `provider` ends in a terminal whole-app
+ * BLOCK instead of the default whole-app needs-approval row (`unlisted`). */
+export const catalogBlocksUnlisted = (provider: string): boolean =>
+  getAppPermissionDefinition(provider)?.unlisted === "block";

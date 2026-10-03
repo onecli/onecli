@@ -158,7 +158,16 @@ export interface SandboxBackend {
   destroyHome(ref: HomeRef): Promise<void>;
   /** No-ops on `resident` backends; archive/restore on `snapshot` ones. */
   parkHome(ref: HomeRef): Promise<void>;
-  wakeHome(ref: HomeRef): Promise<void>;
+  /**
+   * Make the home mountable, awaited to `ready`. `workspaceId` (the
+   * `stopSandbox` optional-hint precedent) is where the sandbox will run:
+   * a `snapshot` backend may BIRTH a brand-new home here (carve its disk
+   * and bring up its device before the sandbox exists), and that needs a
+   * placement only the caller knows. A home that already exists (local or
+   * archived) is always placed by the backend's own truth, never by this
+   * hint; `resident` backends ignore it.
+   */
+  wakeHome(ref: HomeRef, workspaceId?: string): Promise<void>;
   listHomes(): Promise<Array<{ sandboxId: string; ref: HomeRef }>>;
 
   // ── Sandboxes ─────────────────────────────────────────────────────────

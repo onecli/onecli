@@ -62,6 +62,8 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
     // presence it cannot serve yet.
     cardUiOf: (presence) =>
       channelAdapterProviderFor(presence.provider)?.cardUi ?? null,
+    threadAddressOf: (presence) =>
+      channelAdapterProviderFor(presence.provider)?.threadAddress ?? null,
     credentialOf: (presence) =>
       channelAdapterProviderFor(presence.provider)?.credentialOf(presence) ??
       null,
@@ -171,6 +173,29 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
           reason,
         });
         runtime.socket = null;
+        // The socket dial uses the presence's own credential, so a refusal
+        // that means the app is gone (uninstalled or deleted while this
+        // adapter was offline — the one case the webhooks cannot reach on
+        // socket mode, since the socket IS the webhook) is relayed as the
+        // PROVIDER's own removal event through the ingest door. The control
+        // plane flips the presence; its config feed then drops it, and the
+        // reconcile pass stops redialing. Which failures count, and what the
+        // event looks like, are the provider's business (removalEventFor).
+        const removal = runtime.provider.removalEventFor(reason);
+        if (removal !== null) {
+          void controlPlane
+            .ingest({
+              presenceId: runtime.presence.presenceId,
+              eventId: `dead-credential:socket:${runtime.presence.presenceId}:${Date.now()}`,
+              event: removal,
+            })
+            .catch((err: unknown) =>
+              log("dead credential report failed", {
+                presenceId: runtime.presence.presenceId,
+                err: String(err),
+              }),
+            );
+        }
       },
       onLog: log,
     });
@@ -293,6 +318,8 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
       credential: runtime.credential,
       provider: runtime.presence.provider,
       posts: runtime.provider.posts,
+      removalEventFor: runtime.provider.removalEventFor,
+      threadAddress: runtime.provider.threadAddress,
       iconUrl: runtime.presence.agent.imageUrl ?? null,
       // Local cache first; a link acquired mid-history falls back to the
       // item's server-supplied floor (an instance-identity etag no longer
@@ -306,6 +333,13 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
         // The agent's chat — connect-card buttons land the user back in the
         // conversation with the attach dialog open.
         chatUrl: `${config.appUrl}/w/${encodeURIComponent(agent.workspaceId)}/agents/${encodeURIComponent(agent.id)}/chat`,
+        // The web door for one of this turn's files (the degrade line's
+        // link): the workspace's Files page. Same shape the web's
+        // navigation.ts builds (workspaceFilePath); every id percent-encoded,
+        // the conversation as `?c=` because the chat renders only direct
+        // threads.
+        attachmentUrl: (attachmentId: string) =>
+          `${config.appUrl}/w/${encodeURIComponent(agent.workspaceId)}/files/${encodeURIComponent(attachmentId)}?c=${encodeURIComponent(item.conversationId)}`,
       }),
       onLog: log,
     });

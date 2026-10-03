@@ -317,4 +317,15 @@ describe("Composer", () => {
 
     await waitFor(() => expect(uploadFile).toHaveBeenCalledOnce());
   });
+
+  it("follows the typed language's direction: Hebrew starts on the right", () => {
+    // The browser's `dir="auto"` is right for an input: it keys on the
+    // first strong character as the person types, so a Hebrew draft
+    // starts on the right with no per-keystroke work of our own.
+    render(<Composer {...baseProps} />);
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveAttribute(
+      "dir",
+      "auto",
+    );
+  });
 });

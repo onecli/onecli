@@ -9,19 +9,33 @@ import { pickRunnerForSandbox } from "./placement";
 import { requestSandboxRespawn } from "./sandbox-service";
 import { bumpHomeForAgent } from "./home-sync-service";
 import { resolveAgentLlmCredential } from "./llm-credential-service";
+import { syncAgentPresenceNames } from "./channels/agent-channel-service";
 import {
-  teardownAgentPresences,
-  syncAgentPresenceNames,
-} from "./channels/agent-channel-service";
+  enqueueChannelCleanup,
+  lockAgentRow,
+  lockChannelLifecycle,
+  processChannelCleanups,
+} from "./channels/channel-cleanup-service";
 import { presenceSettingsUrlFor } from "./channels/registry";
 import { autoAttachLlmKeys } from "./llm-autoattach-service";
+import { attachWorkspaceResourcesToNewAgent } from "./workspace-autoattach-service";
+import { dropPrincipalFromPolicyInTx, lockScope } from "./policy-service";
 import { llmProvider } from "../llm/registry";
 import { isOnpremEdition } from "../lib/policy-flags";
+import { logger } from "../lib/logger";
+import {
+  AGENT_CONFLICT_REASON_EXISTING,
+  AGENT_CONFLICT_REASON_RACE,
+  createLogAgentConflict,
+} from "./agent-conflict-log";
 import {
   IDENTIFIER_REGEX,
   INSTRUCTIONS_MAX_LENGTH,
   type AgentKind,
 } from "../validations/agent";
+
+/** The #1115 conflict line. Module scope: one child, not one per create. */
+const logAgentConflict = createLogAgentConflict(logger);
 
 export const generateAccessToken = () =>
   `aoc_${randomBytes(32).toString("hex")}`;
@@ -171,7 +185,7 @@ export const agentExistsByIdentifier = async (
 export const createAgent = async (
   workspaceId: string,
   input: CreateAgentInput,
-  /** Who to record as the grantor of the auto-attached LLM keys. */
+  /** Who to record as the grantor of every auto-attached grant. */
   userId: string | null = null,
 ) => {
   const trimmed = input.name.trim();
@@ -216,6 +230,15 @@ export const createAgent = async (
     select: { id: true },
   });
   if (existing) {
+    // The idempotent-`ensureAgent` arm (#1115): expected, and the ONLY record
+    // that says so — the access log sees an anonymous 409. See
+    // `agent-conflict-log.ts` for why it is info, and why the level is pinned.
+    logAgentConflict({
+      workspaceId,
+      identifier: trimmedIdentifier,
+      reason: AGENT_CONFLICT_REASON_EXISTING,
+      existingAgentId: existing.id,
+    });
     throw new ServiceError(
       "CONFLICT",
       "An agent with this identifier already exists",
@@ -318,6 +341,11 @@ export const createAgent = async (
       userId,
     ).catch(() => ({ secretIds: [] as string[] }));
 
+    // Every workspace connection and custom secret is on for a new agent too
+    // (`workspace-autoattach-service`), so it can work right away. Runs after
+    // the LLM attach and is best-effort the same way: it never fails create.
+    await attachWorkspaceResourcesToNewAgent(workspaceId, agent.id, userId);
+
     // `llmKeys` is part of the create contract: an empty array means the
     // workspace has no LLM key, which is the one thing a caller must be able
     // to react to (the dashboard turns it into a guided "add one now").
@@ -327,6 +355,15 @@ export const createAgent = async (
       err instanceof Prisma.PrismaClientKnownRequestError &&
       err.code === "P2002"
     ) {
+      // The RACE arm (#1115): the pre-check above passed, so two concurrent
+      // creates of this identifier reached the insert. Same 409 and the same
+      // message as the pre-check — `conflictReason` is what tells them apart.
+      // No existing id: the insert failed, so nothing came back to name.
+      logAgentConflict({
+        workspaceId,
+        identifier: trimmedIdentifier,
+        reason: AGENT_CONFLICT_REASON_RACE,
+      });
       throw new ServiceError(
         "CONFLICT",
         "An agent with this identifier already exists",
@@ -339,24 +376,35 @@ export const createAgent = async (
 export const deleteAgent = async (workspaceId: string, agentId: string) => {
   const agent = await db.agent.findFirst({
     where: { id: agentId, workspaceId },
-    select: { id: true, workspace: { select: { organizationId: true } } },
+    select: { id: true },
   });
 
   if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
 
-  // Channel presences hold state OUTSIDE our database — a Slack app installed
-  // in the customer's home and a service API key. The row cascade would
-  // drop our end and leave both alive, so tear them down first. Best-effort
-  // inside: a provider that refuses must not make the agent undeletable.
-  await teardownAgentPresences({
-    id: agent.id,
-    organizationId: agent.workspace.organizationId,
+  // Channel presences hold state OUTSIDE our database: a Slack app installed
+  // in the customer's workspace and a service API key. The row cascade would
+  // drop our end and leave both alive, so the teardown is snapshotted and the
+  // key revoked in the SAME transaction as the delete; the remote half runs
+  // after commit and is retried by maintenance if it fails. Every agent is
+  // deletable, the last one included: a workspace with no agents is valid.
+  const ids = await db.$transaction(async (tx) => {
+    await lockChannelLifecycle(tx, workspaceId);
+    // Policy scope BEFORE the agent row: every grant/rule write takes the
+    // scope lock and then touches this row (its identity FK), so the opposite
+    // order deadlocks against one. The row lock then holds off any new
+    // identity naming this agent until the delete commits.
+    await lockScope(tx, { scope: "workspace", workspaceId });
+    await lockAgentRow(tx, agentId, workspaceId);
+    const ids = await enqueueChannelCleanup(tx, { agentId: agent.id });
+    await dropPrincipalFromPolicyInTx(tx, {
+      kind: "agent",
+      id: agentId,
+      workspaceId,
+    });
+    await tx.agent.delete({ where: { id: agentId } });
+    return ids;
   });
-
-  // Every agent is deletable, the last one included: a workspace with no agents
-  // is a valid state (nothing is seeded), and the old "cannot delete the
-  // default agent" guard made the first agent permanent.
-  await db.agent.delete({ where: { id: agentId } });
+  await processChannelCleanups({ ids }).catch(() => undefined);
 };
 
 export interface UpdateAgentInput {

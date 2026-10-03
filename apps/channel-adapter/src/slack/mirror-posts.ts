@@ -1,13 +1,19 @@
 import { escapeSlackText } from "@onecli/channels/slack";
 import { providerDisplayName, providerIconUrl } from "../mirror";
 import type { MirrorPosts } from "../mirror";
+import type { AutomationSource } from "@onecli/api/validations/conversation";
 import type { ChannelPostTarget } from "../targets";
 // The shared client (the old local client merged into @onecli/channels)
 // retries 429s with Retry-After honored — a behavior the local copy lacked.
 // Safe here by the posting model: acks are sent on receipt and posts run
 // async, so a retried post can never sit inside Slack's 3s ack window; and
 // a 429 is pre-execution, so no double-post is possible.
-import { postBlocksMessage, postMessage } from "@onecli/channels/slack";
+import {
+  postBlocksMessage,
+  postMessage,
+  SlackApiError,
+  uploadFiles,
+} from "@onecli/channels/slack";
 import { markdownToMrkdwn } from "@onecli/channels/slack";
 
 /** Slack's per-section text cap is 3,000 — cut with headroom, at a newline
@@ -55,6 +61,17 @@ const HEADER_SEPARATOR = ` ${String.fromCharCode(0x2014)} `;
  * reworded. Anything unrecognised falls back to the bounded first line, so
  * a future header shape degrades to today's behavior instead of vanishing.
  */
+/**
+ * The caption's icon per automation source: the web header's icon family in
+ * Slack's vocabulary. A peer task's report is the agent's own words after
+ * talking with another agent, so it wears the two-bubbles mark.
+ */
+const AUTOMATION_ICONS: Record<AutomationSource, string> = {
+  cron: ":calendar:",
+  watch: ":stopwatch:",
+  peer_task: ":speech_balloon:",
+};
+
 export const automationCaption = (title: string): string => {
   // \r too: a CRLF header would otherwise leave a stray carriage return
   // riding the caption into Slack.
@@ -200,6 +217,32 @@ const modelKeyCard = async (
   });
 };
 
+/**
+ * Slack refusals that mean "this workspace/install cannot take the file",
+ * today and on retry — the mirror's degrade set. Slack's own codes, verbatim
+ * (files.getUploadURLExternal / files.completeUploadExternal docs).
+ * `invalid_arguments` is here because the client maps an empty file to it
+ * (a zero-byte file cannot be shared; the web still shows the row).
+ */
+const UPLOAD_DEGRADE_CODES: ReadonlySet<string> = new Set([
+  "missing_scope",
+  "file_uploads_disabled",
+  "file_uploads_except_images_disabled",
+  "file_type_not_allowed",
+  "file_upload_size_restricted",
+  "storage_limit_reached",
+  "user_is_external_guest",
+  "not_allowed_token_type",
+  "invalid_arguments",
+]);
+const isUploadDegrade = (code: string): boolean =>
+  UPLOAD_DEGRADE_CODES.has(code);
+
+/** The degrade line's tail when the files are LINKED: what the link does. */
+export const FILES_LINKED_LINE = "Click a file to download it from OneCLI.";
+/** The tail when no web door is configured (no APP_URL): where to look. */
+export const FILES_IN_WEB_LINE = "Download from this conversation on the web.";
+
 export const slackMirrorPosts: MirrorPosts = {
   async webSourced(input) {
     // The attributed mirror is a quote, not a rendering: a person who typed
@@ -211,7 +254,7 @@ export const slackMirrorPosts: MirrorPosts = {
     });
   },
   async automation(input) {
-    const icon = input.source === "watch" ? ":stopwatch:" : ":calendar:";
+    const icon = AUTOMATION_ICONS[input.source];
     // The title always rides the post: two automations reporting into the
     // same thread are indistinguishable without it (model-written bodies do
     // not self-identify). It stays a quiet italic caption (quoted verbatim,
@@ -402,6 +445,64 @@ export const slackMirrorPosts: MirrorPosts = {
         "This agent was running on OneCLI's free credit, which ran out. Add your own model key, then send your message again.",
       button: "Add a model key",
     });
+  },
+  async files(input) {
+    // One share for the turn's files. The FIRST caption is the share text
+    // (a share message carries one text); the rest ride as file titles so
+    // no caption is lost. Escaped: the caption is model text quoted into
+    // Slack, never rendered.
+    const comment = input.files.find((f) => f.caption)?.caption ?? null;
+    const unavailable = [...input.unavailable];
+    if (input.files.length > 0) {
+      try {
+        await uploadFiles(input.credential, {
+          channel: input.channel,
+          ...(input.threadTs && { threadTs: input.threadTs }),
+          ...(comment && { initialComment: escapeSlackText(comment) }),
+          files: input.files.map((f) => ({
+            name: f.name,
+            bytes: f.bytes,
+            ...(f.caption && f.caption !== comment && { title: f.caption }),
+          })),
+        });
+      } catch (err) {
+        // A DETERMINISTIC refusal is the degrade path: the install predates
+        // files:write, the workspace forbids uploads (or this type), an
+        // external guest… Retrying would refuse again; the honest move is
+        // a line per file that names it and points at the web thread, where
+        // the file already is. Anything else (transport, 5xx after the
+        // cursor advanced) rethrows into the mirror's loud log.
+        if (!(err instanceof SlackApiError) || !isUploadDegrade(err.code)) {
+          throw err;
+        }
+        unavailable.unshift(
+          ...input.files.map((f) => ({
+            name: f.name,
+            ...(input.attachmentUrl && { url: input.attachmentUrl(f.id) }),
+          })),
+        );
+      }
+    }
+    if (unavailable.length > 0) {
+      // One line per file. With a web door it is a LINK (`<url|label>`, the
+      // renderer's form for server-built URLs — the URL came from config,
+      // never from model text); without one it is the name, and the trailing
+      // line says where to look. The label is the escaped name with `|`
+      // removed: a pipe inside the token is the label/URL separator, and a
+      // file named `a|b.txt` must not hand Slack's parser a second field.
+      const lines = unavailable.map((f) =>
+        f.url
+          ? `:paperclip: <${f.url}|${escapeSlackText(f.name).replaceAll("|", "")}>`
+          : `:paperclip: ${escapeSlackText(f.name)}`,
+      );
+      const allLinked = unavailable.every((f) => f.url);
+      const tail = allLinked ? FILES_LINKED_LINE : FILES_IN_WEB_LINE;
+      await postMessage(input.credential, {
+        channel: input.channel,
+        text: `${lines.join("\n")}\n_${tail}_`,
+        ...targetForm(input),
+      });
+    }
   },
   async failureNotice(input) {
     // Platform chrome, not the agent's voice: one plain italic line (the

@@ -6,7 +6,6 @@ import {
   ExternalLink,
   Gauge,
   Globe,
-  Hand,
   Shield,
   Users,
   type LucideIcon,
@@ -37,13 +36,6 @@ interface FeatureContent {
 }
 
 const FEATURE_CONTENT: Record<PremiumFeature, FeatureContent> = {
-  "policy.manual_approval": {
-    icon: Hand,
-    iconClassName: "text-blue-500",
-    title: "Manual approval",
-    description:
-      "Requiring human approval before an agent acts is a paid feature. Upgrade to gate sensitive actions behind approval.",
-  },
   "policy.rate_limit": {
     icon: Gauge,
     iconClassName: "text-amber-500",

@@ -6,11 +6,13 @@ import { resolveOrgContextWithRole } from "@/lib/actions/resolve-user";
 import { normalizePlan } from "@onecli/api/ee/billing/plans";
 
 /** Check if the user needs a redirect before seeing the dashboard.
- * Billing editions only — without billing there is no subscription-driven
- * onboarding gate, so no redirect. */
+ *
+ * Onboarding (welcome → create your first agent) runs on EVERY edition: a
+ * fresh org owner is routed into it until they finish or skip it. Billing
+ * only adds an exemption — a paid org's owner already has what they came
+ * for, so they are left alone — and that subscription read is the one thing
+ * that must never run without billing (it reaches the Stripe graph). */
 export const checkDashboardRedirect = async (): Promise<string | null> => {
-  if (!CAPS.billing) return null;
-
   let organizationId: string;
   let userId: string;
   let role: string;
@@ -26,20 +28,19 @@ export const checkDashboardRedirect = async (): Promise<string | null> => {
   // not be bounced into a flow that assumes they are setting it up.
   if (role !== "owner") return null;
 
-  const [user, org] = await Promise.all([
-    db.user.findUnique({
-      where: { id: userId },
-      select: { onboardingCompletedAt: true },
-    }),
-    db.organization.findUnique({
+  const user = await db.user.findUnique({
+    where: { id: userId },
+    select: { onboardingCompletedAt: true },
+  });
+  if (!user) return null;
+
+  if (CAPS.billing) {
+    const org = await db.organization.findUnique({
       where: { id: organizationId },
       select: { subscriptionStatus: true },
-    }),
-  ]);
-
-  if (!user || !org) return null;
-
-  if (org.subscriptionStatus !== "free") return null;
+    });
+    if (!org || org.subscriptionStatus !== "free") return null;
+  }
 
   return user.onboardingCompletedAt ? null : "/onboarding";
 };

@@ -165,6 +165,9 @@ export const startTestRunner = async (
           throw error;
         }
       },
+      // The real client, so the e2e proves the raw-body POST and its caps.
+      uploadAttachment: (sandboxId, file) =>
+        controlPlane.uploadAttachment(sandboxId, file),
       sendToSandbox: (sandboxId, item) => sendToSandbox(sandboxId, item),
       containerRefOf: (sandboxId) => containerRefOf(sandboxId),
     }),

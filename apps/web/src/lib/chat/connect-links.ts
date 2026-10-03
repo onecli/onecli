@@ -13,6 +13,13 @@ import type { AppDefinition } from "@onecli/api/apps/types";
  * - `access_restricted` → `…/connections/apps/<provider>` (an account exists
  *   but THIS agent has no grant: the card's Manage button opens the
  *   permissions dialog, which is exactly the attach surface)
+ *
+ * Only an app connection the registry can name gets the app-page link. Every
+ * other restricted credential (a custom secret, an LLM key, an app connection
+ * on an unregistered path) links the agent page that attaches it
+ * (`…/agents/<id>/connections?tab=custom`, `…/models`, `…/connections`).
+ * Those are deliberately not card links: there is no app to card, so they
+ * stay in the prose as plain links.
  */
 
 export interface ConnectSuggestion {

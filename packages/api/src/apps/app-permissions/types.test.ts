@@ -94,6 +94,16 @@ describe("toAppPermissionDefinitionSummary", () => {
     const summary = toAppPermissionDefinitionSummary(definition);
     expect(summary.groups[1]).not.toHaveProperty("wildcard");
   });
+
+  it("carries the unlisted posture only when the catalog sets one", () => {
+    expect(toAppPermissionDefinitionSummary(definition)).not.toHaveProperty(
+      "unlisted",
+    );
+    expect(
+      toAppPermissionDefinitionSummary({ ...definition, unlisted: "block" })
+        .unlisted,
+    ).toBe("block");
+  });
 });
 
 describe("allGroupTools", () => {

@@ -1,5 +1,5 @@
 import { randomBytes } from "crypto";
-import { db } from "@onecli/db";
+import { db, type Prisma } from "@onecli/db";
 import type { ResourceScope } from "./resource-scope";
 import { scopeWhere, scopeCreate, isOrgScope } from "./resource-scope";
 
@@ -115,8 +115,12 @@ export const createServiceApiKey = async (
 /**
  * Delete a service key by id. Deliberately fenced to `kind: "service"` so no
  * teardown path can ever delete a person's own key by mistake; deleting an
- * already-gone key is a no-op (teardown must be idempotent).
+ * already-gone key is a no-op (teardown must be idempotent). Pass the caller's
+ * `tx` when the revoke must commit or roll back with a local deletion.
  */
-export const revokeServiceApiKey = async (id: string): Promise<void> => {
-  await db.apiKey.deleteMany({ where: { id, kind: "service" } });
+export const revokeServiceApiKey = async (
+  id: string,
+  tx: Prisma.TransactionClient = db,
+): Promise<void> => {
+  await tx.apiKey.deleteMany({ where: { id, kind: "service" } });
 };

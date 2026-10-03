@@ -1,4 +1,5 @@
 import { normalizeMentionName } from "@onecli/channels";
+import { cleanLabel } from "../../lib/format";
 import type {
   AdapterMentionReportRequest,
   AdapterMentionResolution,
@@ -37,21 +38,6 @@ export interface MentionDirectoryEntry {
   displayName: string;
 }
 
-/** Strip control characters (normalizeMentionName's whitespace collapse
- * misses non-space controls like ESC), collapse whitespace runs, clamp —
- * every place a display name travels (resolution answers, stored notices,
- * the context note) reads model-visible text. */
-const cleanDirectoryName = (raw: string): string =>
-  [...raw]
-    .filter((ch) => {
-      const code = ch.charCodeAt(0);
-      return code >= 0x20 && code !== 0x7f;
-    })
-    .join("")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 80);
-
 /**
  * The presence's mention directory: normalized platform name → the linked
  * identities bearing it. Users with no usable name (null and no email
@@ -78,9 +64,7 @@ export const mentionDirectoryOf = async (
     // context note or a stored notice: platform names are user-controlled
     // text, and a name is not a place for terminal escapes or fabricated
     // lines (the same posture as ingestion's cleanName).
-    const displayName = cleanDirectoryName(
-      link.user.name?.trim() || link.user.email,
-    );
+    const displayName = cleanLabel(link.user.name?.trim() || link.user.email);
     const key = normalizeMentionName(displayName);
     if (!key) continue;
     const entry = { externalUserId: link.externalUserId, displayName };
@@ -267,12 +251,12 @@ export const recordMentionFailures = async (
       failure.kind === "ambiguous"
         ? {
             kind: failure.kind,
-            name: cleanDirectoryName(failure.name),
+            name: cleanLabel(failure.name),
             candidates: failure.candidates
               .slice(0, 10)
-              .map((candidate) => cleanDirectoryName(candidate)),
+              .map((candidate) => cleanLabel(candidate)),
           }
-        : { kind: failure.kind, name: cleanDirectoryName(failure.name) },
+        : { kind: failure.kind, name: cleanLabel(failure.name) },
     );
   const turn = await db.turn.findUnique({
     where: { id: turnId },

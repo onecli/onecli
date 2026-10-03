@@ -356,6 +356,8 @@ model User {
   channelUserLinks              ChannelUserLink[]             @relation("ChannelUserLinkUser")
   decidedReachGrants            AgentReachGrant[]             @relation("ReachGrantDecider")
   decidedAgentContacts          AgentContact[]                @relation("AgentContactDecider")
+  decidedAgentLinksA            AgentLink[]                   @relation("AgentLinkDeciderA")
+  decidedAgentLinksB            AgentLink[]                   @relation("AgentLinkDeciderB")
   createdChannelIntegrations    ChannelIntegration[]          @relation("ChannelIntegrationCreator")
   createdChannelInstallations   ChannelInstallation[]         @relation("ChannelInstallationCreator")
   createdAgentChannels          AgentChannel[]                @relation("AgentChannelCreator")
@@ -364,6 +366,7 @@ model User {
   skillsCreated                 Skill[]                       @relation("SkillCreator")
   processesCreated              SandboxProcess[]              @relation("ProcessCreator")
   watchesCreated                ProcessWatch[]                @relation("WatchCreator")
+  peerTasksCreated              PeerTask[]                    @relation("PeerTaskCreator")
   sessions                      Session[]
   accounts                      Account[]
   sshKeys                       UserSshKey[]
@@ -464,6 +467,10 @@ model Agent {
   reachGrants          AgentReachGrant[]
   actionApprovals      ActionApproval[]
   contacts             AgentContact[]
+  linksAsA             AgentLink[]          @relation("AgentLinkA")
+  linksAsB             AgentLink[]          @relation("AgentLinkB")
+  peerTasks            PeerTask[]           @relation("PeerTaskOwner")
+  peerTasksAsPeer      PeerTask[]           @relation("PeerTaskPeer")
 
   @@unique([workspaceId, identifier])
   @@index([workspaceId])
@@ -731,8 +738,9 @@ model Conversation {
   id                String   @id @default(uuid())
   agentId           String   @map("agent_id")
   // Where the conversation comes from. `externalRef` is that source's own id
-  // (a Slack thread ts, a cron id) — the pair is what keeps sources apart.
-  source            String   @default("web") // "web" | "slack" | "cron" | "watch"
+  // (a Slack thread ts, a cron id, a peer agent's id for "agent") — the pair
+  // is what keeps sources apart.
+  source            String   @default("web") // "web" | "slack" | "cron" | "watch" | "agent"
   externalRef       String?  @map("external_ref")
   // The direct thread's owner (step 6's per-user amendment to §3.18): a
   // user's conversation with an agent is ONE thread no matter the surface —
@@ -785,6 +793,7 @@ model Conversation {
   cronsHere       AgentCron[]              @relation("CronOrigin")
   processesHere   SandboxProcess[]         @relation("ProcessOrigin")
   watchesHere     ProcessWatch[]           @relation("WatchOrigin")
+  peerTasksHere   PeerTask[]               @relation("PeerTaskHome")
 
   @@unique([agentId, source, externalRef])
   @@index([agentId, createdAt])
@@ -913,7 +922,19 @@ model ConversationAttachment {
   // Uploader (web) / authenticated speaker (Slack). SetNull like Turn.userId:
   // history outlives a deleted user, attribution drops.
   userId         String?  @map("user_id")
-  source         String   @default("web") // door: "web" | a channel provider id
+  source         String   @default("web") // door: "web" | a channel provider id | "agent" (send_file)
+  // Who put the bytes here: "inbound" = a person's message carried it (web
+  // upload, channel fetch); "outbound" = the AGENT sent it back (send_file).
+  // Its own column, not a `source` overload: the web renders the two on
+  // opposite sides of the thread, Slack uploads only outbound rows, and the
+  // per-conversation daily byte cap counts only outbound — none of which
+  // should have to know every door's name.
+  direction      String   @default("inbound") // "inbound" | "outbound"
+  // Outbound only: the agent's one-line note for the file (send_file's
+  // `caption`). Slack carries it as the share's initial_comment; the web
+  // renders it under the chip. Bounded at MAX_OUTBOUND_CAPTION_CHARS on the
+  // wire; model text, rendered as TEXT (the transcript's untrusted-content law).
+  caption        String?
   name           String // sanitized (sanitizeAttachmentName) — safe as a path segment
   mimeType       String   @map("mime_type")
   sizeBytes      Int      @map("size_bytes")
@@ -934,6 +955,10 @@ model ConversationAttachment {
   // status-leading index it sequential-scans the table — and this is the one
   // table that holds megabyte rows.
   @@index([status, createdAt])
+  // The outbound daily byte cap (send_file) sums `size_bytes` for one
+  // conversation's outbound rows in the last 24h on EVERY agent upload —
+  // direction-leading so the sum touches only that conversation's sent rows.
+  @@index([conversationId, direction, createdAt])
   @@map("conversation_attachments")
 }
 
@@ -1541,6 +1566,117 @@ model AgentContact {
 
   @@unique([agentId, kind, externalRef])
   @@map("agent_contacts")
+}
+
+// THE AGENT LINK (PR 5b): one relationship between two OneCLI agents, one
+// word - "communicate" - never "send" plus "receive". One row per unordered
+// pair, ordered so agentAId < agentBId. Two policy columns because two
+// owner groups may govern the one relationship (the agents can live in
+// different workspaces, even organizations): each side's owners hold a
+// standing decision about THIS pair - "ask" (hold each message for a card),
+// "allow" (flow), "blocked" (the standing no). A message flows only when
+// neither side is blocked and every "ask" side has approved it; blocked on
+// either side wins. Every decision - the dashboard's policy menu, a card's
+// "always allow" - writes the DECIDER'S agent's column only, whoever owns
+// the other side; same-workspace pairs simply have one owner group deciding
+// twice. Blank when the agents never met: the first message creates it
+// ask/ask.
+model AgentLink {
+  id       String @id @default(uuid())
+  agentAId String @map("agent_a_id")
+  agentBId String @map("agent_b_id")
+  // agent A's owners' standing decision about this pair.
+  policyA  String @default("ask") @map("policy_a")
+  // agent B's owners' standing decision about this pair.
+  policyB  String @default("ask") @map("policy_b")
+
+  decidedByAUserId String?  @map("decided_by_a_user_id")
+  decidedByBUserId String?  @map("decided_by_b_user_id")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  agentA     Agent @relation("AgentLinkA", fields: [agentAId], references: [id], onDelete: Cascade)
+  agentB     Agent @relation("AgentLinkB", fields: [agentBId], references: [id], onDelete: Cascade)
+  decidedByA User? @relation("AgentLinkDeciderA", fields: [decidedByAUserId], references: [id], onDelete: SetNull)
+  decidedByB User? @relation("AgentLinkDeciderB", fields: [decidedByBUserId], references: [id], onDelete: SetNull)
+
+  @@unique([agentAId, agentBId])
+  @@index([agentBId])
+  @@map("agent_links")
+}
+
+// A PEER TASK: one thing a PERSON asked an agent that the agent took to
+// another agent (the PR after 5b). Opened by the platform when `message_agent`
+// is called from a running human-authored turn; `ask` is that turn's own
+// words (bounded), never a model-written summary. The whole back-and-forth
+// then runs on the two agents' pair conversations under a fixed budget
+// (`agentSent` / `peerSent`, one conditional write per message), and exactly
+// ONE thing reaches the person: the report `complete_task` materializes into
+// `homeConversationId`, or the platform's own close line when the task ends
+// without one (`outcome`: budget spent, `expiresAt` passed, the pair blocked
+// or removed). The A2A reading: a person's ask is a stateful task, an
+// agent's message is a stateless message; a closed task is immutable, a
+// follow-up is a new task.
+//
+// ONE OPEN TASK PER PAIR, either direction, enforced by a partial unique
+// index on the sorted pair (`pair_a_id`, `pair_b_id`) WHERE status = 'open',
+// hand-appended in the migration for the same Prisma-6 reason as Turn's
+// one-active lock. A second person-opened ask on a busy pair is born
+// `queued` with its first message frozen in `opener`, and the close of the
+// open task promotes the oldest queued one (a claim, `SKIP LOCKED`). Both
+// agents may live in different workspaces; every read is fenced on the
+// caller's agent, and a deleted home takes the task with it (Cascade), so
+// nothing ever delivers into a conversation that is gone.
+model PeerTask {
+  id                 String    @id @default(uuid())
+  // The agent that owes the report (the one the person asked).
+  agentId            String    @map("agent_id")
+  peerAgentId        String    @map("peer_agent_id")
+  // The unordered pair, sorted (pairAId < pairBId): the one-open index and
+  // the FIFO queue key, whichever side opened the task.
+  pairAId            String    @map("pair_a_id")
+  pairBId            String    @map("pair_b_id")
+  // The person's conversation the report lands in.
+  homeConversationId String    @map("home_conversation_id")
+  createdByUserId    String?   @map("created_by_user_id")
+  // The person's words (bounded), platform-stamped from the home turn.
+  ask                String
+  // The agent's first message to the peer, frozen so a queued task can be
+  // delivered later without re-reading a turn that may be gone.
+  opener             String
+  // "queued" | "open" | "done"
+  status             String    @default("open")
+  // Why it closed: "reported" | "budget" | "expired" | "blocked" | "removed"
+  // | "undeliverable". Null while queued or open.
+  outcome            String?
+  agentSent          Int       @default(0) @map("agent_sent")
+  peerSent           Int       @default(0) @map("peer_sent")
+  // True when the agent spoke last (a reply is owed by the peer). The
+  // budget backstop closes a task only when nothing is in flight.
+  awaitingPeer       Boolean   @default(false) @map("awaiting_peer")
+  // The peer's latest message (bounded), quoted by the close line so a
+  // task that ends without a report still hands the person something.
+  lastPeerText       String?   @map("last_peer_text")
+  openedAt           DateTime? @map("opened_at")
+  expiresAt          DateTime? @map("expires_at")
+  closedAt           DateTime? @map("closed_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  agent            Agent        @relation("PeerTaskOwner", fields: [agentId], references: [id], onDelete: Cascade)
+  peerAgent        Agent        @relation("PeerTaskPeer", fields: [peerAgentId], references: [id], onDelete: Cascade)
+  homeConversation Conversation @relation("PeerTaskHome", fields: [homeConversationId], references: [id], onDelete: Cascade)
+  createdBy        User?        @relation("PeerTaskCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  // The open-task lookup on a delivery and the FIFO queue claim on a close.
+  @@index([pairAId, pairBId, status, createdAt])
+  // The TTL sweep.
+  @@index([status, expiresAt])
+  // `complete_task` with no attributable origin; the Contacts page.
+  @@index([agentId, status])
+  // The standing line in the person's conversation while a task is open.
+  @@index([homeConversationId, status])
+  @@map("peer_tasks")
 }
 
 // Provider thread ↔ conversation: the adapter's routing table. "direct" rows
@@ -2299,4 +2435,36 @@ model Verification {
 
   @@index([identifier])
   @@map("verifications")
+}
+
+// Durable remote cleanup and identity reservation. Intentionally NO foreign
+// keys: snapshots must survive agent/workspace/organization cascades. Never
+// project credentials through an API. Purge ciphertext after 30 days, retaining
+// the blocked/manual identity reservation and non-secret audit outcome.
+model ChannelCleanup {
+  id               String    @id @default(uuid())
+  organizationId   String    @map("organization_id")
+  workspaceId      String    @map("workspace_id")
+  integrationId    String    @map("integration_id")
+  teamId           String    @map("team_id")
+  sourcePresenceId String    @map("source_presence_id")
+  provider         String
+  externalId       String    @map("external_id")
+  credentials      String?
+  deleteRemote     Boolean   @map("delete_remote")
+  // uninstall -> manifest -> completed. blocked retains its phase for retry.
+  stage            String    @default("uninstall")
+  state            String    @default("pending")
+  reason           String?
+  attempts         Int       @default(0)
+  nextAttemptAt    DateTime  @default(now()) @map("next_attempt_at")
+  claimToken       String?   @map("claim_token")
+  claimExpiresAt   DateTime? @map("claim_expires_at")
+  expiresAt        DateTime  @map("expires_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  @@unique([provider, externalId])
+  @@index([state, nextAttemptAt])
+  @@map("channel_cleanups")
 }

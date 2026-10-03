@@ -68,61 +68,155 @@ const stripForStatus = (raw: string): string =>
 export const ACTIVITY_TEXT_MAX = 80;
 
 /**
- * The tool-name → human phrase map. Deliberately a small allowlist of the
- * tools a reader actually sees, in the present participle ("Reading a
- * file"), so the line reads as an activity rather than an API call.
+ * What a tool works on, when a run of the same kind can be counted in one
+ * phrase ("Ran 3 commands", "Read 2 files"). Tools without one are counted
+ * as plain steps.
+ */
+export type ToolKind = "command" | "read" | "edit" | "fetch" | "search";
+
+interface ToolPhrase {
+  /** Present participle, for a call still running ("Reading a file"). */
+  running: string;
+  /** Past tense, for a finished call ("Read a file"). */
+  done: string;
+  kind?: ToolKind;
+}
+
+/**
+ * The tool-name → human phrase map, in both tenses. Deliberately a small
+ * allowlist of the tools a reader actually sees, so a line reads as an
+ * activity rather than an API call. ONE table for every surface: the live
+ * caption (present tense), the chat's finished steps (past tense) and the
+ * run header's count (kind) all read it, so they can never disagree on what
+ * a tool is called.
  *
  * An UNKNOWN tool falls back to a generic phrase rather than echoing its
  * raw name: tool names come from the sandbox (MCP servers can define their
- * own), so echoing them would put unbounded sandbox-controlled text on two
- * surfaces for no product gain.
+ * own), so echoing them would put unbounded sandbox-controlled text on
+ * every surface for no product gain.
  */
-const TOOL_PHRASES: Record<string, string> = {
-  bash: "Running a command",
-  read: "Reading a file",
-  write: "Writing a file",
-  edit: "Editing a file",
-  multiedit: "Editing a file",
-  agentgrep: "Searching the code",
-  ls: "Listing files",
-  webfetch: "Fetching a page",
-  websearch: "Searching the web",
-  patch: "Applying a patch",
-  apply_patch: "Applying a patch",
-  todo: "Planning the work",
-  swarm: "Coordinating helpers",
-  process_start: "Starting background work",
-  process_status: "Checking background work",
-  process_watch: "Watching background work",
-  process_stop: "Stopping background work",
-  memory_save: "Saving to memory",
-  memory_get: "Reading its memory",
-  memory_list: "Reading its memory",
-  memory_search: "Searching its memory",
-  schedule_task: "Scheduling a task",
-  list_tasks: "Checking its schedule",
-  cancel_task: "Cancelling a task",
-  skill_create: "Writing a skill",
-  skill_update: "Updating a skill",
-  skill_list: "Reading its skills",
-  skill_delete: "Removing a skill",
+const TOOL_PHRASES: Record<string, ToolPhrase> = {
+  bash: {
+    running: "Running a command",
+    done: "Ran a command",
+    kind: "command",
+  },
+  read: { running: "Reading a file", done: "Read a file", kind: "read" },
+  write: { running: "Writing a file", done: "Wrote a file", kind: "edit" },
+  edit: { running: "Editing a file", done: "Edited a file", kind: "edit" },
+  multiedit: { running: "Editing a file", done: "Edited a file", kind: "edit" },
+  agentgrep: {
+    running: "Searching the code",
+    done: "Searched the code",
+    kind: "search",
+  },
+  ls: { running: "Listing files", done: "Listed files" },
+  webfetch: {
+    running: "Fetching a page",
+    done: "Fetched a page",
+    kind: "fetch",
+  },
+  websearch: {
+    running: "Searching the web",
+    done: "Searched the web",
+    kind: "search",
+  },
+  // Provider-native search (jcode v0.90+): runs on the model provider's
+  // side and surfaces under the provider's tool name.
+  web_search: {
+    running: "Searching the web",
+    done: "Searched the web",
+    kind: "search",
+  },
+  patch: { running: "Applying a patch", done: "Applied a patch", kind: "edit" },
+  apply_patch: {
+    running: "Applying a patch",
+    done: "Applied a patch",
+    kind: "edit",
+  },
+  todo: { running: "Planning the work", done: "Planned the work" },
+  swarm: { running: "Coordinating helpers", done: "Coordinated helpers" },
+  process_start: {
+    running: "Starting background work",
+    done: "Started background work",
+  },
+  process_status: {
+    running: "Checking background work",
+    done: "Checked background work",
+  },
+  process_watch: {
+    running: "Watching background work",
+    done: "Watched background work",
+  },
+  process_stop: {
+    running: "Stopping background work",
+    done: "Stopped background work",
+  },
+  memory_save: { running: "Saving to memory", done: "Saved to memory" },
+  memory_get: { running: "Reading its memory", done: "Read its memory" },
+  memory_list: { running: "Reading its memory", done: "Read its memory" },
+  memory_search: {
+    running: "Searching its memory",
+    done: "Searched its memory",
+    kind: "search",
+  },
+  schedule_task: { running: "Scheduling a task", done: "Scheduled a task" },
+  list_tasks: {
+    running: "Checking its schedule",
+    done: "Checked its schedule",
+  },
+  cancel_task: { running: "Cancelling a task", done: "Cancelled a task" },
+  skill_create: { running: "Writing a skill", done: "Wrote a skill" },
+  skill_update: { running: "Updating a skill", done: "Updated a skill" },
+  skill_list: { running: "Reading its skills", done: "Read its skills" },
+  skill_delete: { running: "Removing a skill", done: "Removed a skill" },
+  message_agent: {
+    running: "Messaging another agent",
+    done: "Messaged another agent",
+  },
+  find_recipient: { running: "Looking someone up", done: "Looked someone up" },
+  send_message: { running: "Sending a message", done: "Sent a message" },
+  send_file: { running: "Sending a file", done: "Sent a file" },
+  complete_task: { running: "Reporting back", done: "Reported back" },
 };
 
 /** The phrase for a tool nobody mapped — see TOOL_PHRASES on why we do not
  * echo the raw name. */
-const GENERIC_TOOL_PHRASE = "Using a tool";
+const GENERIC_TOOL_PHRASE: ToolPhrase = {
+  running: "Using a tool",
+  done: "Used a tool",
+};
 
 /**
- * The activity line for a running tool call.
- *
  * The platform prefixes its MCP tools (`mcp__onecli__process_status`), so the
  * lookup strips that prefix before matching — the prefix is plumbing, and a
  * reader should see "Checking background work" either way.
  */
-export const activityForTool = (name: string): string => {
-  const bare = name.replace(/^mcp__[^_]+__/, "").toLowerCase();
-  return TOOL_PHRASES[bare] ?? GENERIC_TOOL_PHRASE;
-};
+const phraseFor = (name: string): ToolPhrase =>
+  TOOL_PHRASES[bareToolName(name).toLowerCase()] ?? GENERIC_TOOL_PHRASE;
+
+/** The activity line for a running tool call ("Running a command"). */
+export const activityForTool = (name: string): string =>
+  phraseFor(name).running;
+
+/** The line for a finished tool call ("Ran a command"). */
+export const finishedActivityForTool = (name: string): string =>
+  phraseFor(name).done;
+
+/** What the tool works on, or undefined when it is not one countable kind. */
+export const toolKind = (name: string): ToolKind | undefined =>
+  phraseFor(name).kind;
+
+/**
+ * A tool's name without the harness's MCP server prefix
+ * (`mcp__onecli__process_status` -> `process_status`). The prefix is
+ * plumbing the harness adds when it advertises a server's tools; every
+ * reader that matches on platform tool names (this activity line, the
+ * supervisor's per-conversation tool attribution) strips it through this one
+ * helper so the two can never disagree on the shape.
+ */
+export const bareToolName = (name: string): string =>
+  name.replace(/^mcp__[^_]+__/, "");
 
 /**
  * The activity line for a reasoning block, or null when there is nothing

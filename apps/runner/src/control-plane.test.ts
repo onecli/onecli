@@ -202,3 +202,80 @@ describe("postEvents retry law", () => {
     expect(calls[2]).toEqual(calls[1]);
   });
 });
+
+describe("uploadAttachment (the raw-body POST)", () => {
+  /**
+   * Against a REAL node:http server through the REAL global fetch — a stub
+   * cannot see what the wire carries. The hosted e2e caught a caller-set
+   * `content-length` colliding with the one fetch derives (undici's
+   * `invalid content-length header` → `fetch failed`) while every fetch-
+   * stubbed test stayed green; this pins the wire shape instead.
+   */
+  const startServer = async () => {
+    const { createServer } = await import("node:http");
+    const seen: {
+      headers: Record<string, string | string[] | undefined>;
+      bytes: Buffer;
+    }[] = [];
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        seen.push({ headers: req.headers, bytes: Buffer.concat(chunks) });
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ ok: true, attachmentId: "att-1" }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const { port } = server.address() as { port: number };
+    return {
+      url: `http://127.0.0.1:${port}`,
+      seen,
+      close: () =>
+        new Promise<void>((r) => {
+          server.closeAllConnections();
+          server.close(() => r());
+        }),
+    };
+  };
+
+  it("POSTs the exact bytes with the self-describing headers; fetch owns content-length", async () => {
+    const server = await startServer();
+    try {
+      const client = createControlPlaneClient({
+        baseUrl: server.url,
+        token: "rnr_t",
+      });
+      const bytes = Buffer.alloc(300_000, 7);
+      const result = await client.uploadAttachment("sb-1", {
+        conversationId: "cv-1",
+        turnId: "t-1",
+        name: "clip <1>.webm",
+        mimeType: "video/webm",
+        sha256: "a".repeat(64),
+        caption: "the run",
+        bytes,
+      });
+      expect(result).toEqual({ ok: true, attachmentId: "att-1" });
+      const [req] = server.seen;
+      expect(req).toBeDefined();
+      expect(Buffer.compare(req!.bytes, bytes)).toBe(0);
+      expect(req!.headers["content-length"]).toBe(String(bytes.byteLength));
+      expect(req!.headers["content-type"]).toBe("video/webm");
+      expect(req!.headers.authorization).toBe("Bearer rnr_t");
+      expect(req!.headers["x-onecli-sandbox-id"]).toBe("sb-1");
+      expect(req!.headers["x-onecli-conversation-id"]).toBe("cv-1");
+      expect(req!.headers["x-onecli-turn-id"]).toBe("t-1");
+      // Human strings percent-encoded: header values are Latin-1.
+      expect(req!.headers["x-onecli-file-name"]).toBe(
+        encodeURIComponent("clip <1>.webm"),
+      );
+      expect(req!.headers["x-onecli-file-caption"]).toBe(
+        encodeURIComponent("the run"),
+      );
+      expect(req!.headers["x-onecli-file-sha256"]).toBe("a".repeat(64));
+    } finally {
+      await server.close();
+    }
+  });
+});

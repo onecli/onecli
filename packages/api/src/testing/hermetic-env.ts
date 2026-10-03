@@ -164,6 +164,10 @@ export const AMBIENT_HAZARD_VARS: readonly string[] = [
   // and a malformed ambient value throws at import.
   "EGRESS_IPV4_ADDRESSES",
   "EGRESS_REGION",
+  // Attachment object storage (plans/agent-owns-its-machine.md tier 3) —
+  // presence flips the edition's blob store from Postgres to S3 at module
+  // load; an ambient bucket name would send every attachment test at AWS.
+  "ATTACHMENTS_S3_BUCKET",
   // Provider base URLs (test doubles point these at fakes per suite)
   "SLACK_API_BASE_URL",
   "SLACK_CDN_BASE_URL",
@@ -216,8 +220,6 @@ export const AMBIENT_HAZARD_VARS: readonly string[] = [
   "NOTION_CLIENT_SECRET",
   "SENTRY_CLIENT_ID",
   "SENTRY_CLIENT_SECRET",
-  "SLACK_CLIENT_ID",
-  "SLACK_CLIENT_SECRET",
   "SUPABASE_CLIENT_ID",
   "SUPABASE_CLIENT_SECRET",
   "TODOIST_CLIENT_ID",

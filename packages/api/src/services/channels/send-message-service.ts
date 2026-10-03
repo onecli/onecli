@@ -1,10 +1,5 @@
 import { db, Prisma } from "@onecli/db";
 import { mentionNamesOf, normalizeMentionName } from "@onecli/channels";
-import {
-  conversationsOpen,
-  markdownToMrkdwn,
-  postMessage,
-} from "@onecli/channels/slack";
 import { getCrypto } from "../../providers";
 import { ServiceError } from "../errors";
 import {
@@ -13,6 +8,8 @@ import {
 } from "./action-approval-service";
 import { resolveMentionNames } from "./mention-resolution-service";
 import { findChannels } from "./recipient-search-service";
+import { noteOutboundFailure } from "./agent-channel-service";
+import { channelProvider, isChannelProviderId } from "./registry";
 import { logger } from "../../lib/logger";
 
 const log = logger.child({ component: "send-message" });
@@ -153,7 +150,7 @@ const resolveSendRecipient = async (
   }
 
   const presence = await db.agentChannel.findFirst({
-    where: { agentId, provider: "slack", status: "active" },
+    where: { agentId, status: "active" },
     select: { id: true },
   });
   if (!presence) {
@@ -332,38 +329,46 @@ const executeSend = async (agentId: string, payload: SendPayload) => {
     );
   }
   const presence = await db.agentChannel.findFirst({
-    where: { agentId, provider: "slack", status: "active" },
-    select: { id: true, credentials: true },
+    where: { agentId, status: "active" },
+    select: { id: true, provider: true, credentials: true },
   });
   if (!presence?.credentials) {
     throw new Error("no active channel presence to send from");
   }
-  const credentials = JSON.parse(
-    await getCrypto().decrypt(presence.credentials),
-  ) as { botToken?: string };
-  if (!credentials.botToken) throw new Error("presence has no bot token");
+  // The column is a free string; a row from a build that knew a provider
+  // this one does not has nothing to send through.
+  if (!isChannelProviderId(presence.provider)) {
+    throw new Error(`unknown channel provider "${presence.provider}"`);
+  }
+  const provider = channelProvider(presence.provider);
+  const credentialsJson = await getCrypto().decrypt(presence.credentials);
 
-  // People are addressed via their DM channel (conversations.open is
-  // idempotent — it returns the existing IM); channels post directly.
-  // People AND apps are addressed via their DM channel (an app's bot user
-  // opens an IM the same way); channels post directly.
-  const channel =
-    payload.to.kind === "channel"
-      ? payload.to.ref
-      : (await conversationsOpen(credentials.botToken, payload.to.ref)).channel
-          .id;
-
-  // The same renderer the mirror trusts, with the map FROZEN at request
-  // time: body @[Name] tokens ping exactly who was resolved when the owner
-  // read the card — never re-resolved at execute (rename-proof, the anchor
-  // philosophy). Tokens without a map entry degrade to visible plain text.
-  const text = markdownToMrkdwn(
-    payload.text,
-    payload.mentions
-      ? { mentions: new Map(Object.entries(payload.mentions)) }
-      : undefined,
-  );
-  await postMessage(credentials.botToken, { channel, text });
+  try {
+    // The provider addresses the recipient and renders the text natively,
+    // with the mention map FROZEN at request time: body @[Name] tokens ping
+    // exactly who was resolved when the owner read the card — never
+    // re-resolved at execute (rename-proof, the anchor philosophy).
+    await provider.sendMessage({
+      credentialsJson,
+      to: { kind: payload.to.kind, ref: payload.to.ref },
+      text: payload.text,
+      ...(payload.mentions && {
+        mentions: new Map(Object.entries(payload.mentions)),
+      }),
+    });
+  } catch (err) {
+    // A refusal that means the app itself is gone (deleted on the provider's
+    // side, a missed uninstall webhook) flips the presence here — the
+    // outbound half of removal detection — and the agent hears why.
+    if (await noteOutboundFailure(presence.id, err)) {
+      const platform = provider.displayName;
+      throw new ServiceError(
+        "UNPROCESSABLE",
+        `Your ${platform} app was removed from the workspace, so this message could not be sent. It needs to be re-attached from your Channels page before you can reach ${platform} again.`,
+      );
+    }
+    throw err;
+  }
 };
 
 /** Module-load registration — the 4c consumer the 4b registry was built
@@ -439,7 +444,7 @@ export const requestSend = async (input: {
   const bodyNames = mentionNamesOf(text);
   if (bodyNames.length > 0) {
     const presence = await db.agentChannel.findFirst({
-      where: { agentId: input.agentId, provider: "slack", status: "active" },
+      where: { agentId: input.agentId, status: "active" },
       select: { id: true },
     });
     if (presence) {

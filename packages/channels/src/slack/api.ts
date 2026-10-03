@@ -502,6 +502,150 @@ export const filesInfo = (botToken: string, fileId: string) =>
     filesInfoResponse,
   );
 
+// ── File upload (the agent's send_file → the thread) ────────────────────────
+
+const uploadUrlResponse = z.object({
+  upload_url: z.string().min(1),
+  file_id: z.string().min(1),
+});
+
+const completeUploadResponse = z.object({
+  files: z.array(z.object({ id: z.string().min(1) })),
+});
+
+/** The single POST of file bytes to a minted upload URL. */
+const UPLOAD_TIMEOUT_MS = 60_000;
+
+/**
+ * Where minted upload URLs may point. Slack mints them on
+ * `files.slack.com`; the bytes we POST there are the agent's own file, not a
+ * credential — but a control plane that POSTs tenant data to whatever URL an
+ * API answer names is one compromised edge away from an exfiltration proxy,
+ * so the host is pinned like every other Slack destination. When
+ * SLACK_API_BASE_URL points at a fake server (the test seam), that exact
+ * origin is the allowed one.
+ */
+export const isSlackUploadUrl = (raw: string): boolean => {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  const base = process.env.SLACK_API_BASE_URL;
+  if (base) {
+    try {
+      const baseUrl = new URL(base);
+      return url.protocol === baseUrl.protocol && url.host === baseUrl.host;
+    } catch {
+      // Unparseable override — fall through to the production rule.
+    }
+  }
+  if (url.protocol !== "https:") return false;
+  const host = url.hostname.toLowerCase();
+  return host === "files.slack.com" || host.endsWith(".files.slack.com");
+};
+
+/** Slack's own per-file ceiling (1 GB); our callers cap far lower, this is
+ * the wire's last belt. */
+export const SLACK_MAX_UPLOAD_BYTES = 1024 * 1024 * 1024;
+
+export interface SlackUploadFile {
+  name: string;
+  bytes: Uint8Array;
+  /** Slack's display title for the file (defaults to the name). */
+  title?: string;
+}
+
+/**
+ * Share files into a channel/thread as ONE message — Slack's three-step
+ * external upload: mint a URL per file, POST each file's bytes, then a
+ * single `files.completeUploadExternal` naming every file id. One
+ * completion = one share message, so a turn's N files land as a single
+ * post under the answer, not N notifications. `initialComment` is the
+ * share message's text (PRE-ESCAPED by the caller, like postMessage).
+ *
+ * NOT retried at the HTTP layer beyond what `slackCall` does for 429s: the
+ * completion is a create (a 5xx after commit would double-share), and a
+ * failed byte POST fails the whole share — the caller decides what to say.
+ *
+ * Refusals arrive as `SlackApiError` with Slack's code verbatim; the caller
+ * maps the DETERMINISTIC ones (`missing_scope`, `file_uploads_disabled`,
+ * `file_type_not_allowed`, …) to its degrade path. `threadTs` must be the
+ * PARENT's ts (Slack's rule for replies).
+ */
+export const uploadFiles = async (
+  botToken: string,
+  input: {
+    channel: string;
+    threadTs?: string;
+    initialComment?: string;
+    files: readonly SlackUploadFile[];
+  },
+): Promise<{ fileIds: string[] }> => {
+  if (input.files.length === 0) return { fileIds: [] };
+  const minted: { id: string; title?: string }[] = [];
+  for (const file of input.files) {
+    if (
+      file.bytes.byteLength === 0 ||
+      file.bytes.byteLength > SLACK_MAX_UPLOAD_BYTES
+    ) {
+      throw new SlackApiError(
+        "files.getUploadURLExternal",
+        "invalid_arguments",
+      );
+    }
+    const ticket = await slackCall(
+      "files.getUploadURLExternal",
+      {
+        token: botToken,
+        form: { filename: file.name, length: String(file.bytes.byteLength) },
+      },
+      uploadUrlResponse,
+    );
+    if (!isSlackUploadUrl(ticket.upload_url)) {
+      throw new Error("Slack minted an upload URL outside its own hosts");
+    }
+    // Raw bytes; no Authorization — the minted URL is its own credential.
+    // `redirect: "manual"` (the download path's rule): the host pin above
+    // covers the URL Slack minted, and a redirect would re-POST the tenant's
+    // bytes to whatever Location says. Slack does not redirect uploads; a
+    // 3xx here is a failed share, not a hop to follow.
+    const put = await fetch(ticket.upload_url, {
+      method: "POST",
+      headers: { "content-type": "application/octet-stream" },
+      // A fresh ArrayBuffer-backed copy: the DOM `BodyInit` typing rejects a
+      // Uint8Array over a SharedArrayBuffer, and a Node Buffer's pooled slab
+      // must not leak its neighbours into the request anyway.
+      body: new Blob([Uint8Array.from(file.bytes)]),
+      redirect: "manual",
+      signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
+    });
+    await put.body?.cancel().catch(() => {});
+    if (!put.ok) {
+      throw new Error(`Slack upload answered HTTP ${put.status}`);
+    }
+    minted.push({
+      id: ticket.file_id,
+      ...(file.title !== undefined && { title: file.title }),
+    });
+  }
+  const done = await slackCall(
+    "files.completeUploadExternal",
+    {
+      token: botToken,
+      form: {
+        files: JSON.stringify(minted),
+        channel_id: input.channel,
+        ...(input.threadTs && { thread_ts: input.threadTs }),
+        ...(input.initialComment && { initial_comment: input.initialComment }),
+      },
+    },
+    completeUploadResponse,
+  );
+  return { fileIds: done.files.map((f) => f.id) };
+};
+
 /**
  * Which URLs the bot token may EVER be sent to. `url_private` arrives inside
  * an event payload — attacker-influencable through the signing-secret /

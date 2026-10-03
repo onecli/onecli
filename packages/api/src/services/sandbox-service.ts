@@ -3,6 +3,9 @@ import type { RunnerEvent, SandboxStartPayload } from "@onecli/agent-protocol";
 import { signalWork } from "./due-work";
 import { failStrandedTurns, reviveColdTurns } from "./turn-service";
 import { buildContainerConfig } from "./container-config-service";
+import { channelPresencesForRender } from "./channels/agent-channel-service";
+import { peersForRender } from "./channels/agent-peer-roster";
+import { connectionsForRender } from "./agent-connections-render";
 import { resolveAgentModel } from "../llm/resolve";
 import {
   AGENT_START_FAILED_MESSAGE,
@@ -115,6 +118,16 @@ export const buildSandboxStartPayload = async (
 
   const { config } = result;
   const resolved = resolveAgentModel(agent, result.llmCredential.provider);
+  // The agent's channel presences, for the supervisor's `channels` section
+  // (where it can be reached, which messaging tools exist) — current truth
+  // at dispatch, like everything else in this payload.
+  const channels = await channelPresencesForRender(agent.id);
+  // The peer agents it may message (PR 5b), for the `agents` capability.
+  const peers = await peersForRender(agent.id);
+  // Its attached app connections and each host-bound app's bound host, for
+  // the `connections` capability — so it calls the org's real host instead
+  // of guessing a generic one.
+  const connections = await connectionsForRender(agent.id);
 
   return {
     ok: true,
@@ -143,6 +156,9 @@ export const buildSandboxStartPayload = async (
       ...(agent.harness && { harness: agent.harness }),
       ...(agent.instructions && { instructions: agent.instructions }),
       ...(agent.name && { agentName: agent.name }),
+      channels,
+      peers,
+      connections,
       warnings: config.warnings ?? [],
     },
   };

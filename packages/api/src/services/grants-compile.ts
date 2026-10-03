@@ -1,5 +1,8 @@
 import type { Prisma } from "@onecli/db";
-import { catalogToolIds } from "../apps/app-permissions/validate";
+import {
+  catalogBlocksUnlisted,
+  catalogToolIds,
+} from "../apps/app-permissions/validate";
 import type { PolicyRuleRow } from "./policy-service";
 import type { ConnectionGrantInput } from "../validations/grants";
 
@@ -35,6 +38,15 @@ export const sorted = (ids: string[]): string[] => [...ids].sort();
 /** The §4.2 stack for one (agent, connection) grant. Order is load-bearing:
  * first-match walks allow → ask → blocked → everything-else.
  *
+ * The terminal "everything else" row covers the requests the catalog does not
+ * describe, and they NEED APPROVAL. A block would dead-end ordinary flows
+ * whose prerequisite calls no catalog lists (a Cloudflare deploy's
+ * `GET /accounts`), and falling through to the Default Rule (usually Allow)
+ * would inject the credential on the surfaces a catalog leaves out on purpose
+ * (Salesforce Composite/Bulk can mass-delete), quietly undoing a "Never" on
+ * the matching tool. A catalog opting in with `unlisted: "block"` (AWS, whose
+ * credential spans every service) keeps a terminal block instead.
+ *
  * Allow-first is DELIBERATE, not an oversight, for overlapping catalog tools:
  * read tools overlap by design (google-calendar's `get_calendar` glob covers
  * `list_events`' endpoints; github's `get_repo` covers the list endpoints), so
@@ -44,7 +56,9 @@ export const sorted = (ids: string[]): string[] => [...ids].sort();
  * mutations on one `POST /graphql` - is not solved by ordering at all but by
  * the fail-closed `graphqlOps` body discrimination: a mutation body never
  * matches the query tool's allow row, falls through, and dies on the blocked
- * or terminal row regardless of this ordering. */
+ * row regardless of this ordering: the blocked complement always carries every
+ * tool the user did not pick, and sits BEFORE the terminal, so an unpicked
+ * catalogued mutation never reaches the approval terminal. */
 export const compileConnectionStack = (
   nameBase: string,
   provider: string,
@@ -95,14 +109,18 @@ export const compileConnectionStack = (
       tools: blocked,
     });
   }
-  // Terminal: the whole app surface — makes "deny" explicit rather than
-  // default-dependent, and future catalog tools arrive as Never until enabled.
-  stack.push({
-    name: `${nameBase}: everything else`,
-    action: "block",
-    requireApproval: false,
-    tools: [],
-  });
+  const terminal = `${nameBase}: everything else`;
+  stack.push(
+    catalogBlocksUnlisted(provider)
+      ? { name: terminal, action: "block", requireApproval: false, tools: [] }
+      : {
+          name: terminal,
+          action: "allow",
+          requireApproval: true,
+          tools: [],
+          conditions,
+        },
+  );
   return stack;
 };
 
@@ -182,6 +200,9 @@ export const stackToGrant = (
     !rows[0].requireApproval &&
     (rows[0].targets[0]?.appTools ?? []).length === 0;
   if (isFull) return { access: "full", allow: [], ask: [] };
+  // The approval terminal is an allow+approval row too, but it names no tools
+  // (it is the unlisted-requests row, not a tool the user picked), so it adds
+  // nothing to `ask`.
   const allow = rows
     .filter((r) => r.action === "allow" && !r.requireApproval)
     .flatMap((r) => r.targets[0]?.appTools ?? []);

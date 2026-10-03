@@ -47,6 +47,14 @@ export interface HarnessCapabilities {
    * when adapters differ).
    */
   instructionFiles: string[];
+  /**
+   * Connects to the supervisor's platform-tools bridge (MCP) at session
+   * start, and therefore ASKS it for the tool list. Declared, never probed:
+   * the supervisor holds a starting session's first turn until that listing
+   * arrives, because the harness serves its own on-disk tool cache until
+   * discovery lands — and a harness that never asks must not be waited for.
+   */
+  platformTools: boolean;
 }
 
 /**
@@ -148,6 +156,18 @@ export interface HarnessSession {
   steer?(input: SteerInput): Promise<void>;
   /** Stop the in-flight turn; the runTurn iterable still ends cleanly. */
   abort(): Promise<void>;
+  /**
+   * Let go of this session WITHOUT ending it, so a later `startSession`
+   * with its `sessionRef` resumes the same transcript in THIS process. The
+   * supervisor calls it between turns when the agent's surface changed
+   * under a live session (a chat presence attached mid-run): the harness
+   * captures the instruction doc and its tool list at session start, so
+   * only a fresh session sees the change — and resume is what keeps the
+   * conversation's memory across that restart. Optional: an adapter whose
+   * refs are never held by a live client (the fake) needs nothing here.
+   * Never called with a turn in flight.
+   */
+  release?(): Promise<void>;
 }
 
 /**

@@ -156,6 +156,13 @@ const BOT_EVENTS = [
   // PRE-EXISTING apps must have their manifest updated (or be re-created)
   // to gain it — until then their leave cleanup falls back to dismiss.
   "member_left_channel",
+  // The APP's own removal (the removed door): the workspace uninstalled it,
+  // or revoked its bot token. No scopes needed for either. Same
+  // pre-existing-app rule as member_left_channel — an app created before
+  // this list carried them learns of its removal only when its manifest is
+  // updated or it is re-created.
+  "app_uninstalled",
+  "tokens_revoked",
 ] as const;
 
 /**
@@ -186,6 +193,10 @@ export const BOT_SCOPES = [
   // scope; without it Slack serves a login page, not a 401). Same reinstall
   // rule as reactions:write for pre-existing installs.
   "files:read",
+  // Sending the agent's files back into the thread (send_file →
+  // files.getUploadURLExternal / completeUploadExternal). Same reinstall
+  // rule; a pre-existing install degrades to a link line, never a lost file.
+  "files:write",
   "users:read",
   "users:read.email",
 ] as const;

@@ -3,8 +3,10 @@ import type { Turn } from "@/lib/api/types";
 import {
   hasActiveTurn,
   hasUnsettledTurn,
+  isAutomationTurn,
   isJoinedTurn,
   isJoiningTurn,
+  isPlatformAuthoredTurn,
   mergeTurnRows,
   resendableKeylessTurn,
 } from "./turns";
@@ -25,6 +27,37 @@ const turn = (status: Turn["status"], overrides: Partial<Turn> = {}): Turn => ({
   finishedAt: null,
   createdAt: "2026-08-10T00:00:00.000Z",
   ...overrides,
+});
+
+describe("authorship vs automation", () => {
+  // Two different questions that used to share one constant. Authorship
+  // decides whether a row wears a USER BUBBLE; the automation set decides
+  // SCHEDULING (due-work ranks it behind user-visible work) and context
+  // relaying (the continuity bridge). The greeting is platform-authored but
+  // foreground — conflating the two put the product's first impression at
+  // the back of the wake queue and narrated the hello back to the agent on
+  // the user's first message.
+  it("a greeting is platform-authored but NOT an automation", () => {
+    const greeting = turn("running", { source: "greeting", userId: null });
+    expect(isPlatformAuthoredTurn(greeting)).toBe(true);
+    expect(isAutomationTurn(greeting)).toBe(false);
+  });
+
+  it("cron and watch deliveries are both", () => {
+    for (const source of ["cron", "watch"]) {
+      const delivery = turn("done", { source, userId: null });
+      expect(isPlatformAuthoredTurn(delivery)).toBe(true);
+      expect(isAutomationTurn(delivery)).toBe(true);
+    }
+  });
+
+  it("a person's turn is neither, whichever door it came through", () => {
+    for (const source of ["web", "slack"]) {
+      const spoken = turn("done", { source });
+      expect(isPlatformAuthoredTurn(spoken)).toBe(false);
+      expect(isAutomationTurn(spoken)).toBe(false);
+    }
+  });
 });
 
 describe("the poll predicate", () => {

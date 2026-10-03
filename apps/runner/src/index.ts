@@ -193,6 +193,8 @@ const main = async (): Promise<void> => {
           throw error;
         }
       },
+      uploadAttachment: (sandboxId, file) =>
+        controlPlane.uploadAttachment(sandboxId, file),
       sendToSandbox: (sandboxId, item) => sendToSandbox(sandboxId, item),
       containerRefOf: (sandboxId) => containerRefOf(sandboxId),
     }),

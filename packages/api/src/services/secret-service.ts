@@ -2,6 +2,8 @@ import { db, Prisma } from "@onecli/db";
 import { getCrypto } from "../providers";
 import { ServiceError } from "./errors";
 import { attachLlmKeyToKeylessAgents } from "./llm-autoattach-service";
+import { attachNewSecretToAllAgents } from "./workspace-autoattach-service";
+import { isLlmProviderId } from "../llm/registry";
 import type { ResourceScope } from "./resource-scope";
 import { scopeWhere, scopeCreate, scopeOwnership } from "./resource-scope";
 import {
@@ -246,30 +248,42 @@ export const listSecrets = async (scope: ResourceScope) => {
 };
 
 /**
- * Hand a newly created LLM key to the agents that can reach no key at all —
- * the other half of the auto-attach (see `llm-autoattach-service`). Applied to
- * BOTH creation arms (inline and 1Password): where the value is stored is
- * irrelevant to whether an agent may use it.
+ * Hand a newly created WORKSPACE secret to the workspace's agents, applied to
+ * BOTH creation arms (inline and 1Password):
+ *  - a CUSTOM (generic) secret goes to every agent, so it works right away
+ *    (`workspace-autoattach-service`);
+ *  - an LLM key goes only to the agents that can reach no key at all
+ *    (`llm-autoattach-service`). A second key would re-point an agent's
+ *    provider, drop its chosen model, and respawn its sandbox.
  *
- * Workspace scope only. An ORG-level key is reachable by every workspace in
+ * Workspace scope only. An ORG-level secret is reachable by every workspace in
  * the org, and quietly granting it across all of them is a widening nobody
- * asked for; org keys stay an explicit attach.
+ * asked for; org secrets stay an explicit attach.
  *
- * Best-effort by contract: the key is already created, and a convenience
+ * Best-effort by contract: the secret is already created, and a convenience
  * grant must never turn that into a failed request.
  */
-const attachNewKey = async (
+const attachNewSecret = async (
   scope: ResourceScope,
-  secretId: string,
+  secret: { id: string; type: string },
   userId: string | null,
 ): Promise<string[]> => {
   if (!scope.workspaceId) return [];
-  const { agentIds } = await attachLlmKeyToKeylessAgents(
+  if (isLlmProviderId(secret.type)) {
+    const { agentIds } = await attachLlmKeyToKeylessAgents(
+      scope.workspaceId,
+      secret.id,
+      userId,
+    ).catch(() => ({ agentIds: [] as string[] }));
+    return agentIds;
+  }
+  // Never throws (it logs and returns nothing instead).
+  const written = await attachNewSecretToAllAgents(
     scope.workspaceId,
-    secretId,
+    secret.id,
     userId,
-  ).catch(() => ({ agentIds: [] as string[] }));
-  return agentIds;
+  );
+  return written.secrets.map((s) => s.agentId);
 };
 
 export const createSecret = async (
@@ -360,7 +374,7 @@ export const createSecret = async (
 
     return {
       ...opSecret,
-      attachedAgents: await attachNewKey(scope, opSecret.id, userId),
+      attachedAgents: await attachNewSecret(scope, opSecret, userId),
     };
   }
 
@@ -401,7 +415,7 @@ export const createSecret = async (
   return {
     ...secret,
     preview: buildPreview(value),
-    attachedAgents: await attachNewKey(scope, secret.id, userId),
+    attachedAgents: await attachNewSecret(scope, secret, userId),
   };
 };
 

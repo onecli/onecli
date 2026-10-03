@@ -40,10 +40,22 @@ vi.mock("@onecli/db", () => ({
         ...rest,
         contentHead: content.slice(0, 400),
       })),
-    turn: { findUnique: async () => state.turn },
+    turn: {
+      findUnique: async () => state.turn,
+    },
     // These suites are web conversations: no thread link, so the mention
-    // note (its own pg-tested builder) stays null and out of frame here.
+    // note (its own pg-tested builder) stays null and out of frame here;
+    // the same for the peer note (a `source: "web"` conversation with no
+    // open peer task, so the home's standing line stays null too).
     channelThreadLink: { findUnique: async () => null },
+    conversation: {
+      findUnique: async () => ({
+        agentId: "agent-1",
+        source: "web",
+        externalRef: null,
+      }),
+    },
+    peerTask: { findFirst: async () => null },
   },
 }));
 

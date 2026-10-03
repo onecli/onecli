@@ -11,6 +11,7 @@
 //! - [`hooks`]: the licensed pre/post-forward extension points
 //! - [`finalizers`] / [`transforms`]: request signing and body transforms
 //! - [`response`]: pre-built gateway responses
+pub mod approval_enrich;
 pub mod body;
 pub mod connect;
 pub mod finalizers;

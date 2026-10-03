@@ -9,6 +9,9 @@ import {
   type RunnerSandboxesResponse,
   type RunnerWorkItem,
   runnerMemoryWriteResponseSchema,
+  RUNNER_ATTACHMENT_HEADERS,
+  runnerAttachmentUploadResponseSchema,
+  type RunnerAttachmentUploadResponse,
   runnerToolCallResponseSchema,
   type RunnerMemoryWriteRequest,
   type RunnerMemoryWriteResponse,
@@ -52,6 +55,26 @@ export interface ControlPlaneClient {
    * deliberately never ride the poll JSON). Throws on any non-200 — the
    * caller degrades to delivering the turn without the file. */
   fetchAttachment(attachmentId: string): Promise<Buffer>;
+  /**
+   * Push one file the agent is sending back (send_file): raw bytes, metadata
+   * in the named headers. The toolCall contract: throws on transport
+   * failure; the api's refusals arrive as a parsed `ok:false`. A 413 (body
+   * over the api's cap) and a 400 (malformed headers) are answered as
+   * NON-retryable refusals here rather than thrown, since retrying the same
+   * bytes cannot succeed.
+   */
+  uploadAttachment(
+    sandboxId: string,
+    file: {
+      conversationId: string;
+      turnId: string;
+      name: string;
+      mimeType: string;
+      sha256: string;
+      caption?: string;
+      bytes: Buffer;
+    },
+  ): Promise<RunnerAttachmentUploadResponse>;
 }
 
 export class ControlPlaneError extends Error {
@@ -226,6 +249,54 @@ export const createControlPlaneClient = ({
         body: capabilities ? { capabilities } : {},
         timeoutMs: 15_000,
       });
+    },
+
+    async uploadAttachment(sandboxId, file) {
+      // No explicit content-length: fetch derives it from the byte body, and
+      // a caller-set one collided with it inside undici (`fetch failed` /
+      // `invalid content-length header`, seen on the real e2e path). The
+      // route's own cap reads the header fetch writes.
+      const headers: Record<string, string> = {
+        authorization: `Bearer ${token}`,
+        "content-type": file.mimeType,
+        [RUNNER_ATTACHMENT_HEADERS.sandboxId]: sandboxId,
+        [RUNNER_ATTACHMENT_HEADERS.conversationId]: file.conversationId,
+        [RUNNER_ATTACHMENT_HEADERS.turnId]: file.turnId,
+        // Header values are Latin-1: percent-encode the human strings.
+        [RUNNER_ATTACHMENT_HEADERS.name]: encodeURIComponent(file.name),
+        [RUNNER_ATTACHMENT_HEADERS.sha256]: file.sha256,
+        ...(file.caption !== undefined && {
+          [RUNNER_ATTACHMENT_HEADERS.caption]: encodeURIComponent(file.caption),
+        }),
+      };
+      // Binary, so not through `call`. 60s: 25 MB over a slow link, bounded
+      // under the supervisor tool's own ceiling only if the link is healthy —
+      // a slower one surfaces as the tool's timeout, which is honest.
+      const response = await fetchImpl(
+        `${baseUrl.replace(/\/$/, "")}/v1/runner/attachments`,
+        {
+          method: "POST",
+          headers,
+          body: new Uint8Array(file.bytes),
+          signal: AbortSignal.timeout(60_000),
+        },
+      );
+      if (response.status === 413 || response.status === 400) {
+        const body = (await response.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        return {
+          ok: false,
+          error: body?.error ?? "The platform refused this file.",
+        };
+      }
+      if (!response.ok) {
+        throw new ControlPlaneError(
+          response.status,
+          `POST /v1/runner/attachments failed: ${response.status}`,
+        );
+      }
+      return runnerAttachmentUploadResponseSchema.parse(await response.json());
     },
 
     async fetchAttachment(attachmentId) {

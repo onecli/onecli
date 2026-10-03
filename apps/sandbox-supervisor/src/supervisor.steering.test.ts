@@ -35,9 +35,13 @@ const config = (homeDir: string) => ({
   effort: undefined,
   instructions: "You are the test agent.",
   agentName: "Ada",
+  channels: [],
+  peers: [],
+  connections: [],
   harness: "fake",
   runnerWsUrl: undefined,
   bootstrapToken: undefined,
+  outboundAttachments: false,
 });
 
 const home = (prefix: string) => mkdtempSync(join(tmpdir(), prefix));

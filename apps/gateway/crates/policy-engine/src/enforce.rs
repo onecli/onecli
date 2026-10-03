@@ -327,25 +327,16 @@ pub async fn evaluate(
         return (PolicyDecision::Allow, None);
     };
     let agent_token = proxy_ctx.agent_token.as_str();
-
-    let rules = assemble_v2(
-        &v2.org,
-        &v2.workspace,
-        &v2.secret_hosts,
-        &v2.connection_providers,
-    );
-
-    let request = PolicyRequest {
-        host: strip_port(host).to_string(),
-        path: path.to_string(),
-        method: method.to_string(),
-        agent_id: agent_id.to_string(),
-        user_ids: v2.principals.user_ids.clone(),
-        group_ids: v2.principals.group_ids.clone(),
+    let (rules, request) = policy_input(
+        agent_id,
+        host,
+        method,
+        path,
         has_injections,
         is_llm_host,
-        winning_connection_id: winning_connection_id.map(str::to_string),
-    };
+        winning_connection_id,
+        v2,
+    );
 
     let matched_of = |rule: &NewRule| MatchedRule {
         logical_id: rule.logical_id.clone(),
@@ -366,6 +357,87 @@ pub async fn evaluate(
         ),
         Outcome::Allow => (PolicyDecision::Allow, None),
     }
+}
+
+/// Would the agent's own rules PLAINLY allow this request (no approval, no
+/// rate limit, no block, no deny-default)? For a gateway-internal read made on
+/// the agent's behalf (e.g. resolving a record id to a name for an approval
+/// card): the gateway may only read what the agent could read itself.
+///
+/// Side-effect free: a rate-limited allow is answered `false` WITHOUT touching
+/// its counter (so the probe never spends the agent's budget), and anything but
+/// an unconditional allow is `false` (fail closed). Bodyless: the probe is a
+/// GET, so a rule whose conditions need a body resolves by its own polarity.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn would_allow(
+    proxy_ctx: &ProxyContext,
+    host: &str,
+    method: &str,
+    path: &str,
+    has_injections: bool,
+    is_llm_host: bool,
+    winning_connection_id: Option<&str>,
+    v2: &PolicyV2Rules,
+) -> bool {
+    let (Some(_), Some(_), Some(agent_id)) = (
+        proxy_ctx.organization_id.as_deref(),
+        proxy_ctx.workspace_id.as_deref(),
+        proxy_ctx.agent_id.as_deref(),
+    ) else {
+        return false;
+    };
+    let (rules, request) = policy_input(
+        agent_id,
+        host,
+        method,
+        path,
+        has_injections,
+        is_llm_host,
+        winning_connection_id,
+        v2,
+    );
+    match evaluate_outcome(&rules, &request, ConditionBody::None) {
+        Outcome::Rule(rule) => {
+            rule.action == Action::Allow && !rule.require_approval && rule.rate_limit.is_none()
+        }
+        Outcome::DenyDefault(_) => false,
+        Outcome::Allow => true,
+    }
+}
+
+/// The rule set and request the first-match engine decides over, shared by
+/// [`evaluate`] and [`would_allow`] so the probe can never judge a different
+/// request than the real decision would.
+#[allow(clippy::too_many_arguments)]
+fn policy_input(
+    agent_id: &str,
+    host: &str,
+    method: &str,
+    path: &str,
+    has_injections: bool,
+    is_llm_host: bool,
+    winning_connection_id: Option<&str>,
+    v2: &PolicyV2Rules,
+) -> (Vec<NewRule>, PolicyRequest) {
+    let rules = assemble_v2(
+        &v2.org,
+        &v2.workspace,
+        &v2.secret_hosts,
+        &v2.connection_providers,
+    );
+    let request = PolicyRequest {
+        host: strip_port(host).to_string(),
+        path: path.to_string(),
+        method: method.to_string(),
+        agent_id: agent_id.to_string(),
+        user_ids: v2.principals.user_ids.clone(),
+        group_ids: v2.principals.group_ids.clone(),
+        has_injections,
+        is_llm_host,
+        winning_connection_id: winning_connection_id.map(str::to_string),
+    };
+    (rules, request)
 }
 
 #[cfg(test)]
@@ -650,5 +722,111 @@ mod body_buffer_tests {
             "api.anthropic.com",
             "/v1/messages"
         ));
+    }
+}
+
+#[cfg(test)]
+mod would_allow_tests {
+    use super::*;
+    use db::{PolicyIdentityRow, PolicyRuleV2Row, PolicyTargetRow};
+    use sqlx::types::Json;
+
+    const HOST: &str = "acme.my.salesforce.com";
+    const QUERY: &str = "/services/data/v60.0/query?q=SELECT+Id%2C+Name+FROM+Account";
+
+    fn ctx() -> ProxyContext {
+        ProxyContext {
+            workspace_id: Some("w1".into()),
+            organization_id: Some("o1".into()),
+            agent_id: Some("a1".into()),
+            agent_name: None,
+            agent_identifier: None,
+            agent_token: "aoc_t".into(),
+        }
+    }
+
+    fn network_rule(
+        name: &str,
+        action: &str,
+        require_approval: bool,
+        rate_limit: Option<i32>,
+        is_default: bool,
+    ) -> PolicyRuleV2Row {
+        PolicyRuleV2Row {
+            id: name.into(),
+            logical_id: name.into(),
+            name: name.into(),
+            source: "custom".into(),
+            priority: 1,
+            is_default,
+            action: action.into(),
+            rate_limit,
+            rate_limit_window: rate_limit.map(|_| "minute".to_string()),
+            require_approval,
+            conditions: None,
+            identities: Json(vec![PolicyIdentityRow {
+                agent_id: Some("a1".into()),
+                user_id: None,
+                group_id: None,
+            }]),
+            targets: Json(if is_default {
+                Vec::new()
+            } else {
+                vec![PolicyTargetRow {
+                    kind: "network".into(),
+                    app_provider: None,
+                    app_tools: Vec::new(),
+                    app_connection_scope: None,
+                    app_connection_id: None,
+                    secret_id: None,
+                    secret_scope: None,
+                    host_pattern: Some(HOST.into()),
+                    path_pattern: Some("/services/data/v*/query*".into()),
+                    method: Some("GET".into()),
+                }]
+            }),
+        }
+    }
+
+    fn probe(workspace: Vec<PolicyRuleV2Row>) -> bool {
+        let v2 = PolicyV2Rules {
+            workspace,
+            ..Default::default()
+        };
+        would_allow(&ctx(), HOST, "GET", QUERY, true, false, None, &v2)
+    }
+
+    #[test]
+    fn only_a_plain_allow_permits_the_internal_read() {
+        assert!(probe(vec![network_rule(
+            "allow", "allow", false, None, false
+        )]));
+        assert!(!probe(vec![network_rule(
+            "ask", "allow", true, None, false
+        )]));
+        assert!(!probe(vec![network_rule(
+            "rate",
+            "allow",
+            false,
+            Some(5),
+            false
+        )]));
+        assert!(!probe(vec![network_rule(
+            "block", "block", false, None, false
+        )]));
+        assert!(!probe(vec![network_rule(
+            "deny", "block", false, None, true
+        )]));
+    }
+
+    #[test]
+    fn a_context_without_identity_never_reads() {
+        let mut c = ctx();
+        c.agent_id = None;
+        let v2 = PolicyV2Rules {
+            workspace: vec![network_rule("allow", "allow", false, None, false)],
+            ..Default::default()
+        };
+        assert!(!would_allow(&c, HOST, "GET", QUERY, true, false, None, &v2));
     }
 }

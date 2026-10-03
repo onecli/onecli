@@ -258,9 +258,31 @@ describe("platform-tool step", () => {
         ]),
       }),
     );
-    const deltas = texts(all);
-    expect(deltas[0]).toBe('[tool echo_tool ok] {"args":{"a":1}}');
-    expect(deltas[1]).toContain("[tool missing_tool error]");
+    // The tool events fire live around each call, named as jcode names an
+    // MCP tool (the supervisor's per-conversation attribution reads that
+    // order); the echoes are deferred into ONE final message so a call
+    // boundary never demotes them out of the answer.
+    const kinds = all.map((e) => e.type);
+    expect(kinds).toEqual([
+      "turn.started",
+      "tool.started",
+      "tool.finished",
+      "tool.started",
+      "tool.finished",
+      "text.delta",
+      "turn.done",
+    ]);
+    const started = all.filter((e) => e.type === "tool.started");
+    expect(started.map((e) => (e as { name: string }).name)).toEqual([
+      "mcp__onecli__echo_tool",
+      "mcp__onecli__missing_tool",
+    ]);
+    const [echoes] = texts(all);
+    expect(echoes).toContain('[tool echo_tool ok] {"args":{"a":1}}');
+    expect(echoes).toContain("[tool missing_tool error]");
+    expect(echoes!.indexOf("echo_tool")).toBeLessThan(
+      echoes!.indexOf("missing_tool"),
+    );
   });
 });
 

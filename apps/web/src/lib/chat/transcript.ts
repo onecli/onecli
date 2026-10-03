@@ -1,4 +1,9 @@
 import {
+  readPeerMessageStamp,
+  readPeerTaskStamp,
+  type PeerTaskOutcome,
+} from "@onecli/agent-protocol";
+import {
   activityForReasoning,
   activityForTool,
 } from "@onecli/agent-protocol/activity";
@@ -20,43 +25,38 @@ export interface ToolCall {
   isError?: boolean;
 }
 
-/**
- * One entry in the turn's live work log, in true stream order: the agent
- * narrates ("Let me check the logs."), a tool runs, it narrates again. The
- * SUPERVISOR's segment rule, mirrored (supervisor.ts, 2026-08-31): a tool
- * call is the one structural break the model cannot write across, so it is
- * the one boundary that closes a narration segment. Thinking is NOT a
- * boundary — reasoning interleaves inside one message, and cutting there
- * would publish half a sentence.
- *
- * Tool items share object identity with `RenderedTurn.tools`, so a
- * `tool.finished` folding onto its start updates both views at once.
- *
- * SECURITY: narration text is UNTRUSTED model output from a sandbox that
- * reads the open internet. It is PROGRESS, not the answer — render it as
- * TEXT, never markdown (the answer path stays the only markdown surface).
- */
-export type WorkItem =
-  | { kind: "tool"; tool: ToolCall }
-  | { kind: "narration"; text: string };
-
 /** One turn as the reader sees it: what was asked, what happened, what came back. */
 export interface RenderedTurn {
   turnId: string;
   /**
    * The agent's ANSWER — the durable `text` event, nothing else. Empty while
-   * the turn still runs: mid-turn deltas build `liveText`/`work`, never this,
+   * the turn still runs: mid-turn deltas build `lead`/`liveText`, never this,
    * so a consumer of `text` can never mistake narration for the answer.
    */
   text: string;
+  /** Every tool call in the turn, in the order it started (an orphaned
+   *  finish, in the order it finished). */
   tools: ToolCall[];
   /**
-   * The work as it happened, chronologically: closed narration segments
-   * interleaved with the tool calls that closed them. Live-tail only in
-   * practice — history carries no deltas, so a reader who joins late gets
-   * tools without narration, which is exactly what the transcript records.
+   * What the agent said BEFORE its first tool call: its opening sentence,
+   * usually the plan ("I'll fetch the docs."). Kept above the work while the
+   * turn runs. Narration between later tool calls is not kept: it is
+   * transient progress, and the run header already says what is happening.
+   * The SUPERVISOR's segment rule decides where it ends (supervisor.ts,
+   * 2026-08-31): a tool call is the one structural break the model cannot
+   * write across, so the first one closes the opening sentence. Thinking is
+   * NOT a boundary: reasoning interleaves inside one message, and cutting
+   * there would publish half a sentence.
+   *
+   * Live-tail only in practice. History carries no deltas, so a reader who
+   * joins late gets tools without it, which is exactly what the transcript
+   * records.
+   *
+   * SECURITY: UNTRUSTED model output from a sandbox that reads the open
+   * internet. It is PROGRESS, not the answer: render it as TEXT, never
+   * markdown (the answer path stays the only markdown surface).
    */
-  work: WorkItem[];
+  lead: string;
   /**
    * The narration segment CURRENTLY streaming — everything said since the
    * last tool call. Rendered as the transient tail while the turn runs, and
@@ -86,6 +86,24 @@ export interface RenderedTurn {
    * turn — the agent goes on to answer, and both belong on screen.
    */
   notices: string[];
+  /**
+   * What THIS agent said to a peer agent on this turn (PR 5b): the sender's
+   * record of a `message_agent` delivery, the structured `peerMessage` the
+   * control plane stamps on the notice. The pair-conversation view renders
+   * these as this agent's own bubbles; the regular chat ignores the field
+   * (the notice text already reads "To Ray: …").
+   */
+  peerMessages: string[];
+  /**
+   * Which of `peerMessages` (by index) OPENED a peer task for a person
+   * (the `opensTask` mark on the stamp): the pair view captions that bubble.
+   */
+  peerMessagesOpeningTask: Set<number>;
+  /**
+   * A peer task CLOSED on this turn (the `peerTask` stamp on the pair
+   * record): why. The pair view draws the dialog's end from it.
+   */
+  peerTaskClosed?: PeerTaskOutcome;
   /** True once a terminal event landed, so the composer can re-enable. */
   ended: boolean;
 }
@@ -112,9 +130,11 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
     const created: RenderedTurn = {
       turnId,
       text: "",
-      work: [],
+      lead: "",
       liveText: "",
       notices: [],
+      peerMessages: [],
+      peerMessagesOpeningTask: new Set(),
       tools: [],
       ended: false,
     };
@@ -141,19 +161,17 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
         break;
       case "tool.started": {
         // The tool call CLOSES the current narration segment (the
-        // supervisor's segment rule, mirrored). Blank segments are never
-        // pushed — back-to-back tools must not litter the log.
-        if (turn.liveText.trim()) {
-          turn.work.push({ kind: "narration", text: turn.liveText });
+        // supervisor's segment rule, mirrored). Only the segment the FIRST
+        // tool closes is kept, as the lead; a blank one is never kept, so
+        // a model's stray newline cannot become the turn's opening line.
+        if (turn.tools.length === 0 && turn.liveText.trim()) {
+          turn.lead = turn.liveText;
         }
         turn.liveText = "";
-        const tool: ToolCall = {
+        turn.tools.push({
           callId: str(event.payload, "callId"),
           name: str(event.payload, "name"),
-        };
-        turn.tools.push(tool);
-        // Same object in both views: the finish below mutates it once.
-        turn.work.push({ kind: "tool", tool });
+        });
         // A started tool IS the current activity, and it outranks whatever
         // the agent was thinking a moment ago: the reasoning explains the
         // plan, the tool call is the plan happening.
@@ -170,23 +188,31 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
         if (started) Object.assign(started, finished);
         // A finish with no start still happened — show it rather than drop it.
         else {
-          const orphan: ToolCall = {
+          turn.tools.push({
             callId,
             name: str(event.payload, "name"),
             ...finished,
-          };
-          turn.tools.push(orphan);
-          turn.work.push({ kind: "tool", tool: orphan });
+          });
         }
         break;
       }
-      case "notice":
+      case "notice": {
         // Deliberately does NOT set `ended`. This is the whole reason it is
         // not an `error` event: a degraded preference travels alongside a turn
         // that then succeeds, and `error` is terminal by definition here and
         // in `isTerminalEvent`.
         turn.notices.push(str(event.payload, "text"));
+        const stamp = readPeerMessageStamp(event.payload);
+        if (stamp?.text) {
+          if (stamp.opensTask) {
+            turn.peerMessagesOpeningTask.add(turn.peerMessages.length);
+          }
+          turn.peerMessages.push(stamp.text);
+        }
+        const task = readPeerTaskStamp(event.payload);
+        if (task) turn.peerTaskClosed = task.outcome;
         break;
+      }
       case "error":
         turn.error = str(event.payload, "message");
         turn.ended = true;

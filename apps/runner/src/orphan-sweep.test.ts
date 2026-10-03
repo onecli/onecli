@@ -97,6 +97,7 @@ beforeEach(() => {
     },
     toolCall: async () => ({ ok: true, result: null }),
     memoryWrite: async () => ({ ok: true }),
+    uploadAttachment: async () => ({ ok: true, attachmentId: "att-fake" }),
     fetchAttachment: async () => Buffer.alloc(0),
   };
 

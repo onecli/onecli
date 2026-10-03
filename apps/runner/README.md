@@ -146,6 +146,29 @@ userns/permission errors, and `/etc/containers/README.onecli` inside the image
 says why. On the microVM substrate, container storage lives under `/workspace`
 (the durable home), so images and volumes survive sandbox restarts there.
 
+## Root in the sandbox (not offered; hosted-only if ever)
+
+The agent runs as `node`, never as root, on both substrates, and the runner
+sets no sudoers rule. The reasons differ by backend:
+
+- **Docker backend (self-host):** the same `no-new-privileges` + `CapDrop:
+ALL` + default-seccomp triple above IS the tenant boundary on a shared
+  kernel. Granting root inside such a container is not a setting to flip;
+  it would mean a different runtime (a gVisor `runsc` option) or a minimal
+  capability set under userns-remap (dpkg alone needs `CHOWN, DAC_OVERRIDE,
+FOWNER, SETUID, SETGID`). Both are real work and both weaken the story this
+  section pins, so neither is planned.
+- **Hosted microVM substrate:** root would be safe kernel-wise (one kernel per
+  sandbox) and was sketched as Tier 2 of `plans/agent-owns-its-machine.md`
+  (passwordless `sudo` written by the boot script). It is **deferred, not
+  built**: durable installs need no root — Nix on the durable home
+  (`nix profile install`), `npm -g`, `pip --user`, and rootless podman all
+  work as `node` and survive relaunch — and `send_file` hands results back
+  without it. The one thing `sudo` would add is an ephemeral `apt install`,
+  which Nix covers durably. Revisit only if agents hit a genuinely
+  system-level wall (a mount, a sysctl) that a package manager cannot solve;
+  the plan's §5 credential audit is a precondition.
+
 ## Orphan reaping
 
 Reconcile destroys anything **this** runner's label owns that the control

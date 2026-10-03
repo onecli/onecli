@@ -52,6 +52,7 @@ const services = vi.hoisted(() => ({
   removeUserLink: vi.fn(),
   withFreshIntegrationCredentials: vi.fn(),
   rotateStaleIntegrations: vi.fn(),
+  processChannelCleanups: vi.fn(),
   // agent-channel-service
   getAgentChannels: vi.fn(),
   getSetupMaterial: vi.fn(),
@@ -72,6 +73,8 @@ const services = vi.hoisted(() => ({
   settleToolApprovalCard: vi.fn(),
   listUnsettledToolApprovalCards: vi.fn(),
   requireLinkedConversation: vi.fn(),
+  // attachment-service (the adapter byte pull)
+  getAttachmentBytesForAdapter: vi.fn(),
   // channel-approval-service + slack dispatch
   decideApprovalFromChannel: vi.fn(),
   // action-approval-service (the 4b click door)
@@ -184,6 +187,10 @@ vi.mock("../services/channels/agent-channel-service", () => ({
   completePresenceFromOAuth: services.completePresenceFromOAuth,
 }));
 
+vi.mock("../services/channels/channel-cleanup-service", () => ({
+  processChannelCleanups: services.processChannelCleanups,
+}));
+
 vi.mock("../services/channels/channel-adapter-service", () => ({
   registerAdapter: services.registerAdapter,
   heartbeatAdapter: services.heartbeatAdapter,
@@ -219,6 +226,11 @@ vi.mock(
 
 vi.mock("../services/channels/providers/slack/dispatch", () => ({
   dispatchSlackEvent: services.dispatchSlackEvent,
+}));
+
+vi.mock("../services/attachment-service", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/attachment-service")>()),
+  getAttachmentBytesForAdapter: services.getAttachmentBytesForAdapter,
 }));
 
 vi.mock("../services/channels/turn-receipt-service", () => ({
@@ -703,6 +715,46 @@ describe("the adapter wire (authenticated by a registered cha_ token)", () => {
     expect(services.getAdapterWork).toHaveBeenCalledWith("ad-1");
   });
 
+  it("serves the agent's outbound file bytes to the OWNING adapter as an opaque download, and a hint-free 404 otherwise", async () => {
+    services.getAttachmentBytesForAdapter.mockResolvedValueOnce({
+      name: "clip.webm",
+      mimeType: "video/webm",
+      bytes: Buffer.from("webm-bytes"),
+    });
+    const res = await appRbacOff.request(
+      "/v1/channel-adapter/attachments/att-1",
+      { headers: CHA_AUTH },
+    );
+    expect(res.status).toBe(200);
+    // Bytes only. The type is deliberately NOT the stored one: this is a
+    // relay, and the adapter already holds the metadata from the work item.
+    expect(res.headers.get("content-type")).toBe("application/octet-stream");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(Buffer.from(await res.arrayBuffer()).toString()).toBe("webm-bytes");
+    // The fence is the service's: the route hands it the CALLER's adapter id.
+    expect(services.getAttachmentBytesForAdapter).toHaveBeenCalledWith(
+      "att-1",
+      "ad-1",
+    );
+
+    services.getAttachmentBytesForAdapter.mockResolvedValueOnce(null);
+    const miss = await appRbacOff.request(
+      "/v1/channel-adapter/attachments/att-2",
+      { headers: CHA_AUTH },
+    );
+    expect(miss.status).toBe(404);
+    expect(await miss.json()).toEqual({ error: "Not found" });
+  });
+
+  it("the byte pull is adapter-only: no bearer → 401, nothing read", async () => {
+    const res = await appRbacOff.request(
+      "/v1/channel-adapter/attachments/att-1",
+    );
+    expect(res.status).toBe(401);
+    expect(services.getAttachmentBytesForAdapter).not.toHaveBeenCalled();
+  });
+
   it("ingest resolves the presence identity and relays the door outcome", async () => {
     const createdAt = new Date("2026-08-06T12:00:00.000Z");
     services.dispatchSlackEvent.mockResolvedValue({
@@ -901,13 +953,21 @@ describe("the adapter wire (authenticated by a registered cha_ token)", () => {
     expect(services.clearTurnReceipts).not.toHaveBeenCalled();
   });
 
-  it("runs the proactive rotation sweep and relays its counts", async () => {
+  it("runs the rotation sweep, kicks the detached cleanup pass, and relays only the rotation counts", async () => {
     // Staleness is decided SERVER-side; the route is just the adapter's
-    // trigger, answering the sweep's counts verbatim.
+    // trigger, answering the sweep's counts verbatim. The durable cleanup
+    // pass rides the same trigger but must not hold the answer: the adapter
+    // aborts at 15s and a cleanup pass can spend minutes on provider calls.
     services.rotateStaleIntegrations.mockResolvedValue({
       rotated: 2,
       failed: 1,
     });
+    let releaseCleanup!: () => void;
+    services.processChannelCleanups.mockReturnValue(
+      new Promise<void>((resolve) => {
+        releaseCleanup = resolve;
+      }),
+    );
     const res = await appRbacOff.request(
       "/v1/channel-adapter/rotate-integrations",
       { method: "POST", headers: CHA_AUTH },
@@ -915,6 +975,22 @@ describe("the adapter wire (authenticated by a registered cha_ token)", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ rotated: 2, failed: 1 });
     expect(services.rotateStaleIntegrations).toHaveBeenCalledTimes(1);
+    expect(services.processChannelCleanups).toHaveBeenCalledTimes(1);
+    releaseCleanup();
+  });
+
+  it("a failing cleanup pass never fails the rotation answer", async () => {
+    services.rotateStaleIntegrations.mockResolvedValue({
+      rotated: 0,
+      failed: 0,
+    });
+    services.processChannelCleanups.mockRejectedValue(new Error("db down"));
+    const res = await appRbacOff.request(
+      "/v1/channel-adapter/rotate-integrations",
+      { method: "POST", headers: CHA_AUTH },
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ rotated: 0, failed: 0 });
   });
 
   it("the rotation sweep needs a registered cha_ token — anything else is 401", async () => {
@@ -939,6 +1015,7 @@ describe("the adapter wire (authenticated by a registered cha_ token)", () => {
       expect(res.status).toBe(401);
     }
     expect(services.rotateStaleIntegrations).not.toHaveBeenCalled();
+    expect(services.processChannelCleanups).not.toHaveBeenCalled();
   });
 
   it("reads a LINKED conversation's transcript (the link is the fence)", async () => {

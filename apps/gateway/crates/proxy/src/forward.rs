@@ -22,6 +22,7 @@ use cache::CacheStore;
 use inject::default_interceptions;
 use policy::PolicyDecision;
 
+use super::approval_enrich;
 use super::hooks;
 use super::mitm::ResolvedRules;
 use super::response;
@@ -49,6 +50,11 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
 fn is_forwarded_request_header(name: &HeaderName) -> bool {
     let s = name.as_str();
     if s == "host" || s == "content-length" || s == crate::connect::CONNECTION_ID_HEADER {
+        return false;
+    }
+    // The agent's batch-grouping headers are for OneCLI only: never leak
+    // them to the upstream API, whether the request is held or allowed.
+    if approval::BATCH_HEADERS.contains(&s) {
         return false;
     }
     !HOP_BY_HOP_HEADERS.contains(&s)
@@ -528,18 +534,28 @@ pub async fn forward_request(
     .await;
 
     // ── Early return for block / rate-limit / default-deny (no body needed) ───
+    // Decided before anything was forwarded, so the recorded latency is the
+    // policy evaluation's and nothing injected.
+    let refused = |status: StatusCode, decision: telemetry::core::RequestDecision| {
+        if let Some(mut meta) = hooks::request_meta(
+            proxy_ctx,
+            host,
+            method.as_str(),
+            &path,
+            status.as_u16(),
+            start.elapsed().as_millis() as u32,
+        ) {
+            meta.decision = Some(decision);
+            meta.matched_rule = matched_rule.clone();
+            telemetry::on_request(meta.into_event(None));
+        }
+    };
     match &decision {
         PolicyDecision::BlockedByDefaultPolicy => {
             warn!(method = %method, url = %url, "BLOCKED by default deny policy");
-            emit_policy_telemetry(
-                proxy_ctx,
-                host,
-                &method,
-                &path,
-                start,
+            refused(
                 StatusCode::FORBIDDEN,
                 telemetry::core::RequestDecision::BlockedByDefaultPolicy,
-                matched_rule.clone(),
             );
             return Ok(response::blocked_by_default_policy(
                 method.as_str(),
@@ -550,17 +566,11 @@ pub async fn forward_request(
         }
         PolicyDecision::Blocked { rule_name } => {
             warn!(method = %method, url = %url, rule = %rule_name, "BLOCKED by policy rule");
-            emit_policy_telemetry(
-                proxy_ctx,
-                host,
-                &method,
-                &path,
-                start,
+            refused(
                 StatusCode::FORBIDDEN,
                 telemetry::core::RequestDecision::Blocked {
                     rule_name: rule_name.clone(),
                 },
-                matched_rule.clone(),
             );
             return Ok(response::blocked_by_policy(
                 method.as_str(),
@@ -576,17 +586,11 @@ pub async fn forward_request(
             retry_after_secs,
         } => {
             warn!(method = %method, url = %url, rule = %rule_name, limit, window, "RATE LIMITED by policy rule");
-            emit_policy_telemetry(
-                proxy_ctx,
-                host,
-                &method,
-                &path,
-                start,
+            refused(
                 StatusCode::TOO_MANY_REQUESTS,
                 telemetry::core::RequestDecision::RateLimited {
                     rule_name: rule_name.clone(),
                 },
-                matched_rule.clone(),
             );
             return Ok(response::rate_limited(*limit, window, *retry_after_secs));
         }
@@ -726,21 +730,52 @@ pub async fn forward_request(
             // gracefully: unknown provider → generic summary, no content-type →
             // best-effort sniffing. The summary/preview never embed raw base64 or
             // oversized JSON, so the approval card can't overflow a chat client.
-            let (summary_provider, _) =
-                apps::provider_for_host_and_path(common::util::strip_port(host), &path)
-                    .unwrap_or((host, host));
+            let matched_app =
+                apps::provider_for_host_and_path(common::util::strip_port(host), &path);
+            let (summary_provider, _) = matched_app.unwrap_or((host, host));
             let content_type = parts
                 .headers
                 .get(hyper::header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok());
             let summary_body = (!summary_bytes.is_empty()).then_some(&*summary_bytes);
-            let approval_summary = summary::summarize_request(
+            let mut approval_summary = summary::summarize_request(
                 summary_provider,
                 method.as_str(),
                 &path,
                 content_type,
                 summary_body,
             );
+            // Records the card names by id are linked and, where the agent
+            // could read them itself, shown by name; the title then says
+            // which record ("Update Contact Dana Reyes"). See `approval_enrich`
+            // for the guards. A name read only ever rides the credential the
+            // winning connection injected onto this request.
+            let may_get = |probe_path: &str| {
+                policy_engine::would_allow(
+                    proxy_ctx,
+                    policy_host,
+                    "GET",
+                    probe_path,
+                    has_injections,
+                    policy::is_llm_host(host),
+                    rules.winning_connection_id.as_deref(),
+                    &rules.policy_rules_v2,
+                )
+            };
+            let enrich = approval_enrich::EnrichContext {
+                http: &http_client,
+                scheme,
+                host,
+                headers: &headers,
+                connection_id: rules
+                    .winning_connection_id
+                    .as_deref()
+                    .filter(|_| injection_count > 0),
+                cache,
+                may_get: &may_get,
+            };
+            let app = matched_app.map(|(provider, _)| provider);
+            approval_enrich::enrich(&mut approval_summary, app, &enrich).await;
             // `body_preview` carries the rendered summary so consumers that only
             // read the legacy field still get a clean, bounded, human-readable
             // card instead of raw JSON/base64. The structured `summary` is sent
@@ -767,6 +802,16 @@ pub async fn forward_request(
                 headers: sanitized_headers.unwrap_or_default(),
                 body_preview,
                 summary: Some(approval_summary),
+                raw_body: approval::RawBody::from_bytes(&summary_bytes),
+                app: app.map(str::to_string),
+                // Lossy, not `to_str`: a label in any language survives
+                // (it is sanitized and rendered as text, never markup).
+                batch: approval::ApprovalBatch::from_headers(|name| {
+                    parts
+                        .headers
+                        .get(name)
+                        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+                }),
                 created_at: now,
                 expires_at: now + APPROVAL_TIMEOUT_SECS,
             };
@@ -793,20 +838,17 @@ pub async fn forward_request(
                 return Ok(response::approval_store_unavailable());
             }
 
-            let telemetry_path = path.split('?').next().unwrap_or(&path);
-            let triggered_at = time::OffsetDateTime::now_utc()
-                .format(&time::format_description::well_known::Iso8601::DEFAULT)
-                .unwrap_or_default();
+            let triggered_at = hooks::iso_now();
+            // The telemetry row for each step of this approval: the pending
+            // INSERT carries no latency yet; a resolution carries the wait.
+            let approval_meta = |status: u16, latency_ms: u32| {
+                hooks::request_meta(proxy_ctx, host, method.as_str(), &path, status, latency_ms)
+            };
 
             let log_id = uuid::Uuid::new_v4().to_string();
             guard.set_log_context(log_id.clone(), engine.pool.clone());
             emit_approval_telemetry(
-                proxy_ctx,
-                host,
-                &method,
-                telemetry_path,
-                202,
-                0,
+                approval_meta(202, 0),
                 telemetry::core::RequestDecision::ApprovalPending {
                     approval_id: approval_id.clone(),
                     triggered_at: triggered_at.clone(),
@@ -851,16 +893,9 @@ pub async fn forward_request(
                 approval_store
                     .remove(org_id, workspace_id, &approval_id)
                     .await;
-                let resolved_at = time::OffsetDateTime::now_utc()
-                    .format(&time::format_description::well_known::Iso8601::DEFAULT)
-                    .unwrap_or_default();
+                let resolved_at = hooks::iso_now();
                 emit_approval_telemetry(
-                    proxy_ctx,
-                    host,
-                    &method,
-                    telemetry_path,
-                    503,
-                    start.elapsed().as_millis() as u32,
+                    approval_meta(503, start.elapsed().as_millis() as u32),
                     telemetry::core::RequestDecision::ApprovalDenied {
                         approval_id: approval_id.clone(),
                         reason: "gateway_restarting".to_string(),
@@ -877,6 +912,31 @@ pub async fn forward_request(
 
             // Decision received (or timed out) — defuse guard, handle explicitly.
             guard.defuse();
+
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    warn!(approval_id = %approval_id, %error, "approval wait failed; request not forwarded");
+                    approval_store
+                        .remove(org_id, workspace_id, &approval_id)
+                        .await;
+                    let resolved_at = hooks::iso_now();
+                    emit_approval_telemetry(
+                        approval_meta(502, start.elapsed().as_millis() as u32),
+                        telemetry::core::RequestDecision::ApprovalDenied {
+                            approval_id: approval_id.clone(),
+                            reason: "approval_store_unavailable".to_string(),
+                            triggered_at,
+                            resolved_at,
+                            approved_by: None,
+                        },
+                        None,
+                        Some(log_id),
+                        matched_rule.clone(),
+                    );
+                    return Ok(response::approval_wait_unavailable(&approval_id));
+                }
+            };
 
             let decision = outcome.as_ref().map(|o| o.decision);
             let approved_by = outcome.and_then(|o| o.approved_by);
@@ -896,24 +956,19 @@ pub async fn forward_request(
                     )
                 }
                 other => {
-                    let reason = match other {
-                        Some(ApprovalDecision::Deny) => "denied",
-                        _ => "timed out",
+                    let (reason, rejection) = match other {
+                        Some(ApprovalDecision::Deny) => {
+                            ("denied", response::ApprovalRejection::Declined)
+                        }
+                        _ => ("timed out", response::ApprovalRejection::Expired),
                     };
                     warn!(url = %url, approval_id = %approval_id, reason, "MANUAL APPROVAL rejected");
                     approval_store
                         .remove(org_id, workspace_id, &approval_id)
                         .await;
-                    let resolved_at = time::OffsetDateTime::now_utc()
-                        .format(&time::format_description::well_known::Iso8601::DEFAULT)
-                        .unwrap_or_default();
+                    let resolved_at = hooks::iso_now();
                     emit_approval_telemetry(
-                        proxy_ctx,
-                        host,
-                        &method,
-                        telemetry_path,
-                        403,
-                        start.elapsed().as_millis() as u32,
+                        approval_meta(403, start.elapsed().as_millis() as u32),
                         telemetry::core::RequestDecision::ApprovalDenied {
                             approval_id: approval_id.clone(),
                             reason: reason.to_string(),
@@ -925,7 +980,7 @@ pub async fn forward_request(
                         Some(log_id),
                         matched_rule.clone(),
                     );
-                    return Ok(response::manual_approval_denied(&approval_id, reason));
+                    return Ok(response::manual_approval_denied(&approval_id, rejection));
                 }
             }
         } else {
@@ -1049,47 +1104,129 @@ pub async fn forward_request(
     // guide the agent to connect/configure credentials in OneCLI.
     // Real OAuth exchanges are exempt (see `is_real_oauth_exchange`): their
     // 401s are the provider talking to the client, not a missing credential.
+    //
+    // A 404 counts too when it means "wrong host" rather than "no such
+    // resource" (see `wrong_host_not_found`).
+    let wrong_host_404 = status == StatusCode::NOT_FOUND
+        && wrong_host_not_found(
+            common::util::strip_port(host),
+            &path,
+            rules
+                .host_mismatch
+                .as_deref()
+                .and_then(|choices| choices.first())
+                .map(|choice| choice.provider.as_str()),
+        );
+
+    // The request's manual-approval outcome, as the telemetry row records it
+    // (`None` when no approval was involved). Built once per emission: both
+    // the guidance answers below and the normal path at the end carry it.
+    let approval_decision = || match (
+        &approval_log_id,
+        &approval_id_for_telemetry,
+        &approval_triggered_at,
+    ) {
+        (Some(log_id), Some(approval_id), Some(triggered_at)) => Some((
+            log_id.clone(),
+            telemetry::core::RequestDecision::ApprovalApproved {
+                approval_id: approval_id.clone(),
+                triggered_at: triggered_at.clone(),
+                resolved_at: hooks::iso_now(),
+                approved_by: approval_approved_by.clone(),
+            },
+        )),
+        _ => None,
+    };
+    // Every guidance answer below replaces the upstream response and returns
+    // before the normal telemetry at the end of this function, so it records
+    // its own row with the status the agent actually received. A request
+    // that first passed a manual approval instead UPDATES that approval's row
+    // with the final status (it still reads "approved"), as the normal path
+    // would, rather than adding a second one.
+    let guidance = |error: &str, resp: Response<hooks::ForwardResponseBody>| {
+        if let Some(mut meta) = hooks::request_meta(
+            proxy_ctx,
+            host,
+            method.as_str(),
+            &path,
+            resp.status().as_u16(),
+            start.elapsed().as_millis() as u32,
+        ) {
+            meta.matched_rule = matched_rule.clone();
+            match approval_decision() {
+                Some((log_id, approved)) => {
+                    meta.existing_log_id = Some(log_id);
+                    meta.decision = Some(approved);
+                    telemetry::on_request(meta.into_event(None));
+                }
+                None => hooks::record_needs_connection(meta, error),
+            }
+        }
+        Ok(resp)
+    };
     if injection_count == 0
         && !is_real_oauth_exchange
-        && (status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN)
+        && (status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN || wrong_host_404)
     {
         let hostname = common::util::strip_port(host);
 
-        // 1. Access restricted — agent in selective mode, credentials exist but not assigned.
-        //    Applies to ANY host (known apps AND manual secrets).
-        if rules.access_restricted {
-            let (provider, display_name) =
-                apps::provider_for_host_and_path(hostname, &path).unwrap_or((hostname, hostname));
-            info!(method = %method, url = %url, status = %status.as_u16(), "access restricted");
-            return Ok(response::access_restricted(
-                status,
-                provider,
-                display_name,
-                proxy_ctx.workspace_id.as_deref(),
-            ));
+        // 0. Host-gated connection on the wrong host — the agent HAS the
+        //    credential; the URL is what is wrong. The most specific
+        //    explanation, checked before `access_restricted` (which is often
+        //    also true here, via the broad suffix match, and would send the
+        //    agent to the grant surface for a grant it already holds).
+        if let Some(connections) = rules.host_mismatch.as_deref() {
+            info!(method = %method, url = %url, status = %status.as_u16(), "connection host mismatch");
+            return guidance(
+                response::ERROR_CONNECTION_HOST_MISMATCH,
+                response::connection_host_mismatch(hostname, &path, connections),
+            );
         }
 
-        // 2. Known app host — not connected.
-        if let Some((provider, display_name)) = apps::provider_for_host_and_path(hostname, &path) {
+        // 1. Access restricted — agent in selective mode, credentials exist but not assigned.
+        //    Applies to ANY host (known apps AND manual secrets).
+        if let Some(credential) = rules.access_restricted {
+            info!(method = %method, url = %url, status = %status.as_u16(), "access restricted");
+            return guidance(
+                response::ERROR_ACCESS_RESTRICTED,
+                response::access_restricted(
+                    status,
+                    credential,
+                    hostname,
+                    &path,
+                    proxy_ctx.workspace_id.as_deref(),
+                    proxy_ctx.agent_id.as_deref(),
+                ),
+            );
+        }
+
+        // 2. Known app host (or a provider's alias host) — not connected.
+        if let Some((provider, display_name)) = apps::guidance_provider_for(hostname, &path) {
             info!(method = %method, url = %url, status = %status.as_u16(), provider = %provider, "app not connected");
-            return Ok(response::app_not_connected(
-                status,
-                provider,
-                display_name,
-                proxy_ctx.agent_name.as_deref(),
-                proxy_ctx.workspace_id.as_deref(),
-            ));
+            return guidance(
+                response::ERROR_APP_NOT_CONNECTED,
+                response::app_not_connected(
+                    status,
+                    provider,
+                    display_name,
+                    proxy_ctx.agent_name.as_deref(),
+                    proxy_ctx.workspace_id.as_deref(),
+                ),
+            );
         }
 
         // 2b. Known host but unrecognized API path — pre-fill a custom connection form.
         if apps::provider_for_host(hostname).is_some() {
             info!(method = %method, url = %url, status = %status.as_u16(), host = %hostname, "app not connected — no matching provider, custom connection");
-            return Ok(response::app_not_connected_unknown_provider(
-                status,
-                hostname,
-                proxy_ctx.agent_name.as_deref(),
-                proxy_ctx.workspace_id.as_deref(),
-            ));
+            return guidance(
+                response::ERROR_APP_NOT_CONNECTED,
+                response::app_not_connected_unknown_provider(
+                    status,
+                    hostname,
+                    proxy_ctx.agent_name.as_deref(),
+                    proxy_ctx.workspace_id.as_deref(),
+                ),
+            );
         }
 
         // 3. Unknown host — no credentials at all, guide user to create a secret.
@@ -1111,12 +1248,15 @@ pub async fn forward_request(
             );
         } else {
             info!(method = %method, url = %url, status = %status.as_u16(), "credential not found");
-            return Ok(response::credential_not_found(
-                status,
-                hostname,
-                &path,
-                proxy_ctx.workspace_id.as_deref(),
-            ));
+            return guidance(
+                response::ERROR_CREDENTIAL_NOT_FOUND,
+                response::credential_not_found(
+                    status,
+                    hostname,
+                    &path,
+                    proxy_ctx.workspace_id.as_deref(),
+                ),
+            );
         }
     }
 
@@ -1135,46 +1275,64 @@ pub async fn forward_request(
         if body_indicates_auth_error(check_slice) {
             let hostname = common::util::strip_port(host);
 
-            // Mirror the 401/403 logic: access_restricted → app_not_connected → credential_not_found
-            if rules.access_restricted {
-                let (provider, display_name) = apps::provider_for_host_and_path(hostname, &path)
-                    .unwrap_or((hostname, hostname));
-                info!(method = %method, url = %url, status = 400, "auth-related 400 — access restricted");
-                return Ok(response::access_restricted(
-                    StatusCode::BAD_REQUEST,
-                    provider,
-                    display_name,
-                    proxy_ctx.workspace_id.as_deref(),
-                ));
+            // Mirror the 401/403 logic: host_mismatch → access_restricted →
+            // app_not_connected → credential_not_found
+            if let Some(connections) = rules.host_mismatch.as_deref() {
+                info!(method = %method, url = %url, status = 400, "auth-related 400 — connection host mismatch");
+                return guidance(
+                    response::ERROR_CONNECTION_HOST_MISMATCH,
+                    response::connection_host_mismatch(hostname, &path, connections),
+                );
             }
-            if let Some((provider, display_name)) =
-                apps::provider_for_host_and_path(hostname, &path)
-            {
+            if let Some(credential) = rules.access_restricted {
+                info!(method = %method, url = %url, status = 400, "auth-related 400 — access restricted");
+                return guidance(
+                    response::ERROR_ACCESS_RESTRICTED,
+                    response::access_restricted(
+                        StatusCode::BAD_REQUEST,
+                        credential,
+                        hostname,
+                        &path,
+                        proxy_ctx.workspace_id.as_deref(),
+                        proxy_ctx.agent_id.as_deref(),
+                    ),
+                );
+            }
+            if let Some((provider, display_name)) = apps::guidance_provider_for(hostname, &path) {
                 info!(method = %method, url = %url, status = 400, provider = %provider, "auth-related 400 — app not connected");
-                return Ok(response::app_not_connected(
-                    StatusCode::BAD_REQUEST,
-                    provider,
-                    display_name,
-                    proxy_ctx.agent_name.as_deref(),
-                    proxy_ctx.workspace_id.as_deref(),
-                ));
+                return guidance(
+                    response::ERROR_APP_NOT_CONNECTED,
+                    response::app_not_connected(
+                        StatusCode::BAD_REQUEST,
+                        provider,
+                        display_name,
+                        proxy_ctx.agent_name.as_deref(),
+                        proxy_ctx.workspace_id.as_deref(),
+                    ),
+                );
             }
             if apps::provider_for_host(hostname).is_some() {
                 info!(method = %method, url = %url, status = 400, host = %hostname, "auth-related 400 — no matching provider, custom connection");
-                return Ok(response::app_not_connected_unknown_provider(
-                    StatusCode::BAD_REQUEST,
-                    hostname,
-                    proxy_ctx.agent_name.as_deref(),
-                    proxy_ctx.workspace_id.as_deref(),
-                ));
+                return guidance(
+                    response::ERROR_APP_NOT_CONNECTED,
+                    response::app_not_connected_unknown_provider(
+                        StatusCode::BAD_REQUEST,
+                        hostname,
+                        proxy_ctx.agent_name.as_deref(),
+                        proxy_ctx.workspace_id.as_deref(),
+                    ),
+                );
             }
             info!(method = %method, url = %url, status = 400, "auth-related 400 — credential not found");
-            return Ok(response::credential_not_found(
-                StatusCode::BAD_REQUEST,
-                hostname,
-                &path,
-                proxy_ctx.workspace_id.as_deref(),
-            ));
+            return guidance(
+                response::ERROR_CREDENTIAL_NOT_FOUND,
+                response::credential_not_found(
+                    StatusCode::BAD_REQUEST,
+                    hostname,
+                    &path,
+                    proxy_ctx.workspace_id.as_deref(),
+                ),
+            );
         }
 
         // Not auth-related: forward the buffered 400 as-is.
@@ -1204,70 +1362,19 @@ pub async fn forward_request(
 
     // Track all authenticated proxied requests and stream response body.
     // Hooks handle telemetry emission and optional response stream wrapping.
-    let body_stream: hooks::BodyStream = if let (Some(aid), Some(gid)) = (
-        proxy_ctx.workspace_id.as_deref(),
-        proxy_ctx.agent_id.as_deref(),
+    let body_stream: hooks::BodyStream = if let Some(mut meta) = hooks::request_meta(
+        proxy_ctx,
+        host,
+        method.as_str(),
+        &path,
+        status.as_u16(),
+        start.elapsed().as_millis() as u32,
     ) {
-        let hostname = common::util::strip_port(host);
-        let (provider, _) =
-            apps::provider_for_host_and_path(hostname, &path).unwrap_or((hostname, hostname));
-
-        let ts = time::OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Iso8601::DEFAULT)
-            .unwrap_or_default();
-
-        let telemetry_path = match path.find('?') {
-            Some(i) => &path[..i],
-            None => &path,
-        };
-
-        let resolved_at = time::OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Iso8601::DEFAULT)
-            .unwrap_or_default();
-        let approval_decision = match (
-            &approval_log_id,
-            approval_id_for_telemetry,
-            approval_triggered_at,
-        ) {
-            (Some(_), Some(aid_val), Some(triggered)) => {
-                Some(telemetry::core::RequestDecision::ApprovalApproved {
-                    approval_id: aid_val,
-                    triggered_at: triggered,
-                    resolved_at,
-                    approved_by: approval_approved_by,
-                })
-            }
-            _ => None,
-        };
-
-        let meta = hooks::RequestMeta {
-            org_id: proxy_ctx
-                .organization_id
-                .as_deref()
-                .unwrap_or("")
-                .to_string(),
-            workspace_id: aid.to_string(),
-            agent_id: gid.to_string(),
-            agent_name: proxy_ctx
-                .agent_name
-                .as_deref()
-                .unwrap_or("unknown")
-                .to_string(),
-            method: method.to_string(),
-            host: host.to_string(),
-            path: telemetry_path.to_string(),
-            provider: provider.to_string(),
-            status: status.as_u16(),
-            latency_ms: start.elapsed().as_millis() as u32,
-            injection_count: injection_count as u16,
-            timestamp: ts,
-            injected: injection_count > 0,
-            connection_label: rules.connection_label.clone(),
-            existing_log_id: approval_log_id,
-            decision: approval_decision,
-            matched_rule,
-        };
-
+        meta.injection_count = injection_count as u16;
+        meta.injected = injection_count > 0;
+        meta.connection_label = rules.connection_label.clone();
+        (meta.existing_log_id, meta.decision) = approval_decision().unzip();
+        meta.matched_rule = matched_rule;
         hooks::track_and_wrap(meta, rules, &resp_headers, upstream_resp.bytes_stream())
     } else {
         Box::pin(upstream_resp.bytes_stream().map_ok(Frame::data))
@@ -1286,117 +1393,46 @@ pub async fn forward_request(
     Ok(response)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn emit_policy_telemetry(
-    proxy_ctx: &context::ProxyContext,
-    host: &str,
-    method: &hyper::Method,
-    path: &str,
-    start: std::time::Instant,
-    status: StatusCode,
-    decision: telemetry::core::RequestDecision,
-    matched_rule: Option<policy::MatchedRule>,
-) {
-    let (pid, aid) = match (
-        proxy_ctx.workspace_id.as_deref(),
-        proxy_ctx.agent_id.as_deref(),
-    ) {
-        (Some(p), Some(a)) => (p, a),
-        _ => return,
-    };
-    let hostname = common::util::strip_port(host);
-    let (provider, _) =
-        apps::provider_for_host_and_path(hostname, path).unwrap_or((hostname, hostname));
-    let ts = time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Iso8601::DEFAULT)
-        .unwrap_or_default();
-    let telemetry_path = path.split('?').next().unwrap_or(path);
-    telemetry::on_request(telemetry::RequestEvent {
-        org_id: proxy_ctx
-            .organization_id
-            .as_deref()
-            .unwrap_or("")
-            .to_string(),
-        workspace_id: pid.to_string(),
-        agent_id: aid.to_string(),
-        agent_name: proxy_ctx
-            .agent_name
-            .as_deref()
-            .unwrap_or("unknown")
-            .to_string(),
-        method: method.to_string(),
-        host: host.to_string(),
-        path: telemetry_path.to_string(),
-        provider: provider.to_string(),
-        status: status.as_u16(),
-        latency_ms: start.elapsed().as_millis() as u32,
-        injection_count: 0,
-        timestamp: ts,
-        injected: false,
-        decision,
-        connection_label: None,
-        existing_log_id: None,
-        log_id: None,
-        budget_charge: None,
-        matched_rule,
-    });
+/// Whether an uncredentialed upstream 404 means "wrong host" rather than "no
+/// such resource", so it is answered with the bound host:
+///
+/// - On a provider's non-injecting alias host (`api.salesforce.com`,
+///   `api.snowflake.com`) only under the API surface that exists solely on
+///   the tenant's own host (`/services/data/`, `/api/v2/`). The alias's own
+///   APIs (Salesforce's Einstein models) keep their genuine 404s.
+/// - On any other host, when a granted host-bound connection of
+///   `mismatched_provider` refused this request for going to a sibling host
+///   in its zone (`oauth2.snowflakecomputing.com` for a connection bound to
+///   `acme.snowflakecomputing.com`), and that zone holds only tenant hosts
+///   (`apps::zone_404_means_wrong_host`): that host is not the agent's
+///   tenant, so its 404 says nothing about the agent's data.
+fn wrong_host_not_found(hostname: &str, path: &str, mismatched_provider: Option<&str>) -> bool {
+    match apps::alias_host(hostname) {
+        Some(alias) => path.starts_with(alias.wrong_host_404_prefix),
+        None => mismatched_provider.is_some_and(apps::zone_404_means_wrong_host),
+    }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// A request-log event for one step of a manual approval: the pending row
+/// (pre-assigned `log_id`, so the resolution can find it) or its resolution
+/// (`existing_log_id`, updating that row in place). `meta` is `None` for an
+/// unauthenticated request, which is never logged.
 fn emit_approval_telemetry(
-    proxy_ctx: &context::ProxyContext,
-    host: &str,
-    method: &hyper::Method,
-    telemetry_path: &str,
-    status: u16,
-    latency_ms: u32,
+    meta: Option<hooks::RequestMeta>,
     decision: telemetry::core::RequestDecision,
     log_id: Option<String>,
     existing_log_id: Option<String>,
     matched_rule: Option<policy::MatchedRule>,
 ) {
-    let (pid, aid) = match (
-        proxy_ctx.workspace_id.as_deref(),
-        proxy_ctx.agent_id.as_deref(),
-    ) {
-        (Some(p), Some(a)) => (p, a),
-        _ => return,
+    let Some(mut meta) = meta else {
+        return;
     };
-    let hostname = common::util::strip_port(host);
-    let (provider, _) =
-        apps::provider_for_host_and_path(hostname, telemetry_path).unwrap_or((hostname, hostname));
-    let ts = time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Iso8601::DEFAULT)
-        .unwrap_or_default();
-    telemetry::on_request(telemetry::RequestEvent {
-        org_id: proxy_ctx
-            .organization_id
-            .as_deref()
-            .unwrap_or("")
-            .to_string(),
-        workspace_id: pid.to_string(),
-        agent_id: aid.to_string(),
-        agent_name: proxy_ctx
-            .agent_name
-            .as_deref()
-            .unwrap_or("unknown")
-            .to_string(),
-        method: method.to_string(),
-        host: host.to_string(),
-        path: telemetry_path.to_string(),
-        provider: provider.to_string(),
-        status,
-        latency_ms,
-        injection_count: 0,
-        timestamp: ts,
-        injected: false,
-        decision,
-        connection_label: None,
-        existing_log_id,
-        log_id,
-        budget_charge: None,
-        matched_rule,
-    });
+    meta.decision = Some(decision);
+    meta.existing_log_id = existing_log_id;
+    meta.matched_rule = matched_rule;
+    let mut event = meta.into_event(None);
+    event.log_id = log_id;
+    telemetry::on_request(event);
 }
 
 /// Check if a response body contains auth-related error keywords,
@@ -1464,6 +1500,16 @@ mod tests {
         assert!(!is_forwarded_request_header(&HeaderName::from_static(
             crate::connect::CONNECTION_ID_HEADER
         )));
+    }
+
+    #[test]
+    fn request_header_strips_the_batch_grouping_headers() {
+        for name in approval::BATCH_HEADERS {
+            assert!(
+                !is_forwarded_request_header(&HeaderName::from_static(name)),
+                "{name} must never reach the upstream API"
+            );
+        }
     }
 
     #[test]
@@ -1911,7 +1957,7 @@ mod tests {
             pending_injections: Vec::new(),
             policy_rules_v2: db::PolicyV2Rules::default(),
             available_apps: db::AvailableApps::default(),
-            access_restricted: false,
+            access_restricted: None,
             intercept_token: None,
             plan: "free".to_string(),
             rewrite_host: None,
@@ -1921,6 +1967,7 @@ mod tests {
             session_policy: None,
             winning_connection_id: None,
             budget_bindings: Vec::new(),
+            host_mismatch: None,
         }
     }
 
@@ -1928,6 +1975,15 @@ mod tests {
     /// to `upstream_addr`. Returns the address a client should call.
     async fn gateway_serving_one_request(
         upstream_addr: std::net::SocketAddr,
+    ) -> std::net::SocketAddr {
+        gateway_serving_one_request_with(upstream_addr, permissive_rules).await
+    }
+
+    /// [`gateway_serving_one_request`] with the resolved rules chosen by the
+    /// test — for behavior that depends on what resolution recorded.
+    async fn gateway_serving_one_request_with(
+        upstream_addr: std::net::SocketAddr,
+        rules: fn() -> ResolvedRules,
     ) -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -1963,7 +2019,7 @@ mod tests {
                             .redirect(reqwest::redirect::Policy::none())
                             .build()
                             .expect("client"),
-                        &permissive_rules(),
+                        &rules(),
                         &*cache,
                         &proxy_ctx,
                         &approvals,
@@ -1979,6 +2035,148 @@ mod tests {
         });
 
         gateway_addr
+    }
+
+    /// An upstream that answers every request with a fixed status and a tiny
+    /// JSON body, then closes.
+    fn fixed_status_upstream(status: u16) -> std::net::SocketAddr {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fixed upstream");
+        let addr = listener.local_addr().expect("local addr");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let body = r#"{"upstream":"answer"}"#;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.flush();
+            }
+        });
+        addr
+    }
+
+    /// Uncredentialed rules where resolution recorded a host-gated mismatch:
+    /// the agent's Salesforce connection is bound to `acme.my.salesforce.com`
+    /// and this request went elsewhere.
+    fn host_mismatch_rules() -> ResolvedRules {
+        ResolvedRules {
+            host_mismatch: Some(vec![crate::connect::ConnectionChoice {
+                id: "conn_sf".to_string(),
+                label: Some("jane@acme.com".to_string()),
+                provider: "salesforce".to_string(),
+                display_name: Some("Salesforce"),
+                host: Some("acme.my.salesforce.com".to_string()),
+            }]),
+            ..permissive_rules()
+        }
+    }
+
+    /// An upstream 401 on a request that a recorded host mismatch explains
+    /// must come back as `connection_host_mismatch` (421) naming the bound
+    /// host — not as the generic `credential_not_found` the uncredentialed
+    /// 401 path would otherwise produce.
+    #[tokio::test]
+    async fn upstream_401_with_recorded_host_mismatch_becomes_421() {
+        pin_test_header_timeout();
+        let upstream_addr = fixed_status_upstream(401);
+        let gateway_addr =
+            gateway_serving_one_request_with(upstream_addr, host_mismatch_rules).await;
+
+        let response = reqwest::Client::new()
+            .get(format!(
+                "http://{gateway_addr}/services/data/v60.0/sobjects/"
+            ))
+            .send()
+            .await
+            .expect("gateway responded");
+        assert_eq!(response.status(), StatusCode::MISDIRECTED_REQUEST);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-should-retry")
+                .map(|v| v.to_str().unwrap()),
+            Some("false")
+        );
+        let json: serde_json::Value = response.json().await.expect("json body");
+        assert_eq!(json["error"], "connection_host_mismatch");
+        assert_eq!(json["connections"][0]["host"], "acme.my.salesforce.com");
+        assert!(json["message"]
+            .as_str()
+            .unwrap()
+            .contains("https://acme.my.salesforce.com/services/data/v60.0/sobjects/"));
+    }
+
+    /// A 404 is "wrong host" on an alias ONLY on the bound host's API
+    /// surface (the alias's own APIs keep their genuine 404s), and on a
+    /// non-alias host only when a host-bound connection recorded a mismatch
+    /// in a zone that holds nothing but tenant hosts.
+    #[test]
+    fn wrong_host_not_found_is_scoped_to_alias_surface_or_recorded_mismatch() {
+        assert!(wrong_host_not_found(
+            "api.salesforce.com",
+            "/services/data/v59.0/sobjects/",
+            None
+        ));
+        assert!(wrong_host_not_found(
+            "api.snowflake.com",
+            "/api/v2/statements",
+            None
+        ));
+        // An alias's own surface stays genuine, even with a mismatch recorded.
+        assert!(!wrong_host_not_found(
+            "api.salesforce.com",
+            "/einstein/platform/v1/models/x",
+            Some("salesforce")
+        ));
+        // Sibling tenant host in the zone: wrong host only with a mismatch.
+        assert!(wrong_host_not_found(
+            "oauth2.snowflakecomputing.com",
+            "/oauth/token",
+            Some("snowflake")
+        ));
+        // JFrog's zone also serves public hosts: their 404s stay genuine.
+        assert!(!wrong_host_not_found(
+            "releases.jfrog.io",
+            "/artifactory/api/x",
+            Some("jfrog-artifactory")
+        ));
+        assert!(!wrong_host_not_found(
+            "acme.my.salesforce.com",
+            "/services/data/v59.0/sobjects/",
+            None
+        ));
+        assert!(!wrong_host_not_found(
+            "api.github.com",
+            "/services/data/x",
+            None
+        ));
+    }
+
+    /// The signal is SOFT: a recorded mismatch must not touch a request the
+    /// upstream was happy to serve (public traffic on a bare-suffix provider).
+    #[tokio::test]
+    async fn upstream_200_with_recorded_host_mismatch_passes_through() {
+        pin_test_header_timeout();
+        let upstream_addr = fixed_status_upstream(200);
+        let gateway_addr =
+            gateway_serving_one_request_with(upstream_addr, host_mismatch_rules).await;
+
+        let response = reqwest::Client::new()
+            .get(format!(
+                "http://{gateway_addr}/artifactory/api/npm/npm/lodash"
+            ))
+            .send()
+            .await
+            .expect("gateway responded");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json: serde_json::Value = response.json().await.expect("json body");
+        assert_eq!(json["upstream"], "answer");
     }
 
     /// Pin the process-wide header deadline to 1s before anything reads it.

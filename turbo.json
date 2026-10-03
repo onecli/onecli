@@ -125,6 +125,9 @@
     "AGENT_EFFORT",
     "AGENT_INSTRUCTIONS",
     "AGENT_NAME",
+    "AGENT_CHANNELS",
+    "AGENT_PEERS",
+    "AGENT_CONNECTIONS",
     "ONECLI_TOOLS_SOCKET",
     "AGENT_HARNESS",
     "JCODE_LIVE_TEST",
@@ -164,6 +167,9 @@
     "MAX_HELD_AWAKE_SANDBOXES",
     "RUNNER_WS_URL",
     "SANDBOX_WS_TOKEN",
+    "RUNNER_OUTBOUND_ATTACHMENTS",
+    "HOSTED_E2E_SCALE",
+    "ATTACHMENTS_S3_BUCKET",
     "SANDBOX_ID",
     "CHANNEL_ADAPTER_TOKEN",
     "CHANNEL_ADAPTER_NAME",
@@ -265,6 +271,62 @@
     "@onecli/gateway#lint": {
       "inputs": ["crates/**", "Cargo.toml"],
       "outputs": []
+    },
+    "@onecli/sandbox-home-device#check": {
+      "inputs": [
+        "crates/**",
+        "Cargo.toml",
+        "../../packages/sandbox-home-device-proto/proto/**"
+      ]
+    },
+    "@onecli/sandbox-home-device#check-types": {
+      "inputs": [
+        "crates/**",
+        "Cargo.toml",
+        "Cargo.lock",
+        "../../packages/sandbox-home-device-proto/proto/**"
+      ],
+      "outputs": []
+    },
+    "@onecli/sandbox-home-device#lint": {
+      "inputs": ["crates/**", "Cargo.toml"],
+      "outputs": []
+    },
+    "@onecli/sandbox-home-device#test": {
+      "inputs": [
+        "crates/**",
+        "Cargo.toml",
+        "Cargo.lock",
+        "../../packages/sandbox-home-device-proto/proto/**"
+      ]
+    },
+    "@onecli/sandbox-home-device-proto#build": {
+      "inputs": ["proto/**", "buf.gen.yaml", "buf.yaml", "package.json"],
+      "outputs": ["src/gen/**"]
+    },
+    "@onecli/sandbox-home-device-proto#check-types": {
+      "dependsOn": ["@onecli/sandbox-home-device-proto#build"],
+      "inputs": ["$TURBO_DEFAULT$", "!src/gen/**", "proto/**"]
+    },
+    "@onecli/sandbox-home-device-proto#lint": {
+      "dependsOn": ["@onecli/sandbox-home-device-proto#build"],
+      "inputs": ["$TURBO_DEFAULT$", "!src/gen/**", "proto/**"]
+    },
+    "@onecli/sandbox-home-daemon#test": {
+      "cache": false,
+      "env": ["ONECLI_TEST_HERMETIC"],
+      "dependsOn": [
+        "@onecli/sandbox-home-device-proto#build",
+        "@onecli/sandbox-home-device-proto#test"
+      ]
+    },
+    "@onecli/sandbox-manager#test": {
+      "cache": false,
+      "env": ["ONECLI_TEST_HERMETIC"],
+      "dependsOn": [
+        "@onecli/sandbox-home-device-proto#build",
+        "@onecli/sandbox-home-device-proto#test"
+      ]
     },
     "lint": {
       "dependsOn": ["^lint"]

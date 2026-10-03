@@ -23,7 +23,9 @@ import { platformToolsSocketPath } from "../platform-tools";
 import { writeManagedFile } from "../home/fs";
 import { mergeBackgroundTasks } from "./background-merge";
 import { createJcodeBackgroundTasks } from "./jcode-background";
+import { forwardJcodeStderr, startJcodeLogForwarder } from "./jcode-log";
 import { createJcodeSwarmTasks } from "./jcode-swarm";
+import { healJcodeTranscripts } from "./jcode-transcript-heal";
 import { createJcodeWakeFeed } from "./jcode-wake";
 
 /**
@@ -110,7 +112,7 @@ const JCODE_HOME_DIRNAME = ".jcode-home";
  * The agent's POSIX home under the workspace volume — byte-equal with the
  * agent image's contract (docker/agent-entrypoint.sh's export,
  * agent.Dockerfile `usermod -d`) and AGENT_POSIX_HOME in
- * apps/sandbox-manager/src/constants.ts. Derived from homeDir, NEVER from
+ * packages/sandbox-shared/src/constants.ts. Derived from homeDir, NEVER from
  * process.env.HOME: in local dev that is the developer's real home, and the
  * purge lists below DELETE from it.
  */
@@ -325,6 +327,31 @@ export const SWARM_WORKER_CAP = 8;
 export const JCODE_SWARM_ENV = {
   JCODE_SWARM_MAX_CONCURRENT_AGENTS: String(SWARM_WORKER_CAP),
   JCODE_SWARM_SPAWN_MODE: "headless",
+} as const;
+
+/**
+ * Provider-native web search (jcode v0.90.0, upstream #1620/#1622). The
+ * local `websearch` tool scrapes DuckDuckGo/Bing from the sandbox, and
+ * search engines CAPTCHA datacenter egress after a handful of requests
+ * (observed in production: Google `/sorry` 429s and DuckDuckGo anomaly
+ * challenges in the middle of a list-enrichment task). With prefer_native the request
+ * carries Anthropic's server-side `web_search` tool instead, so searches
+ * run on the provider's side and never leave the sandbox.
+ * Upstream already defaults prefer_native to true; it is pinned here so the
+ * posture survives an agent editing its own config.toml (env overrides are
+ * reload-fingerprinted upstream, same mechanism as JCODE_SWARM_ENV).
+ * The cap: upstream's default is 5 searches per request, which a single
+ * list-enrichment turn exceeds immediately; past the cap the model gets a
+ * `max_uses_exceeded` tool error and stops early. Searches on API-key
+ * grants bill ~$10 per 1,000; OAuth grants draw on the plan's usage.
+ * Native search is attached only when the session offers `websearch`, so
+ * keep `websearch` OFF JCODE_DISABLED_TOOLS_VALUE.
+ */
+export const WEBSEARCH_NATIVE_MAX_USES = 25;
+
+export const JCODE_WEBSEARCH_ENV = {
+  JCODE_WEBSEARCH_PREFER_NATIVE: "1",
+  JCODE_WEBSEARCH_NATIVE_MAX_USES: String(WEBSEARCH_NATIVE_MAX_USES),
 } as const;
 
 /**
@@ -931,10 +958,37 @@ export const BUSY_RESEND_DELAYS_MS = [2_000, 5_000, 10_000, 30_000, 60_000];
 /** How long a heal round drains orphan residue before resending. */
 const ORPHAN_DRAIN_MIN_MS = 250;
 
-/** While the spawn barrier stands, the live loop wakes on this tick to honor
- * an abort (the daemon's cancel confirmation is stuck behind the frozen
- * request loop) and to keep the quarantine responsive. */
+/** While the fence is pending the live loop wakes on this tick to honor an
+ * abort (a foreign run may be holding the daemon's request loop, so no
+ * cancel confirmation can arrive) and to keep the quarantine responsive. */
 const BARRIER_TICK_MS = 250;
+
+/**
+ * The POST-ACCEPT liveness deadline (issue #1124). Once the daemon has
+ * accepted our message, every frame of the turn rides this connection: the
+ * model's deltas, tool events, the daemon's own 30 s keepalive `Pong`
+ * during a silent think, and the terminal. Silence past this bound with no
+ * tool call open means the ADAPTER's loop is waiting on a terminal that is
+ * not coming — the shape that burned a 6 h ceiling three times live — and
+ * the turn is failed coded (`harness_no_terminal`) instead of hanging.
+ *
+ * Above the harness's own provider idle timeout (`stream_idle_timeout_secs`
+ * = 300 in the managed config) with one retry's headroom, deliberately: a
+ * byte-dead provider stream is the harness's to fail, with its own more
+ * specific error, and this clock must never pre-empt that. Exported for the
+ * adapter tests, which shorten it.
+ */
+export const POST_ACCEPT_IDLE_MS = { value: 600_000 };
+
+/**
+ * How long after `abort()` the live loop waits for the daemon's terminal
+ * before ending the turn itself. The daemon promises ≤ 2.5 s (a 500 ms
+ * cooperative window, then a 2 s hard abort); four times that never races a
+ * healthy cancel. A cancel that finds no task daemon-side (the turn already
+ * ended and its terminal was lost — #1124 again) emits no terminal at all,
+ * and without this bound Stop was visibly a no-op. Exported for the tests.
+ */
+export const ABORT_TERMINAL_GRACE_MS = { value: 10_000 };
 
 /** Foreign-frame kinds worth counting when quarantined — the ones the live
  * loop would otherwise have surfaced or recorded. Everything else (acks,
@@ -980,9 +1034,28 @@ class JcodeSession implements HarnessSession {
     private readonly client: JcodeClient,
     sessionId: string,
     notices: string[] = [],
+    private readonly onRelease?: () => Promise<void>,
   ) {
     this.sessionRef = sessionId;
     this.pendingNotices = notices;
+  }
+
+  /**
+   * Drop this session's client so its ref is no longer HELD in this
+   * process: the next `startSession({ resumeSessionRef })` attaches to the
+   * same daemon session (same transcript) on a fresh connection, which is
+   * where jcode re-reads the instruction doc and re-lists the MCP tools.
+   * Without the release, the resume path would see a live holder and mint
+   * a fresh, memoryless session instead (the duplicate-ref guard).
+   */
+  async release(): Promise<void> {
+    // The contract says never mid-turn; hold the line here too, because a
+    // released client mid-stream would orphan the run's events. A caller
+    // that gets this refusal has a sequencing bug, not a retry case.
+    if (this.turnActive) {
+      throw new Error("release() called with a turn in flight");
+    }
+    await this.onRelease?.();
   }
 
   async *runTurn(input: TurnInput): AsyncIterable<AgentEvent> {
@@ -995,26 +1068,42 @@ class JcodeSession implements HarnessSession {
     let terminal: Extract<AgentEvent, { type: "turn.done" | "error" }> | null =
       null;
 
-    // THE SPAWN BARRIER. The daemon can run turns it did not receive from
-    // us, and their frames are indistinguishable from ours: no ids on
-    // deltas, and the bridge drops the self-started terminal. External wake
+    // THE FRAME FENCE. The daemon can run turns it did not receive from us,
+    // and their frames are indistinguishable from ours: no ids on deltas,
+    // and the bridge drops the self-started terminal. External wake
     // ownership (JCODE_WAKE_MODE=external, v0.81+) removes the BIG source —
-    // background/fan-out/comm self-wake turns — but the barrier stays as
+    // background/fan-out/comm self-wake turns — but the fence stays as
     // defense-in-depth: two daemon turn-starters remain ungated upstream
     // (`notify_session`, interrupted-session recovery), abandoned orphans of
     // our own are version-independent, and the mode is an env we set, not a
-    // guarantee. A send landing mid foreign turn is ACCEPTED (the busy
-    // refusal keys on per-connection state such turns never set) and waits
-    // on the daemon's agent mutex — which freezes this connection's request
-    // loop. So a request issued AFTER the send can only be answered once OUR
-    // turn has spawned: its reply is the barrier, and every frame received
-    // before it is provably another run's. Our own first delta needs a full
-    // model roundtrip past the spawn, so it can never precede the barrier.
+    // guarantee. The fence is `message_accepted` — the bridge's translation
+    // of the daemon's ack for OUR `message` request. The daemon writes that
+    // ack on its request loop BEFORE dispatching the message to the turn
+    // task (client_lifecycle.rs, "Send ack" precedes the `match request`),
+    // so it is causally ahead of every frame our turn can produce, and it
+    // carries our session id, so the SDK's stream filter already scopes it.
+    // Every frame before it is provably another run's; every frame after it
+    // on this per-conversation connection is ours.
+    //
+    // WHY NOT A REQUEST REPLY (issue #1124, three live occurrences). The
+    // previous fence was the reply to a `get_history` issued after the send,
+    // on the theory that the request loop cannot answer it until our turn
+    // has spawned. The daemon answers `get_history` from a fast path when
+    // the agent mutex is busy — but it probes with `try_lock`, drops the
+    // guard, and then takes the real lock; when the probe wins the race
+    // against the turn task by a few microseconds, the reply blocks for the
+    // WHOLE TURN and lands after our terminal. Every frame of our own turn
+    // was then quarantined, the terminal included, and this loop waited out
+    // the 6 h ceiling (jcode#1284). A fence must be a causal fact about our
+    // send, never a timing bet on an unrelated request.
+    //
     // Armed from TURN START (frames in the subscribe→send gap are foreign
     // too — an orphan finishing naturally in that gap used to read as an
     // instant empty end; now it is quarantined like any foreign frame).
     let barrierPending = true;
-    let barrierStopped = false;
+    /** Stops the reconcile-baseline read once the turn is over: a late
+     * `history` reply must not overwrite the next turn's floor. */
+    let baselineStopped = false;
     let droppedForeignFrames = 0;
     let droppedForeignTextChars = 0;
     let exclusionNoticeSent = false;
@@ -1028,16 +1117,26 @@ class JcodeSession implements HarnessSession {
     // The SDK iterator holds a single waker slot, so racing `next()` against
     // timers directly would orphan a waker and silently drop the frame that
     // resolves it — every timed read below goes through this queue instead.
-    // Frames are stamped foreign AT ENQUEUE, not when processed: the barrier
+    // Frames are stamped foreign AT ENQUEUE, not when processed: the fence
     // flips while the consumer may be parked mid-`yield`, and a flag checked
-    // at processing time would launder pre-barrier frames received across
+    // at processing time would launder pre-fence frames received across
     // that suspension. Enqueue order is stream order — the honest oracle.
+    //
+    // The fence itself is ALSO dropped at enqueue: `message_accepted` is
+    // where the line is drawn, so it flips the flag as it is queued and is
+    // never itself stamped foreign. A `message_accepted` for a message we
+    // did not send cannot exist on this connection (the bridge mints it only
+    // for its own `pending_message_id`), so no session check is needed
+    // beyond the SDK's stream filter.
     const queue: { frame: ApiEvent; foreign: boolean }[] = [];
     let streamEnded = false;
     let wakeReader: (() => void) | undefined;
     const pump = (async () => {
       try {
         for await (const frame of stream) {
+          if (frame.ev === "message_accepted") {
+            barrierPending = false;
+          }
           queue.push({ frame, foreign: barrierPending });
           wakeReader?.();
           wakeReader = undefined;
@@ -1078,13 +1177,13 @@ class JcodeSession implements HarnessSession {
      * answered after the SDK gave up, and the SDK re-emits unmatched replies
      * as events. A request reply is never a turn event, whatever its `ev`
      * (observed live: a deferred set_reasoning_effort reply killing an
-     * unrelated stream; barrier attempts add stale `history` replies). */
+     * unrelated stream; baseline attempts add stale `history` replies). */
     const isStaleReply = (frame: ApiEvent): boolean =>
       (frame as { reply_to?: number }).reply_to !== undefined;
     /** Count-and-drop a foreign frame. Only the counts survive — the notice
      * needs no content, and foreign usage/tools must not be recorded. Frames
      * the live loop would ignore anyway (acks, status broadcasts — our own
-     * send's `message_accepted` always precedes the barrier reply) are not
+     * send's `message_accepted` is the fence itself, never foreign) are not
      * counted: they are dropped either way and would page on every turn. */
     const quarantine = (frame: ApiEvent): void => {
       if (frame.ev === "permission_request") {
@@ -1115,10 +1214,10 @@ class JcodeSession implements HarnessSession {
       this.abortRequested = false;
       this.turnActive = true;
       // A stale floor from a previous turn must never survive into this
-      // one's reconcile: if the barrier below never resolves (stream death
-      // mid-freeze), reconcile degrades to the content anchor — the safe
-      // direction (a duplicate beats a loss) — instead of matching against
-      // an old-era window.
+      // one's reconcile: if the baseline read below never resolves (stream
+      // death mid-freeze), reconcile degrades to the content anchor — the
+      // safe direction (a duplicate beats a loss) — instead of matching
+      // against an old-era window.
       this.turnHistoryBaseline = null;
 
       // Inline vision: our TurnImage translates to jcode's [mediaType,
@@ -1132,46 +1231,57 @@ class JcodeSession implements HarnessSession {
       ]);
       const imagesArg = images.length > 0 ? images : undefined;
 
-      // Arm the spawn barrier: a `get_history` issued right after each send.
-      // Its reply doubles as the reconcile window's floor (captured by INDEX
-      // at our spawn — everything the wake turn appended sits below it, and
-      // injection points exist only inside our own turn loop) and as the
-      // barrier that declares earlier frames foreign. NOT awaited inline:
-      // during a self-wake turn the request loop is frozen and the read
-      // would hang for the whole wake turn. Sequential retries, no delay —
-      // the SDK's own request timeout is the pacing, and keeping one attempt
-      // always queued means the barrier drops within ms of our spawn. Any
-      // non-timeout failure opens the gate with a null floor (the content
-      // anchor covers reconcile) rather than quarantining forever.
-      const armBarrier = () => {
-        barrierPending = true;
+      // The reconcile FLOOR: a `get_history` issued right after each send,
+      // captured by INDEX at our spawn — everything a wake turn appended
+      // sits below it, and injection points exist only inside our own turn
+      // loop. NOT awaited inline: the daemon can answer it only after it has
+      // the agent mutex, which a foreign run (or, via jcode#1284's probe
+      // race, OUR OWN run) may hold for its whole life. It gates NOTHING —
+      // the frame fence is `message_accepted` (see the pump) — so a slow or
+      // failed read costs only the index anchor: reconcile then degrades to
+      // the content anchor. Sequential retries through SDK timeouts, no
+      // delay; any other failure leaves the floor null after one attempt.
+      const readBaseline = () => {
         void (async () => {
           for (;;) {
-            if (barrierStopped) return;
-            // An abort stops the retries but leaves the barrier PENDING: the
-            // live loop's tick is what honors the abort, and it only ticks
-            // while the barrier stands.
-            if (this.abortRequested) return;
+            if (baselineStopped || this.abortRequested) return;
             try {
               const history = await this.client.getHistory(this.sessionRef);
-              if (!barrierStopped) this.turnHistoryBaseline = history.length;
+              if (!baselineStopped) this.turnHistoryBaseline = history.length;
             } catch (error) {
-              if (errorCode(error) === "timeout" && !barrierStopped) {
-                log("warn", "spawn barrier read timed out; retrying", {
+              if (errorCode(error) === "timeout" && !baselineStopped) {
+                log("warn", "reconcile baseline read timed out; retrying", {
                   sessionRef: this.sessionRef,
                 });
                 continue;
               }
-              if (!barrierStopped) this.turnHistoryBaseline = null;
+              if (!baselineStopped) this.turnHistoryBaseline = null;
             }
-            barrierPending = false;
             return;
           }
         })();
       };
 
-      await this.client.sendMessage(this.sessionRef, input.message, imagesArg);
-      armBarrier();
+      // The fence is re-armed for every send, including the self-heal's
+      // resends: each send earns its own `message_accepted`, and frames
+      // between a refused send and the next accepted one are the orphan's.
+      const armFence = () => {
+        barrierPending = true;
+        readBaseline();
+      };
+
+      // `waitForAccept: false`, deliberately: the SDK's default awaits
+      // `message_accepted` INSIDE the send with a 10 s timeout, which would
+      // (a) hide the fence's arrival from the pump, where the stamp must
+      // happen, and (b) stall this generator — and every abort behind it —
+      // for the daemon's request-loop latency. The pump sees the ack as an
+      // ordinary frame and drops the fence exactly where it lands in stream
+      // order.
+      await this.client.sendMessage(this.sessionRef, input.message, {
+        ...(imagesArg && { images: imagesArg }),
+        waitForAccept: false,
+      });
+      armFence();
       yield { type: "turn.started" };
 
       for (const text of this.pendingNotices.splice(0))
@@ -1217,9 +1327,12 @@ class JcodeSession implements HarnessSession {
             continue;
           }
           // The busy check MUST run before the foreign quarantine: the
-          // refusal is broadcast while the daemon processes our send — i.e.
-          // strictly before the barrier reply — so it always arrives stamped
-          // foreign, and quarantining it would kill the self-heal.
+          // refusal is broadcast while the daemon processes our send — and
+          // on a healthy daemon it FOLLOWS our ack (the ack precedes
+          // dispatch), but the bridge's ack and the refusal ride different
+          // daemon-side paths to one socket writer, so the stamp is not
+          // relied on. A busy refusal is ours whatever it is stamped:
+          // quarantining it would kill the self-heal.
           if (
             frame.ev === "error" &&
             BUSY_REFUSAL_SHAPE.test(frame.message ?? "")
@@ -1258,22 +1371,25 @@ class JcodeSession implements HarnessSession {
               terminal = { type: "turn.done" };
               break settle;
             }
-            await this.client.sendMessage(
-              this.sessionRef,
-              input.message,
-              imagesArg,
-            );
-            armBarrier();
+            await this.client.sendMessage(this.sessionRef, input.message, {
+              ...(imagesArg && { images: imagesArg }),
+              waitForAccept: false,
+            });
+            armFence();
             continue settle;
           }
-          // Pre-barrier frames are another run's — the self-wake turn our
+          // Pre-fence frames are another run's — the self-wake turn our
           // accepted send is queued behind (or an orphan finishing in the
           // subscribe→send gap, the residual this closes). Count and drop;
-          // never held, never a terminal. (Residual: the barrier reply and
-          // a neighbouring broadcast ride different daemon-side paths to
-          // one socket writer, so the stamp can be wrong by a microtask's
-          // worth of frames at the handoff — the same class as the model
-          // roundtrip margin, and harmless at that scale.)
+          // never held, never a terminal. TERMINALS INCLUDED, deliberately:
+          // the bridge's `pending_message_id` is the PREVIOUS turn's until
+          // our send overwrites it, so an orphan's `done` in that gap is
+          // emitted as a `turn_done`, and a foreign `error` that matches
+          // no request is streamed as an `error` event. Both are
+          // pre-fence by definition (they precede our ack), and adopting
+          // either would end this turn with another run's outcome. Our own
+          // terminal can never be pre-fence — the ack precedes dispatch —
+          // which is exactly what makes the fence safe to trust.
           if (entry.foreign) {
             quarantine(frame);
             continue;
@@ -1290,35 +1406,87 @@ class JcodeSession implements HarnessSession {
       // settle window still deserves its honest code, but only while nothing
       // has streamed (post-progress it cannot be a send refusal).
       let progressed = false;
+      // THE LIVE LOOP'S CLOCKS (#1124). Three deadlines, one `nextEntry`:
+      //
+      // - Fence pending: the short tick. Our send may be queued behind a
+      //   foreign run holding the daemon's request loop, so an abort's
+      //   `cancel` cannot be confirmed; the tick honors it directly.
+      // - Fence down, abort requested: `ABORT_TERMINAL_GRACE_MS` from the
+      //   abort. The daemon ends a cancelled turn in ≤ 2.5 s; past the grace
+      //   the daemon had nothing to cancel (or lost its terminal) and this
+      //   loop ends the turn itself, aborted. Stop is a guarantee.
+      // - Fence down, no abort, no tool open: `POST_ACCEPT_IDLE_MS` of
+      //   silence — no frame of ANY kind, foreign or not — fails the turn
+      //   coded `harness_no_terminal`. A tool call in flight suspends it (a
+      //   `bg wait` is legitimately silent for as long as it likes; its
+      //   `tool_done` restarts the clock).
+      //
+      // The clock is reset by every dequeued frame, trusted or foreign: a
+      // foreign frame still proves the stream is alive.
+      let lastFrameAt = Date.now();
+      let abortSeenAt: number | undefined;
+      let openToolCalls = 0;
       while (!terminal) {
-        // While the barrier is pending our send is queued behind a foreign
-        // run and the daemon's request loop is frozen — an abort's `cancel`
-        // cannot be read until the freeze ends. The short tick keeps the
-        // abort honored (and the exclusion notice prompt) instead of hanging
-        // for the foreign run's whole life; the queued send does spawn a
-        // ghost turn at unfreeze, but the abort's queued cancel sits right
-        // behind it in FIFO, and the next turn's busy-heal is the second
-        // belt. Post-barrier, the daemon's own frames are the honest clock.
+        if (this.abortRequested && abortSeenAt === undefined) {
+          abortSeenAt = Date.now();
+        }
         // Held frames were already classified by the settle phase (foreign
         // ones never reached `held`), so they re-enter trusted; fresh ones
         // carry their enqueue stamp.
         const heldFrame = held.shift();
+        const deadline = barrierPending
+          ? Date.now() + BARRIER_TICK_MS
+          : abortSeenAt !== undefined
+            ? abortSeenAt + ABORT_TERMINAL_GRACE_MS.value
+            : openToolCalls > 0
+              ? undefined
+              : lastFrameAt + POST_ACCEPT_IDLE_MS.value;
         const entry =
           heldFrame !== undefined
             ? { frame: heldFrame, foreign: false }
-            : await nextEntry(
-                barrierPending ? Date.now() + BARRIER_TICK_MS : undefined,
-              );
+            : await nextEntry(deadline);
         if (entry === "ended") break;
         if (entry === "timeout") {
-          if (this.abortRequested && barrierPending) {
+          if (this.abortRequested) {
+            // Which clock fired? Under a standing fence it was the tick:
+            // end now. Past the fence it was the abort grace — unless the
+            // abort landed while the IDLE deadline was armed, in which case
+            // this timeout is the idle clock's and the grace has not run:
+            // loop once more so the deadline above is re-derived from
+            // `abortSeenAt`.
+            if (barrierPending) {
+              terminal = { type: "turn.done" };
+              break;
+            }
+            if (abortSeenAt === undefined) continue;
+            if (Date.now() < abortSeenAt + ABORT_TERMINAL_GRACE_MS.value) {
+              continue;
+            }
+            log("warn", "abort grace elapsed without a terminal", {
+              sessionRef: this.sessionRef,
+            });
             terminal = { type: "turn.done" };
             break;
           }
-          continue;
+          if (barrierPending) continue;
+          log("error", "no frame within the post-accept deadline", {
+            sessionRef: this.sessionRef,
+            idleMs: Date.now() - lastFrameAt,
+            droppedForeignFrames,
+          });
+          terminal = {
+            type: "error",
+            message: `harness delivered no frame for ${Math.round((Date.now() - lastFrameAt) / 1000)}s after accepting the turn`,
+            code: TURN_FAILURE_CODES.harnessNoTerminal,
+          };
+          break;
         }
+        lastFrameAt = Date.now();
         const event = entry.frame;
         if (isStaleReply(event)) continue;
+        // Foreign frames, terminals included, are quarantined (the settle
+        // phase says why a foreign terminal is real). Post-fence, every
+        // frame is ours.
         if (entry.foreign) {
           quarantine(event);
           continue;
@@ -1341,6 +1509,7 @@ class JcodeSession implements HarnessSession {
             break;
           case "tool_start":
             progressed = true;
+            openToolCalls += 1;
             yield {
               type: "tool.started",
               callId: event.call_id,
@@ -1348,6 +1517,7 @@ class JcodeSession implements HarnessSession {
             };
             break;
           case "tool_done":
+            openToolCalls = Math.max(0, openToolCalls - 1);
             yield {
               type: "tool.finished",
               callId: event.call_id,
@@ -1405,19 +1575,23 @@ class JcodeSession implements HarnessSession {
         };
       }
 
-      // A turn that ended without a single trusted frame after the barrier
+      // A turn that ended without a single trusted frame after the fence
       // (stream death, abort under a freeze) still owes the exclusion story.
       if (!exclusionNoticeSent && droppedForeignTextChars > 0) {
         exclusionNoticeSent = true;
         yield exclusionNotice();
       }
       // Logged at the end, when the counts are final (frames are counted as
-      // they are consumed, not as they arrive).
+      // they are consumed, not as they arrive). `fenceDown` is the #1124
+      // tell: a quarantine on a turn whose fence NEVER dropped means the
+      // adapter never saw its own ack — a bridge/daemon regression, not an
+      // overlap — and must read as one in the log.
       if (droppedForeignFrames > 0) {
-        log("warn", "spawn barrier quarantined a foreign run's frames", {
+        log("warn", "frame fence quarantined a foreign run's frames", {
           sessionRef: this.sessionRef,
           frames: droppedForeignFrames,
           textChars: droppedForeignTextChars,
+          fenceDown: !barrierPending,
         });
       }
 
@@ -1429,7 +1603,7 @@ class JcodeSession implements HarnessSession {
       }
       yield terminal;
     } finally {
-      barrierStopped = true;
+      baselineStopped = true;
       this.turnActive = false;
       await stream.return?.(undefined);
       await pump.catch(() => {});
@@ -1517,14 +1691,20 @@ class JcodeSession implements HarnessSession {
   }
 
   async abort(): Promise<void> {
-    // FIRST, before any await: the self-heal loop checks this between its
-    // waits — a stopped turn must never be resent.
+    // FIRST, before any await: the live loop and the self-heal loop check
+    // this between their waits — a stopped turn must never be resent, and
+    // the loop's abort grace starts counting from this flag, not from the
+    // daemon's reply.
     this.abortRequested = true;
     // Stop means silence, daemon-side too: queued-but-undelivered interrupts
     // die with the turn instead of leaking into the next one.
     await this.client.cancelSoftInterrupts(this.sessionRef).catch(() => {});
-    // cancel() resolves immediately; the turn is over only when the stream
-    // delivers its terminal event — runTurn's loop handles that.
+    // `cancel()` resolves on the daemon's ack. The daemon then ends a
+    // running turn within ≤ 2.5 s and emits its terminal on the stream;
+    // runTurn's loop consumes that, or — when the daemon had nothing to
+    // cancel (#1124) — ends the turn itself once ABORT_TERMINAL_GRACE_MS
+    // has elapsed. Either way the caller's `await` here is not the end of
+    // the turn; the generator's terminal is.
     await this.client.cancel(this.sessionRef);
   }
 }
@@ -1540,6 +1720,13 @@ export const createJcodeHarness = (): Harness => {
    * the destructive launch.
    */
   let instance: Promise<Awaited<ReturnType<typeof launchInstance>>> | undefined;
+  /**
+   * The daemon's own log file, re-emitted through `log()` (jcode-log.ts).
+   * Started at launch (once per container, like the instance) and
+   * stopped on dispose. The daemon's file is where its errors live; its
+   * stderr carries almost nothing.
+   */
+  let logForwarder: ReturnType<typeof startJcodeLogForwarder> | undefined;
   /**
    * Per-conversation connections (§3.6): the bridge binds ONE session per
    * connection, so sharing a connection is what made a second conversation
@@ -1610,9 +1797,17 @@ export const createJcodeHarness = (): Harness => {
     // skill stashes do not survive a boot — platform memory and the synced
     // skills root are the only durable knowledge.
     cleanJcodeKnowledgeStores(homeDir, jcodeHome);
+    // The transcript half: a stop that tore the daemon's last checkpoint
+    // left every journaled message doubled, which the provider rejects on
+    // every turn (#1194). Repaired here, while no daemon holds the store.
+    healJcodeTranscripts(jcodeHome);
     writeManagedFile(join(jcodeHome, "config.toml"), managedConfigToml, 0o600);
     preparePromptFiles(homeDir, jcodeHome);
     prepareMcpConfig(homeDir, jcodeHome, platformToolsSocketPath());
+    // Before the launch, so the daemon's own startup lines are forwarded
+    // too: creating the follower pins the end of whatever a PREVIOUS boot
+    // left in today's file, and everything this boot appends is read.
+    logForwarder ??= startJcodeLogForwarder({ jcodeHome });
 
     // OAuth-mode grants ship CLAUDE_CODE_OAUTH_TOKEN (a placeholder — the
     // gateway splices the real token); steer jcode onto its subscription
@@ -1676,6 +1871,8 @@ export const createJcodeHarness = (): Harness => {
         // config — the managed TOML's swarm=true is the switch, these are
         // the limits. See JCODE_SWARM_ENV's doc for the verified mechanics.
         ...JCODE_SWARM_ENV,
+        // Provider-native web search posture — see JCODE_WEBSEARCH_ENV.
+        ...JCODE_WEBSEARCH_ENV,
         // EXTERNAL WAKE OWNERSHIP (v0.81+): the daemon never starts turns on
         // its own — background/swarm-await/comm wakes surface as typed
         // `wake_requested` events the adapter converts into platform wakes
@@ -1704,10 +1901,20 @@ export const createJcodeHarness = (): Harness => {
     // ONE of the two death signals this adapter owes the supervisor: the
     // bridge process exiting means no connection can ever be served again.
     // The per-connection `close` handler below is the other (and usually
-    // faster) signal — first one wins, `fail` is one-shot.
-    launched.process.once("exit", () => {
-      fail("jcode instance exited");
-    });
+    // faster) signal — first one wins, `fail` is one-shot. The exit code /
+    // signal ride the reason: "exited" alone cannot tell an OOM kill from a
+    // panic from a clean stop.
+    launched.process.once(
+      "exit",
+      (code: number | null, signal: NodeJS.Signals | null) => {
+        fail(
+          `jcode instance exited (code ${String(code)}, signal ${String(signal)})`,
+        );
+      },
+    );
+    // The SDK pipes the bridge's stderr and keeps only a startup-failure
+    // tail; a crash AFTER startup would otherwise leave no trace.
+    forwardJcodeStderr(launched.process.stderr);
 
     // The SDK pins both sockets into ONE runtime dir (`<jcodeHome>/run`):
     // `jcode-api.sock` (what it hands back) beside `jcode.sock` (the daemon's
@@ -1813,6 +2020,10 @@ export const createJcodeHarness = (): Harness => {
       steer: true,
       skillsDir: ".agents/skills",
       instructionFiles: ["CLAUDE.md", "AGENTS.md"],
+      // Connects to the platform-tools bridge at session start, and
+      // discovers its tools asynchronously — so a starting session's first
+      // turn is held until that listing arrives (see TOOL_LISTING_WAIT_MS).
+      platformTools: true,
     },
     // The agent starts background work through jcode's OWN tooling by strong
     // reflex (proven live; and disabling that tooling is turn-fatal), so the
@@ -1884,7 +2095,9 @@ export const createJcodeHarness = (): Harness => {
             options.context.conversationId,
           );
         }
-        return new JcodeSession(jcode, session.session_id, notices);
+        return new JcodeSession(jcode, session.session_id, notices, () =>
+          closeClient(jcode),
+        );
       } catch (error) {
         // The connection exists but its session is unusable. Closing the
         // connection IS the detach (one attachment per connection) — without
@@ -1909,6 +2122,10 @@ export const createJcodeHarness = (): Harness => {
         await inst?.shutdown();
         instance = undefined;
       }
+      // After the shutdown, so the daemon's last lines (its own shutdown
+      // trace) are drained by the follower's final poll.
+      logForwarder?.stop();
+      logForwarder = undefined;
     },
   };
 };

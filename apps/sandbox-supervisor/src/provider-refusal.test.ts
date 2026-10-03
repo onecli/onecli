@@ -1,5 +1,37 @@
 import { describe, expect, it } from "vitest";
-import { isProviderRefusal, isTrialCreditExhausted } from "./provider-refusal";
+import {
+  isProviderRefusal,
+  isTranscriptRejected,
+  isTrialCreditExhausted,
+} from "./provider-refusal";
+
+/** The #1194 terminal error in the exact shape jcode relays it (ids made
+ * up). */
+const TRANSCRIPT_400 =
+  'Anthropic API error (400 Bad Request): {"type":"error","error":{"type":"invalid_request_error","message":"messages.814: `tool_use` ids were found without `tool_result` blocks immediately after: toolu_01AAAAAAAAAAAAAAAAAAAAAA, toolu_01BBBBBBBBBBBBBBBBBBBBBB. Each `tool_use` block must have a corresponding `tool_result` block in the next message."},"request_id":"req_011CAAAAAAAAAAAAAAAAAAAA"}';
+
+describe("isTranscriptRejected", () => {
+  it.each([
+    TRANSCRIPT_400,
+    // The duplicate-result sibling: also the transcript, also forever.
+    'Anthropic API error (400 Bad Request): {"type":"error","error":{"type":"invalid_request_error","message":"messages.12.content.0: unexpected `tool_use_id` found in `tool_result` blocks: toolu_01. Each `tool_result` block must have a corresponding `tool_use` block in the previous message."}}',
+  ])("classifies the provider rejecting the stored conversation: %s", (m) => {
+    expect(isTranscriptRejected(m)).toBe(true);
+  });
+
+  it("is never a key problem", () => {
+    expect(isProviderRefusal(TRANSCRIPT_400)).toBe(false);
+  });
+
+  it.each([
+    'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 214937 tokens > 200000 maximum"}}',
+    "harness event stream ended unexpectedly",
+    // A tool's own output that merely mentions the block names.
+    "Error: the tool_use tool_result parser failed",
+  ])("does not claim unrelated failures: %s", (m) => {
+    expect(isTranscriptRejected(m)).toBe(false);
+  });
+});
 
 /** The gateway's real trial-credit 403 body, as the harness wraps it (the
  * shape observed live in dev — prose mentions no refusal token, so without

@@ -403,3 +403,54 @@ export const setContactPolicy = (
 
 export const deleteContact = (agentId: string, contactId: string) =>
   apiDelete(`/v1/agents/${agentId}/contacts/${contactId}`);
+
+/** One of the agent's peers (PR 5b): another hosted agent it may message. */
+export interface AgentPeer {
+  agentId: string;
+  name: string;
+  /** The peer's workspace when it is not this agent's own; null otherwise. */
+  workspaceName: string | null;
+  /** THIS agent's side of the relationship. */
+  myPolicy: "ask" | "allow" | "blocked";
+  /** The peer's side. */
+  theirPolicy: "ask" | "allow" | "blocked";
+  /** The pair conversation on THIS agent's side, once they have talked. */
+  conversationId: string | null;
+  /** THIS side's pair conversation is past the turn cap: the peer's
+   * messages are held off until a person resumes it. */
+  paused: boolean;
+  /** A peer task is open on the pair: one of the two is asking on a
+   * person's behalf, and a report is on its way to that person. */
+  taskOpen: boolean;
+}
+
+/** The agent's peers with both sides' standing. */
+export const listPeers = (agentId: string) =>
+  apiGet<{ peers: AgentPeer[] }>(
+    `/v1/agents/${encodeURIComponent(agentId)}/links`,
+  );
+
+/** Forget the pair from THIS agent's side: policy, conversation, pending
+ * asks. The peer stays in the roster (it still exists) at ask/ask. */
+export const forgetPeer = (agentId: string, peerAgentId: string) =>
+  apiDelete(
+    `/v1/agents/${encodeURIComponent(agentId)}/links/${encodeURIComponent(peerAgentId)}`,
+  );
+
+/** A person continues THIS agent's paused pair conversation. */
+export const resumePeer = (agentId: string, peerAgentId: string) =>
+  apiPost<{ paused: boolean }>(
+    `/v1/agents/${encodeURIComponent(agentId)}/links/${encodeURIComponent(peerAgentId)}/resume`,
+    {},
+  );
+
+/** Set THIS agent's side of a pair — `ask` is the revoke direction. */
+export const setPeerPolicy = (
+  agentId: string,
+  peerAgentId: string,
+  policy: "ask" | "allow" | "blocked",
+) =>
+  apiPut<{ id: string; policy: string }>(
+    `/v1/agents/${encodeURIComponent(agentId)}/links/${encodeURIComponent(peerAgentId)}`,
+    { policy },
+  );

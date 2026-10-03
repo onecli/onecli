@@ -41,6 +41,8 @@ let slackServer: Server;
 /** The roster the fake serves — tests reshape it per arm. */
 let rosterMembers: unknown[] = [];
 let rosterChannels: unknown[] = [];
+/** When set, every roster call answers this Slack error (dead token, rate limit). */
+let rosterError: string | null = null;
 
 const startSlackFake = (): Promise<string> =>
   new Promise((resolve) => {
@@ -50,7 +52,9 @@ const startSlackFake = (): Promise<string> =>
       req.on("end", () => {
         const method = (req.url ?? "/").slice(1);
         res.writeHead(200, { "content-type": "application/json" });
-        if (method === "users.list") {
+        if (rosterError !== null) {
+          res.end(JSON.stringify({ ok: false, error: rosterError }));
+        } else if (method === "users.list") {
           res.end(JSON.stringify({ ok: true, members: rosterMembers }));
         } else if (method === "conversations.list") {
           res.end(JSON.stringify({ ok: true, channels: rosterChannels }));
@@ -244,6 +248,43 @@ describe.skipIf(!PROOF_URL)("findPeople", () => {
   it("answers empty without an active presence (off-channel agent)", async () => {
     const agentId = await seedAgent("nopresence");
     expect(await search.findPeople(agentId, "dan")).toEqual([]);
+  });
+
+  it("a DEAD credential on the roster call flips the presence AND names the removal on that very call; a rate limit fails open and flips nothing", async () => {
+    // Seen on a real-browser walk: the agent's find_recipient was the call
+    // that discovered the deleted app (account_inactive), the presence
+    // flipped, and yet the tool answered "Nobody matching in the connected
+    // workspace." over a roster it never read.
+    const agentId = await seedAgent("deadsearch");
+    const integration = await seedIntegration();
+    const presence = await seedPresence(agentId, integration.id);
+    try {
+      rosterError = "ratelimited";
+      expect(await search.findPeople(agentId, "dan")).toEqual([]);
+      expect(
+        (
+          await db.agentChannel.findUniqueOrThrow({
+            where: { id: presence.id },
+            select: { status: true },
+          })
+        ).status,
+      ).toBe("active");
+
+      rosterError = "account_inactive";
+      await expect(search.findPeople(agentId, "dan")).rejects.toThrow(
+        /Slack app was removed from the workspace.*re-attached.*Do not retry/s,
+      );
+      expect(
+        (
+          await db.agentChannel.findUniqueOrThrow({
+            where: { id: presence.id },
+            select: { status: true },
+          })
+        ).status,
+      ).toBe("disabled");
+    } finally {
+      rosterError = null;
+    }
   });
 });
 

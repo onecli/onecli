@@ -10,3 +10,12 @@ apps/gateway/crates/policy-engine/src/catalog.generated.json
 # Conductor workspace scratch space (gitignored agent collaboration files) —
 # not repo content; the format gate must not fail on it.
 .context/
+
+# Cargo build output of the second Rust app (gitignored at the root like the
+# gateway's; prettier does not read nested .gitignore files, so it is named
+# here too).
+apps/sandbox-home-device/target/
+
+# Generated gRPC client (buf + protoc-gen-es output, gitignored; regenerated
+# by `pnpm --filter @onecli/sandbox-home-device-proto build`).
+packages/sandbox-home-device-proto/src/gen/

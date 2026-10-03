@@ -35,7 +35,6 @@ interface PermissionGroupProps {
   ceilings: Record<string, OrgCeilingVerdict | null>;
   effective: Record<string, EffectiveToolResult>;
   readOnly: boolean;
-  askLocked: boolean;
   onToolSelect: (toolId: string, choice: ToolChoice) => void;
   /** Applies to every tool in the group the ceiling allows to change. */
   onGroupSelect: (toolIds: string[], choice: ToolChoice) => void;
@@ -47,7 +46,6 @@ export const PermissionGroup = ({
   ceilings,
   effective,
   readOnly,
-  askLocked,
   onToolSelect,
   onGroupSelect,
 }: PermissionGroupProps) => {
@@ -122,7 +120,6 @@ export const PermissionGroup = ({
             ceiling={ceilings[tool.id] ?? null}
             effective={effective[tool.id]}
             readOnly={readOnly}
-            askLocked={askLocked}
             onSelect={(choice) => onToolSelect(tool.id, choice)}
           />
         ))}

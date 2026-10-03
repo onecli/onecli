@@ -26,6 +26,8 @@ export interface FakeSandboxRecord {
 export interface FakeBackend extends SandboxBackend {
   readonly sandboxes: Map<string, FakeSandboxRecord>;
   readonly homes: Map<string, HomeRef>;
+  /** Every wakeHome call, in order: what the runner handed the seam. */
+  readonly wakes: Array<{ ref: HomeRef; workspaceId?: string }>;
   readonly prepared: () => boolean;
   /** The runner id the backend was told to label its objects with. */
   readonly owner: () => string | undefined;
@@ -49,6 +51,7 @@ export interface FakeBackend extends SandboxBackend {
 export const createFakeBackend = (): FakeBackend => {
   const sandboxes = new Map<string, FakeSandboxRecord>();
   const homes = new Map<string, HomeRef>();
+  const wakes: Array<{ ref: HomeRef; workspaceId?: string }> = [];
   const failures = new Map<string, Error | undefined>();
   /** Foreign-labeled leftovers planted by tests (the sweep's subjects). */
   let seeded: ManagedObject[] = [];
@@ -80,6 +83,7 @@ export const createFakeBackend = (): FakeBackend => {
     homeDurability: "resident",
     sandboxes,
     homes,
+    wakes,
     prepared: () => prepared,
     owner: () => owner,
     identify(runnerId: string) {
@@ -119,7 +123,9 @@ export const createFakeBackend = (): FakeBackend => {
     },
 
     async parkHome() {},
-    async wakeHome() {},
+    async wakeHome(ref, workspaceId) {
+      wakes.push({ ref, ...(workspaceId !== undefined && { workspaceId }) });
+    },
 
     async listHomes() {
       return [...homes].map(([sandboxId, ref]) => ({ sandboxId, ref }));

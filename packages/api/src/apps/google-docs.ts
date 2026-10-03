@@ -18,6 +18,7 @@ export const googleDocs: AppDefinition = {
       "profile",
       "https://www.googleapis.com/auth/drive.readonly",
       "https://www.googleapis.com/auth/drive.file",
+      "https://www.googleapis.com/auth/documents",
     ],
     permissions: [
       {
@@ -30,6 +31,15 @@ export const googleDocs: AppDefinition = {
         scope: "https://www.googleapis.com/auth/drive.file",
         name: "Manage app documents",
         description: "Create and edit documents opened or created by OneCLI",
+        access: "write",
+      },
+      {
+        // drive.file only covers files OneCLI created or opened via a picker,
+        // so without this an agent can read a user's existing doc but its
+        // batchUpdate gets a 403 from Google.
+        scope: "https://www.googleapis.com/auth/documents",
+        name: "Edit documents",
+        description: "Edit all your Google Docs documents",
         access: "write",
       },
       {

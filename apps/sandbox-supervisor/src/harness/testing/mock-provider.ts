@@ -78,6 +78,9 @@ export interface MockProvider {
     tag?: string;
     swarmToolDescription?: string;
     toolNames: string[];
+    /** The request's system/developer message text, joined — the only
+     * ground truth for "what instruction doc did the model see THIS turn". */
+    systemText: string;
   }[];
   close: () => Promise<void>;
 }
@@ -93,6 +96,28 @@ const toolNamesOf = (body: string): string[] => {
     );
   } catch {
     return [];
+  }
+};
+
+/** Every system/developer-role message's text, joined. */
+const systemTextOf = (body: string): string => {
+  try {
+    const parsed = JSON.parse(body) as {
+      messages?: {
+        role?: string;
+        content?: string | { type?: string; text?: string }[];
+      }[];
+    };
+    return (parsed.messages ?? [])
+      .filter((m) => m.role === "system" || m.role === "developer")
+      .map((m) =>
+        typeof m.content === "string"
+          ? m.content
+          : (m.content ?? []).map((c) => c.text ?? "").join("\n"),
+      )
+      .join("\n");
+  } catch {
+    return "";
   }
 };
 
@@ -236,6 +261,7 @@ export const startMockProvider = (options: {
         }
         const swarmToolDescription = swarmToolDescriptionOf(body);
         const toolNames = toolNamesOf(body);
+        const systemText = systemTextOf(body);
         const scripted = options.script?.({
           lastUser: lastUserContent(body),
           index: served++,
@@ -246,6 +272,7 @@ export const startMockProvider = (options: {
             kind: "scripted",
             tag: scripted.tag,
             toolNames,
+            systemText,
             ...(swarmToolDescription !== undefined && {
               swarmToolDescription,
             }),
@@ -258,6 +285,7 @@ export const startMockProvider = (options: {
           at: Date.now(),
           kind: long ? "long" : "quick",
           toolNames,
+          systemText,
           ...(swarmToolDescription !== undefined && { swarmToolDescription }),
         });
         res.writeHead(200, {

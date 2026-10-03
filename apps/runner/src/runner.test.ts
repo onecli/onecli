@@ -112,6 +112,7 @@ beforeEach(() => {
     checkSandboxIds: async () => [],
     toolCall: async () => ({ ok: true, result: null }),
     memoryWrite: async () => ({ ok: true }),
+    uploadAttachment: async () => ({ ok: true, attachmentId: "att-fake" }),
     fetchAttachment: async () => Buffer.alloc(0),
   };
 
@@ -163,6 +164,23 @@ describe("start", () => {
     expect(record?.spec.limits).toEqual(config.limits);
   });
 
+  it("wakes the home exactly once per start, handing it the payload's workspace (the placement a snapshot backend births a brand-new home from), on a first start and a recreate alike", async () => {
+    queued.push(startItem("sb-1", { workspaceId: "ws-1" }));
+    await drive();
+    expect(backend.wakes).toEqual([
+      { ref: "fake-home-sb-1", workspaceId: "ws-1" },
+    ]);
+
+    // A start of an EXISTING container recreates it (fresh token); the
+    // home is still woken first, once, with the same placement.
+    queued.push(startItem("sb-1", { workspaceId: "ws-1" }));
+    await drive();
+    expect(backend.wakes).toEqual([
+      { ref: "fake-home-sb-1", workspaceId: "ws-1" },
+      { ref: "fake-home-sb-1", workspaceId: "ws-1" },
+    ]);
+  });
+
   it("delivers the CA file into the sandbox, never as a mount", async () => {
     queued.push(startItem());
     await drive();
@@ -184,6 +202,32 @@ describe("start", () => {
       AGENT_INSTRUCTIONS: "Be useful.",
       AGENT_NAME: "Ada",
     });
+    // No presences composed → no variable (the supervisor reads absence as
+    // "none"); an older control plane that never sends the field looks the
+    // same.
+    expect(backend.sandboxes.get("sb-1")?.spec.env).not.toHaveProperty(
+      "AGENT_CHANNELS",
+    );
+  });
+
+  it("passes the agent's channel presences as JSON in AGENT_CHANNELS", async () => {
+    const channels = [
+      {
+        provider: "slack",
+        status: "active" as const,
+        handle: "ada",
+        workspaceName: "Acme",
+      },
+    ];
+    queued.push(startItem("sb-1", { channels }));
+    await drive();
+
+    const env = backend.sandboxes.get("sb-1")?.spec.env ?? {};
+    expect(JSON.parse(env.AGENT_CHANNELS ?? "null")).toEqual(channels);
+    // An empty list is a real value: "no presences", sent as such.
+    queued.push(startItem("sb-2", { channels: [] }));
+    await drive();
+    expect(backend.sandboxes.get("sb-2")?.spec.env.AGENT_CHANNELS).toBe("[]");
   });
 
   it("gives the sandbox a single-use control-channel token and its runner URL", async () => {
@@ -784,6 +828,9 @@ describe("registration", () => {
       // Same gate for attachment manifests: only an advertising runner is
       // told about files, because only it can pull the bytes.
       attachments: true,
+      // And for the reverse direction: the supervisor is offered send_file
+      // only when its runner can relay the bytes.
+      outboundAttachments: true,
     });
     await spy.stop();
   });
@@ -1066,6 +1113,23 @@ describe("home sync fan-out", () => {
         prune: [".agents/skills/deploy/SKILL.md", "memory/index.md"],
         instructions: "Be brief.",
         agentName: "andy",
+        channels: [
+          {
+            provider: "slack",
+            status: "active",
+            handle: "andy",
+            workspaceName: "Acme",
+          },
+        ],
+        peers: [{ name: "Mark" }],
+        connections: [
+          {
+            provider: "salesforce",
+            name: "Salesforce",
+            label: "a@example.com",
+            host: "acme.my.salesforce.com",
+          },
+        ],
       },
     ],
     ...overrides,
@@ -1091,6 +1155,11 @@ describe("home sync fan-out", () => {
       of: 2,
       instructions: "Be brief.",
       agentName: "andy",
+      channels: [{ provider: "slack", status: "active", handle: "andy" }],
+      // Every final-part render input is relayed — a dropped field reads as
+      // "unchanged" at the supervisor and pins the old doc until reboot.
+      peers: [{ name: "Mark" }],
+      connections: [{ provider: "salesforce", host: "acme.my.salesforce.com" }],
     });
     expect(posted).toEqual([]);
   });
