@@ -100,6 +100,61 @@ pub fn extract_agent_token<T>(req: &Request<T>) -> Option<String> {
     Some(token.to_string())
 }
 
+// ── Agent-supplied JWT passthrough ──────────────────────────────────────
+
+/// True when `value` is `Bearer <JWT>`: three non-empty base64url segments whose
+/// first (the header) starts with `eyJ` (`{"`). Deliberately strict so that
+/// opaque account/API tokens (`cfut_…`, `sk-…`) and junk never qualify.
+#[must_use]
+pub fn is_bearer_jwt(value: &str) -> bool {
+    let Some(token) = value
+        .strip_prefix("Bearer ")
+        .or_else(|| value.strip_prefix("bearer "))
+    else {
+        return false;
+    };
+    if token.len() > 8192 || !token.starts_with("eyJ") {
+        return false;
+    }
+    let mut parts = token.split('.');
+    let segs = [parts.next(), parts.next(), parts.next()];
+    parts.next().is_none()
+        && segs.iter().all(|s| {
+            s.is_some_and(|s| {
+                !s.is_empty()
+                    && s.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            })
+        })
+}
+
+/// Copy of `rules` with every injection that sets or replaces `header` removed
+/// (rules left with no injections are dropped). Other injections (params,
+/// other headers) are kept.
+#[must_use]
+pub fn without_header_injections(rules: &[InjectionRule], header: &str) -> Vec<InjectionRule> {
+    rules
+        .iter()
+        .filter_map(|rule| {
+            let injections: Vec<Injection> = rule
+                .injections
+                .iter()
+                .filter(|inj| match inj {
+                    Injection::SetHeader { name, .. } | Injection::ReplaceHeader { name, .. } => {
+                        !name.eq_ignore_ascii_case(header)
+                    }
+                    _ => true,
+                })
+                .cloned()
+                .collect();
+            (!injections.is_empty()).then(|| InjectionRule {
+                path_pattern: rule.path_pattern.clone(),
+                injections,
+            })
+        })
+        .collect()
+}
+
 // ── Injection application ───────────────────────────────────────────────
 
 /// Apply injection rules to the request headers and URL path.
@@ -954,6 +1009,43 @@ mod tests {
             name: name.to_string(),
             value: value.to_string(),
         }
+    }
+
+    // ── agent JWT passthrough ───────────────────────────────────────────
+
+    #[test]
+    fn bearer_jwt_detection() {
+        assert!(is_bearer_jwt(
+            "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln-_x"
+        ));
+        assert!(!is_bearer_jwt("Bearer test-jwt-xyz"));
+        assert!(!is_bearer_jwt("Bearer cfut_abcdef"));
+        assert!(!is_bearer_jwt("Bearer eyJhbGci.eyJzdWIi")); // two segments
+        assert!(!is_bearer_jwt("Bearer eyJhbGci.eyJzdWIi.sig.extra"));
+        assert!(!is_bearer_jwt("Bearer eyJhbGci..sig"));
+        assert!(!is_bearer_jwt("Basic eyJhbGci.eyJzdWIi.sig"));
+        assert!(!is_bearer_jwt("eyJhbGci.eyJzdWIi.sig"));
+    }
+
+    #[test]
+    fn without_header_injections_drops_only_authorization() {
+        let rules = vec![
+            make_rule(
+                "*",
+                vec![
+                    set_header("Authorization", "Bearer acct"),
+                    set_header("x-other", "keep"),
+                ],
+            ),
+            make_rule("/a*", vec![set_header("authorization", "Bearer acct")]),
+        ];
+        let out = without_header_injections(&rules, "authorization");
+        assert_eq!(out.len(), 1);
+        let (mut headers, mut path) = (hyper::HeaderMap::new(), "/a".to_string());
+        headers.insert("authorization", "Bearer eyJa.eyJb.c".parse().unwrap());
+        apply_injections(&mut headers, &mut path, &out);
+        assert_eq!(headers.get("authorization").unwrap(), "Bearer eyJa.eyJb.c");
+        assert_eq!(headers.get("x-other").unwrap(), "keep");
     }
 
     // ── merge_injection_rules / secret+app coexistence (#428) ───────────

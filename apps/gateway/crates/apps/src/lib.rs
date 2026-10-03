@@ -2171,6 +2171,54 @@ pub fn normalize_host(s: &str) -> String {
     h.to_ascii_lowercase()
 }
 
+/// Endpoints that take a short-lived JWT the provider itself minted through an
+/// earlier credentialed call, which the client then sends as its own
+/// `Authorization: Bearer <jwt>` (host, matcher over the query-less path).
+///
+/// Cloudflare Pages / Workers static-asset uploads work this way: wrangler
+/// first calls the account-level `.../upload-token` (or `assets-upload-session`)
+/// endpoint with the account credential, then sends the returned JWT to the
+/// asset endpoints below. Overwriting that JWT with the account token breaks
+/// the deploy (the asset endpoints reject account tokens).
+type JwtPassthrough = (&'static str, fn(&str) -> bool);
+
+const AGENT_JWT_PASSTHROUGH: &[JwtPassthrough] = &[("api.cloudflare.com", cloudflare_jwt_path)];
+
+fn cloudflare_jwt_path(path: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    let Some(rest) = path.strip_prefix("/client/v4/") else {
+        return false;
+    };
+    // Pages direct upload: /pages/assets/{check-missing,upload,upsert-hashes}
+    if let Some(op) = rest.strip_prefix("pages/assets/") {
+        return matches!(op, "check-missing" | "upload" | "upsert-hashes");
+    }
+    // Workers static assets: /accounts/{id}/workers/assets/upload[/{hash}]
+    if let Some(tail) = rest.strip_prefix("accounts/") {
+        let mut seg = tail.split('/');
+        let (Some(id), Some("workers"), Some("assets"), Some("upload")) =
+            (seg.next(), seg.next(), seg.next(), seg.next())
+        else {
+            return false;
+        };
+        let hash = seg.next();
+        return !id.is_empty() && seg.next().is_none() && hash.is_none_or(|h| !h.is_empty());
+    }
+    false
+}
+
+/// True when `hostname` + `path` is an endpoint that authenticates with a
+/// provider-minted JWT the agent sends itself. Callers must ALSO check that the
+/// agent's `Authorization` really is a JWT (`inject::is_bearer_jwt`) before
+/// leaving it alone; anything else still gets the real credential.
+#[must_use]
+pub fn preserves_agent_jwt(hostname: &str, path: &str) -> bool {
+    let path = path.split(['?', '#']).next().unwrap_or(path);
+    AGENT_JWT_PASSTHROUGH
+        .iter()
+        .any(|(host, matches)| host.eq_ignore_ascii_case(hostname) && matches(path))
+}
+
 /// Check whether any provider matching this hostname has intercept rules.
 /// Used to decide whether to pre-compute interception data at resolution time.
 pub fn host_has_intercept_rules(hostname: &str) -> bool {
@@ -3179,6 +3227,37 @@ mod tests {
     }
 
     // ── Cloudflare ─────────────────────────────────────────────────────
+
+    #[test]
+    fn cloudflare_jwt_passthrough_paths() {
+        let h = "api.cloudflare.com";
+        for p in [
+            "/client/v4/pages/assets/check-missing",
+            "/client/v4/pages/assets/upload",
+            "/client/v4/pages/assets/upsert-hashes?x=1",
+            "/client/v4/accounts/abc123/workers/assets/upload?base64=true",
+            "/client/v4/accounts/abc123/workers/assets/upload/deadbeef",
+        ] {
+            assert!(preserves_agent_jwt(h, p), "{p}");
+        }
+        // Account-level calls that need the real credential must NOT match.
+        for p in [
+            "/client/v4/accounts/abc123/pages/projects/p/upload-token",
+            "/client/v4/accounts/abc123/pages/projects/p/deployments",
+            "/client/v4/accounts/abc123/workers/scripts/s/assets-upload-session",
+            "/client/v4/accounts/abc123/workers/assets/upload/a/b",
+            "/client/v4/pages/assets/other",
+            "/client/v4/pages/assets/upload/extra",
+            "/client/v4/user/tokens/verify",
+            "/client/v4/pages/assets/../projects",
+        ] {
+            assert!(!preserves_agent_jwt(h, p), "{p}");
+        }
+        assert!(!preserves_agent_jwt(
+            "evil.example.com",
+            "/client/v4/pages/assets/upload"
+        ));
+    }
 
     #[test]
     fn providers_for_cloudflare_host() {
