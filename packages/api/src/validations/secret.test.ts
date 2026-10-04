@@ -8,6 +8,7 @@ import {
   isPathRegexInjection,
   isPathSafeValue,
   isPathTemplateInjection,
+  readChatgptPlanType,
   wildcardCoversPublicSuffix,
 } from "./secret";
 
@@ -159,5 +160,40 @@ describe("isPathSafeValue", () => {
     expect(isPathSafeValue("a" + String.fromCharCode(0x09) + "b")).toBe(false);
     expect(isPathSafeValue("a" + String.fromCharCode(0x07) + "b")).toBe(false);
     expect(isPathSafeValue("a" + String.fromCharCode(0x7f) + "b")).toBe(false);
+  });
+});
+
+describe("readChatgptPlanType", () => {
+  const jwt = (claims: unknown) =>
+    [
+      "eyJhbGciOiJSUzI1NiJ9",
+      Buffer.from(JSON.stringify(claims)).toString("base64url"),
+      "sig",
+    ].join(".");
+
+  it("reads the plan from the id_token's OpenAI auth claims", () => {
+    expect(
+      readChatgptPlanType(
+        jwt({ "https://api.openai.com/auth": { chatgpt_plan_type: "pro" } }),
+      ),
+    ).toBe("pro");
+  });
+
+  it.each([
+    ["no id_token", undefined],
+    ["a null id_token", null],
+    ["a non-JWT id_token", "not-a-jwt"],
+    ["an undecodable payload", "a.%%%.c"],
+    ["no auth claims", jwt({ sub: "user" })],
+    [
+      "an empty plan",
+      jwt({ "https://api.openai.com/auth": { chatgpt_plan_type: "" } }),
+    ],
+    [
+      "a non-string plan",
+      jwt({ "https://api.openai.com/auth": { chatgpt_plan_type: 1 } }),
+    ],
+  ])("returns null for %s", (_, idToken) => {
+    expect(readChatgptPlanType(idToken)).toBeNull();
   });
 });

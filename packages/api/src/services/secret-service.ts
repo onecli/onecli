@@ -17,6 +17,7 @@ import {
   isPathTemplateInjection,
   parseOpenaiAuthJson,
   parseOpenaiOAuthJson,
+  readChatgptPlanType,
   type CreateSecretInput,
   type UpdateSecretInput,
 } from "../validations/secret";
@@ -111,7 +112,12 @@ const buildMetadata = (
     const parsed = authMode === "oauth" ? parseOpenaiOAuthJson(value) : null;
     return {
       authMode,
-      ...(parsed ? { accountId: parsed.tokens.account_id ?? null } : {}),
+      ...(parsed
+        ? {
+            accountId: parsed.tokens.account_id ?? null,
+            planType: readChatgptPlanType(parsed.tokens.id_token),
+          }
+        : {}),
     } as Prisma.InputJsonValue;
   }
   return Prisma.JsonNull;

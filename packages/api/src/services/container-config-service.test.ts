@@ -187,6 +187,42 @@ describe("auth-mode detection (invariant 2)", () => {
     expect(result.config.env.ANTHROPIC_API_KEY).toBeUndefined();
   });
 
+  it("stamps an OAuth OpenAI secret's ChatGPT account id and plan into the Codex stub", async () => {
+    mocks.secretFindFirst.mockImplementation(
+      async ({ where }: { where: { AND: Array<{ type?: string }> } }) => {
+        const type = where.AND.find((clause) => clause.type)?.type;
+        return type === "openai"
+          ? {
+              metadata: {
+                authMode: "oauth",
+                accountId: "acc_123",
+                planType: "plus",
+              },
+            }
+          : null;
+      },
+    );
+
+    const result = await build();
+    if (!result.ok) throw new Error("expected a config");
+
+    const stub = result.config.credentialStubs?.find((s) =>
+      s.containerPath.endsWith("/.codex/auth.json"),
+    );
+    const { tokens } = JSON.parse(stub!.content);
+    expect(tokens).toMatchObject({
+      account_id: "acc_123",
+      access_token: "onecli-managed",
+      refresh_token: "onecli-managed",
+    });
+    const claims = JSON.parse(
+      Buffer.from(tokens.id_token.split(".")[1], "base64url").toString(),
+    );
+    expect(claims["https://api.openai.com/auth"].chatgpt_plan_type).toBe(
+      "plus",
+    );
+  });
+
   it("warns — rather than silently succeeding — when no credential is granted", async () => {
     const result = await build();
     if (!result.ok) throw new Error("expected a config");

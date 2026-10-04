@@ -395,7 +395,34 @@ export interface OpenaiOAuthJson {
 export interface OpenaiSecretMetadata {
   authMode: OpenaiAuthMode;
   accountId?: string;
+  planType?: string;
 }
+
+/**
+ * The ChatGPT plan (`chatgpt_plan_type`) from an OAuth `auth.json` id_token.
+ * Only the claims are decoded — the signature is never verified — because the
+ * plan is used to shape the container's credential stub, not to authorize.
+ */
+export const readChatgptPlanType = (
+  idToken: string | null | undefined,
+): string | null => {
+  const payload = idToken?.split(".")[1];
+  if (!payload) return null;
+  try {
+    const claims = JSON.parse(
+      Buffer.from(payload, "base64url").toString(),
+    ) as Record<string, unknown>;
+    const auth = claims["https://api.openai.com/auth"] as
+      | Record<string, unknown>
+      | undefined;
+    const planType = auth?.chatgpt_plan_type;
+    return typeof planType === "string" && planType.length > 0
+      ? planType
+      : null;
+  } catch {
+    return null;
+  }
+};
 
 export const parseOpenaiOAuthJson = (value: string): OpenaiOAuthJson | null => {
   try {

@@ -208,7 +208,10 @@ export const buildContainerConfig = async ({
       openaiEnv.CODEX_HOME = CODEX_HOME_CONTAINER_PATH;
       credentialStubs.push({
         containerPath: `${CODEX_HOME_CONTAINER_PATH}/auth.json`,
-        content: buildCodexOAuthStub(),
+        content: buildCodexOAuthStub({
+          accountId: openaiMeta.accountId,
+          planType: openaiMeta.planType,
+        }),
       });
     } else {
       openaiEnv.OPENAI_API_KEY = "placeholder";
