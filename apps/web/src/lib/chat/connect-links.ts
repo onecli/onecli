@@ -7,12 +7,15 @@ import type { AppDefinition } from "@onecli/api/apps/types";
  * renderer (which suppresses them in the chat) and the ConnectorSuggestions
  * card (which renders them as the call to action).
  *
- * TWO gateway refusals mint dashboard links the card can absorb:
+ * THREE gateway refusals mint dashboard links the card can absorb:
  * - `app_not_connected` → `…/connections?connect=<provider>&source=agent…`
  *   (nothing connected: the card's Connect button opens the OAuth popup)
  * - `access_restricted` → `…/connections/apps/<provider>` (an account exists
  *   but THIS agent has no grant: the card's Manage button opens the
  *   permissions dialog, which is exactly the attach surface)
+ * - `connection_needs_reconnect` → `…/connections/apps/<provider>?reconnect=<id>`
+ *   (the provider rejected that account's saved login: the card's Reconnect
+ *   button re-authorizes exactly that account in the OAuth popup)
  *
  * Only an app connection the registry can name gets the app-page link. Every
  * other restricted credential (a custom secret, an LLM key, an app connection
@@ -26,13 +29,21 @@ export interface ConnectSuggestion {
   provider: string;
   agentName?: string;
   /** Why the gateway minted the link — decides the card's action verb:
-   * "connect" opens the OAuth popup, "attach" opens the Manage dialog. */
-  kind: "connect" | "attach";
+   * "connect" opens the OAuth popup, "attach" opens the Manage dialog,
+   * "reconnect" re-authorizes `connectionId` in the OAuth popup. */
+  kind: "connect" | "attach" | "reconnect";
+  /** The account to re-authorize (`reconnect` only). */
+  connectionId?: string;
 }
+
+/** Connection ids are uuids today; bounded and charset-limited so a crafted
+ * link can only ever name an id, which the card then looks up in the user's
+ * own connections list. */
+const CONNECTION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 const PROVIDER_ID_RE = /^[a-z0-9-]{1,64}$/;
 
-/** A connect link as the GATEWAY mints it (both shapes above). Origin
+/** A connect link as the GATEWAY mints it (the shapes above). Origin
  * deliberately unchecked — self-host and cloud bake different dashboard
  * URLs, and the provider id is validated against the app catalog before
  * anything renders. */
@@ -60,6 +71,15 @@ export const parseConnectLink = (href: string): ConnectSuggestion | null => {
     url.pathname,
   );
   if (attachMatch?.[1]) {
+    // connection_needs_reconnect: the same page, naming the dead account.
+    const reconnect = url.searchParams.get("reconnect");
+    if (reconnect && CONNECTION_ID_RE.test(reconnect)) {
+      return {
+        provider: attachMatch[1],
+        kind: "reconnect",
+        connectionId: reconnect,
+      };
+    }
     return { provider: attachMatch[1], kind: "attach" };
   }
 
@@ -82,27 +102,27 @@ export const isCardConnectLink = (href: string): boolean => {
  * call to action vanishes. */
 const TRAILING_PUNCTUATION_RE = /[.,;:!?*_~`…]+$/;
 
+/** A connect link resolved against the catalog: one row of the card. */
+export type CardSuggestion = Omit<ConnectSuggestion, "provider"> & {
+  app: AppDefinition;
+};
+
 /** Every connect link in one turn's text, deduped by provider and resolved
  * against the catalog — an unknown provider renders nothing (its link stays
  * in the prose as the fallback, see `isCardConnectLink`). A provider named
- * by BOTH shapes keeps the first occurrence. */
-export const extractConnectSuggestions = (
-  text: string,
-): { app: AppDefinition; agentName?: string; kind: "connect" | "attach" }[] => {
+ * by more than one shape keeps the first occurrence. */
+export const extractConnectSuggestions = (text: string): CardSuggestion[] => {
   const seen = new Set<string>();
-  const out: {
-    app: AppDefinition;
-    agentName?: string;
-    kind: "connect" | "attach";
-  }[] = [];
+  const out: CardSuggestion[] = [];
   for (const match of text.matchAll(/https?:\/\/[^\s)\]>"']+/g)) {
     const parsed = parseConnectLink(
       match[0].replace(TRAILING_PUNCTUATION_RE, ""),
     );
     if (!parsed || seen.has(parsed.provider)) continue;
     seen.add(parsed.provider);
-    const app = getApp(parsed.provider);
-    if (app) out.push({ app, agentName: parsed.agentName, kind: parsed.kind });
+    const { provider, ...rest } = parsed;
+    const app = getApp(provider);
+    if (app) out.push({ app, ...rest });
   }
   return out;
 };

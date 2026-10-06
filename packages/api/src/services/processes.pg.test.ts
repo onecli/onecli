@@ -1596,6 +1596,105 @@ describe.skipIf(!PROOF_URL)("the in-origin wake (direct origins)", () => {
     ).toBe("fired");
   });
 
+  it("a wake NEVER steers into a person's running exchange: it waits, then fires as its own turn", async () => {
+    // Live 2026-10-03: a wake joined the person's running answer, so the
+    // agent answered the wake instead of the question, and the Slack mirror
+    // posted the platform's instruction as "(from the web)". A person's
+    // turn is never a join target; the wake waits and arrives on its own.
+    // MUTATION-PROOF: drop `source: "watch"` from the join lookup and the
+    // follow-up row below appears.
+    const agentId = await seedAgent("inorigin-human");
+    const sb = await seedSandbox("inorigin-human", agentId, "running", {
+      containerRef: "c",
+    });
+    const origin = await directOrigin(agentId);
+    const asking = await db.turn.create({
+      data: {
+        conversationId: origin.id,
+        message: "is there disk space?",
+        status: "running",
+        source: "slack",
+        userId: USER,
+      },
+      select: { id: true },
+    });
+    const watch = await armTriggeredWithOrigin(sb, origin.id, "human");
+
+    await watchFire.fireDueWatches();
+
+    expect(
+      await db.turn.count({ where: { followUpOfTurnId: asking.id } }),
+    ).toBe(0);
+    expect(
+      (
+        await db.processWatch.findUniqueOrThrow({
+          where: { id: watch.id },
+          select: { status: true },
+        })
+      ).status,
+    ).toBe("triggered");
+
+    // The person's turn closes: the release puts the wake back in reach,
+    // and it fires as its OWN turn in the thread.
+    await db.turn.update({
+      where: { id: asking.id },
+      data: { status: "done", finishedAt: new Date() },
+    });
+    await dueWork.releaseWatchFireClaimsForConversation(origin.id);
+    await watchFire.fireDueWatches();
+
+    const wakes = await db.turn.findMany({
+      where: { conversationId: origin.id, source: "watch" },
+      select: { followUpOfTurnId: true },
+    });
+    expect(wakes).toEqual([{ followUpOfTurnId: null }]);
+    expect(
+      (
+        await db.processWatch.findUniqueOrThrow({
+          where: { id: watch.id },
+          select: { status: true },
+        })
+      ).status,
+    ).toBe("fired");
+  });
+
+  it("a wake JOINS a running wake in the same thread (#1013): one report, not two", async () => {
+    const agentId = await seedAgent("inorigin-join");
+    const sb = await seedSandbox("inorigin-join", agentId, "running", {
+      containerRef: "c",
+    });
+    const origin = await directOrigin(agentId);
+    const reporting = await db.turn.create({
+      data: {
+        conversationId: origin.id,
+        message: "[Watch on process ...]",
+        status: "running",
+        source: "watch",
+        userId: null,
+      },
+      select: { id: true },
+    });
+    const watch = await armTriggeredWithOrigin(sb, origin.id, "join");
+
+    await watchFire.fireDueWatches();
+
+    const joined = await db.turn.findMany({
+      where: { followUpOfTurnId: reporting.id },
+      select: { source: true, status: true, userId: true },
+    });
+    expect(joined).toEqual([
+      { source: "watch", status: "joining", userId: null },
+    ]);
+    expect(
+      (
+        await db.processWatch.findUniqueOrThrow({
+          where: { id: watch.id },
+          select: { status: true },
+        })
+      ).status,
+    ).toBe("fired");
+  });
+
   it("a busy origin DOWNGRADES an expired watch to the hidden path", async () => {
     const agentId = await seedAgent("inorigin-exp");
     const sb = await seedSandbox("inorigin-exp", agentId, "running", {

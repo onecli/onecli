@@ -7,29 +7,18 @@ import {
   useDeletePolicyRule,
   usePolicyDefault,
   usePolicyRules,
-  usePublishedPolicyDefault,
-  usePublishedPolicyRules,
   useReorderPolicyRules,
   useUpdatePolicyRule,
 } from "@/hooks/use-policy";
 import type { PageScope, PolicyRuleV2 } from "@/lib/api";
 import { buildReorderIds } from "@onecli/api/lib/build-reorder-ids";
-import { diffPolicyChanges } from "@onecli/api/lib/policy-diff";
 import { findPolicyOverlaps } from "@onecli/api/lib/policy-overlap";
 import { PolicyFilter } from "./policy-preview/policy-filter";
 import { identityText, targetText } from "./policy-preview/policy-rule-display";
 import { DeleteRuleDialog } from "./delete-rule-dialog";
-// The staged-publish chrome, org guardrails, and directory names are the
-// edition seam: EE aliases this to the real chrome; OSS renders none of it
-// (immediate apply, workspace scope only).
-// MUST be the alias key, never a relative path: turbopack resolveAlias only
-// rewrites as-written `@/` specifiers, so a relative import would load the OSS
-// module in every edition.
-import {
-  StagedActions,
-  StagedMeta,
-  useDirectoryNames,
-} from "@/lib/policy-editor/editor-chrome";
+// Directory names for the identities org rules target (org-admin-gated reads;
+// a non-admin falls back to the raw id).
+import { useDirectoryNames } from "@/lib/policy-editor/editor-chrome";
 import { HowRulesEvaluated } from "./how-rules-evaluated";
 import { PolicyRuleForm } from "./policy-rule-form";
 import { PolicyRulesTable } from "./policy-rules-table";
@@ -47,13 +36,11 @@ export interface PolicyEditorProps {
  * the former App Permissions rules, adopted as customs at the editing cutover —
  * are editable in a right-side drawer; the remaining derived rows (blocklist,
  * plus any mid-deploy app_permission straggler awaiting its adoption re-tag)
- * render read-only. Edits stage into a draft; Publish enforces them.
+ * render read-only. Every edit is enforced as soon as it saves.
  */
 export const PolicyEditor = ({ scope }: PolicyEditorProps) => {
-  const draft = usePolicyRules(scope);
-  const published = usePublishedPolicyRules(scope);
-  const draftDefault = usePolicyDefault(scope);
-  const publishedDefault = usePublishedPolicyDefault(scope);
+  const rulesQuery = usePolicyRules(scope);
+  const defaultQuery = usePolicyDefault(scope);
   // Directory identities are what org rules target — resolved through the
   // edition seam (EE: the org-admin-gated directory reads; OSS: always
   // undefined, identities fall back to the raw id). The agent-name lookup that
@@ -70,38 +57,13 @@ export const PolicyEditor = ({ scope }: PolicyEditorProps) => {
   const [editing, setEditing] = useState<PolicyRuleV2 | null>(null);
   const [pendingDelete, setPendingDelete] = useState<PolicyRuleV2 | null>(null);
 
-  const rules = useMemo(() => draft.data ?? [], [draft.data]);
+  const rules = useMemo(() => rulesQuery.data ?? [], [rulesQuery.data]);
   const q = query.trim().toLowerCase();
   const identityName = useCallback(
     (id: string): string => directoryName(id) ?? id,
     [directoryName],
   );
 
-  // The staged diff (custom rules + the Default action; system-derived rows are
-  // invisible by design). Null while ANY of the four queries is still loading —
-  // no flicker of the changes badge on a half-resolved cache.
-  const policyDiff = useMemo(() => {
-    if (
-      !draft.data ||
-      !published.data ||
-      draftDefault.isPending ||
-      publishedDefault.isPending
-    )
-      return null;
-    return diffPolicyChanges(
-      draft.data,
-      published.data,
-      draftDefault.data,
-      publishedDefault.data,
-    );
-  }, [
-    draft.data,
-    published.data,
-    draftDefault.isPending,
-    draftDefault.data,
-    publishedDefault.isPending,
-    publishedDefault.data,
-  ]);
   const matches = useCallback(
     (rule: PolicyRuleV2) =>
       !q ||
@@ -124,7 +86,7 @@ export const PolicyEditor = ({ scope }: PolicyEditorProps) => {
   );
 
   // Provably-dead rules (duplicates / conflicts / shadowed) — computed over the
-  // FULL unfiltered draft (a filtered subset would mis-compute shadows), keyed
+  // FULL unfiltered list (a filtered subset would mis-compute shadows), keyed
   // by logicalId for the row chips. Zero-false-positive by construction.
   const overlapState = useMemo(() => {
     const warnings = findPolicyOverlaps(
@@ -134,20 +96,20 @@ export const PolicyEditor = ({ scope }: PolicyEditorProps) => {
   }, [rules]);
 
   // The drag/Move handlers emit the new CUSTOM relative order; the API takes
-  // the FULL draft permutation (derived + hidden equipment rows keep their
+  // the FULL permutation (derived + hidden equipment rows keep their
   // slots), rebuilt from the same snapshot the optimistic cache updates.
   const { mutate: applyReorder } = reorderMutation;
   const handleReorder = useCallback(
     (newCustomOrder: string[]) => {
-      if (!draft.data) return;
-      applyReorder(buildReorderIds(draft.data, newCustomOrder));
+      if (!rulesQuery.data) return;
+      applyReorder(buildReorderIds(rulesQuery.data, newCustomOrder));
     },
-    [draft.data, applyReorder],
+    [rulesQuery.data, applyReorder],
   );
   // One reorder at a time; a filtered list is not the true order, so lock it
   // too (the grips explain why via their tooltip).
   const reorderLocked =
-    reorderMutation.isPending || draft.isFetching || q !== "";
+    reorderMutation.isPending || rulesQuery.isFetching || q !== "";
 
   const openCreate = () => {
     setEditing(null);
@@ -168,26 +130,20 @@ export const PolicyEditor = ({ scope }: PolicyEditorProps) => {
 
   return (
     <div className="flex flex-col gap-4">
-      {/* One quiet cluster per kind of thing: find (filter + the how-it-works
-          popover) on the left; act (test / apply / add) on the right. The
-          unpublished count rides INSIDE Apply Changes so state and its action
-          read as one element. Stacks into two calm rows below lg. */}
+      {/* Find (filter + the how-it-works popover) on the left; Add on the
+          right. Stacks into two calm rows below lg. */}
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex items-center gap-1">
           <PolicyFilter value={query} onChange={setQuery} />
           <HowRulesEvaluated />
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <StagedActions scope={scope} policyDiff={policyDiff} />
-          <Button onClick={openCreate}>
-            <Plus className="size-4" />
-            Add Rule
-          </Button>
-        </div>
+        <Button onClick={openCreate} className="self-start lg:self-auto">
+          <Plus className="size-4" />
+          Add Rule
+        </Button>
       </div>
-      <StagedMeta scope={scope} />
 
-      {draft.isError ? (
+      {rulesQuery.isError ? (
         <div
           role="alert"
           className="bg-card flex flex-col items-center gap-3 rounded-xl border py-12 text-center"
@@ -204,7 +160,7 @@ export const PolicyEditor = ({ scope }: PolicyEditorProps) => {
             </p>
           </div>
         </div>
-      ) : draft.isPending ? (
+      ) : rulesQuery.isPending ? (
         <div
           role="status"
           aria-live="polite"
@@ -254,11 +210,9 @@ export const PolicyEditor = ({ scope }: PolicyEditorProps) => {
             // The gateway enforces the workspace default like the org one; Block
             // turns the workspace into an allowlist (org allows must be mirrored
             // by a workspace rule), so the row is editable at both scopes.
-            defaultRule={draftDefault.data ?? null}
+            defaultRule={defaultQuery.data ?? null}
             scope={scope}
-            diffState={policyDiff?.rowState}
             overlapState={overlapState}
-            defaultChanged={!!policyDiff?.defaultChange}
             onReorder={handleReorder}
             reorderLocked={reorderLocked}
             onEdit={openEdit}

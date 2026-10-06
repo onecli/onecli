@@ -36,6 +36,7 @@ const {
   cleanJcodeUpdaterState,
   createJcodeHarness,
   JCODE_DISABLED_TOOLS_VALUE,
+  resolveAnthropicCredential,
   resolveJcodeBinary,
 } = await import("./jcode");
 
@@ -90,6 +91,50 @@ describe("resolveJcodeBinary", () => {
     // …and a resolved-but-deleted one (the image prunes the npm binary).
     sdk.bundled = join(outside, "deleted-bundled");
     expect(() => resolveJcodeBinary()).toThrow("No jcode runtime");
+  });
+});
+
+describe("resolveAnthropicCredential", () => {
+  // The route values are jcode's own `JCODE_RUNTIME_PROVIDER` vocabulary:
+  // `claude` pins the Claude subscription (OAuth) route, `claude-api` the
+  // direct API-key route. Anything else would be silently ignored upstream
+  // and leave the runtime in automatic mode, the defect this pin closes.
+  it.each([
+    {
+      name: "an OAuth grant pins the subscription route and keeps the stub",
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "placeholder" },
+      expected: { route: "claude", oauthStub: true },
+    },
+    {
+      name: "an API-key grant pins the key route and has no stub",
+      env: { ANTHROPIC_API_KEY: "placeholder" },
+      expected: { route: "claude-api", oauthStub: false },
+    },
+    {
+      name: "both set: the API key wins, never a half-OAuth launch",
+      env: {
+        ANTHROPIC_API_KEY: "placeholder",
+        CLAUDE_CODE_OAUTH_TOKEN: "placeholder",
+      },
+      expected: { route: "claude-api", oauthStub: false },
+    },
+    {
+      name: "no Anthropic grant (e.g. OpenAI only) pins nothing",
+      env: { OPENAI_API_KEY: "placeholder" },
+      expected: { route: undefined, oauthStub: false },
+    },
+    {
+      name: "empty values count as unset",
+      env: { ANTHROPIC_API_KEY: "", CLAUDE_CODE_OAUTH_TOKEN: "" },
+      expected: { route: undefined, oauthStub: false },
+    },
+    {
+      name: "an empty API key does not mask an OAuth grant",
+      env: { ANTHROPIC_API_KEY: "", CLAUDE_CODE_OAUTH_TOKEN: "placeholder" },
+      expected: { route: "claude", oauthStub: true },
+    },
+  ])("$name", ({ env, expected }) => {
+    expect(resolveAnthropicCredential(env)).toEqual(expected);
   });
 });
 

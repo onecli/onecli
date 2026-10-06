@@ -5,6 +5,7 @@ import {
   adapterConfigResponseSchema,
   adapterCursorResponseSchema,
   adapterDecisionResponseSchema,
+  adapterGroupDecisionResponseSchema,
   adapterIngestResponseSchema,
   adapterPromptClaimResponseSchema,
   adapterReachDecisionResponseSchema,
@@ -20,6 +21,8 @@ import {
   type AdapterConfigResponse,
   type AdapterDecisionRequest,
   type AdapterDecisionResponse,
+  type AdapterGroupDecisionRequest,
+  type AdapterGroupDecisionResponse,
   type AdapterIngestRequest,
   type AdapterIngestResponse,
   type AdapterReachDecisionRequest,
@@ -63,6 +66,11 @@ export interface ControlPlaneClient {
   getWork(): Promise<AdapterWorkResponse>;
   ingest(request: AdapterIngestRequest): Promise<AdapterIngestResponse>;
   decide(request: AdapterDecisionRequest): Promise<AdapterDecisionResponse>;
+  /** Forward a grouped-card click; the presence fence and the clicker's
+   * authorization are control-plane-side. */
+  decideGroup(
+    request: AdapterGroupDecisionRequest,
+  ): Promise<AdapterGroupDecisionResponse>;
   /** Forward a reach-card click; authorization is control-plane-side. */
   decideReach(
     request: AdapterReachDecisionRequest,
@@ -277,6 +285,14 @@ export const createControlPlane = (options: {
       call("POST", "/channel-adapter/decision", adapterDecisionResponseSchema, {
         body: request,
       }),
+
+    decideGroup: (request) =>
+      call(
+        "POST",
+        "/channel-adapter/group-decision",
+        adapterGroupDecisionResponseSchema,
+        { body: request },
+      ),
 
     decideReach: (request) =>
       call(

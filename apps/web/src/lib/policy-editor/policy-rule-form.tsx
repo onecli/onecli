@@ -51,7 +51,6 @@ import { ConditionBuilder } from "@/lib/components/condition-builder";
 // Alias key on purpose (see editor-chrome's note): a relative import would
 // bypass the edition seam.
 import { OrgIdentityPicker } from "@/lib/policy-editor/identity-picker";
-import { ruleSheetDescription } from "@/lib/policy-editor/publish-mode";
 import {
   AppTargetFields,
   type AppTargetState,
@@ -586,7 +585,10 @@ export const PolicyRuleForm = ({
       >
         <SheetHeader className="border-b px-6 py-4">
           <SheetTitle>{isEdit ? "Edit Rule" : "New Rule"}</SheetTitle>
-          <SheetDescription>{ruleSheetDescription(scope)}</SheetDescription>
+          <SheetDescription>
+            Who this applies to, what it targets, and what happens. Changes take
+            effect as soon as you save.
+          </SheetDescription>
         </SheetHeader>
 
         <div className="flex-1 space-y-6 overflow-y-auto overscroll-contain px-6 py-5">

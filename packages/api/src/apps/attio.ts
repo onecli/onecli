@@ -4,6 +4,7 @@ export const attio: AppDefinition = {
   id: "attio",
   name: "Attio",
   icon: "/icons/attio.svg",
+  apiDocsUrl: "https://docs.attio.com/rest-api/overview",
   darkIcon: "/icons/attio-light.svg",
   description: "Contacts, companies, deals, lists, notes, and tasks.",
   connectionMethod: {

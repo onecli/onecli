@@ -1,7 +1,6 @@
 "use client";
 
 import { ShieldBan, ShieldCheck, Users } from "lucide-react";
-import { Badge } from "@onecli/ui/components/badge";
 import { TableCell, TableRow } from "@onecli/ui/components/table";
 import { cn } from "@onecli/ui/lib/utils";
 import { useSetPolicyDefault } from "@/hooks/use-policy";
@@ -12,20 +11,17 @@ export interface DefaultRuleRowProps {
   rule: PolicyRuleV2;
   /** Editable scope shows an Allowed/Blocked toggle; guardrails show a verdict. */
   editable: boolean;
-  /** Staged-change chip: the default's action differs from the published one. */
-  changed?: boolean;
 }
 
 /**
  * The terminal Default Rule as an ordinary row (same plain background as the
  * rest) — it's the last thing checked in its section. Its action cell is an
- * inline Allowed/Blocked toggle when editable, staged like any other edit.
+ * inline Allowed/Blocked toggle when editable, saved on click.
  */
 export const DefaultRuleRow = ({
   scope,
   rule,
   editable,
-  changed = false,
 }: DefaultRuleRowProps) => {
   const setDefault = useSetPolicyDefault(scope);
   const set = (action: "allow" | "block") => {
@@ -37,17 +33,7 @@ export const DefaultRuleRow = ({
         Default
       </TableCell>
       <TableCell>
-        <span className="inline-flex items-center gap-1.5">
-          <span className="text-sm font-medium">Default Rule</span>
-          {changed && (
-            <Badge
-              variant="outline"
-              className="rounded border-amber-500/40 px-1.5 py-0 text-[10px] font-medium text-amber-700 dark:text-amber-400"
-            >
-              Changed
-            </Badge>
-          )}
-        </span>
+        <span className="text-sm font-medium">Default Rule</span>
       </TableCell>
       <TableCell>
         <span className="text-muted-foreground inline-flex items-center gap-1.5 text-xs">

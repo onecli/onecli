@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { db } from "@onecli/db";
-import { escapeSlackText } from "@onecli/channels/slack";
+import { escapeSlackText, groupClickOf } from "@onecli/channels/slack";
 import type { ApiEnv } from "../types";
 import { getCrypto } from "../providers";
 import { configuredAppUrl } from "../lib/app-origin";
@@ -26,7 +26,11 @@ import {
   verifyMarketplaceInstallState,
 } from "../services/channels/providers/slack/shared-install-service";
 import { onboardingReplyForSlackUser } from "../services/channels/providers/slack/onboarding-service";
-import { decideApprovalFromChannel } from "../services/channels/channel-approval-service";
+import {
+  decideApprovalFromChannel,
+  decideApprovalsFromChannel,
+  type ChannelGroupDecisionResult,
+} from "../services/channels/channel-approval-service";
 import { decideReachFromChannel } from "../services/channels/agent-reach-service";
 import { REACH_ACTION_DECISIONS } from "../services/channels/providers/slack/reach-card";
 import { decideActionApprovalFromChannel } from "../services/channels/action-approval-service";
@@ -209,6 +213,24 @@ const fireReply = (fn: () => Promise<unknown>): void => {
     log.warn({ err }, "slack reply post failed"),
   );
 };
+
+/** A grouped click's outcome, for the clicker: "✅ 3 approved by Ada ·
+ * 1 already decided · 1 couldn't be decided, try again". */
+const groupDecisionText = (
+  decision: "approve" | "deny",
+  outcome: Extract<ChannelGroupDecisionResult, { kind: "decided" }>,
+): string =>
+  [
+    `${decision === "approve" ? "✅" : "⛔"} ${outcome.decided.length} ${
+      decision === "approve" ? "approved" : "denied"
+    } by ${escapeSlackText(outcome.decidedByName)}`,
+    outcome.alreadySettled.length > 0 &&
+      `${outcome.alreadySettled.length} already decided`,
+    outcome.failed.length > 0 &&
+      `${outcome.failed.length} couldn't be decided, try again`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
 /** Slack's documented `response_url` host. Anything else is an SSRF attempt —
  * the interactivity payload is signed with a secret the attacher knows. */
@@ -620,7 +642,11 @@ export const channelInboundSlackRoutes = () => {
       type?: string;
       api_app_id?: string;
       user?: { id?: string };
-      actions?: { action_id?: string; value?: string }[];
+      actions?: {
+        action_id?: string;
+        value?: string;
+        selected_option?: { value?: string };
+      }[];
       response_url?: string;
     };
     try {
@@ -756,6 +782,52 @@ export const channelInboundSlackRoutes = () => {
           }),
         );
       }
+      return c.json({ ok: true });
+    }
+
+    // The GROUPED approval card's branch: Approve all / Deny all / one row.
+    // Every id is fenced to this presence's own posted cards service-side.
+    // Up to APPROVAL_GROUP_MAX_IDS gateway decides can outlast Slack's 3s
+    // ack, so the 200 goes first and the outcome rides response_url (good
+    // for 30 min).
+    const groupClick =
+      payload.type === "block_actions" && action ? groupClickOf(action) : null;
+    if (groupClick && clicker) {
+      const responseUrl =
+        payload.response_url && isSlackResponseUrl(payload.response_url)
+          ? payload.response_url
+          : null;
+      fireReply(async () => {
+        const outcome = await decideApprovalsFromChannel({
+          presenceId: presence.id,
+          approvalIds: groupClick.approvalIds,
+          decision: groupClick.decision,
+          clickerExternalUserId: clicker,
+        });
+        if (!responseUrl) return;
+        const text =
+          outcome.kind === "decided"
+            ? groupDecisionText(groupClick.decision, outcome)
+            : escapeSlackText(outcome.message);
+        // A one-row click on a multi-row card must not wipe the other rows,
+        // nor may a partial failure hide rows that are still pending: the
+        // adapter's next poll rewrites the card with what's left. Only a
+        // whole-card, fully settled decision replaces it here.
+        const replaceOriginal =
+          outcome.kind === "decided" &&
+          groupClick.approvalIds.length > 1 &&
+          outcome.failed.length === 0;
+        await fetch(responseUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(
+            replaceOriginal
+              ? { replace_original: true, text }
+              : { replace_original: false, response_type: "ephemeral", text },
+          ),
+          signal: AbortSignal.timeout(10_000),
+        });
+      });
       return c.json({ ok: true });
     }
 

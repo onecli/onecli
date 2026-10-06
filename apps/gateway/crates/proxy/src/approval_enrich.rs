@@ -28,7 +28,9 @@
 //!
 //! Record links need no read: each is the resolver's page for a validated id
 //! on the held request's own host, so a record row links even when its name
-//! can't be read.
+//! can't be read. A change to an existing record the request's path names (a
+//! GitHub issue, a Drive file) leads with a link to it, built by
+//! `summary`'s per-app template for the matched app.
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
@@ -52,6 +54,9 @@ pub struct EnrichContext<'a> {
     pub scheme: &'a str,
     /// The held request's host (and port, if any).
     pub host: &'a str,
+    pub method: &'a str,
+    /// The held request's path, with its query if any.
+    pub path: &'a str,
     /// Headers of the held request AFTER injection (carry the credential).
     pub headers: &'a reqwest::header::HeaderMap,
     /// The app connection whose credential those headers carry. `None`
@@ -62,16 +67,18 @@ pub struct EnrichContext<'a> {
     pub may_get: &'a (dyn Fn(&str) -> bool + Sync),
 }
 
-/// Link and name the records `summary` shows, through the resolver of the
-/// catalog app the request matched (`app`; never a guess from the host),
-/// then fold the record the action is about into the title. Never fails: on
-/// any problem a record keeps its id.
+/// Link and name the records `summary` shows, for the catalog app the
+/// request matched (`app`; never a guess from the host), then fold the
+/// record the action is about into the title. Never fails: on any problem a
+/// record keeps its id.
 pub async fn enrich(summary: &mut ApprovalSummary, app: Option<&str>, ctx: &EnrichContext<'_>) {
-    let resolver = app.and_then(summary::record_resolver);
-    if let (Some(resolver), "https") = (resolver, ctx.scheme) {
+    if let (Some(app), "https") = (app, ctx.scheme) {
         let host = common::util::strip_port(ctx.host);
-        summary.link_refs(|id| resolver.record_url(host, id));
-        resolve_names(summary, resolver, ctx, &format!("https://{}", ctx.host)).await;
+        summary.link_path_record(app, host, ctx.method, ctx.path);
+        if let Some(resolver) = summary::record_resolver(app) {
+            summary.link_refs(|id| resolver.record_url(host, id));
+            resolve_names(summary, resolver, ctx, &format!("https://{}", ctx.host)).await;
+        }
     }
     summary.finalize_title();
 }
@@ -292,6 +299,8 @@ mod tests {
                 http: &self.http,
                 scheme,
                 host: "acme.my.salesforce.com",
+                method: "POST",
+                path: "/services/data/v59.0/sobjects/Contact",
                 headers: &self.headers,
                 connection_id,
                 cache: &*self.cache,
@@ -479,5 +488,35 @@ mod tests {
         let before = s.clone();
         enrich(&mut s, Some("gmail"), &fx.ctx("https", Some("c"), ALLOW)).await;
         assert_eq!(s, before);
+    }
+
+    /// A change to an existing record the path names leads with a link to
+    /// it: for the matched app, over https only.
+    #[tokio::test]
+    async fn the_record_a_path_changes_leads_the_card_over_https_only() {
+        const ISSUE: &str = "/repos/acme/web/issues/42";
+        let fx = Fixture::new();
+        let github = |scheme| EnrichContext {
+            host: "api.github.com:443",
+            method: "PATCH",
+            path: ISSUE,
+            ..fx.ctx(scheme, None, ALLOW)
+        };
+        let issue = || summary::summarize_request("github", "PATCH", ISSUE, None, None);
+
+        let mut s = issue();
+        enrich(&mut s, Some("github"), &github("https")).await;
+        assert_eq!(
+            s.details[0].url.as_deref(),
+            Some("https://github.com/acme/web/issues/42")
+        );
+        for (scheme, app) in [("http", Some("github")), ("https", None)] {
+            let mut s = issue();
+            enrich(&mut s, app, &github(scheme)).await;
+            assert!(
+                s.details.iter().all(|d| d.url.is_none()),
+                "{scheme} {app:?}"
+            );
+        }
     }
 }

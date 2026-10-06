@@ -173,20 +173,7 @@ describe("createSandbox", () => {
     });
   });
 
-  it("maps the manager's 422 workspace_quota_exceeded to the seam's typed capacity error — the runner then reports at_capacity, the honest copy (step 6)", async () => {
-    manager.nextCreateError = {
-      status: 422,
-      code: "workspace_quota_exceeded",
-      message: "Workspace ws-ws1 is at its home quota",
-    };
-    const backend = backendFor();
-    backend.identify("rnr1");
-    await expect(backend.createSandbox(spec())).rejects.toBeInstanceOf(
-      SandboxCapacityError,
-    );
-  });
-
-  it("maps the WAKE door's quota refusal the same way — a parked home's PVC recreation can hit the fence too", async () => {
+  it("maps the wake's 422 workspace_quota_exceeded to the seam's typed capacity error — the runner then reports at_capacity, the honest copy; the wake is the only call that allocates a home", async () => {
     manager.nextHomeError = {
       status: 422,
       code: "workspace_quota_exceeded",
@@ -244,6 +231,16 @@ describe("lifecycle mapping", () => {
     const backend = backendFor();
     expect(await backend.provisionHome("sbx1")).toBe("home-sbx1");
     expect(await backend.provisionHome("sbx1")).toBe("home-sbx1");
+  });
+
+  it("homeRefFor names the home with NO call and agrees with provisionHome, so the stop path parks it without a list", async () => {
+    const backend = backendFor();
+    const before = manager.requests.length;
+    expect(backend.homeRefFor("sbx1")).toBe("home-sbx1");
+    expect(manager.requests.length).toBe(before);
+    expect(await backend.provisionHome("sbx1")).toBe(
+      backend.homeRefFor("sbx1"),
+    );
   });
 
   it("listManaged parses timestamps and preserves nulls", async () => {

@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  activeSettingsItem,
   getNavItems,
   getSettingsSections,
   getWorkspaceSettingsSections,
   workspaceNavItems,
 } from "./nav-config";
+import { orgConnectionsPath } from "./navigation";
 
 /**
  * The §3.13 truth table for the hosted-only nav entries (Skills, step 9):
@@ -65,6 +67,79 @@ describe("App Availability lives under Organization Settings", () => {
       .flatMap((section) => section.items)
       .find((entry) => entry.title === "App Availability");
     expect(item?.url).toBe("/org/org-1/settings/app-availability");
+  });
+});
+
+describe("Global Connections and Global Policy live under Organization Settings", () => {
+  const settingsItems = () =>
+    getSettingsSections("org-1").flatMap((section) => section.items);
+  const orgTitles = () =>
+    getNavItems("org-1", { entitled: true })
+      .flat()
+      .map((item) => item.title);
+
+  it("are settings entries, not top-level org nav entries", () => {
+    const titles = settingsItems().map((item) => item.title);
+    expect(titles).toContain("Global Connections");
+    expect(titles).toContain("Global Policy");
+    expect(orgTitles()).not.toContain("Global Connections");
+    expect(orgTitles()).not.toContain("Global Policy");
+  });
+
+  it("point at the settings URLs", () => {
+    const byTitle = (title: string) =>
+      settingsItems().find((entry) => entry.title === title)?.url;
+    expect(byTitle("Global Connections")).toBe(
+      "/org/org-1/settings/global-connections",
+    );
+    expect(byTitle("Global Policy")).toBe("/org/org-1/settings/policy");
+  });
+
+  it("the nav entry and the connections components share ONE root", () => {
+    // The tabs, apps grid, connected rows and app back-link all build on
+    // orgConnectionsPath; the nav entry drifting from it is how the moved
+    // section once kept linking to the old top-level URL.
+    const entry = settingsItems().find(
+      (item) => item.title === "Global Connections",
+    );
+    expect(entry?.url).toBe(orgConnectionsPath("org-1"));
+  });
+
+  it("drops the retired Domains and Encryption entries", () => {
+    const titles = settingsItems().map((item) => item.title);
+    expect(titles).not.toContain("Domains");
+    expect(titles).not.toContain("Encryption");
+  });
+});
+
+describe("activeSettingsItem", () => {
+  const sections = getSettingsSections("org-1");
+  const active = (pathname: string) =>
+    activeSettingsItem(sections, pathname)?.title;
+
+  it("keeps the entry active on every page below it", () => {
+    const root = "/org/org-1/settings/global-connections";
+    expect(active(root)).toBe("Global Connections");
+    expect(active(`${root}/custom`)).toBe("Global Connections");
+    expect(active(`${root}/connected`)).toBe("Global Connections");
+    expect(active(`${root}/apps/github`)).toBe("Global Connections");
+  });
+
+  it("matches on a segment boundary, never a bare string prefix", () => {
+    expect(active("/org/org-1/settings/policy")).toBe("Global Policy");
+    expect(active("/org/org-1/settings/policy-archive")).toBeUndefined();
+  });
+
+  it("is undefined outside the settings tree", () => {
+    expect(active("/org/org-1/workspaces")).toBeUndefined();
+    expect(active("/org/org-1/settings")).toBeUndefined();
+  });
+
+  it("resolves workspace settings the same way", () => {
+    const ws = getWorkspaceSettingsSections("w1");
+    expect(activeSettingsItem(ws, "/w/w1/settings/install")?.title).toBe(
+      "Install",
+    );
   });
 });
 

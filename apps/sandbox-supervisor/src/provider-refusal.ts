@@ -55,17 +55,21 @@ export const isTrialCreditExhausted = (message: string): boolean =>
   TRIAL_CREDIT_SHAPE.test(message);
 
 /**
- * The provider rejecting the CONVERSATION ITSELF as malformed: Anthropic's
- * 400 for a `tool_use` not answered by a `tool_result` in the very next
- * message, and its sibling for a `tool_result` no `tool_use` asked for.
- * Neither is a key problem (so it must never read as a provider refusal),
- * and neither can succeed on resend: the stored transcript is replayed
- * whole on every turn, so the same request is rejected forever until the
- * transcript is repaired (issue #1194: a torn checkpoint doubled it).
- * Matched on the provider's own wording, which names the block types.
+ * The provider rejecting the CONVERSATION ITSELF as malformed. None of these
+ * is a key problem (so it must never read as a provider refusal), and none
+ * can succeed on resend: the stored transcript is replayed whole on every
+ * turn, so the same request is rejected forever until the transcript is
+ * repaired. Matched on the provider's own wording, which names the offending
+ * shape:
+ * - a `tool_use` not answered by a `tool_result` in the very next message,
+ *   and its sibling, a `tool_result` no `tool_use` asked for (issue #1194: a
+ *   torn checkpoint doubled the history);
+ * - an image block whose media type the provider does not accept (an agent
+ *   that opened a `.bmp` or `.ico` stored it as `image/bmp`/`image/x-icon`).
+ * The jcode adapter repairs both at its next boot.
  */
 const TRANSCRIPT_REJECTED_SHAPE =
-  /tool_use`? ids were found without `?tool_result|unexpected `?tool_use_id`? found in `?tool_result/i;
+  /tool_use`? ids were found without `?tool_result|unexpected `?tool_use_id`? found in `?tool_result|image\.source\.base64\.media_type: Input should be/i;
 
 export const isTranscriptRejected = (message: string): boolean =>
   TRANSCRIPT_REJECTED_SHAPE.test(message);

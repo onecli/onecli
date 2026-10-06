@@ -36,6 +36,12 @@ import { ManagePermissionsDialog } from "../../_components/manage-permissions-di
  * (org-granted locked on, org-blocked frozen in the ON direction but still
  * detachable, the effective-status pill, Manage only where a catalog exists)
  * holds here without a second implementation.
+ *
+ * With nothing to attach yet and a connect door wired, the same dialog reads
+ * as Connect: the only constructive step is connecting, and the Slack card's
+ * Connect button deep-links here (`?attach=`). Its copy states the workspace
+ * auto-attach contract like every other connect door does, because a new
+ * account lands on for every agent of the workspace, not only this one.
  */
 export const AttachConnectionDialog = ({
   agentId,
@@ -50,8 +56,9 @@ export const AttachConnectionDialog = ({
   provider: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** Open the app's OAuth popup to add ANOTHER account. Omitted → no
-   * connect-new button (e.g. surfaces without popup wiring). */
+  /** Open the app's OAuth popup to add an account: the first one (the
+   * Connect state) or another. Omitted → no connect button (e.g. surfaces
+   * without popup wiring). */
   onConnectNew?: () => void;
 }) => {
   const app = getApp(provider);
@@ -85,6 +92,13 @@ export const AttachConnectionDialog = ({
     credentialsQuery.isPending;
   const isError =
     connectionsQuery.isError || grantsQuery.isError || credentialsQuery.isError;
+  const failed = [connectionsQuery, grantsQuery, credentialsQuery].filter(
+    (q) => q.isError,
+  );
+  const isRetrying = failed.some((q) => q.isFetching);
+  const retry = () => {
+    for (const q of failed) void q.refetch();
+  };
 
   const grantByConnection = new Map(
     (grantsQuery.data?.connections ?? []).map((g) => [g.connectionId, g]),
@@ -93,19 +107,54 @@ export const AttachConnectionDialog = ({
     (credentialsQuery.data?.connections ?? []).map((e) => [e.id, e]),
   );
   const hasCatalog = definitions.some((d) => d.provider === provider);
+  // Until the pool resolves the dialog cannot know whether it is a Connect
+  // or an Attach dialog, so the header names only the app: a cold deep-link
+  // landing must not say "Attach" and then flip to "Connect" (the exact
+  // mismatch this state exists to remove).
+  const known = !isPending && !isError;
+  // Nothing to attach yet and a connect door: the only constructive step IS
+  // connecting, so the dialog says Connect. The popup still needs this
+  // click, because a browser blocks one opened without a user gesture.
+  const connectFirst = known && pool.length === 0 && onConnectNew !== undefined;
+  const who = agentName ?? "this agent";
+  const title = !known
+    ? appName
+    : connectFirst
+      ? `Connect ${appName}`
+      : `Attach ${appName}`;
 
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="sm:max-w-xl">
+        <DialogContent
+          className="sm:max-w-xl"
+          // No description while unresolved: the body's status or alert
+          // carries the message, so opt out of Radix's describedby link.
+          {...(!known && { "aria-describedby": undefined })}
+        >
           <DialogHeader>
-            <DialogTitle>Attach {appName}</DialogTitle>
-            <DialogDescription>
-              Turn on the {appName} accounts{" "}
-              {agentName ? `${agentName} should` : "this agent should"} be able
-              to use. Turning one on grants full access immediately. Adjust
-              access anytime from the agent&apos;s Connections section.
-            </DialogDescription>
+            <DialogTitle>{title}</DialogTitle>
+            {known && (
+              <DialogDescription>
+                {connectFirst ? (
+                  // The consent line every connect door states where the
+                  // click happens (the in-chat card, the app picker): the
+                  // API attaches a new account to every agent of the
+                  // workspace, not only this one.
+                  <>
+                    A new account is on for every agent in this workspace, {who}{" "}
+                    included, with full access. Adjust access anytime from the
+                    agent&apos;s Connections section.
+                  </>
+                ) : (
+                  <>
+                    Turn on the {appName} accounts {who} should be able to use.
+                    Turning one on grants full access immediately. Adjust access
+                    anytime from the agent&apos;s Connections section.
+                  </>
+                )}
+              </DialogDescription>
+            )}
           </DialogHeader>
           {isPending ? (
             // role="status": the swap to rows (or the empty state) is
@@ -121,17 +170,33 @@ export const AttachConnectionDialog = ({
               <span className="sr-only">Loading connections…</span>
             </div>
           ) : isError ? (
-            <div
-              role="alert"
-              className="border-destructive/30 bg-destructive/5 text-destructive flex items-center gap-2 rounded-lg border px-4 py-3 text-sm"
-            >
+            <div className="border-destructive/30 bg-destructive/5 text-destructive flex items-center gap-2 rounded-lg border px-4 py-3 text-sm">
               <TriangleAlert className="size-4 shrink-0" aria-hidden />
-              Couldn&apos;t load {appName} accounts for this agent.
+              {/* The alert is the message alone: a live region around the
+                  button would re-announce it on every label change. */}
+              <span role="alert" className="min-w-0 flex-1">
+                Couldn&apos;t load {appName} accounts for this agent.
+              </span>
+              {/* The way out of the error: refetch what failed (a query that
+                  already succeeded is a no-op cache read). */}
+              <Button
+                size="sm"
+                variant="outline"
+                className="shrink-0"
+                loading={isRetrying}
+                onClick={retry}
+              >
+                {isRetrying ? "Retrying…" : "Try again"}
+              </Button>
             </div>
           ) : pool.length === 0 ? (
-            <p className="text-muted-foreground py-4 text-sm">
-              No connected {appName} accounts in this workspace yet.
-            </p>
+            // The Connect state needs no body: its description already says
+            // what connecting does, and its footer holds the one action.
+            connectFirst ? null : (
+              <p className="text-muted-foreground py-4 text-sm">
+                No connected {appName} accounts in this workspace yet.
+              </p>
+            )
           ) : (
             // Bounded like every sibling list dialog (the reflection dialog's
             // exact scroller) — a many-account pool must not outgrow the
@@ -165,39 +230,36 @@ export const AttachConnectionDialog = ({
             </div>
           )}
           <DialogFooter className="gap-2 sm:justify-between">
-            {onConnectNew ? (
-              // "another" is only true once at least one account exists — the
-              // Slack card's Connect deep link lands exactly on the empty
-              // state, where connecting IS the constructive action: it takes
-              // the primary emphasis and Done steps back to outline. The
-              // visible text IS the accessible name (label-in-name) — the
-              // dialog title already carries the app.
-              <Button
-                variant={
-                  pool.length === 0 && !isPending && !isError
-                    ? "default"
-                    : "outline"
-                }
-                onClick={onConnectNew}
-              >
+            {onConnectNew && known && !connectFirst ? (
+              // The secondary door beside the list: at least one account
+              // exists here, so "another" is true. Hidden until the pool
+              // resolves (its label and role are unknown while loading, and
+              // a failed load's way forward is Try again). The visible text
+              // IS the accessible name (label-in-name).
+              <Button variant="outline" onClick={onConnectNew}>
                 <Plus className="size-3.5" aria-hidden />
-                {pool.length === 0
-                  ? "Connect an account"
-                  : "Connect another account"}
+                Connect another account
               </Button>
             ) : (
               <span />
             )}
-            <Button
-              variant={
-                onConnectNew && pool.length === 0 && !isPending && !isError
-                  ? "outline"
-                  : "default"
-              }
-              onClick={() => onOpenChange(false)}
-            >
-              Done
-            </Button>
+            {/* The confirm pair reads Cancel, then the primary action on the
+                right (the cron and memory dialogs' order). The dismiss
+                button keeps its slot across every state, so focus resting on
+                it survives the loading swap. Cancel before anything is
+                known or done; Done otherwise (never "Close": the corner X
+                already carries that name). */}
+            <div className="flex justify-end gap-2">
+              <Button
+                variant={known && !connectFirst ? "default" : "outline"}
+                onClick={() => onOpenChange(false)}
+              >
+                {connectFirst || isPending ? "Cancel" : "Done"}
+              </Button>
+              {connectFirst && (
+                <Button onClick={onConnectNew}>Connect {appName}</Button>
+              )}
+            </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -21,7 +21,7 @@ import { proofDatabaseUrl } from "../testing/pg-proof.js";
  *    published generation (no rollback brings it back);
  *  - a rule naming other principals too keeps them, minus this one;
  *  - an authored "everyone" rule and another org's rules are untouched;
- *  - nothing is published (a staged draft edit stays staged);
+ *  - the delete publishes no generation of its own (cleaned in place);
  *  - a user's rules in EVERY org they were named in go, and those orgs are
  *    returned for the gateway flush;
  *  - a group delete never deadlocks against concurrent rule writes.
@@ -149,13 +149,22 @@ const everyoneRules = (organizationId = ORG) =>
     select: { name: true, status: true, generation: true },
   });
 
-const identitiesOf = async (name: string) =>
-  (
+/** The distinct identity sets across every copy of the rule (the draft and
+ * each retained published generation). A single entry means every copy agrees. */
+const identitiesOf = async (name: string) => {
+  const sets = (
     await db.policyRuleV2.findMany({
       where: { organizationId: ORG, name },
       include: { identities: true },
     })
-  ).map((r) => r.identities.map((i) => i.userId ?? i.groupId).sort());
+  ).map((r) =>
+    JSON.stringify(r.identities.map((i) => i.userId ?? i.groupId).sort()),
+  );
+  return [...new Set(sets)].map((s) => JSON.parse(s) as string[]);
+};
+
+const copiesOf = (organizationId: string, name: string) =>
+  db.policyRuleV2.count({ where: { organizationId, name } });
 
 beforeAll(async () => {
   if (!PROOF_URL) return;
@@ -201,7 +210,7 @@ describe.skipIf(!PROOF_URL)(
 
     it("a non-member stays blocked past the org's deny default", async () => {
       await makeGroup(GROUP);
-      await policy.setPolicyDefaultAction(ORG_SCOPE, "block");
+      await policy.setPolicyDefaultAction(ORG_SCOPE, "block", OWNER);
       await rule(ORG_SCOPE, "only G reaches x", "allow", "x.example.test", [
         { type: "group", id: GROUP },
       ]);
@@ -240,24 +249,15 @@ describe.skipIf(!PROOF_URL)(
       );
       await publish();
       await publish(OTHER_ORG);
+      const everyoneCopies = await copiesOf(ORG, "everyone");
+      const foreignCopies = await copiesOf(OTHER_ORG, "foreign");
 
       await deleteGroup(GROUP);
 
-      // Draft + live copy, each keeping only the surviving group.
-      expect(await identitiesOf("shared")).toEqual([
-        [OTHER_GROUP],
-        [OTHER_GROUP],
-      ]);
-      expect(
-        await db.policyRuleV2.count({
-          where: { organizationId: ORG, name: "everyone" },
-        }),
-      ).toBe(2);
-      expect(
-        await db.policyRuleV2.count({
-          where: { organizationId: OTHER_ORG, name: "foreign" },
-        }),
-      ).toBe(2);
+      // Every copy (draft + each live generation) keeps only the surviving group.
+      expect(await identitiesOf("shared")).toEqual([[OTHER_GROUP]]);
+      expect(await copiesOf(ORG, "everyone")).toBe(everyoneCopies);
+      expect(await copiesOf(OTHER_ORG, "foreign")).toBe(foreignCopies);
     });
 
     it("only ever touches the group's own organization: planted control", async () => {
@@ -289,25 +289,21 @@ describe.skipIf(!PROOF_URL)(
       ).toBe(1);
     });
 
-    it("cleans every retained generation and publishes nothing", async () => {
+    it("cleans every retained generation in place", async () => {
       await makeGroup(GROUP);
       await makeGroup(OTHER_GROUP);
       const survivor: Identity[] = [{ type: "group", id: OTHER_GROUP }];
       await rule(ORG_SCOPE, "group block", "block", "g.example.test", [
         { type: "group", id: GROUP },
       ]);
-      await publish();
-      // A second generation: the first stays behind as a rollback target that
-      // still names the group.
+      // A later write: the earlier generations stay behind as rollback targets
+      // that still name the group.
       await rule(ORG_SCOPE, "filler", "block", "filler.example.test", survivor);
-      await publish();
-      // Staged, unpublished.
-      await rule(ORG_SCOPE, "staged", "block", "staged.example.test", survivor);
       const before = await db.policyRuleV2.aggregate({
         where: { organizationId: ORG, status: "published" },
         _max: { generation: true },
       });
-      expect(before._max.generation).toBe(2);
+      expect(before._max.generation).toBeGreaterThan(1);
 
       await deleteGroup(GROUP);
 
@@ -317,16 +313,12 @@ describe.skipIf(!PROOF_URL)(
           where: { organizationId: ORG, name: "group block" },
         }),
       ).toBe(0);
+      // Cleaned in place: the delete mints no generation of its own.
       const after = await db.policyRuleV2.aggregate({
         where: { organizationId: ORG, status: "published" },
         _max: { generation: true },
       });
-      expect(after._max.generation).toBe(2);
-      expect(
-        await db.policyRuleV2.count({
-          where: { organizationId: ORG, status: "published", name: "staged" },
-        }),
-      ).toBe(0);
+      expect(after._max.generation).toBe(before._max.generation);
     });
 
     it("a SCIM group delete takes the same path", async () => {
@@ -409,7 +401,7 @@ describe.skipIf(!PROOF_URL)(
       });
       expect(await everyoneRules()).toEqual([]);
       expect(await everyoneRules(OTHER_ORG)).toEqual([]);
-      expect(await identitiesOf("shared")).toEqual([[BYSTANDER], [BYSTANDER]]);
+      expect(await identitiesOf("shared")).toEqual([[BYSTANDER]]);
       expect(await db.user.count({ where: { id: LEAVER } })).toBe(0);
     });
 

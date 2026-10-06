@@ -9,7 +9,12 @@ import type { PageScope } from "@/lib/api";
 import { ConnectionAgentsReflection } from "@/lib/components/policy-reflect";
 
 interface InheritedConnectionCardProps {
-  connection: { id: string; label: string | null };
+  connection: {
+    id: string;
+    label: string | null;
+    /** Set when the provider refused the saved login. */
+    reauthRequiredAt?: string | null;
+  };
   appName: string;
   pageScope?: PageScope;
 }
@@ -35,7 +40,22 @@ export const InheritedConnectionCard = ({
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
             <p className="truncate text-sm font-medium">{displayName}</p>
-            <p className="mt-0.5 text-xs text-muted-foreground">Organization</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              Organization
+              {connection.reauthRequiredAt && (
+                <>
+                  {" "}
+                  &middot;{" "}
+                  <span className="text-destructive">Needs reconnect</span>
+                </>
+              )}
+            </p>
+            {connection.reauthRequiredAt && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                An organization admin can reconnect it from the
+                organization&apos;s connections.
+              </p>
+            )}
           </div>
         </div>
         {showAgentAccess && (

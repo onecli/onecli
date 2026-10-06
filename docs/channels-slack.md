@@ -223,11 +223,11 @@ list those tools; the answer is what keeps the agent from retrying.
   descriptive. Generate a new token under **Your App Configuration Tokens**
   and paste the new Refresh Token. `invalid_refresh_token` means the same for
   a malformed or truncated paste.
-- **The org card says the token could not be refreshed** — Slack refused a
-  rotation as final: the pair was revoked, or another tool consumed the
-  single-use refresh token (a refresh token that keeps being refused after its
-  access token expires counts as dead too). A passing Slack outage does _not_
-  do this: rotation keeps the stored pair through transient refusals and
+- **The org card says Slack refused to rotate the stored token** — Slack
+  refused a rotation as final: the pair was revoked, or another tool consumed
+  the single-use refresh token (a refresh token that keeps being refused after
+  its access token expires counts as dead too). A passing Slack outage does
+  _not_ do this: rotation keeps the stored pair through transient refusals and
   retries on the next hourly sweep. Paste a fresh refresh token; nothing else
   stops working meanwhile.
 - **"Approvals need re-attaching" on an agent** — the member who attached

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   AdapterConfigResponse,
   AdapterDecisionRequest,
+  AdapterGroupDecisionRequest,
   AdapterIngestRequest,
   AdapterIngestResponse,
   AdapterPresence,
@@ -1070,5 +1071,93 @@ describe("interactive decisions", () => {
 
     await vi.waitFor(() => expect(decides).toHaveLength(1));
     expect(decides[0]).toMatchObject({ approvalId: "app-2", decision: "deny" });
+  });
+});
+
+describe("grouped card clicks (socket arm)", () => {
+  const groupClick = (value: string) =>
+    JSON.stringify({
+      envelope_id: "env-group",
+      type: "interactive",
+      payload: {
+        type: "block_actions",
+        user: { id: "U77" },
+        channel: { id: "D100" },
+        actions: [{ action_id: "channel_group_approve", value }],
+      },
+    });
+
+  const startWithGroupDecide = async (
+    result: Awaited<ReturnType<ControlPlaneClient["decideGroup"]>>,
+  ) => {
+    const requests: AdapterGroupDecisionRequest[] = [];
+    const { controlPlane } = feedControlPlane([presence()], {
+      decideGroup: async (request) => {
+        requests.push(request);
+        return result;
+      },
+    });
+    await startAdapter(controlPlane);
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    sockets[0]!.open();
+    return requests;
+  };
+
+  it("forwards exactly the card's ids and the clicker to the fenced group decide", async () => {
+    const requests = await startWithGroupDecide({
+      kind: "decided",
+      decidedByName: "Dana",
+      decided: ["ap-1", "ap-2"],
+      alreadySettled: [],
+      failed: [],
+    });
+    sockets[0]!.emit(groupClick("ap-1,ap-2"));
+
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    expect(requests[0]).toEqual({
+      presenceId: "p1",
+      approvalIds: ["ap-1", "ap-2"],
+      decision: "approve",
+      clickerExternalUserId: "U77",
+    });
+    // A clean decide tells no one privately.
+    expect(slack.callsTo("chat.postEphemeral")).toHaveLength(0);
+  });
+
+  it("tells ONLY the clicker when the control plane refuses the click", async () => {
+    await startWithGroupDecide({
+      kind: "refused",
+      message: "Only workspace members can decide this <here>.",
+    });
+    sockets[0]!.emit(groupClick("ap-1"));
+
+    await vi.waitFor(() =>
+      expect(slack.callsTo("chat.postEphemeral")).toHaveLength(1),
+    );
+    const notice = slack.callsTo("chat.postEphemeral")[0]!;
+    expect(notice.form).toEqual({
+      channel: "D100",
+      user: "U77",
+      text: "Only workspace members can decide this &lt;here&gt;.",
+    });
+    expect(slack.callsTo("chat.update")).toHaveLength(0);
+  });
+
+  it("tells the clicker how many could not be decided on a partial failure", async () => {
+    await startWithGroupDecide({
+      kind: "decided",
+      decidedByName: "Dana",
+      decided: ["ap-1"],
+      alreadySettled: [],
+      failed: ["ap-2", "ap-3"],
+    });
+    sockets[0]!.emit(groupClick("ap-1,ap-2,ap-3"));
+
+    await vi.waitFor(() =>
+      expect(slack.callsTo("chat.postEphemeral")).toHaveLength(1),
+    );
+    expect(slack.callsTo("chat.postEphemeral")[0]!.form.text).toBe(
+      "2 of these couldn't be decided just now. They're still on the card; try again.",
+    );
   });
 });

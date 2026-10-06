@@ -12,6 +12,11 @@ const OverQuotaBanner = dynamic(() =>
     (m) => m.OverQuotaBanner,
   ),
 );
+const PaymentIssueBanner = dynamic(() =>
+  import("@/ee/billing/_components/payment-issue-banner").then(
+    (m) => m.PaymentIssueBanner,
+  ),
+);
 
 interface Props {
   children: React.ReactNode;
@@ -68,6 +73,7 @@ export default async function WorkspaceLayout({ children, params }: Props) {
           page is handed the dashboard's raw flex ROW cell, where two loose
           siblings would render side by side instead of stacked. */}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <PaymentIssueBanner />
         <OverQuotaBanner />
         {children}
       </div>

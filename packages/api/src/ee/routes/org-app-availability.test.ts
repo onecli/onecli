@@ -18,6 +18,10 @@ vi.hoisted(() => {
 const store = vi.hoisted(() => ({
   members: [] as { organizationId: string; userId: string; role: string }[],
   featureAllowed: true,
+  /** Features denied by the quota mock, so a test can allow availability while
+   *  denying the Enterprise directory (the Scale-plan shape). */
+  deniedFeatures: [] as string[],
+  featureCalls: [] as string[],
   lastSetInput: null as unknown,
   setCalls: 0,
 }));
@@ -58,8 +62,9 @@ vi.mock("@onecli/db", () => ({
 vi.mock("../services/quota-service", async () => {
   const { ServiceError } = await import("../../services/errors");
   return {
-    assertFeatureAllowed: async () => {
-      if (!store.featureAllowed)
+    assertFeatureAllowed: async (_orgId: string, feature: string) => {
+      store.featureCalls.push(feature);
+      if (!store.featureAllowed || store.deniedFeatures.includes(feature))
         throw new ServiceError(
           "FORBIDDEN",
           "This feature requires Enterprise.",
@@ -108,6 +113,8 @@ beforeEach(() => {
     { organizationId: "org-1", userId: "user-1", role: "admin" },
   ];
   store.featureAllowed = true;
+  store.deniedFeatures = [];
+  store.featureCalls = [];
   store.lastSetInput = null;
   store.setCalls = 0;
 });
@@ -168,6 +175,41 @@ describe("enterprise gate", () => {
     const res = await app.request(
       "/v1/org/app-availability",
       put({ mode: "open", rules: [] }),
+    );
+    expect(res.status).toBe(200);
+    expect(store.setCalls).toBe(1);
+  });
+});
+
+describe("plan gates", () => {
+  it("gates a restricting write on app_availability (Scale), not on groups", async () => {
+    const res = await app.request(
+      "/v1/org/app-availability",
+      put({
+        mode: "restricted",
+        rules: [{ userIds: ["u1"], groupIds: [], providers: ["gmail"] }],
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(store.featureCalls).toEqual(["app_availability"]);
+  });
+
+  it("additionally requires groups when a rule targets a directory group", async () => {
+    store.deniedFeatures = ["groups"];
+    const res = await app.request("/v1/org/app-availability", put(validBody));
+    expect(res.status).toBe(403);
+    expect(store.setCalls).toBe(0);
+    expect(store.featureCalls).toEqual(["app_availability", "groups"]);
+  });
+
+  it("lets a Scale org save people-only rules while groups stay locked", async () => {
+    store.deniedFeatures = ["groups"];
+    const res = await app.request(
+      "/v1/org/app-availability",
+      put({
+        mode: "restricted",
+        rules: [{ userIds: ["u1"], groupIds: [], providers: ["gmail"] }],
+      }),
     );
     expect(res.status).toBe(200);
     expect(store.setCalls).toBe(1);

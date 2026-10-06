@@ -63,12 +63,13 @@ export const injectableSecretWhere = async (
 };
 
 /**
- * Which secret wins when several of a type are reachable. The gateway merges
- * org → workspace with later injections overriding earlier (`connect.rs`), so
- * the WORKSPACE one is what actually gets injected. Descending `scope` orders
- * "workspace" > "organization", reproducing that — an unordered `findFirst`
- * returns whichever row Postgres reaches first, which can hand the container
- * an org secret's auth mode while the gateway injects the workspace's.
+ * Which secret wins when several of a type are reachable. The gateway keeps
+ * ONE credential per LLM provider type, workspace over organization
+ * (`one_credential_per_llm_provider` in `secret_inject.rs`), so the WORKSPACE
+ * one is what actually gets injected. Descending `scope` orders "workspace" >
+ * "organization", reproducing that; an unordered `findFirst` returns whichever
+ * row Postgres reaches first, which can hand the container an org secret's
+ * auth mode while the gateway injects the workspace's.
  */
 const SCOPE_PRECEDENCE = { scope: "desc" } as const;
 

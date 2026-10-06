@@ -59,9 +59,11 @@ import { clay } from "./clay";
 import { x } from "./x";
 import { fathom } from "./fathom";
 import { fireflies } from "./fireflies";
+import { timeless } from "./timeless";
 import { zohoCrm } from "./zoho-crm";
 import { snowflake } from "./snowflake";
 import { stripe } from "./stripe";
+import { navan } from "./navan";
 import { salesforce } from "./salesforce";
 
 const staticApps: AppDefinition[] = [
@@ -123,9 +125,11 @@ const staticApps: AppDefinition[] = [
   x,
   fathom,
   fireflies,
+  timeless,
   zohoCrm,
   snowflake,
   stripe,
+  navan,
 ];
 
 export const getApps = (): AppDefinition[] => [...staticApps];

@@ -280,11 +280,11 @@ describe("fireDueWatches — the in-origin wake (direct origins)", () => {
     expect(mocks.ensureSourcedConversation).not.toHaveBeenCalled();
   });
 
-  it("a busy origin JOINS the running turn instead of queueing behind it", async () => {
+  it("a busy origin JOINS a running WAKE instead of queueing behind it", async () => {
     // The doubled-wake fix (#1013). Measured on a live stack: every wake in
-    // a batch was born while an earlier turn was still answering, so the
+    // a batch was born while an earlier wake was still answering, so the
     // agent reported partial state, then reported again. Joining makes the
-    // turn that is already speaking say it once.
+    // wake that is already speaking say it once.
     //
     // MUTATION-PROOF: remove the join arm and this fails — the wake goes
     // back to waiting for the running turn to finish.
@@ -305,6 +305,28 @@ describe("fireDueWatches — the in-origin wake (direct origins)", () => {
         where: { id: { in: ["w-1"] }, status: "triggered" },
       }),
     );
+  });
+
+  it("looks ONLY for a running wake to join: a person's exchange is never a join target", async () => {
+    // Steering a wake into a person's live turn hijacked their answer and
+    // put the platform's instruction in their channel thread as if they had
+    // said it (live, 2026-10-03). The lookup itself is the fence.
+    // MUTATION-PROOF: drop `source: "watch"` from the lookup and this fails.
+    mocks.createTurn.mockRejectedValue(new ServiceError("CONFLICT", "busy"));
+
+    await fireDueWatches();
+
+    expect(mocks.turnFindFirst).toHaveBeenCalledWith({
+      where: {
+        conversationId: "conv-origin",
+        status: "running",
+        source: "watch",
+      },
+      select: { id: true },
+    });
+    // No running wake (the default mock): the wake waits, claimed.
+    expect(mocks.createFollowUp).not.toHaveBeenCalled();
+    expect(mocks.watchUpdateMany).not.toHaveBeenCalled();
   });
 
   it("marks the watches fired ONLY after the join row exists", async () => {
@@ -367,9 +389,9 @@ describe("fireDueWatches — the in-origin wake (direct origins)", () => {
     );
   });
 
-  it("falls back when there is no running turn to join", async () => {
-    // The conflict was something other than a live turn (a queued one, a
-    // race that already resolved). Nothing to steer into.
+  it("falls back when there is no running wake to join", async () => {
+    // The conflict was something other than a live wake (a person's turn, a
+    // queued one, a race that already resolved). Nothing to steer into.
     mocks.createTurn.mockRejectedValue(new ServiceError("CONFLICT", "busy"));
     mocks.turnFindFirst.mockResolvedValue(null);
 

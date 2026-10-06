@@ -638,6 +638,44 @@ mod tests {
             "/graphql",
             &mutation
         ));
+        // Monday: the same shape on POST /v2. The read tool admits the
+        // shorthand (anonymous) query Monday's own docs use, and nothing
+        // else; the write tool takes the mutation.
+        let shorthand = graphql_envelope("{ boards (limit: 5) { id name } }");
+        let create_item =
+            graphql_envelope("mutation { create_item (board_id: 1, item_name: \"x\") { id } }");
+        assert!(matches_with_body(
+            "monday",
+            &["query_boards"],
+            "api.monday.com",
+            "POST",
+            "/v2",
+            &shorthand
+        ));
+        assert!(!matches_with_body(
+            "monday",
+            &["query_boards"],
+            "api.monday.com",
+            "POST",
+            "/v2",
+            &create_item
+        ));
+        assert!(matches_with_body(
+            "monday",
+            &["mutate_boards"],
+            "api.monday.com",
+            "POST",
+            "/v2",
+            &create_item
+        ));
+        assert!(!matches_with_body(
+            "monday",
+            &["mutate_boards"],
+            "api.monday.com",
+            "POST",
+            "/v2",
+            &shorthand
+        ));
         // Non-GraphQL tools are untouched by the discrimination: a REST tool
         // matches with or without a body.
         assert!(matches_with_body(
@@ -1245,6 +1283,73 @@ mod tests {
     }
 
     #[test]
+    fn navan_tools_scope_to_their_endpoints() {
+        // "Require approval for every write" compiles to write_all; it must
+        // catch every documented Navan write through the REAL matcher.
+        for (method, path) in [
+            ("PATCH", "/v1/expense/transactions"),
+            ("POST", "/v1/expense/custom-fields/customField1/options"),
+            ("PUT", "/v1/expense/gl-codes"),
+            ("PATCH", "/v1/expense/gl-codes/4000"),
+            ("PATCH", "/v1/expense/gl-code-settings"),
+            ("DELETE", "/v1/expense/gl-code-exclusions/4000"),
+            ("POST", "/v1/expense/tax-mappings/confirm"),
+            ("DELETE", "/v1/expense/tax-mappings/pending"),
+        ] {
+            assert!(
+                matches("navan", &["write_all"], "api.navan.com", method, path),
+                "write_all must gate {method} {path}"
+            );
+        }
+        // read_all is GET-only: it never covers a write.
+        assert!(!matches(
+            "navan",
+            &["read_all"],
+            "api.navan.com",
+            "PATCH",
+            "/v1/expense/transactions"
+        ));
+        // get_transaction covers the receipt sub-resources under one id.
+        for path in [
+            "/v1/expense/transactions/txn_1",
+            "/v1/expense/transactions/txn_1/receipt",
+            "/v1/expense/transactions/txn_1/receipt/download",
+        ] {
+            assert!(matches(
+                "navan",
+                &["get_transaction"],
+                "api.navan.com",
+                "GET",
+                path
+            ));
+        }
+        // A bookings grant does not open expense data.
+        assert!(!matches(
+            "navan",
+            &["list_bookings"],
+            "api.navan.com",
+            "GET",
+            "/v1/expense/card-transactions"
+        ));
+        // A GL-code grant covers both the collection and one code, and only
+        // its own methods: the exclusions endpoint is a separate tool.
+        assert!(matches(
+            "navan",
+            &["manage_gl_codes"],
+            "api.navan.com",
+            "PATCH",
+            "/v1/expense/gl-codes/4000"
+        ));
+        assert!(!matches(
+            "navan",
+            &["manage_gl_codes"],
+            "api.navan.com",
+            "POST",
+            "/v1/expense/gl-code-exclusions"
+        ));
+    }
+
+    #[test]
     fn stripe_rules_cover_the_files_upload_host() {
         // Stripe injects on api.stripe.com AND files.stripe.com (the Files API's
         // separate upload host), but every catalog tool lists api.stripe.com
@@ -1418,6 +1523,46 @@ mod tests {
             "api.affinity.co",
             "GET",
             "/v2/persons"
+        ));
+    }
+
+    #[test]
+    fn timeless_mcp_shares_the_rest_host_but_stays_its_own_tool() {
+        // Unlike Affinity, the Timeless MCP server lives on the SAME host as
+        // the REST API (the one injection host rule covers both), so the fence
+        // is the path alone: `/mcp/*` with or without the trailing slash, any
+        // method, and never a REST path or a lookalike prefix.
+        for (method, path) in [("POST", "/mcp/"), ("POST", "/mcp"), ("GET", "/mcp/")] {
+            assert!(
+                matches(
+                    "timeless",
+                    &["mcp_access"],
+                    "api.timeless.day",
+                    method,
+                    path
+                ),
+                "{method} {path}"
+            );
+        }
+        for path in ["/v1/meetings", "/mcpx", "/v1/mcp"] {
+            assert!(
+                !matches(
+                    "timeless",
+                    &["mcp_access"],
+                    "api.timeless.day",
+                    "POST",
+                    path
+                ),
+                "{path}"
+            );
+        }
+        // And the REST tools do not reach the MCP server.
+        assert!(!matches(
+            "timeless",
+            &["send_bot_to_link", "manage_webhooks"],
+            "api.timeless.day",
+            "POST",
+            "/mcp/"
         ));
     }
 

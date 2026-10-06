@@ -20,7 +20,12 @@ export interface PendingApproval {
   /** The readable card (`summary::ApprovalSummary` on the wire). */
   readonly summary?: {
     readonly action: string;
-    readonly details: ReadonlyArray<{ label: string; value: string }>;
+    readonly details: ReadonlyArray<{
+      label: string;
+      value: string;
+      /** The record's page, gateway-built (https only); absent otherwise. */
+      url?: string;
+    }>;
     readonly subject?: {
       verb: string;
       lead: string;

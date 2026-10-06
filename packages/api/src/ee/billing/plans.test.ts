@@ -166,10 +166,11 @@ describe("premium feature gating", () => {
     // Pins the tier moves in this release: the route tests mock
     // assertFeatureAllowed, so a regression of these map values would otherwise
     // go uncaught.
-    expect(requiredPlanFor("sso")).toBe("enterprise"); // moved Scale -> Enterprise (July 2026)
+    expect(requiredPlanFor("sso")).toBe("scale"); // back to Scale (Sept 2026)
     expect(requiredPlanFor("policy.rate_limit")).toBe("pro");
     expect(requiredPlanFor("policy.deny_mode")).toBe("team");
     expect(requiredPlanFor("groups")).toBe("enterprise");
+    expect(requiredPlanFor("app_availability")).toBe("scale");
   });
 
   it("manual approval is free on every plan (no premium feature, no rule-action gate)", () => {

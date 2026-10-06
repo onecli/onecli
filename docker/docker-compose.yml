@@ -103,8 +103,10 @@ services:
       # THE canonical public URL — the address people open OneCLI at. Every
       # other origin derives from it (http means ports mode: api/gateway on
       # the same host's ports; https means proxy mode: one origin, a reverse
-      # proxy routes /v1, /auth and /gw). install.sh and the setup wizard
-      # write it into the `.env` beside this file; unset means localhost.
+      # proxy routes /v1, /auth, /scim/v2 and /gw, with the dashboard's own
+      # /auth pages carved out; configs in docs/self-hosting.md). install.sh
+      # and the setup wizard write it into the `.env` beside this file; unset
+      # means localhost.
       ONECLI_EXTERNAL_URL: ${ONECLI_EXTERNAL_URL:-}
       # Legacy alias and per-origin overrides (split-host installs). Kept
       # working forever; pass-throughs only — the services derive their own
@@ -258,6 +260,12 @@ services:
       # Where the gateway reaches the api service (internal vault calls — never
       # the public API_URL, which can name a real external host).
       INTERNAL_API_URL: http://api:10256
+      # The gateway refuses to proxy agents to private, loopback and
+      # link-local addresses (its own api/web/postgres neighbours included).
+      # To let agents reach internal services, list them — comma-separated
+      # CIDRs, IPs, hostnames or *.suffix — e.g. 10.20.0.0/16,jira.corp.
+      # Cloud-metadata addresses open only by exact IP.
+      GATEWAY_ALLOW_PRIVATE_DESTINATIONS: ${GATEWAY_ALLOW_PRIVATE_DESTINATIONS:-}
     volumes:
       - app-data:/app/data
     env_file:

@@ -56,10 +56,11 @@
  *   `harness_busy`: the raw message rides beside it.
  * - `transcript_rejected`: the harness lived and the key was fine, but the
  *   model provider rejected the CONVERSATION as malformed (a `tool_use` not
- *   answered by its `tool_result`). The stored transcript is replayed whole
- *   on every turn, so every resend fails identically until it is repaired
- *   (issue #1194: a container stop tore the harness's checkpoint and doubled
- *   the history; the jcode adapter repairs that shape at its next boot).
+ *   answered by its `tool_result`, or an image in a media type the provider
+ *   does not accept). The stored transcript is replayed whole on every turn,
+ *   so every resend fails identically until it is repaired (issue #1194: a
+ *   container stop tore the harness's checkpoint and doubled the history;
+ *   the jcode adapter repairs both shapes at its next boot).
  *   Classified by the supervisor from the provider's wording; same
  *   version-skew posture as `harness_busy`: the raw message rides beside it.
  */

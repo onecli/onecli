@@ -37,12 +37,21 @@ import type { NavItem } from "@dashboard/nav-main";
 // The FULL section table, hidden sections included: this resolves the
 // breadcrumb title for whatever url the user is ON, so it must know Chat
 // even where the sidebar hides it.
-import { workspaceNavItems } from "@/lib/nav-config";
+import {
+  activeSettingsItem,
+  getSettingsSections,
+  workspaceNavItems,
+} from "@/lib/nav-config";
 import { GetStartedButton } from "@dashboard/get-started-button";
 import { AgentCrumb } from "@/lib/dashboard/agent-crumb";
 import { agentSectionTitle } from "@/lib/agents/agent-sections";
+import { breadcrumbSegmentLabel } from "@/lib/dashboard/breadcrumb-segment-label";
 import { ApprovalsBell } from "@/lib/components/approvals";
-import { matchAgentPage, WORKSPACE_PATH_RE } from "@/lib/navigation";
+import {
+  matchAgentPage,
+  orgConnectionsPath,
+  WORKSPACE_PATH_RE,
+} from "@/lib/navigation";
 import { CAPS } from "@/lib/env";
 import { extractOrgId } from "@/lib/org-navigation";
 import { accountNavItems } from "@/lib/account/account-nav-items";
@@ -65,9 +74,6 @@ const getOrgNavItems = (orgId?: string): NavItem[] => {
     { title: "Deploy", url: `${p}/deploy`, icon: Rocket },
   ];
 };
-
-const formatSegment = (s: string) =>
-  s.charAt(0).toUpperCase() + s.slice(1).replace(/-/g, " ");
 
 /**
  * The dashboard header for every edition, reached through the
@@ -119,11 +125,20 @@ export const DashboardHeader = () => {
 
   const effectiveOrgId = orgId ?? workspaceOrgId;
   const isAccount = pathname.startsWith("/account");
-  const items = workspaceId
-    ? workspaceNavItems(workspaceId)
-    : isAccount
-      ? accountNavItems
-      : getOrgNavItems(effectiveOrgId ?? undefined);
+  // Inside Organization Settings the section is the settings ENTRY the user is
+  // on ("Global Connections", "Single sign-on"), not the generic "Organization
+  // Settings" parent with title-cased URL slugs under it.
+  const settingsItem =
+    !workspaceId && !isAccount && orgId
+      ? activeSettingsItem(getSettingsSections(orgId), pathname)
+      : undefined;
+  const items: Pick<NavItem, "title" | "url">[] = settingsItem
+    ? [settingsItem]
+    : workspaceId
+      ? workspaceNavItems(workspaceId)
+      : isAccount
+        ? accountNavItems
+        : getOrgNavItems(effectiveOrgId ?? undefined);
   // Longest URL prefix wins so /workspaces/api-keys beats /workspaces.
   const navItem = items
     .filter((item) => pathname.startsWith(item.url))
@@ -133,6 +148,12 @@ export const DashboardHeader = () => {
   const subPath = navItem
     ? pathname.slice(navItem.url.length).replace(/^\//, "")
     : "";
+  // Below a connections root (the workspace's Connections or the org's
+  // Global Connections) the segments are tabs and app ids with real names.
+  const inConnections =
+    !!navItem &&
+    (navItem.url.endsWith("/connections") ||
+      (!!orgId && navItem.url === orgConnectionsPath(orgId)));
   // The agent page gets a real crumb where its opaque id would be: the
   // agent's NAME as a switcher dropdown (§3.18 — switch agents, hold the
   // section).
@@ -261,9 +282,11 @@ export const DashboardHeader = () => {
                 // Inside an agent page the segment is a SECTION: its label is
                 // the section table's word ("Slack"), never the title-cased
                 // URL ("Channels" — the drift the table exists to prevent).
+                // Inside a connections section it is a tab or an app, named
+                // as the page names it ("LLMs", "GitHub").
                 const label =
                   (agentCrumbId ? agentSectionTitle(segment) : undefined) ??
-                  formatSegment(segment);
+                  breadcrumbSegmentLabel(segment, { inConnections });
                 return (
                   <span key={segment} className="contents">
                     <BreadcrumbSeparator className="shrink-0" />

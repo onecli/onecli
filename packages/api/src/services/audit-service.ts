@@ -41,6 +41,9 @@ export const AUDIT_ACTIONS = {
   // (content recording is deliberately out of scope, privacy posture).
   SESSION_OPEN: "session_open",
   SESSION_CLOSE: "session_close",
+  // "Restart agent": a person reset every conversation of a hosted agent and
+  // stopped its sandbox. First-class because it ends work in flight.
+  RESTART: "restart",
 } as const;
 
 export const AUDIT_SERVICES = {

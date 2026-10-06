@@ -17,6 +17,7 @@ import {
   updateAgent,
   deleteAgent,
   regenerateAgentToken,
+  restartAgent,
 } from "../services/agent-service";
 import {
   createAgentSchema,
@@ -299,6 +300,28 @@ export const agentRoutes = () => {
     );
     invalidateGatewayCache(c.req.raw);
     return c.json(result);
+  });
+
+  // POST /agents/:agentId/restart: "Restart agent". Every conversation of
+  // this hosted agent starts fresh and its sandbox stops, so the next message
+  // cold-starts it. Audited (the agent-image pattern): it ends work in
+  // flight, and this route is its only door. No gateway cache flush: the
+  // gateway reads none of what it changes.
+  app.post("/:agentId/restart", async (c) => {
+    const auth = c.get("auth");
+    const workspaceId = requireWorkspaceId(auth);
+    const agentId = c.req.param("agentId");
+    await restartAgent(workspaceId, agentId);
+    await recordAuditEvent({
+      workspaceId,
+      userId: auth.userId,
+      userEmail: auth.userEmail,
+      action: AUDIT_ACTIONS.RESTART,
+      service: AUDIT_SERVICES.AGENT,
+      source: AUDIT_SOURCE.API,
+      metadata: { agentId },
+    });
+    return c.json({ success: true });
   });
 
   // POST /agents/:agentId/ssh-certificate: mint a

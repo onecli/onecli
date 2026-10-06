@@ -260,6 +260,86 @@ pub fn secret_injects_on_host(
         .any(|p| common::util::host_matches(hostname, p))
 }
 
+/// Whether a secret `type` is one of the LLM provider types whose credential
+/// shape the gateway knows (`build_injections` derives the headers from the
+/// type alone). The one list every "is this an LLM key" check reads, so the
+/// platform trial-credit eligibility (`ee::platform_llm`) and the per-provider
+/// collapse below can never disagree about which types count.
+#[must_use]
+pub fn is_llm_provider_type(secret_type: &str) -> bool {
+    matches!(secret_type, "anthropic" | "openai")
+}
+
+/// The secrets that may actually be INJECTED: at most one per LLM provider
+/// type, preferring a workspace-scoped credential over an organization-scoped
+/// one. Non-LLM secrets pass through untouched.
+///
+/// Two credentials of the same provider reach one agent whenever the org and
+/// the workspace each hold one: `connect::resolve_secret_injections` fetches
+/// both pools and concatenates them, org first. The intended contract is that
+/// the workspace one wins (`findInjectableSecretOfType` on the API side
+/// promises exactly that to the container config), and while both credentials
+/// write the same header it holds incidentally: the workspace rule runs later
+/// and overwrites.
+///
+/// Anthropic breaks that assumption. An API key emits `SetHeader(x-api-key)`
+/// plus `RemoveHeader(authorization)`; an OAuth token emits
+/// `ReplaceHeader(authorization)`, which only fires when the header is
+/// already present. With an org API key and a workspace OAuth token, the org
+/// rule runs first, sets `x-api-key` and removes `authorization`, and the
+/// workspace rule then finds nothing to replace: the ORG credential goes
+/// upstream under a workspace agent's request. Selecting one credential up
+/// front makes the precedence real for every provider instead of
+/// special-casing header shapes.
+///
+/// Within one scope, two secrets of the same LLM type keep the first in pool
+/// order (the pool queries have no `ORDER BY`). On a shared path that pair
+/// was already arbitrary (last-wins by row order); on disjoint `path_pattern`s
+/// each used to inject on its own path and now only one does, which matches
+/// what the API side already presents (`findInjectableSecretOfType` picks one
+/// row per type).
+///
+/// The chosen credential is the only one for its provider: if its value
+/// cannot be resolved, nothing is injected for that provider. The
+/// lower-precedence one is deliberately not a fallback, since that would be
+/// the same cross-scope substitution this prevents.
+///
+/// Borrows rather than consumes: `connect.rs` still hands the uncollapsed list
+/// to budget resolution, so this fix changes nothing on that (dormant) path.
+/// Several generic secrets on one host are a legitimate configuration
+/// (different headers, different params) and are never collapsed.
+#[must_use]
+pub fn one_credential_per_llm_provider(secrets: &[db::SecretRow]) -> Vec<&db::SecretRow> {
+    let mut kept: Vec<&db::SecretRow> = Vec::with_capacity(secrets.len());
+    for secret in secrets {
+        if !is_llm_provider_type(&secret.type_) {
+            kept.push(secret);
+            continue;
+        }
+        match kept.iter().position(|k| k.type_ == secret.type_) {
+            None => kept.push(secret),
+            Some(index) => {
+                // Workspace beats organization; a tie keeps the incumbent. The
+                // rule is written so the outcome never depends on which pool
+                // was concatenated first. `scope` is compared as a string to
+                // match how the rest of the gateway reads the column
+                // (`assemble.rs`, `enforce.rs`).
+                let replaces_incumbent =
+                    kept[index].scope == "organization" && secret.scope != "organization";
+                if replaces_incumbent {
+                    kept[index] = secret;
+                }
+                debug!(
+                    secret_type = %secret.type_,
+                    chosen_scope = %kept[index].scope,
+                    "several credentials of one LLM provider reachable for this host; injecting one"
+                );
+            }
+        }
+    }
+    kept
+}
+
 /// If the OpenAI OAuth access_token is expired, refresh it and persist the
 /// updated credentials. Returns `Some(updated_json)` on successful refresh,
 /// or `None` to fall through with the original (possibly expired) value.
@@ -462,6 +542,90 @@ mod tests {
     #[test]
     fn token_url_is_the_openai_oauth_endpoint() {
         assert_eq!(OPENAI_TOKEN_URL, "https://auth.openai.com/oauth/token");
+    }
+
+    // ── one_credential_per_llm_provider ────────────────────────────────
+
+    fn secret_row(id: &str, type_: &str, scope: &str) -> db::SecretRow {
+        db::SecretRow {
+            id: id.to_string(),
+            scope: scope.to_string(),
+            type_: type_.to_string(),
+            value_source: "inline".to_string(),
+            encrypted_value: Some("enc".to_string()),
+            op_ref: None,
+            host_pattern: "api.anthropic.com".to_string(),
+            path_pattern: None,
+            injection_config: None,
+            metadata: None,
+        }
+    }
+
+    // The regression guard for a production bug: an org API key and a workspace
+    // OAuth token both reached one agent. The org rule ran first, set
+    // `x-api-key` and removed `authorization`, and the workspace OAuth rule
+    // (a ReplaceHeader) then had nothing to replace, so the ORG credential went
+    // upstream and "workspace wins" silently became "org wins".
+    #[test]
+    fn two_anthropic_credentials_collapse_to_the_workspace_one() {
+        let secrets = vec![
+            secret_row("org-key", "anthropic", "organization"),
+            secret_row("ws-key", "anthropic", "workspace"),
+        ];
+        let kept = one_credential_per_llm_provider(&secrets);
+
+        assert_eq!(
+            kept.len(),
+            1,
+            "one credential per provider reaches the wire"
+        );
+        assert_eq!(
+            kept[0].id, "ws-key",
+            "workspace beats organization, matching findInjectableSecretOfType"
+        );
+    }
+
+    // Order must not decide the winner: the pools are concatenated org-first
+    // today, but the precedence is a property of the scopes, not of the
+    // concatenation, so the same inputs resolve the same way either way round.
+    #[test]
+    fn workspace_wins_regardless_of_pool_order() {
+        let secrets = vec![
+            secret_row("ws-key", "anthropic", "workspace"),
+            secret_row("org-key", "anthropic", "organization"),
+        ];
+        let kept = one_credential_per_llm_provider(&secrets);
+
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, "ws-key");
+    }
+
+    #[test]
+    fn each_llm_provider_keeps_its_own_credential() {
+        let secrets = vec![
+            secret_row("anthropic-ws", "anthropic", "workspace"),
+            secret_row("openai-ws", "openai", "workspace"),
+        ];
+        let kept = one_credential_per_llm_provider(&secrets);
+
+        assert_eq!(
+            kept.len(),
+            2,
+            "collapsing is per provider, not across providers"
+        );
+    }
+
+    // Several generic secrets on one host are a legitimate setup (different
+    // headers, different params), so the collapse must not touch them.
+    #[test]
+    fn generic_secrets_are_never_collapsed() {
+        let secrets = vec![
+            secret_row("generic-1", "generic", "workspace"),
+            secret_row("generic-2", "generic", "organization"),
+        ];
+        let kept = one_credential_per_llm_provider(&secrets);
+
+        assert_eq!(kept.len(), 2);
     }
 
     // ── build_injections: anthropic ────────────────────────────────────

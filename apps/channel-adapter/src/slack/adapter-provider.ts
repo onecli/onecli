@@ -2,6 +2,7 @@ import { escapeSlackText } from "@onecli/channels/slack";
 import type { AdapterPresence } from "@onecli/agent-protocol";
 import type {
   ChannelAdapterProvider,
+  GroupApprovalDecision,
   ProviderOutcomeContext,
   ProviderTransport,
   ProviderTransportHandlers,
@@ -9,6 +10,8 @@ import type {
 import { slackApprovalCardUi } from "./approval-card";
 import { isDeadCredentialError } from "@onecli/channels";
 import {
+  groupClickOf,
+  postEphemeral,
   postMessage,
   SlackApiError,
   unpackThreadAddress,
@@ -72,6 +75,34 @@ const approvalDecisionOf = (
     approvalId: action.value,
     decision: action.action_id === "channel_approve" ? "approve" : "deny",
     clickerExternalUserId: clicker,
+  };
+};
+
+/** A GROUPED approval card's click (shared vocabulary: group-card.ts in
+ * @onecli/channels/slack, which the control plane's HTTP arm also reads). */
+const groupApprovalDecisionOf = (
+  payload: Record<string, unknown>,
+): GroupApprovalDecision | null => {
+  const typed = payload as {
+    type?: string;
+    user?: { id?: string };
+    channel?: { id?: string };
+    container?: { channel_id?: string };
+    actions?: {
+      action_id?: string;
+      value?: string;
+      selected_option?: { value?: string };
+    }[];
+  };
+  const action = typed.actions?.[0];
+  const clicker = typed.user?.id;
+  if (typed.type !== "block_actions" || !action || !clicker) return null;
+  const click = groupClickOf(action);
+  if (!click) return null;
+  return {
+    ...click,
+    clickerExternalUserId: clicker,
+    channel: typed.channel?.id ?? typed.container?.channel_id ?? null,
   };
 };
 
@@ -177,6 +208,11 @@ const openTransport = (
     {
       onEvent: handlers.onEvent,
       onInteractive: (payload) => {
+        const group = groupApprovalDecisionOf(payload);
+        if (group) {
+          handlers.onGroupApprovalDecision(group);
+          return;
+        }
         const decision = approvalDecisionOf(payload);
         if (decision) {
           handlers.onApprovalDecision(decision);
@@ -294,6 +330,13 @@ export const slackAdapterProvider: ChannelAdapterProvider = {
   openTransport,
   respondToOutcome,
   decisionSettledText,
+  notifyClicker: async ({ credential, channel, user, text, onLog }) => {
+    await postEphemeral(credential, {
+      channel,
+      user,
+      text: escapeSlackText(text),
+    }).catch((err: unknown) => onLog("clicker notice post failed", { err }));
+  },
   posts: slackMirrorPosts,
   cardUi: slackApprovalCardUi,
   removalEventFor,

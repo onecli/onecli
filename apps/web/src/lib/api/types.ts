@@ -83,6 +83,19 @@ export interface DropboxFolder {
   pathDisplay: string;
 }
 
+/** Mirrors packages/api/src/ee/services/google-drive-folder-service.ts. */
+export interface GoogleDriveFolder {
+  id: string;
+  name: string;
+  kind: "folder" | "sharedDrive";
+  /** Direct children; null when the count couldn't be taken. */
+  subfolderCount: number | null;
+  fileCount: number | null;
+  /** Only the first page of children was counted: the counts are lower
+   * bounds (show "<n>+"). */
+  countCapped: boolean;
+}
+
 export interface Secret {
   id: string;
   name: string;
@@ -125,6 +138,8 @@ export interface Connection {
   scope: string | null;
   metadata: unknown;
   connectedAt: string;
+  /** Set when the provider refused the saved login: reconnect to clear it. */
+  reauthRequiredAt?: string | null;
 }
 
 // A workspace row as returned by the workspace CRUD routes (rename / create).
@@ -457,8 +472,8 @@ export interface PolicyRuleV2 {
   priority: number;
   enabled: boolean;
   isDefault: boolean;
-  /** Generation-stable identity — the key for diffing draft vs published
-   * (the row `id` regenerates on every publish). Empty on a virtual default. */
+  /** Generation-stable identity (the row `id` regenerates on every publish).
+   * Empty on a virtual default. */
   logicalId: string;
   source: PolicyRuleSource;
   name: string;
@@ -473,27 +488,16 @@ export interface PolicyRuleV2 {
   createdAt: string;
 }
 
-export interface PublishResult {
-  generation: number;
-  ruleCount: number;
-}
-
-/** The scope's most recent publish. `appliedBy` null = a system publish (the
- * boot seeder); a null response = never published. */
-export interface LastPublish {
-  generation: number;
-  ruleCount: number;
-  appliedAt: string;
-  appliedBy: { name: string | null; email: string } | null;
-}
-
 // ── Attach-model grants (plans/project-attach-model.md, step 2) ─────────────
 // Hand-mirrored from packages/api/src/services/grants-service.ts and
 // grants-summary-service.ts.
 
 /** A grant's session policy ("Resources"): which repositories/folders the
  * connection's injected credential may reach. One strict axis per provider. */
-export type GrantResources = { repositories: string[] } | { folders: string[] };
+export type GrantResources =
+  | { repositories: string[] }
+  | { folders: string[] }
+  | { driveFolders: string[] };
 
 export interface AgentGrantConnection {
   connectionId: string;

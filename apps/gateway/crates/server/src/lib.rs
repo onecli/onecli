@@ -62,10 +62,14 @@ pub struct GatewayServer {
 ///
 /// - Redirects are disabled so 3xx responses are forwarded to the client as-is.
 /// - `accept_invalid_certs` skips TLS certificate validation for upstream connections.
+/// - DNS goes through the destination guard (`proxy::egress`): a name that
+///   resolves only to non-public addresses fails with a refusal the forward
+///   path turns into a 403, and hyper dials only the addresses it checked.
 fn build_http_client(accept_invalid_certs: bool) -> reqwest::Client {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .danger_accept_invalid_certs(accept_invalid_certs)
+        .dns_resolver(proxy::egress::resolver())
         .build()
         .expect("build HTTP client")
 }
@@ -235,6 +239,10 @@ impl GatewayServer {
                 .as_deref(),
         );
         let skip_verify_hosts = Arc::new(parse_skip_verify_hosts());
+        // Load the destination guard's allowlist now, so a malformed
+        // GATEWAY_ALLOW_PRIVATE_DESTINATIONS is reported at boot rather than
+        // on the first proxied request.
+        let _ = proxy::egress::policy();
 
         if global_skip {
             warn!("GATEWAY_DANGER_ACCEPT_INVALID_CERTS is enabled: TLS verification disabled for ALL upstream hosts");
@@ -468,30 +476,7 @@ async fn invalidate_cache(
         auth_method = %auth.auth_method,
     );
     async move {
-        let org_id = match db::find_organization_id_by_workspace(
-            &state.policy_engine.pool,
-            &auth.workspace_id,
-        )
-        .await
-        {
-            Ok(Some(oid)) => oid,
-            other => {
-                warn!(
-                    error = ?other.err(),
-                    "cache invalidation: failed to resolve org_id; using broad prefix"
-                );
-                String::new()
-            }
-        };
-
-        state
-            .cache
-            .del_by_prefix(&format!("app_injection:{org_id}:{}:", auth.workspace_id))
-            .await;
-        state
-            .cache
-            .del_by_prefix(&format!("connect:{org_id}:{}:", auth.workspace_id))
-            .await;
+        flush_workspace_cache(&state, &auth.workspace_id).await;
         info!("cache invalidated");
         (
             StatusCode::OK,
@@ -500,6 +485,39 @@ async fn invalidate_cache(
     }
     .instrument(span)
     .await
+}
+
+/// Drop every cached CONNECT resolution (and app injection) for a workspace.
+///
+/// The cached responses carry resolved credential VALUES, so anything that
+/// revokes or replaces a credential must flush them, or a stale value keeps
+/// injecting for up to the cache TTL. The cache is the shared Redis store
+/// when one is configured, so the flush reaches every gateway instance.
+pub(crate) async fn flush_workspace_cache(state: &GatewayState, workspace_id: &str) {
+    let org_id = match db::find_organization_id_by_workspace(
+        &state.policy_engine.pool,
+        workspace_id,
+    )
+    .await
+    {
+        Ok(Some(oid)) => oid,
+        other => {
+            warn!(
+                error = ?other.err(),
+                "cache invalidation: failed to resolve org_id; using broad prefix"
+            );
+            String::new()
+        }
+    };
+
+    state
+        .cache
+        .del_by_prefix(&format!("app_injection:{org_id}:{workspace_id}:"))
+        .await;
+    state
+        .cache
+        .del_by_prefix(&format!("connect:{org_id}:{workspace_id}:"))
+        .await;
 }
 
 // `PendingParams` lives in `crate::approval` (wire shapes shared with the
@@ -1135,6 +1153,16 @@ async fn handle_http_proxy(
                     ));
                 }
                 debug!(host = %authority, "requested connection not found; secret rules serve this path");
+            }
+            Ok(AppConnectionResult::NeedsReconnect { connection }) => {
+                if !secrets_serve {
+                    info!(peer = %peer_addr, host = %authority, connection_id = %connection.id, "HTTP proxy: connection needs reconnect; request not forwarded");
+                    return Ok(proxy::response::connection_needs_reconnect_axum(
+                        &connection,
+                        resolved.workspace_id.as_deref(),
+                    ));
+                }
+                debug!(host = %authority, "connection needs reconnect; secret rules serve this path");
             }
             Ok(AppConnectionResult::NoConnections) => {}
             // Nothing injects, exactly as `NoConnections`; the choices ride

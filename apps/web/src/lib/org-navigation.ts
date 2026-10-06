@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { ORG_PATH_RE } from "@/lib/navigation";
+import { ORG_PATH_RE, orgConnectionsPath } from "@/lib/navigation";
 
 export { ORG_PATH_RE };
 
@@ -14,4 +14,11 @@ export const generateOrgPrefix = (orgId: string | undefined): string =>
 export const useOrgPrefix = (): string => {
   const pathname = usePathname();
   return generateOrgPrefix(extractOrgId(pathname));
+};
+
+/** The current org's Global Connections root: the `basePath` every org-scope
+ *  connections component hands the shared workspace tabs. */
+export const useOrgConnectionsPath = (): string => {
+  const orgId = extractOrgId(usePathname());
+  return orgId ? orgConnectionsPath(orgId) : "";
 };

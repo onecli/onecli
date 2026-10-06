@@ -42,6 +42,9 @@ const CONNECTION_SELECT = {
   scope: true,
   metadata: true,
   connectedAt: true,
+  // Set when the provider refused the refresh token: the dashboard flags the
+  // account "Needs reconnect" (cleared by `reconnectConnection`).
+  reauthRequiredAt: true,
 } as const;
 
 export const listConnections = async (scope: ResourceScope) => {
@@ -154,6 +157,9 @@ export const reconnectConnection = async (
     where: { id: existing.id },
     data: {
       status: "connected",
+      // New credentials supersede the ones the provider refused. Also right for
+      // a bare token persist: it only happens after a successful refresh.
+      reauthRequiredAt: null,
       label:
         options?.label || (extractLabel(options?.metadata) ?? existing.label),
       credentials: encryptedCredentials,

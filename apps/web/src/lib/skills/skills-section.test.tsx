@@ -241,8 +241,8 @@ describe("the create dialog", () => {
   it("defaults to THIS agent, and widens to the workspace when asked", async () => {
     renderSection();
     await userEvent.click(screen.getByRole("button", { name: /New skill/ }));
-    await userEvent.type(screen.getByLabelText("Name"), "deploy-notes");
-    await userEvent.type(screen.getByLabelText("Description"), "How to ship");
+    await userEvent.type(screen.getByLabelText(/^Name/), "deploy-notes");
+    await userEvent.type(screen.getByLabelText(/^Description/), "How to ship");
     await userEvent.type(
       screen.getByLabelText(/Instructions/),
       "Run the checks.",
@@ -273,8 +273,8 @@ describe("the create dialog", () => {
     renderSection("organization");
     await userEvent.click(screen.getByRole("button", { name: /New skill/ }));
     expect(screen.queryByRole("combobox")).toBeNull();
-    await userEvent.type(screen.getByLabelText("Name"), "org-standards");
-    await userEvent.type(screen.getByLabelText("Description"), "House rules");
+    await userEvent.type(screen.getByLabelText(/^Name/), "org-standards");
+    await userEvent.type(screen.getByLabelText(/^Description/), "House rules");
     await userEvent.type(screen.getByLabelText(/Instructions/), "Follow them.");
     await userEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(state.orgCreate).toHaveBeenCalledWith(
@@ -299,10 +299,37 @@ describe("the create dialog", () => {
     await userEvent.click(
       screen.getByRole("button", { name: "Edit release-checklist" }),
     );
-    const name = screen.getByLabelText("Name") as HTMLInputElement;
+    const name = screen.getByLabelText(/^Name/) as HTMLInputElement;
     expect(name).toBeDisabled();
     expect(name.value).toBe("release-checklist");
+    // Immutable here, so it is not marked required: nothing to fill in.
+    expect(name.labels?.[0]).toHaveTextContent(/^Name$/);
     expect(screen.getByLabelText(/Instructions/)).toHaveValue("Existing body");
+  });
+
+  it("flags the empty instructions field when the skill was pasted into a file", async () => {
+    state.skills = [skill()];
+    state.detail = { ...skill(), content: "Existing body", files: [] };
+    renderSection();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Edit release-checklist" }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: /Add file/ }));
+    await userEvent.type(screen.getByLabelText("File 1 path"), "ref.md");
+    await userEvent.type(
+      screen.getByLabelText("File 1 content"),
+      "The whole skill, pasted here by mistake.",
+    );
+    await userEvent.clear(screen.getByLabelText(/Instructions/));
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(state.update).not.toHaveBeenCalled();
+    expect(screen.getByLabelText(/Instructions/)).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
+    expect(screen.getByLabelText(/Instructions/)).toHaveFocus();
+    expect(screen.getByText("Fill in the required fields.")).toBeVisible();
   });
 
   it("deleting asks first, and only then fires the mutation", async () => {
@@ -325,6 +352,130 @@ describe("the create dialog", () => {
     expect(state.remove).toHaveBeenCalledWith("sk-1", expect.anything());
   });
 
+  it("keeps extra files shut until the SKILL.md body is written", async () => {
+    renderSection();
+    await userEvent.click(screen.getByRole("button", { name: /New skill/ }));
+
+    // The observed failure starts here: the user reaches for "Add file"
+    // before writing the body, and pastes the whole skill into it. The lock
+    // says why in VISIBLE text: a disabled button takes no pointer events,
+    // so a `title` tooltip on it would never show.
+    const addFile = screen.getByRole("button", { name: /Add file/ });
+    expect(addFile).toBeDisabled();
+    expect(addFile).not.toHaveAttribute("title");
+    expect(screen.getByText("Write the instructions first")).toBeVisible();
+    expect(addFile).toHaveAccessibleDescription("Write the instructions first");
+
+    await userEvent.type(
+      screen.getByLabelText(/Instructions/),
+      "Do the thing.",
+    );
+    expect(screen.getByRole("button", { name: /Add file/ })).toBeEnabled();
+    expect(screen.queryByText("Write the instructions first")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /Add file/ }),
+    ).not.toHaveAccessibleDescription();
+  });
+
+  it("clicking Create on an incomplete form marks what is missing", async () => {
+    renderSection();
+    await userEvent.click(screen.getByRole("button", { name: /New skill/ }));
+    // An untouched form is not an error state, and the button is never dead.
+    expect(screen.getByLabelText(/Instructions/)).toHaveAttribute(
+      "aria-invalid",
+      "false",
+    );
+    expect(screen.getByRole("button", { name: "Create" })).toBeEnabled();
+    // The status region is mounted up front (so screen readers announce what
+    // later lands in it) but says nothing yet.
+    expect(screen.getByRole("status")).toHaveTextContent("");
+
+    await userEvent.type(screen.getByLabelText(/^Name/), "deploy-notes");
+    await userEvent.type(screen.getByLabelText(/^Description/), "How to ship");
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    // The click answers instead of saving: field marked, caret moved there.
+    expect(state.create).not.toHaveBeenCalled();
+    expect(screen.getByLabelText(/Instructions/)).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
+    expect(screen.getByLabelText(/Instructions/)).toHaveFocus();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Fill in the required fields.",
+    );
+    expect(
+      screen.getByRole("button", { name: "Create" }),
+    ).toHaveAccessibleDescription("Fill in the required fields.");
+
+    await userEvent.type(screen.getByLabelText(/Instructions/), "Run it.");
+    expect(screen.getByLabelText(/Instructions/)).toHaveAttribute(
+      "aria-invalid",
+      "false",
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("");
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+    expect(state.create).toHaveBeenCalled();
+  });
+
+  it("the message and the caret always point at the same problem", async () => {
+    renderSection();
+    await userEvent.click(screen.getByRole("button", { name: /New skill/ }));
+    await userEvent.type(screen.getByLabelText(/^Description/), "How to ship");
+    await userEvent.type(screen.getByLabelText(/Instructions/), "Run it.");
+    await userEvent.click(screen.getByRole("button", { name: /Add file/ }));
+    await userEvent.type(screen.getByLabelText("File 1 path"), "Notes.md");
+    await userEvent.type(screen.getByLabelText("File 1 content"), "More.");
+
+    // Two problems: an empty Name above a bad file. Form order decides, and
+    // the words follow the caret rather than naming the file below it.
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+    expect(screen.getByLabelText(/^Name/)).toHaveFocus();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Fill in the required fields.",
+    );
+
+    await userEvent.type(screen.getByLabelText(/^Name/), "deploy-notes");
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+    expect(screen.getByLabelText("File 1 path")).toHaveFocus();
+    expect(screen.getByLabelText("File 1 path")).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
+    expect(screen.getByLabelText("File 1 path")).toHaveAccessibleDescription(
+      /at most two lowercase segments/,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Fix the highlighted file.",
+    );
+    expect(state.create).not.toHaveBeenCalled();
+
+    await userEvent.clear(screen.getByLabelText("File 1 path"));
+    await userEvent.type(screen.getByLabelText("File 1 path"), "notes.md");
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+    expect(state.create).toHaveBeenCalled();
+  });
+
+  it("a skill over the size cap says so and goes back to the body", async () => {
+    renderSection();
+    await userEvent.click(screen.getByRole("button", { name: /New skill/ }));
+    await userEvent.type(screen.getByLabelText(/^Name/), "deploy-notes");
+    await userEvent.type(screen.getByLabelText(/^Description/), "How to ship");
+    await userEvent.click(screen.getByLabelText(/Instructions/));
+    await userEvent.paste("x".repeat(32_001));
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(state.create).not.toHaveBeenCalled();
+    expect(screen.getByLabelText(/Instructions/)).toHaveFocus();
+    expect(screen.getByLabelText(/Instructions/)).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Too long to save. Shorten the instructions or files.",
+    );
+  });
+
   it("a file row with a path but no content blocks Save instead of vanishing", async () => {
     state.skills = [skill()];
     state.detail = { ...skill(), content: "Existing body", files: [] };
@@ -336,7 +487,14 @@ describe("the create dialog", () => {
     await userEvent.type(screen.getByLabelText("File 1 path"), "ref.md");
 
     expect(screen.getByText("Add content, or remove this file")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(state.update).not.toHaveBeenCalled();
+    expect(screen.getByText("Fix the highlighted file.")).toBeVisible();
+    // The caret lands on the input the problem is about: the empty content.
+    expect(screen.getByLabelText("File 1 content")).toHaveFocus();
+    expect(screen.getByLabelText("File 1 content")).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
   });
 });

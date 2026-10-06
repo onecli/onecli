@@ -10,6 +10,7 @@ export const outlookCalendar: AppDefinition = {
   id: "outlook-calendar",
   name: "Outlook Calendar",
   icon: "/icons/outlook-calendar.svg",
+  apiDocsUrl: "https://learn.microsoft.com/en-us/graph/api/overview",
   description: "View and manage calendar events in Microsoft Outlook.",
   connectionMethod: {
     type: "oauth",

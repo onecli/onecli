@@ -183,6 +183,8 @@ export const PLANS: PlanConfig[] = [
     features: [
       "Everything in Team",
       "All policy rules",
+      "App availability control",
+      "SSO & SAML",
       "Dedicated Slack support",
       "90-day audit logs",
       "SLA",

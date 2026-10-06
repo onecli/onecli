@@ -10,6 +10,8 @@ export const googleCalendar: AppDefinition = {
   id: "google-calendar",
   name: "Google Calendar",
   icon: "/icons/google-calendar.svg",
+  apiDocsUrl:
+    "https://developers.google.com/workspace/calendar/api/v3/reference",
   description: "Read, create, and manage calendar events.",
   connectionMethod: {
     type: "oauth",

@@ -221,6 +221,25 @@ pub enum AppConnectionResult {
     /// legitimate public traffic), and the choices are surfaced only when it
     /// then fails in a way the mismatch explains.
     HostMismatch { connections: Vec<ConnectionChoice> },
+    /// The connection serving this request has a refresh token its provider
+    /// refused (`invalid_grant`): nothing can be injected until the user
+    /// reconnects it. The request is answered with
+    /// `connection_needs_reconnect` straight away, before any policy or
+    /// approval hold, because approving it could only forward a dead token.
+    NeedsReconnect { connection: ConnectionChoice },
+}
+
+/// Why a stored connection produced no usable credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenFailure {
+    /// Nothing usable right now: unreadable credentials, a refused scoped
+    /// mint, a disconnected row, or a failed refresh with no token to fall
+    /// back to. The connection contributes nothing, as it always did.
+    Unavailable,
+    /// The provider refused the refresh token for good. Only the user
+    /// reconnecting the account can fix it, so the request is answered with
+    /// `connection_needs_reconnect` before any approval hold.
+    NeedsReconnect,
 }
 
 /// Whether a session policy asks for a resource-scoped credential — a non-empty
@@ -518,7 +537,7 @@ pub trait PolicyEngineExt {
         &self,
         pending: &PendingInjection,
         cache: &dyn CacheStore,
-    ) -> Option<Vec<InjectionRule>>;
+    ) -> Result<Vec<InjectionRule>, TokenFailure>;
 
     /// Resolve the credential and build the connection's injection rules, then
     /// cache them. The tail shared by immediate and deferred resolution, so the
@@ -531,7 +550,7 @@ pub trait PolicyEngineExt {
         workspace_id: &str,
         cache_key: &str,
         cache: &dyn CacheStore,
-    ) -> Option<(Vec<InjectionRule>, Option<String>, Option<i64>)>;
+    ) -> Result<(Vec<InjectionRule>, Option<String>, Option<i64>), TokenFailure>;
 
     /// The kind of credential (secret or app connection) the workspace or org
     /// holds for this host, regardless of what the agent was granted. Probed
@@ -545,29 +564,20 @@ pub trait PolicyEngineExt {
         hostname: &str,
     ) -> Option<RestrictedCredential>;
 
-    /// Extract access token from decrypted credentials JSON, refreshing if expired.
-    /// Resolves BYOC client credentials from AppConfig if available, falls back to env vars.
-    /// On successful refresh, persists the new credentials back to the database.
-    /// Extract the access token from decrypted credentials, refreshing if expired.
-    /// Returns `(token, expires_at)` — the effective token and its expiry timestamp.
+    /// Extract the access token from a connection's decrypted credentials,
+    /// refreshing it when expired (or minting a scoped one when the policy
+    /// requires it). Returns the effective token and its expiry, or why
+    /// nothing may be injected.
+    ///
+    /// An OAuth `refresh_token` is spent only through [`crate::refresh`]
+    /// serialized per connection across every instance; refreshed credentials
+    /// are stored only over the ciphertext they were computed from.
     async fn resolve_access_token(
         &self,
+        conn: &db::AppConnectionRow,
         json: &str,
-        provider: &str,
         workspace_id: &str,
-        connection_id: &str,
-        session_policy: Option<&serde_json::Value>,
-    ) -> Option<(String, Option<i64>)>;
-
-    /// Encrypt and persist refreshed credentials back to the database.
-    /// Failures are logged but do not prevent the current request from succeeding —
-    /// the refreshed token is already available in memory.
-    async fn persist_refreshed_credentials(
-        &self,
-        connection_id: &str,
-        provider: &str,
-        creds: &serde_json::Value,
-    );
+    ) -> Result<(String, Option<i64>), TokenFailure>;
 
     /// Resolve BYOC client credentials for refreshing a connection.
     ///
@@ -769,8 +779,22 @@ impl PolicyEngineExt for PolicyEngine {
             })
             .collect();
 
-        let mut rules = Vec::with_capacity(matching.len());
-        for secret in &matching {
+        // One credential per LLM provider type, workspace over organization,
+        // for INJECTION only. The org and workspace pools are concatenated
+        // above, and two Anthropic credentials in different auth modes emit
+        // different header shapes, so the later rule does not override the
+        // earlier one and the ORG key ends up on the wire; see
+        // `one_credential_per_llm_provider` for the mechanism.
+        //
+        // A SEPARATE binding from `matching` on purpose: budget resolution
+        // below keeps reading the uncollapsed list, so this fix changes
+        // nothing on that (dormant) path. Its own shadow rule
+        // (`effective_partner_secrets`) would need reconciling with this
+        // precedence if budgets are revived.
+        let injectable = secret_inject::one_credential_per_llm_provider(&matching);
+
+        let mut rules = Vec::with_capacity(injectable.len());
+        for secret in injectable {
             // Resolve the value from its source (inline column or live 1Password
             // reference); a failure skips the secret, exactly as a decrypt
             // failure always has.
@@ -998,7 +1022,7 @@ impl PolicyEngineExt for PolicyEngine {
                 })
             };
             if pin_serves || !another_serves() {
-                return self
+                let result = self
                     .resolve_connection_injections(
                         conn,
                         hostname,
@@ -1006,7 +1030,13 @@ impl PolicyEngineExt for PolicyEngine {
                         workspace_id,
                         cache,
                     )
-                    .await;
+                    .await?;
+                // Same rule as the unpinned paths: a dead connection only
+                // answers for a request its provider actually serves.
+                if matches!(result, AppConnectionResult::NeedsReconnect { .. }) && !pin_serves {
+                    return Ok(AppConnectionResult::NoConnections);
+                }
+                return Ok(result);
             }
             debug!(
                 connection_id = %conn.id,
@@ -1035,6 +1065,14 @@ impl PolicyEngineExt for PolicyEngine {
             let mut result = self
                 .resolve_connection_injections(conn, hostname, organization_id, workspace_id, cache)
                 .await?;
+            // A dead connection whose provider does not serve this path (a lone
+            // Gmail account on a `/youtube/` request) is not this request's
+            // problem: report nothing, as if it had no credential.
+            if let AppConnectionResult::NeedsReconnect { connection } = &result {
+                if !provider_serves_request(&connection.provider, hostname, request_path) {
+                    return Ok(AppConnectionResult::NoConnections);
+                }
+            }
             if let AppConnectionResult::Rules {
                 provider,
                 rewrite_host,
@@ -1164,6 +1202,15 @@ impl PolicyEngineExt for PolicyEngine {
                     }
                     AppConnectionResult::HostMismatch { connections } => {
                         host_mismatches.extend(connections);
+                    }
+                    // The connection that serves THIS request is dead: say so
+                    // rather than forwarding without it. A dead connection of
+                    // another provider (a Gmail account on a Calendar call)
+                    // contributes nothing, exactly like `NoConnections`.
+                    AppConnectionResult::NeedsReconnect { connection } => {
+                        if provider_serves_request(&connection.provider, hostname, request_path) {
+                            return Ok(AppConnectionResult::NeedsReconnect { connection });
+                        }
                     }
                     // Nothing to merge from this connection.
                     AppConnectionResult::NoConnections
@@ -1360,7 +1407,7 @@ impl PolicyEngineExt for PolicyEngine {
             });
         }
 
-        let Some((rules, rewrite_host, expires_at)) = self
+        let (rules, rewrite_host, expires_at) = match self
             .build_connection_rules(
                 conn,
                 &decrypted_json,
@@ -1370,8 +1417,14 @@ impl PolicyEngineExt for PolicyEngine {
                 cache,
             )
             .await
-        else {
-            return Ok(AppConnectionResult::NoConnections);
+        {
+            Ok(built) => built,
+            Err(TokenFailure::NeedsReconnect) => {
+                return Ok(AppConnectionResult::NeedsReconnect {
+                    connection: ConnectionChoice::from_row(conn),
+                });
+            }
+            Err(TokenFailure::Unavailable) => return Ok(AppConnectionResult::NoConnections),
         };
 
         Ok(AppConnectionResult::Rules {
@@ -1389,12 +1442,12 @@ impl PolicyEngineExt for PolicyEngine {
     }
     /// Materialize a deferred connection's injection rules — the credential
     /// mint the policy decision was allowed to precede. Called once the request
-    /// is allowed; `None` means the credential could not be resolved.
+    /// is allowed; `Err` says why the credential could not be resolved.
     async fn materialize_pending(
         &self,
         pending: &PendingInjection,
         cache: &dyn CacheStore,
-    ) -> Option<Vec<InjectionRule>> {
+    ) -> Result<Vec<InjectionRule>, TokenFailure> {
         self.build_connection_rules(
             &pending.conn,
             &pending.decrypted_json,
@@ -1408,7 +1461,7 @@ impl PolicyEngineExt for PolicyEngine {
     }
     /// Resolve the credential and build the connection's injection rules, then
     /// cache them. The tail shared by immediate and deferred resolution, so the
-    /// two can never drift. `None` = no usable credential.
+    /// two can never drift. `Err` = no usable credential, and why.
     async fn build_connection_rules(
         &self,
         conn: &db::AppConnectionRow,
@@ -1417,18 +1470,12 @@ impl PolicyEngineExt for PolicyEngine {
         workspace_id: &str,
         cache_key: &str,
         cache: &dyn CacheStore,
-    ) -> Option<(Vec<InjectionRule>, Option<String>, Option<i64>)> {
+    ) -> Result<(Vec<InjectionRule>, Option<String>, Option<i64>), TokenFailure> {
         let creds: Option<serde_json::Value> = serde_json::from_str(decrypted_json).ok();
         let needs_token = apps::needs_access_token(&conn.provider);
         let (token, expires_at) = if needs_token {
-            self.resolve_access_token(
-                decrypted_json,
-                &conn.provider,
-                workspace_id,
-                &conn.id,
-                conn.session_policy.as_ref(),
-            )
-            .await?
+            self.resolve_access_token(conn, decrypted_json, workspace_id)
+                .await?
         } else {
             (String::new(), None)
         };
@@ -1525,7 +1572,7 @@ impl PolicyEngineExt for PolicyEngine {
                 .await;
         }
 
-        Some((rules, rewrite_host, expires_at))
+        Ok((rules, rewrite_host, expires_at))
     }
     async fn restricted_credential(
         &self,
@@ -1597,24 +1644,19 @@ impl PolicyEngineExt for PolicyEngine {
         };
         has_org_conns.then_some(RestrictedCredential::AppConnection)
     }
-    /// Extract access token from decrypted credentials JSON, refreshing if expired.
-    /// Resolves BYOC client credentials from AppConfig if available, falls back to env vars.
-    /// On successful refresh, persists the new credentials back to the database.
-    /// Extract the access token from decrypted credentials, refreshing if expired.
-    /// Returns `(token, expires_at)` — the effective token and its expiry timestamp.
     async fn resolve_access_token(
         &self,
+        conn: &db::AppConnectionRow,
         json: &str,
-        provider: &str,
         workspace_id: &str,
-        connection_id: &str,
-        session_policy: Option<&serde_json::Value>,
-    ) -> Option<(String, Option<i64>)> {
-        let mut creds: serde_json::Value = serde_json::from_str(json)
-            .map_err(|e| {
-                warn!(provider = %provider, error = %e, "failed to parse access token credentials JSON");
-            })
-            .ok()?;
+    ) -> Result<(String, Option<i64>), TokenFailure> {
+        let provider = conn.provider.as_str();
+        let connection_id = conn.id.as_str();
+        let session_policy = conn.session_policy.as_ref();
+        let mut creds: serde_json::Value = serde_json::from_str(json).map_err(|e| {
+            warn!(provider = %provider, error = %e, "failed to parse access token credentials JSON");
+            TokenFailure::Unavailable
+        })?;
 
         let mut token = creds
             .get("access_token")
@@ -1644,12 +1686,8 @@ impl PolicyEngineExt for PolicyEngine {
         // present: a payload without it would otherwise skip the mint entirely
         // and fall back to the broad stored token.
         {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock before UNIX epoch")
-                .as_secs() as i64;
-
-            if effective_expires_at.is_some_and(|exp| exp < now) || needs_scoped_token {
+            let expired = effective_expires_at.is_some_and(|exp| exp < crate::refresh::now_secs());
+            if expired || needs_scoped_token {
                 // Try the granular-access token scoper first, then the shared
                 // credential types. WHICH one answered matters: only the scoper
                 // can have produced a SCOPED credential. The shared fallback
@@ -1675,56 +1713,70 @@ impl PolicyEngineExt for PolicyEngine {
                             if needs_scoped_token {
                                 scoped_token_minted = from_scoper;
                                 debug!(provider = %provider, "scoped token generated, skipping persist");
-                            } else {
+                            } else if let Some(stored) = conn.credentials.as_deref() {
                                 creds["access_token"] = serde_json::Value::String(new_token);
                                 creds["expires_at"] = serde_json::json!(new_expires_at);
-                                self.persist_refreshed_credentials(connection_id, provider, &creds)
-                                    .await;
+                                // No single-use token is spent here (these types
+                                // re-mint from a long-lived key), so there is no
+                                // lock. The write still yields to a newer stored row.
+                                crate::refresh::persist(
+                                    &self.crypto,
+                                    &self.pool,
+                                    connection_id,
+                                    provider,
+                                    stored,
+                                    &creds,
+                                )
+                                .await;
                             }
                         }
                         Err(e) => {
                             debug!(provider = %provider, %cred_type, error = ?e, "credential refresh failed");
                         }
                     }
-                } else if let Some(refresh_token) =
-                    creds.get("refresh_token").and_then(|v| v.as_str())
-                {
-                    // Authorized user / default: refresh via OAuth refresh_token
-                    if let Some(config) = apps::refresh_config(provider) {
-                        let byoc = self
-                            .resolve_byoc_credentials(workspace_id, provider, connection_id)
-                            .await;
-                        let (byoc_id, byoc_secret) = match &byoc {
-                            Some((id, secret)) => (Some(id.as_str()), Some(secret.as_str())),
-                            None => (None, None),
-                        };
-
-                        match apps::refresh_access_token(
+                } else if let (true, Some(config), true) = (
+                    expired,
+                    apps::refresh_config(provider),
+                    creds
+                        .get("refresh_token")
+                        .and_then(|v| v.as_str())
+                        .is_some(),
+                ) {
+                    // Authorized user / default: spend the OAuth refresh_token,
+                    // only on a real expiry. A scope requirement alone mints
+                    // nothing on this path, so it must not spend the token.
+                    // The serialized spend re-reads the row and may find that
+                    // another instance already refreshed.
+                    match crate::refresh::refresh_oauth_token(
+                        self,
+                        crate::refresh::OAuthRefresh {
+                            connection_id,
+                            provider,
+                            workspace_id,
                             config,
-                            refresh_token,
-                            byoc_id,
-                            byoc_secret,
-                            creds.get("token_endpoint").and_then(|v| v.as_str()),
-                        )
-                        .await
-                        {
-                            Ok((new_token, new_expires_at, new_refresh_token)) => {
-                                debug!(provider = %provider, "refreshed expired token");
-                                token = Some(new_token.clone());
-                                effective_expires_at = Some(new_expires_at);
-
-                                creds["access_token"] = serde_json::Value::String(new_token);
-                                creds["expires_at"] = serde_json::json!(new_expires_at);
-                                if let Some(new_rt) = new_refresh_token {
-                                    creds["refresh_token"] = serde_json::Value::String(new_rt);
-                                }
-                                self.persist_refreshed_credentials(connection_id, provider, &creds)
-                                    .await;
-                            }
-                            Err(e) => {
-                                debug!(provider = %provider, error = ?e, "token refresh failed");
-                            }
+                        },
+                    )
+                    .await
+                    {
+                        crate::refresh::RefreshOutcome::Token {
+                            access_token,
+                            expires_at,
+                        } => {
+                            debug!(provider = %provider, "refreshed expired token");
+                            token = Some(access_token);
+                            effective_expires_at = expires_at;
                         }
+                        crate::refresh::RefreshOutcome::Revoked => {
+                            debug!(provider = %provider, connection_id = %connection_id, "connection no longer connected; injecting nothing");
+                            return Err(TokenFailure::Unavailable);
+                        }
+                        // The provider refused the refresh token: the expired
+                        // token must not be forwarded, and only the user can
+                        // fix it. Answered before any approval hold.
+                        crate::refresh::RefreshOutcome::NeedsReconnect => {
+                            return Err(TokenFailure::NeedsReconnect);
+                        }
+                        crate::refresh::RefreshOutcome::Unavailable => {}
                     }
                 }
             }
@@ -1756,41 +1808,12 @@ impl PolicyEngineExt for PolicyEngine {
                 connection_id = %connection_id,
                 "scoped credential required but not minted; withholding the credential"
             );
-            return None;
+            return Err(TokenFailure::Unavailable);
         }
 
-        token.map(|t| (t, effective_expires_at))
-    }
-    /// Encrypt and persist refreshed credentials back to the database.
-    /// Failures are logged but do not prevent the current request from succeeding —
-    /// the refreshed token is already available in memory.
-    async fn persist_refreshed_credentials(
-        &self,
-        connection_id: &str,
-        provider: &str,
-        creds: &serde_json::Value,
-    ) {
-        let Ok(json) = serde_json::to_string(creds) else {
-            debug!(provider = %provider, "failed to serialize refreshed credentials");
-            return;
-        };
-        match self.crypto.encrypt(&json).await {
-            Ok(encrypted) => {
-                match db::update_app_connection_credentials(&self.pool, connection_id, &encrypted)
-                    .await
-                {
-                    Ok(()) => {
-                        debug!(provider = %provider, "persisted refreshed credentials");
-                    }
-                    Err(e) => {
-                        debug!(provider = %provider, error = %e, "failed to persist refreshed credentials");
-                    }
-                }
-            }
-            Err(e) => {
-                debug!(provider = %provider, error = ?e, "failed to encrypt refreshed credentials");
-            }
-        }
+        token
+            .map(|t| (t, effective_expires_at))
+            .ok_or(TokenFailure::Unavailable)
     }
     /// Resolve BYOC client credentials for refreshing a connection.
     ///
@@ -3701,7 +3724,7 @@ mod deferred_injection_tests {
             .await;
 
         assert!(
-            materialized.is_none(),
+            materialized == Err(TokenFailure::Unavailable),
             "no credential may be injected when the scoped mint is refused"
         );
     }

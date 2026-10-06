@@ -38,7 +38,7 @@ export const findActivePlanSubscription = async (
  * subscriptions the query returns — i.e. which org's plan we read. Reject
  * anything that isn't a plain id instead of trying to escape it.
  */
-const SAFE_ORG_ID = /^[A-Za-z0-9_-]+$/;
+export const SAFE_ORG_ID = /^[A-Za-z0-9_-]+$/;
 
 interface OrgSubscriptionMatch {
   subscription: Stripe.Subscription;
@@ -49,10 +49,17 @@ interface OrgSubscriptionMatch {
 const isLive = (s: Stripe.Subscription) =>
   s.status === "active" || s.status === "trialing";
 
-// A subscription's `customer` is an id, an expanded object, or (deleted
-// customer / trimmed webhook payload) absent — never assume it dereferences.
+/**
+ * The id behind a Stripe expandable reference: a bare id, an expanded object,
+ * or (deleted customer / trimmed webhook payload) absent. Never assume a
+ * reference dereferences.
+ */
+export const stripeRefId = (
+  ref: string | { id: string } | null | undefined,
+): string | undefined => (typeof ref === "string" ? ref : ref?.id);
+
 const customerOf = (s: Stripe.Subscription): string | undefined =>
-  typeof s.customer === "string" ? s.customer : s.customer?.id;
+  stripeRefId(s.customer);
 
 /**
  * Live subscriptions on the org's stored customer, split by how surely they

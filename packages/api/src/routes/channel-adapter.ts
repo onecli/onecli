@@ -5,6 +5,7 @@ import {
   adapterMentionResolveRequestSchema,
   adapterRegisterRequestSchema,
   type AdapterConfigResponse,
+  type AdapterGroupDecisionResponse,
   type AdapterIngestResponse,
   type AdapterWorkResponse,
 } from "@onecli/agent-protocol";
@@ -26,7 +27,10 @@ import {
   requireLinkedConversation,
   settleToolApprovalCard,
 } from "../services/channels/channel-adapter-service";
-import { decideApprovalFromChannel } from "../services/channels/channel-approval-service";
+import {
+  decideApprovalFromChannel,
+  decideApprovalsFromChannel,
+} from "../services/channels/channel-approval-service";
 import {
   decideReachFromChannel,
   expireStaleReachGrants,
@@ -54,6 +58,7 @@ import {
   adapterApprovalHealthSchema,
   adapterCursorSchema,
   adapterDecisionSchema,
+  adapterGroupDecisionSchema,
   adapterIngestSchema,
   adapterPromptClaimSchema,
   adapterPromptMessageSchema,
@@ -301,6 +306,19 @@ export const channelAdapterRoutes = () => {
       "Invalid decision body",
     );
     return c.json(await decideApprovalFromChannel(body));
+  });
+
+  // POST /channel-adapter/group-decision — a grouped approval card's click
+  // (socket arm): Approve all / Deny all, or one row. Every id is fenced to
+  // this presence's own posted cards service-side.
+  app.post("/group-decision", async (c) => {
+    const body = parsed(
+      adapterGroupDecisionSchema.safeParse(await parseBody(c.req.raw)),
+      "Invalid group decision body",
+    );
+    const response: AdapterGroupDecisionResponse =
+      await decideApprovalsFromChannel(body);
+    return c.json(response);
   });
 
   // POST /channel-adapter/reach-decision — a forwarded reach-card click

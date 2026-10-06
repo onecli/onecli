@@ -1,6 +1,10 @@
 "use client";
 
-import { LIFECYCLE_TURN_ERROR_CODES } from "@onecli/api/validations/conversation";
+import {
+  LIFECYCLE_TURN_ERROR_CODES,
+  TURN_FAILED_RAW_ERROR_MESSAGE,
+  isRawErrorPayload,
+} from "@onecli/api/validations/conversation";
 import { activityForTool } from "@onecli/agent-protocol/activity";
 import { Bubble, BubbleContent } from "@onecli/ui/components/bubble";
 import { Message, MessageContent } from "@onecli/ui/components/message";
@@ -144,6 +148,11 @@ export const TurnBlock = ({
   // A lifecycle hiccup (restart, start failure, capacity): guidance too,
   // just with no action to attach — the sentence itself says what to do.
   const friendlyFailure = FRIENDLY_FAILURE_CODES.has(turn.errorCode ?? "");
+  // An uncoded failure whose text is a provider's raw response body, not a
+  // sentence: the reader gets the generic copy, and the raw text stays one
+  // click away for whoever is debugging. A readable sentence keeps the red
+  // line as written.
+  const rawPayload = Boolean(errorText && isRawErrorPayload(errorText));
 
   return (
     <>
@@ -168,21 +177,31 @@ export const TurnBlock = ({
         />
       )}
 
-      {followUps?.map((followUp) => (
-        <UserBubble
-          key={followUp.id}
-          text={followUp.message}
-          origin={originLabel(followUp.source)}
-          conversationId={followUp.conversationId}
-          attachments={followUp.attachments}
-          // Steering into the live run: received, being folded into the
-          // answer below. The hint drops once the run consumes it (`joined`)
-          // — the quiet mark's whole lifetime is the in-between.
-          {...(isJoiningTurn(followUp) && {
-            hint: "Received, folding it in",
-          })}
-        />
-      ))}
+      {followUps?.map((followUp) =>
+        // A wake that joined this turn is the platform's instruction, not
+        // the person's words: it gets the automation header, never a bubble.
+        isAutomationTurn(followUp) ? (
+          <AutomationTurnHeader
+            key={followUp.id}
+            source={followUp.source}
+            title={followUp.message}
+          />
+        ) : (
+          <UserBubble
+            key={followUp.id}
+            text={followUp.message}
+            origin={originLabel(followUp.source)}
+            conversationId={followUp.conversationId}
+            attachments={followUp.attachments}
+            // Steering into the live run: received, being folded into the
+            // answer below. The hint drops once the run consumes it
+            // (`joined`): the quiet mark's whole lifetime is the in-between.
+            {...(isJoiningTurn(followUp) && {
+              hint: "Received, folding it in",
+            })}
+          />
+        ),
+      )}
 
       {(rendered ||
         active ||
@@ -306,6 +325,11 @@ export const TurnBlock = ({
                 />
               ) : friendlyFailure ? (
                 <TurnNotice message={errorText} />
+              ) : rawPayload ? (
+                <TurnNotice
+                  message={TURN_FAILED_RAW_ERROR_MESSAGE}
+                  details={errorText}
+                />
               ) : (
                 <p className="bg-destructive/10 text-destructive rounded-md px-3 py-2 text-xs">
                   {errorText}

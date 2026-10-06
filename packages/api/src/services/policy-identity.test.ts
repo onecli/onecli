@@ -24,7 +24,7 @@ vi.mock("@onecli/db", () => ({
   },
 }));
 
-const { assertIdentitiesValid, gatedActions, rowHasDirectoryIdentity } =
+const { assertIdentitiesValid, gatedActions } =
   await import("./policy-service");
 
 const orgScope = { scope: "organization" as const, organizationId: "org-1" };
@@ -139,22 +139,5 @@ describe("assertIdentitiesValid — ownership (IDOR guard)", () => {
     await expect(
       assertIdentitiesValid(workspaceScope, [{ type: "agent", id: "a1" }]),
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
-  });
-});
-
-// The mechanism `publishPolicy` uses to re-gate a stored draft set on Apply — a
-// directory-identity row must still map to the enterprise gate, so a downgraded
-// org can't publish a grandfathered directory rule.
-describe("rowHasDirectoryIdentity (publish re-gate source)", () => {
-  type IdRows = Parameters<typeof rowHasDirectoryIdentity>[0];
-
-  it("is true when a stored rule row carries a directory principal", () => {
-    expect(rowHasDirectoryIdentity([{ groupId: "g1" }] as IdRows)).toBe(true);
-    expect(rowHasDirectoryIdentity([{ userId: "u1" }] as IdRows)).toBe(true);
-  });
-
-  it("is false for an agent-only or empty rule", () => {
-    expect(rowHasDirectoryIdentity([{ agentId: "a1" }] as IdRows)).toBe(false);
-    expect(rowHasDirectoryIdentity([] as IdRows)).toBe(false);
   });
 });

@@ -224,6 +224,7 @@
         "EDITION",
         "DATABASE_URL",
         "SECRET_ENCRYPTION_KEY",
+        "GATEWAY_ALLOW_PRIVATE_DESTINATIONS",
         "KMS_KEY_ARN",
         "AWS_REGION",
         "REDIS_HOST",

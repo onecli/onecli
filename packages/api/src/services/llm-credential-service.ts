@@ -17,7 +17,7 @@ import {
   isLlmProviderId,
   llmProvider,
 } from "../llm/registry";
-import type { LlmProviderId } from "../llm/types";
+import type { LlmAuthMode, LlmProviderId } from "../llm/types";
 import { injectableSecretWhere } from "./injectable-secrets";
 
 /**
@@ -37,7 +37,7 @@ import { injectableSecretWhere } from "./injectable-secrets";
 export interface ResolvedLlmCredential {
   provider: LlmProviderId;
   secretId: string;
-  authMode: "api-key" | "oauth";
+  authMode: LlmAuthMode;
   /**
    * "workspace" | "organization" — which grant won, for explaining the
    * choice — or "platform" for the trial-credit credential (see below).
@@ -50,7 +50,7 @@ export interface ResolvedLlmCredential {
 const authModeOf = (
   provider: LlmProviderId,
   metadata: unknown,
-): "api-key" | "oauth" => {
+): LlmAuthMode => {
   const parsed =
     provider === "anthropic"
       ? parseAnthropicMetadata(metadata)

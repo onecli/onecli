@@ -23,6 +23,15 @@ import { slackAdapterProvider } from "./slack/adapter-provider";
  * of running half a runtime against it.
  */
 
+/** A grouped approval card's click as the provider decoded it. `channel` is
+ * where the card lives, for a reply only the clicker sees. */
+export interface GroupApprovalDecision {
+  approvalIds: string[];
+  decision: "approve" | "deny";
+  clickerExternalUserId: string;
+  channel: string | null;
+}
+
 /** What the orchestrator hands a provider's transport: raw events flow to
  * ingest, approval clicks flow to the decision round-trip, and a permanent
  * failure hands the connection's fate back to the reconcile loop. The
@@ -40,6 +49,10 @@ export interface ProviderTransportHandlers {
     decision: "approve" | "deny";
     clickerExternalUserId: string;
   }) => void;
+  /** A human clicked a GROUPED approval card (Approve all / Deny all, or one
+   * row's menu). Same trust shape: only opaque ids + the clicker's id; the
+   * control plane refuses the click unless every id is this presence's. */
+  onGroupApprovalDecision: (input: GroupApprovalDecision) => void;
   /** A human clicked a REACH card's button ("how should the agent handle
    * this channel?"). Same trust shape as the approval click: only the
    * opaque grant id + the clicker's channel-native id ride the wire, and
@@ -109,6 +122,16 @@ export interface ChannelAdapterProvider {
     decision: "approve" | "deny";
     result: AdapterDecisionResponse;
   }) => string;
+  /** Tell ONE clicker something without touching the shared card (a refused
+   * or partly failed grouped click). Optional; never throws (a failed post
+   * goes to `onLog`). `text` is plain: the provider escapes it. */
+  notifyClicker?: (input: {
+    credential: string;
+    channel: string;
+    user: string;
+    text: string;
+    onLog: (message: string, detail?: unknown) => void;
+  }) => Promise<void>;
   /** The completion pass's rendering seam (mirror.ts stays general). */
   posts: MirrorPosts;
   /** The approvals manager's rendering seam (approvals.ts stays general). */

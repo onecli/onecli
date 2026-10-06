@@ -37,8 +37,10 @@ export const parseInstanceUrl = (value: unknown): string => {
   return url.hostname;
 };
 
-/** Salesforce authenticates against a fixed pair of endpoints. Sandboxes —
- *  including Developer Edition and scratch orgs — use `test.salesforce.com`. */
+/** Salesforce authenticates against a fixed pair of endpoints. Production and
+ *  Developer Edition orgs use `login.salesforce.com`; sandboxes and scratch
+ *  orgs use `test.salesforce.com`. The accepted values are exactly the
+ *  `environment` field's options below, and `salesforce.test.ts` pins that. */
 const loginOrigin = (environment: string): string => {
   if (environment === "production") return "https://login.salesforce.com";
   if (environment === "sandbox") return "https://test.salesforce.com";
@@ -73,6 +75,8 @@ export const salesforce: AppDefinition = {
   id: "salesforce",
   name: "Salesforce",
   icon: "/icons/salesforce.svg",
+  apiDocsUrl:
+    "https://developer.salesforce.com/docs/atlas.en-us.api_rest.meta/api_rest/intro_rest.htm",
   description: "Salesforce CRM records, queries, and object metadata.",
   connectionMethod: {
     type: "oauth",
@@ -214,7 +218,8 @@ export const salesforce: AppDefinition = {
     },
   },
   configurable: {
-    hint: "Use the Consumer Key and Secret from a Salesforce External Client App. Agents act as the connecting Salesforce user, so their permissions apply — including writes.",
+    hint: "Connect your Salesforce External Client App. Access follows the connecting user's permissions and may include writes.",
+    setupGuideUrl: "https://onecli.sh/docs/integrations/salesforce",
     fields: [
       {
         name: "clientId",
@@ -231,8 +236,12 @@ export const salesforce: AppDefinition = {
         name: "environment",
         label: "Environment",
         description:
-          "Use sandbox for sandboxes, Developer Edition, and scratch orgs.",
-        placeholder: "production or sandbox",
+          "Sandbox covers sandboxes and scratch orgs. Developer Edition orgs sign in through Production.",
+        options: [
+          { value: "production", label: "Production" },
+          { value: "sandbox", label: "Sandbox" },
+        ],
+        defaultValue: "production",
       },
     ],
   },

@@ -25,7 +25,10 @@ use sqlx::PgPool;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::core::{collect_batch, extract_columns, CHANNEL_CAPACITY, FLUSH_BATCH_SIZE, SENDER};
+use crate::core::{
+    collect_batch, extract_columns, CHANNEL_CAPACITY, DESTINATION_GUARD_RULE_NAME,
+    FLUSH_BATCH_SIZE, SENDER,
+};
 use cache::CacheStore;
 
 // Re-export shared types for consumer code
@@ -172,6 +175,13 @@ fn serialize_extra_data(event: &RequestEvent) -> Option<String> {
         RequestDecision::NeedsConnection { ref error } => {
             obj["decision"] = serde_json::json!("needs_connection");
             obj["guidance_error"] = serde_json::json!(error);
+        }
+        // Recorded as a block so the feed's existing "Blocked" rendering and
+        // its `blocked_by_rule` attribution apply; the guard is not a policy
+        // rule, so the attribution names the guard itself.
+        RequestDecision::DestinationRefused => {
+            obj["decision"] = serde_json::json!("blocked");
+            obj["blocked_by_rule"] = serde_json::json!(DESTINATION_GUARD_RULE_NAME);
         }
         RequestDecision::Allowed => {}
     }
@@ -596,6 +606,23 @@ mod tests {
             serde_json::from_str(&serialize_extra_data(&ev).expect("extra data")).unwrap();
         assert_eq!(extra["decision"], "needs_connection");
         assert_eq!(extra["guidance_error"], "connection_host_mismatch");
+    }
+
+    /// A destination-guard refusal is un-injected (nothing was dialed) and
+    /// must still persist as a block in every edition, attributed to the
+    /// guard so the feed's "Blocked by" slot explains the 403.
+    #[test]
+    fn destination_refusals_are_persisted_as_guard_blocks() {
+        let mut ev = base_event();
+        ev.injected = false;
+        ev.provider = "10.0.0.5".into();
+        ev.decision = crate::core::RequestDecision::DestinationRefused;
+        assert!(keeps_event(&ev, common::edition::Edition::Cloud));
+        assert!(keeps_event(&ev, common::edition::Edition::Onprem));
+        let extra: serde_json::Value =
+            serde_json::from_str(&serialize_extra_data(&ev).expect("extra data")).unwrap();
+        assert_eq!(extra["decision"], "blocked");
+        assert_eq!(extra["blocked_by_rule"], DESTINATION_GUARD_RULE_NAME);
     }
 
     #[test]

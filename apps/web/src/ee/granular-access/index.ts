@@ -1,11 +1,11 @@
 import dynamic from "next/dynamic";
 import { githubAppConfig } from "@/lib/granular-access/configs/github-app";
 import { dropboxConfig } from "@/lib/granular-access/configs/dropbox";
+import { googleDriveConfig } from "@/lib/granular-access/configs/google-drive";
 import type { GranularAccessConfig } from "@/lib/granular-access/types";
 
 export type {
   GranularAccessConfig,
-  GranularAccessItem,
   PolicyDialogContentProps,
 } from "@/lib/granular-access/types";
 
@@ -24,6 +24,12 @@ const DropboxPolicyDialogContent = dynamic(() =>
   ),
 );
 
+const GoogleDrivePolicyDialogContent = dynamic(() =>
+  import("./google-drive/policy-dialog-content").then(
+    (m) => m.GoogleDrivePolicyDialogContent,
+  ),
+);
+
 export const granularAccessConfigs = new Map<string, GranularAccessConfig>([
   [
     "github-app",
@@ -32,5 +38,12 @@ export const granularAccessConfigs = new Map<string, GranularAccessConfig>([
   [
     "dropbox",
     { ...dropboxConfig, PolicyDialogContent: DropboxPolicyDialogContent },
+  ],
+  [
+    "google-drive",
+    {
+      ...googleDriveConfig,
+      PolicyDialogContent: GoogleDrivePolicyDialogContent,
+    },
   ],
 ]);

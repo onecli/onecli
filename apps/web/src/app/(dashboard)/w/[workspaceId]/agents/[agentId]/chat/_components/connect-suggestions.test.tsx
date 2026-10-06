@@ -204,6 +204,33 @@ describe("ConnectorSuggestions card", () => {
     ).toBeDisabled();
   });
 
+  it("a needs-reconnect link offers Reconnect for that account, not Manage", () => {
+    renderCard(
+      "https://app.onecli.sh/w/a/connections/apps/gmail?reconnect=conn-2",
+      {
+        connections: [
+          connectedGmail,
+          {
+            ...connectedGmail,
+            id: "conn-2",
+            label: "jo@acme.com",
+            reauthRequiredAt: "2026-10-01T00:00:00Z",
+          },
+        ],
+        grantedConnectionIds: ["conn-1", "conn-2"],
+      },
+    );
+    expect(
+      screen.getByText("Needs reconnect · jo@acme.com"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Reconnect Gmail" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Manage Gmail for this agent" }),
+    ).toBeNull();
+  });
+
   it("flips to Connected with Reconnect + Manage once a connection exists", () => {
     renderCard(GMAIL_CONNECT_URL, { connections: [connectedGmail] });
     expect(screen.getByText("Connected")).toBeInTheDocument();
@@ -384,6 +411,18 @@ describe("ConnectorSuggestions card", () => {
       expect(
         screen.queryByRole("button", { name: "Manage Gmail access" }),
       ).toBeNull();
+    });
+
+    it("stays an attach row when the account also needs a reconnect: the grant is what this request lacks", () => {
+      renderCard(GMAIL_ATTACH_URL, {
+        connections: [
+          { ...connectedGmail, reauthRequiredAt: "2026-10-01T00:00:00Z" },
+        ],
+      });
+      expect(
+        screen.getByRole("button", { name: "Attach Gmail for this agent" }),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/Needs reconnect/)).toBeNull();
     });
 
     it("flips to the attached count + Manage once this agent holds a grant", () => {

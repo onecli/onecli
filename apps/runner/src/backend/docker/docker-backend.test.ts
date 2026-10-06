@@ -762,6 +762,17 @@ describe("lifecycle calls", () => {
     expect(backend.homeDurability).toBe("resident");
     expect(calls.length).toBe(before);
   });
+
+  it("homeRefFor names the volume with NO daemon call, and agrees with provisionHome", async () => {
+    const { backend, calls } = makeBackend({ "/networks?": [] });
+    await backend.prepare();
+    const before = calls.length;
+    expect(backend.homeRefFor("sb-1")).toBe("onecli-home-sb-1");
+    expect(calls.length).toBe(before);
+    expect(await backend.provisionHome("sb-1")).toBe(
+      backend.homeRefFor("sb-1"),
+    );
+  });
 });
 
 describe("extra hosts (Linux host-gateway resolution)", () => {

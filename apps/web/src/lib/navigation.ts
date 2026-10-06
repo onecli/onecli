@@ -153,13 +153,22 @@ export const readDefaultOrgCookie = (): string | undefined =>
     ?.split("=")[1];
 
 /**
+ * The org's Global Connections root, under Organization Settings. The single
+ * definition every org-scope connections surface (tabs, apps grid, connected
+ * rows, the app page's back link, the settings nav) builds on, so a future
+ * move cannot strand one of them on the old URL.
+ */
+export const orgConnectionsPath = (orgId: string): string =>
+  `/org/${orgId}/settings/global-connections`;
+
+/**
  * Resolve a path inside the connections section, scoped to the current page.
  * Single source of truth so callers never hardcode a bare `/connections...`
  * path (which 404s everywhere on the org-scoped surface).
  *
  * - Workspace page: `/w/<id>/connections{sub}`            (derived from `pathname`)
  * - Org page:     `<basePath>{sub}` when given, else
- *                 `/org/<id>/global-connections{sub}`   (derived from `pathname`)
+ *                 `/org/<id>/settings/global-connections{sub}`   (derived from `pathname`)
  *
  * `sub` is the path under the connections root, e.g. "" (root),
  * `/apps/<provider>`, or `/vaults/<provider>`.
@@ -171,7 +180,7 @@ export const connectionsPath = (
   if (basePath) return `${basePath}${sub}`;
   const workspaceMatch = pathname.match(WORKSPACE_PATH_RE);
   if (workspaceMatch) return `/w/${workspaceMatch[1]}/connections${sub}`;
-  const orgMatch = pathname.match(ORG_PATH_RE);
-  if (orgMatch) return `/org/${orgMatch[1]}/global-connections${sub}`;
+  const orgId = pathname.match(ORG_PATH_RE)?.[1];
+  if (orgId) return `${orgConnectionsPath(orgId)}${sub}`;
   return "/";
 };

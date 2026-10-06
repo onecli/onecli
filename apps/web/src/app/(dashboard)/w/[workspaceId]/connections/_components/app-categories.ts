@@ -82,5 +82,6 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   "zoho-crm": "communication",
   granola: "communication",
   fathom: "communication",
+  timeless: "communication",
   x: "communication",
 };

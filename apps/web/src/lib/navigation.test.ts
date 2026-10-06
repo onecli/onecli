@@ -18,7 +18,9 @@ describe("hasWorkspaceContext", () => {
     expect(hasWorkspaceContext("/w/abc")).toBe(true);
     expect(hasWorkspaceContext("/w/abc/agents")).toBe(true);
     expect(hasWorkspaceContext("/")).toBe(false);
-    expect(hasWorkspaceContext("/org/o1/global-connections")).toBe(false);
+    expect(hasWorkspaceContext("/org/o1/settings/global-connections")).toBe(
+      false,
+    );
     expect(hasWorkspaceContext("/org/o1/workspaces")).toBe(false);
   });
 });
@@ -34,9 +36,9 @@ describe("withWorkspacePrefix", () => {
   it("never emits a bare dead path outside a workspace scope", () => {
     // Bare workspace paths (/agents, /connections, ...) 404 everywhere on the
     // org-scoped surface — org context degrades to the org's workspaces list.
-    expect(withWorkspacePrefix("/org/o1/global-connections", "/agents")).toBe(
-      "/org/o1/workspaces",
-    );
+    expect(
+      withWorkspacePrefix("/org/o1/settings/global-connections", "/agents"),
+    ).toBe("/org/o1/workspaces");
     expect(withWorkspacePrefix("/org/o1/settings/team", "/connections")).toBe(
       "/org/o1/workspaces",
     );
@@ -48,7 +50,7 @@ describe("withWorkspacePrefix", () => {
 describe("agentPath", () => {
   it("resolves inside the workspace scope and degrades elsewhere", () => {
     expect(agentPath("/w/abc/agents", "a1")).toBe("/w/abc/agents/a1");
-    expect(agentPath("/org/o1/global-connections", "a1")).toBe(
+    expect(agentPath("/org/o1/settings/global-connections", "a1")).toBe(
       "/org/o1/workspaces",
     );
   });
@@ -76,12 +78,12 @@ describe("connectionsPath", () => {
     expect(
       connectionsPath(
         {
-          pathname: "/org/o1/global-connections",
-          basePath: "/org/o1/global-connections",
+          pathname: "/org/o1/settings/global-connections",
+          basePath: "/org/o1/settings/global-connections",
         },
         "/apps/github",
       ),
-    ).toBe("/org/o1/global-connections/apps/github");
+    ).toBe("/org/o1/settings/global-connections/apps/github");
   });
 
   it("derives the workspace connections root from a /p pathname", () => {
@@ -95,11 +97,16 @@ describe("connectionsPath", () => {
 
   it("derives the org global-connections root from an /org pathname", () => {
     expect(
-      connectionsPath({ pathname: "/org/o1/global-connections/apps/github" }),
-    ).toBe("/org/o1/global-connections");
+      connectionsPath({
+        pathname: "/org/o1/settings/global-connections/apps/github",
+      }),
+    ).toBe("/org/o1/settings/global-connections");
     expect(
-      connectionsPath({ pathname: "/org/o1/global-connections" }, "/apps/x"),
-    ).toBe("/org/o1/global-connections/apps/x");
+      connectionsPath(
+        { pathname: "/org/o1/settings/global-connections" },
+        "/apps/x",
+      ),
+    ).toBe("/org/o1/settings/global-connections/apps/x");
   });
 
   it("falls back to home when the pathname carries no scope", () => {

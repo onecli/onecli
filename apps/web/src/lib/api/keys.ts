@@ -80,8 +80,6 @@ export const queryKeys = {
       [...queryKeys.policy.all(), "rules", pageScope] as const,
     default: (pageScope: PageScope = "workspace") =>
       [...queryKeys.policy.all(), "default", pageScope] as const,
-    lastPublish: (pageScope: PageScope = "workspace") =>
-      [...queryKeys.policy.all(), "last-publish", pageScope] as const,
   },
   domains: {
     all: () => ["domains", ...scope()] as const,
@@ -289,6 +287,7 @@ export const queryKeys = {
     planUsage: () => [...queryKeys.billing.all(), "planUsage"] as const,
     subscriptionStatus: () =>
       [...queryKeys.billing.all(), "subscriptionStatus"] as const,
+    paymentIssue: () => [...queryKeys.billing.all(), "paymentIssue"] as const,
     prorationPreview: (plan: string, interval: string) =>
       [...queryKeys.billing.all(), "prorationPreview", plan, interval] as const,
   },
@@ -296,6 +295,18 @@ export const queryKeys = {
     all: () => ["dropbox", ...scope()] as const,
     folders: (connectionId: string, path: string) =>
       [...queryKeys.dropbox.all(), "folders", connectionId, path] as const,
+  },
+  googleDrive: {
+    all: () => ["googleDrive", ...scope()] as const,
+    folders: (connectionId: string, parentId: string) =>
+      [
+        ...queryKeys.googleDrive.all(),
+        "folders",
+        connectionId,
+        parentId,
+      ] as const,
+    folderNames: (connectionId: string, ids: string) =>
+      [...queryKeys.googleDrive.all(), "names", connectionId, ids] as const,
   },
   onepassword: {
     all: () => ["onepassword", ...scope()] as const,

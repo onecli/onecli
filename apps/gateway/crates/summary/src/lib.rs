@@ -21,12 +21,15 @@
 //!
 //! A summarizer that names records by id (`AccountId: 001…`) also implements
 //! [`RecordResolver`] and registers it in [`record_resolver`], so the gateway
-//! can show those records by name and link them (see `records.rs`).
+//! can show those records by name and link them (see `records.rs`). A change
+//! to an existing record its path names (a GitHub issue, a Drive file) leads
+//! with a link to that record (see `record_links.rs`).
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 pub mod mime;
+mod record_links;
 mod records;
 mod redact;
 

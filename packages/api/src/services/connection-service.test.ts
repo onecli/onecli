@@ -153,6 +153,16 @@ describe("bound_host is recorded from the gated credential field", () => {
   });
 });
 
+describe("reconnect clears the needs-reconnect flag", () => {
+  it("new credentials supersede the ones the provider refused", async () => {
+    await reconnectConnection({ workspaceId: "p-1" }, "conn-1", {
+      access_token: "fresh",
+      refresh_token: "rt",
+    });
+    expect(store.updateData).toHaveProperty("reauthRequiredAt", null);
+  });
+});
+
 describe("createConnection persists provenance", () => {
   it("writes the appConfigId when provided", async () => {
     await createConnection(

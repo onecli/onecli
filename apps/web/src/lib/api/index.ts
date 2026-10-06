@@ -24,6 +24,7 @@ import * as appPermissions from "./app-permissions";
 import * as awsExternalId from "./aws-external-id";
 import * as vaults from "./vaults";
 import * as dropbox from "./dropbox";
+import * as googleDrive from "./google-drive";
 import * as conversations from "./conversations";
 import * as attachments from "./attachments";
 import * as channels from "./channels";
@@ -60,6 +61,7 @@ export {
   awsExternalId,
   vaults,
   dropbox,
+  googleDrive,
   conversations,
   attachments,
   channels,
@@ -109,7 +111,6 @@ export type {
   PolicyRuleV2,
   PolicyRuleTarget,
   PolicyRuleSource,
-  PublishResult,
   AgentGrants,
   AgentGrantConnection,
   AgentGrantSecret,

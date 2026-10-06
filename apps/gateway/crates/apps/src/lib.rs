@@ -1097,6 +1097,31 @@ static APP_PROVIDERS: &[AppProvider] = &[
         finalizer: None,
         body_transform: None,
     },
+    // Navan: client_credentials token (re-minted from the stored client
+    // id/secret/token_url). One API host for every region; EU connections
+    // store `ta_region: "EU"`, which becomes the `X-ta-region` header Navan
+    // requires on EU calls. US connections have no such field, so no header.
+    AppProvider {
+        provider: "navan",
+        display_name: "Navan",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.navan.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[CredentialHeader {
+            credential_field: "ta_region",
+            header_name: "X-ta-region",
+        }],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
     AppProvider {
         provider: "flyio",
         display_name: "Fly.io",
@@ -1925,6 +1950,28 @@ static APP_PROVIDERS: &[AppProvider] = &[
         body_transform: None,
     },
     AppProvider {
+        provider: "timeless",
+        display_name: "Timeless",
+        // One host rule with `path_prefix: None` injects the personal API token
+        // as a standard Bearer on every path of api.timeless.day: the REST API
+        // under /v1 and the hosted MCP server at /mcp/, which take the same
+        // token (docs.timeless.day/api-reference, …/api-reference/mcp).
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.timeless.day"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
         provider: "zoho-crm",
         display_name: "Zoho CRM",
         // US data center only, by construction: the definition hardcodes
@@ -1992,6 +2039,17 @@ pub fn provider_for_host(hostname: &str) -> Option<(&'static str, &'static str)>
     })
 }
 
+/// Whether `path` falls under a host rule's `path_prefix` — exactly the paths
+/// that rule's injection pattern (`{prefix}*`) puts the credential on. Defined
+/// by `inject::path_matches` itself so that the requests a provider is
+/// IDENTIFIED for (its granular guard, availability gate, policy adoption) are
+/// never narrower than the ones its credential reaches: `/batch/drive` (no
+/// trailing slash, a live Drive batch endpoint) carries the Drive token, so it
+/// must be judged as Drive too.
+fn path_under_prefix(path: &str, prefix: &str) -> bool {
+    inject::path_matches(path, &format!("{prefix}*"))
+}
+
 /// Given a hostname and request path, return the best matching provider's (id, display_name).
 ///
 /// For shared hosts (e.g., `www.googleapis.com`), uses the path prefix to disambiguate
@@ -2009,7 +2067,8 @@ pub fn provider_for_host_and_path(
             .iter()
             .any(|r| {
                 host_rule_matches(r, hostname)
-                    && r.path_prefix.is_some_and(|pfx| path.starts_with(pfx))
+                    && r.path_prefix
+                        .is_some_and(|pfx| path_under_prefix(path, pfx))
             })
             .then_some((p.provider, p.display_name))
     });
@@ -2290,7 +2349,8 @@ pub fn build_app_injection_rules(
 pub fn provider_matches_host_and_path(provider: &str, hostname: &str, path: &str) -> bool {
     provider_by_id(provider).is_some_and(|app| {
         app.host_rules.iter().any(|r| {
-            host_rule_matches(r, hostname) && r.path_prefix.is_none_or(|pfx| path.starts_with(pfx))
+            host_rule_matches(r, hostname)
+                && r.path_prefix.is_none_or(|pfx| path_under_prefix(path, pfx))
         })
     })
 }
@@ -2307,7 +2367,9 @@ pub fn provider_matches_host_and_path(provider: &str, hostname: &str, path: &str
 pub fn provider_matches_path_scoped(provider: &str, hostname: &str, path: &str) -> bool {
     provider_by_id(provider).is_some_and(|app| {
         app.host_rules.iter().any(|r| {
-            host_rule_matches(r, hostname) && r.path_prefix.is_some_and(|pfx| path.starts_with(pfx))
+            host_rule_matches(r, hostname)
+                && r.path_prefix
+                    .is_some_and(|pfx| path_under_prefix(path, pfx))
         })
     })
 }
@@ -2460,6 +2522,28 @@ pub fn is_intercept_target(hostname: &str, path: &str) -> bool {
     })
 }
 
+/// Ceiling on one OAuth refresh round trip (connect through body). The
+/// refresh lock's wait (`context::refresh_gate::REFRESH_LOCK_WAIT`) is sized to
+/// outlast it, so a queued refresh never gives up on one about to finish.
+pub const REFRESH_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The provider refused the refresh token itself (`invalid_grant`, RFC 6749
+/// section 5.2): it is revoked, expired, or was superseded. Retrying cannot
+/// help, only the user reconnecting can, so [`refresh_access_token`] returns
+/// this type for it and callers check for it with `anyhow::Error::is`. Every
+/// other failure (network, 5xx, a misconfigured client) stays an opaque error
+/// and is treated as transient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefreshRevoked;
+
+impl std::fmt::Display for RefreshRevoked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("token refresh failed: invalid_grant (refresh token revoked or expired)")
+    }
+}
+
+impl std::error::Error for RefreshRevoked {}
+
 /// Refresh an expired access token using the provider's token endpoint.
 /// Returns (new_access_token, expires_at, optional_new_refresh_token).
 ///
@@ -2469,6 +2553,9 @@ pub fn is_intercept_target(hostname: &str, path: &str) -> bool {
 ///
 /// `stored_token_url` is the connection's own endpoint, honored only when the
 /// provider allowlists it in `alternate_token_urls` (see `endpoint_for`).
+///
+/// Bounded by [`REFRESH_REQUEST_TIMEOUT`]: callers hold a cross-instance lock
+/// for the duration, so a provider that never answers must not hold it forever.
 pub async fn refresh_access_token(
     config: &RefreshConfig,
     refresh_token: &str,
@@ -2487,7 +2574,9 @@ pub async fn refresh_access_token(
             .map_err(|_| anyhow::anyhow!("{} env var not set", config.client_secret_env))?,
     };
 
-    let mut req = reqwest::Client::new().post(config.endpoint_for(stored_token_url));
+    let mut req = reqwest::Client::new()
+        .post(config.endpoint_for(stored_token_url))
+        .timeout(REFRESH_REQUEST_TIMEOUT);
 
     if matches!(config.client_auth, ClientCredentialMethod::BasicAuth) {
         let b64 = base64::engine::general_purpose::STANDARD;
@@ -2537,7 +2626,11 @@ pub async fn refresh_access_token(
                 .get("error")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            anyhow::anyhow!("token refresh failed: {error}")
+            if error == "invalid_grant" {
+                anyhow::Error::new(RefreshRevoked)
+            } else {
+                anyhow::anyhow!("token refresh failed: {error}")
+            }
         })?
         .to_string();
 
@@ -3616,6 +3709,50 @@ mod tests {
         assert!(providers_for_host("atlas.mongodb.com").is_empty());
     }
 
+    // ── Navan ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn provider_for_host_navan() {
+        assert_eq!(provider_for_host("api.navan.com"), Some(("navan", "Navan")));
+        assert_eq!(providers_for_host("api.navan.com"), vec!["navan"]);
+    }
+
+    #[test]
+    fn navan_api_uses_bearer() {
+        let injections = build_app_injections("navan", "api.navan.com", "navan-token");
+        assert_eq!(
+            injections,
+            vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer navan-token".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn navan_region_header_comes_from_credentials() {
+        let headers = credential_headers("navan");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].credential_field, "ta_region");
+        assert_eq!(headers[0].header_name, "X-ta-region");
+    }
+
+    #[test]
+    fn navan_refreshes_via_client_credentials_not_oauth() {
+        assert!(refresh_config("navan").is_none());
+        assert!(needs_access_token("navan"));
+    }
+
+    #[test]
+    fn navan_token_and_web_hosts_get_no_injection() {
+        // The token hosts receive the client secret via Basic auth on refresh;
+        // they must never also receive an injected bearer token.
+        assert!(providers_for_host("app.navan.com").is_empty());
+        assert!(providers_for_host("app-fra.navan.com").is_empty());
+        assert!(providers_for_host("navan.com").is_empty());
+        assert!(providers_for_host("evil-api.navan.com").is_empty());
+    }
+
     // ── Docker Hub ────────────────────────────────────────────────────
 
     #[test]
@@ -3811,6 +3948,42 @@ mod tests {
         // return None instead of falling back to the first match (Gmail).
         assert_eq!(
             provider_for_host_and_path("www.googleapis.com", "/some-unknown-api/v1/resource"),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_identification_covers_every_path_its_credential_reaches() {
+        // `/batch/drive` (no trailing slash) is a live Drive batch endpoint and
+        // the `/batch/drive/*` injection pattern puts the Drive token on it, so
+        // it must be identified as Drive — or Drive's folder guard never runs.
+        let rules = build_app_injection_rules("google-drive", "www.googleapis.com", "t");
+        for path in [
+            "/batch/drive",
+            "/batch/drive?x=1",
+            "/drive",
+            "/upload/drive",
+        ] {
+            assert!(
+                rules
+                    .iter()
+                    .any(|(pattern, _)| inject::path_matches(path, pattern)),
+                "{path} carries the credential"
+            );
+            assert_eq!(
+                provider_for_host_and_path("www.googleapis.com", path),
+                Some(("google-drive", "Google Drive")),
+                "{path}"
+            );
+            assert!(provider_matches_host_and_path(
+                "google-drive",
+                "www.googleapis.com",
+                path
+            ));
+        }
+        // ...without bleeding onto a sibling that merely shares the prefix.
+        assert_eq!(
+            provider_for_host_and_path("www.googleapis.com", "/batch/drivex"),
             None
         );
     }
@@ -4996,6 +5169,57 @@ mod tests {
         assert_eq!(providers_for_host("api.fireflies.ai"), vec!["fireflies"]);
     }
 
+    // ── Timeless ───────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_timeless_host() {
+        assert_eq!(providers_for_host("api.timeless.day"), vec!["timeless"]);
+        assert_eq!(
+            provider_for_host("api.timeless.day"),
+            Some(("timeless", "Timeless"))
+        );
+        // Only the API host: the dashboard and lookalikes get nothing.
+        for host in [
+            "my.timeless.day",
+            "timeless.day",
+            "api.timeless.day.evil.example",
+            "evilapi.timeless.day",
+        ] {
+            assert!(providers_for_host(host).is_empty(), "{host}");
+        }
+    }
+
+    #[test]
+    fn timeless_api_uses_bearer() {
+        let injections = build_app_injections("timeless", "api.timeless.day", "abc123");
+        assert_eq!(
+            injections,
+            vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer abc123".to_string(),
+            }]
+        );
+        assert!(needs_access_token("timeless"));
+        assert!(refresh_config("timeless").is_none());
+        assert!(credential_headers("timeless").is_empty());
+    }
+
+    #[test]
+    fn timeless_injects_on_both_rest_and_mcp() {
+        // A single host rule (path_prefix: None) covers both API surfaces, so
+        // the catalog must describe both (its `mcp_access` tool).
+        assert!(provider_matches_host_and_path(
+            "timeless",
+            "api.timeless.day",
+            "/v1/meetings"
+        ));
+        assert!(provider_matches_host_and_path(
+            "timeless",
+            "api.timeless.day",
+            "/mcp/"
+        ));
+    }
+
     #[test]
     fn providers_for_zoho_crm_host() {
         assert_eq!(providers_for_host("www.zohoapis.com"), vec!["zoho-crm"]);
@@ -5374,5 +5598,55 @@ mod tests {
         assert!(providers_for_host("x.com").is_empty());
         assert!(providers_for_host("twitter.com").is_empty());
         assert!(providers_for_host("www.twitter.com").is_empty());
+    }
+
+    /// A token endpoint that accepts the connection and never answers must
+    /// not hold the caller (and the cross-instance refresh lock it holds)
+    /// forever: the exchange gives up at `REFRESH_REQUEST_TIMEOUT`.
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_token_endpoint_is_abandoned_at_the_request_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let token_url: &'static str = Box::leak(format!("http://{addr}/token").into_boxed_str());
+        let config = RefreshConfig {
+            token_url,
+            alternate_token_urls: &[],
+            client_id_env: "ONECLI_TIMEOUT_TEST_UNSET_ID",
+            client_secret_env: "ONECLI_TIMEOUT_TEST_UNSET_SECRET",
+            body_format: TokenBodyFormat::Form,
+            client_auth: ClientCredentialMethod::Body,
+        };
+
+        let started = tokio::time::Instant::now();
+        // The outer bound only exists so a missing timeout fails the test
+        // instead of hanging it.
+        let outcome = tokio::time::timeout(
+            REFRESH_REQUEST_TIMEOUT * 4,
+            refresh_access_token(&config, "rt", Some("id"), Some("secret"), None),
+        )
+        .await
+        .expect("the request timeout fired before the outer bound");
+        let elapsed = started.elapsed();
+
+        // The error text cannot say why (the source chain is flattened into
+        // the message), so the clock does: a refused or broken connection
+        // fails at once, only the request timeout fails at exactly its mark.
+        outcome.expect_err("a hung endpoint yields no token");
+        assert!(
+            elapsed >= REFRESH_REQUEST_TIMEOUT,
+            "gave up early: {elapsed:?}"
+        );
+        assert!(
+            elapsed < REFRESH_REQUEST_TIMEOUT + std::time::Duration::from_secs(1),
+            "gave up late: {elapsed:?}"
+        );
     }
 }

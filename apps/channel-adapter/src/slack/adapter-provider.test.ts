@@ -51,9 +51,11 @@ const openWithSpies = () => {
   const approvals: unknown[] = [];
   const reaches: unknown[] = [];
   const actions: unknown[] = [];
+  const groups: unknown[] = [];
   const handlers: ProviderTransportHandlers = {
     onEvent: () => {},
     onApprovalDecision: (d) => approvals.push(d),
+    onGroupApprovalDecision: (d) => groups.push(d),
     onReachDecision: (d) => reaches.push(d),
     onActionDecision: (d) => actions.push(d),
     onPermanentFailure: () => {},
@@ -62,10 +64,62 @@ const openWithSpies = () => {
   const transport = slackAdapterProvider.openTransport(presence, handlers);
   expect(transport).not.toBeNull();
   if (!socketMock.onInteractive) throw new Error("socket never dialed");
-  return { approvals, reaches, actions, deliver: socketMock.onInteractive };
+  return {
+    approvals,
+    reaches,
+    actions,
+    groups,
+    deliver: socketMock.onInteractive,
+  };
 };
 
 describe("slack adapter-provider — interactivity classification", () => {
+  it("routes a grouped card's Approve all to onGroupApprovalDecision with the shown ids", () => {
+    const { approvals, groups, deliver } = openWithSpies();
+    deliver({
+      type: "block_actions",
+      user: { id: "U-CLICKER" },
+      channel: { id: "D100" },
+      actions: [{ action_id: "channel_group_approve", value: "ap-1,ap-2" }],
+    });
+    expect(groups).toEqual([
+      {
+        approvalIds: ["ap-1", "ap-2"],
+        decision: "approve",
+        clickerExternalUserId: "U-CLICKER",
+        channel: "D100",
+      },
+    ]);
+    expect(approvals).toEqual([]);
+  });
+
+  it("routes a row's menu choice as ONE id, and drops a malformed group value", () => {
+    const { groups, deliver } = openWithSpies();
+    deliver({
+      type: "block_actions",
+      user: { id: "U-CLICKER" },
+      actions: [
+        {
+          action_id: "channel_group_row:4",
+          selected_option: { value: "deny|ap-9" },
+        },
+      ],
+    });
+    deliver({
+      type: "block_actions",
+      user: { id: "U-CLICKER" },
+      actions: [{ action_id: "channel_group_deny", value: "ap-1,<!here>" }],
+    });
+    expect(groups).toEqual([
+      {
+        approvalIds: ["ap-9"],
+        decision: "deny",
+        clickerExternalUserId: "U-CLICKER",
+        channel: null,
+      },
+    ]);
+  });
+
   it("routes a reach-card click to onReachDecision with only the opaque grant id", () => {
     const { approvals, reaches, deliver } = openWithSpies();
     deliver({

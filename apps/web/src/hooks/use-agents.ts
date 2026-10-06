@@ -265,6 +265,25 @@ export const useRegenerateToken = () => {
 };
 
 /**
+ * "Restart agent": every conversation starts fresh and the sandbox stops.
+ * Only the agent list is invalidated (it carries the status pill). The
+ * conversations namespace is deliberately left alone: its direct-thread key
+ * is backed by a PUT that must never be swept, and the open thread's turns
+ * poll already picks up the turns the restart ended.
+ */
+export const useRestartAgent = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: agents.restart,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
+      toast.success("Agent restarted. Your next message starts it fresh.");
+    },
+    onError: () => toast.error("Failed to restart the agent"),
+  });
+};
+
+/**
  * Mint a short-lived SSH certificate for a hosted agent. Headless (the
  * use-crons convention): the SSH section owns the
  * error copy, because refusals must render inline as states — 404 (no SSH

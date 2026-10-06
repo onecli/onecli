@@ -72,6 +72,21 @@ describe("connectionGrantSchema", () => {
     );
   });
 
+  it("accepts a Google Drive driveFolders grant and keeps it exclusive", () => {
+    expect(
+      connectionGrantSchema.parse({
+        access: "full",
+        resources: { driveFolders: ["SD/F1"] },
+      }),
+    ).toMatchObject({ resources: { driveFolders: ["SD/F1"] } });
+    expect(
+      connectionGrantSchema.safeParse({
+        access: "full",
+        resources: { driveFolders: ["SD"], folders: ["/x"] },
+      }).success,
+    ).toBe(false);
+  });
+
   it("rejects malformed resources — one strict axis per policy", () => {
     expect(
       connectionGrantSchema.safeParse({

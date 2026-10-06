@@ -201,12 +201,9 @@ export default function CreatePage() {
             className="mt-10"
             onClick={() => setPhase("form")}
           >
-            Create your first agent
+            Get started
             <ArrowRight className="size-4" aria-hidden />
           </Button>
-          <p className="text-muted-foreground mt-3 text-xs">
-            Under a minute. No keys required.
-          </p>
         </div>
       ) : phase === "form" ? (
         <div
@@ -262,7 +259,7 @@ export default function CreatePage() {
               className="mt-4 w-full"
               disabled={!canSubmit}
             >
-              Create agent
+              Let&apos;s go
               <ArrowRight className="size-4" aria-hidden />
             </Button>
           </form>

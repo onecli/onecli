@@ -4,6 +4,8 @@ export const dropbox: AppDefinition = {
   id: "dropbox",
   name: "Dropbox",
   icon: "/icons/dropbox.svg",
+  apiDocsUrl:
+    "https://www.dropbox.com/developers/documentation/http/documentation",
   description: "Cloud file storage, sharing, and collaboration.",
   connectionMethod: {
     type: "oauth",

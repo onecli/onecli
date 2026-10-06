@@ -1,5 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { supervisorMessageSchema, workItemSchema } from "./transport";
+import {
+  MAX_AGENT_CONNECTION_API_HOST_CHARS,
+  MAX_AGENT_CONNECTION_API_HOSTS,
+  MAX_AGENT_CONNECTION_DOCS_URL_CHARS,
+  MAX_AGENT_CONNECTION_ENDPOINT_CHARS,
+  MAX_AGENT_CONNECTION_ENDPOINTS,
+  MAX_AGENT_CONNECTION_LABEL_CHARS,
+  MAX_AGENT_CONNECTION_NAME_CHARS,
+  MAX_AGENT_CONNECTIONS,
+  MAX_SYNC_PART_BYTES,
+  agentConnectionSchema,
+  supervisorMessageSchema,
+  syncFrameByteLength,
+  workItemSchema,
+} from "./transport";
+import { MAX_SYNC_PARTS } from "./sync-budget";
+import { MAX_HOSTNAME_CHARS } from "./text";
 import {
   ATTACHMENT_CHUNK_BASE64_CHARS,
   MAX_OUTBOUND_ATTACHMENT_BYTES,
@@ -358,5 +374,74 @@ describe("file.part + file.result (send_file wire)", () => {
       error: "Too many uploads in flight — retry shortly.",
     });
     expect(refused.kind === "file.result" && refused.retryable).toBe(true);
+  });
+});
+
+/**
+ * The connections list rides the home-sync FINAL part beside the brief and
+ * the prune manifest. Its catalog fields (apiHosts, endpoints, docsUrl) are
+ * capped so the WORST case at MAX_AGENT_CONNECTIONS still fits the frame:
+ * raising a cap without re-checking the budget fails here, not as a
+ * silently dropped frame in production.
+ */
+describe("the connections list on the sync frame", () => {
+  // Hosts must be bare hostnames (main hardened `host`; `apiHosts` follows),
+  // so the worst case is the longest VALID hostname, not 253 bare letters.
+  const longHost = (chars: number): string => {
+    const labels: string[] = [];
+    let left = chars;
+    while (left > 0) {
+      const take = Math.min(63, left - (labels.length ? 1 : 0));
+      labels.push("h".repeat(Math.max(1, take)));
+      left -= take + (labels.length > 1 ? 1 : 0);
+    }
+    return labels.join(".");
+  };
+  const worst = {
+    provider: "p".repeat(64),
+    name: "n".repeat(MAX_AGENT_CONNECTION_NAME_CHARS),
+    label: "l".repeat(MAX_AGENT_CONNECTION_LABEL_CHARS),
+    host: longHost(MAX_HOSTNAME_CHARS),
+    apiHosts: Array.from({ length: MAX_AGENT_CONNECTION_API_HOSTS }, () =>
+      longHost(MAX_AGENT_CONNECTION_API_HOST_CHARS),
+    ),
+    endpoints: Array.from({ length: MAX_AGENT_CONNECTION_ENDPOINTS }, () =>
+      "e".repeat(MAX_AGENT_CONNECTION_ENDPOINT_CHARS),
+    ),
+    docsUrl: `https://${"d".repeat(MAX_AGENT_CONNECTION_DOCS_URL_CHARS - "https://".length)}`,
+  };
+
+  it("the worst-case entry is valid, and one field past a cap is not", () => {
+    expect(agentConnectionSchema.safeParse(worst).success).toBe(true);
+    expect(
+      agentConnectionSchema.safeParse({
+        ...worst,
+        apiHosts: [...worst.apiHosts, "x"],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("the full worst-case list fits the part budget beside a maximal brief", () => {
+    const bytes = syncFrameByteLength({
+      kind: "skills.changed",
+      generation: Number.MAX_SAFE_INTEGER,
+      part: MAX_SYNC_PARTS,
+      of: MAX_SYNC_PARTS,
+      files: [],
+      instructions: "i".repeat(20_000),
+      agentName: "x".repeat(255),
+      connections: Array(MAX_AGENT_CONNECTIONS).fill(worst),
+    });
+    expect(bytes).toBeLessThan(MAX_SYNC_PART_BYTES * 0.8);
+  });
+
+  it("an older frame without the catalog fields still parses", () => {
+    const legacy = {
+      provider: worst.provider,
+      name: worst.name,
+      label: worst.label,
+      host: worst.host,
+    };
+    expect(agentConnectionSchema.safeParse(legacy).success).toBe(true);
   });
 });

@@ -7,6 +7,7 @@ import {
   TooltipTrigger,
 } from "@onecli/ui/components/tooltip";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
+import { inlineLinkClassName } from "./inline-link";
 
 /**
  * An inline, copyable command inside helper text: the visible text IS what
@@ -21,10 +22,16 @@ import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 export const CopyableCommand = ({
   command,
   toastMessage,
+  tooltip = "Copy command",
+  variant = "chip",
 }: {
   command: string;
   /** The success toast — the "now do this" follow-up after copying. */
   toastMessage: string;
+  /** What hovering explains before the click. */
+  tooltip?: string;
+  /** `chip` is the mono code pill; `link` matches adjacent inline links. */
+  variant?: "chip" | "link";
 }) => {
   const { copy } = useCopyToClipboard();
   return (
@@ -33,9 +40,17 @@ export const CopyableCommand = ({
         <button
           type="button"
           aria-label={`Copy ${command}`}
-          // Rests LIGHTER than an inert code chip and strengthens on hover
-          // (the attachment-chips idiom) — fill, not fade, marks interactive.
-          className="bg-muted/60 hover:bg-muted rounded px-1 py-0.5 font-mono text-[11px] transition-colors"
+          translate="no"
+          // `chip` rests LIGHTER than an inert code chip and strengthens on
+          // hover (the attachment-chips idiom): fill, not fade, marks it
+          // interactive. `link` wears the exact class of the sibling anchors
+          // (rest, hover, and focus) so a command offered as a peer of a link
+          // reads as one.
+          className={
+            variant === "link"
+              ? inlineLinkClassName
+              : "bg-muted/60 hover:bg-muted rounded px-1 py-0.5 font-mono text-[11px] transition-colors"
+          }
           onClick={() => {
             void copy(command).then((copied) => {
               if (copied) toast.success(toastMessage);
@@ -46,7 +61,7 @@ export const CopyableCommand = ({
           {command}
         </button>
       </TooltipTrigger>
-      <TooltipContent>Copy command</TooltipContent>
+      <TooltipContent className="max-w-xs">{tooltip}</TooltipContent>
     </Tooltip>
   );
 };

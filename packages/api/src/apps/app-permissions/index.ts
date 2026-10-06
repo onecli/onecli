@@ -71,10 +71,12 @@ import { clayPermissions } from "./clay";
 import { xPermissions } from "./x";
 import { fathomPermissions } from "./fathom";
 import { firefliesPermissions } from "./fireflies";
+import { timelessPermissions } from "./timeless";
 import { zohoCrmPermissions } from "./zoho-crm";
 import { snowflakePermissions } from "./snowflake";
 import { stripePermissions } from "./stripe";
 import { salesforcePermissions } from "./salesforce";
+import { navanPermissions } from "./navan";
 
 const permissionRegistry = new Map<string, AppPermissionDefinition>();
 
@@ -148,7 +150,9 @@ register(clayPermissions);
 register(xPermissions);
 register(fathomPermissions);
 register(firefliesPermissions);
+register(timelessPermissions);
 register(zohoCrmPermissions);
 register(snowflakePermissions);
 register(stripePermissions);
 register(salesforcePermissions);
+register(navanPermissions);

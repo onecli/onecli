@@ -30,7 +30,6 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@onecli/ui/components/accordion";
-import { Badge } from "@onecli/ui/components/badge";
 import { updateSecret as defaultUpdateSecret } from "@/lib/actions/secrets";
 import { useQueryClient } from "@tanstack/react-query";
 import { secrets } from "@/lib/api";
@@ -38,6 +37,9 @@ import { queryKeys } from "@/lib/api/keys";
 import type { CreateSecretInput } from "@onecli/api/validations/secret";
 import type { SecretActions } from "./types";
 import { CopyableCommand } from "./copyable-command";
+import { inlineLinkClassName } from "./inline-link";
+import { AnthropicKeyBadge } from "./anthropic-key-badge";
+import { keyFormatWarning } from "./key-format-warning";
 import {
   OnePasswordPickerDialog,
   type OpDisplay,
@@ -52,7 +54,6 @@ import {
   isParamInjection,
   isPathRegexInjection,
   isPathTemplateInjection,
-  looksLikeAnthropicKey,
   looksLikeOpenaiKey,
   parseOpenaiAuthJson,
 } from "@onecli/api/validations/secret";
@@ -105,8 +106,9 @@ const OpenAIIcon = ({ className }: { className?: string }) => (
 const SECRET_TYPE_OPTIONS: SecretTypeOption[] = [
   {
     value: "anthropic",
-    label: "Anthropic API Key",
-    description: "Inject your Anthropic key into requests to api.anthropic.com",
+    label: "Anthropic",
+    description:
+      "Inject a Claude subscription token or API key into requests to api.anthropic.com",
     icon: <AnthropicIcon className="size-5" />,
     hostDefault: "api.anthropic.com",
     nameDefault: "Anthropic Token",
@@ -270,6 +272,11 @@ export const SecretDialog = ({
   const fromOnePassword = !!opSelection;
   const isOAuthMode =
     type === "openai" && openaiMode === "codex" && !fromOnePassword;
+
+  // The amber hint under an LLM key input (null for generic secrets, an empty
+  // field, or a value that looks right).
+  const formatWarning =
+    type === "generic" ? null : keyFormatWarning(type, value);
 
   const nameError = useMemo(() => validateDisplayName(name), [name]);
   const showNameError = nameTouched && nameError !== null;
@@ -587,7 +594,7 @@ export const SecretDialog = ({
                 {isEdit
                   ? "Update the secret\u2019s configuration. Leave the value field empty to keep the current value."
                   : type === "anthropic"
-                    ? "Your key will be encrypted and injected into requests to api.anthropic.com."
+                    ? "Your token or key is encrypted and injected into requests to api.anthropic.com."
                     : type === "openai"
                       ? `Inject credentials into requests to ${openaiMode === "codex" ? "chatgpt.com" : "api.openai.com"}.`
                       : "Configure a custom secret to inject as a header, URL parameter, or URL path into matching requests."}
@@ -700,7 +707,7 @@ export const SecretDialog = ({
                           href="https://platform.openai.com/api-keys"
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-foreground underline underline-offset-2"
+                          className={inlineLinkClassName}
                         >
                           platform.openai.com
                         </a>
@@ -709,7 +716,7 @@ export const SecretDialog = ({
                           href="https://onecli.sh/docs/integrations/openai#setup-api-key"
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-foreground underline underline-offset-2"
+                          className={inlineLinkClassName}
                         >
                           Setup guide
                         </a>
@@ -726,7 +733,7 @@ export const SecretDialog = ({
                           href="https://onecli.sh/docs/integrations/openai#setup-codex-oauth"
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-foreground underline underline-offset-2"
+                          className={inlineLinkClassName}
                         >
                           Setup guide
                         </a>
@@ -748,7 +755,7 @@ export const SecretDialog = ({
                     href="https://onecli.sh/docs/integrations/openai#setup-codex-oauth"
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-foreground underline underline-offset-2"
+                    className={inlineLinkClassName}
                   >
                     Setup guide
                   </a>
@@ -860,9 +867,9 @@ export const SecretDialog = ({
                           id="secret-value"
                           placeholder={
                             type === "anthropic"
-                              ? "sk-ant-api03-..."
+                              ? "sk-ant-oat01-… or sk-ant-api03-…"
                               : type === "openai"
-                                ? "sk-proj-..."
+                                ? "sk-proj-…"
                                 : "Enter secret value"
                           }
                           value={value}
@@ -870,14 +877,16 @@ export const SecretDialog = ({
                             const val = e.target.value;
                             setValue(val);
                             if (type === "anthropic" && !name.trim()) {
-                              const detected = detectAnthropicAuthMode(val);
+                              const detected = detectAnthropicAuthMode(
+                                val.trim(),
+                              );
                               if (detected === "api-key")
                                 setName("Anthropic API Key");
                               else if (detected === "oauth")
-                                setName("Anthropic OAuth Token");
+                                setName("Claude Subscription");
                             }
                             if (type === "openai" && !name.trim()) {
-                              if (looksLikeOpenaiKey(val))
+                              if (looksLikeOpenaiKey(val.trim()))
                                 setName("OpenAI API Key");
                             }
                           }}
@@ -889,62 +898,41 @@ export const SecretDialog = ({
                         />
                       )}
                     </div>
-                    <div className="flex items-center gap-2">
-                      {type === "anthropic" &&
-                      value.trim() &&
-                      !looksLikeAnthropicKey(value) ? (
-                        <p className="text-xs text-amber-600 dark:text-amber-400">
-                          {detectAnthropicAuthMode(value) !== null ? (
-                            "This key looks incomplete. Make sure you copied the full value."
-                          ) : (
-                            <>
-                              Keys typically start with{" "}
-                              <code className="text-[11px]">sk-ant-api</code> or{" "}
-                              <code className="text-[11px]">sk-ant-oat</code>
-                            </>
-                          )}
-                        </p>
-                      ) : type === "openai" &&
-                        value.trim() &&
-                        !looksLikeOpenaiKey(value) ? (
-                        <p className="text-xs text-amber-600 dark:text-amber-400">
-                          {value.startsWith("sk-ant-") ? (
-                            "This looks like an Anthropic key, not an OpenAI key."
-                          ) : value.startsWith("sk-") ? (
-                            "This key looks incomplete. Make sure you copied the full value."
-                          ) : (
-                            <>
-                              Keys typically start with{" "}
-                              <code className="text-[11px]">sk-proj-</code> or{" "}
-                              <code className="text-[11px]">sk-</code>
-                            </>
-                          )}
+                    {/* A stable live region: the amber warning and the kind
+                        badge swap in as the user pastes, and a region that
+                        mounts with its content isn't reliably announced. */}
+                    <div role="status" className="flex items-center gap-2">
+                      {formatWarning ? (
+                        <p className="min-w-0 text-xs text-amber-600 dark:text-amber-400">
+                          {formatWarning}
                         </p>
                       ) : (
-                        <p className="text-muted-foreground text-xs">
+                        <p className="text-muted-foreground min-w-0 text-xs">
                           {type === "anthropic" ? (
                             <>
-                              Paste a key from the{" "}
+                              Paste a subscription token from{" "}
+                              <CopyableCommand
+                                command="claude setup-token"
+                                variant="link"
+                                tooltip="Run it in a terminal with Claude Code (needs a Pro, Max, Team, or Enterprise plan), approve in the browser, then paste the token it prints. Click to copy."
+                                toastMessage="Copied. Run it in your terminal, approve in the browser, then paste the token here."
+                              />
+                              , or an API key from the{" "}
                               <a
                                 href="https://platform.claude.com/settings/keys"
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="text-foreground underline underline-offset-2"
+                                className={inlineLinkClassName}
                               >
-                                Anthropic Console
+                                Claude Console
                               </a>
-                              , or a token from{" "}
-                              <CopyableCommand
-                                command="claude setup-token"
-                                toastMessage="Copied. Run it in your terminal, then paste the token here."
-                              />
                             </>
                           ) : type === "openai" ? (
                             <>
                               Paste your API key, or{" "}
                               <button
                                 type="button"
-                                className="text-foreground underline underline-offset-2"
+                                className={inlineLinkClassName}
                                 onClick={() => fileInputRef.current?.click()}
                               >
                                 upload auth.json
@@ -956,7 +944,7 @@ export const SecretDialog = ({
                         </p>
                       )}
                       {type === "anthropic" && (
-                        <AnthropicKeyBadge value={value} />
+                        <AnthropicKeyBadge value={value.trim()} />
                       )}
                     </div>
                   </>
@@ -1444,27 +1432,6 @@ const TypeStep = ({
         ))}
       </div>
     </>
-  );
-};
-
-const AnthropicKeyBadge = ({ value }: { value: string }) => {
-  const detected = detectAnthropicAuthMode(value);
-  if (!detected) return null;
-
-  return (
-    <Badge
-      variant="outline"
-      className="text-muted-foreground animate-in fade-in shrink-0 gap-1.5 text-[10px] font-normal"
-    >
-      <span
-        className={
-          detected === "api-key"
-            ? "bg-brand size-1.5 rounded-full"
-            : "bg-blue-500 size-1.5 rounded-full"
-        }
-      />
-      {detected === "api-key" ? "API Key" : "OAuth Token"}
-    </Badge>
   );
 };
 

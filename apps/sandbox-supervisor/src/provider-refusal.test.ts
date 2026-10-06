@@ -10,18 +10,27 @@ import {
 const TRANSCRIPT_400 =
   'Anthropic API error (400 Bad Request): {"type":"error","error":{"type":"invalid_request_error","message":"messages.814: `tool_use` ids were found without `tool_result` blocks immediately after: toolu_01AAAAAAAAAAAAAAAAAAAAAA, toolu_01BBBBBBBBBBBBBBBBBBBBBB. Each `tool_use` block must have a corresponding `tool_result` block in the next message."},"request_id":"req_011CAAAAAAAAAAAAAAAAAAAA"}';
 
+/** An agent that read a `.ico`: the stored image's media type is refused on
+ * every turn after (Anthropic's wording; request id made up). */
+const UNSUPPORTED_IMAGE_400 =
+  'Anthropic API error (400 Bad Request): {"type":"error","error":{"type":"invalid_request_error","message":"messages.720.content.0.tool_result.content.1.image.source.base64.media_type: Input should be \'image/jpeg\', \'image/png\', \'image/gif\' or \'image/webp\'"},"request_id":"req_011CBBBBBBBBBBBBBBBBBBBB"}';
+
 describe("isTranscriptRejected", () => {
   it.each([
     TRANSCRIPT_400,
     // The duplicate-result sibling: also the transcript, also forever.
     'Anthropic API error (400 Bad Request): {"type":"error","error":{"type":"invalid_request_error","message":"messages.12.content.0: unexpected `tool_use_id` found in `tool_result` blocks: toolu_01. Each `tool_result` block must have a corresponding `tool_use` block in the previous message."}}',
+    UNSUPPORTED_IMAGE_400,
   ])("classifies the provider rejecting the stored conversation: %s", (m) => {
     expect(isTranscriptRejected(m)).toBe(true);
   });
 
-  it("is never a key problem", () => {
-    expect(isProviderRefusal(TRANSCRIPT_400)).toBe(false);
-  });
+  it.each([TRANSCRIPT_400, UNSUPPORTED_IMAGE_400])(
+    "is never a key problem: %s",
+    (m) => {
+      expect(isProviderRefusal(m)).toBe(false);
+    },
+  );
 
   it.each([
     'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 214937 tokens > 200000 maximum"}}',

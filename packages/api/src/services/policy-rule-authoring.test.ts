@@ -12,6 +12,8 @@ const gate = vi.hoisted(() => ({ assertAllowed: vi.fn(async () => {}) }));
 const state = vi.hoisted(() => ({
   // The rule `updatePolicyRule` fetches (findFirst, fenced to isDefault:false).
   existing: null as unknown,
+  // Published snapshots written by the write's in-tx publish.
+  published: [] as unknown[],
 }));
 
 // A RuleRow the DTO mapper can read (identities/targets empty → []). Its shape is
@@ -47,8 +49,13 @@ vi.mock("../providers", () => ({
 vi.mock("@onecli/db", () => {
   const policyRuleV2 = {
     findFirst: async () => state.existing,
-    aggregate: async () => ({ _max: { priority: 0 } }),
-    create: async () => ruleRow(),
+    // The in-tx publish reads the whole draft and snapshots it.
+    findMany: async () => [ruleRow()],
+    aggregate: async () => ({ _max: { priority: 0, generation: 0 } }),
+    create: async ({ data }: { data: { status?: string } }) => {
+      if (data.status === "published") state.published.push(data);
+      return ruleRow();
+    },
     update: async () => ruleRow(),
   };
   const tx = {
@@ -80,6 +87,7 @@ const NETWORK_TARGET = {
 
 beforeEach(() => {
   state.existing = ruleRow();
+  state.published = [];
   gate.assertAllowed.mockClear();
 });
 
@@ -108,19 +116,22 @@ describe("createPolicyRule requires at least one target (Layer 2)", () => {
         USER,
       ),
     ).resolves.toMatchObject({ id: "r1" });
+    // Saved means enforced: the write publishes in the same transaction.
+    expect(state.published).toHaveLength(1);
   });
 });
 
 describe("updatePolicyRule rejects clearing a rule's targets (Layer 2)", () => {
   it("rejects a provided empty targets array with 422", async () => {
     await expect(
-      updatePolicyRule(SCOPE, "r1", { targets: [] }),
+      updatePolicyRule(SCOPE, "r1", { targets: [] }, USER),
     ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
   });
 
   it("allows an update that omits targets (locked-rule preserve)", async () => {
     await expect(
-      updatePolicyRule(SCOPE, "r1", { name: "Renamed" }),
+      updatePolicyRule(SCOPE, "r1", { name: "Renamed" }, USER),
     ).resolves.toMatchObject({ id: "r1" });
+    expect(state.published).toHaveLength(1);
   });
 });

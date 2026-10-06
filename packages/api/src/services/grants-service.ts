@@ -7,16 +7,15 @@ import {
   isSessionPolicy,
   type SessionPolicyInput,
 } from "../validations/policy";
-import { entriesOutside } from "../lib/resource-axis";
+import { canonicalPolicy, entriesOutside } from "../lib/resource-axis";
 import { loadInjectionRules } from "./policy-simulate/load-rules";
 import { resolvePrincipalSet } from "./policy-simulate/principal-set";
 import { orgResourceBoundary } from "./policy-reflect/org-resource-boundary";
 import {
-  ensureDefault,
   gatedActions,
   lockScope,
+  publishDraftInTx,
   RULE_INCLUDE,
-  snapshotDraftRules,
   type PolicyRuleRow,
   type PolicyScopeBase,
 } from "./policy-service";
@@ -56,10 +55,10 @@ import { signalWork } from "./due-work";
  * Writes follow the blocklist-service precedent: one transaction under the
  * per-scope advisory lock — delete the old stack, append the new one at the
  * tail priority band (custom rules keep first-match precedence until step 6),
- * then publish atomically (`ensureDefault` + `snapshotDraftRules`), so a grant
- * is enforced the moment the request returns. The compiler is idempotent (an
- * identical desired state writes nothing) and repairs any hand-edit drift on
- * the next write by construction (delete-then-recompile).
+ * then publish atomically (`publishDraftInTx`), so a grant is enforced the
+ * moment the request returns. The compiler is idempotent (an identical
+ * desired state writes nothing) and repairs any hand-edit drift on the next
+ * write by construction (delete-then-recompile).
  *
  * Fencing deliberately DIFFERS from `assertTargetsValid` (which forbids a
  * workspace rule naming org resources): the attach list spans the workspace's own
@@ -295,32 +294,6 @@ const assertWithinOrgBoundary = async (
   }
 };
 
-/** Server-side mirror of the picker's empty≡all law, plus byte-stable storage.
- *
- * Not a contradiction of `sessionPolicySchema`, which now REJECTS an empty list
- * (validations/policy.ts): the wire can no longer carry one, so this arm exists
- * for direct service callers (the converter, tests) and turns their empty
- * selection into "unrestricted" BEFORE it could ever be stored as the deny-all
- * sentinel the gateway would enforce.
- *
- * an all-empty selection clears to null (a non-null empty list is ambiguous at
- * the gateway), and list values sort — `conditionsEqual`/`stackEquals` sort
- * keys but never array elements, so an unsorted same-set re-pick would defeat
- * write idempotence. */
-const normalizeResources = (
-  resources: SessionPolicyInput | null,
-): SessionPolicyInput | null => {
-  if (resources === null) return null;
-  if ("repositories" in resources) {
-    return resources.repositories.length === 0
-      ? null
-      : { repositories: [...resources.repositories].sort() };
-  }
-  return resources.folders.length === 0
-    ? null
-    : { folders: [...resources.folders].sort() };
-};
-
 const requireSecret = async (scope: GrantScope, secretId: string) => {
   const secret = await db.secret.findFirst({
     where: { id: secretId, ...poolWhere(scope) },
@@ -441,28 +414,6 @@ const appendGrantRules = async (
   return ruleIds;
 };
 
-/** Publish the whole draft as a fresh generation, so a grant is enforced the
- * moment the request returns. Callers hold the scope lock. */
-const publishDraft = async (
-  tx: Tx,
-  scopeBase: PolicyScopeBase,
-  userId: string | null,
-): Promise<number> => {
-  await ensureDefault(tx, scopeBase);
-  const draftRules = await tx.policyRuleV2.findMany({
-    where: { ...scopeBase, status: "draft" },
-    include: RULE_INCLUDE,
-    orderBy: [{ priority: "asc" }, { id: "asc" }],
-  });
-  const { generation } = await snapshotDraftRules(
-    tx,
-    scopeBase,
-    draftRules,
-    userId,
-  );
-  return generation;
-};
-
 /**
  * Replace the draft rows matched by `deleteWhere` with `creates`, then publish
  * the whole draft, in one transaction under the per-scope advisory lock.
@@ -485,7 +436,7 @@ const replaceAndPublish = async (
       },
     });
     const ruleIds = await appendGrantRules(tx, scopeBase, userId, creates);
-    const generation = await publishDraft(tx, scopeBase, userId);
+    const { generation } = await publishDraftInTx(tx, scopeBase, userId);
     return { ruleIds, generation };
   });
 };
@@ -606,7 +557,11 @@ export const setConnectionGrant = async (
   if (input.resources === undefined) {
     conditions = stackConditions(existing);
   } else {
-    const resources = normalizeResources(input.resources);
+    // The picker's empty≡all law plus byte-stable storage. Not a
+    // contradiction of `sessionPolicySchema`, which REJECTS an empty list: the
+    // wire can't carry one, so this protects direct service callers (the
+    // converter, tests) from storing the gateway's deny-all sentinel.
+    const resources = canonicalPolicy(input.resources);
     if (resources !== null) {
       // An explicit SET runs the edition's validator: EE deep-checks the shape
       // against the provider and team-gates the entitlement; OSS rejects every
@@ -630,8 +585,8 @@ export const setConnectionGrant = async (
   );
   if (desired.some((rule) => rule.requireApproval)) {
     // Same law as the rule CRUD: approval-modified rules are plan-gated at
-    // write time (publish re-asserts over the whole draft — an ungated write
-    // here would brick the scope's next publish, not dodge the entitlement).
+    // write time, and the write is what goes live (the in-tx publish gates
+    // nothing of its own).
     // Keyed on the COMPILED stack, not `input.ask`: a customized stack's
     // terminal needs approval even when no tool does.
     await getRuleActionGate().assertAllowed(
@@ -935,7 +890,7 @@ export const addDefaultGrants = async (
       }
       if (creates.length === 0) return written;
       await appendGrantRules(tx, scopeBase, userId, creates);
-      await publishDraft(tx, scopeBase, userId);
+      await publishDraftInTx(tx, scopeBase, userId);
       return written;
     },
     // One row per pair: a large workspace's fan-out can outlast Prisma's 5s

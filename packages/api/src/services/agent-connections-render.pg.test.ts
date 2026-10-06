@@ -139,7 +139,8 @@ describe.skipIf(!PROOF_URL)("connectionsForRender over real PostgreSQL", () => {
     );
 
     const list = await render.connectionsForRender(AGENT);
-    expect(list).toEqual([
+    // The injection-law fields exactly; the catalog facts ride alongside.
+    expect(list).toMatchObject([
       { provider: "gmail", name: "Gmail", label: "j@example.com", host: null },
       {
         provider: "salesforce",
@@ -154,6 +155,15 @@ describe.skipIf(!PROOF_URL)("connectionsForRender over real PostgreSQL", () => {
         host: "acme-prod.snowflakecomputing.com",
       },
     ]);
+    expect(list).toHaveLength(3);
+    // Catalog facts: a fixed-host app gets its API host and docs; a
+    // tenant-only app gets none (its bound host above is the answer).
+    expect(list[0]).toMatchObject({
+      apiHosts: ["gmail.googleapis.com"],
+      docsUrl:
+        "https://developers.google.com/workspace/gmail/api/reference/rest",
+    });
+    expect(list[1]?.apiHosts).toEqual([]);
     // Another agent in the same workspace holds no grant — sees nothing.
     expect(await render.connectionsForRender(OTHER_AGENT)).toEqual([]);
   });

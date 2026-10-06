@@ -4,6 +4,7 @@ export const linear: AppDefinition = {
   id: "linear",
   name: "Linear",
   icon: "/icons/linear.svg",
+  apiDocsUrl: "https://linear.app/developers/graphql",
   darkIcon: "/icons/linear-light.svg",
   description: "Issues, projects, teams, and product development workflows.",
   connectionMethod: {

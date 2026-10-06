@@ -43,6 +43,40 @@ describe("parseConnectLink", () => {
   });
 });
 
+describe("parseConnectLink: the connection_needs_reconnect shape", () => {
+  it("names the dead account the gateway's reconnect link points at", () => {
+    expect(
+      parseConnectLink(
+        "https://app.onecli.sh/w/abc/connections/apps/salesforce?reconnect=f163a8ae%2D7ee3%2D4599",
+      ),
+    ).toEqual({
+      provider: "salesforce",
+      kind: "reconnect",
+      connectionId: "f163a8ae-7ee3-4599",
+    });
+  });
+
+  it("parses a hyphenated provider exactly as the gateway writes it", () => {
+    expect(
+      parseConnectLink(
+        "https://app.onecli.sh/w/abc/connections/apps/google-calendar?reconnect=c1",
+      ),
+    ).toEqual({
+      provider: "google-calendar",
+      kind: "reconnect",
+      connectionId: "c1",
+    });
+  });
+
+  it("falls back to attach when the id is not a plain id", () => {
+    expect(
+      parseConnectLink(
+        "https://app.onecli.sh/connections/apps/salesforce?reconnect=a%20b",
+      ),
+    ).toEqual({ provider: "salesforce", kind: "attach" });
+  });
+});
+
 describe("parseConnectLink — the access_restricted (attach) shape", () => {
   it("parses the manage URL the gateway mints when the agent lacks a grant", () => {
     expect(

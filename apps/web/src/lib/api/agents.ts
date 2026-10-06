@@ -85,6 +85,16 @@ export const deleteImage = (agentId: string) =>
   apiDelete(`/v1/agents/${encodeURIComponent(agentId)}/image`);
 
 /**
+ * "Restart agent": every conversation of this hosted agent starts fresh and
+ * its sandbox stops, so the next message cold-starts it.
+ */
+export const restart = (agentId: string) =>
+  apiPost<{ success: boolean }>(
+    `/v1/agents/${encodeURIComponent(agentId)}/restart`,
+    {},
+  );
+
+/**
  * Mint a short-lived OpenSSH user certificate for this hosted agent.
  * The source is a registered key's id (the
  * one-click path) or a pasted public key line. Refusals are STATES the SSH

@@ -126,7 +126,12 @@ describe("healJcodeSession", () => {
 
     const result = healJcodeSession(sessions, ID);
 
-    expect(result).toEqual({ sessionId: ID, before: 12, dropped: 4 });
+    expect(result).toEqual({
+      sessionId: ID,
+      before: 12,
+      dropped: 4,
+      removedImages: 0,
+    });
     const healed = readSnapshot();
     expect(healed.messages).toEqual(expected);
     // Every tool_use is again followed by its own result: the property the
@@ -182,6 +187,7 @@ describe("healJcodeSession", () => {
       sessionId: ID,
       before: 6,
       dropped: 2,
+      removedImages: 0,
     });
     expect(readSnapshot().messages).toEqual(turns);
   });
@@ -239,6 +245,206 @@ describe("healJcodeSession", () => {
 
     expect(healJcodeSession(sessions, ID)).toBeNull();
     expect(JSON.parse(readFileSync(target, "utf8")).messages).toHaveLength(4);
+  });
+});
+
+/**
+ * The unsupported-image shape, exactly as jcode v0.90.0 stores a `read` of a
+ * `.ico`: the tool result, the image block (labelled by extension), and the
+ * label text jcode writes right after it.
+ */
+const ICON_BYTES = "AAABAAEAAgIAAAEAIAA=";
+const imageReadTurn = (n: number, mediaType: string): Message[] => [
+  {
+    id: `message_assistant_${n}`,
+    role: "assistant",
+    content: [
+      {
+        type: "tool_use",
+        id: `toolu_${n}`,
+        name: "read",
+        input: { file_path: `/workspace/icon-${n}` },
+      },
+    ],
+  },
+  {
+    id: `message_result_${n}`,
+    role: "user",
+    content: [
+      {
+        type: "tool_result",
+        tool_use_id: `toolu_${n}`,
+        content: `Image: /workspace/icon-${n}\nImage sent to model for vision analysis.`,
+      },
+      { type: "image", media_type: mediaType, data: ICON_BYTES },
+      {
+        type: "text",
+        text: `[Attached image associated with the preceding tool result: /workspace/icon-${n}]`,
+      },
+    ],
+  },
+];
+
+describe("healJcodeSession: unsupported images", () => {
+  it("replaces a journaled image/x-icon with a note folded into its tool result", () => {
+    const before = toolTurn(1);
+    const poisoned = imageReadTurn(2, "image/x-icon");
+    writeSession({ id: ID, messages: before }, [
+      { meta: meta("Active"), append_messages: poisoned },
+    ]);
+
+    expect(healJcodeSession(sessions, ID)).toEqual({
+      sessionId: ID,
+      before: 4,
+      dropped: 0,
+      removedImages: 1,
+    });
+
+    const healed = readSnapshot();
+    // The journal that held the image is folded in and gone.
+    expect(existsSync(journalPath())).toBe(false);
+    expect(healed.messages.slice(0, 3)).toEqual([...before, poisoned[0]]);
+    // ONE block left in the result message: the tool result, carrying the
+    // note. No image, no orphaned label, no sibling text between results.
+    expect(healed.messages[3].content).toEqual([
+      {
+        type: "tool_result",
+        tool_use_id: "toolu_2",
+        content:
+          "Image: /workspace/icon-2\nImage sent to model for vision analysis.\n" +
+          "[Image removed: image/x-icon is not a format the model accepts. Convert it to PNG or JPEG to view it.]",
+      },
+    ]);
+  });
+
+  it("repairs an unsupported image already saved into the snapshot", () => {
+    writeSession({
+      id: ID,
+      messages: [...toolTurn(1), ...imageReadTurn(2, "image/bmp")],
+    });
+
+    expect(healJcodeSession(sessions, ID)?.removedImages).toBe(1);
+    expect(JSON.stringify(readSnapshot())).not.toContain('"type":"image"');
+    expect(JSON.stringify(readSnapshot())).toContain(
+      "[Image removed: image/bmp",
+    );
+  });
+
+  it("turns a pasted image with no tool result before it into a text note", () => {
+    writeSession({
+      id: ID,
+      messages: [
+        {
+          id: "message_user_1",
+          role: "user",
+          content: [
+            { type: "image", media_type: "image/tiff", data: ICON_BYTES },
+            { type: "text", text: "what is this?" },
+          ],
+        },
+      ],
+    });
+
+    healJcodeSession(sessions, ID);
+
+    expect(readSnapshot().messages[0].content).toEqual([
+      {
+        type: "text",
+        text: "[Image removed: image/tiff is not a format the model accepts. Convert it to PNG or JPEG to view it.]",
+      },
+      // The person's own words are not the tool label: they stay.
+      { type: "text", text: "what is this?" },
+    ]);
+  });
+
+  it("files each note under its own tool result, past a kept image", () => {
+    // Two results in one message, the first also holding an accepted image.
+    // A standalone note anywhere before the second result would put text
+    // ahead of a tool result, which the provider rejects.
+    const [useOne, resultOne] = imageReadTurn(1, "image/png");
+    const [useTwo, resultTwo] = imageReadTurn(2, "image/bmp");
+    const [, iconResult] = imageReadTurn(3, "image/x-icon");
+    if (!useOne || !resultOne || !useTwo || !resultTwo || !iconResult) {
+      throw new Error("imageReadTurn yields a use and a result");
+    }
+    writeSession({
+      id: ID,
+      messages: [
+        {
+          id: "message_assistant_1",
+          role: "assistant",
+          content: [...useOne.content, ...useTwo.content],
+        },
+        {
+          id: "message_result_1",
+          role: "user",
+          // The ico image + its label, then the second tool's result.
+          content: [
+            ...resultOne.content,
+            ...iconResult.content.slice(1),
+            ...resultTwo.content,
+          ],
+        },
+      ],
+    });
+
+    expect(healJcodeSession(sessions, ID)?.removedImages).toBe(2);
+    const content: { type: string; content?: string }[] =
+      readSnapshot().messages[1].content;
+    expect(content.map((block) => block.type)).toEqual([
+      "tool_result",
+      "image",
+      "text",
+      "tool_result",
+    ]);
+    expect(content[0]?.content).toMatch(/\n\[Image removed: image\/x-icon /);
+    expect(content[3]?.content).toMatch(/\n\[Image removed: image\/bmp /);
+  });
+
+  it("keeps images in every accepted type", () => {
+    writeSession({
+      id: ID,
+      messages: [
+        ...imageReadTurn(1, "image/png"),
+        ...imageReadTurn(2, "image/jpeg"),
+        ...imageReadTurn(3, "image/gif"),
+        ...imageReadTurn(4, "image/webp"),
+      ],
+    });
+    const snapshot = readFileSync(snapshotPath(), "utf8");
+
+    expect(healJcodeSession(sessions, ID)).toBeNull();
+    expect(readFileSync(snapshotPath(), "utf8")).toBe(snapshot);
+  });
+
+  it("matches the label exactly, as the provider does", () => {
+    // jcode's clamp lets a case-only mismatch through unchanged, and the
+    // provider's list is exact, so `IMAGE/PNG` wedges like `image/bmp`.
+    writeSession({ id: ID, messages: imageReadTurn(1, "IMAGE/PNG") });
+
+    expect(healJcodeSession(sessions, ID)?.removedImages).toBe(1);
+  });
+
+  it("repairs a torn checkpoint and an unsupported image in one write", () => {
+    const turns = [...toolTurn(1), ...imageReadTurn(2, "image/x-icon")];
+    // The torn shape: the snapshot already holds what the journal re-appends.
+    writeSession({ id: ID, messages: turns }, [
+      { meta: meta("Active"), append_messages: turns.slice(2) },
+    ]);
+
+    expect(healJcodeSession(sessions, ID)).toEqual({
+      sessionId: ID,
+      before: 6,
+      dropped: 2,
+      removedImages: 1,
+    });
+    const healed = readSnapshot();
+    expect(healed.messages).toHaveLength(4);
+    expect(JSON.stringify(healed)).not.toContain('"type":"image"');
+    // One repair, one pair of backups.
+    expect(
+      readdirSync(sessions).filter((name) => name.includes(".pre-heal-")),
+    ).toHaveLength(2);
   });
 });
 

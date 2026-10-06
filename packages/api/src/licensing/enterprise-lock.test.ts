@@ -71,6 +71,7 @@ import { orgMemberRoutes } from "../ee/routes/org-members";
 import { orgGroupRoutes } from "../ee/routes/org-groups";
 import { orgRoleMappingRoutes } from "../ee/routes/org-role-mappings";
 import { dropboxFolderRoutes } from "../ee/routes/dropbox-folders";
+import { googleDriveFolderRoutes } from "../ee/routes/google-drive-folders";
 import { teamRoutes } from "../ee/routes/team";
 import { provisionClaimRoutes } from "../ee/routes/provision-claim";
 import { workspaceAccessRoutes } from "../ee/routes/workspace-access";
@@ -207,6 +208,11 @@ const PROBES: Probe[] = [
     feature: "granular_access",
     name: "dropbox folders router",
     run: probeRoute(dropboxFolderRoutes, "/folders"),
+  },
+  {
+    feature: "granular_access",
+    name: "google drive folders router",
+    run: probeRoute(googleDriveFolderRoutes, "/folders"),
   },
   {
     feature: "provisioning",

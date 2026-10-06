@@ -213,6 +213,7 @@ dependencies = [
  "serde",
  "serde_json",
  "time",
+ "tokio",
 ]
 
 [[package]]
@@ -1063,6 +1064,7 @@ dependencies = [
  "reqwest",
  "ring",
  "sqlx",
+ "tokio",
  "tokio-rustls 0.26.4",
  "tracing",
  "vault",
@@ -1387,6 +1389,7 @@ dependencies = [
  "context",
  "crypto",
  "db",
+ "form_urlencoded",
  "futures-util",
  "http-body-util",
  "hyper 1.8.1",
@@ -2804,6 +2807,7 @@ dependencies = [
  "cache",
  "common",
  "context",
+ "crypto",
  "dashmap",
  "db",
  "ee",

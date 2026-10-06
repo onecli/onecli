@@ -1,5 +1,13 @@
 import { EventEmitter } from "node:events";
-import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -339,6 +347,7 @@ beforeEach(() => {
   state.bridges = [];
   delete process.env.ONECLI_JCODE_BINARY;
   delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  delete process.env.ANTHROPIC_API_KEY;
 });
 
 afterEach(() => {
@@ -391,6 +400,90 @@ describe("the connection model", () => {
     // The platform-tool cliff fence: never let the auto mode swap mcp__*
     // definitions for a generic search/call pair.
     expect(options.env?.JCODE_MCP_TOOLS).toBe("eager");
+  });
+
+  describe("the Anthropic credential route", () => {
+    /**
+     * Launch once with the given grant env against a home whose durable
+     * `auth.json` still holds an OAuth stub from an EARLIER grant (the shape
+     * a grant change leaves behind, since the respawned container keeps its
+     * volume). Returns the env the adapter handed `launchInstance` and the
+     * stub's path.
+     */
+    const launchWithStaleStub = async (grant: Record<string, string>) => {
+      Object.assign(process.env, grant);
+      const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+      const jcodeHome = join(homeDir, ".jcode-home");
+      mkdirSync(jcodeHome, { recursive: true });
+      const authFile = join(jcodeHome, "auth.json");
+      writeFileSync(authFile, '{"anthropic_accounts":[{"label":"stale"}]}');
+      await createJcodeHarness().startSession({ homeDir });
+      const options = state.launches[0]?.options as {
+        env?: Record<string, string>;
+      };
+      return { env: options.env ?? {}, authFile };
+    };
+
+    it("an API-key grant pins the key route and drops the stale OAuth stub", async () => {
+      const { env, authFile } = await launchWithStaleStub({
+        ANTHROPIC_API_KEY: "placeholder",
+      });
+      expect(env.JCODE_RUNTIME_PROVIDER).toBe("claude-api");
+      expect(env.JCODE_PROVIDER).toBeUndefined();
+      // Left in place, jcode's automatic mode would prefer this account
+      // over the key and send `Authorization: Bearer` until some resumed
+      // session happened to flip it.
+      expect(existsSync(authFile)).toBe(false);
+    });
+
+    it("an OAuth grant pins the subscription route and rewrites the stub", async () => {
+      const { env, authFile } = await launchWithStaleStub({
+        CLAUDE_CODE_OAUTH_TOKEN: "placeholder",
+      });
+      expect(env.JCODE_RUNTIME_PROVIDER).toBe("claude");
+      expect(env.JCODE_PROVIDER).toBe("claude");
+      expect(readFileSync(authFile, "utf8")).toContain(
+        '"access":"placeholder"',
+      );
+    });
+
+    it("no Anthropic grant pins nothing and leaves no stub", async () => {
+      const { env, authFile } = await launchWithStaleStub({});
+      expect(env).not.toHaveProperty("JCODE_RUNTIME_PROVIDER");
+      expect(env).not.toHaveProperty("JCODE_PROVIDER");
+      expect(existsSync(authFile)).toBe(false);
+    });
+
+    // The home is agent-writable, so the stub path may hold anything the
+    // agent planted there. The purge must remove the planted thing itself,
+    // never what a link points at, and must never fail the launch.
+    it("unlinks a planted symlink at the stub path, never its target", async () => {
+      process.env.ANTHROPIC_API_KEY = "placeholder";
+      const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+      const jcodeHome = join(homeDir, ".jcode-home");
+      mkdirSync(jcodeHome, { recursive: true });
+      const outside = join(mkdtempSync(join(tmpdir(), "jcode-out-")), "keep");
+      writeFileSync(outside, "precious");
+      symlinkSync(outside, join(jcodeHome, "auth.json"));
+
+      await createJcodeHarness().startSession({ homeDir });
+
+      expect(existsSync(join(jcodeHome, "auth.json"))).toBe(false);
+      expect(readFileSync(outside, "utf8")).toBe("precious");
+    });
+
+    it("heals a directory planted at the stub path instead of failing the launch", async () => {
+      process.env.ANTHROPIC_API_KEY = "placeholder";
+      const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+      const planted = join(homeDir, ".jcode-home", "auth.json");
+      mkdirSync(planted, { recursive: true });
+      writeFileSync(join(planted, "x"), "y");
+
+      await createJcodeHarness().startSession({ homeDir });
+
+      expect(state.launches).toHaveLength(1);
+      expect(existsSync(planted)).toBe(false);
+    });
   });
 
   it("a resume ref held by a LIVE conversation mints a FRESH session — never steals", async () => {

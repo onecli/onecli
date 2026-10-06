@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo } from "react";
 import { ChevronRight, Folder, Home, Loader2, Search, X } from "lucide-react";
 import { Input } from "@onecli/ui/components/input";
 import { Checkbox } from "@onecli/ui/components/checkbox";
@@ -11,8 +11,7 @@ import { cn } from "@onecli/ui/lib/utils";
 import type { PolicyDialogContentProps } from "@/lib/granular-access/types";
 import { coveredBy } from "@onecli/api/lib/resource-axis";
 import { UpgradeToTeamButton } from "@/ee/billing/_components/upgrade-to-team-button";
-import { getCurrentPlan } from "@/lib/user-plan";
-import { isPlanAtLeast, normalizePlan } from "@onecli/api/ee/billing/plans";
+import { useHasTeamFeatures } from "../use-has-team-features";
 import { useDropboxFolders } from "./use-dropbox-folders";
 
 /** True when `path` is itself a selected folder or sits under one. */
@@ -39,21 +38,7 @@ export const DropboxPolicyDialogContent = ({
   const [search, setSearch] = useState("");
   const [currentPath, setCurrentPath] = useState(""); // "" = account root
 
-  // Optimistically assume Team until the plan loads, so the Save button doesn't
-  // flash an upgrade CTA for paying customers. Entitlement via the shared
-  // user-plan seam (cloud → real plan).
-  const [hasTeamFeatures, setHasTeamFeatures] = useState(true);
-  useEffect(() => {
-    // Team-tier features unlock at team OR above (enterprise), so rank-compare
-    // instead of exact-matching. Only downgrade from the optimistic default on a
-    // DEFINITE plan — getCurrentPlan returns null on error, matching the old cloud
-    // behavior (stay optimistic so a transient fetch error doesn't flash an
-    // upgrade CTA for paying customers).
-    getCurrentPlan().then((plan) => {
-      if (plan !== null)
-        setHasTeamFeatures(isPlanAtLeast(normalizePlan(plan), "team"));
-    });
-  }, []);
+  const hasTeamFeatures = useHasTeamFeatures();
 
   const {
     data: folders = [],

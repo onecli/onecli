@@ -7,10 +7,8 @@ import {
   Settings,
   Building2,
   Fingerprint,
-  Globe,
   KeyRound,
   MessagesSquare,
-  ShieldCheck,
   Plug,
   Shield,
   LayoutGrid,
@@ -121,6 +119,7 @@ export const getNavItems = (
   // RBAC builds (cloud) and once the runtime entitlement is known either way.
   // App Availability is org administration and lives under Organization
   // Settings (`getSettingsSections`), beside the other org-wide controls.
+  // Global Connections and Global Policy live there too, for the same reason.
   // Usage + Billing need billing.
   const adminGroup: NavItem[] = [
     // "Members" (not "Team"/"Users"): for humans OneCLI is the SP — the label
@@ -147,16 +146,10 @@ export const getNavItems = (
   return [
     [
       { title: "Workspaces", url: `${p}/workspaces`, icon: FolderOpen },
-      {
-        title: "Global Connections",
-        url: `${p}/global-connections`,
-        icon: Plug,
-      },
-      { title: "Global Policy", url: `${p}/policy`, icon: Shield },
       // Both hosted-only (§3.13 — no runner, no surface): Channels is where
       // hosted agents meet the team (§3.16), an org-wide integration surface
-      // beside Global Connections rather than a settings pane; org-tier
-      // skills reach every workspace's hosted agents.
+      // rather than a settings pane; org-tier skills reach every workspace's
+      // hosted agents.
       ...(opts?.hosted !== false
         ? [
             {
@@ -205,31 +198,51 @@ export const getSettingsSections = (orgId?: string): SettingsNavSection[] => {
       label: "Organization",
       items: [
         { title: "General", url: `${p}/settings/general`, icon: Building2 },
-        { title: "Domains", url: `${p}/settings/domains`, icon: Globe },
         {
           title: "Single sign-on",
           url: `${p}/settings/sso`,
           icon: Fingerprint,
         },
-        // Enterprise, like Single sign-on above: listed unconditionally and
-        // gated by the page itself, which renders the licensed card when the
-        // deployment is not entitled.
+        // Licensed (the enterprise entitlement gates it on self-host), and on
+        // cloud sold from Scale like Single sign-on above: listed
+        // unconditionally and gated by the page itself, which renders the
+        // licensed card when the deployment is not entitled.
         {
           title: "App Availability",
           url: `${p}/settings/app-availability`,
           icon: LayoutGrid,
         },
         {
+          title: "Global Connections",
+          url: `${p}/settings/global-connections`,
+          icon: Plug,
+        },
+        { title: "Global Policy", url: `${p}/settings/policy`, icon: Shield },
+        {
           title: "API Keys",
           url: `${p}/settings/org-api-keys`,
           icon: KeyRound,
-        },
-        {
-          title: "Encryption",
-          url: `${p}/settings/encryption`,
-          icon: ShieldCheck,
         },
       ],
     },
   ];
 };
+
+/**
+ * The settings entry the user is ON: the longest item URL that is `pathname`
+ * itself or a segment-boundary prefix of it. Exact matching left every page
+ * BELOW an entry (a Global Connections tab, an app's page) with no active
+ * item, and a bare `startsWith` would let `/settings/policy` claim a sibling
+ * like `/settings/policy-x`. One resolver for the desktop pane, the mobile
+ * strip and the header breadcrumb, so the three can never disagree.
+ */
+export const activeSettingsItem = (
+  sections: SettingsNavSection[],
+  pathname: string,
+): SettingsNavItem | undefined =>
+  sections
+    .flatMap((section) => section.items)
+    .filter(
+      (item) => pathname === item.url || pathname.startsWith(`${item.url}/`),
+    )
+    .sort((a, b) => b.url.length - a.url.length)[0];

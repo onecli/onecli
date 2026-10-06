@@ -22,6 +22,8 @@ const state = vi.hoisted(() => ({
   writes: [] as { id: string; priority: number }[],
   /** When set, the update for this id throws P2025 (concurrent delete). */
   deletedMidway: null as string | null,
+  /** Published snapshot rows the in-tx publish wrote, in order. */
+  published: [] as { logicalId: string; priority: number }[],
 }));
 
 const FakeKnownRequestError = vi.hoisted(
@@ -64,10 +66,40 @@ vi.mock("@onecli/db", () => {
       return 0;
     },
     policyRuleV2: {
-      findMany: async ({ where }: { where: unknown }) => {
+      findMany: async ({
+        where,
+        include,
+      }: {
+        where: unknown;
+        include?: unknown;
+      }) => {
+        // The in-tx publish reads the whole draft (with relations) after the
+        // writes; serve it in the written order.
+        if (include) {
+          state.calls.push("publish");
+          return state.writes.map((w) => ({
+            ...dtoRow(w.id, w.priority),
+            identities: [],
+            targets: [],
+          }));
+        }
         state.calls.push("read");
         state.lastWhere = where;
         return state.draftIds.map((id) => ({ id }));
+      },
+      // ensureDefault finds an existing default; no generation yet.
+      findFirst: async () => ({ ...dtoRow("d", 0), isDefault: true }),
+      aggregate: async () => ({ _max: { generation: null } }),
+      create: async ({
+        data,
+      }: {
+        data: { logicalId: string; priority: number };
+      }) => {
+        state.published.push({
+          logicalId: data.logicalId,
+          priority: data.priority,
+        });
+        return {};
       },
       update: async ({
         where,
@@ -104,6 +136,7 @@ vi.mock("@onecli/db", () => {
 const { reorderPolicyRules } = await import("./policy-service");
 
 const SCOPE = { workspaceId: "p1" };
+const USER = "user-1";
 
 beforeEach(() => {
   state.draftIds = ["a", "b", "c"];
@@ -111,23 +144,30 @@ beforeEach(() => {
   state.calls = [];
   state.writes = [];
   state.deletedMidway = null;
+  state.published = [];
 });
 
 describe("reorderPolicyRules", () => {
   it("writes dense 1-based priorities in the given order, lock before read", async () => {
-    const rules = await reorderPolicyRules(SCOPE, ["c", "a", "b"]);
+    const rules = await reorderPolicyRules(SCOPE, ["c", "a", "b"], USER);
 
-    expect(state.calls).toEqual(["lock", "read"]);
+    expect(state.calls).toEqual(["lock", "read", "publish"]);
     expect(state.writes).toEqual([
       { id: "c", priority: 1 },
       { id: "a", priority: 2 },
       { id: "b", priority: 3 },
     ]);
     expect(rules.map((r) => r.id)).toEqual(["c", "a", "b"]);
+    // The new order is live immediately: published in the same transaction.
+    expect(state.published).toEqual([
+      { logicalId: "l-c", priority: 1 },
+      { logicalId: "l-a", priority: 2 },
+      { logicalId: "l-b", priority: 3 },
+    ]);
   });
 
   it("fences the draft read to the caller's scope", async () => {
-    await reorderPolicyRules(SCOPE, ["a", "b", "c"]);
+    await reorderPolicyRules(SCOPE, ["a", "b", "c"], USER);
 
     expect(state.lastWhere).toMatchObject({
       scope: "workspace",
@@ -139,13 +179,15 @@ describe("reorderPolicyRules", () => {
 
   it("409s on a foreign id — another scope's rule can never be named", async () => {
     await expect(
-      reorderPolicyRules(SCOPE, ["a", "b", "other-orgs-rule"]),
+      reorderPolicyRules(SCOPE, ["a", "b", "other-orgs-rule"], USER),
     ).rejects.toMatchObject({ code: "CONFLICT" });
     expect(state.writes).toEqual([]);
   });
 
   it("409s when an id is missing (stale subset)", async () => {
-    await expect(reorderPolicyRules(SCOPE, ["a", "b"])).rejects.toMatchObject({
+    await expect(
+      reorderPolicyRules(SCOPE, ["a", "b"], USER),
+    ).rejects.toMatchObject({
       code: "CONFLICT",
     });
     expect(state.writes).toEqual([]);
@@ -153,15 +195,15 @@ describe("reorderPolicyRules", () => {
 
   it("409s on a duplicated id even at the right length", async () => {
     await expect(
-      reorderPolicyRules(SCOPE, ["a", "b", "b"]),
+      reorderPolicyRules(SCOPE, ["a", "b", "b"], USER),
     ).rejects.toMatchObject({ code: "CONFLICT" });
     expect(state.writes).toEqual([]);
   });
 
-  it("maps a mid-write P2025 (concurrent lockless delete) to 409", async () => {
+  it("maps a mid-write P2025 (row gone under the lock) to 409", async () => {
     state.deletedMidway = "b";
     await expect(
-      reorderPolicyRules(SCOPE, ["c", "a", "b"]),
+      reorderPolicyRules(SCOPE, ["c", "a", "b"], USER),
     ).rejects.toMatchObject({ code: "CONFLICT" });
   });
 });

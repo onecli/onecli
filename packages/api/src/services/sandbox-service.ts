@@ -8,6 +8,7 @@ import { peersForRender } from "./channels/agent-peer-roster";
 import { connectionsForRender } from "./agent-connections-render";
 import { resolveAgentModel } from "../llm/resolve";
 import {
+  AGENT_RESTARTED_MESSAGE,
   AGENT_START_FAILED_MESSAGE,
   AT_CAPACITY_MESSAGE,
   IMAGE_UNAVAILABLE_MESSAGE,
@@ -587,6 +588,82 @@ export const requestSandboxRespawn = async (
     log.warn(
       { agentId, count: stranded },
       "failed turns whose sandbox is being respawned",
+    );
+  }
+};
+
+/**
+ * Restart an agent from scratch (the person's "Restart agent"): every one of
+ * its conversations forgets its harness session, whatever is in flight ends,
+ * and a running sandbox is stopped NOW, so the next message cold-starts a
+ * new one from the runner's current image, with the boot-time transcript
+ * heal on the way.
+ *
+ * ONE transaction, for the same reason as `requestSandboxRespawn`: the three
+ * writes describe one fact. Split, a turn could be claimed between the ref
+ * clear and the strand, and resume a session the person just discarded.
+ *
+ * Three deliberate differences from a respawn:
+ *
+ * - The conversations' harness session refs are CLEARED. That is what makes
+ *   the restart fresh: the supervisor only resumes the ref the control plane
+ *   sends, and the new sandbox has no session in memory. The old session
+ *   files stay on the home volume, unreferenced.
+ * - No `reviveColdTurns`, and not `failStrandedTurns` either: a dispatched
+ *   turn the harness never started would be re-sent into the conversation
+ *   the person chose to reset, or told the agent "couldn't start" when the
+ *   person stopped it. Every in-flight turn ends with the restart's own
+ *   words; `queued` turns stay deliverable and run fresh.
+ * - The sandbox is not respawned in place but marked `stop_requested_at`,
+ *   which holds until its next start claim: the stop arm takes the running
+ *   box at once, the turn arm hands it nothing more, and `finishTurn`
+ *   persists no session ref it reports. That last fence is what keeps the
+ *   reset reset: the old boot can still finish a turn in the moment before
+ *   it stops, and its ref would otherwise land on the cleared conversation.
+ *   Every box that may still be up is marked (`stopping` included: a park
+ *   already underway can report a stale ref too). A parked or never-started
+ *   sandbox has nothing to stop and its next start is already cold.
+ *
+ * Fenced at the query by workspace, like every write here.
+ */
+export const requestAgentRestart = async (
+  agentId: string,
+  workspaceId: string,
+): Promise<void> => {
+  const agentFence = { agent: { id: agentId, workspaceId } } as const;
+  const stranded = await db.$transaction(async (tx) => {
+    await tx.conversation.updateMany({
+      where: { ...agentFence, harnessSessionRef: { not: null } },
+      data: { harnessSessionRef: null },
+    });
+    const { count: failed } = await tx.turn.updateMany({
+      where: {
+        conversation: agentFence,
+        status: { in: ["dispatched", "running"] },
+      },
+      data: {
+        status: "failed",
+        error: AGENT_RESTARTED_MESSAGE,
+        errorCode: "agent_restarted",
+        finishedAt: new Date(),
+      },
+    });
+    await tx.sandbox.updateMany({
+      where: {
+        ...agentFence,
+        status: { in: ["starting", "running", "stopping"] },
+      },
+      data: { stopRequestedAt: new Date() },
+    });
+    return failed;
+  });
+
+  // The held poll claims the stop now rather than at its next re-check.
+  signalWork();
+  if (stranded > 0) {
+    log.warn(
+      { agentId, count: stranded },
+      "failed in-flight turns of an agent being restarted",
     );
   }
 };

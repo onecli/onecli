@@ -43,7 +43,14 @@ export const datadogPermissions: AppPermissionDefinition = {
           name: "Search logs",
           description: "Search and list log events",
           hostPattern: "*.datadoghq.com",
-          pathPattern: "/api/v2/logs/*",
+          // The two documented search endpoints, enumerated rather than
+          // globbed: every POST under /api/v2/logs/ other than these two is a
+          // write - the bare path is log intake (logs_submit), and
+          // /logs/config/{archives,pipelines,indexes,metrics} create
+          // configuration - so any wildcard here would let a rule on
+          // searching logs govern sending them or reshaping the pipeline.
+          pathPattern: "/api/v2/logs/events/search",
+          aliasPatterns: ["/api/v2/logs/analytics/aggregate"],
           method: "POST",
         },
         {

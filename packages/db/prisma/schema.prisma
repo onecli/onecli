@@ -500,13 +500,20 @@ model Runner {
 // agent; the container is disposable, the home is durable behind the
 // opaque homeRef (§3.9's home seam — meaning is backend-defined).
 model Sandbox {
-  id           String    @id @default(uuid())
-  agentId      String    @unique @map("agent_id")
-  runnerId     String    @map("runner_id")
-  status       String    @default("unprovisioned") // "unprovisioned" | "starting" | "running" | "stopped" | "failed"
-  containerRef String?   @map("container_ref")
-  homeRef      String?   @map("home_ref") // opaque, backend-defined (§3.9)
-  lastActiveAt DateTime? @map("last_active_at")
+  id              String    @id @default(uuid())
+  agentId         String    @unique @map("agent_id")
+  runnerId        String    @map("runner_id")
+  status          String    @default("unprovisioned") // "unprovisioned" | "starting" | "running" | "stopped" | "failed"
+  containerRef    String?   @map("container_ref")
+  homeRef         String?   @map("home_ref") // opaque, backend-defined (§3.9)
+  lastActiveAt    DateTime? @map("last_active_at")
+  // A person restarted the agent ("Restart agent"), and the sandbox has not
+  // started a fresh boot since. While set: a running box is stopped at once
+  // (ahead of the idle window and keep-awake), no turn is dispatched to it,
+  // and no session ref it reports is persisted, so nothing from the
+  // pre-restart boot can leak into the fresh one. The next start claim
+  // clears it.
+  stopRequestedAt DateTime? @map("stop_requested_at")
 
   // The home projection's sync clock (step 9). `desired` is bumped by
   // any write that changes the materialized file set (skills, memory, brief,
@@ -2079,6 +2086,9 @@ model AppConnection {
   scopes            String[]           @default([])
   metadata          Json? // non-secret info (username, org, email)
   connectedAt       DateTime           @default(now()) @map("connected_at")
+  // Set by the gateway when the provider refuses the OAuth refresh token
+  // (`invalid_grant`): the account must be reconnected. Cleared by a reconnect.
+  reauthRequiredAt  DateTime?          @map("reauth_required_at")
   updatedAt         DateTime           @updatedAt @map("updated_at")
   workspace         Workspace?         @relation(fields: [workspaceId], references: [id])
   organization      Organization?      @relation(fields: [organizationId], references: [id])

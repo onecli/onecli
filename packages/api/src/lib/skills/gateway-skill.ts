@@ -162,6 +162,16 @@ request. Make that one card for the reviewer:
   file, upload with \`FirstPublishLocationId\` set to that record's id: one
   request, one approval, instead of an upload plus a separate link.
 
+## Link What You Changed
+
+After creating, updating or deleting records, link each one in your reply
+(its name plus a link) so the user can open it and check. Take the link
+from the API's own response (GitHub's \`html_url\`, Notion's \`url\`).
+Salesforce returns no link, only the record id: its record page is
+\`https://<host>/<id>\` on the org host the gateway gave you for that
+connection. Never guess a URL or copy an example hostname. If you can't
+get a real link, show the id instead.
+
 ## When a Request Fails
 
 First classify the gateway error code, not just its HTTP status:
@@ -187,6 +197,13 @@ First classify the gateway error code, not just its HTTP status:
   the correct one.
 - \`x-should-retry: false\` disables automatic retries. It does not prohibit
   a new, explicitly user-requested submission after an approval rejection.
+- \`connection_needs_reconnect\` (401) means the connected account's saved
+  login was rejected by the service (it expired or was revoked), so the
+  request was NOT sent and no approval was requested. Do not retry it, and do
+  not tell the user to approve anything. Show the user the \`connect_url\`
+  from the error so they can reconnect that account, then retry the same
+  request once they confirm. Reconnecting keeps the account's agent access
+  and rules.
 
 For other authentication or connection failures (401, 403, or a gateway
 error such as \`app_not_connected\`):

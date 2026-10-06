@@ -19,6 +19,13 @@ import type { AgentEffort } from "@onecli/agent-protocol";
  */
 export type LlmProviderId = "anthropic" | "openai";
 
+/**
+ * How a stored LLM credential authenticates, from `Secret.metadata.authMode`:
+ * a Console API key, or the OAuth credential a subscription login produced.
+ * Legacy rows with no metadata are `api-key`.
+ */
+export type LlmAuthMode = "api-key" | "oauth";
+
 export interface ModelOption {
   /**
    * The PROVIDER's own model id, always — `claude-sonnet-4-6`, never a harness
@@ -78,10 +85,17 @@ export interface LlmProvider {
    *
    * `false` is a NORMAL state, not an error: an OAuth blob's access token is
    * refreshed by the gateway, which the control plane must not reimplement.
-   * That arm serves the pinned list instead.
+   * That arm serves the pinned list instead. A provider whose OAuth credential
+   * is a long-lived bearer token (Anthropic's `sk-ant-oat`) needs no refresh
+   * and lists live like an API key.
    */
-  canList: (authMode: "api-key" | "oauth") => boolean;
-  catalogHeaders: (credential: string) => Record<string, string>;
+  canList: (authMode: LlmAuthMode) => boolean;
+  /** Same headers the gateway injects for this auth mode, so the catalog is
+   *  the inventory of the credential the agent actually runs on. */
+  catalogHeaders: (
+    credential: string,
+    authMode: LlmAuthMode,
+  ) => Record<string, string>;
   parseCatalog: (body: unknown) => Array<{ id: string; label?: string }>;
   /**
    * Is this id a chat model a hosted agent could actually run? A prefix rule

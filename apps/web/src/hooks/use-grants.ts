@@ -10,7 +10,7 @@ import { queryKeys } from "@/lib/api/keys";
 // Grants mutations are headless on the gateway cache: every grants route wraps
 // withAudit, which flushes the gateway server-side — no client-side flush
 // needed. They are also headless on publish: the server publishes atomically
-// inside the mutation, so there is no afterPolicyWrite chaining here.
+// inside the mutation.
 
 export const useAgentGrants = (agentId: string, enabled = true) =>
   useQuery({

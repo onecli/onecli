@@ -100,10 +100,8 @@ describe("the boot narrative gate", () => {
     // fireEvent (not userEvent): synchronous, so it cannot deadlock with the
     // fake clock this test owns.
     mutateAsync.mockReturnValue(new Promise(() => {}));
-    fireEvent.click(
-      screen.getByRole("button", { name: /create your first agent/i }),
-    );
-    fireEvent.submit(screen.getByRole("button", { name: /^create agent/i }));
+    fireEvent.click(screen.getByRole("button", { name: /get started/i }));
+    fireEvent.submit(screen.getByRole("button", { name: /let's go/i }));
 
     // Play the whole narrative out — well past every boot line.
     await act(async () => {

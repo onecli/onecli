@@ -205,6 +205,20 @@ export const MAX_AGENT_CONNECTION_NAME_CHARS = 80;
 export const MAX_AGENT_CONNECTION_LABEL_CHARS = 120;
 
 /**
+ * Clamps for the catalog facts riding each connection (`apiHosts`,
+ * `endpoints`, `docsUrl`). The whole list at MAX_AGENT_CONNECTIONS must fit
+ * the home-sync FINAL part beside a maximal brief (pinned by
+ * transport.test.ts), so a cap is raised only with that budget re-checked.
+ * Shared with the control-plane composer and the supervisor renderer, so a
+ * fact the composer emits is one the wire admits and the renderer shows.
+ */
+export const MAX_AGENT_CONNECTION_API_HOSTS = 2;
+export const MAX_AGENT_CONNECTION_API_HOST_CHARS = 100;
+export const MAX_AGENT_CONNECTION_ENDPOINTS = 3;
+export const MAX_AGENT_CONNECTION_ENDPOINT_CHARS = 80;
+export const MAX_AGENT_CONNECTION_DOCS_URL_CHARS = 160;
+
+/**
  * One app connection attached to this agent, for the supervisor's
  * `connections` capability: which services the gateway already holds a
  * credential for, and — for host-bound apps (Salesforce, Snowflake, JFrog) —
@@ -228,6 +242,38 @@ export const agentConnectionSchema = z.object({
     .max(MAX_HOSTNAME_CHARS)
     .refine(isBareHostname, "expected a bare hostname")
     .nullable(),
+  /**
+   * The catalog's API hosts for this app, when it has fixed ones (Granola's
+   * `public-api.granola.ai`, Notion's `api.notion.com`). Without them an
+   * agent guessed the obvious host (Granola's desktop `api.granola.ai`, which
+   * answers "Unsupported client") and told its owner the app "isn't
+   * connected". Empty for tenant-only apps, whose `host` above is the answer,
+   * and for apps spanning more fixed hosts than fit here (no one host speaks
+   * for them). Optional: an older control plane omits it. Bare hostnames,
+   * like `host`.
+   */
+  apiHosts: z
+    .array(
+      z
+        .string()
+        .min(1)
+        .max(MAX_AGENT_CONNECTION_API_HOST_CHARS)
+        .refine(isBareHostname, "expected a bare hostname"),
+    )
+    .max(MAX_AGENT_CONNECTION_API_HOSTS)
+    .optional(),
+  /** A few catalog endpoints ("GET /v1/notes") so the first call is right. */
+  endpoints: z
+    .array(z.string().min(1).max(MAX_AGENT_CONNECTION_ENDPOINT_CHARS))
+    .max(MAX_AGENT_CONNECTION_ENDPOINTS)
+    .optional(),
+  /** The provider's public API reference (https), when curated. */
+  docsUrl: z
+    .string()
+    .url()
+    .max(MAX_AGENT_CONNECTION_DOCS_URL_CHARS)
+    .nullable()
+    .optional(),
 });
 export type AgentConnectionWire = z.infer<typeof agentConnectionSchema>;
 

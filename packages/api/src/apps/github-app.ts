@@ -53,6 +53,7 @@ export const githubApp: AppDefinition = {
   id: "github-app",
   name: "GitHub App",
   icon: "/icons/github.svg",
+  apiDocsUrl: "https://docs.github.com/en/rest",
   darkIcon: "/icons/github-light.svg",
   description:
     "Fine-grained, org-approved access to repositories and resources.",

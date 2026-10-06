@@ -281,6 +281,11 @@ export const createDockerBackend = (
       await ensureNetwork();
     },
 
+    homeRefFor: volumeName,
+
+    // An ensure, not a create: the engine answers a create for a name that
+    // already exists with that existing volume (201, its original labels
+    // kept), so a repeat provision is harmless and never a duplicate.
     async provisionHome(sandboxId) {
       const name = volumeName(sandboxId);
       await engine.post("/volumes/create", {

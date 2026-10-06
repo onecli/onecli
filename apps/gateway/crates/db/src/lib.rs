@@ -85,7 +85,28 @@ pub struct VaultConnectionRow {
     pub name: Option<String>,
     pub status: String,
     pub connection_data: Option<serde_json::Value>,
+    /// The row's version: Postgres's `xmin`, the id of the transaction that
+    /// last wrote it. Every UPDATE (and every upsert's conflict branch) stamps
+    /// a new one, so a cached copy of the connection is current exactly when
+    /// its generation still matches the row's. See [`VaultGeneration`].
+    pub generation: VaultGeneration,
 }
+
+/// A vault connection row's version, as read from `xmin`.
+///
+/// Only equality is meaningful (the inner value is public so tests can mint
+/// one, not to be ordered or interpreted — `xid`s wrap). Gateways compare
+/// the generation they loaded a session at against the row's current one to
+/// tell whether the connection was re-paired (or rewritten) since — the signal
+/// that crosses gateway instances, because the row is the one thing they all
+/// share. `xmin` is preserved by VACUUM FREEZE (the frozen flag is a separate
+/// infomask bit), so an untouched row never reads as changed.
+///
+/// Read in SQL as `xmin::text::bigint` (`xid` has no direct integer cast; its
+/// text form is the decimal id) by every vault-connection query below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(transparent)]
+pub struct VaultGeneration(pub i64);
 
 // ── Queries ─────────────────────────────────────────────────────────────
 
@@ -712,19 +733,128 @@ pub async fn find_app_connections_by_org(
     .context("querying app_connections by organization_id")
 }
 
-/// Update the encrypted credentials for an app connection (e.g., after token refresh).
-pub async fn update_app_connection_credentials(
-    pool: &PgPool,
+/// A connected connection's stored credential, as the refresh re-reads it
+/// under its lock (see [`find_connected_app_credentials`]).
+#[derive(Debug, Clone, FromRow)]
+pub struct StoredConnectionCredentials {
+    /// The encrypted credential exactly as stored: the compare-and-set
+    /// version for [`replace_app_connection_credentials`] and
+    /// [`mark_app_connection_reauth_required`].
+    pub credentials: String,
+    /// The provider already refused this credential's refresh token
+    /// (`reauth_required_at` is set), so only the user reconnecting revives it.
+    pub reauth_required: bool,
+}
+
+/// The stored credential of a connection that is still connected, or `None`
+/// when the row is gone, disconnected, or holds no credentials.
+///
+/// The refresh path re-reads through this inside its lock: the connection row
+/// the caller resolved from can be a cached copy up to a minute old, and only
+/// the current value says whether another instance already refreshed it.
+pub async fn find_connected_app_credentials<'e, E>(
+    executor: E,
     connection_id: &str,
+) -> Result<Option<StoredConnectionCredentials>>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    sqlx::query_as::<_, StoredConnectionCredentials>(
+        r#"SELECT credentials, (reauth_required_at IS NOT NULL) AS reauth_required
+           FROM app_connections
+           WHERE id = $1 AND status = 'connected' AND credentials IS NOT NULL"#,
+    )
+    .bind(connection_id)
+    .fetch_optional(executor)
+    .await
+    .context("reading app_connection credentials")
+}
+
+/// Replace a connection's encrypted credentials, but only while the row still
+/// holds `expected`, the ciphertext the refresh was computed from.
+///
+/// Returns whether the write landed. `false` means the row moved underneath
+/// the refresh (a reconnect wrote a fresh pair, a disconnect cleared it, or a
+/// delete removed it), and the newer state wins: a plain overwrite here is how
+/// a slow refresh used to resurrect a credential the user had just replaced.
+pub async fn replace_app_connection_credentials<'e, E>(
+    executor: E,
+    connection_id: &str,
+    expected: &str,
     encrypted_credentials: &str,
-) -> Result<()> {
-    sqlx::query(r#"UPDATE app_connections SET credentials = $1 WHERE id = $2"#)
-        .bind(encrypted_credentials)
-        .bind(connection_id)
-        .execute(pool)
+) -> Result<bool>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let result = sqlx::query(
+        r#"UPDATE app_connections SET credentials = $1, updated_at = now()
+           WHERE id = $2 AND credentials = $3"#,
+    )
+    .bind(encrypted_credentials)
+    .bind(connection_id)
+    .bind(expected)
+    .execute(executor)
+    .await
+    .context("replacing app_connection credentials")?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Take the transaction-scoped lock that serializes every refresh of one
+/// connection across all gateway instances sharing this database.
+///
+/// Waits at most `wait_ms` (a `lock_timeout` local to this transaction, so it
+/// never outlives it); `Ok(false)` means the wait ran out and the caller should
+/// give up on refreshing rather than queue. The lock is released by the
+/// transaction's commit or rollback (including the rollback a dropped
+/// transaction queues), so it cannot leak past the connection's return to the
+/// pool.
+pub async fn lock_app_connection_refresh(
+    conn: &mut sqlx::PgConnection,
+    connection_id: &str,
+    wait_ms: u64,
+) -> Result<bool> {
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(format!("{wait_ms}ms"))
+        .execute(&mut *conn)
         .await
-        .context("updating app_connection credentials")?;
-    Ok(())
+        .context("setting the refresh lock timeout")?;
+    let locked = sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('app-connection-refresh:' || $1, 0))",
+    )
+    .bind(connection_id)
+    .execute(&mut *conn)
+    .await;
+    match locked {
+        Ok(_) => Ok(true),
+        // 55P03 lock_not_available: the bounded wait ran out.
+        Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("55P03") => Ok(false),
+        Err(e) => Err(e).context("taking the app_connection refresh lock"),
+    }
+}
+
+/// Record that the provider refused the refresh token of `expected`, only
+/// while that credential is still stored: a reconnect that landed meanwhile
+/// is never flagged. The connection stays `connected` (it is still the user's
+/// account, attached to the same agents and rules); any reconnect clears the
+/// flag. `false` = not flagged because the credential changed.
+pub async fn mark_app_connection_reauth_required<'e, E>(
+    executor: E,
+    connection_id: &str,
+    expected: &str,
+) -> Result<bool>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let done = sqlx::query(
+        r#"UPDATE app_connections SET reauth_required_at = COALESCE(reauth_required_at, now())
+           WHERE id = $1 AND credentials = $2"#,
+    )
+    .bind(connection_id)
+    .bind(expected)
+    .execute(executor)
+    .await
+    .context("marking app_connection reauth required")?;
+    Ok(done.rows_affected() == 1)
 }
 
 // ── Vault connection queries ────────────────────────────────────────────
@@ -736,7 +866,8 @@ pub async fn find_vault_connection(
     provider: &str,
 ) -> Result<Option<VaultConnectionRow>> {
     sqlx::query_as::<_, VaultConnectionRow>(
-        r#"SELECT id, provider, name, status, connection_data FROM vault_connections WHERE workspace_id = $1 AND provider = $2 LIMIT 1"#,
+        r#"SELECT id, provider, name, status, connection_data, xmin::text::bigint AS generation
+           FROM vault_connections WHERE workspace_id = $1 AND provider = $2 LIMIT 1"#,
     )
     .bind(workspace_id)
     .bind(provider)
@@ -745,47 +876,72 @@ pub async fn find_vault_connection(
     .context("querying vault_connection by workspace_id + provider")
 }
 
-/// Upsert a vault connection (insert or update on workspace_id + provider conflict).
+/// The current generation of a workspace's vault connection, or `None` when
+/// the connection no longer exists (it was disconnected).
+///
+/// The cheap freshness probe behind every cached vault session: one indexed
+/// point read on the `(workspace_id, provider)` unique key, no payload.
+pub async fn find_vault_connection_generation(
+    pool: &PgPool,
+    workspace_id: &str,
+    provider: &str,
+) -> Result<Option<VaultGeneration>> {
+    sqlx::query_scalar::<_, VaultGeneration>(
+        r#"SELECT xmin::text::bigint FROM vault_connections
+           WHERE workspace_id = $1 AND provider = $2 LIMIT 1"#,
+    )
+    .bind(workspace_id)
+    .bind(provider)
+    .fetch_optional(pool)
+    .await
+    .context("querying vault_connection generation")
+}
+
+/// Upsert a vault connection (insert or update on workspace_id + provider
+/// conflict). Returns the written row's new generation.
 pub async fn upsert_vault_connection(
     pool: &PgPool,
     workspace_id: &str,
     provider: &str,
     status: &str,
     connection_data: Option<&serde_json::Value>,
-) -> Result<()> {
-    sqlx::query(
+) -> Result<VaultGeneration> {
+    sqlx::query_scalar::<_, VaultGeneration>(
         r#"INSERT INTO vault_connections (id, workspace_id, provider, status, connection_data, created_at, updated_at)
            VALUES (gen_random_uuid()::text, $1, $2, $3, $4, NOW(), NOW())
            ON CONFLICT (workspace_id, provider)
-           DO UPDATE SET status = $3, connection_data = $4, updated_at = NOW()"#,
+           DO UPDATE SET status = $3, connection_data = $4, updated_at = NOW()
+           RETURNING xmin::text::bigint"#,
     )
     .bind(workspace_id)
     .bind(provider)
     .bind(status)
     .bind(connection_data)
-    .execute(pool)
+    .fetch_one(pool)
     .await
-    .context("upserting vault_connection")?;
-    Ok(())
+    .context("upserting vault_connection")
 }
 
 /// Update only the connection_data JSON for an existing vault connection.
+/// Returns the row's new generation, or `None` when no row exists (the
+/// connection was disconnected).
 pub async fn update_vault_connection_data(
     pool: &PgPool,
     workspace_id: &str,
     provider: &str,
     connection_data: &serde_json::Value,
-) -> Result<()> {
-    sqlx::query(
-        r#"UPDATE vault_connections SET connection_data = $3, updated_at = NOW() WHERE workspace_id = $1 AND provider = $2"#,
+) -> Result<Option<VaultGeneration>> {
+    sqlx::query_scalar::<_, VaultGeneration>(
+        r#"UPDATE vault_connections SET connection_data = $3, updated_at = NOW()
+           WHERE workspace_id = $1 AND provider = $2
+           RETURNING xmin::text::bigint"#,
     )
     .bind(workspace_id)
     .bind(provider)
     .bind(connection_data)
-    .execute(pool)
+    .fetch_optional(pool)
     .await
-    .context("updating vault_connection connection_data")?;
-    Ok(())
+    .context("updating vault_connection connection_data")
 }
 
 /// Delete a vault connection for a workspace + provider pair.

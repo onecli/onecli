@@ -29,6 +29,7 @@ export {
   type ChannelProviderId,
 } from "./errors";
 
+export { APPROVAL_GROUP_ID_RE, APPROVAL_GROUP_MAX_IDS } from "./approval-group";
 export { readCappedBinaryBody } from "./http";
 export {
   MAX_MENTION_TOKENS,

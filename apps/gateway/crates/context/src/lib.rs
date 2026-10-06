@@ -6,6 +6,7 @@
 //! itself — the direction the crate DAG enforces.
 
 pub mod auth;
+pub mod refresh_gate;
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -19,6 +20,8 @@ use ca::CertificateAuthority;
 use cache::CacheStore;
 use crypto::CryptoService;
 use vault::onepassword::OnePasswordVaultProvider;
+
+pub use refresh_gate::RefreshGate;
 
 /// Context for a proxied request, resolved at CONNECT time.
 /// Wrapped in `Arc` and shared across all requests within a MITM session.
@@ -71,6 +74,9 @@ pub struct PolicyEngine {
     /// The same `Arc` is also registered as a `VaultService` provider (where it
     /// acts only as a connection holder — it never races on hostname).
     pub onepassword: Arc<OnePasswordVaultProvider>,
+    /// Serializes OAuth refreshes of one connection across every instance
+    /// sharing the database, on its own small pool (see [`RefreshGate`]).
+    pub refresh_gate: Arc<RefreshGate>,
 }
 
 // ── Response stream aliases ─────────────────────────────────────────────
@@ -233,12 +239,21 @@ impl PolicyEngine {
     /// dependent's test build. Hidden instead - test support, not API.
     #[doc(hidden)]
     pub fn test_stub() -> Self {
-        use crypto::CryptoService;
-        use vault::onepassword::OnePasswordVaultProvider;
-
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://unused:unused@127.0.0.1:9/unused")
             .expect("lazy pool");
+        Self::test_with_pool(pool, refresh_gate::REFRESH_LOCK_WAIT)
+    }
+
+    /// Test-only engine over a real pool: one call per simulated gateway
+    /// instance, each with its own refresh pool (`lock_wait` bounds the
+    /// cross-instance lock, short in tests that observe the timeout). Hidden
+    /// for the same reason as [`PolicyEngine::test_stub`].
+    #[doc(hidden)]
+    pub fn test_with_pool(pool: sqlx::PgPool, lock_wait: std::time::Duration) -> Self {
+        use crypto::CryptoService;
+        use vault::onepassword::OnePasswordVaultProvider;
+
         let crypto = Arc::new(
             CryptoService::from_base64_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
                 .expect("test key"),
@@ -247,10 +262,14 @@ impl PolicyEngine {
             pool.clone(),
             Arc::clone(&crypto),
         ));
+        let refresh_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect_lazy_with((*pool.connect_options()).clone());
         PolicyEngine {
             pool,
             crypto,
             onepassword,
+            refresh_gate: Arc::new(RefreshGate::with_pool(refresh_pool, lock_wait)),
         }
     }
 }

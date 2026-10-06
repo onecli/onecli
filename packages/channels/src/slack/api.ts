@@ -445,6 +445,15 @@ export const deleteMessage = (
     okEnvelope,
   );
 
+/** A message only `user` sees (`chat.postEphemeral`): how a click's refusal
+ * reaches the clicker without rewriting the card everyone shares. `text` is
+ * the caller's already-escaped mrkdwn. */
+export const postEphemeral = (
+  botToken: string,
+  input: { channel: string; user: string; text: string },
+) =>
+  slackCall("chat.postEphemeral", { token: botToken, form: input }, okEnvelope);
+
 /**
  * The agent-session work status (the native "Working…" loader an agent-flavor
  * app shows in a thread). `processing` turns it on; `active` clears it —

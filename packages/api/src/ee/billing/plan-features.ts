@@ -9,16 +9,21 @@ export type PremiumFeature =
   | "policy.rate_limit"
   | "policy.deny_mode"
   | "sso"
-  | "groups";
+  | "groups"
+  | "app_availability";
 
 export const PREMIUM_FEATURES: Record<PremiumFeature, Plan> = {
   "policy.rate_limit": "pro",
   "policy.deny_mode": "team",
-  // Verified email domains + SSO.
-  sso: "enterprise",
+  // Verified email domains, SAML/OIDC SSO, enforcement and SCIM.
+  sso: "scale",
   // Directory groups and everything built on them (SCIM group sync, access
   // bindings, role mappings).
   groups: "enterprise",
+  // Restricting which apps a workspace may connect. Sold from Scale up: it is
+  // a fleet-management control, not a directory feature (rules can target
+  // individual members, so it stands without the enterprise directory).
+  app_availability: "scale",
 };
 
 /** The minimum plan required to use a premium feature. */

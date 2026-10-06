@@ -408,6 +408,31 @@ describe("a platform automation delivery turn", () => {
     expect(screen.queryByText(/via watch/i)).not.toBeInTheDocument();
   });
 
+  it("renders a wake that JOINED the turn as a system label, never a user bubble", () => {
+    // A wake joining a running wake rides as a follow-up row; it is the
+    // platform's instruction, so it gets the same quiet header a standalone
+    // delivery does. MUTATION-PROOF: render every follow-up as <UserBubble>
+    // and the "via watch" chip and a second end-aligned bubble reappear.
+    const { container } = render(
+      <TurnBlock
+        turn={turn({ source: "watch", message: 'Watch on "tests"' })}
+        rendered={rendered({ text: "Both runs passed." })}
+        followUps={[
+          turn({
+            id: "f1",
+            status: "joined",
+            source: "watch",
+            message: 'Watch on "lint"',
+            followUpOfTurnId: "t1",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByText('Watch on "lint"')).toBeInTheDocument();
+    expect(container.querySelector('[data-align="end"]')).toBeNull();
+    expect(screen.queryByText(/via watch/i)).not.toBeInTheDocument();
+  });
+
   it("renders a scheduled-run (cron) report the same system way", () => {
     const { container } = render(
       <TurnBlock
@@ -648,6 +673,80 @@ describe("a turn that could not run for a reason the reader can fix", () => {
     expect(
       screen.getByText("The agent restarted. Send the message again."),
     ).toHaveClass("text-destructive");
+  });
+
+  // An uncoded failure that carries a provider's raw response body: nothing
+  // classified it, so no fix is offered, but the reader never gets the blob
+  // as the message.
+  const RAW_PROVIDER_ERROR =
+    'Claude API error (500 Internal Server Error): {"type":"error","error":{"type":"api_error","message":"Internal server error"}}';
+
+  it("folds an uncoded raw provider body behind Technical details", async () => {
+    const user = userEvent.setup();
+    render(
+      <TurnBlock
+        turn={turn({
+          status: "failed",
+          error: RAW_PROVIDER_ERROR,
+          errorCode: null,
+        })}
+        rendered={undefined}
+        modelsHref="/w/p1/agents/a1/models"
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "The agent ran into an error and couldn't finish this message.",
+    );
+    expect(document.querySelector(".text-destructive")).toBeNull();
+    // Nothing classified it, so no key fix is claimed.
+    expect(screen.queryByRole("link")).toBeNull();
+    // Collapsed: the blob is not on screen until asked for.
+    const trigger = screen.getByRole("button", { name: "Technical details" });
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText(/Internal Server Error/)).toBeNull();
+
+    await user.click(trigger);
+    const details = screen.getByText(/Internal Server Error/);
+    expect(details.textContent).toBe(RAW_PROVIDER_ERROR);
+    // Outside the live region: expanding never reads the blob aloud.
+    expect(screen.getByRole("status")).not.toContainElement(details);
+  });
+
+  it("folds the stream's raw error too, once the turn settles", () => {
+    // The uncoded harness failure's usual shape: turn.error is NULL and the
+    // transcript's error event is the only witness.
+    render(
+      <TurnBlock
+        turn={turn({ status: "failed", error: null })}
+        rendered={rendered({ error: RAW_PROVIDER_ERROR })}
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "The agent ran into an error and couldn't finish this message.",
+    );
+    expect(
+      screen.getByRole("button", { name: "Technical details" }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the payload as text, never as markup", async () => {
+    const user = userEvent.setup();
+    render(
+      <TurnBlock
+        turn={turn({
+          status: "failed",
+          error:
+            'Claude API error (502 Bad Gateway): <html><body><script>alert(1)</script><img src=x onerror="alert(2)"></body></html>',
+        })}
+        rendered={undefined}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Technical details" }));
+    expect(screen.getByText(/502 Bad Gateway/).textContent).toContain(
+      "<script>alert(1)</script>",
+    );
+    expect(document.querySelector("script")).toBeNull();
+    expect(document.querySelector("img")).toBeNull();
   });
 
   it("renders a notice alongside an answer, without ending the turn", () => {

@@ -33,7 +33,11 @@ import { startPlatformTools } from "./platform-tools";
 import { attachmentsFragment } from "./capabilities/attachments";
 import { agentsTools } from "./capabilities/agents";
 import { channelsChangeNote, channelsTools } from "./capabilities/channels";
-import { connectionsFragment } from "./capabilities/connections";
+import {
+  connectionsChangeNote,
+  connectionsFragment,
+  connectionsTools,
+} from "./capabilities/connections";
 import { cronsFragment, cronsTools } from "./capabilities/crons";
 import {
   createSendFileTools,
@@ -434,6 +438,9 @@ export const runSupervisor = async (
       ...channelsTools(renderInputs.channels),
       // message_agent follows the agents section's condition the same way.
       ...agentsTools(renderInputs.peers),
+      // list_apps is unconditional: grants change independently of this
+      // process, and the live tool is how a turn re-checks between syncs.
+      ...connectionsTools,
       ...createProcessTools(processes),
       ...(config.outboundAttachments ? sendFile.tools : []),
       // The skills tools follow their fragment's condition exactly: no
@@ -1351,6 +1358,7 @@ export const runSupervisor = async (
             const beforePresences = [...renderInputs.channels];
             const beforePeers = peersKey(renderInputs.peers);
             const beforeConnections = connectionsKey(renderInputs.connections);
+            const beforeConnectionList = [...renderInputs.connections];
             await applySync(
               config.homeDir,
               item,
@@ -1373,7 +1381,16 @@ export const runSupervisor = async (
             ) {
               // A live session read the old connected-apps list (or an old
               // bound host) — restart it so it calls the right place.
-              markSessionsStale("connections changed", null);
+              // The note is the transcript half: a restarted session still
+              // reads its own earlier "X isn't connected" turns, and a
+              // re-rendered doc loses to them (the Granola incident).
+              markSessionsStale(
+                "connections changed",
+                connectionsChangeNote(
+                  beforeConnectionList,
+                  renderInputs.connections,
+                ),
+              );
             }
           })
           .catch((error: unknown) => {

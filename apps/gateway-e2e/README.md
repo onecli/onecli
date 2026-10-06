@@ -134,11 +134,16 @@ Known gaps, all deliberate:
   bidirectional piping and the non-101 passthrough — is covered against a live stub.
 - **No provider-catalog host logic.** Fixtures use generic secrets on `127.0.0.1`, so the
   catalog's host-coverage rules are not exercised.
-- **No app-connection injection reaching an upstream.** Provider hosts cannot be redirected to
-  a local stub — no `host_rewrite` is set by any provider, and the HTTP client installs no DNS
-  override — so asserting an OAuth credential _arrived_ would need real egress. The
-  resolution outcomes (ambiguity, not-found) are covered instead, since they answer before any
-  socket opens.
+- **No app-connection injection reaching an upstream over TLS.** Provider hosts cannot be
+  redirected to a local stub: no `host_rewrite` is set by any provider, and the HTTP client
+  installs no DNS override. The exceptions are `oauth-refresh.test.ts` and
+  `credential-refresh.test.ts`: they point the gateway's outbound clients at a recording
+  forward proxy (`src/forward-proxy.ts`, via `HTTPS_PROXY`/`HTTP_PROXY`), which counts
+  token-refresh attempts as refused `CONNECT`s and reads the credential injected into a
+  plain-`http://` request, still with no egress. A client-credentials connection stores its
+  own token URL, so `credential-refresh.test.ts` also completes a real re-mint against a
+  local stub (exempted with `NO_PROXY`). The resolution outcomes (ambiguity, not-found) are
+  covered elsewhere, since they answer before any socket opens.
 - **No approval timeout in the default run.** The opt-in expiration suite above
   exercises the real 180-second deadline on both approval backends.
 - **No live KMS decryption.** The KMS backend is hosted-cloud plumbing; its envelope format

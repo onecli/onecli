@@ -18,7 +18,7 @@ import { log } from "../../log";
 /**
  * The remote sandbox backend: the seam implemented against a remote sandbox
  * service's REST API. That service owns the substrate entirely, and this
- * backend simply maps the thirteen seam calls onto its
+ * backend simply maps the seam calls onto its
  * resource API, so the runner's lifecycle logic is byte-identical across
  * Docker and a remote substrate.
  *
@@ -88,14 +88,23 @@ const transientPollError = (error: unknown): boolean => {
 /**
  * The service's per-workspace capacity refusal: a typed capacity error
  * at the seam, so the runner reports `at_capacity` (honest user copy + the
- * 150s patience window) instead of a generic start failure. BOTH doors that
- * allocate a home can hit it — create (fresh home) and wake (a
- * parked home is re-allocated) — so both map through here.
+ * 150s patience window) instead of a generic start failure. Only the wake
+ * allocates a home (the create runs onto the home its wake prepared), so
+ * only the wake maps through here.
  */
 const quotaRefusalAsCapacityError = (error: unknown): unknown =>
   error instanceof ManagerApiError && error.code === "workspace_quota_exceeded"
     ? new SandboxCapacityError(error.message)
     : error;
+
+/**
+ * The service's home ref is deterministic: this prefix plus the sandbox id
+ * (its `POST /v1/homes` answers exactly this, recording nothing). Knowing it
+ * here lets the stop path address a home without asking the service to
+ * enumerate every home it holds. The contract test pins it against
+ * `provisionHome`, and the service pins the same shape on its side.
+ */
+const HOME_REF_PREFIX = "home-";
 
 export interface CloudBackendOptions {
   /** Initial owner label; replaced by `identify()` once registration
@@ -147,6 +156,10 @@ export const createCloudBackend = (
       // redeploys independently of the runner, so refusing to boot while it
       // blips would couple two lifecycles that are deliberately separate.
       // Misconfiguration surfaces loudly on the first call instead.
+    },
+
+    homeRefFor(sandboxId) {
+      return `${HOME_REF_PREFIX}${sandboxId}`;
     },
 
     async provisionHome(sandboxId) {
@@ -259,26 +272,22 @@ export const createCloudBackend = (
         );
       }
 
-      const { containerRef } = await client
-        .createSandbox({
-          sandboxId: spec.sandboxId,
-          workspaceId: spec.workspaceId,
-          runnerId: owner,
-          installationId: options.installationId,
-          image: spec.image,
-          env: spec.env,
-          files: spec.files.map((file) => ({
-            containerPath: file.containerPath,
-            content: file.content,
-            ...(file.mode !== undefined && { mode: file.mode }),
-          })),
-          homeRef: spec.homeRef,
-          limits: spec.limits,
-          payloadHash: spec.payloadHash,
-        })
-        .catch((error: unknown) => {
-          throw quotaRefusalAsCapacityError(error);
-        });
+      const { containerRef } = await client.createSandbox({
+        sandboxId: spec.sandboxId,
+        workspaceId: spec.workspaceId,
+        runnerId: owner,
+        installationId: options.installationId,
+        image: spec.image,
+        env: spec.env,
+        files: spec.files.map((file) => ({
+          containerPath: file.containerPath,
+          content: file.content,
+          ...(file.mode !== undefined && { mode: file.mode }),
+        })),
+        homeRef: spec.homeRef,
+        limits: spec.limits,
+        payloadHash: spec.payloadHash,
+      });
 
       /**
        * The image watch — Docker learns "no such image" synchronously from

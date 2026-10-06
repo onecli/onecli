@@ -23,6 +23,7 @@ const services = vi.hoisted(() => ({
   updateAgent: vi.fn(),
   deleteAgent: vi.fn(),
   regenerateAgentToken: vi.fn(),
+  restartAgent: vi.fn(),
   listAgentsWithGrantsSummary: vi.fn(),
   setAgentImage: vi.fn(),
   clearAgentImage: vi.fn(),
@@ -62,6 +63,7 @@ vi.mock("../services/agent-service", () => ({
   updateAgent: services.updateAgent,
   deleteAgent: services.deleteAgent,
   regenerateAgentToken: services.regenerateAgentToken,
+  restartAgent: services.restartAgent,
 }));
 
 vi.mock("../services/grants-summary-service", () => ({
@@ -387,6 +389,51 @@ describe("PUT/DELETE /v1/agents/:agentId/image", () => {
         }),
       }),
     );
+  });
+});
+
+describe("POST /v1/agents/:agentId/restart", () => {
+  it("requires auth", async () => {
+    const res = await app.request("/v1/agents/a1/restart", { method: "POST" });
+    expect(res.status).toBe(401);
+    expect(services.restartAgent).not.toHaveBeenCalled();
+  });
+
+  it("restarts workspace-fenced, audited, and answers success", async () => {
+    services.restartAgent.mockResolvedValue(undefined);
+    const res = await app.request("/v1/agents/a1/restart", {
+      method: "POST",
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true });
+    expect(services.restartAgent).toHaveBeenCalledWith("p1", "a1");
+    expect(auditCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          action: "restart",
+          service: "agent",
+          source: "api",
+          metadata: { agentId: "a1" },
+        }),
+      }),
+    );
+  });
+
+  it("passes the service's refusal through and audits nothing", async () => {
+    auditCreate.mockClear();
+    services.restartAgent.mockRejectedValue(
+      new ServiceError("UNPROCESSABLE", "Only hosted agents can be restarted"),
+    );
+    const res = await app.request("/v1/agents/a1/restart", {
+      method: "POST",
+      headers: AUTH,
+    });
+    expect(res.status).toBe(422);
+    expect((await res.json()).error.message).toBe(
+      "Only hosted agents can be restarted",
+    );
+    expect(auditCreate).not.toHaveBeenCalled();
   });
 });
 

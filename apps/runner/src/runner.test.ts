@@ -164,6 +164,24 @@ describe("start", () => {
     expect(record?.spec.limits).toEqual(config.limits);
   });
 
+  it("resolves the home by provisioning it (an idempotent ensure), never by enumerating every home, a cost that grows with the fleet", async () => {
+    const startWithEnumerationBroken = async () => {
+      backend.failNext("listHomes");
+      queued.push(startItem());
+      await drive();
+      expect(posted.at(-1)).toMatchObject({
+        kind: "sandbox.status",
+        sandboxId: "sb-1",
+        status: "starting",
+        homeRef: "fake-home-sb-1",
+      });
+    };
+    // A brand-new home, then a wake of that SAME (now existing) home.
+    await startWithEnumerationBroken();
+    await startWithEnumerationBroken();
+    expect(backend.sandboxes.get("sb-1")?.spec.homeRef).toBe("fake-home-sb-1");
+  });
+
   it("wakes the home exactly once per start, handing it the payload's workspace (the placement a snapshot backend births a brand-new home from), on a first start and a recreate alike", async () => {
     queued.push(startItem("sb-1", { workspaceId: "ws-1" }));
     await drive();
@@ -427,6 +445,21 @@ describe("stop", () => {
 
     expect(backend.sandboxes.get("sb-1")?.running).toBe(false);
     expect(backend.homes.get("sb-1")).toBe("fake-home-sb-1");
+    expect(posted).toEqual([
+      { kind: "sandbox.status", sandboxId: "sb-1", status: "stopped" },
+    ]);
+  });
+
+  it("parks the sandbox's own home by NAME, never by enumerating every home (a fleet-sized listing on the stop path)", async () => {
+    queued.push(startItem());
+    await drive();
+    posted.length = 0;
+    backend.failNext("listHomes");
+
+    queued.push({ kind: "sandbox.stop", sandboxId: "sb-1" });
+    await drive();
+
+    expect(backend.parks).toEqual(["fake-home-sb-1"]);
     expect(posted).toEqual([
       { kind: "sandbox.status", sandboxId: "sb-1", status: "stopped" },
     ]);

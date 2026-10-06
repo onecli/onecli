@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
+import type { ConnectNote } from "@onecli/api/apps/types";
 import { Button } from "@onecli/ui/components/button";
 import { IS_CLOUD } from "@/lib/env";
 import { API_ORIGIN, getAuthToken, getWorkspaceId } from "@/lib/api-fetch";
@@ -20,6 +21,7 @@ interface ConnectFlowProps {
     darkIcon?: string;
     connectionType: string;
     labelHint?: string;
+    connectNote?: ConnectNote;
     fields?: {
       name: string;
       label: string;
@@ -88,6 +90,16 @@ export const ConnectFlow = ({
     string | undefined
   >(undefined);
   const hasApiKeyAlternate = !!app.apiKeyFields?.length;
+  // Whether the ready screen counts down and redirects on its own. Off when
+  // the user has something to decide or read first: an API-key alternate to
+  // pick instead of OAuth, or a connect note (e.g. an admin-only prerequisite)
+  // that must not race a 3-second redirect. The timer and the "Auto-connecting"
+  // label both key off this, so neither can show without the other.
+  const autoRedirects =
+    hasDefaults &&
+    app.connectionType === "oauth" &&
+    !hasApiKeyAlternate &&
+    !app.connectNote;
 
   const doRedirect = useCallback(async () => {
     if (redirectedRef.current) return;
@@ -110,11 +122,7 @@ export const ConnectFlow = ({
 
   // Countdown timer for auto-redirect
   useEffect(() => {
-    if (state !== "ready" || !hasDefaults) return;
-    if (app.connectionType !== "oauth") return;
-    // When an API-key alternate is offered, let the user choose instead of
-    // auto-redirecting to OAuth.
-    if (hasApiKeyAlternate) return;
+    if (state !== "ready" || !autoRedirects) return;
 
     setCountdown(3);
     const interval = setInterval(() => {
@@ -129,7 +137,7 @@ export const ConnectFlow = ({
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [state, hasDefaults, app.connectionType, hasApiKeyAlternate, doRedirect]);
+  }, [state, autoRedirects, doRedirect]);
 
   if (state === "success") {
     return (
@@ -305,7 +313,7 @@ export const ConnectFlow = ({
 
   // Ready / redirecting state
   const isRedirecting = state === "redirecting";
-  const showCountdown = state === "ready" && hasDefaults && countdown > 0;
+  const showCountdown = state === "ready" && autoRedirects && countdown > 0;
   const totalSeconds = 3;
   const progress = showCountdown
     ? Math.round(((totalSeconds - countdown) / totalSeconds) * 100)
@@ -343,6 +351,25 @@ export const ConnectFlow = ({
           </div>
         ) : (
           <div className="w-full space-y-3">
+            {app.connectNote && (
+              <div
+                className="space-y-1.5 rounded-md border border-border bg-muted/40 px-3 py-2 text-center text-xs text-muted-foreground"
+                data-testid="connect-note"
+              >
+                <p>{app.connectNote.text}</p>
+                {app.connectNote.fallback && <p>{app.connectNote.fallback}</p>}
+                {app.connectNote.link && (
+                  <a
+                    href={app.connectNote.link.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block underline underline-offset-2 hover:text-foreground"
+                  >
+                    {app.connectNote.link.label}
+                  </a>
+                )}
+              </div>
+            )}
             <Button className="w-full" onClick={doRedirect}>
               Connect to {app.name}
             </Button>

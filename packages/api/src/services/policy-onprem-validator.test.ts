@@ -55,6 +55,30 @@ describe("onpremPolicyValidator.validate (shape-only, no plan gate)", () => {
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
 
+  it("dispatches google-drive to the Drive shape validator", async () => {
+    await expect(
+      onpremPolicyValidator.validate("org-1", "google-drive", null, {
+        driveFolders: ["0ASharedDrive/1folder"],
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      onpremPolicyValidator.validate("org-1", "google-drive", null, {
+        driveFolders: ["/My Drive/Reports"],
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    // Another provider's axis would be unenforceable — refused for each one.
+    await expect(
+      onpremPolicyValidator.validate("org-1", "google-drive", null, {
+        folders: ["/Work"],
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    await expect(
+      onpremPolicyValidator.validate("org-1", "dropbox", null, {
+        driveFolders: ["0ASharedDrive"],
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
   it("is exactly the shared shape half (parity with the cloud validator)", async () => {
     // `eePolicyValidator` = plan gate + `validatePolicyShape`; onprem =
     // `validatePolicyShape` alone. Same input through both paths must reach

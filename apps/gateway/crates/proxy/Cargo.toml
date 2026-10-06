@@ -22,6 +22,7 @@ ca = { path = "../ca" }
 cache = { path = "../cache" }
 common = { path = "../common" }
 context = { path = "../context" }
+crypto = { path = "../crypto" }
 db = { path = "../db" }
 ee = { path = "../ee/ee" }
 inject = { path = "../inject" }

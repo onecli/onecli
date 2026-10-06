@@ -4,6 +4,7 @@ export const zoom: AppDefinition = {
   id: "zoom",
   name: "Zoom",
   icon: "/icons/zoom.svg",
+  apiDocsUrl: "https://developers.zoom.us/docs/api/",
   description: "Meetings, webinars, and cloud recordings.",
   connectionMethod: {
     type: "oauth",

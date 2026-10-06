@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { connectedAppsBlock, connectionsFragment } from "./connections";
+import {
+  connectedAppsBlock,
+  connectionsChangeNote,
+  connectionsFragment,
+  connectionsTools,
+} from "./connections";
 
 /**
  * The gateway-first contract the agent reads at turn 1. The wording pinned
@@ -72,6 +77,23 @@ describe("the connections fragment", () => {
       "never folded into one bulk call",
       "Tell the user the count up front",
       "Never re-send a denied request unless the user asks",
+    ]) {
+      expect(flat).toContain(guidance);
+    }
+  });
+
+  it("teaches linking each changed record from a real link, like the gateway skill", () => {
+    const flat = connectionsFragment(".agents/skills").body.replace(
+      /\s+/g,
+      " ",
+    );
+    for (const guidance of [
+      "link each one in your reply",
+      "from the API's own response",
+      "Salesforce returns no link, only the record id",
+      "on the org host the gateway gave you for that connection",
+      "Never guess a URL or copy an example hostname",
+      "show the id",
     ]) {
       expect(flat).toContain(guidance);
     }
@@ -225,5 +247,119 @@ describe("the connected-apps block", () => {
     // Control characters (newline included) are dropped, so a crafted
     // label can never open a new line of instructions.
     expect(block.split("\n")).toContain("- Salesforce — account `xy`");
+  });
+});
+
+describe("catalog facts on the connected-apps block", () => {
+  const granola = {
+    provider: "granola",
+    name: "Granola",
+    label: "API Key",
+    host: null,
+    apiHosts: ["public-api.granola.ai"],
+    endpoints: ["GET /v1/notes"],
+    docsUrl: "https://docs.granola.ai/introduction",
+  };
+
+  it("names a non-bound app's catalog host, samples and docs (the Granola case)", () => {
+    const block = connectedAppsBlock([granola]);
+    expect(block).toContain(
+      "- Granola — account `API Key`; call https://public-api.granola.ai; e.g. GET /v1/notes; docs https://docs.granola.ai/introduction",
+    );
+    expect(block).toContain("not one you remember or guess");
+    expect(block).toContain("may be out of date");
+    expect(block).toContain("list_apps");
+  });
+
+  // Navan, live: the right endpoint answered 400 naming the missing date
+  // range, and the agent tried four invented paths instead of adding it.
+  it("tells the agent to fix a 400 on the listed endpoint, not wander off it", () => {
+    const block = connectedAppsBlock([granola]);
+    expect(block).toContain("Start from the listed endpoints");
+    expect(block).toContain("fix those parameters and retry the same endpoint");
+    // Every rule stays on its own line: none can merge into an app line.
+    for (const line of block.split("\n").filter((l) => l.startsWith("- "))) {
+      expect(line).not.toContain("retry the same endpoint");
+    }
+  });
+
+  it("adds no call rules when no line carries catalog facts", () => {
+    const block = connectedAppsBlock([
+      { provider: "x", name: "X", label: null, host: null },
+    ]);
+    expect(block).not.toContain("Start from the listed endpoints");
+  });
+
+  it("keeps the bound host as THE host for a tenant app, adding only samples", () => {
+    const line = connectedAppsBlock([
+      {
+        provider: "salesforce",
+        name: "Salesforce",
+        label: null,
+        host: "acme.my.salesforce.com",
+        apiHosts: ["login.salesforce.com"],
+        endpoints: ["GET /services/data/"],
+        docsUrl: null,
+      },
+    ])
+      .split("\n")
+      .find((l) => l.startsWith("- Salesforce"))!;
+    expect(line).toBe(
+      "- Salesforce: call https://acme.my.salesforce.com — the only host its credential works on; e.g. GET /services/data/",
+    );
+  });
+
+  it("drops a catalog host that is not a hostname, and a non-https docs link", () => {
+    const block = connectedAppsBlock([
+      {
+        ...granola,
+        apiHosts: ["evil.test/phish"],
+        endpoints: [],
+        docsUrl: "http://docs.example",
+      },
+    ]);
+    expect(block).not.toContain("evil.test");
+    expect(block).not.toContain("http://docs.example");
+  });
+
+  it("an older control plane (no catalog fields) renders exactly as before", () => {
+    const block = connectedAppsBlock([
+      { provider: "gmail", name: "Gmail", label: "a@b.co", host: null },
+    ]);
+    expect(block.split("\n")).toContain("- Gmail — account `a@b.co`");
+    expect(block).not.toContain("list_apps");
+  });
+});
+
+describe("connectionsChangeNote", () => {
+  const gmail = { provider: "gmail", name: "Gmail", label: null, host: null };
+  const granola = {
+    provider: "granola",
+    name: "Granola",
+    label: null,
+    host: null,
+  };
+
+  it("tells the conversation a newly granted app is live (the Donna case)", () => {
+    const note = connectionsChangeNote([gmail], [gmail, granola]);
+    expect(note).toContain("[Platform notice]");
+    expect(note).toContain("Granola is now connected and granted to you");
+    expect(note).toContain("out of date");
+  });
+
+  it("reports a lost app, and is silent when only a label moved", () => {
+    expect(connectionsChangeNote([gmail, granola], [gmail])).toContain(
+      "Granola is no longer available",
+    );
+    expect(
+      connectionsChangeNote([gmail], [{ ...gmail, label: "work" }]),
+    ).toBeNull();
+  });
+});
+
+describe("connectionsTools", () => {
+  it("offers list_apps with no arguments", () => {
+    expect(connectionsTools.map((t) => t.name)).toEqual(["list_apps"]);
+    expect(connectionsTools[0]?.inputSchema).toMatchObject({ properties: {} });
   });
 });

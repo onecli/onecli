@@ -12,6 +12,7 @@ import {
   grantedConnectionSelection,
   providerLevelKey,
 } from "./policy-reflect/injection";
+import { catalogFactsFor } from "./agent-connection-catalog";
 import { loadInjectionRules } from "./policy-simulate/load-rules";
 import { resolvePrincipalSet } from "./policy-simulate/principal-set";
 
@@ -99,6 +100,9 @@ export const connectionsForRender = async (
         cleanLabel(app.name, MAX_AGENT_CONNECTION_NAME_CHARS) || row.provider,
       label: label || null,
       host: extractBoundHost(row.metadata),
+      // Where and how to call it, from the catalog (the Granola fix: its
+      // public API host, not the desktop host an agent would guess).
+      ...catalogFactsFor(row.provider),
     });
   }
   return out.slice(0, MAX_AGENT_CONNECTIONS);

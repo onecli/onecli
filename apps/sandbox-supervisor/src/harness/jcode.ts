@@ -35,7 +35,8 @@ import { createJcodeWakeFeed } from "./jcode-wake";
  * (invariant 9).
  *
  * Every switch below was verified against jcode v0.71.x source and
- * re-verified against v0.78.1 (2026-08-19) and v0.81.1 (2026-08-26) at the pin bumps
+ * re-verified against v0.78.1 (2026-08-19), v0.81.1 (2026-08-26), v0.90.0
+ * (2026-10-01) and v0.90.1 (2026-10-05) at the pin bumps
  * (see plans/hosted-agents-v2.md §3.2/§3.5):
  * - `inheritLogins: false` — never import host provider logins (zero-cred).
  * - `JCODE_NO_TELEMETRY=1` — telemetry is on by default upstream.
@@ -104,9 +105,52 @@ import { createJcodeWakeFeed } from "./jcode-wake";
  *   gateway's 180 s approval hold (jcode's default is exactly 180).
  * - `[auth] trusted_external_sources` — jcode's consent gate for reading
  *   `CLAUDE_CODE_OAUTH_TOKEN`; pre-trusted because we own this home.
+ * - `JCODE_RUNTIME_PROVIDER`: the Anthropic credential ROUTE, pinned at
+ *   launch from the grant (see resolveAnthropicCredential). Unpinned, the
+ *   runtime picks OAuth-vs-key itself, and a resumed session can re-pick it
+ *   for the whole process.
  */
 
 const JCODE_HOME_DIRNAME = ".jcode-home";
+
+/**
+ * How the launch should present the agent's Anthropic grant to jcode.
+ *
+ * `route` is jcode's own `JCODE_RUNTIME_PROVIDER` vocabulary: `claude` pins
+ * the Claude subscription (OAuth) route, `claude-api` the direct API-key
+ * route. It is pinned because jcode's AUTOMATIC credential mode (what runs
+ * when nothing is pinned) prefers any loadable OAuth account over
+ * `ANTHROPIC_API_KEY`, and resuming a session that was persisted on the
+ * API-key route re-pins the route process-wide from that moment on. Without
+ * the pin, OAuth-vs-key therefore depends on which sessions a boot happens
+ * to resume (verified against the pinned runtime). Bare `JCODE_PROVIDER=
+ * claude` does not help here: upstream treats it as a provider hint that
+ * deliberately keeps automatic mode.
+ *
+ * `oauthStub` says whether the placeholder account belongs in the instance's
+ * `auth.json`: exactly when the route is `claude`, which the union encodes
+ * so no caller can pair a stub with the key route. The file lives on the
+ * durable home, so a grant that moved from an OAuth token to an API key
+ * would otherwise keep a stale OAuth account there for the life of the
+ * volume.
+ *
+ * An API key wins when both are present (matching the control plane, which
+ * hands out one or the other); empty values count as unset. No Anthropic
+ * grant at all pins nothing, so an OpenAI-only agent keeps the runtime's own
+ * provider selection.
+ */
+export type AnthropicCredential =
+  | { route: "claude"; oauthStub: true }
+  | { route: "claude-api"; oauthStub: false }
+  | { route: undefined; oauthStub: false };
+
+export const resolveAnthropicCredential = (
+  env: NodeJS.ProcessEnv,
+): AnthropicCredential => {
+  if (env.ANTHROPIC_API_KEY) return { route: "claude-api", oauthStub: false };
+  if (env.CLAUDE_CODE_OAUTH_TOKEN) return { route: "claude", oauthStub: true };
+  return { route: undefined, oauthStub: false };
+};
 
 /**
  * The agent's POSIX home under the workspace volume — byte-equal with the
@@ -1796,9 +1840,10 @@ export const createJcodeHarness = (): Harness => {
     // skill stashes do not survive a boot — platform memory and the synced
     // skills root are the only durable knowledge.
     cleanJcodeKnowledgeStores(homeDir, jcodeHome);
-    // The transcript half: a stop that tore the daemon's last checkpoint
-    // left every journaled message doubled, which the provider rejects on
-    // every turn (#1194). Repaired here, while no daemon holds the store.
+    // The transcript half: a stored conversation the provider rejects on
+    // every turn (a stop that tore the daemon's last checkpoint and doubled
+    // its messages, #1194; an image in a format the provider refuses) is
+    // repaired here, while no daemon holds the store.
     healJcodeTranscripts(jcodeHome);
     writeManagedFile(join(jcodeHome, "config.toml"), managedConfigToml, 0o600);
     preparePromptFiles(homeDir, jcodeHome);
@@ -1809,13 +1854,12 @@ export const createJcodeHarness = (): Harness => {
     logForwarder ??= startJcodeLogForwarder({ jcodeHome });
 
     // OAuth-mode grants ship CLAUDE_CODE_OAUTH_TOKEN (a placeholder — the
-    // gateway splices the real token); steer jcode onto its subscription
-    // path for that case. Api-key mode needs no steering.
-    const oauthMode =
-      Boolean(process.env.CLAUDE_CODE_OAUTH_TOKEN) &&
-      !process.env.ANTHROPIC_API_KEY;
+    // gateway splices the real token), API-key grants ANTHROPIC_API_KEY;
+    // either way the credential ROUTE is pinned below, never left to the
+    // runtime's automatic mode. See resolveAnthropicCredential.
+    const anthropic = resolveAnthropicCredential(process.env);
 
-    if (oauthMode) {
+    if (anthropic.oauthStub) {
       // Seed jcode's OWN auth store with a never-expiring placeholder
       // account (live-verified: a bare env token is marked expired and the
       // runtime refuses it at request time — "only useful while still
@@ -1847,6 +1891,15 @@ export const createJcodeHarness = (): Harness => {
         })}\n`,
         0o600,
       );
+    } else {
+      // No OAuth grant on THIS boot, but the home is durable: a stub an
+      // earlier OAuth grant wrote is still here, and the runtime would load
+      // it as a live account beside the API key. Recursive so a directory
+      // planted at this path is healed rather than throwing EISDIR: a throw
+      // here would fail the launch, and the memoized instance makes that
+      // permanent for the container. `rmSync` unlinks a planted symlink
+      // rather than following it (the standing purge law above).
+      rmSync(join(jcodeHome, "auth.json"), { recursive: true, force: true });
     }
 
     const launched = await launchInstance({
@@ -1893,7 +1946,11 @@ export const createJcodeHarness = (): Harness => {
         // bypassing `StartSessionOptions` — so a caller passing a different
         // model would get a launch env and a session model that disagree.
         // `setModel` in `applyPreferences` is the single door.
-        ...(oauthMode ? { JCODE_PROVIDER: "claude" } : {}),
+        ...(anthropic.oauthStub ? { JCODE_PROVIDER: "claude" } : {}),
+        // The credential-route pin (see resolveAnthropicCredential). Read by
+        // every Anthropic runtime the daemon constructs, so a session
+        // resumed from either route lands on the route the grant names.
+        ...(anthropic.route ? { JCODE_RUNTIME_PROVIDER: anthropic.route } : {}),
       },
     });
 

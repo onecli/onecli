@@ -119,21 +119,47 @@ describe("unconnected", () => {
     const user = userEvent.setup();
     render(<SlackIntegrationCard />);
 
+    // Step 1 (where to go) is inline under the field, and again as step 1 of
+    // the dialog, so someone with the Slack tab already open never has to
+    // open anything.
     expect(
       screen.getByRole("link", { name: /api\.slack\.com\/apps/ }),
+    ).toHaveAttribute("href", "https://api.slack.com/apps");
+    expect(
+      screen.getByText("Your App Configuration Tokens"),
+    ).toBeInTheDocument();
+    // The rest of the walkthrough (three steps plus Slack's screen) is too
+    // tall for the stacked form, so it stays behind the dialog.
+    expect(screen.queryByText("Generate Token")).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "How do I get this?" }),
+    );
+
+    const dialog = screen.getByRole("dialog");
+    expect(
+      within(dialog).getByRole("link", { name: /api\.slack\.com\/apps/ }),
     ).toHaveAttribute("href", "https://api.slack.com/apps");
     // The one fact the paste flow lives or dies on: a refresh token is
     // single-use, so it must be pasted freshly generated and unused. Slack's
     // own page does not say so, and a stale one answers an opaque
     // `internal_error`.
     expect(
-      screen.getByText(/Each refresh token works once/),
+      within(dialog).getByText(/Each refresh token works once/),
     ).toBeInTheDocument();
-    // Slack's page has two Copy buttons; the hint names which one.
+    // Slack's page has two identical Copy buttons; the steps name which one,
+    // in text (the screenshot beside them is decorative).
     expect(
-      screen.getByText(/paste the Refresh Token \(not the Access Token\)/),
+      within(dialog).getByText(/not the Access Token/),
     ).toBeInTheDocument();
+    expect(within(dialog).getByText("Generate Token")).toBeInTheDocument();
+    // Slack's real tokens row, arrow on the Refresh Token's Copy. `alt=""`
+    // makes it presentational, so step 3 above must carry the fact in words.
+    expect(within(dialog).getByRole("presentation")).toHaveAttribute(
+      "src",
+      expect.stringContaining("slack-app-config-tokens.png"),
+    );
 
+    await user.keyboard("{Escape}");
     const field = screen.getByLabelText("App Configuration refresh token");
     await user.type(field, "xoxe-1-refresh");
     await user.click(screen.getByRole("button", { name: "Connect" }));
@@ -216,7 +242,7 @@ describe("needs credentials", () => {
     // new one) — not "expired", which the old copy claimed even when the
     // token had been consumed by another tool.
     expect(
-      screen.getByText(/could not be refreshed: Slack refused the rotation/),
+      screen.getByText(/Slack refused to rotate the stored token/),
     ).toBeInTheDocument();
     expect(
       screen.getByLabelText("App Configuration refresh token"),

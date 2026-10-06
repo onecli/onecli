@@ -96,6 +96,7 @@ export const createFakeControlPlane = (
   reportMentionFailures: async () => {},
   ingest: async () => ({ kind: "duplicate" as const }),
   decide: async () => ({ kind: "already_settled" as const }),
+  decideGroup: async () => ({ kind: "refused" as const, message: "no" }),
   decideReach: async () => ({ kind: "already_settled" as const }),
   decideAction: async () => ({ kind: "already_settled" as const }),
   claimPrompt: async () => true,

@@ -14,7 +14,7 @@
 #   (ONECLI_JCODE_BINARY), JCODE_NO_AUTO_UPDATE baked below, and the
 #   supervisor deleting the updater's builds/ dirs from persistent volumes
 #   at boot (harness/jcode.ts). @1jehuang/jcode-sdk stays as the CLIENT
-#   library only (its wire protocol major is 1 across 0.67.x–0.81.x);
+#   library only (its wire protocol major is 1 across 0.67.x–0.90.x);
 #   its bundled npm binary is deleted from the final image so a
 #   misconfiguration fails loudly instead of silently running 0.67.1.
 # - pnpm install must NEVER use --omit=optional: other packages' optional
@@ -58,15 +58,15 @@ RUN pnpm install --frozen-lockfile
 # own updater verified only opportunistically, and it is disabled anyway).
 FROM base AS jcode-runtime
 ARG TARGETARCH
-ARG JCODE_VERSION=v0.90.0
+ARG JCODE_VERSION=v0.90.1
 RUN apt-get update \
   && apt-get install -y --no-install-recommends curl ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 RUN case "$TARGETARCH" in \
     arm64) ASSET="jcode-linux-aarch64"; \
-      SHA="8b44b717e1085950cf1fc5b1a5005e087c9e38c1e0293b6009fee1ab0b2c451f";; \
+      SHA="85c095f6ec90bdf06cce2ee9666fa40fc74d05c6aca65e475bc12978af45f16e";; \
     amd64) ASSET="jcode-linux-x86_64"; \
-      SHA="b963b7cd53ec0dc39c805c4549e9752ab194d4e1bd338b536d587c9bf8851516";; \
+      SHA="9a46e0cd4b66416177e78384614787323be7a9d195832733664e8f0354a9927b";; \
     *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1;; \
   esac \
   && curl -fsSL -o /tmp/jcode.tar.gz \

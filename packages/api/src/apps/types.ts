@@ -125,13 +125,44 @@ export type ConnectionMethod =
       };
     };
 
+export interface OAuthConfigFieldOption {
+  /** The stored value, which is what the server-side code switches on. */
+  value: string;
+  /** What the user sees on the toggle. */
+  label: string;
+}
+
 export interface OAuthConfigField {
   name: string;
   label: string;
   description?: string;
-  placeholder: string;
+  /** Text fields only; ignored when `options` is set. */
+  placeholder?: string;
   /** If true, stored encrypted in AppConfig.credentials. Otherwise in AppConfig.settings. */
   secret?: boolean;
+  /** Fixed choices rendered as a segmented control instead of a text input.
+   *  The stored value is always one of these `value`s, so whatever consumes
+   *  the setting can switch on them without a free-text fallback. */
+  options?: OAuthConfigFieldOption[];
+  /** Pre-selected choice for an `options` field; must be one of its values.
+   *  Submitted with the config even if the user never touches the control. */
+  defaultValue?: string;
+}
+
+/**
+ * A short note shown in the connect window above the Connect button, for a
+ * provider-side prerequisite the user should know before they're sent off
+ * (e.g. "an admin must install the app first"). Each part renders on its own
+ * line: `text` is the prerequisite, `fallback` is what someone who can't meet
+ * it should do instead, and `link` opens our docs in a new tab.
+ */
+export interface ConnectNote {
+  text: string;
+  fallback?: string;
+  link?: {
+    url: string;
+    label: string;
+  };
 }
 
 export interface AppDefinition {
@@ -149,6 +180,14 @@ export interface AppDefinition {
   additionalMethods?: ConnectionMethod[];
   /** Custom hint for the connection label field (e.g. 'e.g. "staging", "my-org"'). */
   labelHint?: string;
+  /**
+   * The provider's public API reference (https only). Rendered into a hosted
+   * agent's connected-apps section so its first call lands on the real,
+   * documented API rather than a guessed one. Curate only a link verified to
+   * resolve: an agent follows it.
+   */
+  apiDocsUrl?: string;
+  connectNote?: ConnectNote;
   /** Credential stubs for provisioners to write so MCP servers can boot. */
   credentialStubs?: {
     /** Full destination path (e.g., "~/.config/gcloud/application_default_credentials.json"). */
@@ -169,5 +208,10 @@ export interface AppDefinition {
     envDefaults?: Record<string, string>;
     /** Short hint shown above the credential fields (e.g., "Use credentials from a GitHub OAuth App"). */
     hint?: string;
+    /** A docs page that walks through creating the provider's OAuth app and
+     *  finding these credentials. Linked from the setup dialog as "Follow the
+     *  {app} setup guide". Only point at pages that actually cover that; a
+     *  usage page would send a stuck user somewhere that can't help. */
+    setupGuideUrl?: string;
   };
 }

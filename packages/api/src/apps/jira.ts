@@ -10,6 +10,8 @@ export const jira: AppDefinition = {
   id: "jira",
   name: "Jira",
   icon: "/icons/jira.svg",
+  apiDocsUrl:
+    "https://developer.atlassian.com/cloud/jira/platform/rest/v3/intro/",
   description: "Projects, issues, and workflows in Jira Cloud.",
   connectionMethod: {
     type: "oauth",

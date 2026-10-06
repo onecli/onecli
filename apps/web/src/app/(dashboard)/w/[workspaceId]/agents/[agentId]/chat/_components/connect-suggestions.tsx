@@ -3,13 +3,15 @@
 import { memo, useRef, useState } from "react";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
-import type { AppDefinition } from "@onecli/api/apps/types";
-import { Plug, Settings2 } from "lucide-react";
+import { Plug, RefreshCw, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@onecli/ui/components/button";
 import { cn } from "@onecli/ui/lib/utils";
 import { AppIcon } from "@/lib/components/app-icon";
-import { extractConnectSuggestions } from "@/lib/chat/connect-links";
+import {
+  extractConnectSuggestions,
+  type CardSuggestion,
+} from "@/lib/chat/connect-links";
 import {
   WORKSPACE_PATH_RE,
   agentSectionPath,
@@ -77,11 +79,7 @@ export const ConnectorSuggestionsCard = ({
   channels = NO_CHANNEL_SUGGESTIONS,
   hideHeader = false,
 }: {
-  suggestions: {
-    app: AppDefinition;
-    agentName?: string;
-    kind: "connect" | "attach";
-  }[];
+  suggestions: CardSuggestion[];
   /** Chat-app rows ("talk to this agent on Slack"). A channel is a bot
    * install on the agent's Channels page, not an OAuth credential (Slack is
    * no longer in the app registry at all), so these rows carry their own
@@ -162,6 +160,17 @@ export const ConnectorSuggestionsCard = ({
     }
   };
 
+  // Re-authorize one existing account in place. Claimed like a connect, so
+  // its landing refreshes the list and a cleared needs-reconnect flag shows.
+  const reconnect = (app: CardSuggestion["app"], connectionId: string) => {
+    initiated.current.add(app.id);
+    openPopupOrExplain(app.id, {
+      connectionId,
+      workspaceId,
+      height: connectPopupHeight(app),
+    });
+  };
+
   useAppMessages({
     onConnected: ({ provider }) => {
       if (!provider || !initiated.current.has(provider)) return;
@@ -228,8 +237,26 @@ export const ConnectorSuggestionsCard = ({
             )}
           </div>
         )}
-        {suggestions.map(({ app, agentName, kind }) => {
-          const connection = connectionFor(app.id);
+        {suggestions.map(({ app, agentName, kind, connectionId }) => {
+          // A reconnect link names the dead account: act on THAT one, not
+          // whichever of the app's accounts happens to be listed first.
+          const connection =
+            (kind === "reconnect" &&
+              connections.find(
+                (c) =>
+                  c.id === connectionId &&
+                  c.provider === app.id &&
+                  c.status === "connected",
+              )) ||
+            connectionFor(app.id);
+          // The provider refused this account's saved login (the gateway's
+          // `connection_needs_reconnect`): nothing works until it is
+          // re-authorized, so that becomes the row's only primary action.
+          // Clears on its own once the reconnect lands (the list refetches).
+          // Not on an attach row: there the gateway said THIS agent lacks a
+          // grant, which a reconnect would not fix.
+          const needsReconnect =
+            kind !== "attach" && !!connection?.reauthRequiredAt;
           // Any of this app's accounts already granted to this agent → the
           // attach state is partially satisfied; the button reads Manage and
           // the status line counts what this agent holds. Same pool the
@@ -265,7 +292,12 @@ export const ConnectorSuggestionsCard = ({
               </div>
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium">{app.name}</p>
-                {connection ? (
+                {connection && needsReconnect ? (
+                  <p className="text-destructive truncate text-xs font-medium">
+                    Needs reconnect
+                    {connection.label ? ` · ${connection.label}` : ""}
+                  </p>
+                ) : connection ? (
                   kind === "attach" ? (
                     !attachStateKnown ? (
                       // Grants unresolved (or failed): the only honest claim
@@ -301,7 +333,26 @@ export const ConnectorSuggestionsCard = ({
                   )
                 )}
               </div>
-              {connection ? (
+              {connection && needsReconnect ? (
+                <div className="flex shrink-0 items-center gap-1.5">
+                  {reconnectableHere ? (
+                    <Button
+                      size="xs"
+                      aria-label={`Reconnect ${app.name}`}
+                      onClick={() => reconnect(app, connection.id)}
+                    >
+                      <RefreshCw className="size-3.5" aria-hidden />
+                      Reconnect
+                    </Button>
+                  ) : (
+                    // Org-shared: the workspace OAuth callback can't
+                    // re-authorize it, so send the user where an org admin can.
+                    <span className="text-muted-foreground text-xs">
+                      Ask an org admin to reconnect
+                    </span>
+                  )}
+                </div>
+              ) : connection ? (
                 <div className="flex shrink-0 items-center gap-1.5">
                   {kind === "attach" ? (
                     // The problem is the missing grant, so the fix is the
@@ -337,13 +388,7 @@ export const ConnectorSuggestionsCard = ({
                         variant="ghost"
                         size="xs"
                         aria-label={`Reconnect ${app.name}`}
-                        onClick={() =>
-                          openPopupOrExplain(app.id, {
-                            connectionId: connection.id,
-                            workspaceId,
-                            height: connectPopupHeight(app),
-                          })
-                        }
+                        onClick={() => reconnect(app, connection.id)}
                       >
                         Reconnect
                       </Button>

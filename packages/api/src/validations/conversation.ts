@@ -293,14 +293,17 @@ export const HARNESS_NO_TERMINAL_MESSAGE =
 
 /** The model provider rejected the conversation itself as malformed. Its
  * stored history is replayed whole on every turn, so resending as-is fails
- * the same way. The known cause (#1194: a stop interrupted the agent mid
- * save and left its history duplicated) is repaired the next time the agent
- * starts, which an idle stop brings about on its own; any other cause needs
- * whoever operates the agent. The copy promises neither outcome: it says
- * the problem is the conversation's saved history, not the person's
- * message, and what to try. */
+ * the same way. The known causes (#1194: a stop interrupted the agent mid
+ * save and left its history duplicated; an image stored in a format the
+ * provider rejects) are repaired the next time the agent starts, which an
+ * idle stop brings about on its own and "Restart agent" (the agent's menu in
+ * the dashboard) brings about at once; any other cause needs whoever
+ * operates the agent. The copy names the dashboard because it is also shown
+ * in Slack, where no menu exists. It promises neither outcome: it says the
+ * problem is the conversation's saved history, not the person's message, and
+ * what to try. */
 export const TRANSCRIPT_REJECTED_MESSAGE =
-  "The agent couldn't continue because this conversation's saved history is damaged. It tries to repair it the next time it restarts, so send your message again in a little while. If this keeps happening, contact whoever operates this agent.";
+  "The agent couldn't continue because this conversation's saved history is damaged. To start it fresh, restart the agent from its menu in the dashboard. Or send your message again in a little while: it tries to repair the history the next time it restarts. If this keeps happening, contact whoever operates this agent.";
 
 /** The Slack mirror's last-resort line for a FAILED turn that produced no
  * answer text and no error anywhere — silence would read as the agent
@@ -318,6 +321,39 @@ export const TURN_FAILED_PARTIAL_MESSAGE =
  * the web's word for the same moment (turn-block's aborted arm), kept
  * byte-identical by convention. */
 export const TURN_STOPPED_MESSAGE = "Stopped.";
+
+/** Shown in place of an uncoded failure whose error text is a raw payload
+ * (see `isRawErrorPayload`). Nothing classified the failure, so the copy
+ * names no cause and no fix it cannot vouch for (never the model key: a
+ * provider 500 or a context overflow is not a key problem). Same doctrine as
+ * the family above: temporary in tone, and it says what to do next. */
+export const TURN_FAILED_RAW_ERROR_MESSAGE =
+  "The agent ran into an error and couldn't finish this message. Send it again in a moment. If it keeps happening, contact whoever operates this agent.";
+
+/**
+ * A provider's JSON error envelope (`"error": {…}`: Anthropic, OpenAI and
+ * Google all nest the error object under that key, and a body quoted inside
+ * another string escapes the quote as `\"error\": {`) or an HTML error page
+ * (a proxy's 502). Kept narrow on purpose:
+ * - The OneCLI gateway's own refusals use a FLAT string code
+ *   (`"error": "blocked_by_policy"`) beside a readable message that names
+ *   the rule or budget, so they keep today's passthrough.
+ * - Status phrases, "run this command" lines and tool names never match: an
+ *   ordinary error SENTENCE is the useful answer and must stay as written.
+ * No nested quantifiers: the text is untrusted and can be long.
+ */
+const RAW_ERROR_PAYLOAD = /"error\\?"\s*:\s*\{|<!doctype html|<html[\s>]/i;
+
+/**
+ * Whether an UNCODED failure's error text is a raw payload rather than a
+ * sentence. Coded failures never need this (the control plane already
+ * stored their canonical copy). The surfaces swap a payload for
+ * `TURN_FAILED_RAW_ERROR_MESSAGE`; the web keeps the raw text behind a
+ * collapsed disclosure for whoever is debugging, and a shared channel drops
+ * it.
+ */
+export const isRawErrorPayload = (error: string): boolean =>
+  RAW_ERROR_PAYLOAD.test(error);
 
 /**
  * The server-side allowlist: a WIRE failure code (supervisor/runner-supplied,

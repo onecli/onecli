@@ -13,7 +13,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use std::fmt;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::connect::PolicyEngineExt as _;
 use crate::connect::{self, AppConnectionResult, ConnectionChoice, PolicyEngine};
@@ -186,6 +186,15 @@ pub async fn mitm(
                             connection_id: cid,
                             connections,
                         }) => Ok(response::connection_not_found(&cid, &connections)),
+                        // Answered here, before policy and any approval hold:
+                        // approving the request could only forward a dead token.
+                        Ok(ResolveResult::NeedsReconnect(connection)) => {
+                            info!(host = %host, connection_id = %connection.id, provider = %connection.provider, "connection needs reconnect; request not forwarded");
+                            Ok(response::connection_needs_reconnect(
+                                &connection,
+                                ctx.workspace_id.as_deref(),
+                            ))
+                        }
                         Err(e) => {
                             warn!(host = %host, error = ?e, "rule resolution failed mid-session");
                             Ok(response::resolution_failed())
@@ -355,6 +364,8 @@ enum ResolveResult {
         connection_id: String,
         connections: Vec<ConnectionChoice>,
     },
+    /// The connection serving this request must be reconnected by the user.
+    NeedsReconnect(ConnectionChoice),
 }
 
 /// Resolve injection + policy rules from cache, with per-request app connection
@@ -465,6 +476,12 @@ async fn resolve_rules(
                     });
                 }
                 debug!(host = %hostname, "requested connection not found; secret rules serve this path");
+            }
+            Ok(AppConnectionResult::NeedsReconnect { connection }) => {
+                if !secrets_serve {
+                    return Ok(ResolveResult::NeedsReconnect(connection));
+                }
+                debug!(host = %hostname, "connection needs reconnect; secret rules serve this path");
             }
             Ok(AppConnectionResult::NoConnections) => {}
             // Nothing injects, exactly as `NoConnections`; the choices ride

@@ -10,6 +10,7 @@ export const outlookMail: AppDefinition = {
   id: "outlook-mail",
   name: "Outlook Mail",
   icon: "/icons/outlook-mail.svg",
+  apiDocsUrl: "https://learn.microsoft.com/en-us/graph/api/overview",
   description: "Read, compose, and send emails via Microsoft Outlook.",
   connectionMethod: {
     type: "oauth",

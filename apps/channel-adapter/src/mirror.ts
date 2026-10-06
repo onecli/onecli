@@ -11,8 +11,10 @@ import {
   AUTOMATION_SOURCES,
   GREETING_SOURCE,
   TURN_FAILED_PARTIAL_MESSAGE,
+  TURN_FAILED_RAW_ERROR_MESSAGE,
   TURN_FAILED_SILENT_MESSAGE,
   TURN_STOPPED_MESSAGE,
+  isRawErrorPayload,
   type AutomationSource,
 } from "@onecli/api/validations/conversation";
 import { mentionNamesOf, plainMentionCandidatesOf } from "@onecli/channels";
@@ -109,7 +111,10 @@ const cardLinks = (matches: ConnectLinkMatch[]): ConnectLink[] => {
 };
 
 /** The answer with every occurrence of a carded provider's link removed by
- * exact span; links past the card cap stay put. */
+ * exact span; links past the card cap stay put. A link that stood alone on
+ * its line also takes its colon-terminated lead-in with it ("To reconnect,
+ * open this link:"), which would otherwise dangle in front of nothing: the
+ * card right below already says what to do. */
 const proseWithoutCardedLinks = (
   answer: string,
   matches: ConnectLinkMatch[],
@@ -117,16 +122,238 @@ const proseWithoutCardedLinks = (
 ): string => {
   let prose = "";
   let cursor = 0;
+  // The line break owed where a lifted line was, written only once more
+  // text follows: two adjacent lifts must not stack blank lines, and a lift
+  // at either end of the answer owes nothing.
+  let owed = "";
+  const append = (text: string) => {
+    if (!text) return;
+    if (prose && owed) prose += owed;
+    owed = "";
+    prose += text;
+  };
   for (const match of matches) {
     if (!carded.has(match.provider)) continue;
     // A wrapper-rewound span (a connect link nested inside another link's
     // markdown label) can start BEFORE the previous match's end; the
     // backwards slice is empty, so nothing duplicates — at worst a label
     // fragment of the model's own nesting stays behind.
-    prose += answer.slice(cursor, match.start);
-    cursor = Math.max(cursor, match.end);
+    const lifted = liftedLine(answer, cursor, match);
+    if (!lifted) {
+      append(answer.slice(cursor, match.start));
+      cursor = Math.max(cursor, match.end);
+      continue;
+    }
+    // The lifted line takes its own blank lines with it, trimmed at THIS
+    // splice only, so the model's spacing elsewhere (code blocks included)
+    // is untouched. The break it owes matches what surrounded it: a blank
+    // line on either side keeps a paragraph break, a plain line break (a
+    // list, a tight block) keeps just that.
+    const before = answer.slice(cursor, lifted.start);
+    const kept = dropDanglingLeadIn(before).trimEnd();
+    append(kept);
+    const paragraph =
+      BLANK_LINE.test(before.slice(kept.length)) ||
+      BLANK_LINE.test(answer.slice(match.end, lifted.resume));
+    owed = owed === "\n\n" || paragraph ? "\n\n" : "\n";
+    cursor = Math.max(cursor, lifted.resume);
   }
-  return (prose + answer.slice(cursor)).trim();
+  append(answer.slice(cursor));
+  return prose.trim();
+};
+
+/** A line holding only whitespace, between two line breaks. */
+const BLANK_LINE = /\n[ \t\r]*\n/;
+
+/** A line's markup ahead of a lifted link that holds nothing else:
+ * blockquote markers and at most one bullet. It goes with the link instead
+ * of staying behind as an empty bullet or quote line. Numbered markers stay
+ * (dropping one would leave a gap in the list's numbering). */
+const MARKUP_ONLY = /^[ \t]*(?:>[ \t]*)*(?:[-*+][ \t]+)?$/;
+
+/**
+ * The span of a lifted link's line when the link stood alone on it (bare
+ * bullet or quote markup ahead of it counts as alone): `start` is where the
+ * line begins, `resume` is just past the blank lines after it, at the start
+ * of the next content line so that line keeps its indentation (a nested
+ * bullet, an indented block). Null when the link shares its line with
+ * other text. `cursor` bounds the backwards look: text before it was
+ * already spliced.
+ */
+const liftedLine = (
+  answer: string,
+  cursor: number,
+  match: ConnectLinkMatch,
+): { start: number; resume: number } | null => {
+  const from = Math.max(cursor, match.start);
+  let start = from;
+  while (
+    start > cursor &&
+    from - start <= LINE_PREFIX_SPAN &&
+    answer[start - 1] !== "\n"
+  ) {
+    start--;
+  }
+  if (start > 0 && answer[start - 1] !== "\n") return null;
+  if (!MARKUP_ONLY.test(answer.slice(start, from))) return null;
+  let end = match.end;
+  while (end < answer.length && " \t\r".includes(answer[end]!)) end++;
+  if (end < answer.length && answer[end] !== "\n") return null;
+  let resume = end;
+  for (let k = end; k < answer.length && " \t\r\n".includes(answer[k]!); k++) {
+    if (answer[k] === "\n") resume = k + 1;
+  }
+  return { start, resume };
+};
+
+/** Words that make a colon-ended clause a pointer at the lifted link. */
+const LEAD_IN_WORD = /\b(link|url|here|below|following)\b/i;
+
+/** A clause that OPENS with a (re)connect imperative points at the lifted
+ * connect link too ("Reconnect Salesforce:", "To connect Gmail:"). Only as
+ * the opener: anywhere else the verb is usually a statement ("I couldn't
+ * connect to it because:"), and dropping content is worse than leaving a
+ * lead-in behind. */
+const LEAD_IN_IMPERATIVE =
+  /^(?:please\s+|to\s+)?(?:re)?(?:connect|authori[sz]e)\b/i;
+
+/** A clause over a couple of lines' worth is prose, not a pointer. */
+const MAX_LEAD_IN = 200;
+
+/** How far back the clause scan looks: the longest clause plus room for
+ * line markup. Bounded, so each call is O(1) however long the answer. */
+const LEAD_IN_SCAN = MAX_LEAD_IN + 40;
+
+/** Line-start markup ahead of a line's text: blockquote markers, then a
+ * heading (group 1) or a list marker (group 2). Each marker needs trailing
+ * whitespace, so `**bold`, `#tag` and `1.5` are text, not markup. */
+const LINE_PREFIX =
+  /^[ \t]*(?:>[ \t]*)*(?:(#{1,6}[ \t]+)|((?:[-*+]|\d{1,9}[.)])[ \t]+))?/;
+
+/** Periods that end an abbreviation, not a sentence ("e.g. use this link:").
+ * Only ones that never close a sentence: "etc." often does. */
+const ABBREVIATIONS = new Set(["e.g", "i.e", "vs", "cf"]);
+
+const endsAbbreviation = (text: string, dot: number): boolean => {
+  let i = dot;
+  while (i > 0 && dot - i < 4 && /[A-Za-z.]/.test(text[i - 1]!)) i--;
+  return ABBREVIATIONS.has(text.slice(i, dot).toLowerCase());
+};
+
+/** Line-start markup is read from at most this many chars of a line. */
+const LINE_PREFIX_SPAN = 40;
+
+/** The start of the line holding `index`, when it is close enough that the
+ * line's markup could reach it; -1 otherwise. */
+const nearLineStart = (text: string, index: number): number => {
+  for (let i = index; i >= 0 && index - i <= LINE_PREFIX_SPAN; i--) {
+    if (i === 0 || text[i - 1] === "\n") return i;
+  }
+  return -1;
+};
+
+/**
+ * Strip a trailing clause that only introduced the lifted link: the last
+ * sentence of the preceding text when it ends in a colon (emphasis may
+ * close after it: "**Click here:**") and points at the link ("open this
+ * link:", "click here:", "Reconnect Salesforce:"). Anything else is left
+ * alone: a colon-ended sentence about something other than the link is the
+ * model's content, not scaffolding, and so is a list item (dropping one
+ * would leave an empty bullet or renumber the list). A heading or quote
+ * lead-in goes with its markup.
+ *
+ * A bounded backwards scan, no backtracking regex: this runs on model
+ * output up to the mirror's 40k-char fence.
+ */
+export const dropDanglingLeadIn = (text: string): string => {
+  const trimmed = text.trimEnd();
+  let end = trimmed.length;
+  while (
+    end > 0 &&
+    trimmed.length - end < 3 &&
+    (trimmed[end - 1] === "*" || trimmed[end - 1] === "_")
+  ) {
+    end--;
+  }
+  if (trimmed[end - 1] !== ":") return text;
+  const closing = trimmed.slice(end);
+  // Walk back to the clause start: a line break, or a sentence terminator
+  // followed by whitespace. Past the window the clause is too long anyway.
+  const floor = Math.max(0, end - 1 - LEAD_IN_SCAN);
+  let start = -1;
+  let atLineStart = false;
+  for (let i = end - 2; i >= floor; i--) {
+    const ch = trimmed[i];
+    if (ch === "\n") {
+      start = i + 1;
+      atLineStart = true;
+      break;
+    }
+    if (
+      (ch === "." || ch === "!" || ch === "?") &&
+      /\s/.test(trimmed[i + 1] ?? "") &&
+      !endsAbbreviation(trimmed, i)
+    ) {
+      start = i + 1;
+      // A list marker's period ("1. Open the link:") is markup, not the
+      // end of a sentence: the clause starts its line.
+      const lineStart = nearLineStart(trimmed, i);
+      if (
+        lineStart !== -1 &&
+        lineStart + linePrefix(trimmed, lineStart).length > i
+      ) {
+        start = lineStart;
+        atLineStart = true;
+      }
+      break;
+    }
+  }
+  if (start === -1) {
+    if (floor > 0) return text;
+    start = 0;
+    atLineStart = true;
+  }
+  let contentStart = start;
+  if (atLineStart) {
+    const prefix = linePrefix(trimmed, start);
+    if (prefix.list) return text;
+    contentStart = start + prefix.length;
+  }
+  while (trimmed[contentStart] === " " || trimmed[contentStart] === "\t") {
+    contentStart++;
+  }
+  const clause = trimmed.slice(contentStart, end);
+  if (clause.length > MAX_LEAD_IN) return text;
+  // Emphasis that closes after the colon must open inside the clause, or
+  // dropping the clause would strand the other half of the pair.
+  if (closing && !clause.includes(closing)) return text;
+  // The pointer word must sit in the clause's LAST colon segment: "Here's
+  // what happened: the token expired:" ends on a statement, not a pointer.
+  // An opening "Here" presents what follows ("Here is what I found:"), so
+  // only a later one counts ("click here:"); dropping content is worse than
+  // leaving a lead-in behind.
+  const segment = clause
+    .slice(clause.lastIndexOf(":", clause.length - 2) + 1)
+    .trimStart()
+    .replace(/^[*_]+/, "");
+  if (
+    !LEAD_IN_WORD.test(segment.replace(/^here\b/i, "")) &&
+    !LEAD_IN_IMPERATIVE.test(segment)
+  ) {
+    return text;
+  }
+  return trimmed.slice(0, start).trimEnd();
+};
+
+const linePrefix = (
+  text: string,
+  lineStart: number,
+): { length: number; list: boolean } => {
+  // A bounded slice keeps the match O(1) however long the line runs.
+  const match = LINE_PREFIX.exec(
+    text.slice(lineStart, lineStart + LINE_PREFIX_SPAN),
+  );
+  return { length: match?.[0].length ?? 0, list: match?.[2] !== undefined };
 };
 
 /** The catalog's own display name ("github" → "GitHub"); title-cased id as
@@ -183,6 +410,7 @@ const PROVIDER_DOMAINS: Record<string, string> = {
   linear: "linear.app",
   fathom: "fathom.video",
   fireflies: "fireflies.ai",
+  timeless: "timeless.day",
 };
 
 /** The app's favicon via Google's resolver — Slack's image elements accept
@@ -400,6 +628,15 @@ export interface MirrorDeps {
 }
 
 /**
+ * Whether a turn or follow-up came from an automation rather than a person.
+ * `AUTOMATION_SOURCES` is the control plane's own definition (its
+ * continuity bridge branches on the same constant), so a new automation
+ * source lands in both places in one edit.
+ */
+const isAutomationSource = (source: string): source is AutomationSource =>
+  (AUTOMATION_SOURCES as readonly string[]).includes(source);
+
+/**
  * Handle one finished turn: post what the provider surface is missing, then
  * CAS the cursor. Returns the new cursor when this adapter won, or null when
  * a twin did (nothing was posted in that case).
@@ -440,13 +677,9 @@ export const mirrorFinishedTurn = async (
   // automation to a human. One message: the report, or the header when the
   // run produced none. The icon distinguishes the two, and watch volume is
   // bounded by one-shot semantics (the decided answer to the posting-shape
-  // question). `AUTOMATION_SOURCES` is the control plane's own definition
-  // (its continuity bridge branches on the same constant), so a new
-  // automation source lands in both places in one edit.
-  const automated = (AUTOMATION_SOURCES as readonly string[]).includes(
-    item.turn.source,
-  )
-    ? (item.turn.source as AutomationSource)
+  // question).
+  const automated = isAutomationSource(item.turn.source)
+    ? item.turn.source
     : null;
 
   try {
@@ -459,7 +692,16 @@ export const mirrorFinishedTurn = async (
     // agent's own text first; then the canonical/raw `turn.error`; then the
     // transcript's durable error event — the only record an UNCODED harness
     // failure leaves, which used to fall through to total silence here.
-    const answer = outcome.text ?? item.turn.error ?? outcome.error ?? null;
+    // An error that is a provider's raw response body posts as the generic
+    // failure line instead (the web folds the raw text away; a shared
+    // channel has no place for it at all).
+    const error = item.turn.error ?? outcome.error;
+    const answer =
+      outcome.text ??
+      (error && isRawErrorPayload(error)
+        ? TURN_FAILED_RAW_ERROR_MESSAGE
+        : error) ??
+      null;
 
     // OUTBOUND MENTIONS (plan: platform-rendered, loud failure). Scan the
     // answer for `@[Name]` tokens and ask the control plane to resolve them
@@ -633,6 +875,18 @@ export const mirrorFinishedTurn = async (
     }
     for (const followUp of item.followUps ?? []) {
       if (followUp.source === deps.provider) continue;
+      // A wake that joined this turn is the platform's instruction, not a
+      // person's words: it posts as its automation caption (never "(from the
+      // web)"), with no body of its own. The answer below is its report.
+      if (isAutomationSource(followUp.source)) {
+        await deps.posts.automation({
+          ...target,
+          source: followUp.source,
+          title: followUp.message,
+          body: null,
+        });
+        continue;
+      }
       // Attributed by the follow-up's OWN author. An older control plane
       // sends no per-follow-up name (field absent) — fall back to the turn's
       // asker, the pre-field behavior, exact on direct threads. Null means

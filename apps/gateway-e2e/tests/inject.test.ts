@@ -191,6 +191,56 @@ describe("injection shapes", () => {
     expect(seen?.header("authorization")).toBeUndefined();
   });
 
+  // The regression guard for a production bug: an org-scoped API key and a
+  // workspace-scoped OAuth token both reached one agent. They write DIFFERENT
+  // header shapes, so the later rule did not override the earlier one: the org
+  // API-key rule ran first, set `x-api-key` and removed `authorization`, and
+  // the workspace OAuth rule (a replace-if-present) then had nothing to
+  // replace. The workspace's own choice of credential was silently swapped for
+  // the org's, and Anthropic 400'd the resulting `/v1/models` calls. Only the
+  // workspace one may survive.
+  scenario(
+    "collapses two Anthropic credentials to the workspace one",
+    async (cx) => {
+      const upstream = await cx.upstream();
+      await cx.seed({
+        grantAll: true,
+        secrets: [
+          {
+            type: "anthropic",
+            hostPattern: "127.0.0.1",
+            value: "sk-ant-oat-workspace-token",
+            scope: "workspace",
+          },
+          {
+            type: "anthropic",
+            hostPattern: "127.0.0.1",
+            value: "sk-ant-api03-org-key",
+            scope: "organization",
+          },
+        ],
+      });
+      const gw = await cx.startGateway();
+
+      await throughProxy(gw.origin, {
+        url: upstream.url("/v1/models"),
+        token: cx.ids.agentToken,
+        // An OAuth credential injects via ReplaceHeader, which only fires when
+        // the header is already present, the shape a real Anthropic SDK sends.
+        headers: { authorization: "Bearer client-supplied-token" },
+      });
+
+      const [seen] = await upstream.waitForRequests(1);
+      // The workspace credential wins outright: its token is on the wire and
+      // the org key never appears. Before the fix this read the other way
+      // round: `authorization` undefined, `x-api-key` holding the org key.
+      expect(seen?.header("authorization")).toBe(
+        "Bearer sk-ant-oat-workspace-token",
+      );
+      expect(seen?.header("x-api-key")).toBeUndefined();
+    },
+  );
+
   scenario("injects a credential into a query parameter", async (cx) => {
     const upstream = await cx.upstream();
     await cx.seed({

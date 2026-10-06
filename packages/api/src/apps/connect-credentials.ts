@@ -148,7 +148,21 @@ export const resolveConnectCredentials = async (
   let metadata: Record<string, unknown> | undefined;
 
   if (activeMethod.type === "credentials_import") {
-    const result = await activeMethod.exchangeCredentials(fields);
+    // A provider rejecting the submitted credentials is a user error, not a
+    // server fault: surface it as a 400 with the provider's reason, exactly
+    // like the api_key branch's resolveMetadata failure below.
+    let result: Awaited<ReturnType<typeof activeMethod.exchangeCredentials>>;
+    try {
+      result = await activeMethod.exchangeCredentials(fields);
+    } catch (e) {
+      return {
+        ok: false,
+        error:
+          e instanceof Error
+            ? e.message
+            : "Could not validate the provided credentials",
+      };
+    }
     credentials = result.credentials;
     scopes = result.scopes;
     metadata = result.metadata;

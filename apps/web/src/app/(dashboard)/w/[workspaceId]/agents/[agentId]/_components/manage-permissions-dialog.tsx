@@ -12,6 +12,7 @@ import {
   SheetFooter,
 } from "@onecli/ui/components/sheet";
 import { getApp } from "@onecli/api/apps/registry";
+import { canonicalPolicy } from "@onecli/api/lib/resource-axis";
 import type {
   AgentGrantConnection,
   Connection,
@@ -45,30 +46,6 @@ interface ManagePermissionsDialogProps {
   readOnlyReason?: "org-granted" | "org-blocked";
   onClose: () => void;
 }
-
-/** Narrow the picker's generic policy object to the wire union. The provider
- * dialogs only ever emit one well-formed axis; anything else collapses to null
- * (unrestricted) rather than sending junk to the server. */
-const toGrantResources = (
-  policy: Record<string, unknown> | null,
-): GrantResources | null => {
-  if (policy === null) return null;
-  const repositories = policy["repositories"];
-  if (Array.isArray(repositories)) {
-    return {
-      repositories: repositories.filter(
-        (r): r is string => typeof r === "string",
-      ),
-    };
-  }
-  const folders = policy["folders"];
-  if (Array.isArray(folders)) {
-    return {
-      folders: folders.filter((f): f is string => typeof f === "string"),
-    };
-  }
-  return null;
-};
 
 /** Derive the dialog's tri-state from the stored grant: full access (or no
  * grant yet — Manage-before-attach) = everything allowed; a custom grant
@@ -125,7 +102,7 @@ export const ManagePermissionsDialog = ({
   useEffect(() => {
     // Resources ride the same retarget seeding as the tri-state — so a
     // catalog-less provider (toolIds empty) never seeds or shows them either.
-    // Fine for github-app/dropbox (both cataloged); a future granular provider
+    // Fine for github-app/dropbox/google-drive (all cataloged); a future granular provider
     // without a tool catalog would need this revisited.
     if (connection === null || toolIds.length === 0) return;
     const derived = deriveChoices(toolIds, grant);
@@ -265,7 +242,9 @@ export const ManagePermissionsDialog = ({
                 <ResourceScopeFields
                   connection={connection}
                   policy={resources}
-                  onChange={(p) => setResources(toGrantResources(p))}
+                  // The pickers emit one axis; `canonicalPolicy` narrows it to
+                  // the wire union (anything else → null, unrestricted).
+                  onChange={(p) => setResources(canonicalPolicy(p))}
                   readOnly={readOnly || save.isPending}
                   orgPolicy={reflection.data?.orgResources ?? null}
                 />

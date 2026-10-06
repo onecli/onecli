@@ -51,7 +51,7 @@ const secret = (id: string, scope: "workspace" | "organization") =>
     id,
     name: id,
     type: "anthropic",
-    typeLabel: "Anthropic API Key",
+    typeLabel: "Anthropic",
     hostPattern: "api.anthropic.com",
     scope,
     lastError: null,

@@ -168,7 +168,8 @@ pub fn configured_for_host(hostname: &str) -> bool {
 /// key does NOT fall back to free credit: the restriction stays respected.
 pub fn pool_has_llm_credential(secrets: &[db::SecretRow]) -> bool {
     secrets.iter().any(|s| {
-        matches!(s.type_.as_str(), "anthropic" | "openai") || policy::is_llm_host(&s.host_pattern)
+        inject::secret_inject::is_llm_provider_type(&s.type_)
+            || policy::is_llm_host(&s.host_pattern)
     })
 }
 

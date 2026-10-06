@@ -34,8 +34,11 @@ const normalizeOpenaiValue = (
   return { value, hostPattern };
 };
 
+// Provider names, not credential kinds: an `anthropic` secret is a Console
+// API key OR a Claude subscription token (metadata.authMode tells which), the
+// same way an `openai` secret is an API key or Codex OAuth.
 const SECRET_TYPE_LABELS: Record<string, string> = {
-  anthropic: "Anthropic API Key",
+  anthropic: "Anthropic",
   openai: "OpenAI",
   generic: "Generic Secret",
 };

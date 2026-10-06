@@ -139,11 +139,22 @@ describe("AttachConnectionDialog", () => {
           provider="gmail"
           open
           onOpenChange={vi.fn()}
+          onConnectNew={vi.fn()}
         />
       </QueryClientProvider>,
     );
     expect(screen.getByText("Loading connections…")).toBeInTheDocument();
     expect(screen.queryAllByRole("switch")).toHaveLength(0);
+    // MUTATION-PROOF: the header must not commit to Attach (or Connect)
+    // before the pool resolves, or a cold Slack deep link reads "Attach",
+    // then flips to "Connect": the mismatch the Connect state removes.
+    expect(screen.getByRole("heading", { name: "Gmail" })).toBeInTheDocument();
+    expect(screen.queryByText(/Attach Gmail|Connect Gmail/)).toBeNull();
+    // Only the way out while loading: no connect door with an unknown label.
+    expect(screen.getAllByRole("button").map((b) => b.textContent)).toEqual(
+      expect.not.arrayContaining([expect.stringMatching(/^Connect/)]),
+    );
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
   });
 
   it("shows an error state on a failed load — never the empty-state copy", async () => {
@@ -173,14 +184,74 @@ describe("AttachConnectionDialog", () => {
           provider="gmail"
           open
           onOpenChange={vi.fn()}
+          onConnectNew={vi.fn()}
         />
       </QueryClientProvider>,
     );
+    // MUTATION-PROOF: the alert is the message alone. Wrap the retry button
+    // in it too and every Try again / Retrying… swap re-announces it.
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Couldn't load Gmail accounts for this agent.",
+      /^Couldn't load Gmail accounts for this agent\.$/,
     );
     expect(screen.queryByText(/No connected Gmail accounts/)).toBeNull();
     expect(screen.queryAllByRole("switch")).toHaveLength(0);
+    // The way forward is Try again, not a connect door: with the pool
+    // unknown, neither "Connect Gmail" nor "another account" is true.
+    expect(screen.queryByRole("button", { name: /^Connect/ })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Try again" }),
+    ).toBeInTheDocument();
+  });
+
+  it("recovers from a failed load with Try again", async () => {
+    // First load fails, the retry succeeds: the error gives the reader a
+    // way forward instead of a dead end.
+    let fail = true;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        fail
+          ? Promise.reject(new Error("network down"))
+          : Promise.resolve(
+              new Response(JSON.stringify([gmailConnection("conn-1")]), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              }),
+            ),
+      ),
+    );
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    queryClient.setQueryData(queryKeys.grants.agent("agent-1"), {
+      agentId: "agent-1",
+      mode: "grants",
+      connections: [],
+      secrets: [],
+    });
+    queryClient.setQueryData(
+      [...queryKeys.agents.all(), "agent-1", "effective-credentials"],
+      { agentId: "agent-1", mode: "selective", secrets: [], connections: [] },
+    );
+    queryClient.setQueryData(queryKeys.appPermissionDefinitions.list(), []);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AttachConnectionDialog
+          agentId="agent-1"
+          provider="gmail"
+          open
+          onOpenChange={vi.fn()}
+        />
+      </QueryClientProvider>,
+    );
+    await screen.findByRole("alert");
+    // The error state keeps a way to try again AND a way out; the retry is
+    // secondary (outline) to the footer's dismiss.
+    expect(screen.getByRole("button", { name: "Done" })).toBeInTheDocument();
+    fail = false;
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(screen.getAllByRole("switch")).toHaveLength(1);
   });
 
   it("lists only this provider's CONNECTED accounts", () => {
@@ -196,15 +267,44 @@ describe("AttachConnectionDialog", () => {
     expect(screen.getByText("Work inbox")).toBeInTheDocument();
   });
 
-  it("empty pool: honest copy and the singular Connect label", () => {
+  it("empty pool with a connect door: reads as Connect, not Attach", async () => {
     const onConnectNew = vi.fn();
-    renderDialog({}, { onConnectNew });
+    renderDialog({}, { onConnectNew, agentName: "Arik" });
+    const dialog = screen.getByRole("dialog");
+    expect(
+      screen.getByRole("heading", { name: "Connect Gmail" }),
+    ).toBeInTheDocument();
+    expect(dialog).not.toHaveTextContent("Attach Gmail");
+    // The consent line every connect door states: the API attaches a new
+    // account to EVERY agent of the workspace, so the copy must not imply
+    // only this one gets it.
+    expect(dialog).toHaveTextContent(
+      "A new account is on for every agent in this workspace, Arik included, with full access.",
+    );
+    // One action, no "another" (nothing exists yet), and no empty-state
+    // filler under a header that already says what to do.
+    expect(screen.queryByText(/another account/)).toBeNull();
+    expect(screen.queryByText(/No connected Gmail accounts/)).toBeNull();
+    // The confirm pair in the repo's order: Cancel, then the primary.
+    const cancel = screen.getByRole("button", { name: "Cancel" });
+    const connect = screen.getByRole("button", { name: "Connect Gmail" });
+    expect(
+      cancel.compareDocumentPosition(connect) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    await userEvent.click(connect);
+    expect(onConnectNew).toHaveBeenCalledTimes(1);
+  });
+
+  it("empty pool without a connect door keeps the honest empty copy", () => {
+    renderDialog({});
+    expect(
+      screen.getByRole("heading", { name: "Attach Gmail" }),
+    ).toBeInTheDocument();
     expect(
       screen.getByText("No connected Gmail accounts in this workspace yet."),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Connect an account" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Done" })).toBeInTheDocument();
   });
 
   it("attaches with FULL access on toggle-on — the stated consent contract", async () => {

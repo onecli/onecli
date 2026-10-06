@@ -254,6 +254,33 @@ describe("resolveConnectCredentials", () => {
       credentials: { imported: "pk-1" },
     });
   });
+
+  it("returns a provider's credential rejection as an error, not a throw", async () => {
+    // A wrong client secret is the user's mistake: it must reach the connect
+    // form as a message (400), never escape as an unhandled 500.
+    const rejecting: AppDefinition = {
+      ...apiKeyApp,
+      id: "rejecting",
+      connectionMethod: {
+        type: "credentials_import",
+        fields: [{ name: "clientId", label: "Client ID", placeholder: "id" }],
+        exchangeCredentials: async () => {
+          throw new Error("Provider rejected these credentials");
+        },
+      },
+    };
+    await expect(
+      resolveConnectCredentials(
+        "rejecting",
+        rejecting,
+        { fields: { clientId: "x" } },
+        ORG,
+      ),
+    ).resolves.toEqual({
+      ok: false,
+      error: "Provider rejected these credentials",
+    });
+  });
   // ── Server-owned fields ────────────────────────────────────────────────
   // The reason `serverFields` exists: AWS's external ID defeats the
   // confused-deputy problem only while the CUSTOMER cannot choose it.
@@ -345,9 +372,10 @@ describe("resolveConnectCredentials", () => {
       },
       { fields: { roleArn: "arn:aws:iam::123456789012:role/R" } },
       "org-with-no-id",
-    ).catch((e: Error) => e);
+    );
 
-    expect(result).toBeInstanceOf(Error);
+    // Fail closed: no credentials come back, so nothing can be stored.
+    expect(result).toEqual({ ok: false, error: "external id missing" });
   });
 
   it("leaves apps without serverFields untouched", async () => {

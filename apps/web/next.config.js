@@ -120,6 +120,26 @@ const nextConfig = {
       destination: "/w/:workspaceId/settings/install",
       permanent: true,
     },
+    // Org-wide administration moved under Organization Settings. Whole
+    // subtrees, so every deep link (a Global Connections tab, an app's page)
+    // keeps landing, not just the section root. Non-permanent: the settings
+    // layout is still settling, and a cached 308 would outlive a second move.
+    {
+      source: "/org/:orgId/global-connections/:path*",
+      destination: "/org/:orgId/settings/global-connections/:path*",
+      permanent: false,
+    },
+    {
+      source: "/org/:orgId/policy",
+      destination: "/org/:orgId/settings/policy",
+      permanent: false,
+    },
+    // Domains folded into the Single sign-on page (its step 1).
+    {
+      source: "/org/:orgId/settings/domains",
+      destination: "/org/:orgId/settings/sso",
+      permanent: false,
+    },
   ],
   //
   // `rewrites()` exists for exactly one reason: to serve the whole DEV stack

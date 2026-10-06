@@ -73,11 +73,9 @@ export const ResourceScopeFields = ({
   const emptyScope = effective !== null && selected.length === 0;
   const summary = emptyScope
     ? `No ${plural}`
-    : config.formatSummary
-      ? config.formatSummary(effective, meta)
-      : selected.length > 0
-        ? `${selected.length} ${selected.length === 1 ? singular : plural}`
-        : `All ${plural}`;
+    : selected.length > 0
+      ? `${selected.length} ${selected.length === 1 ? singular : plural}`
+      : `All ${plural}`;
   const editable = !readOnly;
 
   return (

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo } from "react";
 import { Search } from "lucide-react";
 import { Input } from "@onecli/ui/components/input";
 import { Checkbox } from "@onecli/ui/components/checkbox";
@@ -10,8 +10,7 @@ import { cn } from "@onecli/ui/lib/utils";
 import type { PolicyDialogContentProps } from "@/lib/granular-access/types";
 import { coveredBy } from "@onecli/api/lib/resource-axis";
 import { UpgradeToTeamButton } from "@/ee/billing/_components/upgrade-to-team-button";
-import { getCurrentPlan } from "@/lib/user-plan";
-import { isPlanAtLeast, normalizePlan } from "@onecli/api/ee/billing/plans";
+import { useHasTeamFeatures } from "../use-has-team-features";
 
 export const GithubAppPolicyDialogContent = ({
   metadata,
@@ -33,19 +32,7 @@ export const GithubAppPolicyDialogContent = ({
   const selectedRepos = new Set((policy?.repositories as string[]) ?? []);
   const isAllRepos = !policy || !policy.repositories;
   const [search, setSearch] = useState("");
-  const [hasTeamFeatures, setHasTeamFeatures] = useState(true);
-
-  useEffect(() => {
-    // Entitlement via the shared user-plan seam (cloud → real plan). Team-tier features unlock at team OR above,
-    // so rank-compare instead of exact-matching. Only downgrade from the
-    // optimistic default on a DEFINITE plan — getCurrentPlan returns null on
-    // error (stay optimistic so a transient fetch error doesn't flash an
-    // upgrade CTA).
-    getCurrentPlan().then((plan) => {
-      if (plan !== null)
-        setHasTeamFeatures(isPlanAtLeast(normalizePlan(plan), "team"));
-    });
-  }, []);
+  const hasTeamFeatures = useHasTeamFeatures();
 
   const filteredRepos = useMemo(() => {
     if (!search.trim()) return repos;

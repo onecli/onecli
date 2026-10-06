@@ -33,6 +33,7 @@ const formatAction = (action: string, service: string) => {
       update: "Updated",
       delete: "Deleted",
       regenerate: "Regenerated",
+      restart: "Restarted",
       connect: "Connected",
       disconnect: "Disconnected",
     }[action] ?? action;

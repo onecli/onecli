@@ -13,11 +13,19 @@ use ap_client::{
 use ap_noise::MultiDeviceTransport;
 use ap_proxy_protocol::IdentityKeyPair;
 use async_trait::async_trait;
+use db::VaultGeneration;
 use sqlx::PgPool;
 use tracing::warn;
 
 use super::bitwarden::{parse_fingerprint, BitwardenConnectionData};
 use crypto::CryptoService;
+
+/// The row generation a Bitwarden session is valid at, shared between the
+/// session and its connection store: the store's write-throughs move the row
+/// forward, and the session must move with it or it would read its own
+/// writes as a re-pair from elsewhere. `None` until the session has written
+/// or read its row (a pairing that has not persisted yet).
+pub(super) type SharedGeneration = Arc<std::sync::Mutex<Option<VaultGeneration>>>;
 
 // ── BitwardenIdentityProvider ───────────────────────────────────────────
 
@@ -82,6 +90,8 @@ pub struct BitwardenConnectionStore {
     crypto: Arc<CryptoService>,
     /// In-memory connection (at most one per user for Bitwarden).
     connection: Option<ConnectionInfo>,
+    /// The owning session's generation, advanced by every write-through.
+    generation: SharedGeneration,
 }
 
 impl BitwardenConnectionStore {
@@ -92,6 +102,7 @@ impl BitwardenConnectionStore {
         key_data: Option<Vec<u8>>,
         crypto: Arc<CryptoService>,
         connection_data: Option<&BitwardenConnectionData>,
+        generation: SharedGeneration,
     ) -> Self {
         let connection = connection_data.and_then(|cd| {
             let fingerprint = parse_fingerprint(cd.fingerprint.as_deref()?)?;
@@ -116,10 +127,12 @@ impl BitwardenConnectionStore {
             key_data,
             crypto,
             connection,
+            generation,
         }
     }
 
-    /// Persist the current connection data to DB (encrypted).
+    /// Persist the current connection data to DB (encrypted), and record the
+    /// row's new generation on the owning session.
     async fn write_through(&self, cd: &BitwardenConnectionData) {
         let json = match encrypt_connection_data(&self.crypto, cd).await {
             Ok(v) => v,
@@ -129,11 +142,19 @@ impl BitwardenConnectionStore {
             }
         };
 
-        if let Err(e) =
-            db::update_vault_connection_data(&self.pool, &self.workspace_id, "bitwarden", &json)
-                .await
+        match db::update_vault_connection_data(&self.pool, &self.workspace_id, "bitwarden", &json)
+            .await
         {
-            warn!(error = %e, "failed to write-through vault connection data");
+            Ok(Some(generation)) => {
+                if let Ok(mut current) = self.generation.lock() {
+                    *current = Some(generation);
+                }
+            }
+            // The connection was disconnected while this write was in flight.
+            // The session keeps its old generation, so its next use sees the
+            // row gone and drops it.
+            Ok(None) => warn!("bitwarden: write-through found no connection row"),
+            Err(e) => warn!(error = %e, "failed to write-through vault connection data"),
         }
     }
 
@@ -243,6 +264,10 @@ mod tests {
         sqlx::PgPool::connect_lazy("postgres://fake").expect("lazy pool")
     }
 
+    fn no_generation() -> SharedGeneration {
+        Arc::new(std::sync::Mutex::new(None))
+    }
+
     // ── BitwardenIdentityProvider ──────────────────────────────────────
 
     #[test]
@@ -269,8 +294,14 @@ mod tests {
 
     #[tokio::test]
     async fn connection_store_new_without_data() {
-        let store =
-            BitwardenConnectionStore::new(fake_pool(), "user1".into(), None, test_crypto(), None);
+        let store = BitwardenConnectionStore::new(
+            fake_pool(),
+            "user1".into(),
+            None,
+            test_crypto(),
+            None,
+            no_generation(),
+        );
         assert!(store.connection.is_none());
     }
 
@@ -288,6 +319,7 @@ mod tests {
             Some(vec![1, 2, 3]),
             test_crypto(),
             Some(&cd),
+            no_generation(),
         );
 
         let conn = store.connection.as_ref().expect("should have connection");
@@ -307,6 +339,7 @@ mod tests {
             None,
             test_crypto(),
             Some(&cd),
+            no_generation(),
         );
         assert!(store.connection.is_none());
     }
@@ -320,6 +353,7 @@ mod tests {
             Some(key_data.clone()),
             test_crypto(),
             None,
+            no_generation(),
         );
 
         let info = ConnectionInfo {

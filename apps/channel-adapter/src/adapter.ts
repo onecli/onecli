@@ -10,6 +10,7 @@ import { mirrorFinishedTurn } from "./mirror";
 import {
   channelAdapterProviderFor,
   type ChannelAdapterProvider,
+  type GroupApprovalDecision,
   type ProviderTransport,
 } from "./providers";
 
@@ -137,6 +138,11 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
           log("interactive handling failed", { err }),
         );
       },
+      onGroupApprovalDecision: (decision) => {
+        void handleGroupApprovalDecision(runtime, decision).catch(
+          (err: unknown) => log("group decision handling failed", { err }),
+        );
+      },
       onReachDecision: (decision) => {
         // Forward-only: the control plane authorizes the clicker, flips the
         // grant, and rewrites every posted owner card itself (cardRefs) -
@@ -228,6 +234,60 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
       await approvals.settleDecided(input.approvalId, text);
     } finally {
       approvals.endDecision(input.approvalId);
+    }
+  };
+
+  /** A grouped card's click (socket arm). Fence every id against the
+   * absence arm for the round-trip, forward, then move what settled to the
+   * card's done list. A refusal (or ids that failed) is told to the clicker
+   * alone; the shared card is not rewritten for it. */
+  const handleGroupApprovalDecision = async (
+    runtime: PresenceRuntime,
+    input: GroupApprovalDecision,
+  ): Promise<void> => {
+    for (const id of input.approvalIds) approvals.beginDecision(id);
+    try {
+      const result = await controlPlane.decideGroup({
+        presenceId: runtime.presence.presenceId,
+        approvalIds: input.approvalIds,
+        decision: input.decision,
+        clickerExternalUserId: input.clickerExternalUserId,
+      });
+      const tell = async (text: string) => {
+        const { credential } = runtime;
+        if (!credential || !input.channel || !runtime.provider.notifyClicker) {
+          return;
+        }
+        await runtime.provider.notifyClicker({
+          credential,
+          channel: input.channel,
+          user: input.clickerExternalUserId,
+          text,
+          onLog: log,
+        });
+      };
+      if (result.kind !== "decided") {
+        await tell(result.message);
+        return;
+      }
+      if (result.decided.length > 0) {
+        await approvals.settleDecidedMany(result.decided, {
+          outcome: input.decision === "approve" ? "approved" : "denied",
+          by: result.decidedByName,
+        });
+      }
+      if (result.alreadySettled.length > 0) {
+        await approvals.settleDecidedMany(result.alreadySettled, {
+          outcome: "decided",
+        });
+      }
+      if (result.failed.length > 0) {
+        await tell(
+          `${result.failed.length} of these couldn't be decided just now. They're still on the card; try again.`,
+        );
+      }
+    } finally {
+      for (const id of input.approvalIds) approvals.endDecision(id);
     }
   };
 

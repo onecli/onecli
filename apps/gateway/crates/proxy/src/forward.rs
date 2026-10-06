@@ -343,8 +343,21 @@ pub async fn materialize_injections<'a>(
     let mut app_rules = Vec::new();
     for pending in &rules.pending_injections {
         match engine.materialize_pending(pending, cache).await {
-            Some(minted) => app_rules.extend(minted),
-            None => {
+            Ok(minted) => app_rules.extend(minted),
+            Err(crate::connect::TokenFailure::NeedsReconnect) => {
+                warn!(
+                    connection_id = %pending.conn.id,
+                    provider = %pending.conn.provider,
+                    %method,
+                    %path,
+                    "connection needs reconnect; the allowed request was not forwarded"
+                );
+                return Err(Box::new(response::connection_needs_reconnect(
+                    &crate::connect::ConnectionChoice::from_row(&pending.conn),
+                    Some(pending.workspace_id.as_str()),
+                )));
+            }
+            Err(crate::connect::TokenFailure::Unavailable) => {
                 warn!(
                     connection_id = %pending.conn.id,
                     provider = %pending.conn.provider,
@@ -397,6 +410,28 @@ pub async fn forward_request(
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
     let url = format!("{scheme}://{host}{path}");
+
+    // Destination guard, IP-literal half: an IP host never reaches the DNS
+    // resolver, so it is judged here — before approval, injection or anything
+    // else can act on a request that must not leave. Named hosts are judged at
+    // resolution (`egress::GuardedResolver`), mapped to the same 403 at send.
+    // Every refusal is recorded: nothing was dialed, so the normal telemetry
+    // further down never runs for it.
+    let refuse_destination = |refused_host: &str| {
+        warn!(method = %method, url = %url, host = %refused_host, "egress guard: refused non-public destination");
+        hooks::record_destination_refused(proxy_ctx, host, method.as_str(), &path);
+        response::destination_not_allowed(refused_host)
+    };
+    if let Err(refusal) = super::egress::check_url(super::egress::policy(), &url) {
+        return Ok(refuse_destination(&refusal.host));
+    }
+    // Behind an operator's environment proxy the proxy resolves the target,
+    // bypassing the guarded resolver — so judge the name here instead.
+    if super::egress::env_proxy_configured() {
+        if let Err(refusal) = super::egress::check_host_via_proxy(host).await {
+            return Ok(refuse_destination(&refusal.host));
+        }
+    }
 
     // An empty resource scope reaches nothing, so refuse before anything can
     // hand out or mint a credential — ahead of the token interception below,
@@ -766,6 +801,8 @@ pub async fn forward_request(
                 http: &http_client,
                 scheme,
                 host,
+                method: method.as_str(),
+                path: &path,
                 headers: &headers,
                 connection_id: rules
                     .winning_connection_id
@@ -1063,7 +1100,16 @@ pub async fn forward_request(
     // sees only its own eventual timeout (issue #493).
     let upstream_resp = match tokio::time::timeout(upstream_header_timeout(), upstream.send()).await
     {
-        Ok(result) => result.with_context(|| format!("forwarding to {url}"))?,
+        Ok(Ok(resp)) => resp,
+        Ok(Err(e)) => {
+            // The resolver refused every address this name resolved to;
+            // nothing was dialed. Same answer and same activity row as the
+            // pre-send half.
+            if let Some(refusal) = super::egress::find_refusal(&e) {
+                return Ok(refuse_destination(&refusal.host));
+            }
+            return Err(e).with_context(|| format!("forwarding to {url}"));
+        }
         // Deliberately NOT replayed. Once the request has gone upstream its
         // outcome is unknown, and re-sending could double a non-idempotent
         // operation the upstream already performed. Report and stop; the
@@ -1985,6 +2031,17 @@ mod tests {
         upstream_addr: std::net::SocketAddr,
         rules: fn() -> ResolvedRules,
     ) -> std::net::SocketAddr {
+        gateway_serving_one_request_to(upstream_addr.to_string(), "http", rules).await
+    }
+
+    /// [`gateway_serving_one_request_with`] for a request addressed to `host`
+    /// over `scheme` — for behavior keyed on the provider a real host
+    /// identifies (e.g. the Drive guard on `www.googleapis.com`).
+    async fn gateway_serving_one_request_to(
+        host: String,
+        scheme: &'static str,
+        rules: fn() -> ResolvedRules,
+    ) -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind gateway");
@@ -1993,7 +2050,6 @@ mod tests {
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept client");
             let io = hyper_util::rt::TokioIo::new(stream);
-            let host = upstream_addr.to_string();
 
             let service = hyper::service::service_fn(move |req: Request<Incoming>| {
                 let host = host.clone();
@@ -2014,7 +2070,7 @@ mod tests {
                         req,
                         &host,
                         &host,
-                        "http",
+                        scheme,
                         reqwest::Client::builder()
                             .redirect(reqwest::redirect::Policy::none())
                             .build()
@@ -2035,6 +2091,78 @@ mod tests {
         });
 
         gateway_addr
+    }
+
+    /// Drive-scoped rules: a Google Drive connection restricted to one folder
+    /// chain, exactly as connect resolution hands them to the forward path.
+    fn drive_scoped_rules() -> ResolvedRules {
+        ResolvedRules {
+            session_policy: Some(serde_json::json!({ "driveFolders": ["F1/F2"] })),
+            ..permissive_rules()
+        }
+    }
+
+    /// The Drive folder policy is enforced on the real forward path: the
+    /// guard is reached on the shared Google host, the create's body is
+    /// buffered and read, and the agent gets the structured 403 with the
+    /// allowed scope so it can self-correct. Only refusals are exercised, so
+    /// nothing is ever forwarded upstream.
+    #[tokio::test]
+    async fn drive_folder_policy_is_enforced_through_forward_request() {
+        pin_test_header_timeout();
+        let cases: [(&str, &str, Option<&str>, &str); 5] = [
+            // Unconfined search across all of Drive.
+            (
+                "GET",
+                "/drive/v3/files?q=name%20contains%20%27x%27",
+                None,
+                "confined",
+            ),
+            // Create with no parents (lands in root) — only knowable from the BODY.
+            (
+                "POST",
+                "/drive/v3/files",
+                Some(r#"{"name":"x"}"#),
+                "set `parents`",
+            ),
+            // Batch endpoints can smuggle anything — with or without the
+            // trailing slash, both of which carry the Drive credential.
+            ("POST", "/batch/drive/v3", Some(""), "not permitted"),
+            ("POST", "/batch/drive", Some(""), "not permitted"),
+            // In-scope-shaped read, but no credential to verify ancestry with.
+            ("GET", "/drive/v3/files/abc", None, "no credential"),
+        ];
+        for (method, path, body, expect_detail) in cases {
+            let gateway = gateway_serving_one_request_to(
+                "www.googleapis.com".to_string(),
+                "https",
+                drive_scoped_rules,
+            )
+            .await;
+            let client = reqwest::Client::new();
+            let mut req =
+                client.request(method.parse().unwrap(), format!("http://{gateway}{path}"));
+            if let Some(b) = body {
+                req = req
+                    .header("content-type", "application/json")
+                    .body(b.to_string());
+            }
+            let resp = req.send().await.expect("gateway responded");
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{method} {path}");
+            let json: serde_json::Value = resp.json().await.expect("json");
+            assert_eq!(json["error"], "resource_access_denied", "{method} {path}");
+            assert_eq!(json["allowed"], serde_json::json!(["F1/F2"]));
+            // The agent is told how the chain works — only the LAST folder
+            // and what's inside it are reachable, never its parents.
+            let message = json["message"].as_str().unwrap();
+            assert!(message.contains("only the LAST folder"), "{message}");
+            assert!(message.contains("'<folderId>' in parents"), "{message}");
+            assert!(
+                json["detail"].as_str().unwrap().contains(expect_detail),
+                "{method} {path}: {}",
+                json["detail"]
+            );
+        }
     }
 
     /// An upstream that answers every request with a fixed status and a tiny

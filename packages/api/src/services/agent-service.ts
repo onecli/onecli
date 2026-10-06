@@ -6,7 +6,7 @@ import { agentImageUrlOrNull } from "./agent-image-service";
 import { LAST_SEEN_WINDOW_MS } from "../lib/agent-activity";
 import { agentIdsWithLiveBackgroundWork, signalWork } from "./due-work";
 import { pickRunnerForSandbox } from "./placement";
-import { requestSandboxRespawn } from "./sandbox-service";
+import { requestAgentRestart, requestSandboxRespawn } from "./sandbox-service";
 import { bumpHomeForAgent } from "./home-sync-service";
 import { resolveAgentLlmCredential } from "./llm-credential-service";
 import { syncAgentPresenceNames } from "./channels/agent-channel-service";
@@ -639,4 +639,29 @@ export const regenerateAgentToken = async (
   }
 
   return { accessToken: updated.accessToken };
+};
+
+/**
+ * "Restart agent": every conversation of this hosted agent starts a fresh
+ * harness session, in-flight work ends, and a running sandbox stops so the
+ * next message cold-starts a new one (see `requestAgentRestart`). The way
+ * out of any state the agent cannot answer from: a damaged saved history, a
+ * stuck run, or an agent image the running box predates.
+ */
+export const restartAgent = async (
+  workspaceId: string,
+  agentId: string,
+): Promise<void> => {
+  const agent = await db.agent.findFirst({
+    where: { id: agentId, workspaceId },
+    select: { id: true, kind: true },
+  });
+  if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
+  if (agent.kind !== "hosted") {
+    throw new ServiceError(
+      "UNPROCESSABLE",
+      "Only hosted agents can be restarted",
+    );
+  }
+  await requestAgentRestart(agent.id, workspaceId);
 };

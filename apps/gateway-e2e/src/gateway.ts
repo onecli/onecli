@@ -240,6 +240,10 @@ export const startGateway = async (
     // Host-scoped, matched against the port-stripped host — narrower than the
     // global GATEWAY_DANGER_ACCEPT_INVALID_CERTS, so only the stub is exempt.
     GATEWAY_SKIP_VERIFY_HOSTS: "127.0.0.1",
+    // The stubs live on loopback, which the destination guard refuses by
+    // default. The guard judges resolved addresses, so this also lets a name
+    // like `localhost` through; egress.test.ts clears it to test the default.
+    GATEWAY_ALLOW_PRIVATE_DESTINATIONS: "127.0.0.1",
     // Makes agent-facing dashboard links deterministic and silences a boot warning.
     APP_URL: GATEWAY_APP_URL,
     LOG_FORMAT: "json",

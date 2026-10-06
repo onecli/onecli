@@ -7,6 +7,7 @@ import { normalizePlan, type Plan } from "../billing/plans";
 import {
   findActivePlanSubscription,
   findOrgLiveSubscriptions,
+  stripeRefId,
 } from "../billing/plan-switch";
 import { resolveSubscriptionPlan } from "../billing/subscription-plan";
 import { cloudOnly } from "../middleware/cloud-only";
@@ -43,10 +44,7 @@ const adoptSubscriptionCustomer = async (
   organizationId: string,
   subscription: Stripe.Subscription,
 ) => {
-  const customerId =
-    typeof subscription.customer === "string"
-      ? subscription.customer
-      : subscription.customer?.id;
+  const customerId = stripeRefId(subscription.customer);
   if (!customerId) return;
 
   try {
@@ -281,10 +279,7 @@ export const stripeWebhookRoutes = () => {
           // and when search is unavailable the lookup above cannot see it. A
           // metadata-fenced subscription there still counts — only the
           // unlabeled fallback stays reserved for the org-claimed customer.
-          const eventCustomerId =
-            typeof subscription.customer === "string"
-              ? subscription.customer
-              : subscription.customer?.id;
+          const eventCustomerId = stripeRefId(subscription.customer);
           if (!remaining && eventCustomerId) {
             const labeled = await findActivePlanSubscription(
               stripe,
@@ -330,21 +325,29 @@ export const stripeWebhookRoutes = () => {
 
     if (event.type === "invoice.paid") {
       const invoice = event.data.object as Stripe.Invoice;
-      const subDetails = invoice.parent?.subscription_details;
+      const subscriptionId = stripeRefId(
+        invoice.parent?.subscription_details?.subscription,
+      );
 
-      if (
-        subDetails?.subscription &&
-        invoice.billing_reason === "subscription_cycle"
-      ) {
+      if (subscriptionId) {
+        const stripe = getStripe();
+        // One retrieve serves both steps: the adoption reads the sub's
+        // customer and default payment method, the notification its metadata.
+        // Both are best-effort, so a Stripe failure is logged and the webhook
+        // still acks.
         try {
-          await notifyPaymentCollected(
-            invoice,
-            subDetails.subscription as string,
-          );
+          const subscription =
+            await stripe.subscriptions.retrieve(subscriptionId);
+
+          await adoptPayingPaymentMethod(stripe, invoice, subscription);
+
+          if (invoice.billing_reason === "subscription_cycle") {
+            await notifyPaymentCollected(invoice, subscription);
+          }
         } catch (err) {
           logger.error(
-            { err, invoiceId: invoice.id },
-            "failed to send payment collected notification",
+            { err, invoiceId: invoice.id, subscriptionId },
+            "failed to process paid subscription invoice",
           );
         }
       }
@@ -391,13 +394,75 @@ async function cancelSupersededSubscription(
   }
 }
 
+/**
+ * Makes the payment method that just paid a subscription invoice the
+ * subscription's default, so the next renewal charges it too.
+ *
+ * A subscription-level `default_payment_method` beats the customer default,
+ * and paying a past-due invoice with a new card (hosted invoice page, portal,
+ * dashboard) does not always move it. Live incident, 2026-09: a Pro customer
+ * whose Link wallet was closed paid August with a new card, which became the
+ * CUSTOMER default only; September's renewal and all 7 dunning retries went
+ * to the dead Link method and the org fell to free.
+ *
+ * Stripe's own switch for this, `payment_settings.save_default_payment_method:
+ * "on_subscription"`, is not used: Checkout's `subscription_data` cannot set
+ * it at creation, and every existing subscription would need a backfill
+ * update. This webhook covers new and existing subscriptions alike.
+ *
+ * Only adopts a method attached to the subscription's own customer (anything
+ * else would fail the update and is not ours to pin). Best-effort: logged,
+ * never thrown, so a failure here never skips the payment notification.
+ */
+async function adoptPayingPaymentMethod(
+  stripe: Stripe,
+  invoice: Stripe.Invoice,
+  subscription: Stripe.Subscription,
+) {
+  if (!invoice.id || invoice.amount_paid <= 0) return;
+  try {
+    const payments = await stripe.invoicePayments.list({
+      invoice: invoice.id,
+      status: "paid",
+      limit: 10,
+    });
+    const intentId = stripeRefId(
+      payments.data.find((p) => p.payment.type === "payment_intent")?.payment
+        .payment_intent,
+    );
+    if (!intentId) return;
+
+    const intent = await stripe.paymentIntents.retrieve(intentId, {
+      expand: ["payment_method"],
+    });
+    const pm = intent.payment_method;
+    if (!pm || typeof pm === "string") return;
+
+    const subCustomer = stripeRefId(subscription.customer);
+    if (!subCustomer || stripeRefId(pm.customer) !== subCustomer) return;
+
+    // Only a subscription-level default can shadow the customer default. With
+    // none, renewals already follow the customer default (which paying via
+    // the hosted invoice page updates), and pinning one here would freeze the
+    // sub on this card through later customer-level card changes.
+    const current = stripeRefId(subscription.default_payment_method);
+    if (!current || current === pm.id) return;
+
+    await stripe.subscriptions.update(subscription.id, {
+      default_payment_method: pm.id,
+    });
+  } catch (err) {
+    logger.error(
+      { err, invoiceId: invoice.id, subscriptionId: subscription.id },
+      "failed to adopt paying payment method as subscription default",
+    );
+  }
+}
+
 async function notifyPaymentCollected(
   invoice: Stripe.Invoice,
-  subscriptionId: string,
+  subscription: Stripe.Subscription,
 ) {
-  const stripe = getStripe();
-  const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-
   const organizationId = subscription.metadata.organizationId;
   if (!organizationId) return;
 

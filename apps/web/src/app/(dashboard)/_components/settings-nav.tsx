@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@onecli/ui/lib/utils";
 import {
+  activeSettingsItem,
   getSettingsSections,
   getWorkspaceSettingsSections,
 } from "@/lib/nav-config";
@@ -18,9 +19,12 @@ export const SettingsNav = () => {
   const sections = workspaceId
     ? getWorkspaceSettingsSections(workspaceId)
     : getSettingsSections(orgId);
+  // Pages below an entry (a Global Connections tab, an app's page) keep it
+  // highlighted.
+  const activeUrl = activeSettingsItem(sections, pathname)?.url;
 
   return (
-    <nav className="space-y-5">
+    <nav aria-label="Settings" className="space-y-5">
       {sections.map((section) => (
         <div key={section.label} className="space-y-1">
           <p className="text-muted-foreground px-2 pb-1 text-xs font-medium">
@@ -28,11 +32,12 @@ export const SettingsNav = () => {
           </p>
           <ul className="space-y-0.5">
             {section.items.map((item) => {
-              const isActive = pathname === item.url;
+              const isActive = item.url === activeUrl;
               return (
                 <li key={item.url}>
                   <Link
                     href={item.url}
+                    aria-current={isActive ? "page" : undefined}
                     className={cn(
                       "flex h-8 items-center gap-2 rounded-md px-2 text-sm transition-colors",
                       isActive
@@ -40,7 +45,7 @@ export const SettingsNav = () => {
                         : "text-foreground hover:bg-accent hover:text-accent-foreground",
                     )}
                   >
-                    <item.icon className="size-4 shrink-0" />
+                    <item.icon className="size-4 shrink-0" aria-hidden />
                     <span className="truncate">{item.title}</span>
                   </Link>
                 </li>

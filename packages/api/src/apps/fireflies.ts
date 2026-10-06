@@ -4,6 +4,7 @@ export const fireflies: AppDefinition = {
   id: "fireflies",
   name: "Fireflies",
   icon: "/icons/fireflies.svg",
+  apiDocsUrl: "https://docs.fireflies.ai/",
   description: "AI meeting transcripts, summaries, and action items.",
   connectionMethod: {
     type: "api_key",

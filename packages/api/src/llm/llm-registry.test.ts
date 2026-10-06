@@ -30,12 +30,27 @@ describe("the provider definitions", () => {
       expect(provider.catalogUrl).toMatch(/^https:\/\//);
   });
 
-  it("refuses to list with a credential it cannot use", () => {
-    for (const provider of Object.values(LLM_PROVIDERS)) {
-      expect(provider.canList("oauth")).toBe(false);
+  it("lists with every API key", () => {
+    for (const provider of Object.values(LLM_PROVIDERS))
       expect(provider.canList("api-key")).toBe(true);
-      expect(provider.catalogHeaders("token")).not.toBeNull();
-    }
+  });
+
+  it("refuses to list with an OpenAI OAuth blob, whose refresh the gateway owns", () => {
+    expect(openai.canList("oauth")).toBe(false);
+  });
+
+  it("lists with an Anthropic subscription token, sent as the gateway sends it", () => {
+    // A subscription agent must see its subscription's models, not the pinned
+    // list: the `sk-ant-oat` setup token is long-lived and needs no refresh.
+    expect(anthropic.canList("oauth")).toBe(true);
+    expect(anthropic.catalogHeaders("sk-ant-oat-x", "oauth")).toEqual({
+      authorization: "Bearer sk-ant-oat-x",
+      "anthropic-version": "2023-06-01",
+    });
+    expect(anthropic.catalogHeaders("sk-ant-api-x", "api-key")).toEqual({
+      "x-api-key": "sk-ant-api-x",
+      "anthropic-version": "2023-06-01",
+    });
   });
 });
 
@@ -277,12 +292,7 @@ describe("the catalog cache", () => {
     vi.stubGlobal("fetch", spy);
     const credential = vi.fn().mockResolvedValue("oauth-blob");
 
-    const result = await getModelCatalog(
-      provider,
-      "sec-1",
-      credential,
-      "oauth",
-    );
+    const result = await getModelCatalog(openai, "sec-1", credential, "oauth");
     expect(credential).not.toHaveBeenCalled();
     expect(spy).not.toHaveBeenCalled();
     expect(result.degraded).toBe(true);
@@ -382,9 +392,9 @@ describe("the catalog cache", () => {
     const spy = vi.fn().mockResolvedValue(ok());
     vi.stubGlobal("fetch", spy);
     const oauth = await getModelCatalog(
-      provider,
+      openai,
       "sec-1",
-      async () => "sk-ant-oat-x",
+      async () => "oauth-blob",
       "oauth",
     );
     const none = await getModelCatalog(
@@ -398,6 +408,49 @@ describe("the catalog cache", () => {
       expect(result.degraded).toBe(true);
       expect(result.models.length).toBeGreaterThan(0);
     }
+  });
+
+  it("serves an Anthropic subscription its own live list, fetched with a bearer", async () => {
+    const spy = vi.fn().mockResolvedValue(ok());
+    vi.stubGlobal("fetch", spy);
+    const result = await getModelCatalog(
+      provider,
+      "sec-oat",
+      async () => "sk-ant-oat-x",
+      "oauth",
+    );
+    expect(result.degraded).toBe(false);
+    expect(result.models.map((m) => m.id)).toEqual([
+      "claude-sonnet-4-6",
+      "claude-opus-4-6",
+    ]);
+    expect(result.models.every((m) => m.source === "live")).toBe(true);
+    // Exact headers, so the assertion also proves no `x-api-key` and no beta
+    // header rode along.
+    expect(spy).toHaveBeenCalledWith(
+      provider.catalogUrl,
+      expect.objectContaining({
+        headers: {
+          authorization: "Bearer sk-ant-oat-x",
+          "anthropic-version": "2023-06-01",
+        },
+      }),
+    );
+  });
+
+  it("falls back to the pinned list when a subscription token is refused", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("{}", { status: 403 })),
+    );
+    const result = await getModelCatalog(
+      provider,
+      "sec-oat",
+      async () => "sk-ant-oat-x",
+      "oauth",
+    );
+    expect(result.degraded).toBe(true);
+    expect(result.models.map((m) => m.id)).toEqual([...provider.fallback]);
   });
 });
 

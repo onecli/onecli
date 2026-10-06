@@ -69,6 +69,9 @@ export const startGateway = async (
         // The stub upstream's self-signed cert lives on 127.0.0.1 — narrower
         // than the global danger flag, same as gateway-e2e.
         GATEWAY_SKIP_VERIFY_HOSTS: "127.0.0.1",
+        // The stub upstream is on loopback, which the destination guard
+        // refuses unless allowed — same exact-IP entry as gateway-e2e.
+        GATEWAY_ALLOW_PRIVATE_DESTINATIONS: "127.0.0.1",
         APP_URL: "http://127.0.0.1:10254",
         LOG_FORMAT: "json",
         RUST_LOG: process.env.HOSTED_E2E_RUST_LOG ?? "info",

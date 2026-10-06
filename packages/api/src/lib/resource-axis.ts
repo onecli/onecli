@@ -10,8 +10,8 @@ import {
  * ee-boundary.ts LICENSED_MIRRORS.
  *
  * Resource axes — the single definition of what "one resource is inside
- * another" means for a session policy ("Resources": which repositories or
- * folders an injected credential may reach).
+ * another" means for a session policy ("Resources": which repositories,
+ * Dropbox folders, or Google Drive folders an injected credential may reach).
  *
  * It lives here, outside `ee/`, because the shared reflection and grants
  * services compose scopes and must build standalone (and the module is
@@ -32,7 +32,7 @@ const asciiLower = (value: string): string =>
   value.replace(/[A-Z]/g, (c) => c.toLowerCase());
 
 interface ResourceAxis {
-  readonly key: "repositories" | "folders";
+  readonly key: "repositories" | "folders" | "driveFolders";
   normalize(entry: string): string;
   coveredBy(entry: string, boundary: readonly string[]): boolean;
   /** This axis's entries, or undefined when the policy doesn't carry the axis
@@ -77,7 +77,31 @@ const folders: ResourceAxis = {
   build: (entries) => ({ folders: entries }),
 };
 
-const AXES: readonly ResourceAxis[] = [repositories, folders];
+/** Google Drive folders are opaque, case-sensitive IDs, so an entry is the
+ * CHAIN of IDs from the top of a drive down to the chosen folder (`A/B/C`). A
+ * chain is inside another when it names every ID the other does (a target
+ * satisfying the narrower chain then satisfies the wider one). The gateway's
+ * `google_drive.rs` additionally re-verifies the whole chain against Drive's
+ * live parent links on every request. No case folding: IDs are exact. */
+const chainIds = (entry: string): string[] => entry.split("/").filter(Boolean);
+const driveFolders: ResourceAxis = {
+  key: "driveFolders",
+  normalize: (entry) => chainIds(entry).join("/"),
+  coveredBy: (entry, boundary) => {
+    const required = new Set(chainIds(entry));
+    if (required.size === 0) {
+      // An empty chain names nothing; only an empty (unbounded) boundary
+      // entry contains it — the Dropbox account-root reading.
+      return boundary.some((b) => chainIds(b).length === 0);
+    }
+    return boundary.some((b) => chainIds(b).every((id) => required.has(id)));
+  },
+  entriesOf: (policy) =>
+    "driveFolders" in policy ? policy.driveFolders : undefined,
+  build: (entries) => ({ driveFolders: entries }),
+};
+
+const AXES: readonly ResourceAxis[] = [repositories, folders, driveFolders];
 
 /** The axis a policy is written on, by its single key. */
 export const axisOf = (policy: unknown): ResourceAxis | undefined => {
@@ -95,6 +119,21 @@ const rawEntries = (
   return Array.isArray(entries)
     ? entries.filter((e): e is string => typeof e === "string")
     : undefined;
+};
+
+/**
+ * A policy object narrowed to its one well-formed axis, entries sorted for
+ * byte-stable storage (`conditionsEqual`/`stackEquals` sort keys, never array
+ * elements, so an unsorted re-pick of the same set would defeat write
+ * idempotence). `null` for anything that is no restriction: no recognized
+ * axis, a non-list value, or an EMPTY list — the pickers' "all" — which must
+ * never be stored as the deny-all sentinel the gateway would enforce.
+ */
+export const canonicalPolicy = (policy: unknown): SessionPolicyInput | null => {
+  const axis = axisOf(policy);
+  if (!axis || !isSessionPolicy(policy)) return null;
+  const entries = rawEntries(policy, axis);
+  return entries?.length ? axis.build([...entries].sort()) : null;
 };
 
 /**

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { adapterGroupDecisionRequestSchema } from "@onecli/agent-protocol";
 import {
   CHANNEL_PROVIDER_IDS,
   CHANNEL_TRANSPORTS,
@@ -139,6 +140,12 @@ export const adapterDecisionSchema = z
     clickerExternalUserId: z.string().trim().min(1).max(200),
   })
   .strict();
+
+/** POST /channel-adapter/group-decision - a grouped approval card's click
+ * (Approve all / Deny all / one row). The shared wire schema, made strict
+ * like its siblings here: an unknown field is a 422, never ignored. */
+export const adapterGroupDecisionSchema =
+  adapterGroupDecisionRequestSchema.strict();
 
 /** POST /channel-adapter/action-decision - a forwarded action-approval-card
  * click (socket arm). Mirrors adapterReachDecisionSchema; the wire schema is

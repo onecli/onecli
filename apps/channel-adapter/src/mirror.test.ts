@@ -5,7 +5,7 @@ import {
   type AdapterWorkTurn,
 } from "@onecli/agent-protocol";
 import type { ControlPlaneClient } from "./control-plane";
-import { mirrorFinishedTurn } from "./mirror";
+import { dropDanglingLeadIn, mirrorFinishedTurn } from "./mirror";
 import { slackMirrorPosts } from "./slack/mirror-posts";
 import { slackAdapterProvider } from "./slack/adapter-provider";
 import {
@@ -476,6 +476,115 @@ describe("what gets posted", () => {
     expect(posted).toHaveLength(1);
     expect(posted[0]!.form.blocks).toBeUndefined();
     expect(posted[0]!.form.text).toContain("reconnect=gmail");
+  });
+
+  it("drops the lead-in that only introduced a lifted link — no dangling 'open this link:'", async () => {
+    // The reported message: the link moved into the card, and its sentence was
+    // left ending in a colon that pointed at nothing.
+    const controlPlane = createFakeControlPlane(
+      transcriptWith(
+        "Salesforce isn't connected anymore - the connection was removed. To reconnect, open this link:\n\nhttps://app.example.com/w/ws1/connections?connect=salesforce&source=agent\n\nOnce it's reconnected, let me know.",
+      ),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack" }),
+      chatUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    const text = (
+      JSON.parse(posted[0]!.form.blocks!) as { text?: { text: string } }[]
+    )[0]?.text?.text;
+    expect(text).not.toContain("open this link");
+    expect(text).toBe(
+      "Salesforce isn't connected anymore - the connection was removed.\n\nOnce it's reconnected, let me know.",
+    );
+  });
+
+  it("keeps a colon-ended sentence that is not about the link", async () => {
+    const controlPlane = createFakeControlPlane(
+      transcriptWith(
+        "Two things to check:\n\nhttps://app.example.com/w/ws1/connections?connect=salesforce\n\nand the rest.",
+      ),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack" }),
+      chatUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+
+    const text = (
+      JSON.parse(slack.callsTo("chat.postMessage")[0]!.form.blocks!) as {
+        text?: { text: string };
+      }[]
+    )[0]?.text?.text;
+    expect(text).toContain("Two things to check:");
+  });
+
+  /** The first section's text of the one posted card message. */
+  const cardProse = async (answer: string): Promise<string | undefined> => {
+    await mirror({
+      controlPlane: createFakeControlPlane(transcriptWith(answer)),
+      workItem: item({ source: "slack" }),
+      chatUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+    const blocks = JSON.parse(
+      slack.callsTo("chat.postMessage")[0]!.form.blocks!,
+    ) as { type: string; text?: { text: string } }[];
+    return blocks.find((b) => b.type === "section")?.text?.text;
+  };
+
+  it("keeps a lifted line's neighbors intact: indentation, list tightness, one break", async () => {
+    // MUTATION-PROOF: each line pins one splice rule. Skip whitespace past
+    // the line break and the nested bullet loses its indent; owe "\n\n"
+    // regardless and the tight list splits; append a break per lift and two
+    // adjacent lifts stack blank lines.
+    const sf = "https://app.example.com/w/ws1/connections?connect=salesforce";
+    const gm = "https://app.example.com/w/ws1/connections?connect=gmail";
+    expect(
+      await cardProse(
+        `Steps:\n\n1. Connect Salesforce:\n   ${sf}\n   - it takes a minute\n2. Come back.`,
+      ),
+    ).toBe(
+      "Steps:\n\n1. Connect Salesforce:\n   • it takes a minute\n2. Come back.",
+    );
+    slack.calls.length = 0;
+    expect(
+      await cardProse(`Steps:\n- Open the app\n- ${sf}\n- Come back`),
+    ).toBe("Steps:\n• Open the app\n• Come back");
+    slack.calls.length = 0;
+    expect(
+      await cardProse(
+        `Intro.\n\nConnect here:\n${sf}\n\nAnd here:\n${gm}\n\nEnd.`,
+      ),
+    ).toBe("Intro.\n\nEnd.");
+  });
+
+  it("lifts a CRLF-terminated link line and its lead-in", async () => {
+    expect(
+      await cardProse(
+        "Use this link:\r\n\r\nhttps://app.example.com/w/ws1/connections?connect=salesforce\r\n\r\nThanks.",
+      ),
+    ).toBe("Thanks.");
+  });
+
+  it("takes a quote line's markup and lead-in with the link, keeps a presenting 'Here is'", async () => {
+    const sf = "https://app.example.com/w/ws1/connections?connect=salesforce";
+    // MUTATION-PROOF: lift only a bare line and this quote keeps an empty
+    // "> " line and its dangling "Reconnect here:".
+    expect(
+      await cardProse(
+        `> Salesforce token expired.\n> Reconnect here:\n> ${sf}\n\nThanks.`,
+      ),
+    ).toBe("> Salesforce token expired.\n\nThanks.");
+    slack.calls.length = 0;
+    // An opening "Here" presents what follows: the model's own content.
+    expect(
+      await cardProse(`Here is what I found:\n\n${sf}\n\n- 3 open deals`),
+    ).toBe("Here is what I found:\n\n• 3 open deals");
   });
 
   it("lifts a markdown-form connect link out whole — no '[label]()' remnant", async () => {
@@ -1031,6 +1140,48 @@ describe("what gets posted", () => {
     ]);
   });
 
+  it("posts a joined WAKE follow-up as its automation caption, never as '(from the web)'", async () => {
+    // Live 2026-10-03: a wake that joined the turn mirrored as
+    // "_(from the web)_ [Watch on process ...]" with the platform's whole
+    // instruction, as if a person had typed it. A wake is the platform
+    // speaking: caption only (the answer below is its report).
+    // MUTATION-PROOF: drop the follow-up automation arm and the first post
+    // is the "(from the web)" quote again.
+    const controlPlane = createFakeControlPlane(transcriptWith("PR is green."));
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack" }),
+        followUps: [
+          {
+            message:
+              '[Watch on process "PR 1209 CI watcher" fired: the process exited with code 0 — triggered automatically, not by a person typing. Do the task below.]\n\nRe-check CI.',
+            source: "watch",
+            userName: null,
+          },
+        ],
+      },
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted.map((call) => call.form.text)).toEqual([
+      ':stopwatch: Watch on process "PR 1209 CI watcher" fired: the process exited with code 0',
+      "PR is green.",
+    ]);
+    expect(JSON.parse(posted[0]?.form.blocks ?? "[]")).toEqual([
+      {
+        type: "context",
+        elements: [
+          {
+            type: "mrkdwn",
+            text: ':stopwatch: Watch on process "PR 1209 CI watcher" fired: the process exited with code 0',
+          },
+        ],
+      },
+    ]);
+  });
+
   it("answers a DM THREAD inside that thread", async () => {
     // THE BUG THIS FIXES (live): a reply typed in a DM thread was answered
     // at the bottom of the DM, outside the thread the person was reading.
@@ -1376,6 +1527,43 @@ describe("failure surfacing — never silent on a terminal outcome", () => {
     expect(posted[0]?.form.text).toContain("The canonical sentence.");
     expect(posted[0]?.form.text).not.toContain("raw vendor wording");
   });
+
+  it.each([
+    ["the transcript error event", { eventError: true }],
+    ["turn.error", { eventError: false }],
+  ])(
+    "a raw provider body in %s posts the generic failure line, never the blob",
+    async (_where, { eventError }) => {
+      // An uncoded failure whose text is a provider's response body: a shared
+      // room gets a sentence, and nothing of the payload.
+      const raw =
+        'Claude API error (500 Internal Server Error): {"type":"error","error":{"type":"api_error","message":"Internal server error"},"request_id":"req_123"}';
+      const controlPlane = createFakeControlPlane(
+        transcriptOf(
+          eventError ? [{ type: "error", payload: { message: raw } }] : [],
+        ),
+      );
+
+      await mirror({
+        controlPlane,
+        workItem: item({
+          source: "slack",
+          status: "failed",
+          ...(!eventError && { error: raw }),
+        }),
+      });
+
+      const posted = slack.callsTo("chat.postMessage");
+      expect(posted).toHaveLength(1);
+      expect(posted[0]?.form.text).toContain(
+        "The agent ran into an error and couldn",
+      );
+      expect(posted[0]?.form.text).not.toContain("api_error");
+      expect(posted[0]?.form.text).not.toContain("req_123");
+      // Not a key problem as far as anyone knows: no model-key door.
+      expect(JSON.stringify(posted[0]?.form)).not.toMatch(/model key/i);
+    },
+  );
 
   it("a FAILED turn with partial answer text posts the text AND the failure line", async () => {
     // A partial answer must never masquerade as a normal reply.
@@ -2049,5 +2237,85 @@ describe("the agent's files (send_file) — one share after the answer", () => {
     expect(
       slack.callsTo("chat.postMessage").some((c) => c.form.text === "Done."),
     ).toBe(true);
+  });
+});
+
+describe("dropDanglingLeadIn", () => {
+  it("drops a trailing clause that points at the link, keeping the sentence before it", () => {
+    expect(
+      dropDanglingLeadIn(
+        "Salesforce was removed. To reconnect, open this link:\n\n",
+      ),
+    ).toBe("Salesforce was removed.");
+    expect(dropDanglingLeadIn("Click here:\n")).toBe("");
+    // A (re)connect imperative opening the clause points at the lifted
+    // CONNECT link as surely as "link" does.
+    expect(
+      dropDanglingLeadIn("Status: disconnected. Reconnect Salesforce:\n"),
+    ).toBe("Status: disconnected.");
+    expect(dropDanglingLeadIn("To connect Gmail:\n")).toBe("");
+  });
+
+  it("keeps a statement that only mentions connecting", () => {
+    // MUTATION-PROOF: match the verb anywhere in the clause and this
+    // explanation is dropped as if it were a pointer at the link.
+    expect(
+      dropDanglingLeadIn("Sorry. I couldn't connect to it because:\n"),
+    ).toBe("Sorry. I couldn't connect to it because:\n");
+  });
+
+  it("leaves text alone when the clause is not a pointer or there is no colon", () => {
+    expect(dropDanglingLeadIn("Two things to check:\n")).toBe(
+      "Two things to check:\n",
+    );
+    expect(dropDanglingLeadIn("All done.\n")).toBe("All done.\n");
+  });
+
+  it("never splits a list marker or an abbreviation off as a sentence end", () => {
+    // MUTATION-PROOF: treat "1." as a sentence end and the item collapses to
+    // a bare "1." (the reported numbering glitch); treat "e.g." as one and a
+    // lone "e.g." is left behind.
+    expect(dropDanglingLeadIn("Next steps:\n1. Open the URL below:\n")).toBe(
+      "Next steps:\n1. Open the URL below:\n",
+    );
+    expect(dropDanglingLeadIn("e.g. use this link:\n")).toBe("");
+  });
+
+  it("keeps a list item: dropping it would leave an empty bullet", () => {
+    expect(dropDanglingLeadIn("- Open this link:\n")).toBe(
+      "- Open this link:\n",
+    );
+    expect(dropDanglingLeadIn("2) Click here:\n")).toBe("2) Click here:\n");
+  });
+
+  it("reads only the clause's last colon segment", () => {
+    // MUTATION-PROOF: test the whole clause and "Here's" matches `here`,
+    // dropping a statement that only happens to open with it.
+    expect(
+      dropDanglingLeadIn("Here's what happened: the token expired:\n"),
+    ).toBe("Here's what happened: the token expired:\n");
+  });
+
+  it("takes emphasis and heading markup with the lead-in, never half of a pair", () => {
+    expect(
+      dropDanglingLeadIn("You need to authorize it. **Click here:**\n"),
+    ).toBe("You need to authorize it.");
+    expect(dropDanglingLeadIn("Intro.\n## Reconnect here:\n")).toBe("Intro.");
+    // The closing `**` has no opener inside the clause: keep it all.
+    expect(dropDanglingLeadIn("**Done. Click here:**\n")).toBe(
+      "**Done. Click here:**\n",
+    );
+  });
+
+  it("stays linear on hostile model output (no backtracking)", () => {
+    // A bounded scan: each call is O(1) in the answer's length. The
+    // generous budget absorbs CI noise (the mrkdwn suite's precedent) and
+    // still fails any reintroduced quadratic or backtracking pass.
+    const t = performance.now();
+    dropDanglingLeadIn(`${"a ".repeat(20_000)}link:`);
+    dropDanglingLeadIn(`${" ".repeat(40_000)}x`);
+    dropDanglingLeadIn(`${"a".repeat(40_000)}link:`);
+    dropDanglingLeadIn(`${"1. ".repeat(13_000)}link:`);
+    expect(performance.now() - t).toBeLessThan(500);
   });
 });

@@ -27,6 +27,9 @@ describe("gateway approval guidance", () => {
         "`connections[].host` is the real host",
         "Never invent or copy an example hostname",
         "`x-should-retry: false` disables automatic retries",
+        "`connection_needs_reconnect` (401)",
+        "the request was NOT sent and no approval was requested",
+        "Show the user the `connect_url`",
       ])
         expect(text).toContain(guidance);
       expect(text).not.toContain("policy error (403 with a JSON body)");
@@ -46,6 +49,24 @@ describe("gateway approval guidance", () => {
         "Never re-send a denied request unless the user asks",
         "`FirstPublishLocationId`",
         "one request, one approval",
+      ]) {
+        expect(text).toContain(guidance);
+      }
+    },
+  );
+
+  it.each([undefined, "claude", "hermes"])(
+    "teaches linking each changed record from a real link (%s)",
+    (agent) => {
+      const text = getGatewaySkill(agent).replace(/\s+/g, " ");
+      for (const guidance of [
+        "## Link What You Changed",
+        "link each one in your reply",
+        "from the API's own response (GitHub's `html_url`",
+        "Salesforce returns no link, only the record id",
+        "on the org host the gateway gave you for that connection",
+        "Never guess a URL or copy an example hostname",
+        "show the id instead",
       ]) {
         expect(text).toContain(guidance);
       }

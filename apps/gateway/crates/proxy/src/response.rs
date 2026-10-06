@@ -481,6 +481,73 @@ pub fn connection_host_mismatch_axum(
     ))
 }
 
+/// The body for a connection whose refresh token its provider refused. Shared
+/// by the MITM and plain-HTTP wrappers below so the two cannot drift.
+///
+/// 401: the stored authorization is no longer valid, which is what an agent's
+/// HTTP client expects. `connect_url` reopens the dashboard's reconnect flow
+/// for exactly this account (`reconnect=<id>`), so the user re-authorizes it in
+/// place and the account keeps its agents and rules.
+fn connection_needs_reconnect_json(
+    connection: &crate::connect::ConnectionChoice,
+    workspace_id: Option<&str>,
+) -> serde_json::Value {
+    let display = connection
+        .display_name
+        .unwrap_or(connection.provider.as_str());
+    // The provider is a registry id (`google-calendar`), path-safe as is and
+    // written raw like `access_restricted`'s app link: encoding its `-` would
+    // break the dashboard route and the chat card's link parser. The id is a
+    // stored value, so it is encoded.
+    let connect_url = scoped_url(
+        dashboard_url(),
+        &format!(
+            "/connections/apps/{}?reconnect={}",
+            connection.provider,
+            utf8_percent_encode(&connection.id, NON_ALPHANUMERIC)
+        ),
+        workspace_id,
+    );
+    let account = connection
+        .label
+        .as_deref()
+        .map(|l| format!(" ({l})"))
+        .unwrap_or_default();
+    serde_json::json!({
+        "error": "connection_needs_reconnect",
+        "message": format!(
+            "The {display} connection{account} has expired and must be reconnected: \
+             {display} rejected its saved login, so OneCLI did not send this request. \
+             Ask the user to open this URL to reconnect it, then retry: {connect_url}"
+        ),
+        "provider": connection.provider,
+        "connection_id": connection.id,
+        "connect_url": connect_url,
+    })
+}
+
+/// 401: the connection must be reconnected (MITM body).
+pub fn connection_needs_reconnect<S>(
+    connection: &crate::connect::ConnectionChoice,
+    workspace_id: Option<&str>,
+) -> Response<ForwardBody<S>> {
+    with_no_retry(json_error(
+        StatusCode::UNAUTHORIZED,
+        connection_needs_reconnect_json(connection, workspace_id),
+    ))
+}
+
+/// 401: the connection must be reconnected (axum body).
+pub fn connection_needs_reconnect_axum(
+    connection: &crate::connect::ConnectionChoice,
+    workspace_id: Option<&str>,
+) -> Response<axum::body::Body> {
+    with_no_retry(json_error_axum(
+        StatusCode::UNAUTHORIZED,
+        connection_needs_reconnect_json(connection, workspace_id),
+    ))
+}
+
 /// 502 Bad Gateway — rule resolution failed mid-session.
 pub fn resolution_failed<S>() -> Response<ForwardBody<S>> {
     json_error(
@@ -508,6 +575,24 @@ pub fn upstream_unreachable<S>(host: &str) -> Response<ForwardBody<S>> {
             "host": host,
         }),
     )
+}
+
+/// 403 Forbidden — the destination resolved to a non-public address the
+/// operator has not allowed (see `crate::egress`). Nothing was sent upstream.
+pub fn destination_not_allowed<S>(host: &str) -> Response<ForwardBody<S>> {
+    with_no_retry(json_error(
+        StatusCode::FORBIDDEN,
+        serde_json::json!({
+            "error": "destination_not_allowed",
+            "message": format!(
+                "OneCLI gateway refused to connect to {host}: it resolves to a private, \
+                 loopback, or link-local address. Operators can allow internal destinations \
+                 with {}.",
+                crate::egress::ALLOW_ENV
+            ),
+            "host": host,
+        }),
+    ))
 }
 
 /// 504 Gateway Timeout — upstream accepted the request but never returned
@@ -771,6 +856,44 @@ mod tests {
             "application/json"
         );
         assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
+    }
+
+    #[tokio::test]
+    async fn connection_needs_reconnect_names_the_account_and_links_its_reconnect() {
+        let choice = crate::connect::ConnectionChoice {
+            id: "conn 1".to_string(),
+            label: Some("jo@acme.com".to_string()),
+            provider: "google-calendar".to_string(),
+            display_name: Some("Google Calendar"),
+            host: None,
+        };
+        let resp: Response<TestBody> = connection_needs_reconnect(&choice, Some("ws-1"));
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.headers()["x-should-retry"], "false");
+
+        use http_body_util::BodyExt;
+        let body = match resp.into_body() {
+            Either::Left(full) => full.collect().await.expect("collect").to_bytes(),
+            Either::Right(_) => panic!("expected a full body"),
+        };
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(json["error"], "connection_needs_reconnect");
+        assert_eq!(json["provider"], "google-calendar");
+        assert_eq!(json["connection_id"], "conn 1");
+        let url = json["connect_url"].as_str().expect("url");
+        // Workspace-scoped; the provider stays the literal route segment (the
+        // dashboard's `[provider]` route and the chat card match it as is),
+        // and the id is encoded so it cannot inject params.
+        assert!(
+            url.ends_with("/w/ws-1/connections/apps/google-calendar?reconnect=conn%201"),
+            "{url}"
+        );
+        let message = json["message"].as_str().expect("message");
+        assert!(
+            message.contains("Google Calendar connection (jo@acme.com)"),
+            "{message}"
+        );
+        assert!(message.contains(url), "the message carries the link");
     }
 
     #[tokio::test]

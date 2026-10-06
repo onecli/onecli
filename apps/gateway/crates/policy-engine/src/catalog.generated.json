@@ -1873,7 +1873,8 @@
         "*.datadoghq.com"
       ],
       "paths": [
-        "/api/v2/logs/*"
+        "/api/v2/logs/events/search",
+        "/api/v2/logs/analytics/aggregate"
       ],
       "methods": [
         "POST"
@@ -5327,7 +5328,8 @@
       ],
       "methods": [
         "POST"
-      ]
+      ],
+      "graphqlOps": "mutation"
     },
     "mutate_boards": {
       "hosts": [
@@ -5338,7 +5340,8 @@
       ],
       "methods": [
         "POST"
-      ]
+      ],
+      "graphqlOps": "mutation"
     },
     "mutate_docs": {
       "hosts": [
@@ -5349,7 +5352,8 @@
       ],
       "methods": [
         "POST"
-      ]
+      ],
+      "graphqlOps": "mutation"
     },
     "mutate_updates": {
       "hosts": [
@@ -5360,7 +5364,8 @@
       ],
       "methods": [
         "POST"
-      ]
+      ],
+      "graphqlOps": "mutation"
     },
     "query_boards": {
       "hosts": [
@@ -5371,7 +5376,8 @@
       ],
       "methods": [
         "POST"
-      ]
+      ],
+      "graphqlOps": "query"
     },
     "query_docs": {
       "hosts": [
@@ -5382,7 +5388,8 @@
       ],
       "methods": [
         "POST"
-      ]
+      ],
+      "graphqlOps": "query"
     },
     "query_updates": {
       "hosts": [
@@ -5393,7 +5400,8 @@
       ],
       "methods": [
         "POST"
-      ]
+      ],
+      "graphqlOps": "query"
     },
     "query_users": {
       "hosts": [
@@ -5404,7 +5412,8 @@
       ],
       "methods": [
         "POST"
-      ]
+      ],
+      "graphqlOps": "query"
     },
     "query_workspaces": {
       "hosts": [
@@ -5415,7 +5424,8 @@
       ],
       "methods": [
         "POST"
-      ]
+      ],
+      "graphqlOps": "query"
     },
     "send_notifications": {
       "hosts": [
@@ -5426,7 +5436,8 @@
       ],
       "methods": [
         "POST"
-      ]
+      ],
+      "graphqlOps": "mutation"
     }
   },
   "mongodb-atlas": {
@@ -5615,6 +5626,327 @@
       ],
       "methods": [
         "PATCH"
+      ]
+    }
+  },
+  "navan": {
+    "get_custom_field": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/custom-fields/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_gl_code": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/gl-codes/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_gl_code_settings": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/gl-code-settings"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_tax_mapping": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/tax-mappings/by-tax-code"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_transaction": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/transactions/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_adjustments": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/adjustments"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_bookings": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/bookings"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_card_transactions": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/card-transactions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_connect_transactions": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/connect-transactions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_custom_fields": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/custom-fields"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_daily_rebates": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/daily-rebates"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_disputes": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/disputes"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_fees": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/fees"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_gl_codes": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/gl-codes"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_manual_transactions": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/manual-transactions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_receipts": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/transactions/receipts"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_repayments": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/repayments"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_statement_payments": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/statement-payments"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_tax_mappings": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/tax-mappings"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_transactions": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/transactions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "manage_custom_field_options": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/custom-fields/*/options"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "manage_gl_code_exclusions": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/gl-code-exclusions",
+        "/v1/expense/gl-code-exclusions/*"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "manage_gl_codes": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/gl-codes",
+        "/v1/expense/gl-codes/*"
+      ],
+      "methods": [
+        "PUT",
+        "PATCH"
+      ]
+    },
+    "manage_tax_mappings": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/tax-mappings",
+        "/v1/expense/tax-mappings/*"
+      ],
+      "methods": [
+        "PUT",
+        "PATCH",
+        "POST",
+        "DELETE"
+      ]
+    },
+    "read_all": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_gl_code_settings": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/gl-code-settings"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_transactions": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/transactions"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "write_all": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/*"
+      ],
+      "methods": [
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE"
       ]
     }
   },
@@ -7278,6 +7610,207 @@
         "PUT",
         "PATCH",
         "DELETE"
+      ]
+    }
+  },
+  "timeless": {
+    "cancel_bot": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings/*/bot"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_document": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/documents/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_notetaker_automation": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/settings/notetaker-automation"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_recording": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings/*/recording"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_transcript": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings/*/transcript"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_meeting_permissions": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings/*/permissions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_meetings": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_rooms": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/rooms"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_upcoming_meetings": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings/upcoming"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_webhooks": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/webhooks"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "manage_webhooks": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/webhooks",
+        "/v1/webhooks/*"
+      ],
+      "methods": [
+        "POST",
+        "PATCH",
+        "DELETE"
+      ]
+    },
+    "mcp_access": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/mcp/*"
+      ],
+      "methods": []
+    },
+    "revoke_meeting_permission": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings/*/permissions/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "schedule_bot": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings/*/bot"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "send_bot_to_link": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings/bot"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "set_meeting_permission": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings/*/permissions"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "set_notetaker_automation": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/settings/notetaker-automation"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "upload_media": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings/upload"
+      ],
+      "methods": [
+        "PUT"
       ]
     }
   },

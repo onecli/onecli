@@ -1286,9 +1286,16 @@ export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
     // would silently lose its resume handle and every later turn would start
     // a fresh context. The same window also lets a fast follow-up message
     // dispatch with `resumeSessionRef: null` and lose the thread.
+    //
+    // Never from a boot an agent restart discarded (`stopRequestedAt`, held
+    // until the next fresh start): that ref is exactly what the restart
+    // cleared, and keeping it would resume the session it threw away.
     if (result.count > 0 && input.sessionRef) {
       await tx.conversation.updateMany({
-        where: { id: input.conversationId },
+        where: {
+          id: input.conversationId,
+          agent: { sandbox: { stopRequestedAt: null } },
+        },
         data: { harnessSessionRef: input.sessionRef },
       });
     }
@@ -1419,6 +1426,7 @@ export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
       // The extra `none: active` leg is the dying-boot guard: if a NEWER
       // turn is already underway, its own close will persist a fresher ref —
       // a stale boot's ref must not repoint a conversation that moved on.
+      // `stopRequestedAt: null` is its restart twin (see the won close).
       await db.conversation.updateMany({
         where: {
           id: input.conversationId,
@@ -1426,6 +1434,7 @@ export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
             sandbox: {
               id: input.reporter.sandboxId,
               runnerId: input.reporter.runnerId,
+              stopRequestedAt: null,
             },
           },
           turns: {

@@ -42,6 +42,10 @@ const memoryService = vi.hoisted(() => ({
 
 const audit = vi.hoisted(() => ({ recordAuditEvent: vi.fn() }));
 
+const connectionsRender = vi.hoisted(() => ({
+  connectionsForRender: vi.fn(),
+}));
+
 const skillService = vi.hoisted(() => ({
   createSkill: vi.fn(),
   listSkillsReachingAgent: vi.fn(),
@@ -95,6 +99,10 @@ vi.mock("./skill-service", () => ({
   listSkillsReachingAgent: skillService.listSkillsReachingAgent,
   updateAgentSkillByName: skillService.updateAgentSkillByName,
   deleteAgentSkillByName: skillService.deleteAgentSkillByName,
+}));
+
+vi.mock("./agent-connections-render", () => ({
+  connectionsForRender: connectionsRender.connectionsForRender,
 }));
 
 vi.mock("./audit-service", async (importOriginal) => ({
@@ -541,5 +549,38 @@ describe("the memory-write token bucket", () => {
     }
     expect(takeMemoryWriteToken("a", t0)).toBe(false); // a is drained
     expect(takeMemoryWriteToken("b", t0)).toBe(true); // b untouched
+  });
+});
+
+describe("list_apps", () => {
+  const granola = {
+    provider: "granola",
+    name: "Granola",
+    label: "API Key",
+    host: null,
+    apiHosts: ["public-api.granola.ai"],
+    endpoints: ["GET /v1/notes"],
+    docsUrl: "https://docs.granola.ai/introduction",
+  };
+
+  it("answers from the composer for the CALLING agent only", async () => {
+    connectionsRender.connectionsForRender.mockResolvedValue([granola]);
+    const res = await call("list_apps", {});
+    expect(connectionsRender.connectionsForRender).toHaveBeenCalledWith("ag-1");
+    expect(res).toMatchObject({ ok: true, result: { apps: [granola] } });
+  });
+
+  it("an empty grant set says so, and where it is changed", async () => {
+    connectionsRender.connectionsForRender.mockResolvedValue([]);
+    const res = await call("list_apps", {});
+    expect(res).toMatchObject({ ok: true, result: { apps: [] } });
+    expect(JSON.stringify(res)).toContain("OneCLI dashboard");
+  });
+
+  it("a sandbox this runner does not host learns nothing", async () => {
+    state.sandbox = null;
+    const res = await call("list_apps", {});
+    expect(res.ok).toBe(false);
+    expect(connectionsRender.connectionsForRender).not.toHaveBeenCalled();
   });
 });

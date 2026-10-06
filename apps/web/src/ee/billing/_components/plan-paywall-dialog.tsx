@@ -6,6 +6,7 @@ import {
   ExternalLink,
   Gauge,
   Globe,
+  LayoutGrid,
   Shield,
   Users,
   type LucideIcon,
@@ -55,7 +56,14 @@ const FEATURE_CONTENT: Record<PremiumFeature, FeatureContent> = {
     iconClassName: "text-brand",
     title: "Verified domains & SSO",
     description:
-      "Claiming email domains and single sign-on are part of the Enterprise plan.",
+      "Claiming email domains, SAML/OIDC single sign-on and SCIM are part of the Scale plan.",
+  },
+  app_availability: {
+    icon: LayoutGrid,
+    iconClassName: "text-brand",
+    title: "App availability",
+    description:
+      "Restricting which apps your workspaces may connect is part of the Scale plan.",
   },
   groups: {
     icon: Users,

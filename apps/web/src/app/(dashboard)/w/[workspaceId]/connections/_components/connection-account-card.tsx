@@ -43,6 +43,7 @@ import {
   DialogTitle,
 } from "@onecli/ui/components/dialog";
 import { Button } from "@onecli/ui/components/button";
+import { cn } from "@onecli/ui/lib/utils";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
 import {
@@ -66,10 +67,15 @@ interface ConnectionAccountCardProps {
     scopes: string[];
     metadata: Record<string, unknown> | null;
     connectedAt: string;
+    /** Set when the provider refused the saved login (see the gateway's
+     * `connection_needs_reconnect`). Reconnecting clears it. */
+    reauthRequiredAt?: string | null;
   };
   appName: string;
   onReconnect: (connectionId: string) => void;
   pageScope?: PageScope;
+  /** The agent's reconnect link pointed here (`?reconnect=<id>`). */
+  highlighted?: boolean;
 }
 
 export const ConnectionAccountCard = ({
@@ -77,6 +83,7 @@ export const ConnectionAccountCard = ({
   appName,
   onReconnect,
   pageScope = "workspace",
+  highlighted = false,
 }: ConnectionAccountCardProps) => {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
@@ -97,6 +104,7 @@ export const ConnectionAccountCard = ({
   const accountType = connection.metadata?.accountType as string | undefined;
   const tags = (connection.metadata?.tags as string[] | undefined) ?? [];
   const boundHost = extractBoundHost(connection.metadata);
+  const needsReconnect = !!connection.reauthRequiredAt;
 
   const handleRename = () => {
     const trimmed = renameValue.trim();
@@ -122,7 +130,13 @@ export const ConnectionAccountCard = ({
 
   return (
     <>
-      <Card className="gap-2 px-4 py-3">
+      <Card
+        className={cn(
+          "gap-2 px-4 py-3",
+          needsReconnect && "border-destructive/50",
+          highlighted && "ring-2 ring-ring",
+        )}
+      >
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
             {avatarUrl ? (
@@ -160,7 +174,11 @@ export const ConnectionAccountCard = ({
                 </a>
               )}
               <p className="text-xs text-muted-foreground">
-                {accountType ?? "Connected"}{" "}
+                {needsReconnect ? (
+                  <span className="text-destructive">Needs reconnect</span>
+                ) : (
+                  (accountType ?? "Connected")
+                )}{" "}
                 <span className="text-muted-foreground/60">
                   &middot;{" "}
                   {new Date(connection.connectedAt).toLocaleDateString(
@@ -171,70 +189,88 @@ export const ConnectionAccountCard = ({
               </p>
             </div>
           </div>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
+          <div className="flex shrink-0 items-center gap-1">
+            {needsReconnect && !connection.metadata?.manageUrl && (
               <Button
-                variant="ghost"
-                size="icon"
-                className="size-8 shrink-0 text-muted-foreground"
+                variant="outline"
+                size="sm"
+                onClick={() => onReconnect(connection.id)}
               >
-                <MoreVertical className="size-4" />
+                <RefreshCw className="size-3.5" aria-hidden="true" />
+                Reconnect
               </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              {!!connection.metadata?.manageUrl && (
-                <DropdownMenuItem asChild>
-                  <a
-                    href={connection.metadata.manageUrl as string}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <Settings className="size-4" />
-                    Settings
-                  </a>
-                </DropdownMenuItem>
-              )}
-              {!connection.metadata?.manageUrl && (
-                <DropdownMenuItem onClick={() => onReconnect(connection.id)}>
-                  <RefreshCw className="size-4" />
-                  Reconnect
-                </DropdownMenuItem>
-              )}
-              <DropdownMenuItem
-                onClick={() => {
-                  setRenameValue(
-                    displayName === "Unknown account" ? "" : displayName,
-                  );
-                  setRenameOpen(true);
-                }}
-              >
-                <Pencil className="size-4" />
-                Rename
-              </DropdownMenuItem>
-              {showAgentAccess && (
-                <DropdownMenuItem onClick={() => setAgentDialogOpen(true)}>
-                  <Users className="size-4" />
-                  Agent access
-                </DropdownMenuItem>
-              )}
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                onClick={() => setConfirmOpen(true)}
-                disabled={disconnectMutation.isPending}
-                className="text-destructive focus:text-destructive"
-              >
-                {disconnectMutation.isPending ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <Unplug className="size-4" />
+            )}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-8 shrink-0 text-muted-foreground"
+                >
+                  <MoreVertical className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                {!!connection.metadata?.manageUrl && (
+                  <DropdownMenuItem asChild>
+                    <a
+                      href={connection.metadata.manageUrl as string}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <Settings className="size-4" />
+                      Settings
+                    </a>
+                  </DropdownMenuItem>
                 )}
-                {disconnectMutation.isPending
-                  ? "Disconnecting..."
-                  : "Disconnect"}
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+                {!connection.metadata?.manageUrl && (
+                  <DropdownMenuItem onClick={() => onReconnect(connection.id)}>
+                    <RefreshCw className="size-4" />
+                    Reconnect
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem
+                  onClick={() => {
+                    setRenameValue(
+                      displayName === "Unknown account" ? "" : displayName,
+                    );
+                    setRenameOpen(true);
+                  }}
+                >
+                  <Pencil className="size-4" />
+                  Rename
+                </DropdownMenuItem>
+                {showAgentAccess && (
+                  <DropdownMenuItem onClick={() => setAgentDialogOpen(true)}>
+                    <Users className="size-4" />
+                    Agent access
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={() => setConfirmOpen(true)}
+                  disabled={disconnectMutation.isPending}
+                  className="text-destructive focus:text-destructive"
+                >
+                  {disconnectMutation.isPending ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Unplug className="size-4" />
+                  )}
+                  {disconnectMutation.isPending
+                    ? "Disconnecting..."
+                    : "Disconnect"}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         </div>
+        {needsReconnect && (
+          <p className="text-xs text-muted-foreground">
+            {appName} rejected the saved login, so agents can&apos;t use this
+            account until you reconnect it. Agent access and rules are kept.
+          </p>
+        )}
 
         {showAgentAccess && (
           // A neutral opener: policy rules decide agent access, so a summary

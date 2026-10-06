@@ -423,7 +423,9 @@ export const claimDueWork = async (
         -- claim is the one atomic gate every start path crosses; compose can
         -- fail/release after it, and a later re-claim re-resets — idempotent.
         home_applied_generation = 0,
-        home_sync_claimed_at = NULL
+        home_sync_claimed_at = NULL,
+        -- A fresh boot is what a restart was waiting for (see the stop arm).
+        stop_requested_at = NULL
       FROM claimed c
       WHERE s.id = c.id
       RETURNING s.id, s.agent_id, s.container_ref
@@ -437,22 +439,36 @@ export const claimDueWork = async (
               SELECT s.id FROM sandboxes s
               WHERE s.runner_id = ${runnerId}
                 AND s.status = 'running'
-                AND s.last_active_at IS NOT NULL
-                AND s.last_active_at < ${idleBefore}
-                -- Never park a sandbox with work in flight. The idle column
-                -- alone is not enough: a model that thinks in silence for
-                -- longer than the idle window would have its container pulled
-                -- out from under it mid-answer.
-                AND NOT EXISTS (
-                  SELECT 1 FROM conversations c
-                  JOIN turns t ON t.conversation_id = c.id
-                  WHERE c.agent_id = s.agent_id
-                    AND t.status IN ('queued', 'dispatched', 'running')
+                AND (
+                  -- A RESTART: a person asked for this box to go, so it
+                  -- goes now, ahead of the idle window, keep-awake, and
+                  -- whatever it is doing (the restart already failed the
+                  -- turns it was running; a turn that raced onto it ends
+                  -- with it through the ordinary strand door). The flag
+                  -- stays set through the stop and is cleared by the next
+                  -- start claim, so nothing is dispatched to this boot and
+                  -- no session ref it reports is kept in the meantime.
+                  s.stop_requested_at IS NOT NULL
+                  OR (
+                    s.last_active_at IS NOT NULL
+                    AND s.last_active_at < ${idleBefore}
+                    -- Never park a sandbox with work in flight. The idle
+                    -- column alone is not enough: a model that thinks in
+                    -- silence for longer than the idle window would have
+                    -- its container pulled out from under it mid-answer.
+                    AND NOT EXISTS (
+                      SELECT 1 FROM conversations c
+                      JOIN turns t ON t.conversation_id = c.id
+                      WHERE c.agent_id = s.agent_id
+                        AND t.status IN ('queued', 'dispatched', 'running')
+                    )
+                    -- §3.9 keep-awake: live background work holds the box up
+                    -- (keepAwakeExists above — one definition, negated here).
+                    AND NOT ${keepAwakeExists()}
+                  )
                 )
-                -- §3.9 keep-awake: live background work holds the box up
-                -- (keepAwakeExists above — one definition, negated here).
-                AND NOT ${keepAwakeExists()}
-              ORDER BY s.last_active_at ASC
+              -- Someone is waiting on a restart; nobody is waiting on a park.
+              ORDER BY (s.stop_requested_at IS NULL), s.last_active_at ASC
               LIMIT ${remaining}
               FOR UPDATE OF s SKIP LOCKED
             )
@@ -723,6 +739,9 @@ export const claimDueWork = async (
     // Turns whose sandbox is actually up. A queued turn on a sleeping sandbox
     // waits here until the start arm has woken it and the supervisor reported
     // ready — which is why `createTurn` flips a stopped sandbox itself.
+    // A box awaiting its restart is not "up" for new work: its harness still
+    // holds the sessions the restart discarded, so the turn waits for the
+    // fresh boot (the start arm's EXISTS wakes it once the stop lands).
     const turns = await tx.$queryRaw<ClaimedTurnRow[]>`
       WITH claimed AS (
         SELECT t.id
@@ -731,6 +750,7 @@ export const claimDueWork = async (
         JOIN sandboxes s ON s.agent_id = c.agent_id
         WHERE s.runner_id = ${runnerId}
           AND s.status = 'running'
+          AND s.stop_requested_at IS NULL
           AND (
             t.status = 'queued'
             OR (t.status = 'dispatched' AND t.updated_at < ${staleDispatch})

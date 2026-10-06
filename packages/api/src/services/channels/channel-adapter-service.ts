@@ -208,6 +208,9 @@ export interface AdapterPresenceConfig {
     externalUserId: string | null;
     mirrorCursor: Date | null;
   }[];
+  /** The link the presence's tool-approval cards go to: the approver's own
+   * direct thread, or null when they have none (see approvalsLinkOf). */
+  approvalsLinkId: string | null;
 }
 
 export interface AdapterConfigFeed {
@@ -378,7 +381,7 @@ export const getAdapterConfig = async (
         select: { id: true, name: true, workspaceId: true, imageKey: true },
       },
       integration: { select: { externalId: true, name: true } },
-      apiKey: { select: { key: true } },
+      apiKey: { select: { key: true, userId: true } },
       threadLinks: {
         select: {
           id: true,
@@ -387,7 +390,15 @@ export const getAdapterConfig = async (
           kind: true,
           externalUserId: true,
           mirrorCursor: true,
+          conversation: { select: { direct: true, userId: true } },
         },
+        // Deterministic: an unordered relation read comes back in heap
+        // order, which moves every time a link row is rewritten (the mirror
+        // cursor does that per answer). The instance etag below folds link
+        // ids IN THIS ORDER, so a reshuffle would bust it on every mirrored
+        // turn. And an adapter that predates `approvalsLinkId` still picks
+        // "the first direct link" for its cards, which would flip threads.
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
       },
     },
     orderBy: { createdAt: "asc" },
@@ -425,6 +436,12 @@ export const getAdapterConfig = async (
                 l.id,
                 l.mirrorCursor?.toISOString() ?? "",
               ]),
+          // Where approval cards go is a feed output, and it can move with
+          // no other input changing: a link REPOINTED onto the approver's
+          // direct conversation (their Slack account linked after they
+          // first wrote as a guest) keeps its id, and the presence row is
+          // untouched.
+          approvalsLinkOf(r),
         ]),
       ]),
     )
@@ -464,11 +481,46 @@ export const getAdapterConfig = async (
         ? await decryptCached(row.credentials)
         : null,
       approvalsKey: row.apiKey?.key ?? null,
-      links: row.threadLinks,
+      links: row.threadLinks.map(({ conversation, ...link }) => {
+        void conversation;
+        return link;
+      }),
+      approvalsLinkId: approvalsLinkOf(row),
     })),
   );
 
   return { notModified: false, presences, etag };
+};
+
+/**
+ * The thread a presence's tool-approval cards go to: the APPROVER's own
+ * direct thread with the agent. The approver is the owner of the presence's
+ * service key: the identity the gateway decides approvals as. Only that
+ * person's direct conversation qualifies: a guest's DM (an approved external
+ * user talking to the agent) or another member's DM must never receive a
+ * card, since letting someone talk to the agent does not make them its
+ * approver. Null when there is no key (no approvals at all) or the approver
+ * has no DM with the agent yet. The approval stays decidable on the web, and
+ * a card posts once their DM is linked.
+ */
+const approvalsLinkOf = (row: {
+  apiKey: { userId: string } | null;
+  threadLinks: {
+    id: string;
+    kind: string;
+    conversation: { direct: boolean; userId: string | null };
+  }[];
+}): string | null => {
+  const approverId = row.apiKey?.userId;
+  if (!approverId) return null;
+  return (
+    row.threadLinks.find(
+      (l) =>
+        l.kind === "direct" &&
+        l.conversation.direct &&
+        l.conversation.userId === approverId,
+    )?.id ?? null
+  );
 };
 
 /**

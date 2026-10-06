@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useImperativeHandle,
   useRef,
   useState,
@@ -35,6 +36,7 @@ import { Switch } from "@onecli/ui/components/switch";
 import { cn } from "@onecli/ui/lib/utils";
 import { SecretInput } from "@/components/secret-input";
 import type { PageScope } from "@/lib/api";
+import type { OAuthConfigField } from "@onecli/api/apps/types";
 import {
   useAppConfigStatus,
   useSaveAppConfig,
@@ -43,6 +45,8 @@ import {
 } from "@/hooks/use-app-config";
 import { CloudUpsell } from "@/lib/components/cloud-upsell";
 import { RedirectUri } from "./redirect-uri";
+import { ConfigFieldOptions } from "./config-field-options";
+import { buildConfigPayload, resolveConfigValue } from "./config-field-values";
 
 export interface AppConfigFormHandle {
   /** Open the Custom credentials section, scroll it into view, and briefly highlight it. */
@@ -52,13 +56,7 @@ export interface AppConfigFormHandle {
 interface AppConfigFormProps {
   provider: string;
   appName: string;
-  fields: {
-    name: string;
-    label: string;
-    description?: string;
-    placeholder: string;
-    secret?: boolean;
-  }[];
+  fields: OAuthConfigField[];
   hint?: string;
   hasEnvDefaults: boolean;
   isConnected: boolean;
@@ -87,6 +85,9 @@ export const AppConfigForm = ({
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const wantScrollRef = useRef(false);
+  // Per-instance field ids: ConfigureCredentialsDialog renders the same
+  // fields on the same page, so a shared `config-…` id would collide.
+  const idPrefix = useId();
 
   const statusQuery = useAppConfigStatus(provider, pageScope);
   const saveMutation = useSaveAppConfig(provider, pageScope);
@@ -203,7 +204,7 @@ export const AppConfigForm = ({
 
   const doSave = async () => {
     try {
-      await saveMutation.mutateAsync(values);
+      await saveMutation.mutateAsync(buildConfigPayload(fields, values));
       toast.success("Credentials saved");
     } catch {
       toast.error("Failed to save credentials");
@@ -312,47 +313,65 @@ export const AppConfigForm = ({
               <Switch checked={enabled} onCheckedChange={handleToggle} />
             </div>
 
-            {fields.map((field) => (
-              <div key={field.name} className="grid gap-1.5">
-                <Label htmlFor={`config-${field.name}`}>{field.label}</Label>
-                {field.description && (
-                  <p className="text-xs text-muted-foreground">
-                    {field.description}
-                  </p>
-                )}
-                {field.secret ? (
-                  <SecretInput
-                    id={`config-${field.name}`}
-                    value={values[field.name] ?? ""}
-                    onChange={(e) =>
-                      setValues((prev) => ({
-                        ...prev,
-                        [field.name]: e.target.value,
-                      }))
-                    }
-                    placeholder={
-                      hasCredentials
-                        ? "Leave empty to keep current"
-                        : field.placeholder
-                    }
-                  />
-                ) : (
-                  <Input
-                    id={`config-${field.name}`}
-                    type="text"
-                    value={values[field.name] ?? ""}
-                    onChange={(e) =>
-                      setValues((prev) => ({
-                        ...prev,
-                        [field.name]: e.target.value,
-                      }))
-                    }
-                    placeholder={field.placeholder}
-                    className="font-mono text-sm"
-                  />
-                )}
-              </div>
-            ))}
+            {fields.map((field) => {
+              const inputId = `${idPrefix}-${field.name}`;
+              const labelId = `${inputId}-label`;
+              return (
+                <div key={field.name} className="grid gap-1.5">
+                  <Label
+                    id={labelId}
+                    htmlFor={field.options ? undefined : inputId}
+                  >
+                    {field.label}
+                  </Label>
+                  {field.description && (
+                    <p className="text-xs text-muted-foreground">
+                      {field.description}
+                    </p>
+                  )}
+                  {field.options ? (
+                    <ConfigFieldOptions
+                      labelId={labelId}
+                      options={field.options}
+                      value={resolveConfigValue(field, values)}
+                      onChange={(value) =>
+                        setValues((prev) => ({ ...prev, [field.name]: value }))
+                      }
+                    />
+                  ) : field.secret ? (
+                    <SecretInput
+                      id={inputId}
+                      value={values[field.name] ?? ""}
+                      onChange={(e) =>
+                        setValues((prev) => ({
+                          ...prev,
+                          [field.name]: e.target.value,
+                        }))
+                      }
+                      placeholder={
+                        hasCredentials
+                          ? "Leave empty to keep current"
+                          : field.placeholder
+                      }
+                    />
+                  ) : (
+                    <Input
+                      id={inputId}
+                      type="text"
+                      value={values[field.name] ?? ""}
+                      onChange={(e) =>
+                        setValues((prev) => ({
+                          ...prev,
+                          [field.name]: e.target.value,
+                        }))
+                      }
+                      placeholder={field.placeholder}
+                      className="font-mono text-sm"
+                    />
+                  )}
+                </div>
+              );
+            })}
 
             <RedirectUri provider={provider} />
 

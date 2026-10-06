@@ -3,6 +3,7 @@
 import { useState } from "react";
 import {
   MoreHorizontal,
+  RefreshCcw,
   RotateCw,
   Trash2,
   KeyRound,
@@ -41,6 +42,7 @@ import {
   useDeleteAgent,
   useRegenerateToken,
   useRenameAgent,
+  useRestartAgent,
 } from "@/hooks/use-agents";
 import { providerLabel } from "@/lib/agents/channel-provider-ui";
 
@@ -64,6 +66,9 @@ interface AgentActionsMenuProps {
   agent: {
     id: string;
     name: string;
+    /** "hosted" agents get "Restart agent": only they have a computer and
+     * conversations to restart. Prisma types the column as `string`. */
+    kind: string;
     /** Attached channel presences — deletion removes these from the
      * customer's workspace, so the confirmation names them. */
     channels?: {
@@ -93,7 +98,9 @@ export const AgentActionsMenu = ({
   const deleteMutation = useDeleteAgent();
   const regenerateMutation = useRegenerateToken();
   const renameMutation = useRenameAgent();
+  const restartMutation = useRestartAgent();
   const [rotateDialogOpen, setRotateDialogOpen] = useState(false);
+  const [restartDialogOpen, setRestartDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [newName, setNewName] = useState("");
@@ -115,6 +122,11 @@ export const AgentActionsMenu = ({
     });
 
   const handleRegenerate = () => regenerateMutation.mutate(agent.id);
+
+  const handleRestart = () =>
+    restartMutation.mutate(agent.id, {
+      onSuccess: () => setRestartDialogOpen(false),
+    });
 
   const handleDelete = () =>
     deleteMutation.mutate(agent.id, { onSuccess: () => onDeleted?.() });
@@ -160,6 +172,12 @@ export const AgentActionsMenu = ({
             <RotateCw className="size-4" />
             Rotate token
           </DropdownMenuItem>
+          {agent.kind === "hosted" && (
+            <DropdownMenuItem onSelect={() => setRestartDialogOpen(true)}>
+              <RefreshCcw className="size-4" />
+              Restart agent
+            </DropdownMenuItem>
+          )}
           <DropdownMenuSeparator />
           <DropdownMenuItem
             variant="destructive"
@@ -188,6 +206,48 @@ export const AgentActionsMenu = ({
               disabled={regenerateMutation.isPending}
             >
               {regenerateMutation.isPending ? "Rotating..." : "Rotate"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={restartDialogOpen} onOpenChange={setRestartDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Restart agent?</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3">
+                <p>
+                  <strong>{agent.name}</strong> starts fresh in every
+                  conversation, in the dashboard
+                  {channels
+                    .map((c) => ` and in ${providerLabel(c.provider)}`)
+                    .join("")}
+                  . The chat history stays visible, but the agent won&apos;t
+                  remember it.
+                </p>
+                <p>
+                  Anything it&apos;s working on stops now, including background
+                  processes and open SSH sessions. Your next message starts it
+                  again.
+                </p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={restartMutation.isPending}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                // Close on success only: a failed restart leaves the dialog
+                // up, so the person sees it did not happen.
+                e.preventDefault();
+                handleRestart();
+              }}
+              disabled={restartMutation.isPending}
+            >
+              {restartMutation.isPending ? "Restarting..." : "Restart"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

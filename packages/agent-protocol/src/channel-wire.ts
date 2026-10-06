@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { APPROVAL_GROUP_ID_RE, APPROVAL_GROUP_MAX_IDS } from "@onecli/channels";
 
 /**
  * The CHANNEL-ADAPTER ↔ control-plane wire (hosted-agents v2 step 6).
@@ -81,6 +82,18 @@ export const adapterPresenceSchema = z.object({
   /** The gateway approvals key for this presence. */
   approvalsKey: z.string().nullable(),
   links: z.array(adapterLinkSchema),
+  /**
+   * Where this presence's tool-approval cards go: the id of the link to the
+   * approver's OWN direct thread (the owner of the presence's service key,
+   * the identity the approvals are decided as). Never a guest's DM or a
+   * group thread: a guest can be allowed to TALK to the agent without being
+   * able to approve what it does. Null = the approver has no DM with the
+   * agent yet, so no card is posted (the approval stays decidable on the
+   * web).
+   * Optional: an older control plane never sends it, and the adapter then
+   * keeps its legacy first-direct-link behavior.
+   */
+  approvalsLinkId: z.string().nullable().optional(),
 });
 export type AdapterPresence = z.infer<typeof adapterPresenceSchema>;
 
@@ -151,9 +164,10 @@ export const adapterWorkItemSchema = z.object({
   /**
    * Mid-run follow-ups this turn CONSUMED (`joined`), oldest first. The
    * mirror posts the web-sourced ones ahead of the answer so the provider
-   * thread shows the same exchange the web does; provider-sourced ones are
-   * already in the channel. Optional: an older control plane simply never
-   * sends it.
+   * thread shows the same exchange the web does (an automation's, i.e. a
+   * wake that joined a running wake, as its caption, never as a person's
+   * words); provider-sourced ones are already in the channel. Optional: an
+   * older control plane simply never sends it.
    */
   followUps: z
     .array(
@@ -267,6 +281,39 @@ export const adapterDecisionResponseSchema = z.discriminatedUnion("kind", [
 ]);
 export type AdapterDecisionResponse = z.infer<
   typeof adapterDecisionResponseSchema
+>;
+
+/** A grouped card's click: Approve all / Deny all, or one row. The ids are
+ *  exactly the rows the card showed, in the shared grouped-approval id shape
+ *  and cap (@onecli/channels approval-group); the control plane refuses the
+ *  whole click unless every id is one of THIS presence's posted cards. */
+export const adapterGroupDecisionRequestSchema = z.object({
+  presenceId: z.string().min(1),
+  approvalIds: z
+    .array(z.string().regex(APPROVAL_GROUP_ID_RE))
+    .min(1)
+    .max(APPROVAL_GROUP_MAX_IDS),
+  decision: z.enum(["approve", "deny"]),
+  clickerExternalUserId: z.string().min(1).max(200),
+});
+export type AdapterGroupDecisionRequest = z.infer<
+  typeof adapterGroupDecisionRequestSchema
+>;
+
+export const adapterGroupDecisionResponseSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("decided"),
+    decidedByName: z.string(),
+    decided: z.array(z.string()),
+    alreadySettled: z.array(z.string()),
+    /** Still pending (the gateway call failed): the card keeps them. */
+    failed: z.array(z.string()),
+  }),
+  z.object({ kind: z.literal("refused"), message: z.string() }),
+  z.object({ kind: z.literal("unavailable"), message: z.string() }),
+]);
+export type AdapterGroupDecisionResponse = z.infer<
+  typeof adapterGroupDecisionResponseSchema
 >;
 
 // ── Reach grants (space grants: "answer everyone in this channel") ─────────

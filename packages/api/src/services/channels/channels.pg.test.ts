@@ -3264,18 +3264,24 @@ describe.skipIf(!PROOF_URL)("detachPresence", () => {
 describe.skipIf(!PROOF_URL)(
   "a presence REMOVED on the provider side (app_uninstalled / tokens_revoked)",
   () => {
+    const generationOf = async (agentId: string) =>
+      (
+        await db.sandbox.findFirst({
+          where: { agentId },
+          select: { homeDesiredGeneration: true },
+        })
+      )?.homeDesiredGeneration;
+
     const seedActivated = async (suffix: string) => {
       const agentId = await seedAgent(suffix);
-      scriptAuthTest();
-      const presence = await agentChannels.completePresence(
-        WORKSPACE,
-        agentId,
-        "slack",
-        { botToken: "xoxb-d", appToken: "xapp-d", appId: `A-${suffix}` },
-        ADMIN,
-      );
       // A RUNNING sandbox, so the home bump has something to move: the
       // generation counter is how a live agent learns its doc changed.
+      // Created BEFORE the activation on purpose: `completePresence`
+      // re-renders the home fire-and-forget, and with the sandbox already
+      // there that bump always lands (1 → 2). Creating it after left the
+      // order to the scheduler — the bump found no sandbox on an idle
+      // machine and a sandbox under CI load — so a test counting later
+      // bumps against a literal baseline flaked.
       await db.sandbox.create({
         data: {
           agentId,
@@ -3284,16 +3290,19 @@ describe.skipIf(!PROOF_URL)(
           homeDesiredGeneration: 1,
         },
       });
+      scriptAuthTest();
+      const presence = await agentChannels.completePresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        { botToken: "xoxb-d", appToken: "xapp-d", appId: `A-${suffix}` },
+        ADMIN,
+      );
+      // Settle the activation's own bump, so each test starts from a known
+      // generation and measures only the bumps it causes.
+      await vi.waitFor(async () => expect(await generationOf(agentId)).toBe(2));
       return { agentId, presence };
     };
-
-    const generationOf = async (agentId: string) =>
-      (
-        await db.sandbox.findFirst({
-          where: { agentId },
-          select: { homeDesiredGeneration: true },
-        })
-      )?.homeDesiredGeneration;
 
     it("ATTACHING to an agent whose sandbox is RUNNING re-renders its home — the attach-while-awake path (dev incident, 2026-09-15)", async () => {
       // The user's dev walk: the agent's session was awake first, Slack was
@@ -3435,10 +3444,13 @@ describe.skipIf(!PROOF_URL)(
 
     it("is idempotent across Slack's unordered pair, and never touches a presence the owner already detached", async () => {
       const { agentId, presence } = await seedActivated("removed-twice");
+      const before = await generationOf(agentId);
       await agentChannels.markPresenceRemoved(presence.id, "tokens_revoked");
+      // Exactly one bump for the first arrival (the fire-and-forget re-render:
+      // settle it before measuring).
       const generationAfterFirst = await vi.waitFor(async () => {
         const generation = await generationOf(agentId);
-        expect(generation).toBe(2);
+        expect(generation).toBe((before ?? 0) + 1);
         return generation;
       });
       // The second arrival changes nothing: no second bump, no throw.
@@ -5323,6 +5335,202 @@ describe.skipIf(!PROOF_URL)("registerAdapter (the per-instance mint)", () => {
     expect(
       await db.channelAdapter.count({ where: { id: staleAnchor.id } }),
     ).toBe(1);
+  });
+});
+
+describe.skipIf(!PROOF_URL)("approval cards' home (approvalsLinkId)", () => {
+  /** A channel agent whose approvals key belongs to `approver`: the
+   * identity the gateway decides as, so the one whose DM gets the cards.
+   * The presence itself is always created by ADMIN. */
+  const seedApprovedPresence = async (suffix: string, approver: string) => {
+    const seeded = await seedChannelAgent(suffix);
+    const key = await apiKeys.createServiceApiKey(
+      approver,
+      { workspaceId: WORKSPACE },
+      `${P}${suffix}`,
+    );
+    await db.agentChannel.update({
+      where: { id: seeded.presenceId },
+      data: { apiKeyId: key.id },
+    });
+    return seeded;
+  };
+
+  /** A direct link on the presence: a member's own direct conversation
+   * (`dmOwner`), or a guest's sourced, non-direct one (null). `createdAt`
+   * is explicit so creation order never rides a same-millisecond tie. */
+  const seedLink = async (
+    agentId: string,
+    presenceId: string,
+    thread: string,
+    dmOwner: string | null,
+    createdAt?: Date,
+  ) => {
+    const conversation = await db.conversation.create({
+      data: dmOwner
+        ? { agentId, source: "slack", direct: true, userId: dmOwner }
+        : { agentId, source: "slack", externalRef: thread },
+      select: { id: true },
+    });
+    return db.channelThreadLink.create({
+      data: {
+        agentChannelId: presenceId,
+        conversationId: conversation.id,
+        externalThreadId: thread,
+        kind: "direct",
+        externalUserId: dmOwner ? `U-${thread}` : null,
+        ...(createdAt && { createdAt }),
+      },
+      select: { id: true },
+    });
+  };
+
+  /** One adapter caller per test: a second live caller would halve the
+   * fair share and move presences between slices mid-test. */
+  const feedReader = async () => {
+    const caller = await seedAdapterCaller("instance");
+    return async (presenceId: string) => {
+      const cfg = await adapters.getAdapterConfig(caller);
+      if (cfg.notModified) throw new Error("unreachable");
+      const presence = cfg.presences.find((p) => p.presenceId === presenceId);
+      if (!presence) throw new Error("presence missing from the feed");
+      return { presence, etag: cfg.etag };
+    };
+  };
+
+  it("names the approver's own DM, never a guest's or another member's", async () => {
+    // The incident: the owner let a guest talk to the agent, and cards then
+    // followed the link order into the guest's DM, where they expired.
+    const { agentId, presenceId } = await seedApprovedPresence(
+      "home-owner",
+      ADMIN,
+    );
+    await seedLink(agentId, presenceId, "D-guest", null);
+    await seedLink(agentId, presenceId, "D-member", MEMBER);
+    const owner = await seedLink(agentId, presenceId, "D-owner", ADMIN);
+
+    const { presence } = await (await feedReader())(presenceId);
+
+    expect(presence.approvalsLinkId).toBe(owner.id);
+    // The feed's link shape is unchanged (no conversation leaks onto it).
+    expect(Object.keys(presence.links[0]!).sort()).toEqual([
+      "conversationId",
+      "externalThreadId",
+      "externalUserId",
+      "id",
+      "kind",
+      "mirrorCursor",
+    ]);
+  });
+
+  it("keeps links in creation order across a mirror-cursor rewrite, so the instance etag holds", async () => {
+    // MUTATION-TESTED: drop the threadLinks `orderBy` and the rewritten row
+    // comes back last (heap order), which fails both the order and the
+    // unchanged etag.
+    // Thread ids sort against creation order, so the unique index's order
+    // cannot stand in for it either.
+    const { agentId, presenceId } = await seedApprovedPresence(
+      "home-order",
+      ADMIN,
+    );
+    const base = Date.now() - 60_000;
+    const first = await seedLink(
+      agentId,
+      presenceId,
+      "D-3",
+      null,
+      new Date(base),
+    );
+    const second = await seedLink(
+      agentId,
+      presenceId,
+      "D-2",
+      MEMBER,
+      new Date(base + 1_000),
+    );
+    const third = await seedLink(
+      agentId,
+      presenceId,
+      "D-1",
+      ADMIN,
+      new Date(base + 2_000),
+    );
+    const read = await feedReader();
+    const before = await read(presenceId);
+
+    expect(await adapters.advanceMirrorCursor(first.id, null, new Date())).toBe(
+      true,
+    );
+    const after = await read(presenceId);
+
+    expect(after.presence.links.map((l) => l.id)).toEqual([
+      first.id,
+      second.id,
+      third.id,
+    ]);
+    expect(after.etag).toBe(before.etag);
+  });
+
+  it("is null when only a guest has a DM: no card in someone else's thread", async () => {
+    const { agentId, presenceId } = await seedApprovedPresence(
+      "home-guest-only",
+      ADMIN,
+    );
+    await seedLink(agentId, presenceId, "D-guest-only", null);
+
+    const { presence } = await (await feedReader())(presenceId);
+    expect(presence.approvalsLinkId).toBeNull();
+  });
+
+  it("follows the service key's owner, never the presence's creator", async () => {
+    const { agentId, presenceId } = await seedApprovedPresence(
+      "home-key-owner",
+      MEMBER,
+    );
+    await seedLink(agentId, presenceId, "D-creator", ADMIN);
+    const keyOwner = await seedLink(agentId, presenceId, "D-keyowner", MEMBER);
+
+    const { presence } = await (await feedReader())(presenceId);
+    expect(presence.approvalsLinkId).toBe(keyOwner.id);
+  });
+
+  it("is null without a service key, even when the creator has a DM", async () => {
+    // No key means no approvals loop at all, so there is no approver whose
+    // DM could hold a card.
+    const { agentId, presenceId } = await seedChannelAgent("home-no-key");
+    await seedLink(agentId, presenceId, "D-no-key", ADMIN);
+
+    const { presence } = await (await feedReader())(presenceId);
+    expect(presence.approvalsLinkId).toBeNull();
+  });
+
+  it("a guest link repointed onto the approver's DM busts the etag and becomes the home", async () => {
+    // The approver first wrote before their Slack account was linked (a
+    // guest DM); once linked, the ingest door repoints the SAME link row at
+    // their direct conversation. Link ids and the presence row are
+    // unchanged, so only the approvalsLinkId fold can bust the etag.
+    // MUTATION-TESTED: drop that fold and the etag stays the same.
+    const { agentId, presenceId } = await seedApprovedPresence(
+      "home-repoint",
+      ADMIN,
+    );
+    const link = await seedLink(agentId, presenceId, "D-repoint", null);
+    const read = await feedReader();
+    const before = await read(presenceId);
+    expect(before.presence.approvalsLinkId).toBeNull();
+
+    const direct = await db.conversation.create({
+      data: { agentId, source: "slack", direct: true, userId: ADMIN },
+      select: { id: true },
+    });
+    await db.channelThreadLink.update({
+      where: { id: link.id },
+      data: { conversationId: direct.id },
+    });
+    const after = await read(presenceId);
+
+    expect(after.etag).not.toBe(before.etag);
+    expect(after.presence.approvalsLinkId).toBe(link.id);
   });
 });
 
@@ -8207,6 +8415,238 @@ describe.skipIf(!PROOF_URL)("decideApprovalFromChannel", () => {
 
     expect(result.kind).toBe("unavailable");
     expect(gatewayCalls).toHaveLength(0);
+  });
+
+  // ── Grouped cards: Approve all / Deny all ────────────────────────────────
+
+  const seedGroup = async (suffix: string, extra: number) => {
+    const seeded = await seedApprovable(suffix);
+    const ids = [seeded.approvalId];
+    for (let i = 0; i < extra; i++) {
+      const approvalId = `ap-${suffix}-${i}`;
+      await db.toolApprovalCard.create({
+        data: {
+          approvalId,
+          agentChannelId: seeded.presenceId,
+          externalThreadId: "D1",
+          externalMessageRef: "169.1",
+        },
+      });
+      ids.push(approvalId);
+    }
+    return { ...seeded, ids };
+  };
+
+  it("Approve all decides EVERY shown id with the service key and audits each", async () => {
+    const { presenceId, ids, agentId } = await seedGroup("grp", 2);
+
+    const result = await approvals.decideApprovalsFromChannel({
+      presenceId,
+      approvalIds: ids,
+      decision: "approve",
+      clickerExternalUserId: "U111",
+    });
+
+    expect(result).toEqual({
+      kind: "decided",
+      decidedByName: "Morgan Member",
+      decided: ids,
+      alreadySettled: [],
+      failed: [],
+    });
+    expect(gatewayCalls.map((c) => c.path).sort()).toEqual(
+      ids.map((id) => `/v1/approvals/${id}/decision`).sort(),
+    );
+    for (const call of gatewayCalls) {
+      expect(call.auth).toBe(`Bearer ${SERVICE_KEY}`);
+    }
+    // One audit row PER approval, each naming the clicker.
+    const audits = await db.auditLog.findMany({
+      where: { workspaceId: WORKSPACE, service: "channel", action: "approve" },
+    });
+    expect(audits).toHaveLength(ids.length);
+    for (const audit of audits) {
+      expect(audit.userId).toBe(MEMBER);
+      expect(audit.metadata).toMatchObject({
+        agentId,
+        presenceId,
+        groupSize: ids.length,
+      });
+    }
+    const cards = await db.toolApprovalCard.findMany({
+      where: { approvalId: { in: ids } },
+    });
+    expect(cards.every((c) => c.state === "decided")).toBe(true);
+  });
+
+  it("REFUSES the WHOLE click when one id belongs to another agent's or org's presence", async () => {
+    // MUTATION-TESTED: the agentChannelId fence. A signed payload can carry
+    // any id; drop the fence and a click on agent A's card decides agent B's
+    // pending request with A's service key.
+    const { presenceId, ids } = await seedGroup("fence", 1);
+    const other = await seedChannelAgent("fence-other");
+    // The cross-tenant control: a card a FOREIGN org's presence posted.
+    const foreignAgent = await db.agent.create({
+      data: {
+        workspaceId: OTHER_WORKSPACE,
+        name: "foreign",
+        identifier: `${P}fence-foreign`,
+        accessToken: `aoc_${P}fence-foreign`,
+        kind: "hosted",
+        harness: "fake",
+      },
+      select: { id: true },
+    });
+    const foreignIntegration = await seedIntegration({
+      organizationId: OTHER_ORG,
+      externalId: "T999",
+    });
+    const foreignPresence = await seedPresence(
+      foreignAgent.id,
+      foreignIntegration.id,
+    );
+    for (const [approvalId, agentChannelId] of [
+      ["ap-planted", other.presenceId],
+      ["ap-foreign", foreignPresence.id],
+    ] as const) {
+      await db.toolApprovalCard.create({
+        data: {
+          approvalId,
+          agentChannelId,
+          externalThreadId: "D2",
+          externalMessageRef: "170.1",
+        },
+      });
+    }
+
+    for (const planted of ["ap-planted", "ap-foreign", "ap-never-posted"]) {
+      const result = await approvals.decideApprovalsFromChannel({
+        presenceId,
+        approvalIds: [...ids, planted],
+        decision: "approve",
+        clickerExternalUserId: "U111",
+      });
+      expect(result.kind).toBe("refused");
+    }
+    // Nothing was decided: not the planted ids, not even the legitimate ones.
+    expect(gatewayCalls).toHaveLength(0);
+    expect(
+      await db.auditLog.count({
+        where: {
+          workspaceId: { in: [WORKSPACE, OTHER_WORKSPACE] },
+          service: "channel",
+        },
+      }),
+    ).toBe(0);
+    expect(
+      await db.toolApprovalCard.count({
+        where: {
+          approvalId: { in: ["ap-planted", "ap-foreign", ...ids] },
+          state: "decided",
+        },
+      }),
+    ).toBe(0);
+  });
+
+  it("REFUSES an unlinked clicker before the gateway is asked anything", async () => {
+    const { presenceId, ids } = await seedGroup("grp-stranger", 1);
+    const result = await approvals.decideApprovalsFromChannel({
+      presenceId,
+      approvalIds: ids,
+      decision: "approve",
+      clickerExternalUserId: "U999",
+    });
+    expect(result.kind).toBe("refused");
+    expect(gatewayCalls).toHaveLength(0);
+  });
+
+  it("refuses an oversized click outright", async () => {
+    const { presenceId } = await seedGroup("grp-big", 0);
+    const result = await approvals.decideApprovalsFromChannel({
+      presenceId,
+      approvalIds: Array.from({ length: 51 }, (_, i) => `ap-x${i}`),
+      decision: "approve",
+      clickerExternalUserId: "U111",
+    });
+    expect(result.kind).toBe("refused");
+    expect(gatewayCalls).toHaveLength(0);
+  });
+
+  it("splits settled and FAILED ids; a failed one stays pending", async () => {
+    const { presenceId, ids } = await seedGroup("grp-mixed", 2);
+    const [ok, gone, broken] = ids;
+    gatewayRespond = (call) =>
+      call.path.includes(`/${gone}/`)
+        ? { status: 410, body: {} }
+        : call.path.includes(`/${broken}/`)
+          ? { status: 500, body: {} }
+          : { status: 200, body: { success: true } };
+
+    const result = await approvals.decideApprovalsFromChannel({
+      presenceId,
+      approvalIds: ids,
+      decision: "deny",
+      clickerExternalUserId: "U111",
+    });
+
+    expect(result).toMatchObject({
+      kind: "decided",
+      decided: [ok],
+      alreadySettled: [gone],
+      failed: [broken],
+    });
+    expect(
+      (
+        await db.toolApprovalCard.findUniqueOrThrow({
+          where: { approvalId: broken! },
+        })
+      ).state,
+    ).not.toBe("decided");
+    expect(
+      await db.auditLog.count({
+        where: { workspaceId: WORKSPACE, service: "channel", action: "deny" },
+      }),
+    ).toBe(1);
+  });
+
+  it("a refused service key mid-click still records what the gateway DID decide", async () => {
+    // The gateway answers per id: some may already be decided when another
+    // comes back 401. Those decisions happened, so each keeps its audit row
+    // (the clicker's attribution) and its settled card; only then does the
+    // presence flip and the click answer "unavailable".
+    const { presenceId, ids } = await seedGroup("grp-401", 1);
+    const [ok, refused] = ids;
+    gatewayRespond = (call) =>
+      call.path.includes(`/${refused}/`)
+        ? { status: 401, body: {} }
+        : { status: 200, body: { success: true } };
+
+    const result = await approvals.decideApprovalsFromChannel({
+      presenceId,
+      approvalIds: ids,
+      decision: "approve",
+      clickerExternalUserId: "U111",
+    });
+
+    expect(result.kind).toBe("unavailable");
+    const audits = await db.auditLog.findMany({
+      where: { workspaceId: WORKSPACE, service: "channel", action: "approve" },
+    });
+    expect(audits.map((a) => a.metadata)).toEqual([
+      expect.objectContaining({ approvalId: ok }),
+    ]);
+    expect(audits[0]?.userId).toBe(MEMBER);
+    const cards = await db.toolApprovalCard.findMany({
+      where: { approvalId: { in: ids } },
+      select: { approvalId: true, state: true },
+    });
+    expect(
+      Object.fromEntries(cards.map((c) => [c.approvalId, c.state])),
+    ).toEqual({ [ok!]: "decided", [refused!]: "pending" });
+    expect(
+      (await db.agentChannel.findUniqueOrThrow({ where: { id: presenceId } }))
+        .status,
+    ).toBe("needs_attention");
   });
 });
 

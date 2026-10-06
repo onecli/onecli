@@ -64,6 +64,73 @@ describe("unified app registry", () => {
   });
 });
 
+describe("configurable field definitions", () => {
+  // Both config surfaces (the setup dialog and the app page's "Custom
+  // credentials" form) render these without validation of their own: an
+  // `options` field becomes a segmented control whose default is submitted
+  // untouched. A default outside the options, or a duplicate value, would be
+  // a silent mis-save; a text field with no placeholder renders an unlabeled
+  // empty box.
+  const configurableApps = getApps().filter((a) => a.configurable);
+
+  it("options fields are well-formed and their default is one of the options", () => {
+    for (const app of configurableApps) {
+      for (const field of app.configurable!.fields) {
+        const where = `${app.id}.${field.name}`;
+        if (field.options) {
+          expect(field.options.length, where).toBeGreaterThan(1);
+          const values = field.options.map((o) => o.value);
+          expect(new Set(values).size, where).toBe(values.length);
+          for (const option of field.options) {
+            expect(option.value.trim(), where).not.toBe("");
+            expect(option.label.trim(), where).not.toBe("");
+          }
+          if (field.defaultValue !== undefined) {
+            expect(values, where).toContain(field.defaultValue);
+          }
+          // Nothing reads it when options render, so leaving one is dead data.
+          expect(field.placeholder, where).toBeUndefined();
+        } else {
+          expect(field.defaultValue, where).toBeUndefined();
+          expect(field.placeholder?.trim(), where).toBeTruthy();
+        }
+      }
+    }
+  });
+
+  it("setup guide links point at our own docs over https", () => {
+    for (const app of configurableApps) {
+      const url = app.configurable!.setupGuideUrl;
+      if (url === undefined) continue;
+      expect(url, app.id).toMatch(
+        /^https:\/\/onecli\.sh\/docs\/integrations\//,
+      );
+    }
+  });
+});
+
+describe("connect notes", () => {
+  // The connect window renders these verbatim and opens the link in a new
+  // tab, so an empty line would be a blank box and a foreign URL would send
+  // the user off our docs from inside our own popup.
+  it("have non-empty lines and link only at our own docs over https", () => {
+    for (const app of getApps()) {
+      const note = app.connectNote;
+      if (!note) continue;
+      expect(note.text.trim(), app.id).toBeTruthy();
+      if (note.fallback !== undefined) {
+        expect(note.fallback.trim(), app.id).toBeTruthy();
+      }
+      if (note.link) {
+        expect(note.link.label.trim(), app.id).toBeTruthy();
+        expect(note.link.url, app.id).toMatch(
+          /^https:\/\/onecli\.sh\/docs\/integrations\//,
+        );
+      }
+    }
+  });
+});
+
 describe("Slack is a channel, not a gateway app (plans/channel-aware-agents.md)", () => {
   // An agent's Slack access is its own Slack app (agent_channels); the
   // gateway never injects Slack credentials. The registry is the one source

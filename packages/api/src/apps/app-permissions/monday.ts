@@ -1,5 +1,13 @@
 import type { AppPermissionDefinition } from "./types";
 
+// Monday's API is a single GraphQL endpoint (POST /v2). Every read tool is
+// tagged `graphqlOps: "query"` and every write tool `"mutation"`, so the
+// fail-closed body classifier discriminates them: read rows match only
+// provably pure query documents; write rows govern everything else. Without
+// the tags all ten rows were the same request, so a rule naming only the
+// write tools also decided every read. Within a kind the tools remain aliases
+// of the same endpoint (allowing one read tool allows all reads).
+
 export const mondayPermissions: AppPermissionDefinition = {
   provider: "monday",
   groups: [
@@ -13,6 +21,7 @@ export const mondayPermissions: AppPermissionDefinition = {
           hostPattern: "api.monday.com",
           pathPattern: "/v2",
           method: "POST",
+          graphqlOps: "query",
         },
         {
           id: "query_users",
@@ -21,6 +30,7 @@ export const mondayPermissions: AppPermissionDefinition = {
           hostPattern: "api.monday.com",
           pathPattern: "/v2",
           method: "POST",
+          graphqlOps: "query",
         },
         {
           id: "query_docs",
@@ -29,6 +39,7 @@ export const mondayPermissions: AppPermissionDefinition = {
           hostPattern: "api.monday.com",
           pathPattern: "/v2",
           method: "POST",
+          graphqlOps: "query",
         },
         {
           id: "query_updates",
@@ -37,6 +48,7 @@ export const mondayPermissions: AppPermissionDefinition = {
           hostPattern: "api.monday.com",
           pathPattern: "/v2",
           method: "POST",
+          graphqlOps: "query",
         },
         {
           id: "query_workspaces",
@@ -45,6 +57,7 @@ export const mondayPermissions: AppPermissionDefinition = {
           hostPattern: "api.monday.com",
           pathPattern: "/v2",
           method: "POST",
+          graphqlOps: "query",
         },
       ],
     },
@@ -58,6 +71,7 @@ export const mondayPermissions: AppPermissionDefinition = {
           hostPattern: "api.monday.com",
           pathPattern: "/v2",
           method: "POST",
+          graphqlOps: "mutation",
         },
         {
           id: "mutate_docs",
@@ -66,6 +80,7 @@ export const mondayPermissions: AppPermissionDefinition = {
           hostPattern: "api.monday.com",
           pathPattern: "/v2",
           method: "POST",
+          graphqlOps: "mutation",
         },
         {
           id: "mutate_updates",
@@ -74,6 +89,7 @@ export const mondayPermissions: AppPermissionDefinition = {
           hostPattern: "api.monday.com",
           pathPattern: "/v2",
           method: "POST",
+          graphqlOps: "mutation",
         },
         {
           id: "manage_webhooks",
@@ -82,6 +98,7 @@ export const mondayPermissions: AppPermissionDefinition = {
           hostPattern: "api.monday.com",
           pathPattern: "/v2",
           method: "POST",
+          graphqlOps: "mutation",
         },
         {
           id: "send_notifications",
@@ -90,6 +107,7 @@ export const mondayPermissions: AppPermissionDefinition = {
           hostPattern: "api.monday.com",
           pathPattern: "/v2",
           method: "POST",
+          graphqlOps: "mutation",
         },
       ],
     },

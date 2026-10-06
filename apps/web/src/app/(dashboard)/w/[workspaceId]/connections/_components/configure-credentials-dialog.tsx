@@ -1,10 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import { toast } from "sonner";
+import { ExternalLink } from "lucide-react";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@onecli/ui/components/dialog";
@@ -18,6 +20,8 @@ import type { OAuthConfigField } from "@onecli/api/apps/types";
 import { CloudUpsell } from "@/lib/components/cloud-upsell";
 import { AppIcon } from "@/lib/components/app-icon";
 import { RedirectUri } from "./redirect-uri";
+import { ConfigFieldOptions } from "./config-field-options";
+import { buildConfigPayload, resolveConfigValue } from "./config-field-values";
 
 interface ConfigureCredentialsDialogProps {
   provider: string;
@@ -26,6 +30,8 @@ interface ConfigureCredentialsDialogProps {
   appDarkIcon?: string;
   fields: OAuthConfigField[];
   hint?: string;
+  /** The provider's step-by-step guide on onecli.sh (`configurable.setupGuideUrl`). */
+  setupGuideUrl?: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onConfigured: () => void;
@@ -39,22 +45,27 @@ export const ConfigureCredentialsDialog = ({
   appDarkIcon,
   fields,
   hint,
+  setupGuideUrl,
   open,
   onOpenChange,
   onConfigured,
   pageScope = "workspace",
 }: ConfigureCredentialsDialogProps) => {
   const [values, setValues] = useState<Record<string, string>>({});
+  // Field ids are prefixed per instance: the app page mounts this dialog next
+  // to AppConfigForm, which renders the same fields, and a shared `config-…`
+  // id would point every label at whichever element came first in the DOM.
+  const idPrefix = useId();
   const saveMutation = useSaveAppConfig(provider, pageScope);
   const saving = saveMutation.isPending;
 
-  const allFilled = fields.every((f) => !!values[f.name]?.trim());
+  const allFilled = fields.every((f) => !!resolveConfigValue(f, values).trim());
 
   const handleSave = async () => {
     if (!allFilled) return;
     try {
       // upsertAppConfig enables the config on save — no separate toggle call.
-      await saveMutation.mutateAsync(values);
+      await saveMutation.mutateAsync(buildConfigPayload(fields, values));
       setValues({});
       onConfigured();
     } catch {
@@ -72,58 +83,87 @@ export const ConfigureCredentialsDialog = ({
             </div>
             <div>
               <DialogTitle className="text-base">{appName}</DialogTitle>
-              <p className="text-muted-foreground text-xs">
+              <DialogDescription className="text-xs">
                 This connection requires setup
-              </p>
+              </DialogDescription>
             </div>
           </div>
+          {hint && <p className="pt-1 text-muted-foreground text-xs">{hint}</p>}
+          {setupGuideUrl && (
+            <p className="text-xs">
+              <a
+                href={setupGuideUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-foreground inline-flex items-center gap-0.5 font-medium underline underline-offset-2 hover:no-underline"
+              >
+                Follow the {appName} setup guide
+                <ExternalLink className="size-3" aria-hidden />
+              </a>
+            </p>
+          )}
         </DialogHeader>
 
         <div className="space-y-4 pt-2">
-          {hint && <p className="text-muted-foreground text-xs">{hint}</p>}
           <RedirectUri provider={provider} />
-          {fields.map((field, i) => (
-            <div key={field.name} className="grid gap-1.5">
-              <Label htmlFor={`config-${field.name}`}>
-                {field.label}
-                <span className="text-destructive ml-0.5">*</span>
-              </Label>
-              {field.description && (
-                <p className="text-muted-foreground text-xs">
-                  {field.description}
-                </p>
-              )}
-              {field.secret ? (
-                <SecretInput
-                  id={`config-${field.name}`}
-                  value={values[field.name] ?? ""}
-                  onChange={(e) =>
-                    setValues((prev) => ({
-                      ...prev,
-                      [field.name]: e.target.value,
-                    }))
-                  }
-                  placeholder={field.placeholder}
-                  autoFocus={i === 0}
-                />
-              ) : (
-                <Input
-                  id={`config-${field.name}`}
-                  type="text"
-                  value={values[field.name] ?? ""}
-                  onChange={(e) =>
-                    setValues((prev) => ({
-                      ...prev,
-                      [field.name]: e.target.value,
-                    }))
-                  }
-                  placeholder={field.placeholder}
-                  className="font-mono text-sm"
-                  autoFocus={i === 0}
-                />
-              )}
-            </div>
-          ))}
+          {fields.map((field, i) => {
+            const inputId = `${idPrefix}-${field.name}`;
+            const labelId = `${inputId}-label`;
+            return (
+              <div key={field.name} className="grid gap-1.5">
+                <Label
+                  id={labelId}
+                  htmlFor={field.options ? undefined : inputId}
+                >
+                  {field.label}
+                  <span className="text-destructive ml-0.5">*</span>
+                </Label>
+                {field.description && (
+                  <p className="text-muted-foreground text-xs">
+                    {field.description}
+                  </p>
+                )}
+                {field.options ? (
+                  <ConfigFieldOptions
+                    labelId={labelId}
+                    options={field.options}
+                    value={resolveConfigValue(field, values)}
+                    onChange={(value) =>
+                      setValues((prev) => ({ ...prev, [field.name]: value }))
+                    }
+                  />
+                ) : field.secret ? (
+                  <SecretInput
+                    id={inputId}
+                    value={values[field.name] ?? ""}
+                    onChange={(e) =>
+                      setValues((prev) => ({
+                        ...prev,
+                        [field.name]: e.target.value,
+                      }))
+                    }
+                    placeholder={field.placeholder}
+                    autoFocus={i === 0}
+                  />
+                ) : (
+                  <Input
+                    id={inputId}
+                    type="text"
+                    value={values[field.name] ?? ""}
+                    onChange={(e) =>
+                      setValues((prev) => ({
+                        ...prev,
+                        [field.name]: e.target.value,
+                      }))
+                    }
+                    placeholder={field.placeholder}
+                    className="font-mono text-sm"
+                    autoFocus={i === 0}
+                  />
+                )}
+              </div>
+            );
+          })}
 
           <Button
             className="w-full"

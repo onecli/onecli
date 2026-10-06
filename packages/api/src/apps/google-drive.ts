@@ -10,6 +10,8 @@ export const googleDrive: AppDefinition = {
   id: "google-drive",
   name: "Google Drive",
   icon: "/icons/google-drive.svg",
+  apiDocsUrl:
+    "https://developers.google.com/workspace/drive/api/reference/rest/v3",
   description: "Read, create, and manage files and folders.",
   connectionMethod: {
     type: "oauth",

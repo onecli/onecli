@@ -22,6 +22,7 @@ import {
   removedOrgSettingsRoutes,
 } from "../routes/removed-routes";
 import { dropboxFolderRoutes } from "./routes/dropbox-folders";
+import { googleDriveFolderRoutes } from "./routes/google-drive-folders";
 
 export const registerEeRoutes = (app: Hono<ApiEnv>) => {
   app.route("/auth/sso", ssoLookupRoutes());
@@ -52,4 +53,5 @@ export const registerEeRoutes = (app: Hono<ApiEnv>) => {
   app.route("/org/groups", orgGroupRoutes());
   app.route("/org/role-mappings", orgRoleMappingRoutes());
   app.route("/apps/dropbox", dropboxFolderRoutes());
+  app.route("/apps/google-drive", googleDriveFolderRoutes());
 };

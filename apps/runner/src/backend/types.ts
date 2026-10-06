@@ -36,7 +36,8 @@ export class ImageUnavailableError extends Error {
  * `reasonCode: "at_capacity"` — the control plane's honest "too many agents
  * are running right now" copy — without knowing any substrate's error
  * shapes. On the cloud backend this carries the remote service's 422
- * `workspace_quota_exceeded` (its per-workspace capacity limit).
+ * `workspace_quota_exceeded` (its per-workspace capacity limit), which
+ * only the wake (the one call that allocates a home) can hit.
  */
 export class SandboxCapacityError extends Error {
   constructor(detail: string) {
@@ -154,6 +155,19 @@ export interface SandboxBackend {
   identify(runnerId: string): void;
 
   // ── Homes (the §3.9 seam) ────────────────────────────────────────
+  /**
+   * The ref of a sandbox's home: a pure function of the id, with no I/O,
+   * and always exactly what `provisionHome` returns for that id. Every
+   * per-sandbox home operation addresses the home by this name, never by
+   * enumerating homes, whose cost grows with the fleet. `listHomes` is for
+   * reconcile's reap alone.
+   */
+  homeRefFor(sandboxId: string): HomeRef;
+  /**
+   * Ensure the sandbox's home exists and return its ref. An IDEMPOTENT
+   * ensure: provisioning an existing home returns that same home, untouched.
+   * The start path relies on this to resolve the home in one call.
+   */
   provisionHome(sandboxId: string): Promise<HomeRef>;
   destroyHome(ref: HomeRef): Promise<void>;
   /** No-ops on `resident` backends; archive/restore on `snapshot` ones. */

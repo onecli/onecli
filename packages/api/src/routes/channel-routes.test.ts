@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { adapterConfigResponseSchema } from "@onecli/agent-protocol";
 import type { OrgRole } from "../providers";
 
 /**
@@ -77,6 +78,7 @@ const services = vi.hoisted(() => ({
   getAttachmentBytesForAdapter: vi.fn(),
   // channel-approval-service + slack dispatch
   decideApprovalFromChannel: vi.fn(),
+  decideApprovalsFromChannel: vi.fn(),
   // action-approval-service (the 4b click door)
   decideActionApprovalFromChannel: vi.fn(),
   dispatchSlackEvent: vi.fn(),
@@ -208,6 +210,7 @@ vi.mock("../services/channels/channel-adapter-service", () => ({
 
 vi.mock("../services/channels/channel-approval-service", () => ({
   decideApprovalFromChannel: services.decideApprovalFromChannel,
+  decideApprovalsFromChannel: services.decideApprovalsFromChannel,
 }));
 
 vi.mock(
@@ -342,6 +345,13 @@ beforeEach(() => {
   services.decideApprovalFromChannel.mockResolvedValue({
     kind: "decided",
     decidedByName: "Morgan",
+  });
+  services.decideApprovalsFromChannel.mockResolvedValue({
+    kind: "decided",
+    decidedByName: "Morgan",
+    decided: ["ap-1", "ap-2"],
+    alreadySettled: [],
+    failed: [],
   });
   services.dispatchSlackEvent.mockResolvedValue({
     kind: "ignored",
@@ -706,6 +716,46 @@ describe("the adapter wire (authenticated by a registered cha_ token)", () => {
     );
   });
 
+  it("carries each presence's approvalsLinkId onto the wire, null included", async () => {
+    // The route rebuilds every link but spreads the presence itself: this
+    // pins that the card home survives serialization, and that a null (no
+    // approver DM) stays an explicit null rather than vanishing, which an
+    // adapter would read as an older control plane and fall back on. Parsed
+    // with the adapter's own wire schema, so the body is what it accepts.
+    const presence = (presenceId: string, approvalsLinkId: string | null) => ({
+      presenceId,
+      provider: "slack",
+      transport: "socket",
+      status: "active",
+      externalId: `A-${presenceId}`,
+      identityRef: "UBOT",
+      agent: { id: "ag-1", name: "Agent", workspaceId: "ws-1", imageUrl: null },
+      tenant: { externalId: "T1", name: "Acme" },
+      credentialsJson: null,
+      approvalsKey: "oc_service",
+      links: [],
+      approvalsLinkId,
+    });
+    services.getAdapterConfig.mockResolvedValueOnce({
+      notModified: false,
+      presences: [presence("pr-home", "lnk-owner"), presence("pr-none", null)],
+      etag: "etag-2",
+    });
+
+    const res = await appRbacOff.request("/v1/channel-adapter/config", {
+      headers: CHA_AUTH,
+    });
+
+    expect(res.status).toBe(200);
+    const body = adapterConfigResponseSchema.parse(await res.json());
+    expect(
+      body.presences.map((p) => [p.presenceId, p.approvalsLinkId]),
+    ).toEqual([
+      ["pr-home", "lnk-owner"],
+      ["pr-none", null],
+    ]);
+  });
+
   it("serves the work poll", async () => {
     const res = await appRbacOff.request("/v1/channel-adapter/work", {
       headers: CHA_AUTH,
@@ -851,6 +901,69 @@ describe("the adapter wire (authenticated by a registered cha_ token)", () => {
     });
     expect(res.status).toBe(404);
     expect(services.dispatchSlackEvent).not.toHaveBeenCalled();
+  });
+
+  it("forwards a GROUP decision to the fenced grouped decide (socket arm)", async () => {
+    const res = await appRbacOff.request("/v1/channel-adapter/group-decision", {
+      method: "POST",
+      headers: { ...CHA_AUTH, "content-type": "application/json" },
+      body: JSON.stringify({
+        presenceId: "pr-1",
+        approvalIds: ["ap-1", "ap-2"],
+        decision: "approve",
+        clickerExternalUserId: "U1",
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(services.decideApprovalsFromChannel).toHaveBeenCalledWith({
+      presenceId: "pr-1",
+      approvalIds: ["ap-1", "ap-2"],
+      decision: "approve",
+      clickerExternalUserId: "U1",
+    });
+  });
+
+  it("rejects an oversized, misshapen or unknown-field group decision body before the service", async () => {
+    for (const body of [
+      {
+        presenceId: "pr-1",
+        approvalIds: Array.from({ length: 51 }, (_, i) => `ap-${i}`),
+        decision: "approve",
+        clickerExternalUserId: "U1",
+      },
+      {
+        presenceId: "pr-1",
+        approvalIds: [],
+        decision: "approve",
+        clickerExternalUserId: "U1",
+      },
+      {
+        // Not an id a card can carry: the socket arm accepts exactly the
+        // ids the card vocabulary produces, like the HTTP arm.
+        presenceId: "pr-1",
+        approvalIds: ["ap-1", "../ap-2"],
+        decision: "approve",
+        clickerExternalUserId: "U1",
+      },
+      {
+        presenceId: "pr-1",
+        approvalIds: ["ap-1"],
+        decision: "approve",
+        clickerExternalUserId: "U1",
+        agentId: "someone-else",
+      },
+    ]) {
+      const res = await appRbacOff.request(
+        "/v1/channel-adapter/group-decision",
+        {
+          method: "POST",
+          headers: { ...CHA_AUTH, "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+      expect(res.status).toBe(422);
+    }
+    expect(services.decideApprovalsFromChannel).not.toHaveBeenCalled();
   });
 
   it("forwards a decision to the shared decide flow", async () => {
@@ -1775,6 +1888,202 @@ describe("POST /v1/channels/slack/interactivity", () => {
     });
     expect(res.status).toBe(200);
     expect(services.decideApprovalFromChannel).not.toHaveBeenCalled();
+  });
+
+  it("decides a signed Approve all as THAT clicker, and replaces the card", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("{}"));
+    try {
+      const responseUrl = "https://hooks.slack.com/actions/T1/B1/grp";
+      const body = interactivityBody({
+        ...approvePayload,
+        actions: [{ action_id: "channel_group_approve", value: "ap-1,ap-2" }],
+        response_url: responseUrl,
+      });
+      const res = await appRbacOff.request("/v1/channels/slack/interactivity", {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          ...slackSigned(body),
+        },
+        body,
+      });
+      expect(res.status).toBe(200);
+      expect(services.decideApprovalsFromChannel).toHaveBeenCalledWith({
+        presenceId: "pr-1",
+        approvalIds: ["ap-1", "ap-2"],
+        decision: "approve",
+        clickerExternalUserId: "U-clicker",
+      });
+      expect(services.decideApprovalFromChannel).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+      expect(fetchSpy.mock.calls[0]?.[0]).toBe(responseUrl);
+      const sent = JSON.parse(
+        String((fetchSpy.mock.calls[0]?.[1] as RequestInit).body),
+      );
+      expect(sent).toMatchObject({ replace_original: true });
+      expect(sent.text).toContain("2 approved by Morgan");
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("a row's menu choice decides ONE id and never replaces the whole card", async () => {
+    services.decideApprovalsFromChannel.mockResolvedValue({
+      kind: "decided",
+      decidedByName: "Morgan",
+      decided: ["ap-9"],
+      alreadySettled: [],
+      failed: [],
+    });
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("{}"));
+    try {
+      const body = interactivityBody({
+        ...approvePayload,
+        actions: [
+          {
+            action_id: "channel_group_row:3",
+            selected_option: { value: "deny|ap-9" },
+          },
+        ],
+        response_url: "https://hooks.slack.com/actions/T1/B1/row",
+      });
+      await appRbacOff.request("/v1/channels/slack/interactivity", {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          ...slackSigned(body),
+        },
+        body,
+      });
+      expect(services.decideApprovalsFromChannel).toHaveBeenCalledWith(
+        expect.objectContaining({ approvalIds: ["ap-9"], decision: "deny" }),
+      );
+      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+      const sent = JSON.parse(
+        String((fetchSpy.mock.calls[0]?.[1] as RequestInit).body),
+      );
+      expect(sent.replace_original).toBe(false);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("a partly failed group click keeps the card (only the clicker is told)", async () => {
+    services.decideApprovalsFromChannel.mockResolvedValue({
+      kind: "decided",
+      decidedByName: "Morgan",
+      decided: ["ap-1"],
+      alreadySettled: [],
+      failed: ["ap-2"],
+    });
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("{}"));
+    try {
+      const body = interactivityBody({
+        ...approvePayload,
+        actions: [{ action_id: "channel_group_approve", value: "ap-1,ap-2" }],
+        response_url: "https://hooks.slack.com/actions/T1/B1/part",
+      });
+      await appRbacOff.request("/v1/channels/slack/interactivity", {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          ...slackSigned(body),
+        },
+        body,
+      });
+      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+      const sent = JSON.parse(
+        String((fetchSpy.mock.calls[0]?.[1] as RequestInit).body),
+      );
+      expect(sent.replace_original).toBe(false);
+      expect(sent.text).toContain("couldn't be decided");
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("acks a group click at once, before a slow decide finishes (Slack's 3s window)", async () => {
+    // Up to 50 gateway decides can outlast the 3s ack; Slack then shows the
+    // clicker an error and the card a stale state. The decide runs after
+    // the 200, and its outcome rides response_url (valid for 30 minutes).
+    let finish!: () => void;
+    services.decideApprovalsFromChannel.mockReturnValue(
+      new Promise((resolve) => {
+        finish = () =>
+          resolve({
+            kind: "decided",
+            decidedByName: "Morgan",
+            decided: ["ap-1", "ap-2"],
+            alreadySettled: [],
+            failed: [],
+          });
+      }),
+    );
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("{}"));
+    try {
+      const body = interactivityBody({
+        ...approvePayload,
+        actions: [{ action_id: "channel_group_approve", value: "ap-1,ap-2" }],
+        response_url: "https://hooks.slack.com/actions/T1/B1/slow",
+      });
+      const res = await appRbacOff.request("/v1/channels/slack/interactivity", {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          ...slackSigned(body),
+        },
+        body,
+      });
+      expect(res.status).toBe(200);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      finish();
+      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("a group click with a malformed value decides nothing", async () => {
+    const body = interactivityBody({
+      ...approvePayload,
+      actions: [{ action_id: "channel_group_approve", value: "ap-1,<!here>" }],
+    });
+    const res = await appRbacOff.request("/v1/channels/slack/interactivity", {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        ...slackSigned(body),
+      },
+      body,
+    });
+    expect(res.status).toBe(200);
+    expect(services.decideApprovalsFromChannel).not.toHaveBeenCalled();
+    expect(services.decideApprovalFromChannel).not.toHaveBeenCalled();
+  });
+
+  it("a group click with a bad signature decides nothing", async () => {
+    const body = interactivityBody({
+      ...approvePayload,
+      actions: [{ action_id: "channel_group_approve", value: "ap-1,ap-2" }],
+    });
+    const res = await appRbacOff.request("/v1/channels/slack/interactivity", {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        ...slackSigned(body, "the-wrong-signing-secret"),
+      },
+      body,
+    });
+    expect(res.status).toBe(401);
+    expect(services.decideApprovalsFromChannel).not.toHaveBeenCalled();
   });
 
   it("rejects a body with no payload field", async () => {

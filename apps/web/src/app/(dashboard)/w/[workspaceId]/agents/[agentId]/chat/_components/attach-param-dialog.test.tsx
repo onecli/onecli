@@ -90,12 +90,15 @@ describe("AttachParamDialog (?attach= deep link)", () => {
     window.history.replaceState(null, "", "/w/ws-1/agents/agent-1/chat");
   });
 
-  it("opens the attach dialog for a catalog provider", () => {
+  it("opens the connect dialog for a catalog provider with no accounts yet", () => {
     attachParam = "gmail";
     renderDoor();
-    expect(screen.getByRole("dialog")).toHaveTextContent("Attach Gmail");
+    // Arrived from a "Connect" button with nothing to attach: the dialog
+    // says Connect, matching the button that opened it.
+    expect(screen.getByRole("dialog")).toHaveTextContent("Connect Gmail");
+    expect(screen.getByRole("dialog")).not.toHaveTextContent("Attach Gmail");
     expect(
-      screen.getByText("No connected Gmail accounts in this workspace yet."),
+      screen.getByRole("button", { name: "Connect Gmail" }),
     ).toBeInTheDocument();
   });
 
@@ -123,7 +126,7 @@ describe("AttachParamDialog (?attach= deep link)", () => {
     );
     renderDoor();
 
-    await userEvent.click(screen.getByRole("button", { name: "Done" }));
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
     // The dialog closes even while the (mocked, non-syncing) searchParams
     // still carry the param — the closedFor guard, not router timing.
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -145,10 +148,10 @@ describe("AttachParamDialog (?attach= deep link)", () => {
     // refresh that shows the new account attached must still happen. The
     // grant itself is the API's (workspace auto-attach), never written here.
     await userEvent.click(
-      screen.getByRole("button", { name: "Connect an account" }),
+      screen.getByRole("button", { name: "Connect Gmail" }),
     );
     expect(openSpy).toHaveBeenCalledTimes(1);
-    await userEvent.click(screen.getByRole("button", { name: "Done" }));
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
     landing("gmail", "conn-9");
     await waitFor(() =>
       expect(invalidateSpy).toHaveBeenCalledWith({
@@ -165,7 +168,7 @@ describe("AttachParamDialog (?attach= deep link)", () => {
     const { invalidateSpy } = renderDoor();
 
     await userEvent.click(
-      screen.getByRole("button", { name: "Connect an account" }),
+      screen.getByRole("button", { name: "Connect Gmail" }),
     );
     landing("gmail", "conn-9");
     await act(async () => {});
@@ -177,7 +180,7 @@ describe("AttachParamDialog (?attach= deep link)", () => {
     const { invalidateSpy } = renderDoor();
 
     await userEvent.click(
-      screen.getByRole("button", { name: "Connect an account" }),
+      screen.getByRole("button", { name: "Connect Gmail" }),
     );
     landing("github", "conn-3");
     await act(async () => {});

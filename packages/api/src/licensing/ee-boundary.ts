@@ -65,7 +65,7 @@ export const SEAMS: readonly Seam[] = [
   {
     from: "apps/web/src/app/**",
     why: "Next.js route files are mount points, not libraries — the app must be able to route to a licensed page when licensed. Each is a one-line re-export or a thin entitlement wrapper (server-side isEntitled() check → the licensed page or the locked card) carrying no feature logic. The two former residuals (`p/[workspaceId]/layout.tsx`, `(admin)/layout.tsx`) now mount free implementations that route role questions through the provider seam. The aws-marketplace fulfillment routes (cloud-billing-only pages; dark off cloud) mount the licensed billing actions the same way.",
-    count: 15,
+    count: 14,
     permanent: true,
   },
   {
@@ -156,6 +156,10 @@ export const DYNAMIC_SEAMS: readonly DynamicSeam[] = [
     specifiers: ["@/ee/auth/login-content"],
   },
   {
+    from: "apps/web/src/lib/dashboard/org-layout.tsx",
+    specifiers: ["@/ee/billing/_components/payment-issue-banner"],
+  },
+  {
     from: "apps/web/src/lib/onboarding/onboarding-layout.tsx",
     specifiers: ["@/ee/billing/actions"],
   },
@@ -173,7 +177,10 @@ export const DYNAMIC_SEAMS: readonly DynamicSeam[] = [
   },
   {
     from: "apps/web/src/lib/workspaces/workspace-layout.tsx",
-    specifiers: ["@/ee/billing/_components/over-quota-banner"],
+    specifiers: [
+      "@/ee/billing/_components/over-quota-banner",
+      "@/ee/billing/_components/payment-issue-banner",
+    ],
   },
   {
     // Account deletion tears down the user's organizations on the way out.

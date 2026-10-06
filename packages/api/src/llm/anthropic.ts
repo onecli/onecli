@@ -53,13 +53,18 @@ export const anthropic: LlmProvider = {
     { id: "max", label: "Max" },
   ],
   catalogUrl: "https://api.anthropic.com/v1/models?limit=100",
-  // An OAuth token is a subscription credential, not an API key; the models
-  // endpoint expects `x-api-key`. Rather than guess at a bearer flow we do not
-  // use anywhere else, that mode falls back to the pinned list.
-  canList: (authMode) => authMode === "api-key",
-  catalogHeaders: (credential) => ({
-    "x-api-key": credential,
+  // Both modes list live. The OAuth credential is a long-lived `sk-ant-oat`
+  // setup token, not a refreshable blob, so the gateway sends it as-is as a
+  // bearer (`secret_inject.rs`) and so does this. `/v1/models` takes the plain
+  // bearer: the `anthropic-beta: oauth-…` header the Messages call sends with
+  // it (`reaction-chooser.ts`) is deprecated on this endpoint.
+  // A token the endpoint refuses degrades to the pinned list like any failure.
+  canList: () => true,
+  catalogHeaders: (credential, authMode) => ({
     "anthropic-version": "2023-06-01",
+    ...(authMode === "oauth"
+      ? { authorization: `Bearer ${credential}` }
+      : { "x-api-key": credential }),
   }),
   parseCatalog,
   isSelectable: (id) => id.startsWith("claude-"),

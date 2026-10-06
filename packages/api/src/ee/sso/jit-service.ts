@@ -9,6 +9,10 @@ import {
 } from "../../services/audit-service";
 import { logger } from "../../lib/logger";
 import { reconcileMemberRoles } from "../services/team-service";
+import {
+  assertCanInviteMember,
+  QuotaExceededError,
+} from "../services/quota-service";
 import { markConnectionActive } from "./sso-connection-service";
 import { findSsoOrgForIdentity } from "./sso-trust";
 
@@ -71,6 +75,21 @@ export const ensureSsoJitMembership = async (
       select: { jitEnabled: true },
     });
     if (!org?.jitEnabled) return;
+
+    // A JIT join takes a seat like any other new member, and SSO sells from
+    // Scale (a seat-capped plan): a full org refuses the join. The session
+    // still resolves (this hook never throws), so the person signs in with no
+    // membership here, exactly as when the org has JIT off.
+    try {
+      await assertCanInviteMember(ssoOrg.organizationId);
+    } catch (err) {
+      if (!(err instanceof QuotaExceededError)) throw err;
+      log.warn(
+        { organizationId: ssoOrg.organizationId, userId: user.id },
+        "SSO JIT membership refused: the organization's seats are full",
+      );
+      return;
+    }
 
     await withAudit(
       () =>

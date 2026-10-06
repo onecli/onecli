@@ -9,6 +9,7 @@ import { ArrowLeft, Loader2, Settings2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import type { Connection, PageScope } from "@/lib/api";
+import type { OAuthConfigField } from "@onecli/api/apps/types";
 import { queryKeys } from "@/lib/api/keys";
 import {
   useAppMessages,
@@ -44,15 +45,10 @@ interface AppDetailProps {
     blocklist?: { id: string; name: string; hostPattern: string }[];
   };
   configurable?: {
-    fields: {
-      name: string;
-      label: string;
-      description?: string;
-      placeholder: string;
-      secret?: boolean;
-    }[];
+    fields: OAuthConfigField[];
     envDefaults?: Record<string, string>;
     hint?: string;
+    setupGuideUrl?: string;
   };
   hasEnvDefaults: boolean;
   hasAppConfig: boolean;
@@ -136,6 +132,10 @@ export const AppDetail = ({
   // popup's message was posted and can only learn of it from the URL. One-shot
   // per mount, then stripped so a refresh doesn't reopen the dialog.
   const connectedParam = searchParams.get("connected");
+  // `?reconnect=<id>`: the agent's `connection_needs_reconnect` link. Marks the
+  // account to reconnect while it still needs it; the popup itself needs the
+  // user's click.
+  const reconnectParam = searchParams.get("reconnect");
   const consumedConnectedParam = useRef(false);
   useEffect(() => {
     if (consumedConnectedParam.current) return;
@@ -288,6 +288,9 @@ export const AppDetail = ({
                   appName={app.name}
                   onReconnect={(id) => openPopup(id, popupOpts)}
                   pageScope={pageScope}
+                  highlighted={
+                    conn.id === reconnectParam && !!conn.reauthRequiredAt
+                  }
                 />
               ))}
               {inheritedConnections.map((conn) => (
@@ -333,6 +336,7 @@ export const AppDetail = ({
           appDarkIcon={app.darkIcon}
           fields={configurable.fields}
           hint={configurable.hint}
+          setupGuideUrl={configurable.setupGuideUrl}
           open={configDialogOpen}
           onOpenChange={setConfigDialogOpen}
           pageScope={pageScope}

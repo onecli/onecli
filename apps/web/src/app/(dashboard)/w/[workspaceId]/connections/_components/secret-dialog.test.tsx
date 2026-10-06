@@ -60,17 +60,19 @@ describe("SecretDialog provider guidance", () => {
     vi.mocked(toast.error).mockClear();
   });
 
-  it("links the CANONICAL Anthropic console — platform.claude.com, the host the rest of the app uses", () => {
+  it("links the CANONICAL Claude Console: platform.claude.com, the host the rest of the app uses", () => {
     renderDialog({ defaultType: "anthropic" });
     expect(
-      screen.getByRole("link", { name: "Anthropic Console" }),
+      screen.getByRole("link", { name: "Claude Console" }),
     ).toHaveAttribute("href", "https://platform.claude.com/settings/keys");
   });
 
   it("hands focus to the value input when the name arrives pre-filled", async () => {
     renderDialog({ defaultType: "anthropic" });
     await waitFor(() =>
-      expect(screen.getByPlaceholderText("sk-ant-api03-...")).toHaveFocus(),
+      expect(
+        screen.getByPlaceholderText("sk-ant-oat01-… or sk-ant-api03-…"),
+      ).toHaveFocus(),
     );
   });
 
@@ -84,9 +86,117 @@ describe("SecretDialog provider guidance", () => {
     expect(mocks.copy).toHaveBeenCalledWith("claude setup-token");
     await waitFor(() =>
       expect(toast.success).toHaveBeenCalledWith(
-        "Copied. Run it in your terminal, then paste the token here.",
+        "Copied. Run it in your terminal, approve in the browser, then paste the token here.",
       ),
     );
+  });
+
+  it("leads with `claude setup-token` and explains on hover that it runs in the terminal", async () => {
+    renderDialog({ defaultType: "anthropic" });
+
+    const command = screen.getByRole("button", {
+      name: "Copy claude setup-token",
+    });
+    const consoleLink = screen.getByRole("link", { name: "Claude Console" });
+    // The command is offered first, ahead of the console link.
+    expect(
+      command.compareDocumentPosition(consoleLink) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // Peers in every state: the command wears the anchor's exact class.
+    expect(command.className).toBe(consoleLink.className);
+
+    await userEvent.hover(command);
+    expect(
+      (await screen.findAllByText(/Run it in a terminal with Claude Code/))
+        .length,
+    ).toBeGreaterThan(0);
+  });
+
+  it.each([
+    [
+      "a setup-token subscription token",
+      "sk-ant-oat01-",
+      "Subscription",
+      "Claude Subscription",
+    ],
+    ["a Console API key", "sk-ant-api03-", "API Key", "Anthropic API Key"],
+  ])(
+    "names %s by its kind: badge and auto-filled name",
+    async (_name, prefix, badge, autoName) => {
+      renderDialog({ defaultType: "anthropic" });
+      const nameInput = screen.getByPlaceholderText(
+        "e.g. Anthropic Production Key",
+      );
+      await userEvent.clear(nameInput);
+      await userEvent.click(
+        screen.getByPlaceholderText("sk-ant-oat01-… or sk-ant-api03-…"),
+      );
+      // Surrounding whitespace is what a terminal copy often carries; the
+      // kind is read from the trimmed value, the one that gets saved.
+      await userEvent.paste(`  ${prefix}${"x".repeat(90)}\n`);
+
+      expect(screen.getByText(badge)).toBeInTheDocument();
+      expect(nameInput).toHaveValue(autoName);
+      // No amber warning: the guidance hint is still the one showing.
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /Paste a subscription token from/,
+      );
+    },
+  );
+
+  it.each([
+    [
+      "anthropic",
+      "an Anthropic Admin key",
+      `sk-ant-admin01-${"x".repeat(90)}`,
+      /Admin API key, which can.t call Claude models/,
+    ],
+    [
+      "anthropic",
+      "a token wrapped across terminal lines",
+      // The input drops the line break but keeps the wrap's indentation.
+      `sk-ant-oat01-${"x".repeat(40)}\n  ${"x".repeat(40)}`,
+      /contains spaces/,
+    ],
+    [
+      "anthropic",
+      "an OpenAI key",
+      `sk-proj-${"x".repeat(90)}`,
+      /looks like an OpenAI key/,
+    ],
+    [
+      "openai",
+      "an OpenAI Admin key",
+      `sk-admin-${"x".repeat(90)}`,
+      /Admin API key, which can.t call models/,
+    ],
+  ] as const)(
+    "%s: warns when pasting %s",
+    async (type, _name, value, warning) => {
+      renderDialog({ defaultType: type });
+      await userEvent.click(
+        screen.getByPlaceholderText(
+          type === "anthropic"
+            ? "sk-ant-oat01-… or sk-ant-api03-…"
+            : "sk-proj-…",
+        ),
+      );
+      await userEvent.paste(value);
+
+      expect(screen.getByRole("status")).toHaveTextContent(warning);
+    },
+  );
+
+  it("never badges an Anthropic Admin key as an API key: it is neither kind", async () => {
+    renderDialog({ defaultType: "anthropic" });
+    await userEvent.click(
+      screen.getByPlaceholderText("sk-ant-oat01-… or sk-ant-api03-…"),
+    );
+    await userEvent.paste(`sk-ant-admin01-${"x".repeat(90)}`);
+
+    expect(screen.queryByText("Subscription")).not.toBeInTheDocument();
+    expect(screen.queryByText("API Key")).not.toBeInTheDocument();
   });
 
   it("reports a failed copy honestly — an error toast, never a fake success and never silence", async () => {

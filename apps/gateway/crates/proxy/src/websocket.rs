@@ -246,9 +246,17 @@ pub async fn handle_websocket(
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(443);
 
-    let upstream_io = connect_upstream_tls(hostname, port, connector)
-        .await
-        .context("WebSocket: connecting to upstream")?;
+    let upstream_io = match connect_upstream_tls(hostname, port, connector).await {
+        Ok(io) => io,
+        Err(e) => {
+            let Some(refusal) = super::egress::find_refusal_anyhow(&e) else {
+                return Err(e.context("WebSocket: connecting to upstream"));
+            };
+            warn!(host = %hostname, "egress guard: refused non-public WebSocket destination");
+            hooks::record_destination_refused(proxy_ctx, host, "GET", &path);
+            return Ok(response::destination_not_allowed(&refusal.host));
+        }
+    };
 
     let (mut sender, conn) = http1::Builder::new()
         .handshake(upstream_io)
@@ -359,7 +367,9 @@ async fn connect_upstream_tls(
     port: u16,
     connector: &TlsConnector,
 ) -> Result<TokioIo<tokio_rustls::client::TlsStream<TcpStream>>> {
-    let tcp = TcpStream::connect((hostname, port))
+    // Guarded dial: resolves, drops non-public addresses, connects to a
+    // checked one — never `TcpStream::connect((host, port))` directly.
+    let tcp = super::egress::connect_tcp(hostname, port)
         .await
         .context("TCP connect to upstream")?;
 

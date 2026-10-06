@@ -426,10 +426,7 @@ export const createRunner = ({
         admittedNew.add(item.sandboxId);
       }
 
-      const homeRef =
-        (await backend.listHomes()).find(
-          (home) => home.sandboxId === item.sandboxId,
-        )?.ref ?? (await backend.provisionHome(item.sandboxId));
+      const homeRef = await backend.provisionHome(item.sandboxId);
 
       events.push({
         kind: "sandbox.status",
@@ -593,10 +590,9 @@ export const createRunner = ({
       // starts with capacity to spare.
       startCompletedAt.delete(item.sandboxId);
       admittedNew.delete(item.sandboxId);
-      const home = (await backend.listHomes()).find(
-        (candidate) => candidate.sandboxId === item.sandboxId,
-      );
-      if (home) await backend.parkHome(home.ref);
+      // Addressed by name: a park of a home that was never born is the
+      // backend's no-op, so this needs no lookup first.
+      await backend.parkHome(backend.homeRefFor(item.sandboxId));
       return [
         {
           kind: "sandbox.status",

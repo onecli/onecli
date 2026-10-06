@@ -27,7 +27,7 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use ca::CertificateAuthority;
-use context::PolicyEngine;
+use context::{PolicyEngine, RefreshGate};
 use server::{Entrypoint, GatewayServer};
 use vault::bitwarden::{BitwardenConfig, BitwardenVaultProvider};
 use vault::onepassword::OnePasswordVaultProvider;
@@ -222,10 +222,16 @@ async fn main() -> Result<()> {
         Arc::clone(&crypto),
     ));
 
+    // OAuth refreshes run on their own small, lazily-opened pool so one slow
+    // provider can never park the shared pool's connections (see RefreshGate).
+    let refresh_gate = Arc::new(RefreshGate::new(&pool));
+    let shutdown_refresh_gate = Arc::clone(&refresh_gate);
+
     let policy_engine = Arc::new(PolicyEngine {
         pool,
         crypto: Arc::clone(&crypto),
         onepassword: Arc::clone(&onepassword),
+        refresh_gate,
     });
 
     let proxy_url = std::env::var("BITWARDEN_PROXY_URL")
@@ -282,7 +288,10 @@ async fn main() -> Result<()> {
     telemetry::core::shutdown(budget.allow(TELEMETRY_FLUSH_TIMEOUT)).await;
     // Bounded: a detached approval-cleanup task can briefly hold a connection,
     // and no amount of tidiness is worth missing the SIGKILL deadline.
-    let _ = tokio::time::timeout(budget.allow(POOL_CLOSE_TIMEOUT), shutdown_pool.close()).await;
+    let _ = tokio::time::timeout(budget.allow(POOL_CLOSE_TIMEOUT), async {
+        tokio::join!(shutdown_pool.close(), shutdown_refresh_gate.close());
+    })
+    .await;
 
     info!(drained, "drain complete");
     result

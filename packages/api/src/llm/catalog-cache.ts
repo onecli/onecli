@@ -1,4 +1,4 @@
-import type { LlmProvider, ModelOption } from "./types";
+import type { LlmAuthMode, LlmProvider, ModelOption } from "./types";
 
 /**
  * The model catalog, fetched live and cached in process.
@@ -160,7 +160,7 @@ export const getModelCatalog = async (
   provider: LlmProvider,
   secretId: string,
   credential: () => Promise<string | null>,
-  authMode: "api-key" | "oauth",
+  authMode: LlmAuthMode,
 ): Promise<ModelCatalog> => {
   const key = `${provider.id}:${secretId}`;
   const entry = cache.get(key);
@@ -183,7 +183,7 @@ export const getModelCatalog = async (
 
   const value = await credential();
   if (value === null) return serveWhatWeHave();
-  const headers = provider.catalogHeaders(value);
+  const headers = provider.catalogHeaders(value, authMode);
 
   if (entry) {
     // Stale-while-revalidate: answer now from what we hold, refresh behind it,

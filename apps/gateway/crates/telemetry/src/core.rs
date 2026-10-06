@@ -13,6 +13,12 @@ pub const FLUSH_BATCH_SIZE: usize = 500;
 pub const CHANNEL_CAPACITY: usize = 10_000;
 const MAX_PATH_LEN: usize = 2048;
 
+/// What a [`RequestDecision::DestinationRefused`] row is attributed to in the
+/// activity feed's "Blocked by" slot. Not a policy rule: the destination
+/// guard is fixed behavior, so the name says so instead of pretending a
+/// rule exists.
+pub const DESTINATION_GUARD_RULE_NAME: &str = "Non-public destination";
+
 #[allow(dead_code)] // variants read by cloud telemetry (extra_data), unused in OSS
 pub enum RequestDecision {
     Allowed,
@@ -53,6 +59,11 @@ pub enum RequestDecision {
     NeedsConnection {
         error: String,
     },
+    /// The destination guard refused the request: the host resolved only to
+    /// non-public addresses the operator has not allowed (`proxy::egress`).
+    /// Nothing was dialed. Its own variant so the activity feed shows the
+    /// refusal as a block attributed to the guard, not a plain 403.
+    DestinationRefused,
 }
 
 /// A metered spend charge attached to a request event (cloud budget feature).

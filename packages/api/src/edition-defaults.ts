@@ -1,5 +1,6 @@
-import { IS_CLOUD } from "./lib/env";
+import { IS_CLOUD, SECRET_ENCRYPTION_KEY } from "./lib/env";
 import { cryptoService as kmsCrypto } from "./ee/kms-crypto";
+import { cryptoService as localCrypto } from "./lib/crypto";
 import { getRedis, hasRedisConfigured } from "./ee/clients/redis-client";
 import { createRedisEventBus } from "./ee/event-bus/redis-event-bus";
 import { createInProcessEventBus } from "./services/event-bus";
@@ -121,7 +122,12 @@ export const ensureEditionDefaults = (): void => {
   }
 
   if (IS_CLOUD) {
-    setDefaultCrypto(kmsCrypto);
+    // Secret crypto follows config presence, by the same rule as the gateway's
+    // `wiring::create_crypto_service`: an explicit SECRET_ENCRYPTION_KEY
+    // selects local AES, otherwise KMS envelope. The two MUST agree — the
+    // gateway decrypts only the format its own backend writes, so a row this
+    // side encrypts with the other backend is unreadable at injection time.
+    setDefaultCrypto(SECRET_ENCRYPTION_KEY ? localCrypto : kmsCrypto);
     // The SSH CA is nullable by design: null (no SSH_CA_KMS_KEY_ARN) keeps
     // the front-door surface dark rather than failing the boot — the same
     // config-presence posture as RUNNER_TOKEN.

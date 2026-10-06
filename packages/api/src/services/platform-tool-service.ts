@@ -54,6 +54,7 @@ import {
   requestCommunicate,
 } from "./channels/agent-link-service";
 import { createOutboundAttachment } from "./attachment-service";
+import { connectionsForRender } from "./agent-connections-render";
 import { removedPresenceNotice } from "./channels/agent-channel-service";
 import {
   anchorRecipient,
@@ -1115,6 +1116,24 @@ export const executePlatformTool = async (
             status: "reported",
             to: done.peerName,
             note: `Your report was delivered to the person. The task with ${done.peerName} is closed; a new question from them opens a new one.`,
+          },
+        };
+      }
+
+      case "list_apps": {
+        // Live, from the SAME composer as the Connected apps block, so the
+        // tool and the doc cannot disagree, and a grant made after the
+        // session started shows on the very next call. No arguments: the
+        // resolved identity is the fence (this agent's own grants only).
+        const apps = await connectionsForRender(identity.agentId);
+        return {
+          ok: true,
+          result: {
+            apps,
+            note:
+              apps.length === 0
+                ? "No external apps are granted to you. They are connected and granted in the OneCLI dashboard."
+                : "Call the host listed for each app (`host` for account-bound apps, else `apiHosts`); the gateway injects credentials.",
           },
         };
       }
