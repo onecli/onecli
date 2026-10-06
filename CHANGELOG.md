@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.9.0](https://github.com/onecli/onecli/compare/v2.8.0...v2.9.0) (2026-10-06)
+
+
+### Features
+
+* Circleback integration, Navan paste cleaning and agent API-docs hints ([#601](https://github.com/onecli/onecli/issues/601)) ([37e0e21](https://github.com/onecli/onecli/commit/37e0e21d41cb0b22cc3dc32e4c3ca2736ee72e73))
+
 ## [2.8.0](https://github.com/onecli/onecli/compare/v2.7.0...v2.8.0) (2026-10-06)
 
 
