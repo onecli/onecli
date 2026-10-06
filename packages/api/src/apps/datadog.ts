@@ -49,6 +49,7 @@ const resolveMetadata = async (
 export const datadog: AppDefinition = {
   id: "datadog",
   name: "Datadog",
+  apiDocsUrl: "https://docs.datadoghq.com/api/latest/",
   icon: "/icons/datadog.svg",
   darkIcon: "/icons/datadog-light.svg",
   description: "Monitoring, APM, logs, and infrastructure metrics.",

@@ -183,6 +183,8 @@ const exchangeCredentials = async (
 export const vertexAi: AppDefinition = {
   id: "vertex-ai",
   name: "Vertex AI",
+  apiDocsUrl:
+    "https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/rest",
   icon: "/icons/vertex-ai.svg",
   description: "Access Vertex AI models on Google Cloud.",
   connectionMethod: {

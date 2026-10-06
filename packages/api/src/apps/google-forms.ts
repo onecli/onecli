@@ -8,6 +8,8 @@ import {
 export const googleForms: AppDefinition = {
   id: "google-forms",
   name: "Google Forms",
+  apiDocsUrl:
+    "https://developers.google.com/workspace/forms/api/reference/rest",
   icon: "/icons/google-forms.svg",
   description: "Read, create, and edit forms and responses.",
   connectionMethod: {

@@ -411,6 +411,7 @@ const PROVIDER_DOMAINS: Record<string, string> = {
   fathom: "fathom.video",
   fireflies: "fireflies.ai",
   timeless: "timeless.day",
+  circleback: "circleback.ai",
 };
 
 /** The app's favicon via Google's resolver — Slack's image elements accept

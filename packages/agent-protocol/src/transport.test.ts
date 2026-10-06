@@ -379,10 +379,10 @@ describe("file.part + file.result (send_file wire)", () => {
 
 /**
  * The connections list rides the home-sync FINAL part beside the brief and
- * the prune manifest. Its catalog fields (apiHosts, endpoints, docsUrl) are
- * capped so the WORST case at MAX_AGENT_CONNECTIONS still fits the frame:
- * raising a cap without re-checking the budget fails here, not as a
- * silently dropped frame in production.
+ * the prune manifest. Its catalog fields (apiHosts, endpoints, docsUrl,
+ * specUrl) are capped so the WORST case at MAX_AGENT_CONNECTIONS still fits
+ * the frame: raising a cap without re-checking the budget fails here, not as
+ * a silently dropped frame in production.
  */
 describe("the connections list on the sync frame", () => {
   // Hosts must be bare hostnames (main hardened `host`; `apiHosts` follows),
@@ -409,6 +409,7 @@ describe("the connections list on the sync frame", () => {
       "e".repeat(MAX_AGENT_CONNECTION_ENDPOINT_CHARS),
     ),
     docsUrl: `https://${"d".repeat(MAX_AGENT_CONNECTION_DOCS_URL_CHARS - "https://".length)}`,
+    specUrl: `https://${"s".repeat(MAX_AGENT_CONNECTION_DOCS_URL_CHARS - "https://".length)}`,
   };
 
   it("the worst-case entry is valid, and one field past a cap is not", () => {

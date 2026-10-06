@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { navan, parseNavanRegion } from "./navan";
+import { cleanNavanValue, navan, parseNavanRegion } from "./navan";
 import {
   ALLOWED_TOKEN_URLS,
   ClientCredentialsExchangeError,
@@ -53,6 +53,60 @@ describe("parseNavanRegion", () => {
       expect(() => parseNavanRegion(raw)).toThrow(/Region must be/);
     },
   );
+});
+
+describe("cleanNavanValue", () => {
+  const UUID =
+    /(?<![0-9a-f-])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f-])/gi;
+  const HEX32 = /(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])/gi;
+  const KEY = "873c5e26ab6b4414a9f96db4d2c7bf12";
+  const ID = "168c1f94-a55d-40a9-ad99-80113e62002c";
+
+  it.each([
+    [KEY, KEY],
+    [`Secret Key: ${KEY}`, KEY],
+    [`secret key:${KEY}`, KEY],
+    [`"${KEY}"`, KEY],
+    [`\u200B${KEY}\uFEFF\n`, KEY],
+    [`Secret Key\n\u{1F517} ${KEY}   Copy key`, KEY],
+  ])("secret %j -> key", (raw, expected) => {
+    expect(cleanNavanValue(raw, HEX32)).toBe(expected);
+  });
+
+  it.each([
+    [ID, ID],
+    [`Client ID: ${ID}`, ID],
+    [`Client ID:\n${ID.toUpperCase()}`, ID.toUpperCase()],
+  ])("client id %j -> id", (raw, expected) => {
+    expect(cleanNavanValue(raw, UUID)).toBe(expected);
+  });
+
+  it("does not cut a 32-hex run out of a longer value", () => {
+    const long = `${KEY}abcd`;
+    expect(cleanNavanValue(`Secret Key: ${long}`, HEX32)).toBe(long);
+  });
+
+  it("falls back to label and quote stripping for an unexpected format", () => {
+    expect(cleanNavanValue("Secret Key: 'new-format-secret'", HEX32)).toBe(
+      "new-format-secret",
+    );
+  });
+
+  it("leaves input with two candidate keys for Navan to judge", () => {
+    const other = "0".repeat(32);
+    expect(cleanNavanValue(`${KEY} ${other}`, HEX32)).toBe(`${KEY} ${other}`);
+  });
+
+  it("returns empty for missing or invisible-only input", () => {
+    expect(cleanNavanValue(undefined, HEX32)).toBe("");
+    expect(cleanNavanValue("  \u200B ", HEX32)).toBe("");
+  });
+
+  it("stays fast on a long run of quotes", () => {
+    const start = performance.now();
+    expect(cleanNavanValue(`${'"'.repeat(200_000)}x`, HEX32)).toBe("x");
+    expect(performance.now() - start).toBeLessThan(500);
+  });
 });
 
 describe("navan exchangeCredentials", () => {
@@ -129,7 +183,21 @@ describe("navan exchangeCredentials", () => {
     await expect(
       exchangeCredentials({ clientId: "id", clientSecret: "bad" }),
     ).rejects.toThrow(
-      /Navan rejected this Client ID \/ Secret Key for the US region/,
+      /Navan rejected this Client ID \/ Secret Key for the US region.*\(Token exchange failed \(401\): invalid_client\)/,
+    );
+  });
+
+  it("strips the labels Navan's admin page copies along with the values", async () => {
+    const fetchMock = stubFetch();
+    await exchangeCredentials({
+      clientId: "Client ID:\n168c1f94-a55d-40a9-ad99-80113e62002c",
+      clientSecret: "Secret Key: 873c5e26ab6b4414a9f96db4d2c7bf12  Copy key",
+    });
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect((init.headers as Record<string, string>).Authorization).toBe(
+      `Basic ${Buffer.from(
+        "168c1f94-a55d-40a9-ad99-80113e62002c:873c5e26ab6b4414a9f96db4d2c7bf12",
+      ).toString("base64")}`,
     );
   });
 

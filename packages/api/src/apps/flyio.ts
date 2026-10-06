@@ -3,6 +3,7 @@ import type { AppDefinition } from "./types";
 export const flyio: AppDefinition = {
   id: "flyio",
   name: "Fly.io",
+  apiDocsUrl: "https://docs.fly.io/machines/api",
   icon: "/icons/flyio.svg",
   description:
     "Deploy and manage applications, Machines, volumes, and secrets on Fly.io.",

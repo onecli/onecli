@@ -3,6 +3,7 @@ import type { AppDefinition } from "./types";
 export const affinity: AppDefinition = {
   id: "affinity",
   name: "Affinity",
+  apiDocsUrl: "https://api-docs.affinity.co/",
   icon: "/icons/affinity.svg",
   darkIcon: "/icons/affinity.svg",
   description: "Manage relationships, deals, and interactions in Affinity CRM.",

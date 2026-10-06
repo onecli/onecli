@@ -1133,7 +1133,7 @@ export const executePlatformTool = async (
             note:
               apps.length === 0
                 ? "No external apps are granted to you. They are connected and granted in the OneCLI dashboard."
-                : "Call the host listed for each app (`host` for account-bound apps, else `apiHosts`); the gateway injects credentials.",
+                : "Call the host listed for each app (`host` for account-bound apps, else `apiHosts`); the gateway injects credentials. Before a first call, read the endpoint's required parameters and their formats in `docsUrl` or `specUrl`: never guess them.",
           },
         };
       }

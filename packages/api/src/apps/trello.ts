@@ -3,6 +3,7 @@ import type { AppDefinition } from "./types";
 export const trello: AppDefinition = {
   id: "trello",
   name: "Trello",
+  apiDocsUrl: "https://developer.atlassian.com/cloud/trello/rest/",
   icon: "/icons/trello.svg",
   description: "Boards, lists, and cards for project management.",
   connectionMethod: {

@@ -9,6 +9,7 @@ import {
 export const youtube: AppDefinition = {
   id: "youtube",
   name: "YouTube",
+  apiDocsUrl: "https://developers.google.com/youtube/v3/docs",
   icon: "/icons/youtube.svg",
   description: "Manage playlists, videos, and channel content on YouTube.",
   connectionMethod: {

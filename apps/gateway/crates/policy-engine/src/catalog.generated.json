@@ -1331,6 +1331,242 @@
       ]
     }
   },
+  "circleback": {
+    "create_action_item": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/action-items"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_action_item": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/action-item/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_meeting": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/meeting/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_account": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/oauth/test"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_company": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/company/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_meeting": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/meeting/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_person": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/person/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_transcript": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/meeting/*/transcript"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "import_meeting": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/meetings"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_action_items": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/action-items"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_calendar_events": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/calendar/events"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_companies": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/companies"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_meetings": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/meetings"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_people": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/people"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_tags": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/tag"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "manage_tags": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/tag",
+        "/api/tag/*/"
+      ],
+      "methods": [
+        "POST",
+        "PUT",
+        "DELETE"
+      ]
+    },
+    "search_meetings": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/search"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "share_meeting": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/meeting/*/share"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "update_action_item": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/action-item/*/"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "update_calendar_event_meeting": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/calendar/events/*/meeting"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "update_meeting": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/meeting/*/"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    }
+  },
   "clay": {
     "get_credit_balance": {
       "hosts": [

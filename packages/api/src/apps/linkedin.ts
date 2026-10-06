@@ -3,6 +3,8 @@ import type { AppDefinition } from "./types";
 export const linkedin: AppDefinition = {
   id: "linkedin",
   name: "LinkedIn",
+  apiDocsUrl:
+    "https://learn.microsoft.com/en-us/linkedin/shared/api-guide/concepts",
   icon: "/icons/linkedin.svg",
   description: "Profile, posts, and social engagement.",
   connectionMethod: {

@@ -83,5 +83,6 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   granola: "communication",
   fathom: "communication",
   timeless: "communication",
+  circleback: "communication",
   x: "communication",
 };

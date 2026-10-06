@@ -25,7 +25,8 @@ export const hubspot: AppDefinition = {
   id: "hubspot",
   name: "HubSpot",
   icon: "/icons/hubspot.svg",
-  apiDocsUrl: "https://developers.hubspot.com/docs/api/overview",
+  apiDocsUrl:
+    "https://developers.hubspot.com/docs/api-reference/latest/overview",
   description: "CRM contacts, companies, deals, and tickets.",
   connectionMethod: {
     type: "oauth",

@@ -6,6 +6,7 @@ import type { AppDefinition } from "./types";
 export const timeless: AppDefinition = {
   id: "timeless",
   name: "Timeless",
+  apiDocsUrl: "https://docs.timeless.day/api-reference/introduction",
   // Timeless's own mark (timeless.day/icon.svg): two brand-red squares that
   // read on both light and dark backgrounds, so no darkIcon.
   icon: "/icons/timeless.svg",

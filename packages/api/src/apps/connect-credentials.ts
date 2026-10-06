@@ -1,4 +1,6 @@
+import { logger } from "../lib/logger";
 import { ensureOrgAwsExternalId } from "../services/aws-external-id-service";
+import { ClientCredentialsExchangeError } from "./oauth/client-credentials";
 import type { AppDefinition, ConnectionMethod, ServerField } from "./types";
 
 /** Request body accepted by the direct-connect endpoints (workspace and org). */
@@ -8,6 +10,28 @@ export interface ConnectRequestBody {
   label?: string;
   method?: string;
 }
+
+/** What a rejected connect writes to the log: see `describeExchangeFailure`. */
+type ExchangeFailureLog =
+  | { status: number; error: string }
+  | { errorName: string };
+
+/**
+ * What a rejected connect may write to the log. Only a token endpoint's own
+ * answer (status + OAuth error fields, found anywhere in the `cause` chain)
+ * is logged in full. Any other error is reduced to its name, because an
+ * exchanger or a library (JSON.parse quotes its input) can echo part of a
+ * submitted secret into the message.
+ */
+export const describeExchangeFailure = (e: unknown): ExchangeFailureLog => {
+  for (let cur: unknown = e, depth = 0; cur && depth < 5; depth++) {
+    if (cur instanceof ClientCredentialsExchangeError) {
+      return { status: cur.status, error: cur.message };
+    }
+    cur = cur instanceof Error ? cur.cause : undefined;
+  }
+  return { errorName: e instanceof Error ? e.name : typeof e };
+};
 
 /** A connection method that accepts direct credentials (not OAuth). */
 export type DirectConnectionMethod = Extract<
@@ -155,6 +179,11 @@ export const resolveConnectCredentials = async (
     try {
       result = await activeMethod.exchangeCredentials(fields);
     } catch (e) {
+      // Never `fields` or a raw message: see describeExchangeFailure.
+      logger.warn(
+        { appId: appDef.id, ...describeExchangeFailure(e) },
+        "Credential exchange rejected on connect",
+      );
       return {
         ok: false,
         error:
@@ -184,6 +213,11 @@ export const resolveConnectCredentials = async (
       try {
         metadata = (await activeMethod.resolveMetadata(fields)) ?? undefined;
       } catch (e) {
+        // Same shape and the same message-safety as the exchange branch above.
+        logger.warn(
+          { appId: appDef.id, ...describeExchangeFailure(e) },
+          "Credential validation rejected on connect",
+        );
         return {
           ok: false,
           error:

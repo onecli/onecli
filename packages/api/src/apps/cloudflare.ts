@@ -3,6 +3,7 @@ import type { AppDefinition } from "./types";
 export const cloudflare: AppDefinition = {
   id: "cloudflare",
   name: "Cloudflare",
+  apiDocsUrl: "https://developers.cloudflare.com/api/",
   icon: "/icons/cloudflare.svg",
   darkIcon: "/icons/cloudflare-light.svg",
   description:

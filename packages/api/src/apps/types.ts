@@ -187,6 +187,18 @@ export interface AppDefinition {
    * resolve: an agent follows it.
    */
   apiDocsUrl?: string;
+  /**
+   * A machine-readable API spec (OpenAPI, https only), for an API the docs
+   * page above does not fully cover. Rendered beside the docs link so an
+   * agent reads exact parameter names and formats instead of guessing them.
+   * Curate only a link verified to resolve.
+   */
+  apiSpecUrl?: string;
+  /**
+   * OneCLI's own setup guide for this app (onecli.sh/docs/integrations/…).
+   * Shown at the top of the API-key connect form, above the fields.
+   */
+  docsUrl?: string;
   connectNote?: ConnectNote;
   /** Credential stubs for provisioners to write so MCP servers can boot. */
   credentialStubs?: {

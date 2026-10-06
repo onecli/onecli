@@ -9,6 +9,8 @@ import {
 export const googleSheets: AppDefinition = {
   id: "google-sheets",
   name: "Google Sheets",
+  apiDocsUrl:
+    "https://developers.google.com/workspace/sheets/api/reference/rest",
   icon: "/icons/google-sheets.svg",
   description: "Read, create, and edit spreadsheets.",
   connectionMethod: {

@@ -29,6 +29,7 @@ const profileMetadata = (
 export const apolloIo: AppDefinition = {
   id: "apollo-io",
   name: "Apollo.io",
+  apiDocsUrl: "https://docs.apollo.io/reference/apollo-api",
   icon: "/icons/apollo-io.svg",
   description: "People and company search, enrichment, contacts, and deals.",
   connectionMethod: {

@@ -9,6 +9,7 @@ import {
 export const confluence: AppDefinition = {
   id: "confluence",
   name: "Confluence",
+  apiDocsUrl: "https://developer.atlassian.com/cloud/confluence/rest/v2/intro/",
   icon: "/icons/confluence.svg",
   description: "Pages, spaces, and documentation in Confluence Cloud.",
   connectionMethod: {

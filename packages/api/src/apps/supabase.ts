@@ -3,6 +3,7 @@ import type { AppDefinition } from "./types";
 export const supabase: AppDefinition = {
   id: "supabase",
   name: "Supabase",
+  apiDocsUrl: "https://supabase.com/docs/reference/api/introduction",
   icon: "/icons/supabase.svg",
   description: "Projects, databases, edge functions, and storage.",
   connectionMethod: {

@@ -3,6 +3,7 @@ import type { AppDefinition } from "./types";
 export const vercel: AppDefinition = {
   id: "vercel",
   name: "Vercel",
+  apiDocsUrl: "https://vercel.com/docs/rest-api",
   icon: "/icons/vercel.svg",
   darkIcon: "/icons/vercel-light.svg",
   description: "Projects, deployments, domains, and environment variables.",

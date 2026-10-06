@@ -3,6 +3,7 @@ import type { AppDefinition } from "./types";
 export const gitlab: AppDefinition = {
   id: "gitlab",
   name: "GitLab",
+  apiDocsUrl: "https://docs.gitlab.com/api/rest/",
   icon: "/icons/gitlab.svg",
   description: "Repositories, issues, merge requests, and CI/CD pipelines.",
   connectionMethod: {

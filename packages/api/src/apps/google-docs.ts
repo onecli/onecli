@@ -8,6 +8,7 @@ import {
 export const googleDocs: AppDefinition = {
   id: "google-docs",
   name: "Google Docs",
+  apiDocsUrl: "https://developers.google.com/workspace/docs/api/reference/rest",
   icon: "/icons/google-docs.svg",
   description: "Read, create, and edit Google Docs documents.",
   connectionMethod: {

@@ -42,6 +42,7 @@ const exchangeCredentials = async (
 export const mongodbAtlas: AppDefinition = {
   id: "mongodb-atlas",
   name: "MongoDB Atlas",
+  apiDocsUrl: "https://www.mongodb.com/docs/api/doc/atlas-admin-api-v2/",
   icon: "/icons/mongodb-atlas.svg",
   description:
     "Manage clusters, users, and projects via the Atlas Administration API.",

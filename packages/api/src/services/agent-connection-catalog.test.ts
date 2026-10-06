@@ -4,6 +4,7 @@ import {
   agentConnectionSchema,
 } from "@onecli/agent-protocol";
 import { catalogFactsFor } from "./agent-connection-catalog";
+import { getApps } from "../apps/registry";
 import {
   allGroupTools,
   getAppPermissionDefinitions,
@@ -69,7 +70,28 @@ describe("catalogFactsFor", () => {
       apiHosts: [],
       endpoints: [],
       docsUrl: null,
+      specUrl: null,
     });
+  });
+
+  // The call rules send the agent to the docs before it guesses a
+  // parameter, so a line without a docs link leaves it nothing to read.
+  // Over the whole registry, not only the permission catalog: a connection
+  // renders for any registered app (JFrog has no catalog and still renders).
+  it("every app names its API docs", () => {
+    const missing = getApps()
+      .filter((app) => !catalogFactsFor(app.id).docsUrl)
+      .map((app) => app.id);
+    expect(missing).toEqual([]);
+  });
+
+  // Navan's docs page covers Expense only; bookings are documented solely
+  // in its OpenAPI file (epoch-second dates), which the agent must reach.
+  it("links Navan's bookings OpenAPI spec beside its Expense docs", () => {
+    const facts = catalogFactsFor("navan");
+    expect(facts.docsUrl).toBe("https://docs.navan.com/api/");
+    expect(facts.specUrl).toBe("https://app.navan.com/api/public-api.yml");
+    expect(facts.endpoints).toContain("GET /v1/bookings");
   });
 
   it("every catalog provider's facts fit the wire schema", () => {

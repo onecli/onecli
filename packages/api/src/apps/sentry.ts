@@ -3,6 +3,7 @@ import type { AppDefinition } from "./types";
 export const sentry: AppDefinition = {
   id: "sentry",
   name: "Sentry",
+  apiDocsUrl: "https://docs.sentry.io/api/",
   icon: "/icons/sentry.svg",
   darkIcon: "/icons/sentry-light.svg",
   description: "Error tracking, performance monitoring, and issue management.",

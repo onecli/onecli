@@ -151,10 +151,11 @@ ${lines.join("\n")}${anyCatalog ? `\n\n${CALL_RULES}` : ""}`;
 /**
  * What the catalog adds to a line: for an app with no bound host, its fixed
  * API hosts ("; call https://public-api.granola.ai"); for every app, a few
- * sample endpoints and the API docs. Appended, never replacing: a line for
- * an app with no catalog facts renders exactly as before. Hosts pass the
- * same hostname check as the bound host, endpoints are one-lined and
- * backtick-free, and the docs link must be https.
+ * sample endpoints, the API docs and, when curated, a machine-readable API
+ * spec. Appended, never replacing: a line for an app with no catalog facts
+ * renders exactly as before. Hosts pass the same hostname check as the
+ * bound host, endpoints are one-lined and backtick-free, and the docs and
+ * spec links must be https.
  */
 const catalogSuffix = (
   c: AgentConnectionWire,
@@ -178,13 +179,19 @@ const catalogSuffix = (
       `docs ${cleanLabel(c.docsUrl, MAX_AGENT_CONNECTION_DOCS_URL_CHARS)}`,
     );
   }
+  if (c.specUrl?.startsWith("https://")) {
+    parts.push(
+      `API spec ${cleanLabel(c.specUrl, MAX_AGENT_CONNECTION_DOCS_URL_CHARS)}`,
+    );
+  }
   return parts.length > 0 ? `; ${parts.join("; ")}` : "";
 };
 
 /**
  * The rules that turn the list into first-call behavior: call the listed
- * host, start from the listed endpoints, and re-check before calling an app
- * unavailable. The last is the transcript half of the Granola incident: the
+ * host, start from the listed endpoints with parameters read from the docs,
+ * and re-check before calling an app unavailable. The last is the
+ * transcript half of the Granola incident: the
  * agent repeated its own two-week-old "Granola isn't connected" answer after
  * it had been granted Granola. Rendered only when some line carries catalog
  * facts. Generic by design: a lesson from one app becomes a rule every app
@@ -195,7 +202,12 @@ const CALL_RULES = [
   // Navan, live: GET /v1/bookings answered 400 "at least one complete date
   // range is required: createdFrom/createdTo, ...", and the agent abandoned
   // the right endpoint for four invented paths before adding the dates.
-  "Start from the listed endpoints. When one answers 400 or 422, its error message usually names what is missing: fix those parameters and retry the same endpoint before trying any other path.",
+  // Then it guessed the date FORMAT (ISO; Navan wants epoch seconds), and
+  // Navan answered a bare 500 "try again later" that no retry could fix.
+  // The parameters live in the docs, so the rule sends the agent there
+  // before it guesses, rather than the hint carrying parameters itself.
+  "Start from the listed endpoints. Before calling one for the first time, look up its required parameters and their formats (dates, IDs, paging) in the app's docs or API spec; never guess a parameter name or format.",
+  "When a call answers 400 or 422, its error message usually names what is missing: fix those parameters and retry the same endpoint before trying any other path. A 500 right after you changed parameters usually means a malformed value, not an outage: check the docs for that parameter's format.",
   "Grants change while you run: an earlier answer in this conversation that an app was unavailable may be out of date. Check this list, or call list_apps, and try again before saying so.",
 ].join("\n");
 

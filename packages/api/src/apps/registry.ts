@@ -60,6 +60,7 @@ import { x } from "./x";
 import { fathom } from "./fathom";
 import { fireflies } from "./fireflies";
 import { timeless } from "./timeless";
+import { circleback } from "./circleback";
 import { zohoCrm } from "./zoho-crm";
 import { snowflake } from "./snowflake";
 import { stripe } from "./stripe";
@@ -126,6 +127,7 @@ const staticApps: AppDefinition[] = [
   fathom,
   fireflies,
   timeless,
+  circleback,
   zohoCrm,
   snowflake,
   stripe,

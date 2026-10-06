@@ -8,6 +8,7 @@ import {
 export const googleContacts: AppDefinition = {
   id: "google-contacts",
   name: "Google Contacts",
+  apiDocsUrl: "https://developers.google.com/people/api/rest",
   icon: "/icons/google-contacts.svg",
   description: "Read, search, and manage Google Contacts.",
   connectionMethod: {

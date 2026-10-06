@@ -283,6 +283,41 @@ describe("catalog facts on the connected-apps block", () => {
     }
   });
 
+  // Navan, live: the agent guessed ISO dates where Navan wants epoch
+  // seconds and got a bare 500. The rules send it to the docs first, and
+  // read a 500 after a parameter change as a malformed value.
+  it("sends the agent to the docs for parameters before guessing them", () => {
+    const block = connectedAppsBlock([granola]);
+    expect(block).toContain(
+      "look up its required parameters and their formats",
+    );
+    expect(block).toContain("never guess a parameter name or format");
+    expect(block).toContain("usually means a malformed value, not an outage");
+  });
+
+  it("renders an https API spec after the docs link", () => {
+    const line = connectedAppsBlock([
+      {
+        ...granola,
+        specUrl: "https://app.navan.com/api/public-api.yml",
+      },
+    ])
+      .split("\n")
+      .find((l) => l.startsWith("- Granola"))!;
+    expect(line).toMatch(
+      /docs https:\/\/docs\.granola\.ai\/introduction; API spec https:\/\/app\.navan\.com\/api\/public-api\.yml$/,
+    );
+  });
+
+  it("drops a non-https API spec", () => {
+    const block = connectedAppsBlock([
+      { ...granola, specUrl: "http://spec.example/openapi.yml" },
+    ]);
+    expect(block).not.toContain("spec.example");
+    const line = block.split("\n").find((l) => l.startsWith("- Granola"))!;
+    expect(line).not.toContain("API spec");
+  });
+
   it("adds no call rules when no line carries catalog facts", () => {
     const block = connectedAppsBlock([
       { provider: "x", name: "X", label: null, host: null },

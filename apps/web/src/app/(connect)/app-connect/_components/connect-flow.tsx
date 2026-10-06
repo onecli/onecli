@@ -21,6 +21,7 @@ interface ConnectFlowProps {
     darkIcon?: string;
     connectionType: string;
     labelHint?: string;
+    docsUrl?: string;
     connectNote?: ConnectNote;
     fields?: {
       name: string;

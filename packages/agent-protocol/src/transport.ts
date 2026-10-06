@@ -206,9 +206,10 @@ export const MAX_AGENT_CONNECTION_LABEL_CHARS = 120;
 
 /**
  * Clamps for the catalog facts riding each connection (`apiHosts`,
- * `endpoints`, `docsUrl`). The whole list at MAX_AGENT_CONNECTIONS must fit
- * the home-sync FINAL part beside a maximal brief (pinned by
- * transport.test.ts), so a cap is raised only with that budget re-checked.
+ * `endpoints`, `docsUrl`, `specUrl`). The whole list at
+ * MAX_AGENT_CONNECTIONS must fit the home-sync FINAL part beside a maximal
+ * brief (pinned by transport.test.ts), so a cap is raised only with that
+ * budget re-checked.
  * Shared with the control-plane composer and the supervisor renderer, so a
  * fact the composer emits is one the wire admits and the renderer shows.
  */
@@ -269,6 +270,18 @@ export const agentConnectionSchema = z.object({
     .optional(),
   /** The provider's public API reference (https), when curated. */
   docsUrl: z
+    .string()
+    .url()
+    .max(MAX_AGENT_CONNECTION_DOCS_URL_CHARS)
+    .nullable()
+    .optional(),
+  /**
+   * A machine-readable API spec (OpenAPI, https), when the provider
+   * publishes one the docs page does not cover. Navan's bookings API is
+   * documented only in its OpenAPI file (epoch-second dates, `size`), not
+   * on the docs page, and an agent guessing those formats got a bare 500.
+   */
+  specUrl: z
     .string()
     .url()
     .max(MAX_AGENT_CONNECTION_DOCS_URL_CHARS)

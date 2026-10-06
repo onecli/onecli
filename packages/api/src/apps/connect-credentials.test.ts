@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { resolveConnectCredentials } from "./connect-credentials";
+import { logger } from "../lib/logger";
+import {
+  describeExchangeFailure,
+  resolveConnectCredentials,
+} from "./connect-credentials";
+import { ClientCredentialsExchangeError } from "./oauth/client-credentials";
 import type { AppDefinition } from "./types";
 
 // The caller's organization, which server-owned fields resolve against.
@@ -15,6 +20,10 @@ const orgExternalIds: Record<string, string> = {
 vi.mock("../services/aws-external-id-service", () => ({
   ensureOrgAwsExternalId: async (organizationId: string) =>
     orgExternalIds[organizationId] ?? "",
+}));
+
+vi.mock("../lib/logger", () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
 // Minimal typed app fixtures — the helper only reads connectionMethod /
@@ -177,6 +186,7 @@ describe("resolveConnectCredentials", () => {
   });
 
   it("maps resolveMetadata failures to the thrown message", async () => {
+    vi.mocked(logger.warn).mockClear();
     const failingApp: AppDefinition = {
       ...apiKeyApp,
       id: "failing",
@@ -184,7 +194,8 @@ describe("resolveConnectCredentials", () => {
         type: "api_key",
         fields: [{ name: "apiKey", label: "API Key", placeholder: "key" }],
         resolveMetadata: async () => {
-          throw new Error("Invalid API key");
+          // Echoes the key, as a provider's own message or JSON.parse can.
+          throw new Error("Invalid API key sk-echoed-secret");
         },
       },
     };
@@ -192,11 +203,22 @@ describe("resolveConnectCredentials", () => {
       "failing",
       failingApp,
       {
-        fields: { apiKey: "bad" },
+        fields: { apiKey: "sk-echoed-secret" },
       },
       ORG,
     );
-    expect(result).toEqual({ ok: false, error: "Invalid API key" });
+    expect(result).toEqual({
+      ok: false,
+      error: "Invalid API key sk-echoed-secret",
+    });
+    // Logged like a rejected exchange: the app and the error's name only.
+    expect(logger.warn).toHaveBeenCalledWith(
+      { appId: "failing", errorName: "Error" },
+      "Credential validation rejected on connect",
+    );
+    expect(JSON.stringify(vi.mocked(logger.warn).mock.calls)).not.toContain(
+      "sk-echoed-secret",
+    );
   });
 
   it("validates credentials_import group fields by privateKey presence", async () => {
@@ -258,6 +280,7 @@ describe("resolveConnectCredentials", () => {
   it("returns a provider's credential rejection as an error, not a throw", async () => {
     // A wrong client secret is the user's mistake: it must reach the connect
     // form as a message (400), never escape as an unhandled 500.
+    vi.mocked(logger.warn).mockClear();
     const rejecting: AppDefinition = {
       ...apiKeyApp,
       id: "rejecting",
@@ -280,6 +303,10 @@ describe("resolveConnectCredentials", () => {
       ok: false,
       error: "Provider rejected these credentials",
     });
+    expect(logger.warn).toHaveBeenCalledWith(
+      { appId: "rejecting", errorName: "Error" },
+      "Credential exchange rejected on connect",
+    );
   });
   // ── Server-owned fields ────────────────────────────────────────────────
   // The reason `serverFields` exists: AWS's external ID defeats the
@@ -391,5 +418,34 @@ describe("resolveConnectCredentials", () => {
       ok: true,
       credentials: { externalId: "attacker" },
     });
+  });
+});
+
+describe("describeExchangeFailure", () => {
+  it("logs a token endpoint's status and reason, found through the cause chain", () => {
+    const upstream = new ClientCredentialsExchangeError(401, "invalid_client");
+    const wrapped = new Error("Navan rejected this Client ID", {
+      cause: upstream,
+    });
+    expect(describeExchangeFailure(wrapped)).toEqual({
+      status: 401,
+      error: "Token exchange failed (401): invalid_client",
+    });
+  });
+
+  it("never logs the message of any other error, which may echo input", () => {
+    let parseError: unknown;
+    try {
+      JSON.parse("873c5e26ab6b4414a9f96db4d2c7bf12 not json");
+    } catch (e) {
+      parseError = e;
+    }
+    const logged = describeExchangeFailure(parseError);
+    expect(logged).toEqual({ errorName: "SyntaxError" });
+    expect(JSON.stringify(logged)).not.toContain("873c5e26");
+  });
+
+  it("handles non-Error throws", () => {
+    expect(describeExchangeFailure("boom")).toEqual({ errorName: "string" });
   });
 });

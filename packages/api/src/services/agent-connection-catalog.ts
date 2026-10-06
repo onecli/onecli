@@ -116,8 +116,12 @@ const safeDocsUrl = (raw: string | undefined): string | null => {
 /** The catalog facts for one provider. Unknown providers get empty facts. */
 export const catalogFactsFor = (
   provider: string,
-): Pick<AgentConnectionWire, "apiHosts" | "endpoints" | "docsUrl"> => ({
+): Pick<
+  AgentConnectionWire,
+  "apiHosts" | "endpoints" | "docsUrl" | "specUrl"
+> => ({
   apiHosts: fixedApiHosts(provider),
   endpoints: endpointSamples(provider),
   docsUrl: safeDocsUrl(getApp(provider)?.apiDocsUrl),
+  specUrl: safeDocsUrl(getApp(provider)?.apiSpecUrl),
 });

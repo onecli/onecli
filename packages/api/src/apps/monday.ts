@@ -3,6 +3,7 @@ import type { AppDefinition } from "./types";
 export const monday: AppDefinition = {
   id: "monday",
   name: "monday.com",
+  apiDocsUrl: "https://developer.monday.com/api-reference/docs/basics",
   icon: "/icons/monday.svg",
   description: "Boards, items, docs, and workspace management.",
   connectNote: {

@@ -42,11 +42,52 @@ export const parseNavanRegion = (raw: string | undefined): NavanRegion => {
   return value;
 };
 
+/** Navan Client IDs are UUIDs and Secret Keys are 32 hex characters. */
+const CLIENT_ID_PATTERN =
+  /(?<![0-9a-f-])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f-])/gi;
+const SECRET_KEY_PATTERN = /(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])/gi;
+
+/** Labels Navan's admin page shows next to the values, which come along
+ *  when a user copies the whole row ("Secret Key: 873c..."). */
+const LABEL_PREFIX = /^(?:client\s*id|secret\s*key|secret|key)\s*[:=]\s*/i;
+
+const QUOTES = new Set(['"', "'", "`", "“", "”", "‘", "’"]);
+
+/** Strip surrounding quotes with index scans: a `["']+$` regex is quadratic
+ *  on a long run of quotes, and this input is user-supplied. */
+const stripQuotes = (s: string): string => {
+  let start = 0;
+  let end = s.length;
+  while (start < end && QUOTES.has(s[start] ?? "")) start++;
+  while (end > start && QUOTES.has(s[end - 1] ?? "")) end--;
+  return s.slice(start, end);
+};
+
+/**
+ * Reduce a pasted Navan value to the credential itself. Copying from Navan's
+ * admin page can bring along the field label, quotes, "Copy key" or
+ * invisible characters, and Navan then answers 401 for a valid credential.
+ * When exactly one value of the expected shape is present it is used as is;
+ * otherwise the label, quotes and whitespace are stripped and Navan judges
+ * what remains, so a future format change is never rejected locally.
+ */
+export const cleanNavanValue = (
+  raw: string | undefined,
+  pattern: RegExp,
+): string => {
+  // Zero-width and BOM characters survive .trim() and break Basic auth.
+  const text = (raw ?? "").replace(/[\u200B-\u200D\u2060\uFEFF]/g, "").trim();
+  const matches = [...new Set(text.match(pattern) ?? [])];
+  const [only] = matches;
+  if (matches.length === 1 && only) return only;
+  return stripQuotes(text.replace(LABEL_PREFIX, "").trim()).trim();
+};
+
 const exchangeCredentials = async (
   fields: Record<string, string>,
 ): Promise<OAuthExchangeResult> => {
-  const clientId = fields.clientId?.trim();
-  const clientSecret = fields.clientSecret?.trim();
+  const clientId = cleanNavanValue(fields.clientId, CLIENT_ID_PATTERN);
+  const clientSecret = cleanNavanValue(fields.clientSecret, SECRET_KEY_PATTERN);
   if (!clientId || !clientSecret) {
     throw new Error("Client ID and Secret Key are required");
   }
@@ -68,7 +109,9 @@ const exchangeCredentials = async (
       (e.status === 401 || e.status === 403)
     ) {
       throw new Error(
-        `Navan rejected this Client ID / Secret Key for the ${region.label} region. Check both values, that the credential still exists in Navan, and the Region field.`,
+        `Navan rejected this Client ID / Secret Key for the ${region.label} region. Check both values, that the credential still exists in Navan, and the Region field. (${e.message})`,
+        // Kept so the connect handler can log Navan's status and reason.
+        { cause: e },
       );
     }
     throw e;
@@ -109,6 +152,10 @@ export const navan: AppDefinition = {
   icon: "/icons/navan.svg",
   darkIcon: "/icons/navan-light.svg",
   apiDocsUrl: "https://docs.navan.com/api/",
+  // The docs page covers the Expense API only. Bookings (`/v1/bookings`,
+  // epoch-second `createdFrom`/`createdTo`, `size`) are documented solely in
+  // this OpenAPI file; an agent guessing ISO dates there got a bare 500.
+  apiSpecUrl: "https://app.navan.com/api/public-api.yml",
   description:
     "Read bookings and expense transactions, and sync expense data back to Navan.",
   connectionMethod: {

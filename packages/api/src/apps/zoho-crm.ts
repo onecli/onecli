@@ -10,6 +10,7 @@ const DEFAULT_SCOPES = [
 export const zohoCrm: AppDefinition = {
   id: "zoho-crm",
   name: "Zoho CRM",
+  apiDocsUrl: "https://www.zoho.com/crm/developer/docs/api/v8/",
   icon: "/icons/zoho-crm.svg",
   description: "Leads, contacts, accounts, deals, and tasks in Zoho CRM.",
   connectionMethod: {

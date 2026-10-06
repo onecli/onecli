@@ -8,6 +8,8 @@ import {
 export const googleAdmin: AppDefinition = {
   id: "google-admin",
   name: "Google Admin",
+  apiDocsUrl:
+    "https://developers.google.com/workspace/admin/directory/reference/rest",
   icon: "/icons/google-admin.svg",
   description: "Manage users, groups, and devices in Google Workspace.",
   connectionMethod: {

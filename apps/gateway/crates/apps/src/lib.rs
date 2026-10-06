@@ -1972,6 +1972,29 @@ static APP_PROVIDERS: &[AppProvider] = &[
         body_transform: None,
     },
     AppProvider {
+        provider: "circleback",
+        display_name: "Circleback",
+        // The REST API lives under /api on the same host as the Circleback web
+        // app (circleback.ai/docs/api), so the account API key is injected as a
+        // standard Bearer under /api/ only, never on the web app's pages. The
+        // hosted MCP server at /api/mcp uses its own OAuth, so a Bearer from
+        // here is simply not what it accepts.
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("circleback.ai"),
+            path_prefix: Some("/api/"),
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
         provider: "zoho-crm",
         display_name: "Zoho CRM",
         // US data center only, by construction: the definition hardcodes
@@ -5218,6 +5241,81 @@ mod tests {
             "api.timeless.day",
             "/mcp/"
         ));
+    }
+
+    // ── Circleback ─────────────────────────────────────────────────────
+    #[test]
+    fn providers_for_circleback_host() {
+        assert_eq!(providers_for_host("circleback.ai"), vec!["circleback"]);
+        // Only the apex host: subdomains and lookalikes get nothing.
+        for host in [
+            "www.circleback.ai",
+            "support.circleback.ai",
+            "circleback.ai.evil.example",
+            "evilcircleback.ai",
+        ] {
+            assert!(providers_for_host(host).is_empty(), "{host}");
+        }
+    }
+
+    #[test]
+    fn circleback_api_uses_bearer() {
+        let injections = build_app_injections("circleback", "circleback.ai", "cb_abc123");
+        assert_eq!(
+            injections,
+            vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer cb_abc123".to_string(),
+            }]
+        );
+        assert!(needs_access_token("circleback"));
+        assert!(refresh_config("circleback").is_none());
+        assert!(credential_headers("circleback").is_empty());
+    }
+
+    #[test]
+    fn circleback_injects_under_api_only() {
+        // The API shares the host with the web app: the key must reach /api/
+        // and never the app's own pages or a lookalike prefix.
+        for path in [
+            "/api/meetings",
+            "/api/meeting/m1/transcript",
+            "/api/oauth/test",
+        ] {
+            assert!(
+                provider_matches_host_and_path("circleback", "circleback.ai", path),
+                "{path}"
+            );
+        }
+        for path in [
+            "/",
+            "/settings",
+            "/docs/api",
+            "/apix/meetings",
+            "/apimeetings",
+        ] {
+            assert!(
+                !provider_matches_host_and_path("circleback", "circleback.ai", path),
+                "{path}"
+            );
+        }
+        assert_eq!(
+            provider_for_host_and_path("circleback.ai", "/api/meetings"),
+            Some(("circleback", "Circleback"))
+        );
+        // The rule the proxy actually installs (build_app_injection_rules) is
+        // the path_prefix turned into a pattern: one Bearer rule on /api/*.
+        let rules = build_app_injection_rules("circleback", "circleback.ai", "cb_abc123");
+        assert_eq!(
+            rules,
+            vec![(
+                "/api/*".to_string(),
+                vec![Injection::SetHeader {
+                    name: "authorization".to_string(),
+                    value: "Bearer cb_abc123".to_string(),
+                }]
+            )]
+        );
     }
 
     #[test]

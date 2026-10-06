@@ -374,6 +374,9 @@ RUN podman --version \
   && command -v newgidmap \
   && test -u /usr/bin/newuidmap \
   && test -u /usr/bin/newgidmap \
+  # catatonit doubles as the container init a remote backend may run in
+  # place of the ENTRYPOINT's tini; its absence would fail every start there.
+  && test -x /usr/bin/catatonit \
   && test -f /etc/containers/policy.json \
   && [ "$(grep -c '^node:' /etc/subuid)" -eq 1 ] \
   && [ "$(grep -c '^node:' /etc/subgid)" -eq 1 ] \
