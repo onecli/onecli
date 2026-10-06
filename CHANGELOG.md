@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.8.0](https://github.com/onecli/onecli/compare/v2.7.0...v2.8.0) (2026-10-06)
+
+
+### Features
+
+* Google Drive folder permissions, Navan + Timeless apps, grouped Slack approvals, OAuth refresh hardening, egress guard ([#599](https://github.com/onecli/onecli/issues/599)) ([93a639b](https://github.com/onecli/onecli/commit/93a639b9ab1c626a86786413a24339e738d8933c))
+
 ## [2.7.0](https://github.com/onecli/onecli/compare/v2.6.0...v2.7.0) (2026-10-03)
 
 
