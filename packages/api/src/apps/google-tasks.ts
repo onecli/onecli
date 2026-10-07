@@ -7,6 +7,7 @@ import {
 
 export const googleTasks: AppDefinition = {
   id: "google-tasks",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/google-tasks",
   name: "Google Tasks",
   apiDocsUrl: "https://developers.google.com/workspace/tasks/reference/rest",
   icon: "/icons/google-tasks.svg",

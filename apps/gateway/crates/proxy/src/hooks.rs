@@ -283,6 +283,24 @@ pub(crate) fn request_meta(
     })
 }
 
+/// Label a row with the app connection that actually injected into it.
+/// `request_meta` resolves the provider from the host, which cannot tell two
+/// apps on one host apart: every GitHub App request resolved to `github`, so
+/// the app was invisible in the activity feed. Uncredentialed rows keep the
+/// host's provider.
+pub(crate) fn attribute_to_connection(
+    meta: &mut RequestMeta,
+    rules: &ResolvedRules,
+    injection_count: usize,
+) {
+    if injection_count == 0 {
+        return;
+    }
+    if let Some(provider) = rules.winning_provider.as_deref() {
+        meta.provider = provider.to_string();
+    }
+}
+
 /// Emits a request-log event for a request the guard blocked. The guard
 /// returns before `forward.rs` runs its normal telemetry, so without this the
 /// denial would be invisible in the activity feed. Mirrors the policy-refusal

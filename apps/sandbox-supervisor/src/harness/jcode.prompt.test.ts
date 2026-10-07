@@ -82,6 +82,31 @@ describe("the platform system prompt", () => {
     expect(flat).toContain("never ask anyone for a key or token");
   });
 
+  it("carves out the one exception: a website login a person hands over for a browser task", () => {
+    // The opposite incident: told "never ask anyone for a key or token" with
+    // no carve-out, an agent refused three times to use a login the user
+    // volunteered for a browser task, quoting the rule back. The exception
+    // follows the rule it bends (never precedes it), names the scope (a
+    // website login, a browser task), the hygiene (not in replies or
+    // memory), and the preference for a connection. MUTATION-PROOF: drop
+    // the sentence and the first assertion fails; move it ahead of the rule
+    // and the ordering assertion fails.
+    const flat = PLATFORM_SYSTEM_PROMPT.replace(/\s+/g, " ");
+    const rule = flat.indexOf("never ask anyone for a key or token");
+    const exception = flat.indexOf(
+      "The one exception is a website login a person hands you for a browser task",
+    );
+    expect(exception).toBeGreaterThan(rule);
+    expect(flat).toContain("for that task only");
+    expect(flat).toContain("keep it out of your replies and your memory");
+    expect(flat).toContain(
+      "prefer a gateway connection whenever one exists for that service",
+    );
+    // API keys are NOT part of the exception: the gateway's own error
+    // already hands out a dashboard link for those.
+    expect(flat).not.toMatch(/exception[^.]*(API key|token)/i);
+  });
+
   it("writes BOTH replacement slots — either one alone leaves the vendor identity reachable", () => {
     // The project slot wins precedence and lives on the durable volume (an
     // agent-planted file would survive reboots); an EMPTY or missing file
@@ -251,11 +276,17 @@ describe("the turn-ending contract", () => {
     );
   });
 
-  it("the processes fragment carries the same law", () => {
+  it("the processes fragment leaves the law to the prompt and keeps the mechanics", () => {
+    // One home per rule (the 2026-10 budget audit): the fragment used to
+    // restate the contract word for word. The prompt above is the law; the
+    // fragment keeps what the prompt cannot carry — the restart fate that
+    // tells the agent WHY a watch may fire "lost". MUTATION-PROOF: paste
+    // the law back and the negative assertions fail.
     const flat = processesFragment.body.replace(/\s+/g, " ");
-    expect(flat).toContain("Nothing runs between your turns");
+    expect(flat).not.toContain("Nothing runs between your turns");
+    expect(flat).not.toContain('A promise to "report back"');
     expect(flat).toContain(
-      'A promise to "report back" is only real after you arm the watch',
+      'background tasks die and their watches fire with "lost"',
     );
   });
 });

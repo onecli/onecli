@@ -194,12 +194,13 @@ export interface AppDefinition {
    * Curate only a link verified to resolve.
    */
   apiSpecUrl?: string;
-  /**
-   * OneCLI's own setup guide for this app (onecli.sh/docs/integrations/…).
-   * Shown at the top of the API-key connect form, above the fields.
-   */
-  docsUrl?: string;
   connectNote?: ConnectNote;
+  /** The app's OneCLI setup guide, `https://onecli.sh/docs/integrations/<id>`.
+   *  The one docs link every connect surface shows, rendered as "Follow the
+   *  {app} setup guide". Set it only once the page exists; a link to a page
+   *  that doesn't exist sends a user mid-setup to a 404. Field-level `helpUrl`
+   *  stays for a pointer to the vendor's own docs about one value. */
+  setupGuideUrl?: string;
   /** Credential stubs for provisioners to write so MCP servers can boot. */
   credentialStubs?: {
     /** Full destination path (e.g., "~/.config/gcloud/application_default_credentials.json"). */
@@ -220,10 +221,5 @@ export interface AppDefinition {
     envDefaults?: Record<string, string>;
     /** Short hint shown above the credential fields (e.g., "Use credentials from a GitHub OAuth App"). */
     hint?: string;
-    /** A docs page that walks through creating the provider's OAuth app and
-     *  finding these credentials. Linked from the setup dialog as "Follow the
-     *  {app} setup guide". Only point at pages that actually cover that; a
-     *  usage page would send a stuck user somewhere that can't help. */
-    setupGuideUrl?: string;
   };
 }

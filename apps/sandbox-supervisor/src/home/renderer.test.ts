@@ -87,10 +87,39 @@ describe("renderInstructionDoc", () => {
     expect(flat).toContain("You are Ada, a hosted agent");
     // The environment names the runtime executing the agent; the document has
     // to say what that is (plumbing) or the agent answers identity questions
-    // from it — which is exactly what the live probe caught.
-    expect(flat).toContain("that is plumbing, not identity");
+    // from it — which is exactly what the live probe caught. One sentence:
+    // the full rule (and its coding-assistant clause) lives in the system
+    // prompt, which the model reads first; this is the reminder in the
+    // document the agent re-reads, not a second copy.
+    expect(flat).toContain("plumbing, not identity");
     expect(flat).toContain(
-      "Never repeat a runtime or vendor name, even to deny it",
+      "never repeat a runtime or vendor name, even to deny it",
+    );
+  });
+
+  it("states the zero-credential posture WITH its exception, so the preamble cannot be quoted against a login the user hands over", () => {
+    // Observed live: told "your environment deliberately contains none", an
+    // agent quoted it back to refuse a website login the user offered. The
+    // preamble keeps the posture (it is true) and names the one exception
+    // in the same breath; the system prompt carries the full rule.
+    const doc = renderInstructionDoc({
+      instructions: undefined,
+      agentName: "Ada",
+      channels: [],
+      peers: [],
+      connections: [],
+      capabilities,
+      fragments: [],
+    });
+    const flat = doc.replace(/\s+/g, " ");
+    expect(flat).toContain(
+      "your environment deliberately contains none, unless a person hands you one for a task",
+    );
+    // The memory bullet is a pointer: the Memory section owns the facts
+    // (sync timing, durability, index.md). One home per rule.
+    expect(flat).toContain("yours to edit — see Memory below");
+    expect(flat).not.toContain(
+      "memory/index.md is the one generated exception",
     );
   });
 

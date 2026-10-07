@@ -28,6 +28,7 @@ const profileMetadata = (
 
 export const apolloIo: AppDefinition = {
   id: "apollo-io",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/apollo-io",
   name: "Apollo.io",
   apiDocsUrl: "https://docs.apollo.io/reference/apollo-api",
   icon: "/icons/apollo-io.svg",

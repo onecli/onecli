@@ -8,6 +8,7 @@ import {
 
 export const jira: AppDefinition = {
   id: "jira",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/jira",
   name: "Jira",
   icon: "/icons/jira.svg",
   apiDocsUrl:

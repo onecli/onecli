@@ -39,6 +39,7 @@ const AppDetailPage = async ({ params }: Props) => {
           (m) => m.type === "api_key",
         ),
         blocklist: app.blocklist,
+        setupGuideUrl: app.setupGuideUrl,
       }}
       configurable={app.configurable}
       hasEnvDefaults={hasEnvDefaults}

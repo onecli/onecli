@@ -1091,6 +1091,8 @@ async fn handle_http_proxy(
     // `resolved_session_policy`; unlike `connection_label` below, it MUST be
     // threaded (policy decisions bind to it).
     let mut resolved_connection_id: Option<String> = None;
+    // Its provider, for request-log attribution (see `ResolvedRules`).
+    let mut resolved_provider: Option<String> = None;
     // Connections whose credential is minted only after the request is allowed.
     let mut pending_injections: Vec<proxy::connect::PendingInjection> = Vec::new();
     // Host-gated connections that refused this request (wrong host) — see
@@ -1122,6 +1124,7 @@ async fn handle_http_proxy(
                 body_transform,
                 session_policy,
                 connection_id: winning_connection_id,
+                provider,
                 pending,
                 ..
             }) => {
@@ -1130,6 +1133,7 @@ async fn handle_http_proxy(
                 resolved_finalizer = finalizer;
                 resolved_body_transform = body_transform;
                 resolved_session_policy = session_policy;
+                resolved_provider = winning_connection_id.is_some().then_some(provider);
                 resolved_connection_id = winning_connection_id;
             }
             Ok(AppConnectionResult::Ambiguous { connections }) => {
@@ -1239,6 +1243,7 @@ async fn handle_http_proxy(
         body_transform: resolved_body_transform,
         session_policy: resolved_session_policy,
         winning_connection_id: resolved_connection_id,
+        winning_provider: resolved_provider,
         budget_bindings: resolved.budget_bindings,
         host_mismatch,
     };

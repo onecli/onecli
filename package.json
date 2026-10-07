@@ -14,7 +14,7 @@
     "test:scripts": "node --test 'scripts/**/*.test.mjs'",
     "test:licensing": "pnpm --filter @onecli/api test:licensing",
     "fix": "turbo run lint:fix && pnpm run format",
-    "agent:build": "docker build -f docker/agent.Dockerfile -t onecli-agent:dev .",
+    "agent:build": "node scripts/agent-build.mjs",
     "db:up": "docker compose --project-directory . -f docker/docker-compose.dev.yml up -d --wait postgres",
     "db:down": "docker compose --project-directory . -f docker/docker-compose.dev.yml down postgres",
     "db:nuke": "docker compose --project-directory . -f docker/docker-compose.dev.yml down -v",

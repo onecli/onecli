@@ -2,7 +2,6 @@
 
 import { useId, useState } from "react";
 import { toast } from "sonner";
-import { ExternalLink } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -19,6 +18,7 @@ import { useSaveAppConfig } from "@/hooks/use-app-config";
 import type { OAuthConfigField } from "@onecli/api/apps/types";
 import { CloudUpsell } from "@/lib/components/cloud-upsell";
 import { AppIcon } from "@/lib/components/app-icon";
+import { SetupGuideLink } from "@/lib/components/setup-guide-link";
 import { RedirectUri } from "./redirect-uri";
 import { ConfigFieldOptions } from "./config-field-options";
 import { buildConfigPayload, resolveConfigValue } from "./config-field-values";
@@ -30,7 +30,7 @@ interface ConfigureCredentialsDialogProps {
   appDarkIcon?: string;
   fields: OAuthConfigField[];
   hint?: string;
-  /** The provider's step-by-step guide on onecli.sh (`configurable.setupGuideUrl`). */
+  /** The app's OneCLI setup guide (`AppDefinition.setupGuideUrl`). */
   setupGuideUrl?: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -89,19 +89,7 @@ export const ConfigureCredentialsDialog = ({
             </div>
           </div>
           {hint && <p className="pt-1 text-muted-foreground text-xs">{hint}</p>}
-          {setupGuideUrl && (
-            <p className="text-xs">
-              <a
-                href={setupGuideUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-foreground inline-flex items-center gap-0.5 font-medium underline underline-offset-2 hover:no-underline"
-              >
-                Follow the {appName} setup guide
-                <ExternalLink className="size-3" aria-hidden />
-              </a>
-            </p>
-          )}
+          <SetupGuideLink appName={appName} url={setupGuideUrl} />
         </DialogHeader>
 
         <div className="space-y-4 pt-2">

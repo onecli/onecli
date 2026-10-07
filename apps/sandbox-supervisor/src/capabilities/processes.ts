@@ -23,6 +23,13 @@ import {
  * container. That INVERTS the crons/memory drift rule — there is no
  * control-plane zod behind these, so the schemas here plus the parses below
  * ARE the enforcement authority, not a mirror kept identical by eye.
+ *
+ * The fragment carries the MECHANICS (which tool does what, watch kinds,
+ * expiry, the restart fate). The turn-ending LAW — nothing runs between
+ * turns, no report-back promise without an armed wake, poll external
+ * systems with a watched process — lives in the platform system prompt
+ * alone (one home per rule; it was stated in both until the 2026-10 budget
+ * audit).
  */
 
 export const processesFragment: CapabilityFragment = {
@@ -42,17 +49,11 @@ you through watches.
   "silence" (no output for N seconds). Your watch prompt runs automatically
   and its report reaches this chat. Watches expire
   (default 4 hours), and every watch also fires if the process ends first,
-  whatever its kind — so say in the prompt what to do in each case. This is
-  THE way to be woken about background work; a wake requested through your
-  own tooling is honored the same way, as a watch.
+  whatever its kind — so say in the prompt what to do in each case.
 - process_stop stops a process_start task; tasks started other ways are
   stopped the way they were started.
 - If the machine restarts, background tasks die and their watches fire with
-  "lost" so you can restart the work.
-- Nothing runs between your turns. A promise to "report back" is only real
-  after you arm the watch (or schedule) that will wake you. To follow
-  something outside this machine (a CI run, a deploy), process_start a
-  poller for it and watch that.`,
+  "lost" so you can restart the work.`,
 };
 
 const startSchema = z

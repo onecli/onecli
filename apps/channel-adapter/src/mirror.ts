@@ -412,6 +412,7 @@ const PROVIDER_DOMAINS: Record<string, string> = {
   fireflies: "fireflies.ai",
   timeless: "timeless.day",
   circleback: "circleback.ai",
+  pylon: "usepylon.com",
 };
 
 /** The app's favicon via Google's resolver — Slack's image elements accept

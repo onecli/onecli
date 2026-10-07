@@ -148,6 +148,7 @@ const exchangeCredentials = async (
 
 export const navan: AppDefinition = {
   id: "navan",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/navan",
   name: "Navan",
   icon: "/icons/navan.svg",
   darkIcon: "/icons/navan-light.svg",

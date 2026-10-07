@@ -7,6 +7,7 @@ import {
 
 export const googleMeet: AppDefinition = {
   id: "google-meet",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/google-meet",
   name: "Google Meet",
   apiDocsUrl:
     "https://developers.google.com/workspace/meet/api/reference/rest/v2",

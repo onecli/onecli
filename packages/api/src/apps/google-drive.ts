@@ -8,6 +8,7 @@ import {
 
 export const googleDrive: AppDefinition = {
   id: "google-drive",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/google-drive",
   name: "Google Drive",
   icon: "/icons/google-drive.svg",
   apiDocsUrl:

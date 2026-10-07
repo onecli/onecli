@@ -57,6 +57,7 @@ const exchangeCredentials = async (
 
 export const awsRole: AppDefinition = {
   id: "aws-role",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/aws-role",
   name: "AWS Role",
   apiDocsUrl: "https://docs.aws.amazon.com/general/latest/gr/",
   icon: "/icons/aws.svg",

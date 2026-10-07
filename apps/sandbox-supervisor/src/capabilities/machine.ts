@@ -9,14 +9,21 @@ import type { CapabilityFragment } from "../home/renderer";
  *    entrypoint.sh's contract). Everything else is the image and resets.
  *    An agent that does not hold this loses installed tools and re-pulls
  *    container images forever.
- * 2. WHAT IS HERE. The inventory of docker/agent.Dockerfile's runner stage,
+ * 2. WHAT IS HERE. The inventory of the agent image (docker/agent-base.Dockerfile
+ *    plus docker/agent.Dockerfile's runner stage),
  *    named so the agent never says "no browser" while chromium sits at
  *    /usr/bin (the failure that motivated this rewrite, observed live:
  *    four consecutive "I can't" replies for a task the machine could do).
  *    The browser, Nix, and container bullets defer to root-owned in-image READMEs
- *    rather than re-teaching them (one source, no drift); the background-
- *    process line defers to the processes fragment the same way — this
- *    fragment must be registered AFTER it for the "above" reference to hold.
+ *    rather than re-teaching them (one source, no drift). What happens to
+ *    background tasks on a restart is the processes fragment's fact alone
+ *    (one home per rule); this fragment no longer repeats it.
+ *    The sign-in bullet is the MECHANICS half of the system prompt's
+ *    website-login exception (the LAW half: a login a person hands over for
+ *    a browser task is theirs to give): the file-not-argv handoff, the
+ *    delete-after, the saved session that spares the password on later
+ *    turns, and the honest stop on 2FA/captcha/bot checks that big sites
+ *    throw at headless browsers.
  *    The Nix rung says up front that `nix` is absent until the helper runs:
  *    observed live (prod, 2026-09-09), an agent asked for a durable install
  *    ran `which nix`, saw nothing, and fetched a static binary from GitHub
@@ -49,6 +56,12 @@ and pip modules build.
   /etc/onecli/README.browser FIRST — it has the proxy-credential launch
   snippet a browser needs here, and the sandbox flag for self-hosted
   deployments. Playwright records .webm natively; ffmpeg stitches frames.
+- Signing in to a website with a login a person gave you: pass it to your
+  script through a file (never a command-line argument), delete the file
+  once signed in, and save the session (Playwright \`storageState\`) under
+  /workspace so later turns reuse it instead of the password. Some sites
+  answer a headless browser with 2FA, a captcha, or a bot check: report
+  that and stop rather than retrying.
 - To install tools that persist, use \`npm install -g\` or
   \`pip install --user\` — both land under ~/.local, whose bin dir is on
   your PATH — or a venv / project node_modules under /workspace. Any
@@ -67,8 +80,6 @@ and pip modules build.
   containers STOP when the machine sleeps: \`podman start\` (or
   \`docker start\`) the stopped container — do not re-create it, or you
   orphan its state. Details in /etc/containers/README.onecli.
-- Background processes do not survive a restart: tracked tasks die and
-  their watches fire with "lost" (see Background processes above).
 
 Before telling anyone something cannot be done on this machine, check
 for an npm or pip package, a container image, and the tools listed above.

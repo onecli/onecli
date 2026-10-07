@@ -2,6 +2,7 @@ import type { AppDefinition } from "./types";
 
 export const fireflies: AppDefinition = {
   id: "fireflies",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/fireflies",
   name: "Fireflies",
   icon: "/icons/fireflies.svg",
   apiDocsUrl: "https://docs.fireflies.ai/getting-started/introduction",

@@ -35,6 +35,7 @@ docker run -d --name he2e-pg -e POSTGRES_PASSWORD=postgres -p 5461:5432 postgres
 docker exec he2e-pg psql -U postgres -c 'CREATE DATABASE onecli_he2e_template'
 DATABASE_URL=postgresql://postgres:postgres@localhost:5461/onecli_he2e_template \
   pnpm --filter @onecli/db exec prisma migrate deploy
+docker build -f docker/agent-base.Dockerfile -t onecli-agent-base:local .
 docker build -f docker/agent.Dockerfile -t onecli-agent:he2e .
 cargo build --manifest-path apps/gateway/Cargo.toml --bin onecli-gateway
 

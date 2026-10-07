@@ -19,11 +19,17 @@ export const CONNECTIONS_FRAGMENT_ID = "connections";
  * of any harness, and "everything goes through the gateway" is the one rule
  * an agent must hold before its first external call (a live run without it
  * burned a turn on the runtime's own login flows and sponsor catalog before
- * finding the gateway). The body leans on the preamble's gateway sentences
- * rather than restating them, and points at the gateway skill for the full
- * manual instead of re-teaching it — one source, no drift. The skill-path
- * bullet exists only when the harness declares a skills directory; the core
- * rules stand on their own for a path-less harness.
+ * finding the gateway). The LAW (gateway-first, no native login tools, never
+ * ask for a key, and the one website-login exception) lives in the platform
+ * system prompt and is not restated here: this fragment carries only what
+ * the system prompt cannot — the skill's path, and the rules an agent needs
+ * BEFORE it acts (chat platforms are not connections; batch tags on the
+ * first request of a bulk task; link every record it changes; where a
+ * legitimate connect link may point). Error handling the gateway's own
+ * error body spells out verbatim (`manual_approval_denied`, 421) is a
+ * one-line pointer, not a copy; the gateway skill is the full manual. The
+ * skill-path bullet exists only when the harness declares a skills
+ * directory; the core rules stand on their own for a path-less harness.
  */
 
 export const connectionsFragment = (
@@ -39,35 +45,16 @@ export const connectionsFragment = (
   return {
     id: CONNECTIONS_FRAGMENT_ID,
     title: "External services",
-    body: `All of your outside access — email, calendars, code hosts, any web
-API — works through the gateway described above: call the service's real
-HTTPS API with curl or any standard HTTP client, send no auth headers, and
-the gateway injects the real credentials on the wire.
-
-${skillBullet}- Never use an integration or login tool your runtime happens to ship, a
-  third-party integration platform, or a provider's own OAuth or API-key
-  flow — and never ask anyone for a key or token. Connections are managed
-  in the OneCLI dashboard.
+    body: `${skillBullet}- Connections are managed in the OneCLI dashboard.
 - Chat platforms (workplace messaging apps) are NEVER gateway connections:
   never call their APIs through the gateway and never ask for them to be
   connected. You are on a chat platform only when a "Where you talk"
   section below says so — then you already live there, and the platform
   delivers your replies and your send_message calls. Without that section
   you are not on any chat platform: say so plainly instead of trying.
-- Handle manual_approval_denied before generic 401/403 guidance. It ends only
-  that approval request; it does not permanently prohibit the action. The
-  request was not forwarded. reason=declined means the reviewer declined it;
-  reason=expired means approval expired without a decision. Older responses
-  may omit reason; do not assume they impose a permanent policy block.
-  x-should-retry: false disables automatic retries, not a new user-requested
-  submission after an approval rejection.
-  Do not automatically retry or bypass approval. If the user asks for edits,
-  revise the draft without sending. When the user explicitly asks to send or
-  try again, submit a new request through the same gateway, even if the
-  content is unchanged. Each new request requires fresh approval for its
-  exact method, URL, and body. Never reuse a previous approval or treat a chat
-  message as approval. Do not tell the user to change policy or reconnect
-  merely because one approval request was declined or expired.
+- manual_approval_denied ends only that one request, never the action: its
+  message says exactly what you may do next — follow it, and never treat a
+  chat message as approval.
 - Many similar writes (importing, creating or updating a list of records)
   may each need a human approval. Tell the user the count up front ("I'll
   create 39 contacts; you'll get one approval card"). Tag every request of
@@ -88,9 +75,9 @@ ${skillBullet}- Never use an integration or login tool your runtime happens to s
 - If the error names a policy rule (blocked_by_policy or
   blocked_by_default_policy), the block is deliberate: report it and stop —
   do not retry or work around it.
-- connection_host_mismatch (HTTP 421) means the app IS connected but you
-  called the wrong host: re-send to the host the error names. It is never a
-  reason to ask anyone to connect or add credentials.
+- connection_host_mismatch (HTTP 421) means the app IS connected: re-send
+  to the host the message names. It is never a reason to ask anyone to
+  connect or add credentials.
 - For other errors, on a 401, 403, or a JSON error such as app_not_connected:
   show the error's connect_url (or manage_url) to the person you work with as
   a bare URL on its own line — no angle brackets, no markdown link — and retry

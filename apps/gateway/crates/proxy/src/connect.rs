@@ -185,6 +185,9 @@ pub enum AppConnectionResult {
         /// Provider-specific body transform (e.g., commit trailer injection).
         body_transform: Option<apps::BodyTransform>,
         /// Provider name of the resolved connection (e.g., "github-app", "datadog").
+        /// Names the connection behind `connection_id` when that is set.
+        /// Otherwise it is only the provider that happened to yield `rules`,
+        /// so callers attribute by it only alongside a `Some` `connection_id`.
         provider: String,
         /// Per-agent granular-access policy of THIS connection — the one that
         /// won injection. Carried here (rather than re-derived by a provider
@@ -1190,8 +1193,10 @@ impl PolicyEngineExt for PolicyEngine {
                             }
                             resolved_session_policy = session_policy;
                             resolved_connection_id = connection_id;
-                        }
-                        if resolved_provider.is_none() {
+                            // The serving connection names the app, not
+                            // merely the first connection to yield rules.
+                            resolved_provider = Some(provider);
+                        } else if resolved_provider.is_none() {
                             resolved_provider = Some(provider);
                         }
                         match (earliest_expires_at, token_expires_at) {

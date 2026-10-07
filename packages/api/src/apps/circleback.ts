@@ -13,7 +13,7 @@ export const circleback: AppDefinition = {
   icon: "/icons/circleback.svg",
   description:
     "AI meeting notes. Search meetings, read notes and transcripts, and manage action items.",
-  docsUrl: "https://onecli.sh/docs/integrations/circleback",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/circleback",
   apiDocsUrl: "https://circleback.ai/docs/api",
   connectionMethod: {
     type: "api_key",

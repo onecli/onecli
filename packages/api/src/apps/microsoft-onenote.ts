@@ -8,6 +8,7 @@ import {
 
 export const microsoftOnenote: AppDefinition = {
   id: "microsoft-onenote",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/microsoft-onenote",
   name: "Microsoft OneNote",
   apiDocsUrl:
     "https://learn.microsoft.com/en-us/graph/api/resources/onenote-api-overview?view=graph-rest-1.0",

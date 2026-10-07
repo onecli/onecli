@@ -7,7 +7,7 @@ name: CI cache seed
 # caches are readable by every PR, so this workflow does one warm build per
 # merge and the PR lanes restore from it: the rust caches via the
 # `gateway-debug` shared-key (must match ci.yml's two Swatinem steps), the
-# agent image via the `ci-agent` buildx scope.
+# agent image pair via the `ci-agent-base` and `ci-agent` buildx scopes.
 #
 # Side benefit: a merge that breaks the gateway build or the agent image
 # surfaces HERE immediately, instead of on the next unrelated PR.
@@ -33,6 +33,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # Same reason as ci.yml's e2e lane: the agent image pair holds the base
+      # three times on the runner (builder cache, OCI layout, its re-import)
+      # beside the Rust target. The unused preinstalled toolchains (~10 GB)
+      # go first.
+      - name: Free runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
+          df -h /
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -49,13 +59,28 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      # Populates the buildx layer cache only — the image itself is
-      # discarded (no load, no push).
+      # Populates the buildx layer caches only — the images themselves are
+      # discarded (no load, no push). Same two-image shape and the same
+      # base hand-off as ci.yml's e2e lane: the base is exported as an OCI
+      # layout and named into the thin build, because the docker-container
+      # builder cannot see a `load`ed daemon image.
+      - name: Build the agent base image
+        id: agent-base
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/agent-base.Dockerfile
+          outputs: type=oci,dest=${{ runner.temp }}/agent-base,tar=false
+          cache-from: type=gha,scope=ci-agent-base
+          cache-to: type=gha,mode=max,scope=ci-agent-base
+
       - name: Build the agent image
         uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/agent.Dockerfile
+          build-contexts: |
+            onecli-agent-base:local=oci-layout://${{ runner.temp }}/agent-base@${{ steps.agent-base.outputs.digest }}
           tags: onecli-agent:seed
           cache-from: type=gha,scope=ci-agent
           cache-to: type=gha,mode=max,scope=ci-agent

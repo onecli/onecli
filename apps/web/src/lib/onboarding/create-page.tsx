@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  ArrowLeft,
   ArrowRight,
   Box,
   Check,
@@ -263,13 +262,6 @@ export default function CreatePage() {
               <ArrowRight className="size-4" aria-hidden />
             </Button>
           </form>
-
-          <div className="mt-10">
-            <Button variant="ghost" onClick={() => setPhase("mission")}>
-              <ArrowLeft className="size-4" aria-hidden />
-              Back
-            </Button>
-          </div>
         </div>
       ) : (
         <div key="booting" className={cn("w-full max-w-sm", PHASE_ENTRANCE)}>

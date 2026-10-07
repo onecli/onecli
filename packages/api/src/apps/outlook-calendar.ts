@@ -8,6 +8,7 @@ import {
 
 export const outlookCalendar: AppDefinition = {
   id: "outlook-calendar",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/outlook-calendar",
   name: "Outlook Calendar",
   icon: "/icons/outlook-calendar.svg",
   apiDocsUrl:

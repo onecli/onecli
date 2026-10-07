@@ -7,6 +7,7 @@ import {
 
 export const googleForms: AppDefinition = {
   id: "google-forms",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/google-forms",
   name: "Google Forms",
   apiDocsUrl:
     "https://developers.google.com/workspace/forms/api/reference/rest",

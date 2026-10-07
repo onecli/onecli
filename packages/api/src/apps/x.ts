@@ -20,6 +20,7 @@ const deriveCodeChallenge = async (verifier: string): Promise<string> => {
 
 export const x: AppDefinition = {
   id: "x",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/x",
   name: "X",
   apiDocsUrl: "https://docs.x.com/x-api/introduction",
   icon: "/icons/x.svg",

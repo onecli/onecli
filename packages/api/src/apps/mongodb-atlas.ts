@@ -41,6 +41,7 @@ const exchangeCredentials = async (
 
 export const mongodbAtlas: AppDefinition = {
   id: "mongodb-atlas",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/mongodb-atlas",
   name: "MongoDB Atlas",
   apiDocsUrl: "https://www.mongodb.com/docs/api/doc/atlas-admin-api-v2/",
   icon: "/icons/mongodb-atlas.svg",

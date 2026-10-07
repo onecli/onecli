@@ -5,6 +5,7 @@ import type { AppDefinition } from "./types";
 // is no OAuth option here.
 export const clay: AppDefinition = {
   id: "clay",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/clay",
   name: "Clay",
   apiDocsUrl: "https://developers.clay.com/",
   // Clay publishes its Kiln mark only as a 3-D raster (brand kit at

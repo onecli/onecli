@@ -48,6 +48,7 @@ const resolveMetadata = async (
 
 export const datadog: AppDefinition = {
   id: "datadog",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/datadog",
   name: "Datadog",
   apiDocsUrl: "https://docs.datadoghq.com/api/latest/",
   icon: "/icons/datadog.svg",

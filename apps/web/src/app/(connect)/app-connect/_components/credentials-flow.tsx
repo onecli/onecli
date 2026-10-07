@@ -2,7 +2,7 @@
 
 import type { ReactNode } from "react";
 import { useRef, useState } from "react";
-import { ChevronRight, ExternalLink } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import {
   Collapsible,
@@ -12,6 +12,7 @@ import {
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
 import { SecretInput } from "@/components/secret-input";
+import { SetupGuideLink } from "@/lib/components/setup-guide-link";
 import { apiFetch } from "@/lib/api-fetch";
 import { ConnectLayout } from "./connect-layout";
 
@@ -41,7 +42,8 @@ export interface CredentialsFlowProps {
     darkIcon?: string;
     connectionType: string;
     labelHint?: string;
-    docsUrl?: string;
+    /** The app's OneCLI setup guide (`AppDefinition.setupGuideUrl`). */
+    setupGuideUrl?: string;
   };
   fields: CredentialsFlowField[];
   fileImport?: FileImportConfig;
@@ -192,20 +194,7 @@ export const CredentialsFlow = ({
     >
       <div className="space-y-5 py-2">
         {preContent}
-        {app.docsUrl && (
-          <a
-            href={app.docsUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center justify-between gap-3 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-          >
-            <span>Step-by-step guide to connect {app.name}</span>
-            <span className="inline-flex shrink-0 items-center gap-1 font-medium text-foreground">
-              View guide
-              <ExternalLink className="size-3" aria-hidden />
-            </span>
-          </a>
-        )}
+        <SetupGuideLink appName={app.name} url={app.setupGuideUrl} />
         {fileImport && (
           <>
             <div>

@@ -44,6 +44,7 @@ import {
   useToggleAppConfig,
 } from "@/hooks/use-app-config";
 import { CloudUpsell } from "@/lib/components/cloud-upsell";
+import { SetupGuideLink } from "@/lib/components/setup-guide-link";
 import { RedirectUri } from "./redirect-uri";
 import { ConfigFieldOptions } from "./config-field-options";
 import { buildConfigPayload, resolveConfigValue } from "./config-field-values";
@@ -58,6 +59,8 @@ interface AppConfigFormProps {
   appName: string;
   fields: OAuthConfigField[];
   hint?: string;
+  /** The app's OneCLI setup guide (`AppDefinition.setupGuideUrl`). */
+  setupGuideUrl?: string;
   hasEnvDefaults: boolean;
   isConnected: boolean;
   pageScope?: PageScope;
@@ -70,6 +73,7 @@ export const AppConfigForm = ({
   appName,
   fields,
   hint,
+  setupGuideUrl,
   hasEnvDefaults,
   isConnected,
   pageScope = "workspace",
@@ -313,6 +317,11 @@ export const AppConfigForm = ({
               <Switch checked={enabled} onCheckedChange={handleToggle} />
             </div>
 
+            {/* Guide, then the URI to register, then the credentials it
+                produces. */}
+            <SetupGuideLink appName={appName} url={setupGuideUrl} />
+            <RedirectUri provider={provider} />
+
             {fields.map((field) => {
               const inputId = `${idPrefix}-${field.name}`;
               const labelId = `${inputId}-label`;
@@ -372,8 +381,6 @@ export const AppConfigForm = ({
                 </div>
               );
             })}
-
-            <RedirectUri provider={provider} />
 
             <div className="flex items-center gap-3">
               <Button

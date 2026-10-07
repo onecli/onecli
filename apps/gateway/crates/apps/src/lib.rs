@@ -389,6 +389,23 @@ fn datadog_host_for_site(site: &str, original_host: &str) -> Option<String> {
     })
 }
 
+/// Maps a Pylon connection's stored `region` to the API host that region is
+/// served from. Pylon's API has two regional hosts and a token works only on
+/// its own. The connect form accepts the region case- and
+/// whitespace-insensitively but stores what was typed, so the same
+/// normalization is applied here: what passed validation at connect time is
+/// exactly what routes at injection time. Anything else is treated as US
+/// (Pylon's documented default base URL) rather than steering the token at
+/// an arbitrary host. The request host is ignored: every host rule of the
+/// provider is one of the two regional API hosts, so the rewrite is the same
+/// whichever one the agent called.
+fn pylon_host_for_region(region: &str, _original_host: &str) -> Option<String> {
+    Some(match region.trim().to_ascii_lowercase().as_str() {
+        "eu" => "api.eu.usepylon.com".to_string(),
+        _ => "api.usepylon.com".to_string(),
+    })
+}
+
 // ── Provider registry ──────────────────────────────────────────────────
 
 static APP_PROVIDERS: &[AppProvider] = &[
@@ -1991,6 +2008,44 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         credential_params: &[],
         host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "pylon",
+        display_name: "Pylon",
+        // Pylon's API is served from two regional hosts and a token works
+        // only on its own region (docs.usepylon.com, Authentication). Both
+        // hosts take the token as a standard Bearer on every path: they are
+        // dedicated API hosts, nothing else lives there. The connection's
+        // stored `region` rewrites the upstream to the right host, so an
+        // agent calling the documented US base URL reaches an EU tenant too.
+        // The hosted MCP server at mcp.usepylon.com uses its own OAuth, so a
+        // Bearer from here is not what it accepts and it is not a rule.
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("api.usepylon.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("api.eu.usepylon.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: Some(&HostRewrite {
+            credential_field: "region",
+            template: pylon_host_for_region,
+        }),
         finalizer: None,
         body_transform: None,
     },
@@ -5316,6 +5371,121 @@ mod tests {
                 }]
             )]
         );
+    }
+
+    // ── Pylon ──────────────────────────────────────────────────────────
+    #[test]
+    fn providers_for_pylon_hosts() {
+        // Both regional API hosts, and only those.
+        assert_eq!(providers_for_host("api.usepylon.com"), vec!["pylon"]);
+        assert_eq!(providers_for_host("api.eu.usepylon.com"), vec!["pylon"]);
+        assert_eq!(
+            provider_for_host("api.eu.usepylon.com"),
+            Some(("pylon", "Pylon"))
+        );
+        // The apex, the dashboard, the docs, the OAuth-only MCP server, and
+        // lookalikes get nothing.
+        for host in [
+            "usepylon.com",
+            "app.usepylon.com",
+            "app.eu.usepylon.com",
+            "docs.usepylon.com",
+            "mcp.usepylon.com",
+            "api.usepylon.com.evil.example",
+            "evilapi.usepylon.com",
+            "api.us.usepylon.com",
+        ] {
+            assert!(providers_for_host(host).is_empty(), "{host}");
+        }
+    }
+
+    #[test]
+    fn pylon_api_uses_bearer_on_every_path_of_both_hosts() {
+        for host in ["api.usepylon.com", "api.eu.usepylon.com"] {
+            let injections = build_app_injections("pylon", host, "tok");
+            assert_eq!(
+                injections,
+                vec![Injection::SetHeader {
+                    name: "authorization".to_string(),
+                    value: "Bearer tok".to_string(),
+                }],
+                "{host}"
+            );
+            // Dedicated API hosts: no path prefix, so the installed rule is
+            // the catch-all.
+            let rules = build_app_injection_rules("pylon", host, "tok");
+            assert_eq!(rules.len(), 1, "{host}");
+            assert_eq!(rules[0].0, "*", "{host}");
+            assert!(
+                provider_matches_host_and_path("pylon", host, "/me"),
+                "{host}"
+            );
+            assert!(
+                provider_matches_host_and_path("pylon", host, "/issues/search"),
+                "{host}"
+            );
+        }
+        assert!(needs_access_token("pylon"));
+        assert!(refresh_config("pylon").is_none());
+        assert!(credential_headers("pylon").is_empty());
+        assert!(credential_params("pylon").is_empty());
+    }
+
+    #[test]
+    fn pylon_rewrites_the_upstream_host_to_the_stored_region() {
+        // A US tenant: the documented default host, whichever host the
+        // agent called.
+        let us = serde_json::json!({"access_token": "tok", "region": "us"});
+        assert_eq!(
+            rewrite_host("pylon", &us, "api.usepylon.com"),
+            Some("api.usepylon.com".to_string())
+        );
+        assert_eq!(
+            rewrite_host("pylon", &us, "api.eu.usepylon.com"),
+            Some("api.usepylon.com".to_string())
+        );
+        // An EU tenant: the EU host, even when the agent called the US one.
+        let eu = serde_json::json!({"access_token": "tok", "region": "eu"});
+        assert_eq!(
+            rewrite_host("pylon", &eu, "api.usepylon.com"),
+            Some("api.eu.usepylon.com".to_string())
+        );
+        assert_eq!(
+            rewrite_host("pylon", &eu, "api.eu.usepylon.com"),
+            Some("api.eu.usepylon.com".to_string())
+        );
+        // The connect form validates the region case- and whitespace-
+        // insensitively but stores what was typed: the same value it
+        // accepted must route to the same host here.
+        for stored in [" EU ", "Eu", "eu\n"] {
+            let creds = serde_json::json!({"access_token": "tok", "region": stored});
+            assert_eq!(
+                rewrite_host("pylon", &creds, "api.usepylon.com"),
+                Some("api.eu.usepylon.com".to_string()),
+                "{stored:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pylon_rewrite_falls_back_to_us_and_never_to_an_arbitrary_host() {
+        // The connect form only stores a normalized `us`/`eu`, but the
+        // gateway must still fail safe on anything else in the database: a
+        // stored value is never spliced into the host.
+        for region in ["", "apac", "evil.example", "api.eu.usepylon.com"] {
+            let creds = serde_json::json!({"access_token": "tok", "region": region});
+            assert_eq!(
+                rewrite_host("pylon", &creds, "api.usepylon.com"),
+                Some("api.usepylon.com".to_string()),
+                "{region:?}"
+            );
+        }
+        // No region at all (or not a string): no rewrite, the request host
+        // stands.
+        let none = serde_json::json!({"access_token": "tok"});
+        assert_eq!(rewrite_host("pylon", &none, "api.usepylon.com"), None);
+        let bad = serde_json::json!({"access_token": "tok", "region": 7});
+        assert_eq!(rewrite_host("pylon", &bad, "api.usepylon.com"), None);
     }
 
     #[test]

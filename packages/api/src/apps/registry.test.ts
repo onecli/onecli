@@ -97,13 +97,17 @@ describe("configurable field definitions", () => {
       }
     }
   });
+});
 
-  it("setup guide links point at our own docs over https", () => {
-    for (const app of configurableApps) {
-      const url = app.configurable!.setupGuideUrl;
-      if (url === undefined) continue;
-      expect(url, app.id).toMatch(
-        /^https:\/\/onecli\.sh\/docs\/integrations\//,
+// `AppDefinition.setupGuideUrl` is the one way an app links its OneCLI docs
+// page. Pinning the URL to the app's own slug keeps every link on our docs
+// site and stops a copy-paste from sending one app's users to another's page.
+describe("setup guides", () => {
+  it("point at the app's own page on onecli.sh/docs", () => {
+    for (const app of getApps()) {
+      if (app.setupGuideUrl === undefined) continue;
+      expect(app.setupGuideUrl, app.id).toBe(
+        `https://onecli.sh/docs/integrations/${app.id}`,
       );
     }
   });

@@ -2,6 +2,7 @@ import type { AppDefinition } from "./types";
 
 export const gitlab: AppDefinition = {
   id: "gitlab",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/gitlab",
   name: "GitLab",
   apiDocsUrl: "https://docs.gitlab.com/api/rest/",
   icon: "/icons/gitlab.svg",

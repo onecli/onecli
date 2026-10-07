@@ -2,6 +2,7 @@ import type { AppDefinition } from "./types";
 
 export const vercel: AppDefinition = {
   id: "vercel",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/vercel",
   name: "Vercel",
   apiDocsUrl: "https://vercel.com/docs/rest-api",
   icon: "/icons/vercel.svg",

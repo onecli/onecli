@@ -7,6 +7,7 @@ import {
 
 export const googleAdmin: AppDefinition = {
   id: "google-admin",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/google-admin",
   name: "Google Admin",
   apiDocsUrl:
     "https://developers.google.com/workspace/admin/directory/reference/rest",

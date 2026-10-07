@@ -72,4 +72,33 @@ describe("gateway approval guidance", () => {
       }
     },
   );
+
+  it.each([undefined, "claude", "hermes"])(
+    "scopes the no-manual-auth rule to the gateway's services and carves out a user-provided website login (%s)",
+    (agent) => {
+      // Observed live: told "never use manual auth flows" and "you never
+      // see credential values", an agent refused a website login the user
+      // offered for a browser task. The rule stays for every service the
+      // gateway connects; a login the user hands over is named as outside
+      // it. API keys and tokens keep the dashboard path. MUTATION-PROOF:
+      // restore the unscoped wording or drop the carve-out and this fails.
+      const text = getGatewaySkill(agent).replace(/\s+/g, " ");
+      expect(text).toContain(
+        "You never see or handle the gateway's credential values directly",
+      );
+      expect(text).toContain(
+        "**Never** use browser extensions, gcloud, or manual auth flows for a service the gateway connects",
+      );
+      expect(text).toContain(
+        "A website login the user hands you for a browser task is not a gateway auth flow",
+      );
+      expect(text).toContain("keep it out of your replies and memory");
+      expect(text).toContain(
+        "prefer a connection when one exists for that service",
+      );
+      expect(text).toContain(
+        "**Never** ask the user for API keys or tokens directly",
+      );
+    },
+  );
 });

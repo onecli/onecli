@@ -7,6 +7,7 @@ import type { ConnectNote } from "@onecli/api/apps/types";
 import { Button } from "@onecli/ui/components/button";
 import { IS_CLOUD } from "@/lib/env";
 import { API_ORIGIN, getAuthToken, getWorkspaceId } from "@/lib/api-fetch";
+import { SetupGuideLink } from "@/lib/components/setup-guide-link";
 import { ConnectLayout } from "./connect-layout";
 import { ConnectSuccess } from "./connect-success";
 import { CredentialsFlow } from "./credentials-flow";
@@ -21,8 +22,8 @@ interface ConnectFlowProps {
     darkIcon?: string;
     connectionType: string;
     labelHint?: string;
-    docsUrl?: string;
     connectNote?: ConnectNote;
+    setupGuideUrl?: string;
     fields?: {
       name: string;
       label: string;
@@ -256,6 +257,7 @@ export const ConnectFlow = ({
               {app.name} needs OAuth credentials before connecting.
             </p>
           </div>
+          <SetupGuideLink appName={app.name} url={app.setupGuideUrl} />
           <Button
             variant="outline"
             size="sm"

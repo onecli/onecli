@@ -9,6 +9,7 @@ const DEFAULT_SCOPES = [
 
 export const zohoCrm: AppDefinition = {
   id: "zoho-crm",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/zoho-crm",
   name: "Zoho CRM",
   apiDocsUrl: "https://www.zoho.com/crm/developer/docs/api/v8/",
   icon: "/icons/zoho-crm.svg",

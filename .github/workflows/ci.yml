@@ -304,8 +304,22 @@ jobs:
               - 'packages/agent-protocol/**'
               - 'packages/db/prisma/**'
               - 'docker/agent.Dockerfile'
+              - 'docker/agent-base.Dockerfile'
               - 'docker/agent-entrypoint.sh'
               - '.github/workflows/ci.yml'
+
+      # The agent image pair holds the base three times on this runner (the
+      # builder's cache, the OCI layout, its re-import as a build context)
+      # beside the gateway's Rust target and node_modules, which can exhaust
+      # ubuntu-latest's ~14 GB free mid-build. The preinstalled toolchains
+      # nothing in this lane uses are ~10 GB; drop them first. `df` before
+      # and after keeps the margin visible.
+      - name: Free runner disk
+        if: steps.changes.outputs.e2e == 'true'
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
+          df -h /
 
       - name: Setup Node.js
         if: steps.changes.outputs.e2e == 'true'
@@ -340,13 +354,32 @@ jobs:
 
       # The one image with a network download in its build (the vendored
       # jcode runtime) — the gha cache is what keeps warm runs inside the
-      # timeout. Scope deliberately distinct from publish.yml's.
+      # timeout. Scope deliberately distinct from publish.yml's. Two images:
+      # the OS base first, then the app on top. The base is exported as an
+      # OCI layout and handed to the thin build as a named build context
+      # under the tag its Dockerfile defaults to: the docker-container
+      # builder resolves `FROM onecli-agent-base:local` against the registry,
+      # never the host daemon, so a `load`ed base is invisible to it (fails
+      # with "pull access denied").
+      - name: Build the agent base image
+        if: steps.changes.outputs.e2e == 'true'
+        id: agent-base
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/agent-base.Dockerfile
+          outputs: type=oci,dest=${{ runner.temp }}/agent-base,tar=false
+          cache-from: type=gha,scope=ci-agent-base
+          cache-to: type=gha,mode=max,scope=ci-agent-base
+
       - name: Build the agent image
         if: steps.changes.outputs.e2e == 'true'
         uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/agent.Dockerfile
+          build-contexts: |
+            onecli-agent-base:local=oci-layout://${{ runner.temp }}/agent-base@${{ steps.agent-base.outputs.digest }}
           tags: onecli-agent:ci
           load: true
           cache-from: type=gha,scope=ci-agent

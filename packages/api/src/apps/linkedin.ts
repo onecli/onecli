@@ -2,6 +2,7 @@ import type { AppDefinition } from "./types";
 
 export const linkedin: AppDefinition = {
   id: "linkedin",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/linkedin",
   name: "LinkedIn",
   apiDocsUrl:
     "https://learn.microsoft.com/en-us/linkedin/shared/api-guide/concepts",

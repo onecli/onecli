@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { guideHref } from "@/lib/components/setup-guide-link";
 import type { OAuthConfigField } from "@onecli/api/apps/types";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
 
@@ -157,7 +158,7 @@ describe("ConfigureCredentialsDialog", () => {
     });
     expect(link).toHaveAttribute(
       "href",
-      "https://onecli.sh/docs/integrations/salesforce",
+      guideHref("https://onecli.sh/docs/integrations/salesforce"),
     );
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", "noopener noreferrer");

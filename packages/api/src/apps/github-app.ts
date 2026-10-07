@@ -51,6 +51,7 @@ export const signGitHubAppJwt = (appId: string, privateKey: string): string => {
 
 export const githubApp: AppDefinition = {
   id: "github-app",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/github-app",
   name: "GitHub App",
   icon: "/icons/github.svg",
   apiDocsUrl: "https://docs.github.com/en/rest",

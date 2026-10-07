@@ -7,6 +7,7 @@ import {
 
 export const googleSlides: AppDefinition = {
   id: "google-slides",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/google-slides",
   name: "Google Slides",
   apiDocsUrl:
     "https://developers.google.com/workspace/slides/api/reference/rest",

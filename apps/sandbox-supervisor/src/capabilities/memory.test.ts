@@ -79,14 +79,13 @@ describe("the memory tool surface", () => {
 
   it("the fragment teaches the write-back laws (files writable, index generated, deletes restored)", () => {
     // The laws the write-back amendment added — each one steers real agent
-    // behavior the platform depends on.
-    expect(memoryFragment.body).toContain("edit or create memory/");
-    expect(memoryFragment.body).toContain(
-      "memory/index.md is generated — never edit it",
-    );
-    expect(memoryFragment.body).toContain(
-      "Deleting a file does not delete the memory",
-    );
-    expect(memoryFragment.body).toContain("source of truth");
+    // behavior the platform depends on. index.md is named ONCE (the 2026-10
+    // budget audit folded the second mention into the opening sentence).
+    const flat = memoryFragment.body.replace(/\s+/g, " ");
+    expect(flat).toContain("edit or create memory/");
+    expect(flat).toContain("memory/index.md, a generated map you never edit");
+    expect(flat.match(/memory\/index\.md/g)).toHaveLength(1);
+    expect(flat).toContain("Deleting a file does not delete the memory");
+    expect(flat).toContain("source of truth");
   });
 });

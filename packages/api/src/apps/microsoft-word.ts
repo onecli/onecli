@@ -8,6 +8,7 @@ import {
 
 export const microsoftWord: AppDefinition = {
   id: "microsoft-word",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/microsoft-word",
   name: "Microsoft Word",
   apiDocsUrl:
     "https://learn.microsoft.com/en-us/graph/api/resources/driveitem?view=graph-rest-1.0",

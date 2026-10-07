@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { PLATFORM_SYSTEM_PROMPT } from "../harness/jcode";
 import {
   connectedAppsBlock,
   connectionsChangeNote,
@@ -25,14 +26,20 @@ describe("the connections fragment", () => {
     expect(flat).toContain("read .agents/skills/onecli-gateway/SKILL.md");
   });
 
-  it("keeps the core rules without a skills dir", () => {
+  it("keeps the core rules without a skills dir, and never restates the system prompt's law", () => {
+    // The gateway-first law (no native login tools, never ask for a key, and
+    // the website-login exception) lives in PLATFORM_SYSTEM_PROMPT, pinned
+    // there. A second copy here was pure cost: the whole document is paid
+    // for on every turn. MUTATION-PROOF: paste the law back and the
+    // negative assertions fail.
     const body = connectionsFragment(null).body;
     expect(body).not.toContain("SKILL.md");
     const flat = body.replace(/\s+/g, " ");
-    expect(flat).toContain(
-      "Never use an integration or login tool your runtime happens to ship",
-    );
-    expect(flat).toContain("never ask anyone for a key or token");
+    expect(flat).toContain("Connections are managed in the OneCLI dashboard");
+    expect(flat).toContain("are NEVER gateway connections");
+    expect(flat).not.toContain("Never use an integration or login tool");
+    expect(flat).not.toContain("never ask anyone for a key or token");
+    expect(flat).not.toContain("works through the gateway described above");
   });
 
   it("matches the gateway skill's connect_url handling: bare URL, own line, retry", () => {
@@ -115,26 +122,29 @@ describe("the connections fragment", () => {
   });
 
   it.each([".agents/skills", null])(
-    "allows user-directed resubmission, not automatic retries (%s)",
+    "points at the denial's own message instead of restating it (%s)",
     (dir) => {
+      // The gateway's manual_approval_denied body already spells out the
+      // next step verbatim (not permanent, no automatic retry, a new
+      // user-requested submission needs fresh approval): the agent reads it
+      // at the moment it matters, whether or not it opened the skill. The
+      // fragment keeps the two things the error cannot say about itself —
+      // that it is not permanent, and that a chat message is not approval —
+      // and defers the rest. MUTATION-PROOF: paste the old 14-line bullet
+      // back and the length guard fails.
       const flat = connectionsFragment(dir).body.replace(/\s+/g, " ");
-      expect(flat.indexOf("manual_approval_denied")).toBeLessThan(
-        flat.indexOf("For other errors"),
+      const at = flat.indexOf("manual_approval_denied");
+      expect(at).toBeGreaterThan(-1);
+      expect(at).toBeLessThan(flat.indexOf("For other errors"));
+      expect(flat).toContain(
+        "manual_approval_denied ends only that one request, never the action",
       );
-      for (const guidance of [
-        "reason=declined",
-        "reason=expired",
-        "may omit reason",
-        "Do not automatically retry or bypass approval",
-        "revise the draft without sending",
-        "When the user explicitly asks to send or try again, submit a new request",
-        "content is unchanged",
-        "requires fresh approval",
-        "exact method, URL, and body",
-        "Never reuse a previous approval",
-        "Do not tell the user to change policy or reconnect",
-      ])
-        expect(flat).toContain(guidance);
+      expect(flat).toContain("message says exactly what you may do next");
+      expect(flat).toContain("never treat a chat message as approval");
+      // The bullet is a pointer, not the manual.
+      const bullet = flat.slice(at, flat.indexOf("- Many similar writes"));
+      expect(bullet.length).toBeLessThan(260);
+      expect(flat).not.toContain("reason=declined");
     },
   );
 
@@ -150,16 +160,18 @@ describe("the connections fragment", () => {
     // The live incident (plans/channel-aware-agents.md): "chat" in the
     // gateway's service list made "send me a message on Slack" an attempt
     // to call slack.com through the proxy, ending in a request to connect
-    // Slack while the agent was answering IN Slack. The channels section
-    // says where the agent lives; this bullet says the gateway is not it.
-    // MUTATION-PROOF: re-add "chat" to the list or drop the bullet and
-    // this fails.
+    // Slack while the agent was answering IN Slack. The service list now
+    // lives ONLY in the system prompt (one home per rule), so that is where
+    // "chat" must stay out; this fragment carries the carve-out bullet.
+    // MUTATION-PROOF: re-add "chat" to the prompt's list or drop the bullet
+    // and this fails.
+    const prompt = PLATFORM_SYSTEM_PROMPT.replace(/\s+/g, " ");
+    expect(prompt).toContain("email, calendars, code hosts, any web API");
+    expect(prompt).not.toContain("code hosts, chat,");
     const flat = connectionsFragment(".agents/skills").body.replace(
       /\s+/g,
       " ",
     );
-    expect(flat).toContain("email, calendars, code hosts, any web API");
-    expect(flat).not.toContain("code hosts, chat,");
     expect(flat).toContain("are NEVER gateway connections");
     expect(flat).toContain("never ask for them to be connected");
     expect(flat).toContain('"Where you talk"');
@@ -185,9 +197,15 @@ describe("the connections fragment", () => {
   });
 
   it("teaches that a 421 host mismatch means connected, wrong host", () => {
+    // The error body names the bound host and says "re-send"; the fragment
+    // keeps the one fact the error cannot state about itself — it is never
+    // a reason to ask for credentials.
     const flat = connectionsFragment(null).body.replace(/\s+/g, " ");
     expect(flat).toContain("connection_host_mismatch (HTTP 421)");
-    expect(flat).toContain("re-send to the host the error names");
+    expect(flat).toContain("re-send to the host the message names");
+    expect(flat).toContain(
+      "never a reason to ask anyone to connect or add credentials",
+    );
   });
 });
 

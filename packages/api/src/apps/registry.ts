@@ -66,6 +66,7 @@ import { snowflake } from "./snowflake";
 import { stripe } from "./stripe";
 import { navan } from "./navan";
 import { salesforce } from "./salesforce";
+import { pylon } from "./pylon";
 
 const staticApps: AppDefinition[] = [
   salesforce,
@@ -132,6 +133,7 @@ const staticApps: AppDefinition[] = [
   snowflake,
   stripe,
   navan,
+  pylon,
 ];
 
 export const getApps = (): AppDefinition[] => [...staticApps];

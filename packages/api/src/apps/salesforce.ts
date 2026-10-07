@@ -73,6 +73,7 @@ const ASSUMED_TOKEN_LIFETIME_SECONDS = 10 * 60;
 
 export const salesforce: AppDefinition = {
   id: "salesforce",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/salesforce",
   name: "Salesforce",
   icon: "/icons/salesforce.svg",
   apiDocsUrl:
@@ -219,7 +220,6 @@ export const salesforce: AppDefinition = {
   },
   configurable: {
     hint: "Connect your Salesforce External Client App. Access follows the connecting user's permissions and may include writes.",
-    setupGuideUrl: "https://onecli.sh/docs/integrations/salesforce",
     fields: [
       {
         name: "clientId",

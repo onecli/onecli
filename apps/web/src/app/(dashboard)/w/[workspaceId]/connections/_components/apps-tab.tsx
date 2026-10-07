@@ -413,7 +413,7 @@ export const AppsTab = ({
           appDarkIcon={configApp.darkIcon}
           fields={configApp.configurable.fields}
           hint={configApp.configurable.hint}
-          setupGuideUrl={configApp.configurable.setupGuideUrl}
+          setupGuideUrl={configApp.setupGuideUrl}
           open={!!configApp}
           onOpenChange={(open) => {
             if (!open) setConfigApp(null);

@@ -8,6 +8,7 @@ import {
 
 export const youtube: AppDefinition = {
   id: "youtube",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/youtube",
   name: "YouTube",
   apiDocsUrl: "https://developers.google.com/youtube/v3/docs",
   icon: "/icons/youtube.svg",

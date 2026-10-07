@@ -38,7 +38,7 @@ The gateway handles all credentials automatically.
 
 Your outbound HTTPS traffic is transparently proxied through the OneCLI
 gateway, which injects stored credentials at the proxy boundary. You never
-see or handle credential values directly.
+see or handle the gateway's credential values directly.
 
 ## How to Access External Services
 
@@ -240,8 +240,11 @@ user can connect the service in OneCLI.
 
 - **Never** say "I don't have access to X" without first making the HTTP
   request through the proxy.
-- **Never** use browser extensions, gcloud, or manual auth flows. The
-  gateway handles credentials for you.
+- **Never** use browser extensions, gcloud, or manual auth flows for a
+  service the gateway connects. The gateway handles those credentials for
+  you. A website login the user hands you for a browser task is not a
+  gateway auth flow: use it for that task, keep it out of your replies and
+  memory, and prefer a connection when one exists for that service.
 - **Never** ask the user for API keys or tokens directly. Direct them to
   connect the service in the OneCLI dashboard.
 - **Never** suggest the user open Gmail/Calendar/GitHub in their browser

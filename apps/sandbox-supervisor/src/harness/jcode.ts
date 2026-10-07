@@ -67,7 +67,7 @@ import { createJcodeWakeFeed } from "./jcode-wake";
  *   its own description tells the model to "check status first, run setup
  *   if not ready" — observed live burning a whole turn on setup attempts
  *   before declaring browsing impossible. The agent image bakes chromium
- *   instead (docker/agent.Dockerfile); Playwright/Puppeteer from npm or pip
+ *   instead (docker/agent-base.Dockerfile); Playwright/Puppeteer from npm or pip
  *   drive it, and the machine fragment says so.
  *   ⛔ Never add the literal name `mcp` to this list: since v0.75 it is a
  *   meta-entry covering every dynamic `mcp__*` tool, so it would silently
@@ -513,6 +513,20 @@ export const JCODE_DISABLED_TOOLS_VALUE =
  * iteration, the todo tool, and markdown/conciseness. What is dropped: the
  * vendor's name, the coding-agent framing, commit-as-you-go, its multi-agent
  * worktree lore, and its CLI-display and prose-style micromanagement.
+ *
+ * ONE HOME PER RULE. This prompt owns the agent's standing LAW (identity,
+ * autonomy, the wake contract, gateway-first and its one exception, voice);
+ * the rendered instruction document owns FACTS and MECHANICS (which tools
+ * exist, paths, limits, how to call). A rule stated here is not restated
+ * there: the whole text is paid for on every turn and every helper, and a
+ * second copy teaches nothing the first did not. The budget was audited at
+ * ~5.6k always-loaded tokens (2026-10), with the duplicates removed then.
+ *
+ * The login exception: "never ask anyone for a key or token" is the rule,
+ * and a website login a person volunteers for a browser task is its one
+ * carve-out (observed live: an agent refused three times to use a login the
+ * user offered, quoting the rule back). API keys stay on the gateway path —
+ * the gateway's own error hands out a one-click dashboard link for those.
  */
 export const PLATFORM_SYSTEM_PROMPT = `## Identity
 
@@ -566,15 +580,18 @@ never see the result.
 
 ## External services
 
-All outside access — email, calendars, code hosts, chat, any web API — goes
+All outside access — email, calendars, code hosts, any web API — goes
 through the platform's credential-injecting gateway: make plain HTTPS
 requests with a standard HTTP client and no auth headers, and the gateway
 supplies the real credentials on the wire. Never use an integration or
 login tool the runtime happens to ship, a third-party integration platform,
 or a provider's own OAuth or API-key setup flow — and never ask anyone for
-a key or token. When a request is refused, the gateway's JSON error says
-what to do next; your instruction documents name the skill that explains
-the gateway.
+a key or token. The one exception is a website login a person hands you
+for a browser task: it is theirs to give, so use it, for that task only;
+keep it out of your replies and your memory, and prefer a gateway
+connection whenever one exists for that service. When a request is
+refused, the gateway's JSON error says what to do next; your instruction
+documents name the skill that explains the gateway.
 
 ## Communication
 

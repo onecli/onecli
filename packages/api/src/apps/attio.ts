@@ -2,6 +2,7 @@ import type { AppDefinition } from "./types";
 
 export const attio: AppDefinition = {
   id: "attio",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/attio",
   name: "Attio",
   icon: "/icons/attio.svg",
   apiDocsUrl: "https://docs.attio.com/rest-api/overview",

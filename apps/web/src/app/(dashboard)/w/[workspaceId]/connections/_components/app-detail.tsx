@@ -27,6 +27,7 @@ import { AppIcon } from "@/lib/components/app-icon";
 import { AppConfigForm, type AppConfigFormHandle } from "./app-config-form";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
 import { ConnectionAgentsReflection } from "@/lib/components/policy-reflect";
+import { SetupGuideLink } from "@/lib/components/setup-guide-link";
 import { ConnectionAccountCard } from "./connection-account-card";
 import { InheritedConnectionCard } from "./inherited-connection-card";
 import { AppBlocklist } from "./app-blocklist";
@@ -43,12 +44,13 @@ interface AppDetailProps {
      *  OAuth setup first. */
     hasApiKeyAlternate?: boolean;
     blocklist?: { id: string; name: string; hostPattern: string }[];
+    /** The app's OneCLI setup guide (`AppDefinition.setupGuideUrl`). */
+    setupGuideUrl?: string;
   };
   configurable?: {
     fields: OAuthConfigField[];
     envDefaults?: Record<string, string>;
     hint?: string;
-    setupGuideUrl?: string;
   };
   hasEnvDefaults: boolean;
   hasAppConfig: boolean;
@@ -262,6 +264,12 @@ export const AppDetail = ({
         </div>
       </div>
 
+      {/* Apps with a Custom credentials card show the guide inside it, right
+          above the Redirect URI. The rest show it here. */}
+      {!configurable && (
+        <SetupGuideLink appName={app.name} url={app.setupGuideUrl} />
+      )}
+
       {loading ? (
         <div className="flex items-center justify-center py-12">
           <Loader2 className="size-5 animate-spin text-muted-foreground" />
@@ -313,6 +321,7 @@ export const AppDetail = ({
           appName={app.name}
           fields={configurable.fields}
           hint={configurable.hint}
+          setupGuideUrl={app.setupGuideUrl}
           hasEnvDefaults={hasEnvDefaults}
           isConnected={isConnected}
           pageScope={pageScope}
@@ -336,7 +345,7 @@ export const AppDetail = ({
           appDarkIcon={app.darkIcon}
           fields={configurable.fields}
           hint={configurable.hint}
-          setupGuideUrl={configurable.setupGuideUrl}
+          setupGuideUrl={app.setupGuideUrl}
           open={configDialogOpen}
           onOpenChange={setConfigDialogOpen}
           pageScope={pageScope}

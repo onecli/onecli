@@ -66,8 +66,8 @@ export default async function ConnectPage({ params, searchParams }: Props) {
         darkIcon: app.darkIcon,
         connectionType: app.connectionMethod.type,
         labelHint: app.labelHint,
-        docsUrl: app.docsUrl,
         connectNote: app.connectNote,
+        setupGuideUrl: app.setupGuideUrl,
         fields:
           app.connectionMethod.type === "api_key" ||
           app.connectionMethod.type === "credentials_import"

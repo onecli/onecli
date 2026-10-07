@@ -136,6 +136,7 @@ const fetchAccessiblePages = async (
 
 export const notion: AppDefinition = {
   id: "notion",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/notion",
   name: "Notion",
   icon: "/icons/notion.svg",
   apiDocsUrl: "https://developers.notion.com/reference/intro",

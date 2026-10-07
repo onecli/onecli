@@ -6880,6 +6880,1618 @@
       ]
     }
   },
+  "pylon": {
+    "create_account": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_account_activity": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/*/activities"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_account_notebook_note": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/*/notebook-blocks/*/notes"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_article": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/articles"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_attachment": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/attachments"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_collection": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/collections"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_contact": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/contacts"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_custom_object": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/custom-objects/*/"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_feature_request": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/feature-requests"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_issue": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_issue_ai_response": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/ai-response"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_issue_note": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/note"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_issue_thread": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/threads"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_milestone": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/milestones"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_project": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/projects"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_route_redirect": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/route-redirects"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_task": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tasks"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_team": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/teams"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_account": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_article": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/articles/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_call_recording": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/call-recordings/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_collection": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/collections/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_contact": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/contacts/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_custom_object": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/custom-objects/*/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_email_suppression": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/email-suppressions/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_feature_request": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/feature-requests/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_issue": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_message": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/messages/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_milestone": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/milestones/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_project": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/projects/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_task": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tasks/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "draft_issue_reply": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/draft-reply"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_account": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_account_activities": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/*/activities"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_account_notebook_notes": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/*/notebook-blocks/*/notes"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_account_relationships": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/*/relationships"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_article": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/articles/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_call_recording": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/call-recordings/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_collection": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/collections/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_contact": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/contacts/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_custom_field": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/custom-fields/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_custom_object": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/custom-objects/*/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_feature_request": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/feature-requests/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_issue": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_issue_followers": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/followers"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_issue_messages": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/messages"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_issue_threads": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/threads"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_issue_voice_calls": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/voice-calls"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_knowledge_base": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_knowledge_base_theme": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/themes/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_macro": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/macros/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_me": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/me"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_milestone": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/milestones/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_project": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/projects/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_survey": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/surveys/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_survey_responses": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/surveys/*/responses"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_tag": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tags/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_task": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tasks/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_task_comments": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tasks/*/comments"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_team": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/teams/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_ticket_form": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/ticket-forms/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_training_data": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/training-data/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_user": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/users/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "link_external_issue": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/external-issues"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "link_feature_request_evidence": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/feature-requests/*/evidence"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "link_task_issue": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tasks/*/issues",
+        "/tasks/*/external-issues"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_accounts": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_activity_types": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/activity-types"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_article_feedback": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/article-feedback"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_articles": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/articles"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_audit_logs": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/audit-logs"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_collections": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/collections"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_contacts": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/contacts"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_custom_fields": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/custom-fields"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_custom_objects": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/custom-objects/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_email_suppressions": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/email-suppressions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_issue_statuses": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issue-statuses"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_issues": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_knowledge_bases": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_macro_groups": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/macro-groups"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_macros": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/macros"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_surveys": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/surveys"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_tags": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tags"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_tasks": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tasks"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_teams": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/teams"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_ticket_forms": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/ticket-forms"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_training_data": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/training-data"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_user_roles": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/user-roles"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_users": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/users"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "manage_account_relationships": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/*/relationship",
+        "/accounts/*/relationships/*/"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "manage_custom_fields": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/custom-fields",
+        "/custom-fields/*/",
+        "/custom-fields/*/select-options"
+      ],
+      "methods": [
+        "POST",
+        "PATCH",
+        "DELETE"
+      ]
+    },
+    "manage_issue_followers": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/followers"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "manage_issue_groups": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issue-groups",
+        "/issue-groups/*/children",
+        "/issue-groups/*/children/*/"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "manage_knowledge_base_theme": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/themes/*/",
+        "/knowledge-bases/*/themes/*/publish"
+      ],
+      "methods": [
+        "PATCH",
+        "POST"
+      ]
+    },
+    "manage_macros": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/macros",
+        "/macros/*/"
+      ],
+      "methods": [
+        "POST",
+        "PATCH",
+        "DELETE"
+      ]
+    },
+    "manage_tags": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tags",
+        "/tags/*/"
+      ],
+      "methods": [
+        "POST",
+        "PATCH",
+        "DELETE"
+      ]
+    },
+    "manage_task_comments": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tasks/*/comments",
+        "/tasks/*/comments/*/"
+      ],
+      "methods": [
+        "POST",
+        "PATCH",
+        "DELETE"
+      ]
+    },
+    "manage_training_data": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/training-data",
+        "/training-data/upload",
+        "/training-data/upload-content",
+        "/training-data/*/documents"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "merge_accounts": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/merge"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "merge_feature_requests": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/feature-requests/merge"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "redact_message": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/messages/*/redact"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "reply_to_issue": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/reply"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "request_article_review": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/articles/*/request-review"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_accounts": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_audit_logs": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/audit-logs/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_call_recordings": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/call-recordings/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_contacts": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/contacts/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_custom_objects": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/custom-objects/*/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_feature_requests": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/feature-requests/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_issues": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_milestones": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/milestones/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_projects": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/projects/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_surveys": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/surveys/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_tasks": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tasks/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_users": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/users/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "set_feature_request_portal_visibility": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/feature-requests/*/set-portal-visibility"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "snooze_issue": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/snooze"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "submit_ticket_form": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/ticket-forms/*/submissions"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_account": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_accounts": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_article": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/articles/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_call_recording": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/call-recordings/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_collection": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/collections/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_contact": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/contacts/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_custom_objects": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/custom-objects/*/*/",
+        "/custom-objects/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_feature_request": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/feature-requests/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_issue": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_milestone": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/milestones/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_project": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/projects/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_task": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tasks/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_team": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/teams/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_user": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/users/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    }
+  },
   "resend": {
     "create_batch": {
       "hosts": [

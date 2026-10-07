@@ -2,6 +2,7 @@ import type { AppDefinition } from "./types";
 
 export const dropbox: AppDefinition = {
   id: "dropbox",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/dropbox",
   name: "Dropbox",
   icon: "/icons/dropbox.svg",
   apiDocsUrl:

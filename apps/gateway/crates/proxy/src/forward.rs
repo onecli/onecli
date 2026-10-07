@@ -880,6 +880,10 @@ pub async fn forward_request(
             // INSERT carries no latency yet; a resolution carries the wait.
             let approval_meta = |status: u16, latency_ms: u32| {
                 hooks::request_meta(proxy_ctx, host, method.as_str(), &path, status, latency_ms)
+                    .map(|mut meta| {
+                        hooks::attribute_to_connection(&mut meta, rules, injection_count);
+                        meta
+                    })
             };
 
             let log_id = uuid::Uuid::new_v4().to_string();
@@ -1418,6 +1422,7 @@ pub async fn forward_request(
     ) {
         meta.injection_count = injection_count as u16;
         meta.injected = injection_count > 0;
+        hooks::attribute_to_connection(&mut meta, rules, injection_count);
         meta.connection_label = rules.connection_label.clone();
         (meta.existing_log_id, meta.decision) = approval_decision().unzip();
         meta.matched_rule = matched_rule;
@@ -2012,6 +2017,7 @@ mod tests {
             body_transform: None,
             session_policy: None,
             winning_connection_id: None,
+            winning_provider: None,
             budget_bindings: Vec::new(),
             host_mismatch: None,
         }
@@ -2091,6 +2097,42 @@ mod tests {
         });
 
         gateway_addr
+    }
+
+    /// A GitHub App request's row names the app, not the `github` its shared
+    /// host resolves to. Uncredentialed traffic, and a connection that won
+    /// nothing, keep the host's provider.
+    #[test]
+    fn request_log_rows_name_the_injecting_connection_provider() {
+        let ctx = ProxyContext {
+            workspace_id: Some("ws".into()),
+            organization_id: Some("org".into()),
+            agent_id: Some("agent".into()),
+            agent_name: None,
+            agent_identifier: None,
+            agent_token: "test-token".to_string(),
+        };
+        let row = || {
+            hooks::request_meta(&ctx, "api.github.com:443", "GET", "/repos/o/r", 200, 1)
+                .expect("authenticated request")
+        };
+        let github_app = ResolvedRules {
+            winning_connection_id: Some("conn_1".into()),
+            winning_provider: Some("github-app".into()),
+            ..permissive_rules()
+        };
+
+        let mut injected = row();
+        hooks::attribute_to_connection(&mut injected, &github_app, 1);
+        assert_eq!(injected.provider, "github-app");
+
+        let mut uncredentialed = row();
+        hooks::attribute_to_connection(&mut uncredentialed, &github_app, 0);
+        assert_eq!(uncredentialed.provider, "github");
+
+        let mut no_winner = row();
+        hooks::attribute_to_connection(&mut no_winner, &permissive_rules(), 1);
+        assert_eq!(no_winner.provider, "github");
     }
 
     /// Drive-scoped rules: a Google Drive connection restricted to one folder

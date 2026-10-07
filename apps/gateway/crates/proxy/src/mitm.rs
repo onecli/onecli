@@ -309,6 +309,11 @@ pub struct ResolvedRules {
     /// non-serving wipe, or a swallowed escalation). Same attribution law as
     /// `session_policy`. `Target::Connection` policy decisions bind to it.
     pub winning_connection_id: Option<String>,
+    /// Provider of that winning connection (`github-app`, not the `github`
+    /// its shared host resolves to). Request logs are labelled with it, so
+    /// two apps on one host stay distinguishable in the activity feed. Same
+    /// attribution law as `winning_connection_id`.
+    pub winning_provider: Option<String>,
     /// Cloud-only: spend budgets governing the effective credential for this host
     /// (0/1 in practice).
     pub budget_bindings: Vec<ee::budget::BudgetBinding>,
@@ -410,6 +415,7 @@ async fn resolve_rules(
     // Id of the connection that wins injection (if any) — rides with
     // `session_policy` under the same attribution law.
     let mut winning_connection_id: Option<String> = None;
+    let mut winning_provider: Option<String> = None;
     let mut host_mismatch: Option<Vec<crate::connect::ConnectionChoice>> = None;
 
     // Resolve app connections whenever any exist and MERGE their rules with
@@ -436,7 +442,7 @@ async fn resolve_rules(
         {
             Ok(AppConnectionResult::Rules {
                 rules,
-                provider: _,
+                provider,
                 token_expires_at: exp,
                 rewrite_host: rh,
                 connection_label: cl,
@@ -454,6 +460,7 @@ async fn resolve_rules(
                 finalizer = f;
                 body_transform = bt;
                 session_policy = sp;
+                winning_provider = cid.is_some().then_some(provider);
                 winning_connection_id = cid;
             }
             Ok(AppConnectionResult::Ambiguous { connections }) => {
@@ -564,6 +571,7 @@ async fn resolve_rules(
             body_transform,
             session_policy,
             winning_connection_id,
+            winning_provider,
             budget_bindings: resp.budget_bindings,
             host_mismatch,
         }),
@@ -711,10 +719,14 @@ mod tests {
             applied_auth("/calendar/v3/users/me/calendarList", &rules.injection_rules);
         assert_eq!(auth.as_deref(), Some("Bearer cal"));
         assert!(!path.contains("key=yt-key"));
-        // …and the serving connection's label is attributed.
+        // …and the serving connection's label and provider are attributed:
+        // its request-log rows name `google-calendar`, not the host.
         assert_eq!(rules.connection_label.as_deref(), Some("Conn"));
+        assert_eq!(rules.winning_connection_id.as_deref(), Some("c1"));
+        assert_eq!(rules.winning_provider.as_deref(), Some("google-calendar"));
 
-        // A youtube request still gets the API key and no app metadata.
+        // A youtube request still gets the API key and no app metadata: the
+        // Calendar connection won nothing, so it labels nothing.
         let res = resolve_rules(
             &ctx(),
             HOST,
@@ -734,6 +746,8 @@ mod tests {
         assert!(path.contains("key=yt-key"));
         assert!(rules.connection_label.is_none());
         assert!(rules.session_policy.is_none());
+        assert!(rules.winning_connection_id.is_none());
+        assert!(rules.winning_provider.is_none());
     }
 
     #[tokio::test]
@@ -932,6 +946,9 @@ mod tests {
         };
         let (auth, _) = applied_auth("/v1/x", &rules.injection_rules);
         assert_eq!(auth.as_deref(), Some("catch-all"));
+        // A secret is not an app connection: nothing relabels its rows.
+        assert!(rules.winning_connection_id.is_none());
+        assert!(rules.winning_provider.is_none());
     }
 
     #[tokio::test]

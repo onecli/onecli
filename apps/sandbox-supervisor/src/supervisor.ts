@@ -289,8 +289,7 @@ export const runSupervisor = async (
       // beside memory and ahead of the machine sections.
       processesFragment,
       // Unconditional like connections: what survives sleep/relaunch is a
-      // substrate property. Registered AFTER processes — its last bullet
-      // says "see Background processes above".
+      // substrate property.
       machineFragment,
       // Unconditional like connections: receiving files is a platform
       // property (every harness can read a file), not an adapter capability.

@@ -324,7 +324,7 @@ pub async fn handle_websocket(
         }
     }
 
-    emit_telemetry(proxy_ctx, host, &path, injection_count, start);
+    emit_telemetry(proxy_ctx, host, &path, rules, injection_count, start);
 
     let host_owned = host.to_string();
     tokio::spawn(async move {
@@ -430,6 +430,7 @@ fn emit_telemetry(
     proxy_ctx: &ProxyContext,
     host: &str,
     path: &str,
+    rules: &ResolvedRules,
     injection_count: usize,
     start: std::time::Instant,
 ) {
@@ -456,6 +457,7 @@ fn emit_telemetry(
     };
     meta.injection_count = injection_count as u16;
     meta.injected = injection_count > 0;
+    hooks::attribute_to_connection(&mut meta, rules, injection_count);
     telemetry::on_request(meta.into_event(None));
 }
 

@@ -70,6 +70,24 @@ jobs:
         id: appversion
         run: echo "value=$(jq -r .version package.json)" >> "$GITHUB_OUTPUT"
 
+      # The agent image is two images (#1246 2a): docker/agent-base.Dockerfile
+      # is the OS surface, built here first for this arch and pushed by digest
+      # to its own name, then handed to the agent build through the one arg
+      # the Dockerfile exposes. By digest, never by tag: a published agent
+      # image must not change because its base was re-pushed. Only the agent
+      # entry pays for it; the base is not a service and has no compose name.
+      - name: Build and push the agent base by digest
+        if: matrix.service == 'agent'
+        id: build-agent-base
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/agent-base.Dockerfile
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-agent-base,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=agent-base-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=agent-base-${{ matrix.arch }}
+
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v7
@@ -78,8 +96,12 @@ jobs:
           file: docker/${{ matrix.service }}.Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          # AGENT_BASE_IMAGE is read by the agent Dockerfile alone; every other
+          # Dockerfile ignores an arg it does not declare (an empty value here
+          # is exactly that case).
           build-args: |
             APP_VERSION=${{ steps.appversion.outputs.value }}
+            AGENT_BASE_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-agent-base@${{ steps.build-agent-base.outputs.digest }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.service }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}-${{ matrix.arch }}
@@ -95,6 +117,25 @@ jobs:
         with:
           name: digest-${{ matrix.service }}-${{ matrix.arch }}
           path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+      # The base's digest travels in its own artifact family. `digest-agent-*`
+      # (the agent manifest's download glob) would also match
+      # `digest-agent-base-<arch>` and fold the base into the agent manifest.
+      - name: Export the agent base digest
+        if: matrix.service == 'agent'
+        run: |
+          mkdir -p /tmp/base-digests
+          digest="${{ steps.build-agent-base.outputs.digest }}"
+          touch "/tmp/base-digests/${digest#sha256:}"
+
+      - name: Upload the agent base digest
+        if: matrix.service == 'agent'
+        uses: actions/upload-artifact@v7
+        with:
+          name: base-digest-${{ matrix.arch }}
+          path: /tmp/base-digests/*
           if-no-files-found: error
           retention-days: 1
 
@@ -151,3 +192,55 @@ jobs:
       - name: Inspect image
         run: |
           docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }}:${{ steps.meta.outputs.version }}
+
+  # The agent base's manifest, tagged like a service so a self-hoster can
+  # `FROM ghcr.io/onecli/onecli-agent-base:<version>` and GHCR holds no
+  # orphaned untagged versions of it. Not a `merge` matrix entry: the base is
+  # not a service (compose never pulls it) and its digests come from the
+  # agent's build job, not a job of its own.
+  merge-agent-base:
+    name: agent-base (manifest)
+    if: github.repository == 'onecli/onecli'
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v8
+        with:
+          path: /tmp/base-digests
+          pattern: base-digest-*
+          merge-multiple: true
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-agent-base
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - name: Create multi-arch manifest and push
+        working-directory: /tmp/base-digests
+        run: |
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-agent-base@sha256:%s ' *)
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-agent-base:${{ steps.meta.outputs.version }}

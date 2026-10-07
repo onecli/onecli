@@ -23,6 +23,7 @@ const OPTIONAL_SCOPES = [
 
 export const hubspot: AppDefinition = {
   id: "hubspot",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/hubspot",
   name: "HubSpot",
   icon: "/icons/hubspot.svg",
   apiDocsUrl:

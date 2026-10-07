@@ -2,6 +2,7 @@ import type { AppDefinition } from "./types";
 
 export const affinity: AppDefinition = {
   id: "affinity",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/affinity",
   name: "Affinity",
   apiDocsUrl: "https://api-docs.affinity.co/",
   icon: "/icons/affinity.svg",

@@ -2,6 +2,7 @@ import type { AppDefinition } from "./types";
 
 export const supabase: AppDefinition = {
   id: "supabase",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/supabase",
   name: "Supabase",
   apiDocsUrl: "https://supabase.com/docs/reference/api/introduction",
   icon: "/icons/supabase.svg",

@@ -5,6 +5,7 @@ import type { AppDefinition } from "./types";
 // public API, so the API key is the only connection method.
 export const timeless: AppDefinition = {
   id: "timeless",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/timeless",
   name: "Timeless",
   apiDocsUrl: "https://docs.timeless.day/api-reference/introduction",
   // Timeless's own mark (timeless.day/icon.svg): two brand-red squares that

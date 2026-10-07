@@ -26,7 +26,7 @@ fi
 # The durable POSIX home: ~ lives ON the home volume (/workspace), so
 # dotfiles, shell history, `npm -g` and `pip --user` installs survive a
 # sandbox relaunch and sleep. Byte-equal contract with the image's
-# passwd entry (agent.Dockerfile `usermod -d`), the AGENT_POSIX_HOME a
+# passwd entry (agent-base.Dockerfile `usermod -d`), the AGENT_POSIX_HOME a
 # deployment's own boot exports, and
 # /etc/profile.d/onecli-path.sh. Re-exported here unconditionally so the
 # image is self-contained under ANY spawner — an older boot script, a bare

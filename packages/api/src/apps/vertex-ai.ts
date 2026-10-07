@@ -182,6 +182,7 @@ const exchangeCredentials = async (
 
 export const vertexAi: AppDefinition = {
   id: "vertex-ai",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/vertex-ai",
   name: "Vertex AI",
   apiDocsUrl:
     "https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/rest",

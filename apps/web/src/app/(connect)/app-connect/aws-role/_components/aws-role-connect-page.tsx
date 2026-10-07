@@ -42,6 +42,7 @@ const AwsRoleConnectPage = () => {
         name: app.name,
         icon: app.icon,
         darkIcon: app.darkIcon,
+        setupGuideUrl: app.setupGuideUrl,
         connectionType: app.connectionMethod.type,
         fields:
           app.connectionMethod.type === "credentials_import"

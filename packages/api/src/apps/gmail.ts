@@ -8,6 +8,7 @@ import {
 
 export const gmail: AppDefinition = {
   id: "gmail",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/gmail",
   name: "Gmail",
   icon: "/icons/gmail.svg",
   apiDocsUrl:

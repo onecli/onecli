@@ -2,6 +2,7 @@ import type { AppDefinition } from "./types";
 
 export const trello: AppDefinition = {
   id: "trello",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/trello",
   name: "Trello",
   apiDocsUrl: "https://developer.atlassian.com/cloud/trello/rest/",
   icon: "/icons/trello.svg",

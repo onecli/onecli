@@ -8,6 +8,7 @@ import {
 
 export const googleCalendar: AppDefinition = {
   id: "google-calendar",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/google-calendar",
   name: "Google Calendar",
   icon: "/icons/google-calendar.svg",
   apiDocsUrl:

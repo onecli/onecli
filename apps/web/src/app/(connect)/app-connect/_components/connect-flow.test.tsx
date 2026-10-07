@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { guideHref } from "@/lib/components/setup-guide-link";
 import { ConnectFlow } from "./connect-flow";
 
 vi.mock("@/lib/api-fetch", () => ({
@@ -97,5 +98,36 @@ describe("ConnectFlow ready screen", () => {
     expect(fakeLocation.href).toContain(
       "http://api.test/v1/apps/monday/authorize",
     );
+  });
+});
+
+// When an app has no OneCLI client (own-app on Cloud, every OAuth app on open
+// source), the user lands on "Configuration required". That is where they are
+// stuck, so the guide must be right there.
+describe("ConnectFlow configuration required", () => {
+  it("shows the setup guide next to Configure credentials", () => {
+    render(
+      <ConnectFlow
+        app={{
+          ...baseApp,
+          setupGuideUrl: "https://onecli.sh/docs/integrations/monday",
+        }}
+        hasDefaults={false}
+      />,
+    );
+    expect(screen.getByText("Configuration required")).toBeTruthy();
+    const guide = screen.getByRole("link", {
+      name: /Follow the monday\.com setup guide/,
+    });
+    expect(guide.getAttribute("href")).toBe(
+      guideHref("https://onecli.sh/docs/integrations/monday"),
+    );
+    expect(guide.getAttribute("target")).toBe("_blank");
+  });
+
+  it("shows no guide when the app has no docs page", () => {
+    render(<ConnectFlow app={baseApp} hasDefaults={false} />);
+    expect(screen.getByText("Configuration required")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: /setup guide/ })).toBeNull();
   });
 });

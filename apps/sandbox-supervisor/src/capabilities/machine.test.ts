@@ -4,13 +4,12 @@ import { machineFragment } from "./machine";
 /**
  * The persistence contract the agent reads at turn 1. The wording pinned
  * here must stay consistent with the substrate's real behavior: the durable
- * set is the home volume (agent-entrypoint.sh, agent.Dockerfile), running
+ * set is the home volume (agent-entrypoint.sh, agent-base.Dockerfile) and running
  * nested containers stop-not-die across sleep (/etc/containers/
- * README.onecli), and tracked background tasks report "lost" after a
- * restart (processes fragment). Since the 2026-09-09 rewrite it is also the
- * INVENTORY contract: every tool named here is baked by agent.Dockerfile's
- * runner stage and gated at build, so a name here without a binary there
- * is a lie the agent will act on.
+ * README.onecli). Since the 2026-09-09 rewrite it is also the
+ * INVENTORY contract: every tool named here is baked by agent-base.Dockerfile
+ * (or agent.Dockerfile's runner stage) and gated at build, so a name here
+ * without a binary there is a lie the agent will act on.
  */
 
 describe("the machine fragment", () => {
@@ -106,9 +105,28 @@ describe("the machine fragment", () => {
     expect(flat).toContain("say what you tried");
   });
 
-  it('matches the processes fragment\'s restart wording ("lost")', () => {
-    expect(flat).toContain('"lost"');
-    expect(flat).toContain("Background processes above");
+  it("leaves the restart fate of background tasks to the processes fragment (one home per rule)", () => {
+    // The "lost" wording was repeated here; the processes fragment owns it.
+    // MUTATION-PROOF: paste the bullet back and this fails.
+    expect(flat).not.toContain('"lost"');
+    expect(flat).not.toContain("Background processes above");
+  });
+
+  it("carries the sign-in mechanics for a login a person hands over", () => {
+    // The MECHANICS half of the system prompt's website-login exception
+    // (the LAW half is pinned in jcode.prompt.test.ts). Each clause is
+    // load-bearing: a password on argv is visible to every process and lands
+    // in shell history; the saved session is what spares the password on
+    // later turns; and big sites answer headless browsers with 2FA or a
+    // captcha, where retrying only burns the turn. MUTATION-PROOF: drop
+    // any clause and this fails.
+    expect(flat).toContain("a login a person gave you");
+    expect(flat).toContain("through a file (never a command-line argument)");
+    expect(flat).toContain("delete the file once signed in");
+    expect(flat).toContain("storageState");
+    expect(flat).toContain("reuse it instead of the password");
+    expect(flat).toContain("2FA, a captcha, or a bot check");
+    expect(flat).toContain("report that and stop rather than retrying");
   });
 
   it("never names a runtime vendor", () => {

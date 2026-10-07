@@ -7,6 +7,7 @@ import {
 
 export const googleClassroom: AppDefinition = {
   id: "google-classroom",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/google-classroom",
   name: "Google Classroom",
   apiDocsUrl:
     "https://developers.google.com/workspace/classroom/reference/rest",

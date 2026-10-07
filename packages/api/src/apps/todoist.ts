@@ -2,6 +2,7 @@ import type { AppDefinition } from "./types";
 
 export const todoist: AppDefinition = {
   id: "todoist",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/todoist",
   name: "Todoist",
   apiDocsUrl: "https://developer.todoist.com/api/v1/",
   icon: "/icons/todoist.svg",

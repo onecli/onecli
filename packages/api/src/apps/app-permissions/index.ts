@@ -78,6 +78,7 @@ import { snowflakePermissions } from "./snowflake";
 import { stripePermissions } from "./stripe";
 import { salesforcePermissions } from "./salesforce";
 import { navanPermissions } from "./navan";
+import { pylonPermissions } from "./pylon";
 
 const permissionRegistry = new Map<string, AppPermissionDefinition>();
 
@@ -158,3 +159,4 @@ register(snowflakePermissions);
 register(stripePermissions);
 register(salesforcePermissions);
 register(navanPermissions);
+register(pylonPermissions);

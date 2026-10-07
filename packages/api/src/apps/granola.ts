@@ -2,6 +2,7 @@ import type { AppDefinition } from "./types";
 
 export const granola: AppDefinition = {
   id: "granola",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/granola",
   name: "Granola",
   icon: "/icons/granola.svg",
   apiDocsUrl: "https://docs.granola.ai/introduction",

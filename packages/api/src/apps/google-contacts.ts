@@ -7,6 +7,7 @@ import {
 
 export const googleContacts: AppDefinition = {
   id: "google-contacts",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/google-contacts",
   name: "Google Contacts",
   apiDocsUrl: "https://developers.google.com/people/api/rest",
   icon: "/icons/google-contacts.svg",

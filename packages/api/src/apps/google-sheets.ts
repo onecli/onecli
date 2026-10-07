@@ -8,6 +8,7 @@ import {
 
 export const googleSheets: AppDefinition = {
   id: "google-sheets",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/google-sheets",
   name: "Google Sheets",
   apiDocsUrl:
     "https://developers.google.com/workspace/sheets/api/reference/rest",

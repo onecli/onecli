@@ -8,6 +8,7 @@ import {
 
 export const outlookMail: AppDefinition = {
   id: "outlook-mail",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/outlook-mail",
   name: "Outlook Mail",
   icon: "/icons/outlook-mail.svg",
   apiDocsUrl:
