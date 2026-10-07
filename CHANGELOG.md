@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.10.0](https://github.com/onecli/onecli/compare/v2.9.0...v2.10.0) (2026-10-07)
+
+
+### Features
+
+* Pylon integration, setup-guide links on every connect surface, and a two-image agent sandbox ([#603](https://github.com/onecli/onecli/issues/603)) ([c378134](https://github.com/onecli/onecli/commit/c378134e06213644845c98f28009deb370fb9ab1))
+
 ## [2.9.0](https://github.com/onecli/onecli/compare/v2.8.0...v2.9.0) (2026-10-06)
 
 
