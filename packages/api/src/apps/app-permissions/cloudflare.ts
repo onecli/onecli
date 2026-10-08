@@ -7,6 +7,23 @@ export const cloudflarePermissions: AppPermissionDefinition = {
       category: "read",
       tools: [
         {
+          id: "get_current_user",
+          name: "Get authenticated user",
+          description:
+            "Get the user profile associated with the current API token",
+          hostPattern: "api.cloudflare.com",
+          pathPattern: "/client/v4/user",
+          method: "GET",
+        },
+        {
+          id: "verify_token",
+          name: "Verify API token",
+          description: "Verify that the current API token is valid",
+          hostPattern: "api.cloudflare.com",
+          pathPattern: "/client/v4/user/tokens/verify",
+          method: "GET",
+        },
+        {
           id: "list_zones",
           name: "List zones",
           description: "List all DNS zones (domains)",
