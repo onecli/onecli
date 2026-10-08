@@ -14,9 +14,10 @@ import type { AgentEvent } from "@onecli/agent-protocol";
  * Agent RUNS on REAL PostgreSQL. Laws:
  *  - a member sees their own direct runs and non-direct (eval, cron) runs,
  *    never a colleague's direct thread;
- *  - where roles are enforced, an org admin sees every run, and `getRun`
- *    flags a colleague's direct run as `viewedOthersDirect` (the route
- *    audits that read); without role enforcement there is no override;
+ *  - where roles are enforced, an org admin sees every run. A list names a
+ *    colleague's direct run but carries none of its content; `getRun` flags
+ *    it as `viewedOthersDirect` (the route audits that read). Without role
+ *    enforcement there is no override;
  *  - "apps used" comes from the gateway log inside the turn window, LLM
  *    traffic excluded, and rows outside the window do not count;
  *  - another workspace's agent is NOT_FOUND (negative control).
@@ -405,15 +406,28 @@ describe.skipIf(!PROOF_URL)("agent runs (pg)", () => {
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
-  it("admin: sees every run and a colleague's direct read is flagged", async () => {
+  it("admin: lists a colleague's direct run without its content; opening it is the flagged read", async () => {
     await setRole("admin");
     const res = await runs.listRuns(WS, ORG, USER_A, agentId);
-    expect(res.runs.map((r) => r.turnId)).toContain(turnIds.bDirect);
-    expect(res.viewedOthersDirect.map((r) => r.turnId)).toEqual([
-      turnIds.bDirect,
-    ]);
-    const other = await runs.getRun(WS, ORG, USER_A, agentId, turnIds.bDirect!);
-    expect(other.viewedOthersDirect).toBe(true);
+    const other = res.runs.find((r) => r.turnId === turnIds.bDirect);
+    expect(other).toMatchObject({ private: true, source: "slack" });
+    expect(JSON.stringify(other)).not.toContain("B: private question");
+    expect(other).not.toHaveProperty("question");
+    expect(other).not.toHaveProperty("answer");
+    // Own and shared runs keep their content in the list.
+    expect(res.runs.find((r) => r.turnId === turnIds.aDirect)).toMatchObject({
+      private: false,
+      question: "A: what was Q1 revenue?",
+    });
+    const opened = await runs.getRun(
+      WS,
+      ORG,
+      USER_A,
+      agentId,
+      turnIds.bDirect!,
+    );
+    expect(opened.viewedOthersDirect).toBe(true);
+    expect(opened.run.question).toBe("B: private question");
     const own = await runs.getRun(WS, ORG, USER_A, agentId, turnIds.aDirect!);
     expect(own.viewedOthersDirect).toBe(false);
     const evalRun = await runs.getRun(WS, ORG, USER_A, agentId, turnIds.eval!);
@@ -464,6 +478,90 @@ describe.skipIf(!PROOF_URL)("agent runs (pg)", () => {
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
+  it("workspace runs (agent null) span this workspace's agents only, each with its own agent's evidence", async () => {
+    await setRole("admin");
+    const sibling = await db.agent.create({
+      data: {
+        workspaceId: WS,
+        name: "agent sibling",
+        identifier: `${P}sibling`,
+        accessToken: `aoc_${P}sibling`,
+        kind: "hosted",
+        harness: "fake",
+      },
+      select: { id: true },
+    });
+    const mkRun = async (forAgent: string, message: string) => {
+      const c = await db.conversation.create({
+        data: { agentId: forAgent, source: "cron", direct: false },
+        select: { id: true },
+      });
+      return (
+        await db.turn.create({
+          data: {
+            conversationId: c.id,
+            source: "cron",
+            message,
+            status: "done",
+            // Overlaps aDirect's window, so one evidence scan covers both.
+            createdAt: at("2026-09-01T10:00:05Z"),
+            startedAt: at("2026-09-01T10:00:05Z"),
+            finishedAt: at("2026-09-01T10:00:15Z"),
+          },
+          select: { id: true },
+        })
+      ).id;
+    };
+    const siblingTurn = await mkRun(sibling.id, "sibling scheduled run");
+    const foreignTurn = await mkRun(otherAgentId, "other workspace run");
+    // A sibling's gateway call inside aDirect's window: one scan serves both
+    // agents, and it must never be credited to aDirect.
+    const siblingCall = await db.requestLog.create({
+      data: {
+        workspaceId: WS,
+        agentId: sibling.id,
+        method: "GET",
+        host: "api.sibling.example",
+        path: "/",
+        provider: "sibling-app",
+        status: 200,
+        latencyMs: 5,
+        injectionCount: 1,
+        createdAt: at("2026-09-01T10:00:12Z"),
+      },
+    });
+    try {
+      const all = await runs.listRuns(WS, ORG, USER_A, null);
+      const ids = all.runs.map((r) => r.turnId);
+      expect(ids).toContain(siblingTurn);
+      expect(ids).toContain(turnIds.aDirect);
+      expect(ids).not.toContain(foreignTurn);
+      expect(all.runs.find((r) => r.turnId === siblingTurn)?.agent).toEqual({
+        id: sibling.id,
+        name: "agent sibling",
+      });
+      expect(
+        all.runs.find((r) => r.turnId === turnIds.aDirect)?.appsUsed.sort(),
+      ).toEqual(["docs", "notion"]);
+      expect(all.runs.find((r) => r.turnId === siblingTurn)?.appsUsed).toEqual([
+        "sibling-app",
+      ]);
+      // The same viewer fence applies across agents: a member never sees a
+      // colleague's private run, whichever agent it was with.
+      await setRole("member");
+      const member = await runs.listRuns(WS, ORG, USER_A, null);
+      expect(member.runs.map((r) => r.turnId)).not.toContain(turnIds.bDirect);
+      // The org pairing is part of the fence: the right workspace id with a
+      // foreign org reads nothing.
+      const crossOrg = await runs.listRuns(WS, OTHER_ORG, USER_A, null);
+      expect(crossOrg.runs).toEqual([]);
+    } finally {
+      await db.requestLog.delete({ where: { id: siblingCall.id } });
+      await db.agent.delete({ where: { id: sibling.id } });
+      await db.turn.delete({ where: { id: foreignTurn } });
+    }
+  });
+
   it.each(["member", "admin", "owner"])(
     "excludes sourced guest DMs for %s",
     async (role) => {
@@ -482,7 +580,7 @@ describe.skipIf(!PROOF_URL)("agent runs (pg)", () => {
     const res = await runs.listRuns(WS, ORG, USER_A, agentId);
     expect(res.isAdmin).toBe(false);
     expect(res.runs.map((r) => r.turnId)).not.toContain(turnIds.bDirect);
-    expect(res.viewedOthersDirect).toEqual([]);
+    expect(res.runs.every((r) => !r.private)).toBe(true);
     expect(res.appEvidenceWithheld).toBe(true);
     await expect(
       runs.getRun(WS, ORG, USER_A, agentId, turnIds.bDirect!),
@@ -504,7 +602,6 @@ describe.skipIf(!PROOF_URL)("agent runs (pg)", () => {
       app: "notion",
     });
     expect(filtered.runs).toEqual([]);
-    expect(filtered.viewedOthersDirect).toEqual([]);
   });
 
   it("a suspended admin cannot widen private ownership", async () => {
@@ -526,7 +623,7 @@ describe.skipIf(!PROOF_URL)("agent runs (pg)", () => {
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
-  it("private audit flags follow the conversation owner, not the turn author", async () => {
+  it("privacy follows the conversation owner, not the turn author", async () => {
     await setRole("admin");
     const id = turnIds.bDirect!;
     await db.turn.update({ where: { id }, data: { userId: USER_A } });
@@ -535,10 +632,10 @@ describe.skipIf(!PROOF_URL)("agent runs (pg)", () => {
         (await runs.getRun(WS, ORG, USER_A, agentId, id)).viewedOthersDirect,
       ).toBe(true);
       expect(
-        (await runs.listRuns(WS, ORG, USER_A, agentId)).viewedOthersDirect.map(
-          (r) => r.turnId,
-        ),
-      ).toContain(id);
+        (await runs.listRuns(WS, ORG, USER_A, agentId)).runs.find(
+          (r) => r.turnId === id,
+        )?.private,
+      ).toBe(true);
     } finally {
       await db.turn.update({ where: { id }, data: { userId: USER_B } });
     }

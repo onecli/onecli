@@ -63,7 +63,7 @@ import {
   webhookReceiveRoutes,
 } from "./routes/agent-webhooks";
 import { agentMemoryRoutes } from "./routes/agent-memories";
-import { agentRunRoutes } from "./routes/agent-runs";
+import { agentRunRoutes, workspaceRunRoutes } from "./routes/agent-runs";
 import { agentEvalRoutes } from "./routes/agent-evals";
 import { userSkillRoutes } from "./routes/skills";
 import { orgSkillRoutes } from "./routes/org-skills";
@@ -254,6 +254,8 @@ export const createApiApp = (
   // The agent's runs (audit) and evals — same composition rule as channels.
   app.route("/agents", agentRunRoutes());
   app.route("/agents", agentEvalRoutes());
+  // The workspace's runs across agents (Activity's Runs tab).
+  app.route("/runs", workspaceRunRoutes());
   // 410 Gone for the old-model paths step 10 removed. LAST, so every live route
   // above wins the first-match — these only catch what no longer exists.
   app.route("/rules", removedRuleRoutes());

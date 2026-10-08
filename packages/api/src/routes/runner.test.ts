@@ -207,15 +207,18 @@ describe("token-family separation", () => {
     expect(services.claimDueWork).not.toHaveBeenCalled();
   });
 
-  it("refuses a runner token on the general /v1 surface", async () => {
-    const res = await app.request("/v1/agents", {
-      headers: {
-        authorization: `Bearer ${RUNNER_TOKEN}`,
-        "x-workspace-id": "p1",
-      },
-    });
-    expect(res.status).toBe(401);
-  });
+  it.each(["/v1/agents", "/v1/runs"])(
+    "refuses a runner token on the general /v1 surface (%s)",
+    async (path) => {
+      const res = await app.request(path, {
+        headers: {
+          authorization: `Bearer ${RUNNER_TOKEN}`,
+          "x-workspace-id": "p1",
+        },
+      });
+      expect(res.status).toBe(401);
+    },
+  );
 
   it("refuses an unknown runner token", async () => {
     const res = await app.request("/v1/runner/work", {

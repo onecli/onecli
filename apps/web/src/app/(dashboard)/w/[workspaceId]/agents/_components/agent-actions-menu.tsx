@@ -9,6 +9,7 @@ import {
   KeyRound,
   Pencil,
   Info,
+  History,
 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
@@ -83,6 +84,8 @@ interface AgentActionsMenuProps {
   /** The agent page's "Details" entry: the agent's facts as a dialog. Omitted
    * by the list card, whose row already shows them. */
   onDetails?: () => void;
+  /** Open Activity narrowed to this agent (its runs and requests). */
+  onViewActivity?: () => void;
   /** Detail-page hook: navigate away after a successful delete. */
   onDeleted?: () => void;
 }
@@ -93,6 +96,7 @@ export const AgentActionsMenu = ({
   agent,
   onCredentialAccess,
   onDetails,
+  onViewActivity,
   onDeleted,
 }: AgentActionsMenuProps) => {
   const deleteMutation = useDeleteAgent();
@@ -153,6 +157,12 @@ export const AgentActionsMenu = ({
             <DropdownMenuItem onSelect={onDetails}>
               <Info className="size-4" />
               Details
+            </DropdownMenuItem>
+          )}
+          {onViewActivity && (
+            <DropdownMenuItem onSelect={onViewActivity}>
+              <History className="size-4" />
+              View activity
             </DropdownMenuItem>
           )}
           <DropdownMenuItem

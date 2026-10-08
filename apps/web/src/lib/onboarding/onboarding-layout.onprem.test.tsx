@@ -61,38 +61,33 @@ import OnboardingLayout from "./onboarding-layout";
 beforeEach(() => {
   replace.mockReset();
   getSubscriptionStatus.mockReset();
-  checkOnboardingComplete.mockReset();
-  getOnboardingProgress.mockReset();
+  checkOnboardingComplete.mockReset().mockResolvedValue(false);
+  getOnboardingProgress.mockReset().mockResolvedValue({
+    discovery: [],
+    agentName: null,
+  });
   getActiveWorkspacePath.mockReset().mockResolvedValue("/w/p1/overview");
 });
 
 afterEach(cleanup);
 
 describe("onboarding layout (onprem)", () => {
-  it("boots the flow for a not-yet-onboarded owner without ever touching the billing action", async () => {
-    // MUTATION-TESTED (the onprem guard): route the status read through the
-    // EE billing action unconditionally and a self-hosted visit runs it
-    // head-on — the headerless 500 the release blocker asked to make
-    // unreachable. Without billing every org reads as free, so the flow boots.
-    checkOnboardingComplete.mockResolvedValue(false);
-    getOnboardingProgress.mockResolvedValue({
-      discovery: [],
-      agentName: null,
-    });
-    render(<OnboardingLayout>step</OnboardingLayout>);
-    await waitFor(() => expect(screen.getByText("step")).toBeTruthy());
-    expect(replace).not.toHaveBeenCalled();
-    expect(getSubscriptionStatus).not.toHaveBeenCalled();
-  });
-
-  it("bounces a completed user home — onboarding has no return door", async () => {
-    checkOnboardingComplete.mockResolvedValue(true);
-    getOnboardingProgress.mockResolvedValue({
-      discovery: [],
-      agentName: null,
-    });
+  it("bounces a direct visit home without booting the flow or touching billing", async () => {
+    // MUTATION-TESTED (the onprem guard): drop the !CAPS.billing branch and a
+    // fresh, never-onboarded self-hosted owner who types /onboarding gets the
+    // cloud-only walkthrough booted for them. Onboarding is cloud-only.
     render(<OnboardingLayout>step</OnboardingLayout>);
     await waitFor(() => expect(replace).toHaveBeenCalledWith("/w/p1/overview"));
+    expect(screen.queryByText("step")).toBeNull();
     expect(getSubscriptionStatus).not.toHaveBeenCalled();
+    expect(checkOnboardingComplete).not.toHaveBeenCalled();
+    expect(getOnboardingProgress).not.toHaveBeenCalled();
+  });
+
+  it("fails OPEN when the workspace lookup rejects: home, never a spinner", async () => {
+    getActiveWorkspacePath.mockRejectedValue(new Error("500"));
+    render(<OnboardingLayout>step</OnboardingLayout>);
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/"));
+    expect(screen.queryByText("step")).toBeNull();
   });
 });

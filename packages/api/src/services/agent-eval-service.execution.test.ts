@@ -36,7 +36,6 @@ vi.mock("./turn-service", () => ({
 }));
 vi.mock("./agent-runs-service", () => ({
   getEvalRunEvidence: mocks.getEvalRunEvidence,
-  WINDOW_SLACK_MS: 2_000,
 }));
 vi.mock("../lib/logger", () => ({
   logger: { child: () => ({ error: vi.fn(), warn: vi.fn() }) },

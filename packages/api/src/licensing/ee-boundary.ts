@@ -88,8 +88,8 @@ export const SEAMS: readonly Seam[] = [
   },
   {
     from: "apps/gateway/crates/proxy/**",
-    why: "The proxy pipeline calls the licensed features at defined points: connect-time budget bindings, granular-access scoping and the platform trial credential; the forward/websocket app-availability check; the hooks' budget + granular guards; and the licensed agent-facing responses. One binary, so these are direct calls rather than a runtime seam.",
-    count: 11,
+    why: "The proxy pipeline calls the licensed features at defined points: connect-time budget bindings, granular-access scoping and the platform trial credential; the forward/websocket/tunnel app-availability check (the open tunnel lane gates a CONNECT on the same allowlist, and answers with the same licensed response); the hooks' budget + granular guards; and the licensed agent-facing responses. One binary, so these are direct calls rather than a runtime seam.",
+    count: 13,
     permanent: true,
   },
   {

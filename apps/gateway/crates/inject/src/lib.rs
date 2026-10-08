@@ -80,24 +80,99 @@ pub struct InjectionRule {
 
 // ── Agent token extraction ──────────────────────────────────────────────
 
-/// Extract the agent access token from the `Proxy-Authorization: Basic base64({token}:)` header.
+/// The proxy username that selects the open lane (`open:<agent token>`).
+///
+/// A declaration, not a detection: the gateway cannot tell a browser from
+/// `curl` at CONNECT time, and does not try. Anything inside the sandbox can
+/// send this username, and gains nothing by doing so, because the open lane
+/// never injects a credential. It only changes what the gateway does with
+/// bytes it would otherwise decrypt: relay them. Not "browser": other clients
+/// that need an untouched TLS session (a client-certificate dance, a pinned
+/// certificate, an SSH-over-443) belong on the same lane.
+pub const OPEN_LANE_USER: &str = "open";
+
+/// Which path a CONNECT takes once its token is accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyLane {
+    /// Terminate TLS, inject credentials, enforce per-request policy, log
+    /// every request. The default: every username but [`OPEN_LANE_USER`].
+    Mitm,
+    /// Relay the client's bytes to the host untouched: no injection, no
+    /// per-request policy, one activity row per tunnel. Host block rules and
+    /// the destination guard still apply at CONNECT.
+    Open,
+}
+
+impl ProxyLane {
+    /// The lane a proxy username selects. Exact match only (`open`, not
+    /// `Open` or `open-browser`): a lane is a protocol switch, and a loose
+    /// match would let a typo silently change what happens to the bytes.
+    #[must_use]
+    pub fn from_user(user: Option<&str>) -> Self {
+        match user {
+            Some(OPEN_LANE_USER) => Self::Open,
+            _ => Self::Mitm,
+        }
+    }
+}
+
+/// The `Proxy-Authorization: Basic` pair an agent presents.
+///
+/// `Debug` redacts the token: this value sits one `?` away from a log line,
+/// and a proxy token in the logs is a credential leak.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProxyCredential {
+    /// The username, when the pair had one. Carries no identity (the token
+    /// does) and selects nothing but the [`ProxyLane`].
+    pub user: Option<String>,
+    /// The agent access token. May be empty; callers reject that.
+    pub token: String,
+}
+
+impl std::fmt::Debug for ProxyCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyCredential")
+            .field("user", &self.user)
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
+
+impl ProxyCredential {
+    #[must_use]
+    pub fn lane(&self) -> ProxyLane {
+        ProxyLane::from_user(self.user.as_deref())
+    }
+}
+
+/// Extract the agent credential from `Proxy-Authorization: Basic base64({user}:{token})`.
 /// Returns `None` if the header is missing or malformed.
-pub fn extract_agent_token<T>(req: &Request<T>) -> Option<String> {
+#[must_use]
+pub fn extract_proxy_credential<T>(req: &Request<T>) -> Option<ProxyCredential> {
     let value = req.headers().get("proxy-authorization")?.to_str().ok()?;
     let encoded = value.strip_prefix("Basic ")?.trim();
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(encoded)
         .ok()?;
     let decoded_str = String::from_utf8(decoded).ok()?;
-    // Format is "{username}:{token}" — extract the token from the password field.
+    // Format is "{username}:{token}": the token rides in the password field.
     // Follows the convention of GitHub/GitLab/Bitbucket: dummy username, token as password.
     // Also handles legacy "{token}:" format (token as username, empty password).
-    let token = match decoded_str.split_once(':') {
-        Some((_, pass)) if !pass.is_empty() => pass,
-        Some((user, _)) => user, // empty password → token is the username
-        None => &decoded_str,
-    };
-    Some(token.to_string())
+    Some(match decoded_str.split_once(':') {
+        Some((user, pass)) if !pass.is_empty() => ProxyCredential {
+            user: Some(user.to_string()),
+            token: pass.to_string(),
+        },
+        // Empty password → the token is the username, and there is no username.
+        Some((user, _)) => ProxyCredential {
+            user: None,
+            token: user.to_string(),
+        },
+        None => ProxyCredential {
+            user: None,
+            token: decoded_str,
+        },
+    })
 }
 
 // ── Injection application ───────────────────────────────────────────────
@@ -606,11 +681,16 @@ mod tests {
         format!("Basic {encoded}")
     }
 
+    /// The token the credential carries, for the shape tests below.
+    fn token_of<T>(req: &Request<T>) -> Option<String> {
+        extract_proxy_credential(req).map(|c| c.token)
+    }
+
     #[test]
     fn extract_token_valid() {
         // Standard format: x:token (token in password field)
         let req = request_with_proxy_auth(Some(&encode_basic_auth("aoc_test123")));
-        assert_eq!(extract_agent_token(&req).as_deref(), Some("aoc_test123"));
+        assert_eq!(token_of(&req).as_deref(), Some("aoc_test123"));
     }
 
     #[test]
@@ -618,7 +698,7 @@ mod tests {
         // Legacy format: token: (token in username field, empty password)
         let encoded = base64::engine::general_purpose::STANDARD.encode("aoc_legacy:");
         let req = request_with_proxy_auth(Some(&format!("Basic {encoded}")));
-        assert_eq!(extract_agent_token(&req).as_deref(), Some("aoc_legacy"));
+        assert_eq!(token_of(&req).as_deref(), Some("aoc_legacy"));
     }
 
     #[test]
@@ -626,25 +706,25 @@ mod tests {
         // Some clients might send just the token without ":"
         let encoded = base64::engine::general_purpose::STANDARD.encode("aoc_nocolon");
         let req = request_with_proxy_auth(Some(&format!("Basic {encoded}")));
-        assert_eq!(extract_agent_token(&req).as_deref(), Some("aoc_nocolon"));
+        assert_eq!(token_of(&req).as_deref(), Some("aoc_nocolon"));
     }
 
     #[test]
     fn extract_token_missing_header() {
         let req = request_with_proxy_auth(None);
-        assert_eq!(extract_agent_token(&req), None);
+        assert_eq!(extract_proxy_credential(&req), None);
     }
 
     #[test]
     fn extract_token_wrong_scheme() {
         let req = request_with_proxy_auth(Some("Bearer some_token"));
-        assert_eq!(extract_agent_token(&req), None);
+        assert_eq!(extract_proxy_credential(&req), None);
     }
 
     #[test]
     fn extract_token_invalid_base64() {
         let req = request_with_proxy_auth(Some("Basic !!!not-base64!!!"));
-        assert_eq!(extract_agent_token(&req), None);
+        assert_eq!(extract_proxy_credential(&req), None);
     }
 
     #[test]
@@ -652,7 +732,89 @@ mod tests {
         let encoded = base64::engine::general_purpose::STANDARD.encode(":");
         let req = request_with_proxy_auth(Some(&format!("Basic {encoded}")));
         // Empty token (just ":") → returns Some("") which the caller rejects
-        assert_eq!(extract_agent_token(&req).as_deref(), Some(""));
+        assert_eq!(token_of(&req).as_deref(), Some(""));
+    }
+
+    /// The username surfaces only when the pair really had one: the two
+    /// legacy shapes (token as username, bare token) carry no username, so
+    /// a token that happens to equal "open" can never select the lane.
+    #[test]
+    fn credential_surfaces_the_username_only_in_the_user_password_shape() {
+        let standard = request_with_proxy_auth(Some(&encode_basic_auth("aoc_t")));
+        assert_eq!(
+            extract_proxy_credential(&standard),
+            Some(ProxyCredential {
+                user: Some("x".to_string()),
+                token: "aoc_t".to_string(),
+            })
+        );
+
+        let legacy = base64::engine::general_purpose::STANDARD.encode("open:");
+        let legacy = request_with_proxy_auth(Some(&format!("Basic {legacy}")));
+        assert_eq!(
+            extract_proxy_credential(&legacy),
+            Some(ProxyCredential {
+                user: None,
+                token: "open".to_string(),
+            })
+        );
+
+        let bare = base64::engine::general_purpose::STANDARD.encode("open");
+        let bare = request_with_proxy_auth(Some(&format!("Basic {bare}")));
+        assert_eq!(
+            extract_proxy_credential(&bare),
+            Some(ProxyCredential {
+                user: None,
+                token: "open".to_string(),
+            })
+        );
+    }
+
+    /// The lane is an exact-match protocol switch: only the literal `open`
+    /// username opens it. Case, whitespace, prefixes and the legacy no-user
+    /// shapes all stay on the MITM lane: a lane change must never be the
+    /// side effect of a typo.
+    #[test]
+    fn lane_opens_only_on_the_exact_open_username() {
+        assert_eq!(ProxyLane::from_user(Some("open")), ProxyLane::Open);
+        for user in [
+            Some("x"),
+            Some("agent"),
+            Some("Open"),
+            Some("OPEN"),
+            Some(" open"),
+            Some("open "),
+            Some("open-browser"),
+            Some(""),
+            None,
+        ] {
+            assert_eq!(ProxyLane::from_user(user), ProxyLane::Mitm, "user {user:?}");
+        }
+
+        let open = base64::engine::general_purpose::STANDARD.encode("open:aoc_t");
+        let open = request_with_proxy_auth(Some(&format!("Basic {open}")));
+        assert_eq!(
+            extract_proxy_credential(&open).map(|c| c.lane()),
+            Some(ProxyLane::Open)
+        );
+        let x = request_with_proxy_auth(Some(&encode_basic_auth("aoc_t")));
+        assert_eq!(
+            extract_proxy_credential(&x).map(|c| c.lane()),
+            Some(ProxyLane::Mitm)
+        );
+    }
+
+    /// A credential one `?` away from a log line must never print its token.
+    #[test]
+    fn credential_debug_redacts_the_token() {
+        let cred = ProxyCredential {
+            user: Some("open".to_string()),
+            token: "aoc_super_secret".to_string(),
+        };
+        let shown = format!("{cred:?}");
+        assert!(shown.contains("open"), "{shown}");
+        assert!(shown.contains("<redacted>"), "{shown}");
+        assert!(!shown.contains("aoc_super_secret"), "{shown}");
     }
 
     // ── path_matches ────────────────────────────────────────────────────

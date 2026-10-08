@@ -45,19 +45,18 @@ export default function OnboardingLayout({
     }
 
     const bootFlow = async () => {
-      // The subscription read is the ONE billing-only input: a paid org's
-      // owner is bounced home, and without billing every org reads as free.
-      // The import sits behind the capability check so the billing actions
-      // (and the Stripe graph behind them) never load in non-billing
-      // processes — a self-hosted direct visit used to 500 on exactly that.
-      const readStatus = async (): Promise<string> => {
-        if (!CAPS.billing) return "free";
-        const { getSubscriptionStatus } = await import("@/ee/billing/actions");
-        return (await getSubscriptionStatus({ fallbackToDefault: true }))
-          .status;
-      };
-      const [status, complete, path, progress] = await Promise.all([
-        readStatus(),
+      // Onboarding is the billing editions' first-login walkthrough. Nothing
+      // routes here without billing, so a self-hosted direct visit bounces
+      // home before any billing action runs.
+      if (!CAPS.billing) {
+        router.replace(await getActiveWorkspacePath());
+        return;
+      }
+      // Imported after the capability check so the billing actions (and the
+      // Stripe graph behind them) never load in non-billing processes.
+      const { getSubscriptionStatus } = await import("@/ee/billing/actions");
+      const [{ status }, complete, path, progress] = await Promise.all([
+        getSubscriptionStatus({ fallbackToDefault: true }),
         checkOnboardingComplete(),
         getActiveWorkspacePath(),
         getOnboardingProgress(),

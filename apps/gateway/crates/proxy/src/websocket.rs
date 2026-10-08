@@ -5,8 +5,6 @@
 //! service. When a WebSocket upgrade is detected, the request is routed here
 //! instead of the normal reqwest-based forwarding path.
 
-use std::time::Duration;
-
 use anyhow::{Context, Result};
 use http_body_util::{Either, Full};
 use hyper::body::{Bytes, Incoming};
@@ -14,7 +12,6 @@ use hyper::client::conn::http1;
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tracing::{info, warn};
@@ -24,10 +21,9 @@ use policy::PolicyDecision;
 
 use super::hooks;
 use super::mitm::ResolvedRules;
+use super::relay;
 use super::response;
 use context::ProxyContext;
-
-const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
 const WEBSOCKET_HANDSHAKE_HEADERS: &[&str] = &[
     "upgrade",
@@ -332,13 +328,14 @@ pub async fn handle_websocket(
             Ok(client_io) => {
                 let mut client = TokioIo::new(client_io);
                 let mut upstream = TokioIo::new(upstream_upgraded);
+                let meter = relay::Meter::default();
 
-                match pipe_websocket(&mut client, &mut upstream, WS_IDLE_TIMEOUT).await {
-                    Ok((c2s, s2c)) => {
+                match relay::relay(&mut client, &mut upstream, relay::IDLE_TIMEOUT, &meter).await {
+                    Ok(()) => {
                         info!(
                             host = %host_owned,
-                            client_to_server = c2s,
-                            server_to_client = s2c,
+                            client_to_server = meter.to_server(),
+                            server_to_client = meter.to_client(),
                             "WebSocket closed"
                         );
                     }
@@ -382,48 +379,6 @@ async fn connect_upstream_tls(
         .context("TLS handshake with upstream")?;
 
     Ok(TokioIo::new(tls_stream))
-}
-
-async fn pipe_websocket<C, S>(
-    client: &mut C,
-    server: &mut S,
-    timeout: Duration,
-) -> std::io::Result<(u64, u64)>
-where
-    C: AsyncRead + AsyncWrite + Unpin,
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let (cr, cw) = tokio::io::split(client);
-    let (sr, sw) = tokio::io::split(server);
-
-    let c2s = copy_with_idle_timeout(cr, sw, timeout);
-    let s2c = copy_with_idle_timeout(sr, cw, timeout);
-
-    tokio::try_join!(c2s, s2c)
-}
-
-async fn copy_with_idle_timeout<R, W>(
-    mut reader: R,
-    mut writer: W,
-    timeout: Duration,
-) -> std::io::Result<u64>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    let mut buf = vec![0u8; 8192];
-    let mut total = 0u64;
-
-    loop {
-        let n = match tokio::time::timeout(timeout, reader.read(&mut buf)).await {
-            Ok(Ok(0)) => return Ok(total),
-            Ok(Ok(n)) => n,
-            Ok(Err(e)) => return Err(e),
-            Err(_) => return Ok(total),
-        };
-        writer.write_all(&buf[..n]).await?;
-        total += n as u64;
-    }
 }
 
 fn emit_telemetry(

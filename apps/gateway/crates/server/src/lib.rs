@@ -857,7 +857,9 @@ async fn handle_connection(
 
 // ── CONNECT handling ────────────────────────────────────────────────────
 
-/// Handle a CONNECT request: authenticate, resolve policy, then MITM.
+/// Handle a CONNECT request: authenticate, resolve, then either terminate
+/// TLS (the MITM lane, the default) or relay the bytes untouched (the open
+/// lane, selected by the proxy username `open`; see `proxy::tunnel`).
 async fn handle_connect(
     req: Request<Incoming>,
     peer_addr: SocketAddr,
@@ -871,12 +873,13 @@ async fn handle_connect(
 
     let hostname = strip_port(&host).to_string();
 
-    // Extract agent token from Proxy-Authorization header. A CONNECT with no
-    // token is refused outright: serving it would mean a raw tunnel — bytes
-    // copied to any host the client names, with no policy, no injection, and
-    // no audit — an open relay wherever this gateway is the only route out of
-    // a sandbox network.
-    let Some(agent_token) = inject::extract_agent_token(&req).filter(|t| !t.is_empty()) else {
+    // Extract the agent credential from Proxy-Authorization. A CONNECT with
+    // no token is refused outright, on either lane: serving it would mean a
+    // raw tunnel — bytes copied to any host the client names, with no
+    // policy, no injection, and no audit — an open relay wherever this
+    // gateway is the only route out of a sandbox network.
+    let Some(credential) = inject::extract_proxy_credential(&req).filter(|c| !c.token.is_empty())
+    else {
         warn!(
             peer = %peer_addr,
             host = %host,
@@ -884,6 +887,8 @@ async fn handle_connect(
         );
         return Ok(proxy::response::proxy_auth_required());
     };
+    let lane = credential.lane();
+    let agent_token = credential.token;
 
     // Resolve at CONNECT time for the agent identity and the injection posture.
     // DB injection/policy rules are NOT frozen here — they're re-resolved
@@ -906,9 +911,10 @@ async fn handle_connect(
     // fallback, but only when DB resolution found no injection for this host.
     // Vault queries are expensive (network calls to Bitwarden), so they're not
     // repeated per request. DB secrets (re-resolved per request from cache)
-    // take precedence when available.
+    // take precedence when available. The open lane never injects, so it
+    // never asks.
     let mut vault_injection_rules = vec![];
-    if !resp.intercept {
+    if lane == inject::ProxyLane::Mitm && !resp.intercept {
         if let Some(ref aid) = resp.workspace_id {
             if let Some(cred) = state.vault_service.request_credential(aid, &hostname).await {
                 let vault_rules = inject::vault_credential_to_rules(&hostname, &cred);
@@ -924,21 +930,27 @@ async fn handle_connect(
         }
     }
 
-    // Every session is MITM'd — even one with no injection rules — so the
-    // gateway can intercept auth errors (401/403/400) and provide actionable
-    // guidance (credential_not_found, app_not_connected, access_restricted).
+    // On the MITM lane every session is terminated, even one with no
+    // injection rules, so the gateway can intercept auth errors (401/403/
+    // 400) and provide actionable guidance (credential_not_found,
+    // app_not_connected, access_restricted). The open lane trades that for
+    // an untouched TLS session: host-level policy and the destination guard
+    // still decide the CONNECT, but nothing inside it is seen or injected.
     let connect::ConnectResponse {
         workspace_id,
         organization_id,
         agent_id,
         agent_name,
         agent_identifier,
+        policy_rules_v2,
+        available_apps,
         ..
     } = resp;
 
     let session_span = info_span!("session",
         peer = %peer_addr,
         host = %host,
+        lane = ?lane,
         workspace_id = workspace_id.as_deref().unwrap_or("-"),
         org_id = organization_id.as_deref().unwrap_or("-"),
         agent = agent_name.as_deref().unwrap_or("-"),
@@ -946,6 +958,37 @@ async fn handle_connect(
     );
 
     info!(parent: &session_span, "CONNECT");
+
+    let proxy_ctx = Arc::new(ProxyContext {
+        workspace_id,
+        organization_id,
+        agent_id,
+        agent_name,
+        agent_identifier,
+        agent_token,
+    });
+
+    // The open lane decides everything before the 200: a refusal has to be
+    // a readable answer, and a dial failure a 502, not a tunnel that opens
+    // and immediately dies.
+    let session = match lane {
+        inject::ProxyLane::Mitm => Session::Mitm,
+        inject::ProxyLane::Open => {
+            let opened = proxy::tunnel::open(
+                &proxy_ctx,
+                &host,
+                &policy_rules_v2,
+                &available_apps,
+                &*state.cache,
+            )
+            .instrument(session_span.clone())
+            .await;
+            match opened {
+                Ok(upstream) => Session::Open(upstream),
+                Err(refusal) => return Ok(proxy::tunnel::refusal_response(refusal)),
+            }
+        }
+    };
 
     let ca = Arc::clone(&state.ca);
     let skip_verify = host_matches_skip_verify(&hostname, &state.skip_verify_hosts);
@@ -964,14 +1007,6 @@ async fn handle_connect(
     };
     let cache = Arc::clone(&state.cache);
     let approval_store = Arc::clone(&state.approval_store);
-    let proxy_ctx = Arc::new(ProxyContext {
-        workspace_id,
-        organization_id,
-        agent_id,
-        agent_name,
-        agent_identifier,
-        agent_token,
-    });
 
     // Taken here, before the spawn, so the session is tracked from the moment
     // it is promised rather than from whenever the new task first runs — the
@@ -982,24 +1017,33 @@ async fn handle_connect(
         async move {
             match hyper::upgrade::on(req).await {
                 Ok(upgraded) => {
-                    // A MITM session is HTTP: the drain waits for it, and
-                    // its inner connection gets its own graceful shutdown.
+                    // Both lanes hold the guard. A MITM session is HTTP and
+                    // drains like one. A tunnel is a pipe with no completion,
+                    // so it ends itself on the signal; the guard makes the
+                    // drain wait for it to do so and write its row.
                     let _guard = session_guard;
-                    let result = proxy::mitm::mitm(
-                        upgraded,
-                        &host,
-                        &ca,
-                        http_client,
-                        ws_connector,
-                        vault_injection_rules,
-                        cache,
-                        proxy_ctx,
-                        approval_store,
-                        Arc::clone(&state.policy_engine),
-                    )
-                    .await;
-                    if let Err(e) = result {
-                        warn!(host = %host, error = ?e, "connection error");
+                    match session {
+                        Session::Open(upstream) => {
+                            proxy::tunnel::serve(upgraded, upstream, &proxy_ctx, &host).await;
+                        }
+                        Session::Mitm => {
+                            let result = proxy::mitm::mitm(
+                                upgraded,
+                                &host,
+                                &ca,
+                                http_client,
+                                ws_connector,
+                                vault_injection_rules,
+                                cache,
+                                proxy_ctx,
+                                approval_store,
+                                Arc::clone(&state.policy_engine),
+                            )
+                            .await;
+                            if let Err(e) = result {
+                                warn!(host = %host, error = ?e, "connection error");
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -1012,6 +1056,15 @@ async fn handle_connect(
 
     // 200 tells the client the tunnel is established.
     Ok(Response::new(axum::body::Body::empty()))
+}
+
+/// What a CONNECT becomes once its lane has been decided and, on the open
+/// lane, its upstream dialed.
+enum Session {
+    /// Terminate TLS and serve HTTP inside (`proxy::mitm`).
+    Mitm,
+    /// Relay bytes to the already-connected upstream (`proxy::tunnel`).
+    Open(TcpStream),
 }
 
 // ── HTTP proxy handling ─────────────────────────────────────────────────
@@ -1042,8 +1095,12 @@ async fn handle_http_proxy(
     // reaches an arbitrary host through this proxy — a plain
     // `GET http://host/…` the gateway forwards over the original scheme — so
     // an untokened one is exactly as ungoverned as an untokened tunnel.
-    // Refuse it wherever a tunnel would be refused.
-    let Some(agent_token) = inject::extract_agent_token(&req).filter(|t| !t.is_empty()) else {
+    // Refuse it wherever a tunnel would be refused. There is no lane here:
+    // the gateway reads this request itself, so the username is ignored.
+    let Some(agent_token) = inject::extract_proxy_credential(&req)
+        .map(|c| c.token)
+        .filter(|t| !t.is_empty())
+    else {
         warn!(
             peer = %peer_addr,
             host = %authority,

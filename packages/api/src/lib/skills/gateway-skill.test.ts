@@ -92,6 +92,12 @@ describe("gateway approval guidance", () => {
       expect(text).toContain(
         "A website login the user hands you for a browser task is not a gateway auth flow",
       );
+      // The exception names its path: the open proxy, which injects nothing,
+      // so a browser task can never read as a way to pull a gateway credential.
+      expect(text).toContain(
+        "through the open proxy (the `OPEN_PROXY` variable",
+      );
+      expect(text).toContain("injects nothing");
       expect(text).toContain("keep it out of your replies and memory");
       expect(text).toContain(
         "prefer a connection when one exists for that service",

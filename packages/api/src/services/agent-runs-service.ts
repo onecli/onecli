@@ -16,6 +16,17 @@ import {
   isConcreteHost,
   normalizeLoggedHost,
 } from "../validations/evals";
+import {
+  RUN_WINDOW_SLACK_MS,
+  RUNS_PAGE_MAX,
+  type RunAppAttribution,
+  type RunAppCall,
+  type RunDetail,
+  type RunListItem,
+  type RunsPage,
+  type RunsQuery,
+  type RunToolCall,
+} from "../validations/runs";
 
 /**
  * Agent RUNS: the turn audit view.
@@ -32,21 +43,15 @@ import {
  * VISIBILITY. A member sees their own runs plus non-direct ones (cron,
  * watch, eval, channel threads): the same fence as conversations. Where
  * roles are enforced (cloud, licensed self-host) an org admin also sees
- * everyone's DIRECT runs, and the route audits each such read. Without role
- * enforcement every member is an implicit admin, so that override does not
- * exist there: direct threads stay private to their owner.
+ * everyone's DIRECT runs. A list names such a run but never carries its
+ * content: opening it is the read, and the route audits each one. Without
+ * role enforcement every member is an implicit admin, so that override does
+ * not exist there: direct threads stay private to their owner.
  */
-
-/** Most turns a single list call returns. */
-export const RUNS_PAGE_MAX = 100;
 
 /** Characters of any one string the list returns: the list is a scan, the
  * detail is where full text lives. */
 const LIST_TEXT_MAX = 300;
-
-/** Grace on either side of the turn window when matching gateway rows: the
- * runner reports start/finish a beat after the sandbox acts. */
-export const WINDOW_SLACK_MS = 2_000;
 
 /** Gateway rows one evidence scan reads. One more than this means the scan
  * was partial, and partial evidence is withheld rather than scored. */
@@ -64,60 +69,6 @@ const LLM_PROVIDER_LABELS: ReadonlySet<string> = new Set([
 /** The model's own traffic is not an app the agent used. */
 const isModelTraffic = (log: { provider: string; host: string }) =>
   LLM_PROVIDER_LABELS.has(log.provider) || isLlmHost(log.host.toLowerCase());
-
-type AppAttribution = "agent_time_window" | "withheld";
-
-export interface RunToolCall {
-  callId: string;
-  name: string;
-  input: string | null;
-  output: string | null;
-  isError: boolean;
-}
-
-export interface RunAppCall {
-  provider: string;
-  host: string;
-  method: string;
-  status: number;
-  latencyMs: number;
-  at: string;
-}
-
-export interface RunSummary {
-  turnId: string;
-  conversationId: string;
-  source: string;
-  direct: boolean;
-  status: string;
-  question: string;
-  answer: string | null;
-  error: string | null;
-  askedBy: { id: string; email: string; name: string | null } | null;
-  toolNames: string[];
-  /** Gateway evidence is a time-window correlation, never exact attribution. */
-  appAttribution: AppAttribution;
-  appsUsed: string[];
-  createdAt: string;
-  startedAt: string | null;
-  finishedAt: string | null;
-  durationMs: number | null;
-}
-
-export interface RunDetail extends RunSummary {
-  tools: RunToolCall[];
-  appCalls: RunAppCall[];
-}
-
-interface RunsQuery {
-  limit?: number;
-  /** Keyset cursor as emitted in `nextBefore`: `<createdAt ISO>~<turn id>`. */
-  before?: string;
-  source?: string;
-  userId?: string;
-  app?: string;
-  failedOnly?: boolean;
-}
 
 const clip = (s: string, max = LIST_TEXT_MAX) =>
   s.length <= max ? s : `${s.slice(0, max)}…`;
@@ -197,7 +148,13 @@ const turnSelect = {
   createdAt: true,
   startedAt: true,
   finishedAt: true,
-  conversation: { select: { direct: true, userId: true } },
+  conversation: {
+    select: {
+      direct: true,
+      userId: true,
+      agent: { select: { id: true, name: true } },
+    },
+  },
   user: { select: { id: true, email: true, name: true } },
 } satisfies Prisma.TurnSelect;
 type TurnRow = Prisma.TurnGetPayload<{ select: typeof turnSelect }>;
@@ -257,26 +214,31 @@ const loadEvents = async (turnIds: string[]) => {
 };
 
 const windowOf = (t: TurnRow) => ({
-  start: (t.startedAt ?? t.createdAt).getTime() - WINDOW_SLACK_MS,
-  end: t.finishedAt ? t.finishedAt.getTime() + WINDOW_SLACK_MS : Date.now(),
+  start: (t.startedAt ?? t.createdAt).getTime() - RUN_WINDOW_SLACK_MS,
+  end: t.finishedAt ? t.finishedAt.getTime() + RUN_WINDOW_SLACK_MS : Date.now(),
 });
 
 /**
- * App calls the agent made during each turn, from the gateway log. Model
- * traffic is dropped. Withheld when the scan would be partial.
+ * App calls each turn's agent made during that turn, from the gateway log,
+ * in ONE scan however many agents the turns span: each turn's window is
+ * matched against its own agent's rows only. Model traffic is dropped.
+ * Withheld when the scan would be partial.
  */
 const loadAppCalls = async (
   workspaceId: string,
-  agentId: string,
   turns: TurnRow[],
 ): Promise<{ calls: Map<string, RunAppCall[]>; withheld: boolean }> => {
   const calls = new Map<string, RunAppCall[]>();
   if (turns.length === 0) return { calls, withheld: false };
-  const windows = turns.map((t) => ({ id: t.id, ...windowOf(t) }));
+  const windows = turns.map((t) => ({
+    id: t.id,
+    agentId: t.conversation.agent.id,
+    ...windowOf(t),
+  }));
   const logs = await db.requestLog.findMany({
     where: {
       workspaceId,
-      agentId,
+      agentId: { in: [...new Set(windows.map((w) => w.agentId))] },
       createdAt: {
         gte: new Date(Math.min(...windows.map((w) => w.start))),
         lte: new Date(Math.max(...windows.map((w) => w.end))),
@@ -284,6 +246,7 @@ const loadAppCalls = async (
     },
     // Paths may carry private text from unrelated overlapping turns.
     select: {
+      agentId: true,
       provider: true,
       host: true,
       method: true,
@@ -300,7 +263,7 @@ const loadAppCalls = async (
     if (isModelTraffic(log)) continue;
     const at = log.createdAt.getTime();
     for (const w of windows) {
-      if (at < w.start || at > w.end) continue;
+      if (w.agentId !== log.agentId || at < w.start || at > w.end) continue;
       calls.get(w.id)?.push({
         provider: log.provider,
         host: log.host,
@@ -323,10 +286,11 @@ const summarize = (
   t: TurnRow,
   events: TurnEvidence | undefined,
   apps: RunAppCall[],
-  attribution: AppAttribution,
-): RunSummary => ({
+  attribution: RunAppAttribution,
+): Omit<RunDetail, "tools" | "appCalls"> => ({
   turnId: t.id,
   conversationId: t.conversationId,
+  agent: t.conversation.agent,
   source: t.source,
   direct: t.conversation.direct,
   status: t.status,
@@ -350,20 +314,41 @@ const summarize = (
 const isOthersDirect = (t: TurnRow, viewerUserId: string) =>
   t.conversation.direct && t.conversation.userId !== viewerUserId;
 
+/**
+ * A run as a list row. A colleague's private thread keeps only its facts:
+ * the question, the answer, the error and the tool names are content, and
+ * content is read through the audited detail, never by listing or polling.
+ */
+const toListItem = (
+  run: Omit<RunDetail, "tools" | "appCalls">,
+  othersDirect: boolean,
+): RunListItem => {
+  const { question, answer, error, toolNames, ...facts } = run;
+  if (othersDirect) return { ...facts, private: true };
+  return {
+    ...facts,
+    private: false,
+    question: clip(question),
+    answer: answer === null ? null : clip(answer),
+    error,
+    toolNames,
+  };
+};
+
+/**
+ * One page of runs, newest first: one agent's, or the whole workspace's when
+ * `agentId` is null (Activity). Lists never carry a colleague's private
+ * content (see `toListItem`), so no list read is an audited one.
+ */
 export const listRuns = async (
   workspaceId: string,
   organizationId: string,
   viewerUserId: string,
-  agentId: string,
+  agentId: string | null,
   query: RunsQuery = {},
-): Promise<{
-  runs: RunSummary[];
-  nextBefore: string | null;
-  isAdmin: boolean;
-  appEvidenceWithheld: boolean;
-  viewedOthersDirect: { turnId: string; conversationId: string }[];
-}> => {
-  await requireAgent(workspaceId, organizationId, agentId);
+): Promise<RunsPage> => {
+  if (agentId !== null)
+    await requireAgent(workspaceId, organizationId, agentId);
   const isAdmin = await holdsAdminOverride(viewerUserId, organizationId);
   const limit = Math.min(Math.max(query.limit ?? 50, 1), RUNS_PAGE_MAX);
   // An app filter applies after the gateway join, so scan a full page.
@@ -372,8 +357,10 @@ export const listRuns = async (
   const turns = await db.turn.findMany({
     where: {
       conversation: {
-        agentId,
-        agent: { workspaceId },
+        ...(agentId !== null && { agentId }),
+        // The workspace fence holds with or without an agent: a run of
+        // another workspace's agent is never in this list.
+        agent: { workspaceId, workspace: { organizationId } },
         ...visibleConversations(viewerUserId, isAdmin),
       },
       status: query.failedOnly
@@ -393,9 +380,9 @@ export const listRuns = async (
   // gateway evidence (provider and host metadata, and the app filter).
   const [events, apps] = await Promise.all([
     loadEvents(page.map((t) => t.id)),
-    isAdmin ? loadAppCalls(workspaceId, agentId, page) : NO_APP_EVIDENCE,
+    isAdmin ? loadAppCalls(workspaceId, page) : NO_APP_EVIDENCE,
   ]);
-  const attribution: AppAttribution = apps.withheld
+  const attribution: RunAppAttribution = apps.withheld
     ? "withheld"
     : "agent_time_window";
   const matched = page
@@ -414,23 +401,15 @@ export const listRuns = async (
   const shown = query.app ? matched : matched.slice(0, limit);
   const last = page.at(-1);
   return {
-    runs: shown.map(({ run }) => ({
-      ...run,
-      question: clip(run.question),
-      answer: run.answer === null ? null : clip(run.answer),
-    })),
+    runs: shown.map(({ turn, run }) =>
+      toListItem(run, isOthersDirect(turn, viewerUserId)),
+    ),
     nextBefore:
       turns.length > scan && last
         ? `${last.createdAt.toISOString()}~${last.id}`
         : null,
     isAdmin,
     appEvidenceWithheld: apps.withheld,
-    viewedOthersDirect: shown
-      .filter(({ turn }) => isOthersDirect(turn, viewerUserId))
-      .map(({ turn }) => ({
-        turnId: turn.id,
-        conversationId: turn.conversationId,
-      })),
   };
 };
 
@@ -458,7 +437,7 @@ export const getRun = async (
 
   const [events, apps] = await Promise.all([
     loadEvents([turn.id]),
-    isAdmin ? loadAppCalls(workspaceId, agentId, [turn]) : NO_APP_EVIDENCE,
+    isAdmin ? loadAppCalls(workspaceId, [turn]) : NO_APP_EVIDENCE,
   ]);
   const evidence = events.get(turn.id);
   const appCalls = apps.calls.get(turn.id) ?? [];
@@ -487,7 +466,7 @@ export const getRun = async (
 interface EvalTurnEvidence {
   answer: string | null;
   appsUsed: string[];
-  appAttribution: AppAttribution;
+  appAttribution: RunAppAttribution;
 }
 
 export const getEvalRunEvidence = async (
@@ -531,17 +510,19 @@ export const getEvalRunEvidence = async (
       AND: [
         {
           OR: [
-            { startedAt: { lte: new Date(window.end + WINDOW_SLACK_MS) } },
+            { startedAt: { lte: new Date(window.end + RUN_WINDOW_SLACK_MS) } },
             {
               startedAt: null,
-              createdAt: { lte: new Date(window.end + WINDOW_SLACK_MS) },
+              createdAt: { lte: new Date(window.end + RUN_WINDOW_SLACK_MS) },
             },
           ],
         },
         {
           OR: [
             { finishedAt: null },
-            { finishedAt: { gte: new Date(window.start - WINDOW_SLACK_MS) } },
+            {
+              finishedAt: { gte: new Date(window.start - RUN_WINDOW_SLACK_MS) },
+            },
           ],
         },
       ],

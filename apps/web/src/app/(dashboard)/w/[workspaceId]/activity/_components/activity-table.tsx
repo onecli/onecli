@@ -18,8 +18,8 @@ import {
 import { StatusBadge } from "./status-badge";
 import { DecisionBadge } from "./decision-badge";
 import { MethodBadge } from "./method-badge";
-import { ProviderIcon } from "./provider-icon";
-import { formatRelative, formatUTC } from "@onecli/api/lib/format";
+import { ProviderLabel } from "./provider-label";
+import { TimeCell } from "./time-cell";
 import { getProviderIcon } from "@onecli/api/apps/provider-icons";
 import {
   isBlockedRequest,
@@ -32,24 +32,6 @@ import {
 } from "@onecli/api/services/request-log-service";
 import { ApprovalActions } from "@/lib/components/approvals";
 import type { PendingApproval } from "@/lib/api/approvals";
-
-const localTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-
-const DateCell = ({ dateStr }: { dateStr: string }) => (
-  <Tooltip>
-    <TooltipTrigger asChild>
-      <span className="text-muted-foreground cursor-default text-xs tabular-nums">
-        {formatRelative(dateStr)}
-      </span>
-    </TooltipTrigger>
-    <TooltipContent side="bottom" align="start" className="text-xs">
-      <p>{formatUTC(dateStr)}</p>
-      <p className="text-muted-foreground">
-        {new Date(dateStr).toLocaleString()} ({localTz})
-      </p>
-    </TooltipContent>
-  </Tooltip>
-);
 
 interface ActivityTableProps {
   logs: RequestLogEntry[];
@@ -105,7 +87,7 @@ export const ActivityTable = ({
                 onClick={() => onRowClick(log)}
               >
                 <TableCell>
-                  <DateCell dateStr={log.createdAt} />
+                  <TimeCell iso={log.createdAt} />
                 </TableCell>
                 <TableCell>
                   <span className="text-sm truncate block max-w-[7rem]">
@@ -133,13 +115,8 @@ export const ActivityTable = ({
                   <div className="flex items-center gap-1.5 min-w-0">
                     <Tooltip>
                       <TooltipTrigger asChild>
-                        <div className="flex items-center gap-1.5 min-w-0">
-                          <span className="shrink-0">
-                            <ProviderIcon provider={log.provider} size={14} />
-                          </span>
-                          <span className="text-sm truncate">
-                            {providerInfo?.name ?? log.provider}
-                          </span>
+                        <div className="min-w-0">
+                          <ProviderLabel provider={log.provider} />
                         </div>
                       </TooltipTrigger>
                       <TooltipContent side="top">

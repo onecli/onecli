@@ -47,12 +47,26 @@ describe("the machine fragment", () => {
     // MUTATION-PROOF: the failure this fragment was rewritten for — an agent
     // asked to browse said "no browser" four times while chromium sat at
     // /usr/bin. The binary path, the drivers, and the README (which carries
-    // the proxy-credential snippet a browser here cannot work without) are
-    // each load-bearing.
+    // the launch snippet a browser here cannot work without) are each
+    // load-bearing.
     expect(flat).toContain("/usr/bin/chromium");
     expect(flat).toContain("Playwright");
     expect(flat).toContain("ffmpeg");
     expect(flat).toContain("/etc/onecli/README.browser");
+  });
+
+  it("routes browsers to the open proxy and keeps the gateway proxy for APIs", () => {
+    // The gateway's open lane: a browser launched against HTTPS_PROXY loads
+    // nothing (chromium never sends the userinfo) and, with credentials
+    // handed over, is refused by bot defences that see the re-signed
+    // session. The variable is what the agent reads, never a port number,
+    // and the API path is named so the two are never confused.
+    expect(flat).toContain("open proxy in $OPEN_PROXY");
+    expect(flat).toContain("proxy: { server: process.env.OPEN_PROXY }");
+    expect(flat).toContain(
+      "never the gateway proxy in HTTPS_PROXY, which is for APIs and CLIs",
+    );
+    expect(flat).not.toMatch(/127\.0\.0\.1:\d+/);
   });
 
   it("names the C toolchain so native-module installs are not mistaken for broken packages", () => {
@@ -115,17 +129,20 @@ describe("the machine fragment", () => {
   it("carries the sign-in mechanics for a login a person hands over", () => {
     // The MECHANICS half of the system prompt's website-login exception
     // (the LAW half is pinned in jcode.prompt.test.ts). Each clause is
-    // load-bearing: a password on argv is visible to every process and lands
+    // load-bearing: the sign-in rides the open proxy (the lane that injects
+    // nothing); a password on argv is visible to every process and lands
     // in shell history; the saved session is what spares the password on
-    // later turns; and big sites answer headless browsers with 2FA or a
-    // captcha, where retrying only burns the turn. MUTATION-PROOF: drop
-    // any clause and this fails.
-    expect(flat).toContain("a login a person gave you");
+    // later turns; and big sites answer a browser from here with 2FA, a
+    // captcha, or a human check, where one real-cursor attempt is worth a
+    // turn and a retry loop is not. MUTATION-PROOF: drop any clause and
+    // this fails.
+    expect(flat).toContain("login a person gave you: through the open proxy");
     expect(flat).toContain("through a file (never a command-line argument)");
     expect(flat).toContain("delete the file once signed in");
     expect(flat).toContain("storageState");
     expect(flat).toContain("reuse it instead of the password");
-    expect(flat).toContain("2FA, a captcha, or a bot check");
+    expect(flat).toContain('2FA, a captcha, or a "verify you are human" box');
+    expect(flat).toContain("try once with a visible window and a real cursor");
     expect(flat).toContain("report that and stop rather than retrying");
   });
 

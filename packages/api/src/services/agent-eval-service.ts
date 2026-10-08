@@ -4,10 +4,11 @@ import { z } from "zod";
 import { ServiceError } from "./errors";
 import { createConversation } from "./conversation-service";
 import { abortTurn, createTurn } from "./turn-service";
-import { getEvalRunEvidence, WINDOW_SLACK_MS } from "./agent-runs-service";
+import { getEvalRunEvidence } from "./agent-runs-service";
 import { scoreEval } from "./eval-scoring";
 import { logger } from "../lib/logger";
 import { ACTIVE_TURN_STATUSES, EVAL_SOURCE } from "../validations/conversation";
+import { RUN_WINDOW_SLACK_MS } from "../validations/runs";
 import {
   ACTIVE_EVAL_RUN_STATUSES,
   EVAL_CHECK_KINDS,
@@ -47,7 +48,7 @@ const ABORT_SETTLE_MS = 30_000;
 const POLL_MS = 1_500;
 /** Let the gateway rows land and keep consecutive questions' evidence
  * windows apart, so one question never overlaps the previous one. */
-const EVIDENCE_SETTLE_MS = 2 * WINDOW_SLACK_MS + 500;
+const EVIDENCE_SETTLE_MS = 2 * RUN_WINDOW_SLACK_MS + 500;
 /** An active run with no checkpoint for this long has lost its worker. A
  * live worker checkpoints at least once per question, and one question
  * takes at most QUESTION_TIMEOUT_MS + ABORT_SETTLE_MS + EVIDENCE_SETTLE_MS. */

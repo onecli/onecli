@@ -90,6 +90,10 @@ FROM node:22.23.2-trixie-slim
 # - xvfb is the fallback display for the rare tool that refuses headless
 #   mode; fonts-liberation + fonts-noto-color-emoji stop pages rendering as
 #   empty boxes (slim ships no fonts at all).
+# - xdotool moves a real X cursor and clicks on that display: the one way a
+#   browser here can answer a "verify you are human" box with an input event
+#   that did not come from the automation protocol (README.browser tells the
+#   agent to try it once, then stop).
 # - ffmpeg is the video half: Playwright records .webm natively, and frames
 #   or screenshots are stitched with ffmpeg. The gate proves VP9 encoding.
 # - libnss3-tools is `certutil`, the only way to add a CA to the NSS shared
@@ -119,7 +123,7 @@ RUN apt-get update \
     podman podman-docker uidmap passt slirp4netns fuse-overlayfs aardvark-dns catatonit iptables \
     python3 python3-pip python3-venv \
     nano less \
-    dbus-x11 chromium chromium-sandbox xvfb fonts-liberation fonts-noto-color-emoji ffmpeg libnss3-tools \
+    dbus-x11 chromium chromium-sandbox xvfb xdotool fonts-liberation fonts-noto-color-emoji ffmpeg libnss3-tools \
     gcc g++ make libc6-dev python3-dev \
     procps jq zip unzip wget xz-utils \
   && rm -rf /var/lib/apt/lists/*
@@ -245,13 +249,15 @@ RUN podman --version \
 
 # The browser note the machine fragment cites (one source, no drift — same
 # pattern as /etc/containers/README.onecli). Root-owned: substrate facts,
-# not agent preferences. The proxy paragraph is the load-bearing one,
-# MEASURED 2026-09-09 against an authenticating test proxy: bare chromium
-# reads the proxy HOST from HTTP_PROXY/HTTPS_PROXY but never the userinfo —
-# it answers the 407 challenge with nothing and every page fails — while
-# Playwright's launch({ proxy: { server, username, password } }) authenticates
-# on the first challenge. The sandbox's proxy URL carries the agent's token
-# as userinfo, so a browser started without that option reaches nothing.
+# not agent preferences. The proxy paragraph is the load-bearing one. Two
+# measured facts shape it: bare chromium reads the proxy HOST from
+# HTTP_PROXY/HTTPS_PROXY but never the userinfo (MEASURED 2026-09-09: it
+# answers the 407 challenge with nothing and every page fails), and a site
+# behind bot defence refuses a session the gateway re-signed (the origin
+# sees a non-browser TLS stack under a browser User-Agent). So browsers use
+# the open proxy (apps/sandbox-supervisor/src/open-proxy.ts): loopback, no
+# credentials, and the gateway relays the browser's own TLS untouched. The
+# gateway proxy stays the API path, and the deliberate exception below.
 RUN install -d /etc/onecli \
   && printf '%s\n' \
     'OneCLI agent sandbox — the browser stack.' \
@@ -261,11 +267,37 @@ RUN install -d /etc/onecli \
     'Puppeteer from npm/pip and point them at the system binary:' \
     '  npm install -g playwright   # or: pip install --user playwright' \
     '' \
-    'PROXY — READ THIS FIRST. Every request leaves this machine through the' \
-    'sandbox proxy, whose URL (in HTTPS_PROXY) carries your access token as' \
-    'user:password. Chromium reads the proxy HOST from that variable but never' \
-    'the credentials, so a browser launched without them loads nothing. Hand' \
-    'them to Playwright explicitly:' \
+    'PROXY — READ THIS FIRST. This machine has two ways out, both through the' \
+    'OneCLI gateway, and a browser must use the second:' \
+    '' \
+    '1. The gateway proxy, in HTTPS_PROXY. It opens every HTTPS request,' \
+    '   injects the credentials of the apps connected to you, and applies' \
+    '   the rules. For APIs, CLIs, SDKs, curl, git, pip, npm: everything' \
+    '   that is not a web page. Those tools read HTTPS_PROXY on their own.' \
+    '' \
+    '2. The open proxy, in OPEN_PROXY (http://127.0.0.1:3128 normally; read' \
+    '   the variable, never assume the number). It carries your bytes to the' \
+    '   site untouched, so the site sees a real browser with its real' \
+    '   certificates. No credentials, no CA setup, no extra flags:' \
+    '     const browser = await chromium.launch({' \
+    '       executablePath: "/usr/bin/chromium",' \
+    '       proxy: { server: process.env.OPEN_PROXY },' \
+    '     });' \
+    '   (Python: proxy={"server": os.environ["OPEN_PROXY"]}. Puppeteer or' \
+    '   bare chromium: --proxy-server=$OPEN_PROXY.)' \
+    '   The open proxy injects nothing: a website only ever gets what you' \
+    '   type into it. It is for browsing, and for signing in with a login a' \
+    '   person gave you for that site. The gateway still refuses blocked' \
+    '   hosts and private addresses there; the browser then reports' \
+    '   ERR_TUNNEL_CONNECTION_FAILED, and the reason is in the gateway log.' \
+    '' \
+    'Why not the gateway proxy for a browser: Chromium reads the proxy host' \
+    'from HTTPS_PROXY but never the credentials, so it loads nothing; and' \
+    'even with credentials handed to Playwright, sites behind bot defence' \
+    '(Cloudflare and the like) refuse the re-signed session. Use the gateway' \
+    'proxy from a browser ONLY when you deliberately want the gateway to' \
+    'inject a connected app'"'"'s credential into a page load, and then hand' \
+    'the credentials over explicitly:' \
     '  const u = new URL(process.env.HTTPS_PROXY);' \
     '  const browser = await chromium.launch({' \
     '    executablePath: "/usr/bin/chromium",' \
@@ -273,18 +305,21 @@ RUN install -d /etc/onecli \
     '             username: decodeURIComponent(u.username),' \
     '             password: decodeURIComponent(u.password) },' \
     '  });' \
-    '(Python: proxy={"server": ..., "username": ..., "password": ...}.)' \
-    'Puppeteer has no proxy-credential launch option; use' \
-    'page.authenticate({ username, password }) after --proxy-server=<host>.' \
     '' \
-    'TLS: the proxy re-signs every HTTPS site with the sandbox CA. Chromium does' \
-    'not read SSL_CERT_FILE; it trusts the NSS database at ~/.pki/nssdb, and the' \
-    'sandbox CA is imported there at every boot, so pages load with normal' \
-    'certificate checks. Never set ignoreHTTPSErrors or' \
-    '--ignore-certificate-errors: that turns verification off for every site,' \
-    'not just the proxy. If a page fails with ERR_CERT_AUTHORITY_INVALID, check' \
-    'the import: `certutil -d sql:$HOME/.pki/nssdb -L` must list an' \
-    'onecli-gateway-* entry with trust flags C,,.' \
+    'TLS on that path: the gateway proxy re-signs every HTTPS site with the' \
+    'sandbox CA. Chromium does not read SSL_CERT_FILE; it trusts the NSS' \
+    'database at ~/.pki/nssdb, and the sandbox CA is imported there at every' \
+    'boot, so pages load with normal certificate checks. Never set' \
+    'ignoreHTTPSErrors or --ignore-certificate-errors: that turns verification' \
+    'off for every site, not just the proxy. If a page fails with' \
+    'ERR_CERT_AUTHORITY_INVALID, check the import: `certutil -d' \
+    'sql:$HOME/.pki/nssdb -L` must list an onecli-gateway-* entry with trust' \
+    'flags C,,. (The open proxy never needs any of this.)' \
+    '' \
+    'Human checks: some sites answer a browser from here with a "verify you' \
+    'are human" box. Try once with a visible window (Xvfb) and a real cursor' \
+    'move + click (xdotool); if the box stays, that site needs a person to' \
+    'click it. Report that and stop; do not loop on it.' \
     '' \
     'Playwright can also download its own Chromium build (`playwright install' \
     'chromium`); it lands under ~/.cache/ms-playwright on the durable home and' \
@@ -310,6 +345,7 @@ RUN chromium --version \
   && command -v certutil \
   && ffmpeg -version | head -1 \
   && Xvfb -help >/dev/null 2>&1 \
+  && xdotool --version >/dev/null \
   && fc-list | grep -qi liberation \
   && gcc --version | head -1 \
   && g++ --version | head -1 \
@@ -425,6 +461,23 @@ RUN usermod -d /workspace/.home node \
     '    if [ -n "${SSL_CERT_FILE:-}" ]; then export NIX_SSL_CERT_FILE="$SSL_CERT_FILE"; fi' \
     '  fi' \
     '  unset _onecli_nix' \
+    'fi' \
+    '' \
+    '# The open proxy (the gateway lane that keeps a client'"'"'s own TLS; see' \
+    '# /etc/onecli/README.browser). The supervisor exports OPEN_PROXY to its' \
+    '# own children and publishes the same URL here for sessions that do not' \
+    '# inherit its environment (an SSH login shell). Only set when the file' \
+    '# holds exactly http://127.0.0.1:<digits>, so a planted value can never' \
+    '# redirect a browser elsewhere (a glob like [0-9]* would let a port' \
+    '# that continues into @host through).' \
+    'if [ -z "${OPEN_PROXY:-}" ] && [ -r /tmp/onecli-open-proxy.url ]; then' \
+    '  _onecli_open="$(head -n 1 /tmp/onecli-open-proxy.url 2>/dev/null)"' \
+    '  _onecli_port="${_onecli_open#http://127.0.0.1:}"' \
+    '  case "$_onecli_port" in' \
+    '    ""|*[!0-9]*) ;;' \
+    '    *) [ "$_onecli_open" = "http://127.0.0.1:$_onecli_port" ] && export OPEN_PROXY="$_onecli_open" ;;' \
+    '  esac' \
+    '  unset _onecli_open _onecli_port' \
     'fi' \
     > /etc/profile.d/onecli-path.sh
 

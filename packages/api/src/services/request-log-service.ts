@@ -2,6 +2,7 @@ import { db, Prisma } from "@onecli/db";
 
 import { LLM_HOST_FRAGMENTS } from "../lib/llm-hosts";
 import { getRoleResolver } from "../providers";
+import type { ActivityPageParams } from "../validations/request-logs";
 
 export interface RequestLogEntry {
   id: string;
@@ -192,14 +193,6 @@ export interface RequestLogPage {
   nextCursor: { createdAt: string; id: string } | null;
 }
 
-export type ActivityFilter = "all" | "hide-llm" | "blocked";
-
-export interface ActivityPageParams {
-  cursor?: { createdAt: string; id: string };
-  limit?: number;
-  filter?: ActivityFilter;
-}
-
 const resolveAgentNames = async (
   workspaceId: string,
   agentIds: string[],
@@ -281,16 +274,26 @@ export const getRecentRequestLogs = async (
 };
 
 /**
- * Build the Prisma `where` for an activity query: workspace scope, the selected
- * {@link ActivityFilter}, and the keyset-pagination cursor. Pure and synchronous
- * so it can be unit-tested without a database.
+ * Build the Prisma `where` for an activity query: workspace scope, the
+ * optional agent and time window, the selected filter, and the keyset
+ * pagination cursor. Pure and synchronous so it can be unit-tested without a
+ * database. Params arrive parsed by `activityPageSchema`.
  */
 export const buildActivityWhere = (
   workspaceId: string,
-  params: Pick<ActivityPageParams, "cursor" | "filter"> = {},
+  params: Omit<ActivityPageParams, "limit"> = {},
 ): Prisma.RequestLogWhereInput => {
-  const { cursor, filter = "all" } = params;
+  const { cursor, filter = "all", agentId, from, to } = params;
   const where: Prisma.RequestLogWhereInput = { workspaceId };
+  // Inside the workspace scope above: another workspace's agent id simply
+  // matches nothing.
+  if (agentId) where.agentId = agentId;
+  if (from || to) {
+    where.createdAt = {
+      ...(from && { gte: new Date(from) }),
+      ...(to && { lte: new Date(to) }),
+    };
+  }
 
   if (filter === "blocked") {
     where.status = { gte: 400 };

@@ -215,8 +215,8 @@ export const queryKeys = {
   },
   activity: {
     all: () => ["activity", ...scope()] as const,
-    list: (filter?: string) =>
-      [...queryKeys.activity.all(), "list", filter] as const,
+    list: (params: object) =>
+      [...queryKeys.activity.all(), "list", params] as const,
   },
   approvals: {
     all: () => ["approvals", ...scope()] as const,
@@ -262,6 +262,8 @@ export const queryKeys = {
   },
   runs: {
     all: () => ["runs", ...scope()] as const,
+    list: (filter: object) =>
+      [...queryKeys.runs.all(), "list", filter] as const,
     detail: (agentId: string, turnId: string) =>
       [...queryKeys.runs.all(), "detail", agentId, turnId] as const,
   },

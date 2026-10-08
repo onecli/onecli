@@ -1,10 +1,12 @@
 "use client";
 
-import { Loader2 } from "lucide-react";
+import { ArrowRight, Loader2 } from "lucide-react";
+import { Button } from "@onecli/ui/components/button";
 import {
   Sheet,
   SheetContent,
   SheetDescription,
+  SheetFooter,
   SheetHeader,
   SheetTitle,
 } from "@onecli/ui/components/sheet";
@@ -21,10 +23,13 @@ export const RunDetailSheet = ({
   agentId,
   turnId,
   onOpenChange,
+  onViewNetwork,
 }: {
   agentId: string;
   turnId: string | null;
   onOpenChange: (open: boolean) => void;
+  /** Activity only: show this run's gateway requests in the Network tab. */
+  onViewNetwork?: () => void;
 }) => {
   const detail = useRun(agentId, turnId);
   const run = detail.data?.run;
@@ -47,9 +52,19 @@ export const RunDetailSheet = ({
             This run could not be loaded.
           </div>
         ) : run ? (
-          <ScrollArea className="min-h-0 flex-1">
-            <RunDetailBody run={run} />
-          </ScrollArea>
+          <>
+            <ScrollArea className="min-h-0 flex-1">
+              <RunDetailBody run={run} />
+            </ScrollArea>
+            {onViewNetwork && (
+              <SheetFooter className="border-t">
+                <Button variant="outline" size="sm" onClick={onViewNetwork}>
+                  View requests in Network
+                  <ArrowRight aria-hidden />
+                </Button>
+              </SheetFooter>
+            )}
+          </>
         ) : (
           <div className="flex justify-center py-12">
             <Loader2 className="text-muted-foreground size-5 animate-spin" />

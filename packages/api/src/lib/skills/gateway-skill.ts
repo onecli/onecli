@@ -243,8 +243,10 @@ user can connect the service in OneCLI.
 - **Never** use browser extensions, gcloud, or manual auth flows for a
   service the gateway connects. The gateway handles those credentials for
   you. A website login the user hands you for a browser task is not a
-  gateway auth flow: use it for that task, keep it out of your replies and
-  memory, and prefer a connection when one exists for that service.
+  gateway auth flow: use it for that task through the open proxy (the
+  \`OPEN_PROXY\` variable, where one exists; it relays a browser's own TLS
+  and injects nothing), keep it out of your replies and memory, and prefer
+  a connection when one exists for that service.
 - **Never** ask the user for API keys or tokens directly. Direct them to
   connect the service in the OneCLI dashboard.
 - **Never** suggest the user open Gmail/Calendar/GitHub in their browser

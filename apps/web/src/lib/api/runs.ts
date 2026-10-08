@@ -1,54 +1,44 @@
+import type {
+  RunAppCall,
+  RunDetail,
+  RunListItem,
+  RunsPage,
+  RunToolCall,
+} from "@onecli/api/validations/runs";
 import { apiGet } from "./client";
 
 /**
- * The agent RUNS client (audit): GET /v1/agents/:agentId/runs/:turnId, one
- * run in full. Types hand-mirrored from `agent-runs-service.ts`, dates as
- * ISO strings (the house convention for the typed client).
+ * The RUNS client (audit): a runs list at /v1/runs (the workspace's, for
+ * Activity) or /v1/agents/:agentId/runs (one agent's), and one run in full at
+ * /v1/agents/:agentId/runs/:turnId. The shapes are the API's own
+ * (`validations/runs`), so the two sides cannot drift.
  */
 
-export interface RunToolCall {
-  callId: string;
-  name: string;
-  input: string | null;
-  output: string | null;
-  isError: boolean;
+export type { RunAppCall, RunDetail, RunListItem, RunsPage, RunToolCall };
+
+export interface RunsFilter {
+  /** One agent's runs; omitted, the whole workspace's. */
+  agentId?: string;
+  source?: string;
+  failed?: boolean;
+  before?: string;
 }
 
-export interface RunAppCall {
-  provider: string;
-  host: string;
-  method: string;
-  status: number;
-  latencyMs: number;
-  at: string;
-}
+const agentRuns = (agentId: string) =>
+  `/v1/agents/${encodeURIComponent(agentId)}/runs`;
 
-export interface RunSummary {
-  turnId: string;
-  conversationId: string;
-  source: string;
-  direct: boolean;
-  status: string;
-  question: string;
-  answer: string | null;
-  error: string | null;
-  askedBy: { id: string; email: string; name: string | null } | null;
-  toolNames: string[];
-  /** Gateway evidence is a time-window correlation, never exact attribution. */
-  appAttribution: "agent_time_window" | "withheld";
-  appsUsed: string[];
-  createdAt: string;
-  startedAt: string | null;
-  finishedAt: string | null;
-  durationMs: number | null;
-}
-
-export interface RunDetail extends RunSummary {
-  tools: RunToolCall[];
-  appCalls: RunAppCall[];
-}
+/** A page of runs, newest first. */
+export const list = ({ agentId, source, failed, before }: RunsFilter = {}) => {
+  const q = new URLSearchParams();
+  if (source) q.set("source", source);
+  if (failed) q.set("failed", "true");
+  if (before) q.set("before", before);
+  const qs = q.toString();
+  const path = agentId ? agentRuns(agentId) : "/v1/runs";
+  return apiGet<RunsPage>(qs ? `${path}?${qs}` : path);
+};
 
 export const get = (agentId: string, turnId: string) =>
   apiGet<{ run: RunDetail }>(
-    `/v1/agents/${encodeURIComponent(agentId)}/runs/${encodeURIComponent(turnId)}`,
+    `${agentRuns(agentId)}/${encodeURIComponent(turnId)}`,
   );

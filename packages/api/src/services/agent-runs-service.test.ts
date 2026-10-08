@@ -39,7 +39,11 @@ const turn = {
   createdAt: new Date("2026-09-01T12:00:00Z"),
   startedAt: new Date("2026-09-01T12:00:00Z"),
   finishedAt: new Date("2026-09-01T12:01:00Z"),
-  conversation: { direct: false, userId: null },
+  conversation: {
+    direct: false,
+    userId: null,
+    agent: { id: "agent", name: "Agent" },
+  },
   user: { id: "viewer", email: "viewer@example.com", name: null },
 };
 beforeEach(() => {
@@ -293,6 +297,70 @@ describe("Runs evidence query boundaries", () => {
     ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
     expect(mocks.turns).not.toHaveBeenCalled();
   });
+  it("lists a colleague's private run as facts only, and clips everyone else's text", async () => {
+    mocks.role.mockResolvedValue("admin");
+    const long = "x".repeat(400);
+    mocks.turns.mockResolvedValue([
+      {
+        ...turn,
+        id: "theirs",
+        message: "their private question",
+        error: "their private error",
+        conversation: {
+          ...turn.conversation,
+          direct: true,
+          userId: "colleague",
+        },
+      },
+      { ...turn, message: long },
+    ]);
+    const { runs } = await listRuns("ws", "org", "viewer", null);
+    expect(runs[0]).toMatchObject({ turnId: "theirs", private: true });
+    expect(JSON.stringify(runs[0])).not.toContain("their private");
+    expect(runs[0]).not.toHaveProperty("answer");
+    expect(runs[1]).toMatchObject({
+      turnId: "turn",
+      private: false,
+      question: `${"x".repeat(300)}…`,
+      answer: "answer",
+    });
+  });
+
+  it("matches a page spanning agents in one gateway scan, each run to its own agent", async () => {
+    mocks.role.mockResolvedValue("admin");
+    const other = {
+      ...turn,
+      id: "other-turn",
+      conversation: { ...turn.conversation, agent: { id: "b", name: "B" } },
+    };
+    mocks.turns.mockResolvedValue([turn, other]);
+    mocks.logs.mockResolvedValue([
+      {
+        agentId: "b",
+        provider: "notion",
+        host: "api.notion.com",
+        method: "GET",
+        status: 200,
+        latencyMs: 9,
+        createdAt: new Date("2026-09-01T12:00:30Z"),
+      },
+    ]);
+    const { runs } = await listRuns("ws", "org", "viewer", null);
+    expect(mocks.logs).toHaveBeenCalledOnce();
+    expect(mocks.logs).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          workspaceId: "ws",
+          agentId: { in: ["agent", "b"] },
+        }),
+      }),
+    );
+    expect(runs.map((r) => [r.turnId, r.appsUsed])).toEqual([
+      ["turn", []],
+      ["other-turn", ["notion"]],
+    ]);
+  });
+
   it("does not query gateway logs at all for a restricted viewer's list or detail", async () => {
     await listRuns("ws", "org", "viewer", "agent");
     const { run } = await getRun("ws", "org", "viewer", "agent", "turn");

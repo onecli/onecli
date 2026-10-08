@@ -201,7 +201,7 @@ export {
   ApiError,
 } from "./client";
 export { queryKeys } from "./keys";
-export type { RunAppCall, RunDetail, RunSummary, RunToolCall } from "./runs";
+export type { RunAppCall, RunDetail, RunListItem, RunToolCall } from "./runs";
 export type {
   EvalQuestion,
   EvalRunDetail,

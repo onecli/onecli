@@ -23,6 +23,8 @@ pub mod hints;
 pub mod hooks;
 pub mod mitm;
 pub mod refresh;
+pub mod relay;
 pub mod response;
 pub mod transforms;
+pub mod tunnel;
 pub mod websocket;

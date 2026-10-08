@@ -64,6 +64,17 @@ pub enum RequestDecision {
     /// Nothing was dialed. Its own variant so the activity feed shows the
     /// refusal as a block attributed to the guard, not a plain 403.
     DestinationRefused,
+    /// An open-lane CONNECT (`proxy::tunnel`): the client's bytes were relayed
+    /// to the host untouched, so there was no request to log; this is the
+    /// one row the tunnel leaves, written when it closes, with how much
+    /// crossed in each direction. Its own variant so `keeps_event` persists
+    /// it: an un-injected `Allowed` row is dropped by design, and a tunnel
+    /// that left no trace would be the open relay the token check exists to
+    /// prevent.
+    Tunneled {
+        bytes_up: u64,
+        bytes_down: u64,
+    },
 }
 
 /// A metered spend charge attached to a request event (cloud budget feature).

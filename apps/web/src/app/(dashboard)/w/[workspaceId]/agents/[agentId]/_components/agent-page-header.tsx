@@ -64,6 +64,14 @@ export const AgentPageHeader = ({ agent }: AgentPageHeaderProps) => {
           agent={agent}
           onCredentialAccess={() => setAccessDialogOpen(true)}
           onDetails={() => setDetailsOpen(true)}
+          onViewActivity={() =>
+            router.push(
+              withWorkspacePrefix(
+                pathname,
+                `/activity?agent=${encodeURIComponent(agent.id)}`,
+              ),
+            )
+          }
           onDeleted={() =>
             router.push(withWorkspacePrefix(pathname, "/agents"))
           }

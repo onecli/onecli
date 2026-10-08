@@ -6,8 +6,14 @@ export default function ActivityLoading() {
     <div className="flex flex-1 flex-col gap-6">
       <PageHeader
         title="Activity"
-        description="Request logs from your gateway. Bodies and query strings are never recorded."
+        description="What your agents did, and every request through your gateway. Request bodies and query strings are never recorded."
       />
+      {/* The tabs and the agent picker. */}
+      <div className="flex items-center justify-between">
+        <Skeleton className="h-8 w-40 rounded-lg" />
+        <Skeleton className="h-8 w-48 rounded-lg" />
+      </div>
+      {/* The tab's filter and Live switch. */}
       <div className="flex items-center justify-between">
         <Skeleton className="h-8 w-36 rounded-lg" />
         <Skeleton className="h-8 w-16 rounded-lg" />

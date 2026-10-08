@@ -13,6 +13,7 @@ const { RunDetailSheet } = await import("./run-detail-sheet");
 const detail = (patch: Partial<RunDetail> = {}): RunDetail => ({
   turnId: "real-turn",
   conversationId: "conversation",
+  agent: { id: "agent", name: "Donna" },
   source: "eval",
   direct: false,
   status: "failed",
@@ -32,13 +33,21 @@ const detail = (patch: Partial<RunDetail> = {}): RunDetail => ({
   ...patch,
 });
 
-const mount = (turnId: string | null = "real-turn") => {
+const mount = (
+  turnId: string | null = "real-turn",
+  onViewNetwork?: () => void,
+) => {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
   return render(
     <QueryClientProvider client={client}>
-      <RunDetailSheet agentId="agent" turnId={turnId} onOpenChange={vi.fn()} />
+      <RunDetailSheet
+        agentId="agent"
+        turnId={turnId}
+        onOpenChange={vi.fn()}
+        onViewNetwork={onViewNetwork}
+      />
     </QueryClientProvider>,
   );
 };
@@ -121,6 +130,23 @@ describe("RunDetailSheet", () => {
     expect(await screen.findByText("POST api.example.com")).toBeInTheDocument();
     expect(screen.getByText("502")).toHaveClass("text-destructive");
     expect(screen.getByText("40 ms")).toBeInTheDocument();
+  });
+
+  it("offers View requests in Network only where the host provides it (Activity)", async () => {
+    const user = userEvent.setup();
+    get.mockResolvedValue({ run: detail() });
+    const onViewNetwork = vi.fn();
+    mount("real-turn", onViewNetwork);
+    await user.click(
+      await screen.findByRole("button", { name: "View requests in Network" }),
+    );
+    expect(onViewNetwork).toHaveBeenCalledOnce();
+    cleanup();
+    mount();
+    await screen.findByText("Ada");
+    expect(
+      screen.queryByRole("button", { name: "View requests in Network" }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows the steps with their requests as text, never markup", async () => {

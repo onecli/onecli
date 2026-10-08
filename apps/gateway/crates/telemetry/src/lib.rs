@@ -183,6 +183,16 @@ fn serialize_extra_data(event: &RequestEvent) -> Option<String> {
             obj["decision"] = serde_json::json!("blocked");
             obj["blocked_by_rule"] = serde_json::json!(DESTINATION_GUARD_RULE_NAME);
         }
+        // The tunnel's one row: the feed renders the decision, the byte counts
+        // are what an operator has instead of a URL and a body.
+        RequestDecision::Tunneled {
+            bytes_up,
+            bytes_down,
+        } => {
+            obj["decision"] = serde_json::json!("tunneled");
+            obj["bytes_up"] = serde_json::json!(bytes_up);
+            obj["bytes_down"] = serde_json::json!(bytes_down);
+        }
         RequestDecision::Allowed => {}
     }
     if let Some(ref label) = event.connection_label {
@@ -623,6 +633,29 @@ mod tests {
             serde_json::from_str(&serialize_extra_data(&ev).expect("extra data")).unwrap();
         assert_eq!(extra["decision"], "blocked");
         assert_eq!(extra["blocked_by_rule"], DESTINATION_GUARD_RULE_NAME);
+    }
+
+    /// An open-lane tunnel is un-injected and allowed, which is exactly the
+    /// shape `keeps_event` drops; its own variant is what keeps the row, in
+    /// both editions, carrying the byte counts the feed shows in place of a
+    /// URL. MUTATION-PROOF: fold `Tunneled` into `Allowed` and the keep
+    /// assertions fail.
+    #[test]
+    fn tunnels_are_persisted_with_their_byte_counts() {
+        let mut ev = base_event();
+        ev.injected = false;
+        ev.method = "CONNECT".into();
+        ev.decision = crate::core::RequestDecision::Tunneled {
+            bytes_up: 1_234,
+            bytes_down: 56_789,
+        };
+        assert!(keeps_event(&ev, common::edition::Edition::Cloud));
+        assert!(keeps_event(&ev, common::edition::Edition::Onprem));
+        let extra: serde_json::Value =
+            serde_json::from_str(&serialize_extra_data(&ev).expect("extra data")).unwrap();
+        assert_eq!(extra["decision"], "tunneled");
+        assert_eq!(extra["bytes_up"], 1_234);
+        assert_eq!(extra["bytes_down"], 56_789);
     }
 
     #[test]

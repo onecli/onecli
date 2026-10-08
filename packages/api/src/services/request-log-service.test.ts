@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { LLM_HOST_FRAGMENTS } from "../lib/llm-hosts";
 import { initRoleResolver } from "../providers";
+import { activityPageSchema } from "../validations/request-logs";
 import {
   buildActivityWhere,
   getMatchedRuleScope,
@@ -93,6 +94,41 @@ describe("buildActivityWhere", () => {
       { createdAt: { lt: new Date(cursor.createdAt) } },
       { createdAt: new Date(cursor.createdAt), id: { lt: cursor.id } },
     ]);
+  });
+
+  it("narrows to one agent and a time window (a run's requests), still workspace-scoped", () => {
+    const where = buildActivityWhere(WORKSPACE_ID, {
+      agentId: "agent-1",
+      from: "2026-09-01T10:00:00.000Z",
+      to: "2026-09-01T10:00:30.000Z",
+    });
+    expect(where).toEqual({
+      workspaceId: WORKSPACE_ID,
+      agentId: "agent-1",
+      createdAt: {
+        gte: new Date("2026-09-01T10:00:00.000Z"),
+        lte: new Date("2026-09-01T10:00:30.000Z"),
+      },
+    });
+  });
+
+  it("refuses a malformed agent id, window bound or cursor before it reaches the query", () => {
+    for (const bad of [
+      { from: "nope" },
+      { to: "2026-13-01" },
+      { agentId: "" },
+      { agentId: "x".repeat(101) },
+      { cursor: { createdAt: "yesterday", id: "log-1" } },
+      { filter: "everything" },
+    ]) {
+      expect(activityPageSchema.safeParse(bad).success).toBe(false);
+    }
+    expect(
+      activityPageSchema.safeParse({
+        agentId: "agent-1",
+        from: "2026-09-01T10:00:00.000Z",
+      }).success,
+    ).toBe(true);
   });
 });
 

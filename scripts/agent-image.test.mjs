@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Pins the two-image contract of the agent sandbox image: docker/agent-base
@@ -112,4 +115,75 @@ test("the base pins its own base image the same way the thin image did (no float
   // The thin image's build stages keep the same pin, so the app is built
   // and run on the same Node and glibc the base ships.
   assert.match(agent, /^FROM node:22\.23\.2-trixie-slim AS base$/m);
+});
+
+test("the browser README routes browsers to the open proxy and the image can act on a human check", () => {
+  // The in-image README is the one source the machine fragment defers to,
+  // so its proxy paragraph must say what the fragment says: browsers use
+  // the open proxy by the variable (never a hard-coded port), the gateway
+  // proxy stays the API path and the deliberate exception.
+  assert.match(base, /The open proxy, in OPEN_PROXY/);
+  assert.match(base, /proxy: \{ server: process\.env\.OPEN_PROXY \}/);
+  assert.match(base, /read' \\\n\s+'\s+the variable, never assume the number/);
+  assert.match(base, /The gateway proxy, in HTTPS_PROXY/);
+  assert.match(base, /The open proxy injects nothing/);
+  // The human-check posture needs a real cursor on the virtual display:
+  // xdotool is installed in the one apt layer and proven at build time.
+  assert.match(base, /^\s+dbus-x11 chromium chromium-sandbox xvfb xdotool /m);
+  assert.match(base, /&& xdotool --version >\/dev\/null \\/);
+  assert.match(base, /Human checks: some sites answer a browser/);
+});
+
+test("login shells learn the open proxy from the supervisor's published URL, loopback only", () => {
+  // An SSH session is a fresh exec that never inherits the supervisor's
+  // environment; the profile drop-in reads the boot-owned URL file. The
+  // guard is the security line: only exactly http://127.0.0.1:<digits> is
+  // exported, so a value planted in /tmp can never point a browser
+  // off-machine. Pinned by RUNNING the snippet, not by reading it: the
+  // printf'd lines are extracted, the file path is swapped for a temp file,
+  // and sh evaluates it against planted values.
+  const profile = base.slice(
+    base.indexOf("RUN usermod -d /workspace/.home node"),
+    base.indexOf("> /etc/profile.d/onecli-path.sh"),
+  );
+  const snippet = [...profile.matchAll(/^\s+'(.*)' \\$/gm)]
+    .map((m) => m[1].replaceAll(`'"'"'`, "'"))
+    .join("\n");
+  assert.match(snippet, /onecli-open-proxy\.url/);
+
+  const dir = mkdtempSync(join(tmpdir(), "agent-image-"));
+  const urlFile = join(dir, "open-proxy.url");
+  const script = snippet.replaceAll("/tmp/onecli-open-proxy.url", urlFile);
+  const exported = (planted, env = {}) => {
+    writeFileSync(urlFile, `${planted}\n`);
+    return execFileSync(
+      "sh",
+      ["-c", `${script}\nprintf '%s' "\${OPEN_PROXY:-unset}"`],
+      { env: { PATH: process.env.PATH, ...env }, encoding: "utf8" },
+    );
+  };
+  try {
+    assert.equal(exported("http://127.0.0.1:3128"), "http://127.0.0.1:3128");
+    assert.equal(exported("http://127.0.0.1:3129"), "http://127.0.0.1:3129");
+    // Planted values: a port that continues into another host, a non-loopback
+    // host, a scheme change, trailing garbage, an empty file.
+    for (const bad of [
+      "http://127.0.0.1:3128@evil.example",
+      "http://127.0.0.1:3128/evil",
+      "http://127.0.0.1.evil.example:3128",
+      "http://10.0.0.1:3128",
+      "https://127.0.0.1:3128",
+      "http://127.0.0.1:",
+      "",
+    ]) {
+      assert.equal(exported(bad), "unset", `planted ${JSON.stringify(bad)}`);
+    }
+    // An already-set OPEN_PROXY (the supervisor's own children) is left alone.
+    assert.equal(
+      exported("http://127.0.0.1:3128", { OPEN_PROXY: "http://127.0.0.1:9" }),
+      "http://127.0.0.1:9",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

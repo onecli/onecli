@@ -53,15 +53,19 @@ and pip modules build.
 - Browsing and video: chromium is at /usr/bin/chromium. Install
   Playwright or Puppeteer (\`npm install -g playwright\`, or
   \`pip install --user playwright\`) and point it at that binary. Read
-  /etc/onecli/README.browser FIRST — it has the proxy-credential launch
-  snippet a browser needs here, and the sandbox flag for self-hosted
+  /etc/onecli/README.browser FIRST: a browser here goes through the open
+  proxy in $OPEN_PROXY (\`proxy: { server: process.env.OPEN_PROXY }\`),
+  never the gateway proxy in HTTPS_PROXY, which is for APIs and CLIs. The
+  README has the launch snippet and the sandbox flag for self-hosted
   deployments. Playwright records .webm natively; ffmpeg stitches frames.
-- Signing in to a website with a login a person gave you: pass it to your
-  script through a file (never a command-line argument), delete the file
-  once signed in, and save the session (Playwright \`storageState\`) under
-  /workspace so later turns reuse it instead of the password. Some sites
-  answer a headless browser with 2FA, a captcha, or a bot check: report
-  that and stop rather than retrying.
+- Signing in to a website with a login a person gave you: through the
+  open proxy, pass it to your script through a file (never a command-line
+  argument), delete the file once signed in, and save the session
+  (Playwright \`storageState\`) under /workspace so later turns reuse it
+  instead of the password. Some sites answer a browser from here with 2FA,
+  a captcha, or a "verify you are human" box: try once with a visible
+  window and a real cursor (README.browser, "Human checks"); if it stays,
+  report that and stop rather than retrying.
 - To install tools that persist, use \`npm install -g\` or
   \`pip install --user\` — both land under ~/.local, whose bin dir is on
   your PATH — or a venv / project node_modules under /workspace. Any

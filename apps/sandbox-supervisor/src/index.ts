@@ -7,6 +7,11 @@ import { loadConfig, type SupervisorConfig } from "./config";
 import { createFakeHarness } from "./harness/fake";
 import { createJcodeHarness } from "./harness/jcode";
 import { log } from "./log";
+import {
+  gatewayFromProxyUrl,
+  publishOpenProxyUrl,
+  startOpenProxy,
+} from "./open-proxy";
 import { createStdioTransport } from "./transport/stdio";
 import { createWsTransport } from "./transport/ws";
 import { runSignalCleanup, runSupervisor } from "./supervisor";
@@ -82,6 +87,29 @@ const main = async (): Promise<void> => {
   };
   process.on("SIGTERM", () => onSignal("SIGTERM"));
   process.on("SIGINT", () => onSignal("SIGINT"));
+
+  // The open proxy (open-proxy.ts): the loopback door onto the gateway's
+  // open lane, for browsers and anything else that must keep its own TLS.
+  // Started BEFORE the harness so `OPEN_PROXY` is in the environment every
+  // child inherits (the harness daemon, its shells, background processes):
+  // the agent reads the variable, never a number. Best-effort, like the CA
+  // import in the entrypoint: a sandbox without a gateway URL (local dev)
+  // or with no free port simply has no open proxy, and the supervisor comes
+  // up regardless. The agent learns the absence the same way it learns
+  // everything else here, from the environment.
+  const gateway = gatewayFromProxyUrl(process.env.HTTPS_PROXY);
+  if (gateway) {
+    try {
+      const openProxy = await startOpenProxy(gateway);
+      process.env.OPEN_PROXY = openProxy.url;
+      publishOpenProxyUrl(openProxy.url);
+      log("info", "open proxy listening", { url: openProxy.url });
+    } catch (error) {
+      log("warn", "open proxy did not start", { error: String(error) });
+    }
+  } else {
+    log("info", "open proxy not started: no gateway proxy URL in HTTPS_PROXY");
+  }
 
   await runSupervisor(config, harness, selectTransport(config));
   log("info", "supervisor exited cleanly");
