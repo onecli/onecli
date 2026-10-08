@@ -62,6 +62,14 @@ export const notionPermissions: AppPermissionDefinition = {
           pathPattern: "/v1/users",
           method: "GET",
         },
+        {
+          id: "get_user",
+          name: "Get user",
+          description: "Retrieve a user by ID or the bot user via /v1/users/me",
+          hostPattern: "api.notion.com",
+          pathPattern: "/v1/users/*",
+          method: "GET",
+        },
       ],
     },
     {

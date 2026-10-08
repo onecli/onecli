@@ -6264,6 +6264,17 @@
         "GET"
       ]
     },
+    "get_user": {
+      "hosts": [
+        "api.notion.com"
+      ],
+      "paths": [
+        "/v1/users/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
     "list_comments": {
       "hosts": [
         "api.notion.com"
