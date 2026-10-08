@@ -2,11 +2,13 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { ChevronLeft, SlidersHorizontal } from "lucide-react";
 import { Badge } from "@onecli/ui/components/badge";
 import { cn } from "@onecli/ui/lib/utils";
-import { agentPath } from "@/lib/navigation";
+import { agentPath, matchAgentPage } from "@/lib/navigation";
 import {
   agentSectionsFor,
+  defaultAgentSection,
   AGENT_SECTION_GROUPS,
   type AgentSection,
 } from "@/lib/agents/agent-sections";
@@ -26,7 +28,7 @@ const RailLink = ({
   prominent,
   connectedMark,
 }: {
-  section: AgentSection;
+  section: Pick<AgentSection, "title" | "icon">;
   href: string;
   active: boolean;
   count?: number;
@@ -86,12 +88,22 @@ const RailLink = ({
   </Link>
 );
 
+/** The Advanced row on the main rail: one entry that drills into the
+ *  Advanced view, like a workspace drills in from All workspaces. */
+const ADVANCED_ENTRY = { title: "Advanced", icon: SlidersHorizontal } as const;
+
 /**
  * The agent page's second rail (§3.18): every entry is a property of this one
  * agent. Which sections exist for this agent comes from the shared section
  * table, so the rail, the breadcrumb switcher and the frame's guard can never
  * disagree. On small screens the rail becomes a horizontal strip under the
  * header — same items, same order.
+ *
+ * Two views, chosen by the URL: the main view (Work, Access, Behavior, and
+ * one Advanced row), and the Advanced view (a back link to the agent, then
+ * the advanced sections), the same drill-in the dashboard sidebar does for a
+ * workspace. Deriving the view from the path keeps deep links and refreshes
+ * honest: an advanced section's URL always opens the Advanced view.
  *
  * The badges are the workspace's totals (how much there is to grant), read from
  * the counts endpoint the overview already warms rather than from full list
@@ -152,13 +164,49 @@ export const AgentSectionRail = ({ agent }: { agent: AgentPageAgent }) => {
     />
   );
 
+  // Which view: the Advanced view whenever the current section is an advanced
+  // one, else the main view. Each view lists only its own sections; the main
+  // view's Advanced row (linking to the first advanced section) exists only
+  // when this agent has at least one advanced section left after gating.
+  const current = matchAgentPage(pathname)?.section;
+  const advanced = sections.filter((s) => s.group === "advanced");
+  const inAdvanced = advanced.some((s) => s.section === current);
+  const viewSections = inAdvanced
+    ? advanced
+    : sections.filter((s) => s.group !== "advanced");
+  const advancedHref =
+    !inAdvanced && advanced[0] ? hrefFor(advanced[0]) : undefined;
+
+  const renderBackLink = (compact?: boolean) => (
+    <Link
+      href={`${base}/${defaultAgentSection(agent.kind)}`}
+      className={cn(
+        "text-muted-foreground hover:text-foreground focus-visible:ring-ring flex shrink-0 items-center gap-1 rounded-md px-2 py-1.5 text-sm outline-none focus-visible:ring-2",
+        compact && "py-1 text-xs",
+      )}
+    >
+      <ChevronLeft className="size-3.5" aria-hidden />
+      Back to agent
+    </Link>
+  );
+
+  const renderAdvancedRow = (href: string, compact?: boolean) => (
+    <RailLink
+      section={ADVANCED_ENTRY}
+      href={href}
+      active={false}
+      compact={compact}
+    />
+  );
+
   return (
     <>
       {/* Desktop: the rail. */}
       <aside className="hidden w-52 shrink-0 overflow-y-auto border-r md:block">
         <nav aria-label="Agent sections" className="flex flex-col gap-0.5 p-3">
+          {inAdvanced && renderBackLink()}
           {AGENT_SECTION_GROUPS.map(({ group, label }) => {
-            const items = sections.filter((s) => s.group === group);
+            const items = viewSections.filter((s) => s.group === group);
             if (items.length === 0) return null;
             return (
               <div key={group} className="flex flex-col gap-0.5">
@@ -171,16 +219,23 @@ export const AgentSectionRail = ({ agent }: { agent: AgentPageAgent }) => {
               </div>
             );
           })}
+          {advancedHref && (
+            <div className="mt-3 flex flex-col gap-0.5 border-t pt-3">
+              {renderAdvancedRow(advancedHref)}
+            </div>
+          )}
         </nav>
       </aside>
 
-      {/* Mobile: the same sections as a horizontal strip. */}
+      {/* Mobile: the same view as a horizontal strip. */}
       <div className="shrink-0 overflow-x-auto border-b md:hidden">
         <nav
           aria-label="Agent sections"
           className="flex min-w-max gap-1 px-2 py-1.5"
         >
-          {sections.map((s) => renderLink(s, true))}
+          {inAdvanced && renderBackLink(true)}
+          {viewSections.map((s) => renderLink(s, true))}
+          {advancedHref && renderAdvancedRow(advancedHref, true)}
         </nav>
       </div>
     </>

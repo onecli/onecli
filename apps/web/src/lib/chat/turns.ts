@@ -20,6 +20,10 @@ const UNSETTLED: readonly TurnStatus[] = UNSETTLED_TURN_STATUSES;
 export const isActiveTurn = (turn: Turn): boolean =>
   ACTIVE.includes(turn.status);
 
+/** The same test on a bare status string (a run's, read off the wire). */
+export const isActiveTurnStatus = (status: string): boolean =>
+  ACTIVE.some((active) => active === status);
+
 /** A mid-run follow-up riding the active turn (steering, or parked). */
 export const isJoiningTurn = (turn: Turn): boolean => turn.status === "joining";
 

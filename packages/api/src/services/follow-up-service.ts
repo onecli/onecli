@@ -23,8 +23,10 @@ const log = logger.child({ component: "follow-up-service" });
  * turn is in flight the message becomes a follow-up row that steers into it —
  * never a 409, never a silent drop. Every human surface (web `POST
  * /conversations/:id/messages`, the channel ingestion doors) speaks through
- * here; automation (cron/watch) deliberately does not — a schedule must skip
- * a busy conversation, not steer into a human's live exchange.
+ * here, and so does a webhook event (its own sourced conversation, where an
+ * event must queue rather than be lost). Clock automation (cron/watch)
+ * deliberately does not — a schedule must skip a busy conversation, not
+ * steer into a human's live exchange.
  */
 
 export type SendMessageOutcome =

@@ -1,0 +1,88 @@
+{{- /*
+The network fence around agent sandboxes, the reason they live in their own
+namespace. Two policies:
+
+  default-deny     every pod in the namespace: no ingress, no egress
+  egress-allow     egress to the gateway pods (:10255), the runner pods
+                   (:8484), and cluster DNS. Pod selectors, never Service
+                   ClusterIP ipBlocks: policy is enforced on the pod IP the
+                   kube-proxy DNATs to, so an ipBlock on a ClusterIP never
+                   matches (verified: 3/3 runs broke that way).
+
+The selectors name the release's pods by the three selector labels, so a
+second release in another namespace cannot be reached. CNIs enforce
+NetworkPolicy 1-2s AFTER a pod starts; the runner's egress-gate init
+container covers that window by refusing to start the agent until the api
+is observed unreachable, and fails closed when no policy is enforced at all.
+*/ -}}
+{{- if and .Values.runner.enabled .Values.sandboxes.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "onecli.component" (dict "root" . "component" "sandboxes-default-deny") }}
+  namespace: {{ .Values.sandboxes.namespace.name }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "sandboxes") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "onecli.component" (dict "root" . "component" "sandboxes-egress") }}
+  namespace: {{ .Values.sandboxes.namespace.name }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "sandboxes") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+spec:
+  podSelector:
+    matchLabels:
+      onecli.sh/role: sandbox
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              {{- include "onecli.selectorLabels" (dict "root" . "component" "gateway") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 10255
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              {{- include "onecli.selectorLabels" (dict "root" . "component" "runner") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8484
+    # DNS: the sandbox resolves the gateway and runner through hostAliases
+    # and needs no cluster DNS for them, but tools inside an agent still
+    # call the resolver; a refused resolver stalls them for seconds. Two
+    # shapes: the resolver's pods (CoreDNS as a Deployment, the usual) or an
+    # address (EKS Auto Mode runs CoreDNS on each node, reachable only at
+    # the service CIDR's .10, so a pod selector would match nothing).
+    - to:
+        {{- if .Values.sandboxes.networkPolicy.dns.cidr }}
+        - ipBlock:
+            cidr: {{ .Values.sandboxes.networkPolicy.dns.cidr }}
+        {{- else }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.sandboxes.networkPolicy.dns.namespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.sandboxes.networkPolicy.dns.podLabels | nindent 14 }}
+        {{- end }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}

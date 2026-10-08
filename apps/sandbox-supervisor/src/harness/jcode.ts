@@ -1050,6 +1050,14 @@ export const POST_ACCEPT_IDLE_MS = { value: 600_000 };
  */
 export const ABORT_TERMINAL_GRACE_MS = { value: 10_000 };
 
+/**
+ * Ceiling on one tool call's accumulated arguments, kept below the runner's
+ * per-string wire bound (MAX_EVENT_TEXT_CHARS = 16,000) with room for the
+ * truncation marker, so the runner never cuts it a second time. Exported
+ * for the tests.
+ */
+export const TOOL_INPUT_MAX_CHARS = 15_900;
+
 /** Foreign-frame kinds worth counting when quarantined — the ones the live
  * loop would otherwise have surfaced or recorded. Everything else (acks,
  * status broadcasts) is dropped by the default arm even when trusted. */
@@ -1486,6 +1494,14 @@ class JcodeSession implements HarnessSession {
       let lastFrameAt = Date.now();
       let abortSeenAt: number | undefined;
       let openToolCalls = 0;
+      // Tool-call ARGUMENTS, per call id. jcode streams them as
+      // `tool_input_delta` chunks between `tool_start` and `tool_exec`; they
+      // ride out on the call's `tool.finished` so a transcript can say what
+      // the agent asked for, not only what came back. Bounded here so a
+      // model writing a huge argument cannot grow this map without limit;
+      // the runner truncates again for the wire.
+      const toolInputs = new Map<string, { text: string; dropped: number }>();
+      let streamingToolId: string | undefined;
       while (!terminal) {
         if (this.abortRequested && abortSeenAt === undefined) {
           abortSeenAt = Date.now();
@@ -1570,22 +1586,51 @@ class JcodeSession implements HarnessSession {
           case "tool_start":
             progressed = true;
             openToolCalls += 1;
+            streamingToolId = event.call_id;
             yield {
               type: "tool.started",
               callId: event.call_id,
               name: event.name,
             };
             break;
-          case "tool_done":
+          case "tool_input_delta": {
+            // jcode before v0.88 sends `tool_input` WITHOUT a call id and
+            // the bridge forwards it as `call_id: ""`. Its own turn loop
+            // credits such a delta to the tool call currently streaming (the
+            // last `tool_start`), so do the same. v0.88+ keys every delta.
+            const callId = event.call_id || streamingToolId;
+            if (!callId) break;
+            const acc = toolInputs.get(callId) ?? {
+              text: "",
+              dropped: 0,
+            };
+            const room = TOOL_INPUT_MAX_CHARS - acc.text.length;
+            acc.text += event.delta.slice(0, Math.max(0, room));
+            acc.dropped += Math.max(0, event.delta.length - Math.max(0, room));
+            toolInputs.set(callId, acc);
+            break;
+          }
+          case "tool_done": {
             openToolCalls = Math.max(0, openToolCalls - 1);
+            const acc = toolInputs.get(event.call_id);
+            toolInputs.delete(event.call_id);
+            // Cut visibly, like the runner does for every other string: a
+            // reader must not mistake a partial SQL statement for the whole.
+            const input = acc?.text
+              ? acc.dropped > 0
+                ? `${acc.text}\n… [truncated ${acc.dropped} characters]`
+                : acc.text
+              : undefined;
             yield {
               type: "tool.finished",
               callId: event.call_id,
               name: event.name,
+              ...(input ? { input } : {}),
               output: event.output,
               ...(event.error ? { isError: true } : {}),
             };
             break;
+          }
           case "token_usage":
             usage = usageFromEvent(event);
             break;

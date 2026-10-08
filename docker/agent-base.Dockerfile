@@ -1,5 +1,5 @@
-# OneCLI agent sandbox base — the OS surface of the hosted agent's computer
-# (#1246 2a). Build context: repo root (`docker build -f docker/agent-base.Dockerfile .`),
+# OneCLI agent sandbox base — the OS surface of the hosted agent's computer.
+# Build context: repo root (`docker build -f docker/agent-base.Dockerfile .`),
 # though nothing from the context enters this image: it is the Debian base,
 # ONE apt layer, and the configuration, notes and build-time gates that depend
 # only on those packages. docker/agent.Dockerfile stacks the app on top
@@ -35,7 +35,7 @@ FROM node:22.23.2-trixie-slim
 
 # tini as PID 1: Node is not an init (signal handling differs, orphans are
 # never reaped). Common tools are the agent's hands — every outbound request
-# they make still exits through the gateway (§3.4).
+# they make still exits through the gateway.
 # e2fsprogs + util-linux let a deployment that hands the sandbox a raw disk
 # format and mount it as the home; inert under the Docker backend, where the
 # home arrives as a pre-mounted volume.
@@ -50,8 +50,8 @@ FROM node:22.23.2-trixie-slim
 # newuidmap/newgidmap — the user-namespace helpers), passt (pasta, the
 # default rootless network) + slirp4netns (fallback), fuse-overlayfs
 # (storage fallback; native overlay is the expected driver), aardvark-dns +
-# iptables (netavark named networks / compose), catatonit (pod infra /
-# --init). This is a capability of sandboxes that own a whole kernel (a
+# iptables (netavark named networks / compose), catatonit (podman's pod
+# infra container / --init). This is a capability of sandboxes that own a whole kernel (a
 # per-sandbox VM); under the self-host Docker backend the same
 # binaries are deliberately inert — the runner pins `no-new-privileges` +
 # `CapDrop: ALL` on every sandbox (apps/runner/src/backend/docker/
@@ -70,8 +70,7 @@ FROM node:22.23.2-trixie-slim
 # in slim, and --no-install-recommends keeps git from pulling less in);
 # EDITOR/PAGER/LESS pin them below.
 # The browser stack — chromium + chromium-sandbox + dbus-x11 + xvfb + fonts +
-# ffmpeg: agents need browsers (decided 2026-09-09, plans/agent-owns-its-
-# machine.md Tier 1). Playwright/Puppeteer from npm or pip drive the baked
+# ffmpeg: agents need browsers. Playwright/Puppeteer from npm or pip drive the baked
 # binary at /usr/bin/chromium; the alternative — the harness's own
 # Firefox-extension browser tool — can never work in a headless guest and is
 # disabled in the adapter. Four load-bearing details:
@@ -99,9 +98,8 @@ FROM node:22.23.2-trixie-slim
 #   NODE_EXTRA_CA_CERTS. Every page here is re-signed by the gateway CA, so
 #   without the import agent-entrypoint.sh does with this tool, every load
 #   fails ERR_CERT_AUTHORITY_INVALID and the agent's escape by trial is
-#   ignoreHTTPSErrors — verification off for every site (measured live,
-#   2026-09-09). The gate below proves the import is what chromium
-#   trusts, on a real handshake.
+#   ignoreHTTPSErrors — verification off for every site. The gate below
+#   proves the import is what chromium trusts, on a real handshake.
 # gcc + g++ + make + libc6-dev + python3-dev: the C toolchain for native npm
 # and pip modules (better-sqlite3, sharp, bcrypt, psycopg2, lxml…) that ship
 # no prebuilt binary for this platform/runtime pairing and fall back to
@@ -185,12 +183,12 @@ RUN printf 'node:100000:65536\n' > /etc/subuid \
     '# rootless_storage_path is the load-bearing key — rootless podman IGNORES' \
     '# [storage] graphroot from the user config (that is the ROOTFUL path).' \
     '# graphroot is deliberately NOT set: pointing it at the durable home would' \
-    '# aim a rootful invocation (e.g. a root kubectl exec, which inherits the' \
-    '# global CONTAINERS_STORAGE_CONF) INTO the tenant rootless store, writing' \
-    '# root-owned db/lock files that brick it. A rootful podman falls back to' \
-    '# ephemeral /var/lib/containers, which is harmless. The store tree itself' \
-    '# is pre-created node-owned by agent-entrypoint.sh (podman does not create' \
-    '# <graphroot>/tmp before the first pull needs it).' \
+    '# aim a rootful invocation (e.g. a root exec into the sandbox, which' \
+    '# inherits the global CONTAINERS_STORAGE_CONF) INTO the tenant rootless' \
+    '# store, writing root-owned db/lock files that brick it. A rootful podman' \
+    '# falls back to ephemeral /var/lib/containers, which is harmless. The store' \
+    '# tree itself is pre-created node-owned by agent-entrypoint.sh (podman does' \
+    '# not create <graphroot>/tmp before the first pull needs it).' \
     '[storage]' \
     'driver = "overlay"' \
     'rootless_storage_path = "/workspace/.local/share/containers/storage"' \
@@ -199,8 +197,8 @@ RUN printf 'node:100000:65536\n' > /etc/subuid \
   && printf '%s\n' \
     'OneCLI agent sandbox — nested containers (podman, plus the `docker` CLI shim).' \
     '' \
-    'Rootless podman works on the hosted microVM substrate, where each sandbox' \
-    'owns a whole kernel. Under the self-host Docker backend it is intentionally' \
+    'Rootless podman works on a backend that gives each sandbox its own kernel.' \
+    'Under the self-host Docker backend it is intentionally' \
     'disabled: the sandbox hardening (no-new-privileges, CapDrop ALL, and the' \
     'container runtime default seccomp profile) prevents the user-namespace' \
     'setup rootless containers need on a shared kernel. Do not weaken any of' \
@@ -292,7 +290,8 @@ RUN install -d /etc/onecli \
     'chromium`); it lands under ~/.cache/ms-playwright on the durable home and' \
     'the shared libraries it needs are already here.' \
     '' \
-    'Sandbox flag: on the hosted platform, Chromium'"'"'s own sandbox works as-is.' \
+    'Sandbox flag: where the sandbox owns its kernel, Chromium'"'"'s own sandbox' \
+    'works as-is.' \
     'Under a self-hosted Docker deployment (no-new-privileges, CapDrop ALL) it' \
     'cannot start and you must pass --no-sandbox (Playwright:' \
     '`chromiumSandbox: false`). If launch fails with "No usable sandbox", that' \
@@ -330,9 +329,9 @@ RUN chromium --version \
   && test -f /etc/onecli/README.browser \
   # Headless chromium REALLY renders as uid 1000: a screenshot of about:blank
   # must come out non-empty. --no-sandbox because the build environment has
-  # no user namespaces (the default sandbox is proven live on the hosted
-  # substrate, not here); --disable-gpu because there is no GPU anywhere
-  # this image runs. Both are what a self-host Docker sandbox passes too.
+  # no user namespaces (the default sandbox works on a backend where the
+  # sandbox owns its kernel, not here); --disable-gpu because there is no GPU
+  # anywhere this image runs. Both are what a self-host Docker sandbox passes too.
   # HOME and --user-data-dir are pinned to a throwaway dir: setpriv keeps
   # root's HOME=/root, which uid 1000 cannot write, and chromium then dies
   # with "Failed to create headless user data directory" (found live on
@@ -398,8 +397,8 @@ RUN chromium --version \
 # - the directory itself is created at CONTAINER runtime by
 #   agent-entrypoint.sh as uid 1000 — deliberately NOT here: root must never
 #   create tenant-mount dirs, and content baked under /workspace forks the
-#   substrates (Docker seeds named volumes from image content; the hosted
-#   block mount shadows it).
+#   substrates (Docker seeds named volumes from image content; a backend
+#   that mounts the home as a block device shadows it).
 RUN usermod -d /workspace/.home node \
   && printf '%s\n' \
     '# OneCLI agent sandbox: the durable tool bin (npm -g, pip --user).' \

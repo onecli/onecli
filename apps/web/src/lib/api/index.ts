@@ -29,7 +29,10 @@ import * as conversations from "./conversations";
 import * as attachments from "./attachments";
 import * as channels from "./channels";
 import * as crons from "./crons";
+import * as webhooks from "./webhooks";
 import * as memories from "./memories";
+import * as runs from "./runs";
+import * as evals from "./evals";
 import * as skills from "./skills";
 import * as sshKeys from "./ssh-keys";
 import * as user from "./user";
@@ -66,7 +69,10 @@ export {
   attachments,
   channels,
   crons,
+  webhooks,
   memories,
+  runs,
+  evals,
   skills,
   sshKeys,
   user,
@@ -158,6 +164,7 @@ export type {
   OrgChannelsView,
 } from "./channels";
 export type { AgentCron, CronInput, CronUpdate } from "./crons";
+export type { AgentWebhook, WebhookInput, WebhookUpdate } from "./webhooks";
 export type {
   AgentMemory,
   AgentMemorySummary,
@@ -194,3 +201,10 @@ export {
   ApiError,
 } from "./client";
 export { queryKeys } from "./keys";
+export type { RunAppCall, RunDetail, RunSummary, RunToolCall } from "./runs";
+export type {
+  EvalQuestion,
+  EvalRunDetail,
+  EvalRunSummary,
+  EvalsView,
+} from "./evals";

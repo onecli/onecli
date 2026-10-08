@@ -1,0 +1,54 @@
+{{- /*
+Database migrations as a one-shot Job, the same image compose and the cloud
+run (prisma migrate deploy + the P3005 baseline rule in docker/migrate.sh).
+Named per release revision so every install/upgrade runs one; the api's
+init container waits for the schema to be current before the api serves.
+
+With migrations.useHelmHooks=true the Job becomes a pre-install/pre-upgrade
+hook instead: Helm blocks until it completes and deletes it after, for GitOps
+tools that want the release to fail when a migration does.
+*/ -}}
+{{- $name := include "onecli.component" (dict "root" . "component" "migrations") }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}-{{ .Release.Revision }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "migrations") | nindent 4 }}
+  annotations:
+    {{- if .Values.migrations.useHelmHooks }}
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    {{- end }}
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        {{- include "onecli.selectorLabels" (dict "root" . "component" "migrations") | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      {{- include "onecli.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- include "onecli.podSecurityContext" (dict "uid" 1000 "gid" 1000) | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "onecli.image" (dict "root" . "service" "migrations") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "onecli.containerSecurityContext" (dict "readOnlyRootFilesystem" true) | nindent 12 }}
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "onecli.databaseSecretName" . }}
+                  key: DATABASE_URL
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}

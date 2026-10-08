@@ -135,6 +135,7 @@ export const clamp = (event: AgentEvent): AgentEvent => {
         ...event,
         callId: clean(event.callId),
         name: clean(event.name),
+        ...(event.input !== undefined && { input: clean(event.input) }),
         output: clean(event.output),
       };
     case "approval.pending":

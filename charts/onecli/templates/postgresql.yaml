@@ -1,0 +1,92 @@
+{{- /*
+The bundled PostgreSQL: evaluation only. One replica on one PVC, no backups,
+no replication, no tuning. The NOTES say so loudly; production installs set
+database.enabled=false and bring their own through database.external.*.
+*/ -}}
+{{- if .Values.database.enabled }}
+{{- $name := include "onecli.component" (dict "root" . "component" "postgresql") }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "postgresql") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "onecli.selectorLabels" (dict "root" . "component" "postgresql") | nindent 4 }}
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "postgresql") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+spec:
+  serviceName: {{ $name }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "onecli.selectorLabels" (dict "root" . "component" "postgresql") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "onecli.selectorLabels" (dict "root" . "component" "postgresql") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "onecli.podSecurityContext" (dict "uid" 70 "gid" 70) | nindent 8 }}
+        fsGroup: 70
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: postgresql
+          image: {{ .Values.database.image }}
+          securityContext:
+            {{- include "onecli.containerSecurityContext" (dict) | nindent 12 }}
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.database.user | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.database.name | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "onecli.component" (dict "root" . "component" "database") }}
+                  key: POSTGRES_PASSWORD
+          ports:
+            - name: postgresql
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.database.user | quote }}]
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.database.user | quote }}]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.database.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.database.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.database.persistence.size }}
+{{- end }}

@@ -33,7 +33,7 @@ test("publish.yml has exactly two identical service matrices (build + merge)", (
 
 test("the matrix equals the docker/*.Dockerfile set, minus the agent's base image", () => {
   // docker/agent-base.Dockerfile is not a service: it is the OS surface the
-  // agent image stacks on (#1246 2a), published as onecli-agent-base by the
+  // agent image stacks on, published as onecli-agent-base by the
   // agent's own matrix entry (below), never pulled by compose on its own.
   const dockerfiles = readdirSync(
     fileURLToPath(new URL("../docker", import.meta.url)),

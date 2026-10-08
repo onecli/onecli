@@ -1,0 +1,44 @@
+{{ .Chart.Name }} {{ include "onecli.imageTag" . }} is being installed into {{ .Release.Namespace }}.
+
+Open OneCLI at:  {{ .Values.externalUrl }}
+
+The first account to sign up owns the install.
+
+{{- if .Values.database.enabled }}
+
+!! The bundled PostgreSQL is for EVALUATION ONLY: one replica, one PVC, no
+!! backups. For production set database.enabled=false and point
+!! database.external.existingSecret at a Secret holding DATABASE_URL.
+{{- end }}
+{{- if .Values.secrets.generate.enabled }}
+
+The application secrets were minted by a Job into the Secret
+"{{ include "onecli.secretsName" . }}". BACK IT UP: SECRET_ENCRYPTION_KEY
+encrypts every stored credential, and losing it orphans them all.
+{{- end }}
+{{- if not .Values.gatewayCa.existingSecret }}
+
+The gateway CA was minted into "{{ include "onecli.gatewayCaSecretName" . }}"
+(by the gateway binary itself; keep it with your other backups).
+{{- end }}
+
+Watch the rollout:
+  kubectl -n {{ .Release.Namespace }} get pods -w
+
+The api waits for the migrations Job before it serves; the dashboard and
+gateway wait for the api. First boot on a cold cluster takes a few minutes
+of image pulls.
+{{- if .Values.runner.enabled }}
+
+Hosted agents run as Jobs in the "{{ .Values.sandboxes.namespace.name }}"
+namespace, fenced by NetworkPolicy. The fence needs a CNI that enforces
+NetworkPolicy, and the runner refuses to start an agent until it sees the
+fence in place. Check with:
+  kubectl -n {{ .Values.sandboxes.namespace.name }} get networkpolicy
+{{- end }}
+{{- if and (not .Values.ingress.enabled) (not .Values.httpRoute.enabled) }}
+
+Neither ingress nor httpRoute is enabled: nothing routes {{ .Values.externalUrl }}
+to the Services yet. Enable one, or test from a port-forward:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "onecli.component" (dict "root" . "component" "web") }} 10254:10254
+{{- end }}

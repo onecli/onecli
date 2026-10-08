@@ -58,7 +58,13 @@ import { conversationRoutes, turnRoutes } from "./routes/conversations";
 import { orgChannelRoutes } from "./routes/org-channels";
 import { agentChannelRoutes } from "./routes/agent-channels";
 import { agentCronRoutes } from "./routes/agent-crons";
+import {
+  agentWebhookRoutes,
+  webhookReceiveRoutes,
+} from "./routes/agent-webhooks";
 import { agentMemoryRoutes } from "./routes/agent-memories";
+import { agentRunRoutes } from "./routes/agent-runs";
+import { agentEvalRoutes } from "./routes/agent-evals";
 import { userSkillRoutes } from "./routes/skills";
 import { orgSkillRoutes } from "./routes/org-skills";
 import { channelAdapterRoutes } from "./routes/channel-adapter";
@@ -239,8 +245,15 @@ export const createApiApp = (
   app.route("/agents", agentChannelRoutes());
   // The agent's schedules (step 7) — same composition rule as channels.
   app.route("/agents", agentCronRoutes());
+  // Inbound webhooks: the agent's CRUD surface, and the public catch URL
+  // (token-authenticated only, so it sits outside every auth middleware).
+  app.route("/agents", agentWebhookRoutes());
+  app.route("/hooks", webhookReceiveRoutes());
   // The agent's memory (step 8) — same composition rule as channels.
   app.route("/agents", agentMemoryRoutes());
+  // The agent's runs (audit) and evals — same composition rule as channels.
+  app.route("/agents", agentRunRoutes());
+  app.route("/agents", agentEvalRoutes());
   // 410 Gone for the old-model paths step 10 removed. LAST, so every live route
   // above wins the first-match — these only catch what no longer exists.
   app.route("/rules", removedRuleRoutes());

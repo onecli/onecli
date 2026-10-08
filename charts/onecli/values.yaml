@@ -1,0 +1,256 @@
+# Default values for the OneCLI chart.
+#
+# The shortest working install needs exactly two things:
+#
+#   externalUrl: https://onecli.example.com     # the address people open
+#   secrets.existingSecret: onecli-secrets      # four generated secrets
+#
+# Everything else has a working default. Read the README for the install
+# walkthrough; every value below is documented in place (helm-docs style:
+# the `# --` line above a key is its description).
+
+# -- The one URL people open OneCLI at: `https://host`, no path. Every other
+# address derives from it: one origin, with your Ingress or Gateway API
+# route splitting `/v1`, `/auth`, `/scim/v2` to the api and `/gw` to the
+# gateway (the chart's routes do exactly that). Required.
+externalUrl: ""
+
+# -- Allow an `http://` externalUrl. Only for a port-forward trial with no
+# edge: an http URL tells browsers the api lives on `host:10256`, which
+# nothing serves on Kubernetes, so the dashboard cannot sign in through it.
+allowInsecureExternalUrl: false
+
+# -- Extra browser origins the sign-in layer should trust (comma-separated),
+# for an install reachable at more than one address.
+trustedOrigins: ""
+
+# -- Unlocks the Enterprise feature set (SSO & SCIM, directory groups, RBAC,
+# workspace sharing, multi-org, spend budgets). Off by default, like the
+# compose stack: everything else, hosted agents included, works without it.
+# Set to true only with a OneCLI Enterprise license (https://onecli.sh).
+enterpriseEnabled: false
+
+# -- Cap on organizations one user may own. Unset means unlimited.
+maxOrgsPerUser: 1
+
+image:
+  # -- Registry + repository prefix. Each service image is
+  # `<repository>-<service>:<tag>` (web, api, gateway, runner, migrations,
+  # agent), the names publish.yml pushes.
+  repository: ghcr.io/onecli/onecli
+  # -- Image tag. Empty = the chart's appVersion, so chart and images move
+  # together. Set it only to pin a different OneCLI version on purpose.
+  tag: ""
+  # -- Pull policy for every OneCLI image.
+  pullPolicy: IfNotPresent
+  # -- Names of imagePullSecrets in the release namespace (private mirrors).
+  pullSecrets: []
+
+secrets:
+  # -- Name of a Secret you created holding BETTER_AUTH_SECRET,
+  # SECRET_ENCRYPTION_KEY, GATEWAY_INTERNAL_SECRET and RUNNER_TOKEN
+  # (`rnr_` + 64 hex). The README shows the one-liner. This is the supported
+  # path: the values live where your secret management already puts them.
+  existingSecret: ""
+  generate:
+    # -- Opt in to a one-time Job that mints the four secrets into a Secret
+    # named `<release>-secrets` on first install, for trials and clusters
+    # with no secret manager. It never overwrites an existing Secret, and
+    # `secrets.existingSecret` wins when both are set. Runs on the api image
+    # (no extra image is pulled).
+    enabled: false
+
+gatewayCa:
+  # -- Name of a Secret holding the gateway's CA as `GATEWAY_CA_KEY` and
+  # `GATEWAY_CA_CERT` (PEM). Mint it with the gateway binary, never openssl
+  # (the README explains why). Empty = the chart mints it with a one-time
+  # Job into `<release>-gateway-ca`, the same never-overwrite rule as above.
+  existingSecret: ""
+
+database:
+  # -- A PostgreSQL in the cluster for evaluation only: one replica, a PVC,
+  # no backups, no HA. Production installs set `enabled: false` and bring
+  # their own (RDS, Cloud SQL, a Postgres operator) through `external`.
+  enabled: true
+  image: postgres:18-alpine
+  # -- Credentials of the bundled database. The password is read from the
+  # same Secret as the other secrets (`POSTGRES_PASSWORD`, optional: the
+  # generator mints it; with an existing Secret, add the key or leave it
+  # out and the chart uses `password` below).
+  user: onecli
+  name: onecli
+  password: onecli
+  persistence:
+    size: 10Gi
+    storageClass: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 1Gi }
+  networkPolicy:
+    # -- Only this release's pods may connect to the bundled database. Any
+    # pod in the cluster can otherwise reach a ClusterIP. Needs a
+    # NetworkPolicy-enforcing CNI, like the sandbox fence.
+    enabled: true
+  external:
+    # -- Name of a Secret with a `DATABASE_URL` key (a full
+    # `postgresql://user:pass@host:5432/db?sslmode=require` URL). The
+    # supported production path. Mutually exclusive with `url`.
+    existingSecret: ""
+    # -- The same URL inline, for clusters with no secret manager. Lands in
+    # a chart-managed Secret. Mutually exclusive with `existingSecret`.
+    url: ""
+
+web:
+  replicas: 1
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 1Gi }
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+api:
+  # -- Keep at 1. The self-hosted api runs its event bus in-process; a second
+  # replica would not see the first one's events.
+  replicas: 1
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { memory: 2Gi }
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # -- Extra environment for the api container (name/value pairs).
+  extraEnv: []
+
+gateway:
+  replicas: 1
+  resources:
+    requests: { cpu: 250m, memory: 256Mi }
+    limits: { memory: 1Gi }
+  # -- The gateway image runs as this uid:gid (`onecli`, alpine system
+  # account). Kubernetes needs the numbers; change only for a rebuilt image.
+  runAsUser: 100
+  runAsGroup: 101
+  # -- Internal destinations agents may reach THROUGH the gateway: CIDRs,
+  # IPs, hostnames or `*.suffix`, comma-separated. Private, loopback and
+  # link-local addresses are refused unless listed.
+  allowPrivateDestinations: ""
+  service:
+    # -- `ClusterIP` keeps the raw CONNECT proxy (:10255) in-cluster, which
+    # is all hosted agents need. `LoadBalancer` exposes it for agents on
+    # other machines (a VPN is the recommended transport instead).
+    type: ClusterIP
+    annotations: {}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  extraEnv: []
+
+runner:
+  # -- The hosted-agents runner. `false` leaves the stack without hosted
+  # agents (bring-your-own agents still work through the gateway).
+  enabled: true
+  # -- Name the runner registers under. Shown in the dashboard.
+  name: kubernetes
+  # -- How many sandboxes may run at once on this runner.
+  maxSandboxes: 10
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 512Mi }
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  extraEnv: []
+
+sandboxes:
+  namespace:
+    # -- Namespace agent sandboxes run in. Separate from the release
+    # namespace on purpose: it carries the network fence and the runner's
+    # only write grant.
+    name: onecli-sandboxes
+    # -- Create the namespace (with PSA `restricted` labels and the fence).
+    # `false` when a platform team pre-creates namespaces; the chart still
+    # installs its policies into it.
+    create: true
+  # -- Per-sandbox memory ceiling in MiB (request == limit: memory is not
+  # compressible, so a sandbox is scheduled with all of it reserved).
+  memoryMb: 2048
+  # -- Per-sandbox CPU ceiling in cores. The request is a quarter of it, so
+  # idle agents pack onto nodes and a busy one can burst to the ceiling.
+  cpus: 2
+  # -- Cap on each sandbox's node-local scratch (`/tmp`, image upper layer).
+  # The persistent home below is a separate budget. Empty = no cap.
+  ephemeralStorageLimit: 4Gi
+  home:
+    # -- Size of each agent's persistent home (a PVC per sandbox; it
+    # survives park/wake and is deleted with the agent).
+    size: 20Gi
+    # -- StorageClass for the homes. Empty = the cluster default. On EKS
+    # that is usually gp3 via the EBS CSI driver; homes then pin to an AZ.
+    storageClass: ""
+  # -- Pin sandboxes to dedicated nodes (recommended: agents share a kernel
+  # with whatever else runs on the node).
+  nodeSelector: {}
+  tolerations: []
+  # -- RuntimeClass for sandbox pods (`gvisor`, `kata-qemu`, ...).
+  runtimeClassName: ""
+  # -- Pull secrets for the agent image in the sandbox namespace.
+  imagePullSecrets: []
+  quota:
+    # -- A ResourceQuota on the sandbox namespace, sized from maxSandboxes
+    # and the per-sandbox limits with headroom, so a runner bug can never
+    # starve the cluster.
+    enabled: true
+  networkPolicy:
+    # -- The fence: default-deny both ways in the sandbox namespace, egress
+    # to the gateway (:10255) and runner (:8484) pods only, plus DNS. The
+    # runner's egress gate refuses to start an agent until this is seen
+    # enforced. Requires a CNI that enforces NetworkPolicy (EKS: the VPC
+    # CNI with network policy on, Calico, or Cilium).
+    enabled: true
+    # -- How sandboxes reach the cluster resolver. Default: the CoreDNS pods
+    # (namespace + label). On EKS Auto Mode CoreDNS runs on each node and is
+    # reachable only at the service CIDR's `.10`, so set `cidr` instead
+    # (e.g. `10.100.0.10/32`); it replaces the pod selector.
+    dns:
+      namespace: kube-system
+      podLabels: { k8s-app: kube-dns }
+      cidr: ""
+
+migrations:
+  # -- Run migrations as a plain Job (default): `helm install`/`upgrade`
+  # create it, the api waits for the schema to be current, and `kubectl
+  # logs` works like any other pod. `useHelmHooks: true` runs it as a
+  # pre-upgrade hook instead (blocks the release until done; some GitOps
+  # tools prefer that).
+  useHelmHooks: false
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 1Gi }
+
+ingress:
+  # -- Create a networking.k8s.io/v1 Ingress for externalUrl with the path
+  # split the services need. Independent of `httpRoute`.
+  enabled: false
+  className: ""
+  annotations: {}
+  tls:
+    # -- TLS secret for the host (cert-manager or your own).
+    secretName: ""
+
+httpRoute:
+  # -- Create a gateway.networking.k8s.io/v1 HTTPRoute for externalUrl with
+  # the same path split, attached to the parent Gateway below. Independent
+  # of `ingress`.
+  enabled: false
+  parentRefs: []
+  annotations: {}
+
+# -- Labels added to every object the chart creates.
+commonLabels: {}
+# -- Annotations added to every object the chart creates.
+commonAnnotations: {}

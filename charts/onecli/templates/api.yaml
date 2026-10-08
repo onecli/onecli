@@ -1,0 +1,165 @@
+{{- /*
+The api: the ONLY /v1 server. One replica (its event bus is in-process on a
+self-host). Its init container waits for the migrations Job's work to be
+visible in the database (`prisma migrate status` exits 0 only when every
+migration is applied), so a ready api always means a ready schema, the
+same guarantee compose gives with service_completed_successfully.
+*/ -}}
+{{- $name := include "onecli.component" (dict "root" . "component" "api") }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "api") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "onecli.selectorLabels" (dict "root" . "component" "api") | nindent 4 }}
+  ports:
+    - name: http
+      port: 10256
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "api") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+spec:
+  replicas: {{ .Values.api.replicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "onecli.selectorLabels" (dict "root" . "component" "api") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "onecli.selectorLabels" (dict "root" . "component" "api") | nindent 8 }}
+        onecli.sh/role: api
+      {{- with .Values.api.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- include "onecli.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- include "onecli.podSecurityContext" (dict "uid" 1000 "gid" 1000) | nindent 8 }}
+      initContainers:
+        - name: wait-for-schema
+          image: {{ include "onecli.image" (dict "root" . "service" "migrations") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "onecli.containerSecurityContext" (dict "readOnlyRootFilesystem" true) | nindent 12 }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              until node /app/packages/db/node_modules/prisma/build/index.js migrate status --schema /app/packages/db/prisma/schema.prisma; do
+                echo "schema not current yet; waiting for the migrations job"
+                sleep 5
+              done
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "onecli.databaseSecretName" . }}
+                  key: DATABASE_URL
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+      containers:
+        - name: api
+          image: {{ include "onecli.image" (dict "root" . "service" "api") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "onecli.containerSecurityContext" (dict "readOnlyRootFilesystem" true) | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 10256
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "onecli.databaseSecretName" . }}
+                  key: DATABASE_URL
+            - name: BETTER_AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "onecli.secretsName" . }}
+                  key: BETTER_AUTH_SECRET
+            - name: SECRET_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "onecli.secretsName" . }}
+                  key: SECRET_ENCRYPTION_KEY
+            - name: GATEWAY_INTERNAL_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "onecli.secretsName" . }}
+                  key: GATEWAY_INTERNAL_SECRET
+            {{- if .Values.runner.enabled }}
+            - name: RUNNER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "onecli.secretsName" . }}
+                  key: RUNNER_TOKEN
+            {{- end }}
+            # The gateway's CA certificate, served to install flows and to
+            # hosted agents (the api never sees the key).
+            - name: GATEWAY_CA_CERT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "onecli.gatewayCaSecretName" . }}
+                  key: GATEWAY_CA_CERT
+            {{- include "onecli.publicUrlEnv" . | nindent 12 }}
+            {{- include "onecli.flagsEnv" . | nindent 12 }}
+            - name: MAX_ORGS_PER_USER
+              value: {{ .Values.maxOrgsPerUser | quote }}
+            - name: GATEWAY_INTERNAL_URL
+              value: {{ include "onecli.gatewayUrl" . | quote }}
+            # What hosted agents are told to dial; equals the runner's
+            # RUNNER_KUBE_GATEWAY_HOST so the sandbox's host alias resolves it.
+            - name: ONECLI_AGENT_PROXY_ADDRESS
+              value: {{ include "onecli.agentProxyAddress" . | quote }}
+            - name: LOG_FORMAT
+              value: json
+            {{- with .Values.api.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /v1/health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.api.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

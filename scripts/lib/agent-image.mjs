@@ -1,6 +1,6 @@
 // The agent sandbox image build, shared by `pnpm agent:build` and `pnpm dev`.
 //
-// Two images since #1246 2a: docker/agent-base.Dockerfile (the OS surface,
+// Two images: docker/agent-base.Dockerfile (the OS surface,
 // one big apt layer) and docker/agent.Dockerfile (the app on top, through
 // `ARG AGENT_BASE_IMAGE`). The base is tagged exactly what the agent
 // Dockerfile defaults to, so the second build needs no arg. Docker caches

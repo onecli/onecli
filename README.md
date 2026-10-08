@@ -37,6 +37,10 @@ pnpm run setup
 
 Open http://localhost:10254
 
+On Kubernetes, install the [Helm chart](charts/onecli/README.md) instead:
+`helm install onecli oci://ghcr.io/onecli/charts/onecli`. The
+[self-hosting guide](docs/self-hosting.md) covers both.
+
 ## What is OneCLI v2?
 
 OneCLI is an open-source platform for running AI agents as a team. You create an agent per person, give each agent the access it needs, and it works in a sandbox, routed through a gateway that injects the credentials and enforces your policy.

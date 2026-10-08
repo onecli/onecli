@@ -1,7 +1,7 @@
-# OneCLI agent sandbox — the hosted agent's computer (hosted-agents v2, step 2)
+# OneCLI agent sandbox — the hosted agent's computer
 # Build context: repo root (run with `docker build -f docker/agent.Dockerfile .`)
 #
-# Two images (#1246 2a): docker/agent-base.Dockerfile is the OS surface (the
+# Two images: docker/agent-base.Dockerfile is the OS surface (the
 # one big apt layer and what depends only on it); THIS file builds the app
 # and stacks it on that base through `ARG AGENT_BASE_IMAGE` (Stage 7). Build
 # the base first (`pnpm agent:build` does both), or pass a registry
@@ -114,7 +114,7 @@ RUN JCODE_NO_AUTO_UPDATE=1 JCODE_NO_TELEMETRY=1 /opt/jcode/jcode --version \
 
 # ──────────────────────────────────────────────
 # Stage 4b: Vendor the PINNED Nix release (checksum-gated), UNPACKED — the
-# agent's durable-install path (plans/agent-owns-its-machine.md Tier 1.5)
+# agent's durable-install path
 # ──────────────────────────────────────────────
 # Same law as the jcode pin: version and per-arch checksums travel together
 # and a mismatch fails the build. The hashes are the ones the OFFICIAL
@@ -181,7 +181,7 @@ RUN echo "node-linker=hoisted" >> .npmrc \
 # ──────────────────────────────────────────────
 # The OS surface (Debian, the one big apt layer, podman/browser/toolchain
 # wiring and their gates, the durable-home passwd + profile.d, the OS-level
-# ENV) is docker/agent-base.Dockerfile (#1246 2a): built only when THAT file
+# ENV) is docker/agent-base.Dockerfile: built only when THAT file
 # changes, so an app change ships only this stage's ~90 MB. The default tag
 # is what `pnpm agent:build` builds first; a deployment and publish.yml
 # pass a registry reference pinned BY DIGEST (a re-tagged base must never
@@ -199,7 +199,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV NO_COLOR=1
 ENV FORCE_COLOR=0
-# Telemetry stays off no matter what spawns the supervisor (§3.5).
+# Telemetry stays off no matter what spawns the supervisor.
 ENV JCODE_NO_TELEMETRY=1
 # The updater stays off no matter what spawns jcode — the supervisor, a
 # docker exec, the agent's own shell. Presence-based upstream: any value
@@ -242,15 +242,15 @@ RUN ls /app/node_modules/@1jehuang/jcode-linux-*/bin/jcode > /dev/null \
 COPY docker/agent-entrypoint.sh ./agent-entrypoint.sh
 RUN chmod +x ./agent-entrypoint.sh
 
-# The durable home (§3.9): the container is disposable, this is not.
+# The durable home: the container is disposable, this is not.
 RUN mkdir -p /workspace && chown node:node /workspace
 # The durable-home gate (same law as the jcode/podman gates): prove the
 # surface at build time, not at first agent boot. setpriv, never `su -l` —
 # su strips the ENV these pins live in, so it would test a different
 # environment than production runs. The probe home is removed in this same
 # layer and BEFORE the VOLUME line: baked /workspace content would seed
-# Docker named volumes while the hosted block mount shadows it — a
-# substrate fork.
+# Docker named volumes while a backend that mounts the home as a block
+# device shadows it — a substrate fork.
 RUN python3 --version \
   && pip3 --version \
   && nano --version \

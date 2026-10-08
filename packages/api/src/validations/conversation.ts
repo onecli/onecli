@@ -9,9 +9,26 @@ import { CHANNEL_PROVIDER_IDS } from "../services/channels/types";
  */
 
 /**
+ * An EVAL run's conversation: the eval worker asks one test question on a
+ * fresh, non-direct conversation it owns, one per question per run.
+ *
+ * PLATFORM-ONLY, like the greeting: it is a stored conversation source, but
+ * `createConversationSchema` excludes it, so no client can mint an "eval"
+ * conversation and pass its own turns off as test runs.
+ *
+ * Deliberately NOT an automation source: an eval turn is a foreground ask
+ * the user clicked for and is waiting on (due-work must not rank it behind
+ * crons), and its answer must never be relayed into anyone's direct thread
+ * by the continuity bridge. It is never linked to a channel, so no mirror
+ * sees it, and chat lists do not show it (the web renders only the direct
+ * thread); the Runs view reads it by source.
+ */
+export const EVAL_SOURCE = "eval";
+
+/**
  * Where a conversation comes from. `web` is a person in the dashboard; the
  * rest arrive with their own steps (channels §3.16, crons step 7, watches
- * step 10, agent-to-agent PR 5b). Channel ingestion stamps
+ * step 10, agent-to-agent PR 5b, evals). Channel ingestion stamps
  * `source: presence.provider`, so the provider ids ARE sources — composed
  * from the one provider list, a new provider cannot forget this union.
  * `agent` is a peer OneCLI agent: the conversation's `externalRef` is the
@@ -22,7 +39,10 @@ export const CONVERSATION_SOURCES = [
   ...CHANNEL_PROVIDER_IDS,
   "cron",
   "watch",
+  // An inbound webhook's own conversation (externalRef = the webhook id).
+  "webhook",
   "agent",
+  EVAL_SOURCE,
 ] as const;
 export type ConversationSource = (typeof CONVERSATION_SOURCES)[number];
 
@@ -53,6 +73,7 @@ export const PEER_TASK_SOURCE = "peer_task";
 export const AUTOMATION_SOURCES = [
   "cron",
   "watch",
+  "webhook",
   PEER_TASK_SOURCE,
 ] as const satisfies readonly TurnSource[];
 export type AutomationSource = (typeof AUTOMATION_SOURCES)[number];
@@ -423,7 +444,8 @@ const noNulBytes = <T extends z.ZodType<string>>(schema: T) =>
 
 export const createConversationSchema = z.object({
   agentId: z.string().min(1),
-  source: z.enum(CONVERSATION_SOURCES).optional(),
+  // A client may create any stored source except the platform-only ones.
+  source: z.enum(CONVERSATION_SOURCES).exclude([EVAL_SOURCE]).optional(),
   externalRef: noNulBytes(z.string().trim().min(1).max(500)).optional(),
   title: noNulBytes(z.string().trim().min(1).max(200)).optional(),
 });

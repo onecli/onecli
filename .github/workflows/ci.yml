@@ -260,6 +260,72 @@ jobs:
         env:
           GATEWAY_TEST_DATABASE_URL: postgresql://ci:ci@localhost:5434/onecli
 
+  helm-chart:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Check for changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            chart:
+              - 'charts/**'
+              # scripts/helm-chart.test.mjs pins the chart to these.
+              - 'apps/web/src/proxy.ts'
+              - 'apps/runner/src/config.ts'
+              - 'apps/runner/src/backend/kubernetes/**'
+              - 'apps/api-server/src/app.ts'
+              - '.github/workflows/publish.yml'
+              - '.github/workflows/ci.yml'
+
+      - name: Set up Helm
+        if: steps.changes.outputs.chart == 'true'
+        uses: azure/setup-helm@v5
+        with:
+          version: v3.21.4
+
+      - name: Set up kubeconform
+        if: steps.changes.outputs.chart == 'true'
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz \
+            | tar xz -C /usr/local/bin kubeconform
+
+      - name: Lint
+        if: steps.changes.outputs.chart == 'true'
+        run: |
+          for values in charts/onecli/ci/*-values.yaml; do
+            helm lint --strict charts/onecli -f "$values"
+          done
+
+      # Every fixture renders and conforms to the Kubernetes 1.30 schemas
+      # (the chart's floor) and to the Gateway API HTTPRoute CRD.
+      - name: Render + kubeconform
+        if: steps.changes.outputs.chart == 'true'
+        run: |
+          for values in charts/onecli/ci/*-values.yaml; do
+            echo "== $values"
+            helm template onecli charts/onecli -f "$values" --kube-version 1.30.0 \
+              | kubeconform -strict -summary -kubernetes-version 1.30.0 \
+                  -schema-location default \
+                  -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+          done
+
+      # The cross-repo pins (page list, runner env, labels, RBAC, images) in
+      # scripts/helm-chart.test.mjs, with helm on PATH so its render-level
+      # cases run too. Also part of `pnpm check` through test:scripts.
+      - name: Setup Node.js
+        if: steps.changes.outputs.chart == 'true'
+        uses: ./.github/actions/setup-node
+
+      - name: Chart pins
+        if: steps.changes.outputs.chart == 'true'
+        run: node --test scripts/helm-chart.test.mjs
+
   # ── The ONE end-to-end check: the enterprise edition, real Postgres ────────
   #
   # Both black-box suites in one job against one Postgres and one Redis:

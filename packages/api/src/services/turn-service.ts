@@ -19,11 +19,14 @@ import {
 } from "./conversation-service";
 import { findAgentLlmBlocker } from "./llm-credential-service";
 import { CRON_FAILURE_DISABLE_THRESHOLD } from "./agent-cron-service";
+import { webhookRunOutcome } from "../validations/webhooks";
 import {
   ACTIVE_TURN_STATUSES,
   AGENT_RESTARTED_MESSAGE,
   AGENT_START_FAILED_MESSAGE,
   AUTOMATION_SOURCES,
+  isRawErrorPayload,
+  TURN_FAILED_RAW_ERROR_MESSAGE,
   TURN_FAILURE_COPY,
   PEER_TASK_SOURCE,
   TURNS_PAGE_DEFAULT,
@@ -1496,7 +1499,7 @@ export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
 
 /** Delivery headers repeat the automation's operator/agent-named label —
  * clamped and stripped like every other name spliced into platform text. */
-const cleanAutomationName = (raw: string): string =>
+export const cleanAutomationName = (raw: string): string =>
   stripControl(raw).replace(/\n/g, " ").trim().slice(0, 100);
 
 /**
@@ -1545,20 +1548,32 @@ const runReport = async (input: AutomationSettleInput): Promise<string> => {
   // Either detail also makes the transcript read below unnecessary.
   if (input.status !== "done") {
     const detail = knownFailureCopy(input)?.message ?? input.error;
-    if (detail) return `The run failed: ${detail}`;
+    if (detail) return `The run failed: ${failureLine(detail)}`;
   }
-  const textEvent = await db.turnEvent.findFirst({
-    where: { turnId: input.turnId, type: "text" },
-    orderBy: { seq: "desc" },
-    select: { payload: true },
-  });
-  const answer = String(
-    (textEvent?.payload as { text?: unknown } | null)?.text ?? "",
-  ).trim();
-  return input.status === "done"
-    ? answer || "The run finished without producing a report."
-    : `The run failed: ${answer || "no detail was reported."}`;
+  // The sandbox often reports a failure as an `error` EVENT (a provider 4xx
+  // mid-run) with no error on the finish report: that event is the detail.
+  const lastEvent = async (type: string, key: string) => {
+    const e = await db.turnEvent.findFirst({
+      where: { turnId: input.turnId, type },
+      orderBy: { seq: "desc" },
+      select: { payload: true },
+    });
+    return String(
+      (e?.payload as Record<string, unknown> | null)?.[key] ?? "",
+    ).trim();
+  };
+  const answer = await lastEvent("text", "text");
+  if (input.status === "done")
+    return answer || "The run finished without producing a report.";
+  const error = await lastEvent("error", "message");
+  if (error) return `The run failed: ${failureLine(error)}`;
+  return `The run failed: ${answer || "no detail was reported."}`;
 };
+
+/** A raw provider payload is never relayed (it can be long and leak wire
+ * detail): it gets the same canonical line the chat shows. */
+const failureLine = (detail: string) =>
+  isRawErrorPayload(detail) ? TURN_FAILED_RAW_ERROR_MESSAGE : detail;
 
 /** A finished non-human run settles its automation source. Dispatches on the
  * conversation's `source`: crons carry outcome bookkeeping + auto-disable;
@@ -1585,6 +1600,10 @@ const settleAutomationRun = async (
   }
   if (conversation.source === "watch") {
     await settleWatchRun(input, conversation.externalRef);
+    return;
+  }
+  if (conversation.source === "webhook") {
+    await settleWebhookRun(input, conversation.externalRef);
     return;
   }
   if (conversation.source !== "cron") return;
@@ -1672,6 +1691,38 @@ const settleWatchRun = async (
 };
 
 /**
+ * A webhook's run finished: outcome bookkeeping (`webhookRunOutcome`, shared
+ * with the receive door's create-time failure arm) and the report to the
+ * origin chat. An aborted run (a human stopped it) records nothing and
+ * delivers nothing.
+ */
+const settleWebhookRun = async (
+  input: AutomationSettleInput,
+  webhookId: string,
+): Promise<void> => {
+  const hook = await db.agentWebhook.findUnique({
+    where: { id: webhookId },
+    select: {
+      id: true,
+      name: true,
+      originConversationId: true,
+      consecutiveFailures: true,
+    },
+  });
+  if (!hook) return; // deleted while its last run was in flight
+  const outcome = webhookRunOutcome(input.status, hook.consecutiveFailures);
+  if (!outcome) return;
+  await db.agentWebhook.update({ where: { id: hook.id }, data: outcome });
+  if (!hook.originConversationId) return;
+  await materializeAutomationDelivery(
+    hook.originConversationId,
+    `Webhook "${cleanAutomationName(hook.name)}"`,
+    await runReport(input),
+    "webhook",
+  );
+};
+
+/**
  * The report lands in the ORIGIN conversation as a completed turn — decided
  * with the user (2026-08-07): output goes where the schedule was born. This
  * shape is the whole delivery mechanism: the web thread renders it from the
@@ -1688,7 +1739,7 @@ export const materializeAutomationDelivery = async (
   header: string,
   report: string,
   /** The delivery turn's source — the mirror keys its per-run shape on it. */
-  source: "cron" | "watch",
+  source: "cron" | "watch" | "webhook",
 ): Promise<void> => {
   await materializeBornDoneTurn(originConversationId, {
     message: header,

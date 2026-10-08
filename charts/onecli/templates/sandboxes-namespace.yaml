@@ -1,0 +1,30 @@
+{{- /*
+The sandbox namespace: Pod Security Admission `restricted` enforced (every
+sandbox pod is built to pass it), labelled so the fence's selectors and the
+release namespace's policies can name it.
+
+The release namespace is labelled by the operator (`helm install -n` creates
+it unlabelled); `onecli.sh/role: core` on the sandbox policy's
+namespaceSelector therefore matches on `kubernetes.io/metadata.name`, which
+every namespace carries automatically.
+*/ -}}
+{{- if and .Values.runner.enabled .Values.sandboxes.namespace.create }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.sandboxes.namespace.name }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "sandboxes") | nindent 4 }}
+    onecli.sh/role: sandboxes
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+  annotations:
+    # The namespace outlives the release on purpose: agent homes (PVCs) are
+    # customer data. `helm uninstall` leaves it; delete it by hand.
+    helm.sh/resource-policy: keep
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

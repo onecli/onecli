@@ -273,6 +273,16 @@ describe("conversations", () => {
     expect(res.status).toBe(422);
   });
 
+  it("refuses the platform-only eval source: no client can pass its turns off as test runs", async () => {
+    const res = await app.request("/v1/conversations", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ agentId: "ag-1", source: "eval" }),
+    });
+    expect(res.status).toBe(422);
+    expect(services.createConversation).not.toHaveBeenCalled();
+  });
+
   it("lists, filtered by agent when asked — as the session's user", async () => {
     const res = await app.request("/v1/conversations?agentId=ag-1", {
       headers: AUTH,

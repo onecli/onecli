@@ -1,0 +1,33 @@
+{{- /*
+The release namespace's own fence, as far as it can be drawn without
+knowing the operator's edge: the bundled database accepts connections only
+from this release's pods (api, web, gateway, the migrations Job and the
+api's schema gate), never from anything else in the cluster. Every other
+pod keeps default-allow ingress: the edge (Ingress controller, Gateway)
+lives in a namespace the chart cannot name, and the three Services it
+fronts carry their own authentication.
+*/ -}}
+{{- if and .Values.database.enabled .Values.database.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "onecli.component" (dict "root" . "component" "postgresql") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "postgresql") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "onecli.selectorLabels" (dict "root" . "component" "postgresql") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "onecli.name" . }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}

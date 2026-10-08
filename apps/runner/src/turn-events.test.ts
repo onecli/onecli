@@ -321,6 +321,39 @@ describe("size is bounded, not just count", () => {
     expect(event.code?.length).toBeLessThan(MAX_EVENT_TEXT_CHARS + 100);
   });
 
+  it("bounds and cleans a tool call's input like its output", () => {
+    const { posts, collector } = collect();
+    collector.add("sb-1", "cv-1", "t1", {
+      type: "tool.finished",
+      callId: "c1",
+      name: "warehouse_query",
+      input: `sel${String.fromCharCode(0)}ect ${"x".repeat(100_000)}`,
+      output: "ok",
+    });
+    collector.flush("t1");
+
+    const [event] = flatEvents(posts);
+    if (event?.type !== "tool.finished")
+      throw new Error("expected a tool event");
+    expect(event.input?.startsWith("select ")).toBe(true);
+    expect(event.input?.length).toBeLessThan(MAX_EVENT_TEXT_CHARS + 100);
+    expect(event.input).toContain("truncated");
+  });
+
+  it("does not invent an input on a tool event that had none", () => {
+    const { posts, collector } = collect();
+    collector.add("sb-1", "cv-1", "t1", {
+      type: "tool.finished",
+      callId: "c1",
+      name: "cat",
+      output: "ok",
+    });
+    collector.flush("t1");
+
+    const [event] = flatEvents(posts);
+    expect(event && "input" in event).toBe(false);
+  });
+
   it("STRIPS a NUL byte, which PostgreSQL will not store", () => {
     // An agent that reads a binary file emits a valid event the database
     // refuses. Rejecting it would take the whole batch down and lose that

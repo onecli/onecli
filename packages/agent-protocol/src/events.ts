@@ -66,10 +66,20 @@ export const toolStartedEventSchema = z.object({
   name: z.string(),
 });
 
+/**
+ * A tool call's end. `input` is the arguments the model sent (the SQL, the
+ * search query, the shell command), as the harness streamed them: raw text,
+ * usually JSON. Optional because not every harness exposes it and a reader
+ * written before it existed must keep working. It is what makes a transcript
+ * explain a wrong answer ("it queried the wrong table"), so it is durable
+ * alongside `output`, and it is just as UNTRUSTED: model-authored, rendered
+ * as text only.
+ */
 export const toolFinishedEventSchema = z.object({
   type: z.literal("tool.finished"),
   callId: z.string(),
   name: z.string(),
+  input: z.string().optional(),
   output: z.string(),
   isError: z.boolean().optional(),
 });

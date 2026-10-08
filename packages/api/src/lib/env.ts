@@ -8,7 +8,11 @@
 
 import { capabilitiesFor, parseEdition } from "./edition";
 import { isEntitled } from "./entitlements";
-import { firstConfigured, gatewayHttpOrigin } from "./public-origins";
+import {
+  firstConfigured,
+  apiOrigin,
+  gatewayHttpOrigin,
+} from "./public-origins";
 
 // ── App URLs ────────────────────────────────────────────────────────────
 //
@@ -27,6 +31,17 @@ import { firstConfigured, gatewayHttpOrigin } from "./public-origins";
  */
 export const getGatewayInternalUrl = (): string =>
   firstConfigured(process.env.GATEWAY_INTERNAL_URL) ?? gatewayHttpOrigin();
+
+/**
+ * Server-side address of the api (the dashboard's forward of form submits on
+ * its own `/auth/<page>` paths): the same shape as the gateway's. An explicit
+ * internal override for layouts where the public URL isn't routable from the
+ * dashboard process (compose and the Helm chart point it at the api service),
+ * else the public api origin. An origin only (`scheme://host[:port]`): any
+ * path on it is dropped when the forward joins its own.
+ */
+export const getApiInternalUrl = (): string =>
+  firstConfigured(process.env.API_INTERNAL_URL) ?? apiOrigin();
 
 // ── Edition ─────────────────────────────────────────────────────────────
 

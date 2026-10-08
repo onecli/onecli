@@ -1,0 +1,165 @@
+{{- /*
+The hosted-agents runner with the kubernetes backend: one Job + PVC + Secret
+per sandbox in the sandbox namespace. Outbound-only (it dials the api and
+serves the sandboxes' WebSocket control channel on :8484); the only pod in
+the release that holds a ServiceAccount token, scoped by rbac.yaml to the
+sandbox namespace's Jobs/Pods/PVCs/Secrets plus a read of the three
+Services whose ClusterIPs it pins into each sandbox's hostAliases.
+
+Pod label onecli.sh/role=runner is selected by the sandbox namespace's
+egress policy; keep it in step with networkpolicy.yaml. The Service name is
+the hostname sandboxes dial (RUNNER_ADVERTISED_HOST = the Service).
+*/ -}}
+{{- if .Values.runner.enabled }}
+{{- $name := include "onecli.component" (dict "root" . "component" "runner") }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "runner") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "onecli.selectorLabels" (dict "root" . "component" "runner") | nindent 4 }}
+  ports:
+    - name: ws
+      port: 8484
+      targetPort: ws
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "runner") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "onecli.selectorLabels" (dict "root" . "component" "runner") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "onecli.selectorLabels" (dict "root" . "component" "runner") | nindent 8 }}
+        onecli.sh/role: runner
+      {{- with .Values.runner.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: true
+      {{- include "onecli.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- include "onecli.podSecurityContext" (dict "uid" 1000 "gid" 1000) | nindent 8 }}
+      containers:
+        - name: runner
+          image: {{ include "onecli.image" (dict "root" . "service" "runner") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "onecli.containerSecurityContext" (dict "readOnlyRootFilesystem" true) | nindent 12 }}
+          ports:
+            - name: ws
+              containerPort: 8484
+          env:
+            - name: RUNNER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "onecli.secretsName" . }}
+                  key: RUNNER_TOKEN
+            - name: RUNNER_CONTROL_PLANE_URL
+              value: {{ include "onecli.apiUrl" . | quote }}
+            - name: RUNNER_BACKEND
+              value: kubernetes
+            - name: RUNNER_NAME
+              value: {{ .Values.runner.name | quote }}
+            - name: RUNNER_AGENT_IMAGE
+              value: {{ include "onecli.image" (dict "root" . "service" "agent") | quote }}
+            - name: RUNNER_ADVERTISED_HOST
+              value: {{ $name | quote }}
+            - name: RUNNER_MAX_SANDBOXES
+              value: {{ .Values.runner.maxSandboxes | quote }}
+            # Per-sandbox ceiling: memory is request==limit, CPU request is a
+            # quarter of this ceiling (the backend's packing rule).
+            - name: RUNNER_SANDBOX_MEMORY_MB
+              value: {{ .Values.sandboxes.memoryMb | quote }}
+            - name: RUNNER_SANDBOX_CPUS
+              value: {{ .Values.sandboxes.cpus | quote }}
+            - name: RUNNER_KUBE_NAMESPACE
+              value: {{ .Values.sandboxes.namespace.name | quote }}
+            - name: RUNNER_KUBE_CONTROL_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: RUNNER_KUBE_GATEWAY_SERVICE
+              value: {{ include "onecli.component" (dict "root" . "component" "gateway") | quote }}
+            - name: RUNNER_KUBE_GATEWAY_PORT
+              value: "10255"
+            - name: RUNNER_KUBE_RUNNER_SERVICE
+              value: {{ $name | quote }}
+            - name: RUNNER_KUBE_API_SERVICE
+              value: {{ include "onecli.component" (dict "root" . "component" "api") | quote }}
+            - name: RUNNER_KUBE_API_PORT
+              value: "10256"
+            - name: RUNNER_KUBE_HOME_SIZE
+              value: {{ .Values.sandboxes.home.size | quote }}
+            {{- with .Values.sandboxes.home.storageClass }}
+            - name: RUNNER_KUBE_STORAGE_CLASS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.sandboxes.nodeSelector }}
+            - name: RUNNER_KUBE_NODE_SELECTOR
+              value: {{ include "onecli.keyValues" . | quote }}
+            {{- end }}
+            {{- with .Values.sandboxes.tolerations }}
+            - name: RUNNER_KUBE_TOLERATIONS
+              value: {{ toJson . | quote }}
+            {{- end }}
+            {{- with .Values.sandboxes.runtimeClassName }}
+            - name: RUNNER_KUBE_RUNTIME_CLASS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.sandboxes.imagePullSecrets }}
+            - name: RUNNER_KUBE_IMAGE_PULL_SECRETS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.sandboxes.ephemeralStorageLimit }}
+            - name: RUNNER_KUBE_EPHEMERAL_STORAGE_LIMIT
+              value: {{ . | quote }}
+            {{- end }}
+            - name: LOG_FORMAT
+              value: json
+            {{- with .Values.runner.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: ws
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: ws
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.runner.resources | nindent 12 }}
+      {{- with .Values.runner.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.runner.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.runner.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

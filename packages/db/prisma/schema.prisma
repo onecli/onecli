@@ -353,6 +353,7 @@ model User {
   authoredTurns                 Turn[]                        @relation("TurnAuthor")
   uploadedAttachments           ConversationAttachment[]      @relation("AttachmentUploader")
   createdCrons                  AgentCron[]                   @relation("CronCreator")
+  createdWebhooks               AgentWebhook[]                @relation("WebhookCreator")
   channelUserLinks              ChannelUserLink[]             @relation("ChannelUserLinkUser")
   decidedReachGrants            AgentReachGrant[]             @relation("ReachGrantDecider")
   decidedAgentContacts          AgentContact[]                @relation("AgentContactDecider")
@@ -367,6 +368,7 @@ model User {
   processesCreated              SandboxProcess[]              @relation("ProcessCreator")
   watchesCreated                ProcessWatch[]                @relation("WatchCreator")
   peerTasksCreated              PeerTask[]                    @relation("PeerTaskCreator")
+  evalRunsCreated               AgentEvalRun[]                @relation("EvalRunCreator")
   sessions                      Session[]
   accounts                      Account[]
   sshKeys                       UserSshKey[]
@@ -462,6 +464,9 @@ model Agent {
   conversations        Conversation[]
   channels             AgentChannel[]
   crons                AgentCron[]
+  evalQuestions        AgentEvalQuestion[]
+  evalRuns             AgentEvalRun[]
+  webhooks             AgentWebhook[]
   memories             AgentMemory[]
   skills               Skill[]
   reachGrants          AgentReachGrant[]
@@ -798,6 +803,7 @@ model Conversation {
   mentionAnchors  MentionAnchor[]
   actionApprovals ActionApproval[]
   cronsHere       AgentCron[]              @relation("CronOrigin")
+  webhooksHere    AgentWebhook[]           @relation("WebhookOrigin")
   processesHere   SandboxProcess[]         @relation("ProcessOrigin")
   watchesHere     ProcessWatch[]           @relation("WatchOrigin")
   peerTasksHere   PeerTask[]               @relation("PeerTaskHome")
@@ -1051,6 +1057,48 @@ model AgentCron {
   @@index([enabled, nextFireAt])
   @@index([agentId])
   @@map("agent_crons")
+}
+
+// An agent's inbound webhook (plans/agent-webhooks.md): a schedule fired by
+// an EVENT instead of a clock. An external app POSTs to /v1/hooks/<token>;
+// the payload plus `instructions` becomes a turn in the webhook's own
+// conversation, and the report lands where the webhook was created — the
+// cron delivery path, unchanged.
+model AgentWebhook {
+  id           String @id @default(uuid())
+  agentId      String @map("agent_id")
+  // Short label: the dashboard row, the run header, the delivery caption.
+  name         String
+  // What to do with each event, in the user's words (the cron prompt's twin).
+  instructions String
+  // The capability: whoever holds the URL may fire it. `whk_` + 32 random
+  // bytes, looked up by value (unique), never logged.
+  token        String @unique
+
+  // User pause switch; auto-disable also clears it and records why —
+  // "authorization" (creator lost workspace access) | "failures".
+  enabled        Boolean @default(true)
+  disabledReason String? @map("disabled_reason")
+
+  // Reports go to the chat the webhook was created from (cron rule).
+  originConversationId String? @map("origin_conversation_id")
+  // Fire-time authority: the creator must still be in the workspace.
+  createdByUserId      String? @map("created_by_user_id")
+
+  lastReceivedAt      DateTime? @map("last_received_at")
+  // "ok" | "failed"
+  lastOutcome         String?   @map("last_outcome")
+  consecutiveFailures Int       @default(0) @map("consecutive_failures")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  agent              Agent         @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  originConversation Conversation? @relation("WebhookOrigin", fields: [originConversationId], references: [id], onDelete: SetNull)
+  createdBy          User?         @relation("WebhookCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([agentId])
+  @@map("agent_webhooks")
 }
 
 // ── Memory: what an agent knows, visible and correctable (plans/hosted-agents-v2.md step 8, §3.8) ──
@@ -2477,4 +2525,56 @@ model ChannelCleanup {
   @@unique([provider, externalId])
   @@index([state, nextAttemptAt])
   @@map("channel_cleanups")
+}
+
+// Agent evals: test questions with known answers, asked of the live agent
+// after a change. Both tables inherit the agent's workspace scope.
+
+// One test question. Archived questions leave future runs but stay
+// referenced by the result snapshots of past runs.
+model AgentEvalQuestion {
+  id           String   @id @default(uuid())
+  agentId      String   @map("agent_id")
+  question     String
+  expected     String
+  kind         String // numeric | text
+  expectedApps String[] @default([]) @map("expected_apps")
+  archived     Boolean  @default(false)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId, archived, createdAt])
+  @@map("agent_eval_questions")
+}
+
+// One "Run tests" press on an agent: its progress and a result snapshot per
+// question, linked to the turns that produced them. `updatedAt` moves on
+// every checkpoint, so a run that stopped making progress (its worker died
+// with the process) can be told apart from a slow one.
+model AgentEvalRun {
+  id              String    @id @default(uuid())
+  agentId         String    @map("agent_id")
+  createdByUserId String?   @map("created_by_user_id")
+  status          String    @default("queued") // queued | running | done | failed
+  // A partial fingerprint of the agent's configuration at run time
+  // (instructions, model, effort, enabled skills, granted rule IDs).
+  configVersion   String    @map("config_version")
+  total           Int
+  // EvalResult[] (validations/evals.ts), in question order. Bounded by the
+  // active-question cap. Outcome counts are derived from it, never stored.
+  results         Json      @default("[]")
+  error           String?
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  startedAt       DateTime? @map("started_at")
+  finishedAt      DateTime? @map("finished_at")
+
+  agent     Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  createdBy User? @relation("EvalRunCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([agentId, createdAt])
+  @@index([agentId, status])
+  @@map("agent_eval_runs")
 }

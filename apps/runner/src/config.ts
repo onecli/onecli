@@ -82,6 +82,35 @@ export interface RunnerConfig {
    * as a spurious START (the storm feedback loop).
    */
   lifecycleConcurrency: number;
+  /**
+   * The `kubernetes` backend's settings. Every address is a Service name in
+   * the release namespace (the chart wires them), and the sandbox namespace
+   * is where the Jobs/PVCs/Secrets land. Only read (and only validated) when
+   * RUNNER_BACKEND=kubernetes, which is why it is optional on the type: the
+   * docker and cloud arms, and every test fixture for them, never carry it.
+   */
+  kube?: {
+    namespace: string;
+    controlNamespace: string | null;
+    gatewayService: string;
+    gatewayPort: number;
+    /** The hostname sandboxes address the gateway by. MUST equal the host
+     * part of the api's ONECLI_AGENT_PROXY_ADDRESS, since that is the name
+     * inside every HTTPS_PROXY the control plane hands out. */
+    gatewayHost: string;
+    runnerService: string;
+    apiService: string;
+    apiPort: number;
+    storageClass: string | null;
+    homeSize: string;
+    /** Per-pod cap on node-local scratch (`ephemeral-storage` limit);
+     * null leaves it to the namespace's LimitRange, if any. */
+    ephemeralStorageLimit: string | null;
+    nodeSelector: Record<string, string>;
+    tolerations: unknown[];
+    runtimeClassName: string | null;
+    imagePullSecrets: string[];
+  };
 }
 
 const int = (raw: string | undefined, fallback: number): number => {
@@ -95,6 +124,43 @@ const bool = (raw: string | undefined, fallback: boolean): boolean =>
   raw === undefined || raw === "" ? fallback : raw !== "false" && raw !== "0";
 
 export class ConfigError extends Error {}
+
+/** `key=value,key2=value2` → a map; empty input → empty map. */
+const parseKeyValues = (raw: string | undefined): Record<string, string> =>
+  Object.fromEntries(
+    (raw ?? "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0)
+      .map((entry) => {
+        const index = entry.indexOf("=");
+        return index === -1
+          ? [entry, ""]
+          : [entry.slice(0, index), entry.slice(index + 1)];
+      }),
+  );
+
+/** A JSON array of toleration objects, or empty. Malformed input is a
+ * configuration error, never silently ignored. */
+const parseTolerations = (raw: string | undefined): unknown[] => {
+  if (!raw?.trim()) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new ConfigError("RUNNER_KUBE_TOLERATIONS must be a JSON array.");
+  }
+  if (!Array.isArray(parsed)) {
+    throw new ConfigError("RUNNER_KUBE_TOLERATIONS must be a JSON array.");
+  }
+  return parsed;
+};
+
+const list = (raw: string | undefined): string[] =>
+  (raw ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 
 export const loadConfig = (
   env: NodeJS.ProcessEnv = process.env,
@@ -121,6 +187,13 @@ export const loadConfig = (
       'RUNNER_BACKEND="cloud" requires RUNNER_SANDBOX_MANAGER_URL and ' +
         "RUNNER_SANDBOX_MANAGER_TOKEN — the cloud backend cannot reach its " +
         "sandbox-manager without them.",
+    );
+  }
+  const kubeNamespace = env.RUNNER_KUBE_NAMESPACE?.trim() || "";
+  if (backend === "kubernetes" && !kubeNamespace) {
+    throw new ConfigError(
+      'RUNNER_BACKEND="kubernetes" requires RUNNER_KUBE_NAMESPACE, the ' +
+        "namespace sandboxes are created in.",
     );
   }
 
@@ -161,6 +234,34 @@ export const loadConfig = (
     cloudParkWaitSeconds: int(env.RUNNER_CLOUD_PARK_WAIT_SECONDS, 120),
     cloudWakeWaitSeconds: int(env.RUNNER_CLOUD_WAKE_WAIT_SECONDS, 900),
     cloudImageWaitSeconds: int(env.RUNNER_CLOUD_IMAGE_WAIT_SECONDS, 240),
-    lifecycleConcurrency: int(env.RUNNER_LIFECYCLE_CONCURRENCY, 1),
+    // The kubernetes backend's starts are remote operations like the cloud
+    // arm's, so the default serialization that protects a single Docker
+    // host would only head-of-line-block them here.
+    lifecycleConcurrency: int(
+      env.RUNNER_LIFECYCLE_CONCURRENCY,
+      backend === "kubernetes" ? 4 : 1,
+    ),
+    kube: {
+      namespace: kubeNamespace,
+      controlNamespace: env.RUNNER_KUBE_CONTROL_NAMESPACE?.trim() || null,
+      gatewayService:
+        env.RUNNER_KUBE_GATEWAY_SERVICE?.trim() || "onecli-gateway",
+      gatewayPort: int(env.RUNNER_KUBE_GATEWAY_PORT, 10255),
+      gatewayHost:
+        env.RUNNER_KUBE_GATEWAY_HOST?.trim() ||
+        env.RUNNER_KUBE_GATEWAY_SERVICE?.trim() ||
+        "onecli-gateway",
+      runnerService: env.RUNNER_KUBE_RUNNER_SERVICE?.trim() || "onecli-runner",
+      apiService: env.RUNNER_KUBE_API_SERVICE?.trim() || "onecli-api",
+      apiPort: int(env.RUNNER_KUBE_API_PORT, 10256),
+      storageClass: env.RUNNER_KUBE_STORAGE_CLASS?.trim() || null,
+      homeSize: env.RUNNER_KUBE_HOME_SIZE?.trim() || "20Gi",
+      ephemeralStorageLimit:
+        env.RUNNER_KUBE_EPHEMERAL_STORAGE_LIMIT?.trim() || null,
+      nodeSelector: parseKeyValues(env.RUNNER_KUBE_NODE_SELECTOR),
+      tolerations: parseTolerations(env.RUNNER_KUBE_TOLERATIONS),
+      runtimeClassName: env.RUNNER_KUBE_RUNTIME_CLASS?.trim() || null,
+      imagePullSecrets: list(env.RUNNER_KUBE_IMAGE_PULL_SECRETS),
+    },
   };
 };

@@ -6,14 +6,14 @@ set -e
 # Rootless CA trust: the gateway's MITM CA arrives as a mounted file (the
 # container-config payload names it in NODE_EXTRA_CA_CERTS). Inside the
 # sandbox every TLS handshake presents the gateway's certificate — egress is
-# gateway-only (§3.4) — so this one CA is the only trust anyone needs:
+# gateway-only — so this one CA is the only trust anyone needs:
 # - NODE_EXTRA_CA_CERTS: the supervisor's Node runtime (set by the payload).
 # - SSL_CERT_FILE: the jcode runtime (rustls-native-certs honors it; verified).
 # - CURL_CA_BUNDLE / GIT_SSL_CAINFO: the agent's common tools.
 # - Chromium reads none of these; it gets the CA imported into its NSS DB
 #   below, once HOME exists.
-# System-store installation (update-ca-certificates, needs root) arrives with
-# step 3's runner-controlled spawn.
+# System-store installation (update-ca-certificates, needs root) is left to
+# a runner-controlled spawn.
 CA_FILE="${NODE_EXTRA_CA_CERTS:-/tmp/onecli-gateway-ca.pem}"
 if [ -f "$CA_FILE" ]; then
   export SSL_CERT_FILE="$CA_FILE"
@@ -57,9 +57,8 @@ mkdir -p "$HOME/.local/bin" 2>/dev/null || true
 # this one path covers every build, including one Playwright downloads).
 # Without the gateway CA there every page load through the MITM fails
 # ERR_CERT_AUTHORITY_INVALID, and the escape an agent finds by trial is
-# ignoreHTTPSErrors — verification off for every site (measured live,
-# 2026-09-09). So import it here, as uid 1000, onto the durable home,
-# after HOME exists:
+# ignoreHTTPSErrors — verification off for every site. So import it here,
+# as uid 1000, onto the durable home, after HOME exists:
 # - the nickname carries the CA's fingerprint, which makes the import
 #   idempotent (present → nothing to do) and rotation-safe (a new gateway
 #   CA gets its own entry and the previous onecli-gateway-* entries go);
@@ -108,8 +107,8 @@ export PATH
 # NEVER source the profile hook here: ~/.nix-profile/etc/profile.d/nix.sh
 # is agent-writable, and this shell is the SUPERVISOR's (it ends in `exec
 # node`) — sourcing it would hand the agent arbitrary code in the
-# supervisor's process image before the harness even starts (the review's
-# security-onecli §6 finding). Nix needs exactly one thing from the
+# supervisor's process image before the harness even starts (a security
+# review finding). Nix needs exactly one thing from the
 # environment to work: its bin dir on PATH (measured: nix, nix profile, and
 # installed programs all run with only PATH set). So set that, and:
 # - APPEND, never prepend: the hook itself prepends, but the image's law is

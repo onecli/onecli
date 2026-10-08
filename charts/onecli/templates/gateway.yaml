@@ -1,0 +1,138 @@
+{{- /*
+The credential-injecting MITM gateway. Its CA arrives as two env vars from
+the gateway-ca Secret, so it needs no volume and runs on a read-only root
+(proven on kind). Port 10255 is both the browser-facing HTTP surface (the
+route /gw/* prefix-strips onto it) and the raw CONNECT proxy agents dial;
+the Service stays ClusterIP unless gateway.service.type says otherwise.
+
+Pod label onecli.sh/role=gateway is what the sandbox namespace's egress
+policy selects; it must stay in step with networkpolicy.yaml.
+*/ -}}
+{{- $name := include "onecli.component" (dict "root" . "component" "gateway") }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "gateway") | nindent 4 }}
+  annotations:
+    {{- with .Values.gateway.service.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  type: {{ .Values.gateway.service.type }}
+  selector:
+    {{- include "onecli.selectorLabels" (dict "root" . "component" "gateway") | nindent 4 }}
+  ports:
+    - name: proxy
+      port: 10255
+      targetPort: proxy
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "gateway") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector:
+    matchLabels:
+      {{- include "onecli.selectorLabels" (dict "root" . "component" "gateway") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "onecli.selectorLabels" (dict "root" . "component" "gateway") | nindent 8 }}
+        onecli.sh/role: gateway
+      {{- with .Values.gateway.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- include "onecli.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- include "onecli.podSecurityContext" (dict "uid" .Values.gateway.runAsUser "gid" .Values.gateway.runAsGroup) | nindent 8 }}
+      containers:
+        - name: gateway
+          image: {{ include "onecli.image" (dict "root" . "service" "gateway") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "onecli.containerSecurityContext" (dict "readOnlyRootFilesystem" true) | nindent 12 }}
+          ports:
+            - name: proxy
+              containerPort: 10255
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "onecli.databaseSecretName" . }}
+                  key: DATABASE_URL
+            - name: BETTER_AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "onecli.secretsName" . }}
+                  key: BETTER_AUTH_SECRET
+            - name: SECRET_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "onecli.secretsName" . }}
+                  key: SECRET_ENCRYPTION_KEY
+            - name: GATEWAY_INTERNAL_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "onecli.secretsName" . }}
+                  key: GATEWAY_INTERNAL_SECRET
+            - name: GATEWAY_CA_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "onecli.gatewayCaSecretName" . }}
+                  key: GATEWAY_CA_KEY
+            - name: GATEWAY_CA_CERT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "onecli.gatewayCaSecretName" . }}
+                  key: GATEWAY_CA_CERT
+            {{- include "onecli.publicUrlEnv" . | nindent 12 }}
+            {{- include "onecli.flagsEnv" . | nindent 12 }}
+            # Internal vault calls go to the api Service, never the public URL.
+            - name: INTERNAL_API_URL
+              value: {{ include "onecli.apiUrl" . | quote }}
+            {{- with .Values.gateway.allowPrivateDestinations }}
+            - name: GATEWAY_ALLOW_PRIVATE_DESTINATIONS
+              value: {{ . | quote }}
+            {{- end }}
+            - name: LOG_FORMAT
+              value: json
+            {{- with .Values.gateway.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            exec:
+              command: ["onecli-gateway", "--healthcheck"]
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["onecli-gateway", "--healthcheck"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+      {{- with .Values.gateway.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

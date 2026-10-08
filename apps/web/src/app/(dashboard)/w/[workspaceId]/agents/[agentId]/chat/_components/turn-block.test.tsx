@@ -171,6 +171,44 @@ describe("TurnBlock", () => {
     expect(document.querySelector("script")).toBeNull();
   });
 
+  it("discloses optional input while running and retains failed output after settling", async () => {
+    const user = userEvent.setup();
+    const tool = {
+      callId: "input-call",
+      name: "bash",
+      input: JSON.stringify({ command: "echo '<script>bad()</script>'" }),
+    };
+    const { container, rerender } = render(
+      <TurnBlock
+        turn={turn({ status: "running" })}
+        rendered={rendered({ ended: false, tools: [tool] })}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /Running a command/ }));
+    await user.click(screen.getByRole("button", { name: /echo/ }));
+    expect(screen.getByText("Request")).toBeInTheDocument();
+    expect(container.querySelector("pre")?.textContent).toBe(
+      JSON.stringify(JSON.parse(tool.input), null, 2),
+    );
+    expect(screen.queryByText("Output")).toBeNull();
+    expect(container.querySelector("script")).toBeNull();
+
+    rerender(
+      <TurnBlock
+        turn={turn()}
+        rendered={rendered({
+          tools: [{ ...tool, output: "bash: denied\nExit code: 2" }],
+        })}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /Ran a command/ }));
+    await user.click(screen.getByRole("button", { name: /echo/ }));
+    expect(screen.getByText("Request")).toBeInTheDocument();
+    expect(screen.getByText("Output")).toBeInTheDocument();
+    expect(screen.getByText("Failed")).toBeInTheDocument();
+    expect(screen.getByText("Exit code: 2")).toHaveClass("text-red-700");
+  });
+
   it("renders the running turn as a work log, in order, as plain text", () => {
     // The live view: the agent's opening sentence, the run header for its
     // tool calls, then the still-streaming tail. Narration is UNTRUSTED

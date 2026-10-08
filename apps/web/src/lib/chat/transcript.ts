@@ -20,6 +20,8 @@ import type { TurnEvent } from "@/lib/api/types";
 export interface ToolCall {
   callId: string;
   name: string;
+  /** The arguments the agent sent, when the harness reported them. */
+  input?: string;
   /** Absent until the tool reports back — that is what "running" looks like. */
   output?: string;
   isError?: boolean;
@@ -181,7 +183,9 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
       case "tool.finished": {
         const callId = str(event.payload, "callId");
         const started = turn.tools.find((t) => t.callId === callId);
+        const input = str(event.payload, "input");
         const finished = {
+          ...(input !== "" && { input }),
           output: str(event.payload, "output"),
           ...(event.payload.isError === true && { isError: true }),
         };

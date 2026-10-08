@@ -6,6 +6,12 @@ import { ControlPlaneError, createControlPlaneClient } from "./control-plane";
 import { createCloudBackend } from "./backend/cloud/cloud-backend";
 import { createDockerBackend } from "./backend/docker/docker-backend";
 import { createFakeBackend } from "./backend/fake";
+import {
+  createInClusterTransport,
+  inClusterServer,
+  KubeClient,
+} from "./backend/kubernetes/kube-client";
+import { createKubernetesBackend } from "./backend/kubernetes/kubernetes-backend";
 import type { SandboxBackend } from "./backend/types";
 import { createRunner } from "./runner";
 import { createRunnerWsServer } from "./ws/server";
@@ -18,14 +24,55 @@ import { log } from "./log";
  * everything else speaks the SandboxBackend seam, so adding a substrate is a
  * new module plus one line here (§3.14 rule 2).
  */
-const selectBackend = (
+const selectBackend = async (
   config: RunnerConfig,
   options: {
     runnerId: string;
     installationId: string;
   },
-): SandboxBackend => {
+): Promise<SandboxBackend> => {
   if (config.backend === "fake") return createFakeBackend();
+  if (config.backend === "kubernetes") {
+    const server = inClusterServer();
+    if (!server) {
+      throw new ConfigError(
+        'RUNNER_BACKEND="kubernetes" needs the in-cluster API server ' +
+          "(KUBERNETES_SERVICE_HOST is unset; is the runner running in a pod?).",
+      );
+    }
+    // loadConfig always fills this for the kubernetes backend; the guard
+    // keeps that single source of truth without a non-null assertion.
+    const kube = config.kube;
+    if (!kube) {
+      throw new ConfigError("kubernetes backend selected without settings.");
+    }
+    // The release namespace defaults to the runner's own: the chart puts
+    // the gateway/api/runner Services beside the runner.
+    const controlNamespace =
+      kube.controlNamespace ?? (await readOwnNamespace()) ?? kube.namespace;
+    return createKubernetesBackend({
+      runnerId: options.runnerId,
+      installationId: options.installationId,
+      namespace: kube.namespace,
+      controlNamespace,
+      gatewayService: kube.gatewayService,
+      gatewayPort: kube.gatewayPort,
+      gatewayHost: kube.gatewayHost,
+      runnerService: kube.runnerService,
+      runnerPort: config.wsPort,
+      runnerHost: config.advertisedHost,
+      apiService: kube.apiService,
+      apiPort: kube.apiPort,
+      storageClass: kube.storageClass,
+      homeSize: kube.homeSize,
+      ephemeralStorageLimit: kube.ephemeralStorageLimit,
+      nodeSelector: kube.nodeSelector,
+      tolerations: kube.tolerations,
+      runtimeClassName: kube.runtimeClassName,
+      imagePullSecrets: kube.imagePullSecrets,
+      client: new KubeClient(await createInClusterTransport({ server })),
+    });
+  }
   if (config.backend === "cloud") {
     // loadConfig already refused to boot without these two; the non-null
     // assertion-free narrowing here keeps that single source of truth.
@@ -46,7 +93,7 @@ const selectBackend = (
   }
   if (config.backend !== "docker") {
     throw new ConfigError(
-      `Unknown RUNNER_BACKEND "${config.backend}" — expected "docker", "cloud" or "fake".`,
+      `Unknown RUNNER_BACKEND "${config.backend}": expected "docker", "kubernetes", "cloud" or "fake".`,
     );
   }
   return createDockerBackend({
@@ -57,6 +104,20 @@ const selectBackend = (
     socketPath: config.dockerSocket,
     extraHosts: config.sandboxExtraHosts,
   });
+};
+
+/** The namespace this pod runs in, from the projected ServiceAccount mount. */
+const readOwnNamespace = async (): Promise<string | null> => {
+  try {
+    const { readFile } = await import("node:fs/promises");
+    const value = await readFile(
+      "/var/run/secrets/kubernetes.io/serviceaccount/namespace",
+      "utf8",
+    );
+    return value.trim() || null;
+  } catch {
+    return null;
+  }
 };
 
 /** Queue depth past which reports are dropped rather than accumulated. */
@@ -73,7 +134,7 @@ const main = async (): Promise<void> => {
   // after registration), so a restart still recognizes what it created.
   const localId = randomUUID();
 
-  const backend = selectBackend(config, {
+  const backend = await selectBackend(config, {
     runnerId: localId,
     installationId: installationFingerprint(config.token),
   });

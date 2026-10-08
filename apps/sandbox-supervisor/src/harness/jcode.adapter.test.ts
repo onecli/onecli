@@ -289,6 +289,7 @@ import {
   ABORT_TERMINAL_GRACE_MS,
   BUSY_RESEND_DELAYS_MS,
   POST_ACCEPT_IDLE_MS,
+  TOOL_INPUT_MAX_CHARS,
   createJcodeHarness,
 } from "./jcode";
 
@@ -1558,5 +1559,164 @@ describe("the external wake listener", () => {
     });
 
     expect(await wakeTasks(harness)).toHaveLength(0);
+  });
+});
+
+describe("tool-call input capture", () => {
+  const finishedOf = (events: AgentEvent[]) =>
+    events.filter(
+      (e): e is Extract<AgentEvent, { type: "tool.finished" }> =>
+        e.type === "tool.finished",
+    );
+
+  it("assembles tool_input_delta chunks onto the call's tool.finished", async () => {
+    state.events = [
+      { ev: "tool_start", call_id: "c1", name: "warehouse_query" },
+      { ev: "tool_input_delta", call_id: "c1", delta: '{"sql":"select ' },
+      {
+        ev: "tool_input_delta",
+        call_id: "c1",
+        delta: 'sum(amount) from revenue"}',
+      },
+      { ev: "tool_exec", call_id: "c1", name: "warehouse_query" },
+      {
+        ev: "tool_done",
+        call_id: "c1",
+        name: "warehouse_query",
+        output: "[[3200000]]",
+      },
+      { ev: "turn_done" },
+    ];
+    const { session } = await startSession();
+    const [finished] = finishedOf(
+      await collect(session.runTurn({ message: "q1 revenue?" })),
+    );
+
+    expect(finished).toEqual({
+      type: "tool.finished",
+      callId: "c1",
+      name: "warehouse_query",
+      input: '{"sql":"select sum(amount) from revenue"}',
+      output: "[[3200000]]",
+    });
+  });
+
+  it("keeps concurrent calls' inputs apart by call id", async () => {
+    state.events = [
+      { ev: "tool_start", call_id: "a", name: "docs_search" },
+      { ev: "tool_start", call_id: "b", name: "warehouse_query" },
+      { ev: "tool_input_delta", call_id: "a", delta: '{"q":"Acme' },
+      { ev: "tool_input_delta", call_id: "b", delta: '{"sql":"select 1"}' },
+      { ev: "tool_input_delta", call_id: "a", delta: ' status"}' },
+      { ev: "tool_done", call_id: "b", name: "warehouse_query", output: "1" },
+      { ev: "tool_done", call_id: "a", name: "docs_search", output: "3 docs" },
+      { ev: "turn_done" },
+    ];
+    const { session } = await startSession();
+    const finished = finishedOf(
+      await collect(session.runTurn({ message: "acme" })),
+    );
+
+    expect(finished.map((e) => [e.callId, e.input])).toEqual([
+      ["b", '{"sql":"select 1"}'],
+      ["a", '{"q":"Acme status"}'],
+    ]);
+  });
+
+  it("credits an UNKEYED delta (jcode < 0.88) to the call being streamed", async () => {
+    // Observed live on jcode v0.81.1: `tool_input` carries no id, and the
+    // bridge forwards it as call_id "". Without this, input never landed.
+    state.events = [
+      { ev: "tool_start", call_id: "c1", name: "bash" },
+      { ev: "tool_input_delta", call_id: "", delta: '{"command":"echo ' },
+      { ev: "tool_input_delta", call_id: "", delta: 'hello && ls /"}' },
+      { ev: "tool_exec", call_id: "c1", name: "bash" },
+      { ev: "tool_done", call_id: "c1", name: "bash", output: "hello" },
+      { ev: "tool_start", call_id: "c2", name: "read" },
+      {
+        ev: "tool_input_delta",
+        call_id: "",
+        delta: '{"file_path":"/etc/hostname"}',
+      },
+      { ev: "tool_done", call_id: "c2", name: "read", output: "0a2d" },
+      { ev: "turn_done" },
+    ];
+    const { session } = await startSession();
+    const finished = finishedOf(
+      await collect(session.runTurn({ message: "x" })),
+    );
+
+    expect(finished.map((e) => [e.callId, e.input])).toEqual([
+      ["c1", '{"command":"echo hello && ls /"}'],
+      ["c2", '{"file_path":"/etc/hostname"}'],
+    ]);
+  });
+
+  it("omits input when the harness streamed none — the pre-existing shape", async () => {
+    state.events = [
+      { ev: "tool_start", call_id: "c1", name: "bash" },
+      {
+        ev: "tool_done",
+        call_id: "c1",
+        name: "bash",
+        output: "ok",
+        error: "boom",
+      },
+      { ev: "turn_done" },
+    ];
+    const { session } = await startSession();
+    const [finished] = finishedOf(
+      await collect(session.runTurn({ message: "x" })),
+    );
+
+    expect(finished).toEqual({
+      type: "tool.finished",
+      callId: "c1",
+      name: "bash",
+      output: "ok",
+      isError: true,
+    });
+    expect(finished && "input" in finished).toBe(false);
+  });
+
+  it("bounds a huge input and marks the cut visibly", async () => {
+    const chunk = "x".repeat(10_000);
+    state.events = [
+      { ev: "tool_start", call_id: "c1", name: "write_file" },
+      { ev: "tool_input_delta", call_id: "c1", delta: chunk },
+      { ev: "tool_input_delta", call_id: "c1", delta: chunk },
+      { ev: "tool_input_delta", call_id: "c1", delta: chunk },
+      { ev: "tool_done", call_id: "c1", name: "write_file", output: "ok" },
+      { ev: "turn_done" },
+    ];
+    const { session } = await startSession();
+    const [finished] = finishedOf(
+      await collect(session.runTurn({ message: "x" })),
+    );
+    const input = finished?.input ?? "";
+
+    expect(input.startsWith("x".repeat(TOOL_INPUT_MAX_CHARS))).toBe(true);
+    expect(input).toContain(
+      `[truncated ${30_000 - TOOL_INPUT_MAX_CHARS} characters]`,
+    );
+    // Stays under the runner's per-string bound, so it is never cut twice.
+    expect(input.length).toBeLessThanOrEqual(16_000);
+  });
+
+  it("does not carry one call's input onto a later call that reuses nothing", async () => {
+    state.events = [
+      { ev: "tool_start", call_id: "c1", name: "bash" },
+      { ev: "tool_input_delta", call_id: "c1", delta: '{"cmd":"ls"}' },
+      { ev: "tool_done", call_id: "c1", name: "bash", output: "a" },
+      { ev: "tool_start", call_id: "c2", name: "bash" },
+      { ev: "tool_done", call_id: "c2", name: "bash", output: "b" },
+      { ev: "turn_done" },
+    ];
+    const { session } = await startSession();
+    const finished = finishedOf(
+      await collect(session.runTurn({ message: "x" })),
+    );
+
+    expect(finished.map((e) => e.input)).toEqual(['{"cmd":"ls"}', undefined]);
   });
 });

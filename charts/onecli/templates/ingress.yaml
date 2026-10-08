@@ -1,0 +1,62 @@
+{{- /*
+networking.k8s.io/v1 Ingress for externalUrl. Ingress has no prefix-strip,
+so `/gw` needs a controller-specific rewrite. For ingress-nginx
+(`ingress.className: nginx`) the path is emitted as the regex
+`/gw(/|$)(.*)` that its `rewrite-target: /$2` annotation expects (the
+annotation itself is the operator's, through ingress.annotations); other
+controllers get a plain Prefix and their own rewrite annotation. Exact
+dashboard page paths come first; `Exact` beats `Prefix` regardless of order
+on conformant controllers, but ordering them first keeps the intent
+readable.
+*/ -}}
+{{- if .Values.ingress.enabled }}
+{{- $web := include "onecli.component" (dict "root" . "component" "web") }}
+{{- $api := include "onecli.component" (dict "root" . "component" "api") }}
+{{- $gateway := include "onecli.component" (dict "root" . "component" "gateway") }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "onecli.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "onecli.labels" . | nindent 4 }}
+  annotations:
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.ingress.tls.secretName }}
+  tls:
+    - hosts: [{{ include "onecli.externalHost" $ | quote }}]
+      secretName: {{ . }}
+  {{- end }}
+  rules:
+    - host: {{ include "onecli.externalHost" . | quote }}
+      http:
+        paths:
+          {{- range (include "onecli.routes.webAuthPages" . | fromYamlArray) }}
+          - path: {{ . }}
+            pathType: Exact
+            backend: { service: { name: {{ $web }}, port: { name: http } } }
+          {{- end }}
+          - path: /auth/login/
+            pathType: Prefix
+            backend: { service: { name: {{ $web }}, port: { name: http } } }
+          {{- range (include "onecli.routes.apiPrefixes" . | fromYamlArray) }}
+          - path: {{ . }}
+            pathType: Prefix
+            backend: { service: { name: {{ $api }}, port: { name: http } } }
+          {{- end }}
+          - path: {{ if eq .Values.ingress.className "nginx" }}/gw(/|$)(.*){{ else }}/gw{{ end }}
+            pathType: {{ if eq .Values.ingress.className "nginx" }}ImplementationSpecific{{ else }}Prefix{{ end }}
+            backend: { service: { name: {{ $gateway }}, port: { name: proxy } } }
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: {{ $web }}, port: { name: http } } }
+{{- end }}

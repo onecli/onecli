@@ -219,6 +219,10 @@ services:
       BETTER_AUTH_COOKIE_DOMAIN: ${BETTER_AUTH_COOKIE_DOMAIN:-}
       # In-network address of the gateway for server-side cache flushes.
       GATEWAY_INTERNAL_URL: http://gateway:10255
+      # In-network address of the api: the dashboard forwards form submits
+      # that land on its own /auth/<page> paths (POST /auth/reset-password)
+      # to the api server-side, so the proxy in front needs no method rule.
+      API_INTERNAL_URL: http://api:10256
     env_file:
       # Only the install's own .env — same rule as the api service (a
       # checkout's repo-root dev .env never reaches the containers).

@@ -1,0 +1,97 @@
+{{- /*
+The runner's grant: the ONLY write path from the release into the sandbox
+namespace, and the only ServiceAccount token the release mounts.
+
+  - sandbox namespace: Jobs, Pods (read), PVCs and Secrets, create/get/list/
+    delete. No pods/exec, no NetworkPolicies, no Namespaces: the fence is
+    not the runner's to change.
+  - release namespace: `get` on exactly the three Services it resolves into
+    each sandbox's hostAliases (gateway, runner, api). Nothing else.
+
+Verified as a can-i matrix in the acceptance run (see the README).
+*/ -}}
+{{- if .Values.runner.enabled }}
+{{- $name := include "onecli.component" (dict "root" . "component" "runner") }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "runner") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Values.sandboxes.namespace.name }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "runner") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Values.sandboxes.namespace.name }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "runner") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-services
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "runner") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    resourceNames:
+      - {{ include "onecli.component" (dict "root" . "component" "gateway") | quote }}
+      - {{ $name | quote }}
+      - {{ include "onecli.component" (dict "root" . "component" "api") | quote }}
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-services
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "runner") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}-services
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

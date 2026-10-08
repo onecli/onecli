@@ -229,6 +229,11 @@ export const queryKeys = {
     agent: (agentId: string) =>
       [...queryKeys.crons.all(), "agent", agentId] as const,
   },
+  webhooks: {
+    all: () => ["webhooks", ...scope()] as const,
+    agent: (agentId: string) =>
+      [...queryKeys.webhooks.all(), "agent", agentId] as const,
+  },
   skills: {
     all: () => ["skills", ...scope()] as const,
     list: () => [...queryKeys.skills.all(), "list"] as const,
@@ -254,6 +259,18 @@ export const queryKeys = {
         memoryId,
         revisionId,
       ] as const,
+  },
+  runs: {
+    all: () => ["runs", ...scope()] as const,
+    detail: (agentId: string, turnId: string) =>
+      [...queryKeys.runs.all(), "detail", agentId, turnId] as const,
+  },
+  evals: {
+    all: () => ["evals", ...scope()] as const,
+    agent: (agentId: string) =>
+      [...queryKeys.evals.all(), "agent", agentId] as const,
+    run: (agentId: string, runId: string) =>
+      [...queryKeys.evals.all(), "run", agentId, runId] as const,
   },
   channels: {
     all: () => ["channels", ...scope()] as const,

@@ -36,6 +36,8 @@ describe("agentSectionsFor", () => {
     // Schedules wake a HOSTED agent's sandbox — a BYO agent has no computer
     // the platform can wake.
     expect(byo).not.toContain("schedules");
+    // Webhooks fire a HOSTED agent's run — a BYO agent has no run to fire.
+    expect(byo).not.toContain("webhooks");
     // Memory is written by a HOSTED agent's tools — a BYO agent has none.
     expect(byo).not.toContain("memory");
     // Its own page still works: Connections and Models.
@@ -51,6 +53,7 @@ describe("agentSectionBlocked", () => {
     expect(agentSectionBlocked("contacts", "byo")).toBe(true);
     expect(agentSectionBlocked("ssh", "byo")).toBe(true);
     expect(agentSectionBlocked("schedules", "byo")).toBe(true);
+    expect(agentSectionBlocked("webhooks", "byo")).toBe(true);
     expect(agentSectionBlocked("memory", "byo")).toBe(true);
   });
 
@@ -82,7 +85,7 @@ describe("isFullHeightAgentSection", () => {
 });
 
 describe("the rail's shape (§3.18 as amended)", () => {
-  it("puts Chat first, then Access, then Behavior", () => {
+  it("puts Chat first, then Access, then Behavior, then Advanced", () => {
     const hosted = agentSectionsFor("hosted").map((s) => s.section);
     expect(hosted).toEqual([
       "chat",
@@ -90,11 +93,13 @@ describe("the rail's shape (§3.18 as amended)", () => {
       "connections",
       "contacts",
       "models",
-      "ssh",
       "instructions",
       "skills",
       "schedules",
       "memory",
+      "ssh",
+      "webhooks",
+      "evals",
     ]);
   });
 
@@ -105,17 +110,16 @@ describe("the rail's shape (§3.18 as amended)", () => {
     expect(sections).not.toContain("secrets");
   });
 
-  it("keeps Access to exactly what the agent is GIVEN, plus the ways in: connections, contacts, models and ssh", () => {
+  it("keeps Access to exactly what the agent is GIVEN: connections, contacts and models", () => {
     const access = AGENT_SECTIONS.filter((s) => s.group === "access");
     expect(access.map((s) => s.section)).toEqual([
       "connections",
       "contacts",
       "models",
-      "ssh",
     ]);
   });
 
-  it("puts everything else under Behavior", () => {
+  it("keeps Behavior to how the agent works", () => {
     const behavior = AGENT_SECTIONS.filter((s) => s.group === "behavior");
     expect(behavior.map((s) => s.section)).toEqual([
       "instructions",
@@ -125,17 +129,27 @@ describe("the rail's shape (§3.18 as amended)", () => {
     ]);
   });
 
+  it("puts the occasional, set-and-forget tools under Advanced", () => {
+    const advanced = AGENT_SECTIONS.filter((s) => s.group === "advanced");
+    expect(advanced.map((s) => s.section)).toEqual([
+      "ssh",
+      "webhooks",
+      "evals",
+    ]);
+  });
+
   it("renders every section under exactly one declared group, in order", () => {
     const declared = AGENT_SECTION_GROUPS.map((g) => g.group);
     for (const s of AGENT_SECTIONS) expect(declared).toContain(s.group);
     const order = AGENT_SECTIONS.map((s) => declared.indexOf(s.group));
     expect(order).toEqual([...order].sort((a, b) => a - b));
-    // Three titled clusters; ONE section leads visually (prominent), and it
+    // Four titled clusters; ONE section leads visually (prominent), and it
     // is Chat — not its whole cluster, or Slack would falsely lead too.
     expect(AGENT_SECTION_GROUPS.map((g) => g.label)).toEqual([
       "Work",
       "Access",
       "Behavior",
+      "Advanced",
     ]);
     expect(AGENT_SECTIONS.filter((s) => s.prominent)).toHaveLength(1);
     expect(AGENT_SECTIONS.find((s) => s.prominent)?.section).toBe("chat");
@@ -208,7 +222,7 @@ describe("Contacts is an Access entry (PR 5b)", () => {
     expect(contacts?.group).toBe("access");
     expect(
       AGENT_SECTIONS.filter((s) => s.group === "access").map((s) => s.section),
-    ).toEqual(["connections", "contacts", "models", "ssh"]);
+    ).toEqual(["connections", "contacts", "models"]);
   });
 
   it("stays hosted-only: a BYO agent is not reached through the platform", () => {
@@ -227,9 +241,9 @@ describe("SSH is instance-gated (sandbox-platform step 5)", () => {
     expect(gated[0]?.instanceGated).toBe("ssh");
   });
 
-  it("is an Access entry and hosted-only — a BYO agent has no computer to shell into", () => {
+  it("is an Advanced entry and hosted-only: a BYO agent has no computer to shell into", () => {
     const ssh = AGENT_SECTIONS.find((s) => s.section === "ssh");
-    expect(ssh?.group).toBe("access");
+    expect(ssh?.group).toBe("advanced");
     expect(ssh?.hostedOnly).toBe(true);
     expect(agentSectionBlocked("ssh", "byo")).toBe(true);
     expect(agentSectionBlocked("ssh", "hosted")).toBe(false);

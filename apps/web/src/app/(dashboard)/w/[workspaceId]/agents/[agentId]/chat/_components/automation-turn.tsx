@@ -4,6 +4,7 @@ import {
   AlarmClock,
   CalendarClock,
   MessagesSquare,
+  Webhook,
   type LucideIcon,
 } from "lucide-react";
 import type { AutomationSource } from "@/lib/chat/turns";
@@ -24,6 +25,8 @@ import type { AutomationSource } from "@/lib/chat/turns";
 const AUTOMATION_ICON: Record<AutomationSource, LucideIcon> = {
   cron: CalendarClock,
   watch: AlarmClock,
+  // An external app's event (the Webhooks section uses the same mark).
+  webhook: Webhook,
   // A peer task's report: the agent's own words after talking with another
   // agent, so the two-bubbles mark - the same family the Contacts page uses
   // for a pair conversation.

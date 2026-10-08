@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "OneCLI chart values",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "externalUrl": {
+      "type": "string",
+      "pattern": "^(https?://[^/]+)?$",
+      "description": "scheme://host[:port], no path. Required (checked by the templates)."
+    },
+    "allowInsecureExternalUrl": { "type": "boolean" },
+    "trustedOrigins": { "type": "string" },
+    "enterpriseEnabled": { "type": "boolean" },
+    "maxOrgsPerUser": { "type": ["integer", "string"] },
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        },
+        "pullSecrets": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "properties": {
+        "existingSecret": { "type": "string" },
+        "generate": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "gatewayCa": {
+      "type": "object",
+      "properties": { "existingSecret": { "type": "string" } }
+    },
+    "database": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "type": "string" },
+        "user": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "password": { "type": "string" },
+        "persistence": {
+          "type": "object",
+          "properties": {
+            "size": {
+              "type": "string",
+              "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|k|M|G|T)?$"
+            },
+            "storageClass": { "type": "string" }
+          }
+        },
+        "networkPolicy": {
+          "type": "object",
+          "properties": { "enabled": { "type": "boolean" } }
+        },
+        "external": {
+          "type": "object",
+          "properties": {
+            "existingSecret": { "type": "string" },
+            "url": { "type": "string", "pattern": "^(postgres(ql)?://.+)?$" }
+          }
+        }
+      }
+    },
+    "api": {
+      "type": "object",
+      "properties": {
+        "replicas": { "type": "integer", "minimum": 1, "maximum": 1 }
+      }
+    },
+    "web": {
+      "type": "object",
+      "properties": { "replicas": { "type": "integer", "minimum": 1 } }
+    },
+    "gateway": {
+      "type": "object",
+      "properties": {
+        "replicas": { "type": "integer", "minimum": 1 },
+        "runAsUser": { "type": "integer", "minimum": 1 },
+        "runAsGroup": { "type": "integer", "minimum": 1 },
+        "allowPrivateDestinations": { "type": "string" },
+        "service": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["ClusterIP", "LoadBalancer", "NodePort"]
+            }
+          }
+        }
+      }
+    },
+    "runner": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "name": { "type": "string", "minLength": 1 },
+        "maxSandboxes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "sandboxes": {
+      "type": "object",
+      "properties": {
+        "namespace": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+            },
+            "create": { "type": "boolean" }
+          }
+        },
+        "memoryMb": { "type": "integer", "minimum": 256 },
+        "cpus": { "type": "number", "exclusiveMinimum": 0 },
+        "ephemeralStorageLimit": { "type": "string" },
+        "home": {
+          "type": "object",
+          "properties": {
+            "size": {
+              "type": "string",
+              "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|k|M|G|T)?$"
+            },
+            "storageClass": { "type": "string" }
+          }
+        },
+        "runtimeClassName": { "type": "string" },
+        "imagePullSecrets": { "type": "array", "items": { "type": "string" } },
+        "quota": {
+          "type": "object",
+          "properties": { "enabled": { "type": "boolean" } }
+        },
+        "networkPolicy": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "dns": {
+              "type": "object",
+              "properties": {
+                "namespace": { "type": "string", "minLength": 1 },
+                "podLabels": { "type": "object", "minProperties": 1 },
+                "cidr": {
+                  "type": "string",
+                  "pattern": "^([0-9.]+/[0-9]+|[0-9a-fA-F:]+/[0-9]+)?$"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "migrations": {
+      "type": "object",
+      "properties": { "useHelmHooks": { "type": "boolean" } }
+    },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "annotations": { "type": "object" },
+        "tls": {
+          "type": "object",
+          "properties": { "secretName": { "type": "string" } }
+        }
+      }
+    },
+    "httpRoute": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "parentRefs": { "type": "array" },
+        "annotations": { "type": "object" }
+      },
+      "if": { "properties": { "enabled": { "const": true } } },
+      "then": { "properties": { "parentRefs": { "minItems": 1 } } }
+    },
+    "commonLabels": { "type": "object" },
+    "commonAnnotations": { "type": "object" }
+  }
+}

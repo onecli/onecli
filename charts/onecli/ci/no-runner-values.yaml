@@ -1,0 +1,7 @@
+# Control plane only (bring-your-own agents through the gateway); the
+# private-VM chart overlays this shape with its own runner.
+externalUrl: https://onecli.example.com
+secrets:
+  existingSecret: onecli-secrets
+runner:
+  enabled: false

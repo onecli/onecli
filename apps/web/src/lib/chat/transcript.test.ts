@@ -146,6 +146,40 @@ describe("foldTranscript", () => {
     ]);
   });
 
+  it("carries a tool call's input onto the started call", () => {
+    const turns = foldTranscript([
+      event("t1", "tool.started", { callId: "c1", name: "warehouse_query" }),
+      event("t1", "tool.finished", {
+        callId: "c1",
+        name: "warehouse_query",
+        input: '{"sql":"select 1"}',
+        output: "1",
+      }),
+    ]);
+    const expected = {
+      callId: "c1",
+      name: "warehouse_query",
+      input: '{"sql":"select 1"}',
+      output: "1",
+    };
+    expect(turns[0]?.tools).toEqual([expected]);
+  });
+
+  it("leaves input absent for older events, and for a non-string input", () => {
+    const turns = foldTranscript([
+      event("t1", "tool.finished", { callId: "c1", name: "bash", output: "a" }),
+      event("t1", "tool.finished", {
+        callId: "c2",
+        name: "bash",
+        input: { sql: "not a string" },
+        output: "b",
+      }),
+    ]);
+    for (const tool of turns[0]?.tools ?? []) {
+      expect("input" in tool).toBe(false);
+    }
+  });
+
   it("tracks the live activity, and drops it when the turn ends", () => {
     // THE LOADER (user decision, 2026-08-31). The agent's own words while it
     // works, replaced as work moves, gone once the turn is over — the answer

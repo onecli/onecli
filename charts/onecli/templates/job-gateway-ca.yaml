@@ -1,0 +1,126 @@
+{{- /*
+Mint the gateway CA ONCE into `<fullname>-gateway-ca`, with the gateway
+binary itself (`onecli-gateway --generate-ca`). Never openssl: the gateway
+re-signs its CA on load with its own key-identifier method, and a CA minted
+elsewhere issues leaves no TLS client will verify. Idempotent like the
+secrets generator: an existing Secret is left untouched.
+
+Two containers share an in-memory emptyDir: the gateway image mints the
+files, then the api image's Node stores them through the Kubernetes API
+(configmap-secret-tool). Neither has a writable root; the mint lands on the
+shared volume only. The pod runs as the gateway's uid so both containers
+can read the files the mint wrote with mode 0600.
+*/ -}}
+{{- if not .Values.gatewayCa.existingSecret }}
+{{- $name := include "onecli.component" (dict "root" . "component" "gateway-ca") }}
+{{- $jobName := printf "%s-generate" $name }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $jobName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "gateway-ca-generate") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $jobName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "gateway-ca-generate") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ $name | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $jobName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "gateway-ca-generate") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $jobName }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $jobName }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $jobName }}-{{ .Release.Revision }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "gateway-ca-generate") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "onecli.selectorLabels" (dict "root" . "component" "gateway-ca-generate") | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ $jobName }}
+      automountServiceAccountToken: true
+      {{- include "onecli.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- include "onecli.podSecurityContext" (dict "uid" .Values.gateway.runAsUser "gid" .Values.gateway.runAsGroup) | nindent 8 }}
+      initContainers:
+        - name: mint
+          image: {{ include "onecli.image" (dict "root" . "service" "gateway") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "onecli.containerSecurityContext" (dict "readOnlyRootFilesystem" true) | nindent 12 }}
+          args: ["--generate-ca", "--data-dir", "/mint"]
+          volumeMounts:
+            - name: mint
+              mountPath: /mint
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 128Mi }
+      containers:
+        - name: store
+          image: {{ include "onecli.image" (dict "root" . "service" "api") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "onecli.containerSecurityContext" (dict "readOnlyRootFilesystem" true) | nindent 12 }}
+          env:
+            - name: SECRET_NAME
+              value: {{ $name | quote }}
+            - name: NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+          command: ["node", "/tools/secret-tool.js", "store-ca", "/mint"]
+          volumeMounts:
+            - name: mint
+              mountPath: /mint
+              readOnly: true
+            - name: tools
+              mountPath: /tools
+              readOnly: true
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 128Mi }
+      volumes:
+        - name: mint
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: tools
+          configMap:
+            name: {{ include "onecli.component" (dict "root" . "component" "secret-tool") }}
+{{- end }}

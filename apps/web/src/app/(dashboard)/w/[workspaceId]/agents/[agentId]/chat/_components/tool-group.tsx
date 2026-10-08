@@ -61,19 +61,23 @@ export const ToolGroup = ({
   tools,
   turnEnded,
   startedAt,
+  defaultOpen = false,
 }: {
   tools: ToolCall[];
   turnEnded: boolean;
   /** When the turn started (ISO). The timer counts from here to the answer,
    *  not from the current step, so it never resets between steps. */
   startedAt: string;
+  /** Open on mount: where the steps are the point (a run's detail), not
+   *  the answer. */
+  defaultOpen?: boolean;
 }) => {
   // The header stays live for the whole turn, between steps too, so the
   // spinner and timer run until the answer arrives.
   const running = !turnEnded;
 
   return (
-    <Collapsible>
+    <Collapsible defaultOpen={defaultOpen}>
       <CollapsibleTrigger className="text-muted-foreground hover:text-foreground focus-visible:ring-ring/50 group flex items-center gap-1.5 rounded-md py-1 text-start text-sm transition-colors outline-none focus-visible:ring-[3px]">
         {running && (
           <Loader2

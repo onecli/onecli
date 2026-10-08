@@ -69,6 +69,7 @@ const HEADER_SEPARATOR = ` ${String.fromCharCode(0x2014)} `;
 const AUTOMATION_ICONS: Record<AutomationSource, string> = {
   cron: ":calendar:",
   watch: ":stopwatch:",
+  webhook: ":link:",
   peer_task: ":speech_balloon:",
 };
 

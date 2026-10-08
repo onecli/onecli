@@ -88,22 +88,23 @@ test(
  * rule): generic words like "pod", "S3" or "load balancer" are legitimate in
  * shared prose and are left to review. Every entry was checked against the
  * whole synced tree for false positives when it was added.
+ *
+ * Plain Kubernetes vocabulary (kubelet, PVC, ServiceAccount, ResourceQuota,
+ * EKS as a platform name, Kata as a RuntimeClass, an ALB/NLB fronting the
+ * chart's Gateway) is NOT in this list: the synced Helm chart and the
+ * runner's kubernetes backend describe a self-hoster's own cluster in those
+ * words. What stays cloud-only is the cloud's own machinery (the sandbox
+ * platform, its stacks, its AWS services).
  */
 const CLOUD_IMPLEMENTATION_TERMS = [
-  /\bkata\b/i,
   /\bmicro-?vms?\b/i,
   /\bublk\b/i,
-  /\bkubelet\b/i,
   /\bkarpenter\b/i,
   /\btopolvm\b/i,
-  /\b(eks|irsa|fargate|ecs)\b/i,
+  /\b(irsa|fargate|ecs)\b/i,
   /\bcloudfront\b/i,
   /\belasticache\b/i,
   /\bcloudwatch\b/i,
-  /\b(nlb|alb)\b/i,
-  /\bpvcs?\b/i,
-  /\bresourcequota\b/i,
-  /\bserviceaccount\b/i,
   /\bkube-root-ca\b/i,
   /\btwingate\b/i,
   /\bsandbox[- ]manager\b/i,
@@ -302,7 +303,7 @@ test(
     // comment is found, the same term inside a string literal is not.
     const rows = await commentsOf(
       "x.ts",
-      'const a = "kata";\n// boots under Kata on EKS\nconst b = `sandbox-manager ${a}`;\n',
+      'const a = "fargate";\n// boots under Fargate\nconst b = `sandbox-manager ${a}`;\n',
     );
     const flagged = rows.filter(({ text }) =>
       CLOUD_IMPLEMENTATION_TERMS.some((re) => re.test(text)),

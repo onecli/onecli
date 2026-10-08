@@ -4,7 +4,7 @@
 //! The CA signs per-hostname leaf certs on the fly so the gateway can terminate
 //! TLS with clients while forwarding to the real upstream server.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -164,6 +164,37 @@ impl CertificateAuthority {
         params.not_before = OffsetDateTime::now_utc();
         params.not_after = OffsetDateTime::now_utc() + time::Duration::days(CA_VALIDITY_DAYS);
         params
+    }
+
+    /// Mint a CA into the on-disk layout `load_or_generate` reads
+    /// (`{data_dir}/gateway/ca.key` + `ca.pem`) WITHOUT starting anything,
+    /// and refuse if either file already exists. This is
+    /// `onecli-gateway --generate-ca`: deployments that keep the CA in a
+    /// secret store (the Helm chart's Secret, Secrets Manager) mint it once
+    /// with this and hand the two files back through
+    /// `GATEWAY_CA_KEY`/`GATEWAY_CA_CERT`. Minted by THIS binary rather than
+    /// by openssl on purpose: `load_from_pem` re-self-signs the CA with
+    /// rcgen's own key-identifier method, so a CA whose SubjectKeyIdentifier
+    /// was computed differently issues leaves whose AuthorityKeyIdentifier
+    /// never matches, and every TLS client rejects the chain. Only a CA rcgen
+    /// produced round-trips cleanly.
+    pub async fn generate_into(data_dir: &Path) -> Result<(PathBuf, PathBuf)> {
+        let gateway_dir = data_dir.join("gateway");
+        let key_path = gateway_dir.join("ca.key");
+        let cert_path = gateway_dir.join("ca.pem");
+        for existing in [&key_path, &cert_path] {
+            if existing.exists() {
+                anyhow::bail!(
+                    "refusing to overwrite existing CA material at {}",
+                    existing.display()
+                );
+            }
+        }
+        fs::create_dir_all(&gateway_dir)
+            .await
+            .context("creating gateway data directory")?;
+        Self::generate_and_persist(&key_path, &cert_path).await?;
+        Ok((key_path, cert_path))
     }
 
     /// Generate a new CA, persist to disk, and return the authority.
@@ -431,6 +462,69 @@ mod tests {
     }
 
     // ── der_to_pem round-trip ───────────────────────────────────────────
+
+    /// The `--generate-ca` contract: a CA minted into a directory loads back
+    /// through the ENV path (the Secret → `GATEWAY_CA_*` route the chart
+    /// takes) and issues leaves a real TLS client verifies against the minted
+    /// certificate. Checked with rustls's own webpki verifier, exactly what
+    /// curl/node do at the proxy. An externally minted CA (openssl) passes the
+    /// load and FAILS this verify, because `load_from_pem` re-self-signs with
+    /// rcgen's key-identifier method, which is why the chart mints through
+    /// the gateway binary.
+    #[tokio::test]
+    async fn generated_ca_round_trips_through_env_and_chains() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let (key_path, cert_path) = CertificateAuthority::generate_into(tmp.path())
+            .await
+            .expect("generate CA");
+        assert_eq!(key_path, tmp.path().join("gateway").join("ca.key"));
+        assert_eq!(cert_path, tmp.path().join("gateway").join("ca.pem"));
+
+        let key_pem = std::fs::read_to_string(&key_path).expect("read key");
+        let cert_pem = std::fs::read_to_string(&cert_path).expect("read cert");
+        assert!(key_pem.starts_with("-----BEGIN PRIVATE KEY-----"));
+        assert!(cert_pem.starts_with("-----BEGIN CERTIFICATE-----"));
+
+        let ca = CertificateAuthority::load_from_pem(&key_pem, &cert_pem).expect("load pair");
+        assert_eq!(ca.ca_cert_pem(), cert_pem);
+
+        let leaf_der = ca.sign_leaf_der("chain.example.com").expect("sign leaf");
+
+        // Verify the way a client would: trust ONLY the minted CA bytes.
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(ca.ca_cert_der.clone())
+            .expect("minted CA is a valid trust anchor");
+        let verifier = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
+            .build()
+            .expect("verifier");
+        use rustls::client::danger::ServerCertVerifier;
+        let name = rustls::pki_types::ServerName::try_from("chain.example.com").expect("name");
+        verifier
+            .verify_server_cert(
+                &CertificateDer::from(leaf_der),
+                &[],
+                &name,
+                &[],
+                rustls::pki_types::UnixTime::now(),
+            )
+            .expect("a leaf signed by the loaded CA chains to the minted certificate");
+    }
+
+    #[tokio::test]
+    async fn generate_into_refuses_to_overwrite() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        CertificateAuthority::generate_into(tmp.path())
+            .await
+            .expect("first mint");
+        let before = std::fs::read(tmp.path().join("gateway/ca.key")).expect("read");
+        let err = CertificateAuthority::generate_into(tmp.path())
+            .await
+            .expect_err("second mint must refuse");
+        assert!(err.to_string().contains("refusing to overwrite"), "{err}");
+        let after = std::fs::read(tmp.path().join("gateway/ca.key")).expect("read");
+        assert_eq!(before, after, "the existing key is untouched");
+    }
 
     #[test]
     fn der_to_pem_round_trips() {

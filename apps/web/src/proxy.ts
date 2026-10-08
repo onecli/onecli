@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { isMissingSessionSecret } from "@onecli/api/lib/session-secret";
+import { getApiInternalUrl } from "@onecli/api/lib/env";
 import { IS_CLOUD, SECRET_ENCRYPTION_KEY } from "@/lib/env";
 import { buildCsp, createCspNonce } from "@/lib/csp";
 import { WORKSPACE_PATH_RE, ORG_PATH_RE } from "@/lib/navigation";
@@ -53,18 +54,64 @@ export const WEB_AUTH_PAGES = [
   "/auth/reset-password",
 ];
 
+const isWebAuthPage = (pathname: string): boolean =>
+  WEB_AUTH_PAGES.some(
+    (page) => pathname === page || pathname.startsWith(`${page}/`),
+  );
+
+/**
+ * A page load, in the sense an edge router would use: only `GET`/`HEAD` can
+ * render a dashboard page. Anything else on one of those paths is a form
+ * submit meant for the api (`apiFormSubmitOnPagePath`).
+ */
+const isPageLoad = (method: string): boolean =>
+  method === "GET" || method === "HEAD";
+
+/**
+ * The api shares its path namespace with the dashboard's pages under
+ * `/auth`: better-auth answers `POST /auth/reset-password` while the
+ * dashboard renders `GET /auth/reset-password`. Every edge in front of a
+ * self-host (Caddy, nginx, an Ingress, a Gateway API route) would otherwise
+ * need a method-aware rule to split the two, and most cannot express one
+ * (Ingress matches on path only). So the dashboard takes the whole page path
+ * and forwards the non-page-load methods to the api itself, server-side,
+ * over `API_INTERNAL_URL`. The browser never sees the hop: it posted to the
+ * dashboard origin, and the api's response (set-cookie included) comes back
+ * through the same connection. Self-host only: cloud's auth is Cognito and
+ * has no better-auth endpoint to forward to.
+ *
+ * Only the exact page paths are forwarded, never their subroutes: a
+ * subroute under a page (`/auth/login/sso`) is also a dashboard page, and
+ * the api's own `/auth/reset-password/<token>` is not a page at all (it is
+ * routed to the api by `isProxiedApiPath` before this is consulted).
+ */
+const apiFormSubmitOnPagePath = (request: NextRequest): URL | null => {
+  if (IS_CLOUD || isPageLoad(request.method)) return null;
+  const { pathname } = request.nextUrl;
+  if (!WEB_AUTH_PAGES.includes(pathname)) return null;
+  const target = new URL(getApiInternalUrl());
+  target.pathname = pathname;
+  target.search = request.nextUrl.search;
+  return target;
+};
+
 const isProxiedApiPath = (pathname: string): boolean => {
   if (pathname.startsWith("/v1/") || pathname.startsWith("/gw/")) return true;
-  return (
-    pathname.startsWith("/auth/") &&
-    !WEB_AUTH_PAGES.some(
-      (page) => pathname === page || pathname.startsWith(`${page}/`),
-    )
-  );
+  return pathname.startsWith("/auth/") && !isWebAuthPage(pathname);
 };
 
 export const proxy = (request: NextRequest) => {
   const { pathname } = request.nextUrl;
+
+  // First: a form submit on one of the dashboard's own page paths is api
+  // surface, like `/v1` and the rest of `/auth`. It bypasses the setup gate
+  // (the api reports its own configuration errors to a form client; a 307 to
+  // an HTML setup page is not a response one can use) and carries none of
+  // the scope/CSP work below, which belongs on dashboard renders only.
+  const apiTarget = apiFormSubmitOnPagePath(request);
+  if (apiTarget) {
+    return NextResponse.rewrite(apiTarget);
+  }
 
   const error = getSetupError();
 

@@ -1,0 +1,14 @@
+# The zero-prerequisite evaluation install: generated secrets, bundled
+# PostgreSQL, ingress-nginx.
+externalUrl: https://onecli.example.com
+secrets:
+  generate:
+    enabled: true
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+  tls:
+    secretName: onecli-tls

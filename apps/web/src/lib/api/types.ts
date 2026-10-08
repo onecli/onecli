@@ -675,6 +675,7 @@ export type ConversationSource =
   | "slack"
   | "cron"
   | "watch"
+  | "eval"
   | "greeting";
 
 export interface Conversation {

@@ -44,6 +44,13 @@ export const AUDIT_ACTIONS = {
   // "Restart agent": a person reset every conversation of a hosted agent and
   // stopped its sandbox. First-class because it ends work in flight.
   RESTART: "restart",
+  // Runs audit: an org admin READ of a colleague's private conversation with
+  // an agent. Reads are normally never audited; this one is the privacy
+  // exception, and the read is refused when the record cannot be written.
+  // Metadata carries IDs, never the question.
+  VIEW: "view",
+  // Evals: one "Run tests" press (it spends the workspace's model tokens).
+  RUN: "run",
 } as const;
 
 export const AUDIT_SERVICES = {
@@ -71,6 +78,9 @@ export const AUDIT_SERVICES = {
   // audited from the API routes; agent-authored tool calls are not audited
   // here (the fired turns are their own record).
   CRON: "cron",
+  // Agent webhooks: inbound catch URLs that trigger a hosted agent (CRUD
+  // audited from the routes; fired events are their own turn record).
+  WEBHOOK: "webhook",
   // Agent memory (hosted-agents v2 step 8): per-agent durable memory with
   // revision history. Free — audited from the API routes; agent tool WRITES
   // are audited under the resolved creating user (viaAgent), reads never.
@@ -112,6 +122,10 @@ export const AUDIT_SERVICES = {
   // terminator-reported session open/close. Free shared code, dark without
   // an SSH CA configured; sourceIp in metadata is terminator-reported.
   SSH: "ssh",
+  // Runs audit: an org admin viewing a colleague's private run. Free.
+  CONVERSATION: "conversation",
+  // Agent evals: test-question edits and runs. Free.
+  EVAL: "eval",
 } as const;
 
 export const AUDIT_STATUS = {
@@ -157,7 +171,10 @@ export interface AuditEventParams {
 
 const log = logger.child({ component: "audit" });
 
-const logAuditEvent = async (params: AuditEventParams): Promise<void> => {
+const logAuditEvent = async (
+  params: AuditEventParams,
+  failClosed = false,
+): Promise<void> => {
   const { source = AUDIT_SOURCE.APP, metadata, ...rest } = params;
 
   try {
@@ -169,8 +186,10 @@ const logAuditEvent = async (params: AuditEventParams): Promise<void> => {
       },
     });
   } catch (err) {
-    // Never fail the parent operation due to audit logging
+    // Mutations remain best-effort. Sensitive read overrides may require a
+    // durable audit record before releasing their response.
     log.error({ err, ...params }, "failed to write audit log");
+    if (failClosed) throw err;
   }
 };
 
@@ -221,12 +240,19 @@ export const withAudit = async <T>(
  * Use when the audited state change is conditional or has already happened, so
  * the `withAudit` HOF — which always logs and flushes the gateway cache around a
  * wrapped call — doesn't fit. Example: auditing an API key only when it was
- * actually minted during a read (`ensureApiKey`). Like `logAuditEvent`, it never
- * throws — a failed audit write must not break the parent operation.
+ * actually minted during a read (`ensureApiKey`). Best-effort by default.
+ * Sensitive read overrides opt into `failClosed` so a failed audit write
+ * prevents their response from releasing private content.
  */
-export const recordAuditEvent = async (params: AuditParams): Promise<void> => {
-  await logAuditEvent({
-    ...params,
-    status: params.status ?? AUDIT_STATUS.SUCCESS,
-  });
+export const recordAuditEvent = async (
+  params: AuditParams,
+  options: { failClosed?: boolean } = {},
+): Promise<void> => {
+  await logAuditEvent(
+    {
+      ...params,
+      status: params.status ?? AUDIT_STATUS.SUCCESS,
+    },
+    options.failClosed,
+  );
 };

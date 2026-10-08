@@ -1,0 +1,45 @@
+{{- /*
+Belt and braces for the sandbox namespace: a ResourceQuota sized from
+runner.maxSandboxes and the per-sandbox ceilings (plus one sandbox of
+headroom for the gate init container and in-flight replacements), and a
+LimitRange that caps any pod the runner did not size.
+*/ -}}
+{{- if and .Values.runner.enabled .Values.sandboxes.quota.enabled }}
+{{- $n := add (int .Values.runner.maxSandboxes) 1 }}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ include "onecli.component" (dict "root" . "component" "sandboxes") }}
+  namespace: {{ .Values.sandboxes.namespace.name }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "sandboxes") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+spec:
+  hard:
+    pods: {{ $n | quote }}
+    count/jobs.batch: {{ $n | quote }}
+    limits.cpu: {{ mul $n (int .Values.sandboxes.cpus) | quote }}
+    limits.memory: {{ printf "%dMi" (mul $n (int .Values.sandboxes.memoryMb)) | quote }}
+    requests.memory: {{ printf "%dMi" (mul $n (int .Values.sandboxes.memoryMb)) | quote }}
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: {{ include "onecli.component" (dict "root" . "component" "sandboxes") }}
+  namespace: {{ .Values.sandboxes.namespace.name }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "sandboxes") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+spec:
+  limits:
+    - type: Container
+      max:
+        cpu: {{ .Values.sandboxes.cpus | quote }}
+        memory: {{ printf "%dMi" (int .Values.sandboxes.memoryMb) | quote }}
+      default:
+        cpu: {{ .Values.sandboxes.cpus | quote }}
+        memory: {{ printf "%dMi" (int .Values.sandboxes.memoryMb) | quote }}
+      defaultRequest:
+        cpu: 250m
+        memory: 256Mi
+{{- end }}

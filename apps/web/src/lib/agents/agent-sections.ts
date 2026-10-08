@@ -8,8 +8,10 @@ import {
   Sparkles,
   Terminal,
   Users,
+  Webhook,
   type LucideIcon,
   CalendarClock,
+  FlaskConical,
 } from "lucide-react";
 
 /**
@@ -37,9 +39,11 @@ export interface AgentSection {
   /**
    * Which rail cluster it sits in, in render order: Work (the thread), then
    * what the agent is given (Access: the connections it can reach and the
-   * model it runs on), then how it behaves (Behavior).
+   * model it runs on), then how it behaves (Behavior), then Advanced: the
+   * optional, technical tools you set up once. The rail shows Advanced as a
+   * drill-in (one row, then its own view), not as a cluster beside the rest.
    */
-  group: "chat" | "access" | "behavior";
+  group: "chat" | "access" | "behavior" | "advanced";
   /** Hosted only: a BYO agent has no computer to talk to and no brief. */
   hostedOnly?: boolean;
   /**
@@ -60,9 +64,9 @@ export interface AgentSection {
   prominent?: boolean;
 }
 
-/** The rail's cluster order and their labels — three plain answers: where
- *  you WORK with the agent, what it is given (Access), and how it behaves
- *  (Behavior). */
+/** The rail's cluster order and their labels: where you WORK with the agent,
+ *  what it is given (Access), how it behaves (Behavior), and the occasional
+ *  tools you set up once and rarely revisit (Advanced). */
 export const AGENT_SECTION_GROUPS: readonly {
   group: AgentSection["group"];
   label: string | null;
@@ -70,6 +74,7 @@ export const AGENT_SECTION_GROUPS: readonly {
   { group: "chat", label: "Work" },
   { group: "access", label: "Access" },
   { group: "behavior", label: "Behavior" },
+  { group: "advanced", label: "Advanced" },
 ] as const;
 
 export const AGENT_SECTIONS: readonly AgentSection[] = [
@@ -116,17 +121,6 @@ export const AGENT_SECTIONS: readonly AgentSection[] = [
   // GIVEN, beside the connections it can reach.
   { section: "models", title: "Models", icon: Cpu, group: "access" },
   {
-    // A shell on the agent's computer (SSH) is the other
-    // way IN — an Access entry. Hosted-only (a BYO agent has no computer) and
-    // instance-gated: only deployments with the SSH front door show it.
-    section: "ssh",
-    title: "SSH",
-    icon: Terminal,
-    group: "access",
-    hostedOnly: true,
-    instanceGated: "ssh",
-  },
-  {
     section: "instructions",
     title: "Instructions",
     icon: ScrollText,
@@ -154,6 +148,36 @@ export const AGENT_SECTIONS: readonly AgentSection[] = [
     title: "Memory",
     icon: Brain,
     group: "behavior",
+    hostedOnly: true,
+  },
+  // Advanced: optional, technical tools you set up once, kept out of the
+  // everyday clusters above.
+  {
+    // A shell on the agent's computer. Hosted-only (a BYO agent has no
+    // computer) and instance-gated: only deployments with the SSH front door
+    // show it.
+    section: "ssh",
+    title: "SSH",
+    icon: Terminal,
+    group: "advanced",
+    hostedOnly: true,
+    instanceGated: "ssh",
+  },
+  {
+    // Inbound webhooks: an external app's event triggers the agent.
+    section: "webhooks",
+    title: "Webhooks",
+    icon: Webhook,
+    group: "advanced",
+    hostedOnly: true,
+  },
+  {
+    // Test questions with known answers, run against the live agent after
+    // a change: the agent's regression tests.
+    section: "evals",
+    title: "Evals",
+    icon: FlaskConical,
+    group: "advanced",
     hostedOnly: true,
   },
 ] as const;

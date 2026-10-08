@@ -70,7 +70,7 @@ jobs:
         id: appversion
         run: echo "value=$(jq -r .version package.json)" >> "$GITHUB_OUTPUT"
 
-      # The agent image is two images (#1246 2a): docker/agent-base.Dockerfile
+      # The agent image is two images: docker/agent-base.Dockerfile
       # is the OS surface, built here first for this arch and pushed by digest
       # to its own name, then handed to the agent build through the one arg
       # the Dockerfile exposes. By digest, never by tag: a published agent
@@ -244,3 +244,84 @@ jobs:
       - name: Inspect image
         run: |
           docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-agent-base:${{ steps.meta.outputs.version }}
+
+  # The Helm chart, pushed as an OCI artifact beside the images it pulls
+  # (oci://ghcr.io/onecli/charts/onecli) and signed with cosign keyless
+  # (Sigstore, GitHub OIDC). Both chart version and appVersion are stamped
+  # from the tag, so `helm install ... --version 2.11.0` pulls the 2.11.0
+  # images: one version to reason about. Waits for every image manifest so
+  # a chart version never exists before the images it pulls do.
+  #
+  # ONE-TIME after the first run: GHCR creates the `charts/onecli` package
+  # PRIVATE (every package a workflow creates starts that way; the image
+  # packages were flipped once, by hand). Open
+  # https://github.com/orgs/onecli/packages/container/charts%2Fonecli/settings
+  # and set the visibility to Public, or `helm pull` fails with 403 for
+  # everyone outside the org.
+  chart:
+    name: chart (oci)
+    if: github.repository == 'onecli/onecli'
+    runs-on: ubuntu-latest
+    needs: [merge, merge-agent-base]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: v3.21.4
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4
+
+      - name: Resolve chart version
+        id: version
+        # The tag is `v<semver>`; the chart takes the semver verbatim.
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Lint
+        run: |
+          helm lint charts/onecli \
+            --set externalUrl=https://onecli.example.com \
+            --set secrets.existingSecret=onecli-secrets
+
+      - name: Package
+        run: |
+          helm package charts/onecli \
+            --version "${{ steps.version.outputs.value }}" \
+            --app-version "${{ steps.version.outputs.value }}" \
+            --destination /tmp/chart
+
+      - name: Log in to the Container registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} \
+            --username ${{ github.actor }} --password-stdin
+
+      - name: Push
+        id: push
+        run: |
+          out=$(helm push /tmp/chart/onecli-${{ steps.version.outputs.value }}.tgz \
+            oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts 2>&1)
+          echo "$out"
+          digest=$(sed -n 's/^Digest: //p' <<< "$out")
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Sign (cosign keyless)
+        run: |
+          cosign sign --yes \
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/charts/onecli@${{ steps.push.outputs.digest }}
+
+      - name: Verify
+        run: |
+          cosign verify \
+            --certificate-identity-regexp '^https://github.com/${{ github.repository }}/' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/charts/onecli@${{ steps.push.outputs.digest }}
+          helm show chart oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts/onecli \
+            --version "${{ steps.version.outputs.value }}"

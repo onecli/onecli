@@ -51,6 +51,15 @@ struct Cli {
     /// image healthcheck run without curl/wget in the runtime image.
     #[arg(long)]
     healthcheck: bool,
+
+    /// Mint the gateway CA into `<data-dir>/gateway/` (`ca.key` + `ca.pem`,
+    /// the same files a first boot would create) and exit without starting
+    /// the proxy. Refuses to overwrite an existing CA. For deployments that
+    /// keep the CA in a secret store rather than on the gateway's disk (the
+    /// Helm chart, Secrets Manager): mint once, store the two files, hand them
+    /// back through `GATEWAY_CA_KEY` / `GATEWAY_CA_CERT`. Needs no database.
+    #[arg(long)]
+    generate_ca: bool,
 }
 
 /// Cap on the final telemetry flush, inside the overall shutdown budget.
@@ -84,6 +93,12 @@ async fn main() -> Result<()> {
     // after the rustls provider install above (reqwest needs it). Exits.
     if cli.healthcheck {
         run_healthcheck(cli.port).await;
+    }
+
+    // CA minting: before the tracing stack and before any config/DB work, so
+    // it needs nothing but a writable --data-dir. Exits.
+    if cli.generate_ca {
+        run_generate_ca(&expand_tilde(&cli.data_dir)).await;
     }
 
     // Initialize logging — JSON for production (log aggregators), text for dev
@@ -318,6 +333,24 @@ fn database_url_from_parts(host: &str, port: &str, user: &str, pass: &str, name:
     let user = utf8_percent_encode(user, NON_ALPHANUMERIC);
     let pass = utf8_percent_encode(pass, NON_ALPHANUMERIC);
     format!("postgresql://{user}:{pass}@{host}:{port}/{name}")
+}
+
+/// `onecli-gateway --generate-ca`: mint the CA into the data dir's on-disk
+/// layout and exit. Prints the two paths on success (never the key) so a
+/// wrapper can pick the files up; exits 1 with the reason on stderr otherwise.
+/// The explicit exits matter: the release profile is panic=abort.
+async fn run_generate_ca(data_dir: &Path) -> ! {
+    match CertificateAuthority::generate_into(data_dir).await {
+        Ok((key_path, cert_path)) => {
+            println!("{}", key_path.display());
+            println!("{}", cert_path.display());
+            std::process::exit(0);
+        }
+        Err(error) => {
+            eprintln!("generate-ca: {error:#}");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Self-probe for container healthchecks (`onecli-gateway --healthcheck`):

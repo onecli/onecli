@@ -97,10 +97,12 @@ test("caddy: the dashboard matcher covers exactly the dashboard's /auth pages", 
   }
 });
 
-test("caddy: only page loads reach the dashboard; form POSTs reach the api", () => {
-  // better-auth answers POST /auth/reset-password: a method-blind matcher
-  // would send the reset form's submit to the dashboard.
-  assert.deepEqual([...caddyMethods].sort(), ["GET", "HEAD"]);
+test("caddy: the dashboard matcher is by path only and comes before the api's /auth", () => {
+  // The dashboard forwards the reset form's POST to the api itself (the web
+  // proxy's apiFormSubmitOnPagePath), so the example needs no method rule.
+  // A method rule here would be a regression: Ingress-style routers cannot
+  // express one, and the docs must show the shape every edge can copy.
+  assert.deepEqual(caddyMethods, [], "the Caddy matcher grew a method rule");
   const matcherAt = CADDY.indexOf("handle @dashboard_auth");
   assert.ok(matcherAt >= 0, "@dashboard_auth is defined but never handled");
   assert.ok(
@@ -147,16 +149,30 @@ test("nginx: the dashboard carve-out covers exactly the dashboard's /auth pages"
   }
 });
 
-test("nginx: only page loads reach the dashboard; form POSTs reach the api", () => {
+test("nginx: the dashboard carve-out is by path only, every method to the dashboard", () => {
   const body = nginxCarveOut[2];
-  assert.match(
+  assert.doesNotMatch(
     body,
-    /if \(\$request_method !~ \^\(GET\|HEAD\)\$\) \{\s*proxy_pass http:\/\/127\.0\.0\.1:10256;/,
+    /\$request_method/,
+    "the nginx carve-out grew a method rule (the dashboard forwards submits itself)",
   );
-  assert.match(
-    body,
-    new RegExp(`\\}\\s*proxy_pass http://127\\.0\\.0\\.1:${WEB};`),
-  );
+  assert.match(body, new RegExp(`proxy_pass http://127\\.0\\.0\\.1:${WEB};`));
+  assert.doesNotMatch(body, new RegExp(`127\\.0\\.0\\.1:${API}`));
+});
+
+// ── the forward both examples now rely on ────────────────────────────────
+
+test("the dashboard forwards non-page-load methods on its page paths to the api", () => {
+  // The examples above are only correct because proxy.ts rewrites a POST on
+  // a dashboard page path to the api. Pin the two sides together: should the
+  // forward go, this test fails before a self-host copies a broken example.
+  const PROXY = read("apps/web/src/proxy.ts");
+  assert.match(PROXY, /const apiFormSubmitOnPagePath = /);
+  assert.match(PROXY, /NextResponse\.rewrite\(apiTarget\)/);
+  assert.match(PROXY, /getApiInternalUrl\(\)/);
+  // And compose hands the dashboard the in-network api address it needs.
+  const COMPOSE = read("docker/docker-compose.yml");
+  assert.match(COMPOSE, /API_INTERNAL_URL: http:\/\/api:10256/);
 });
 
 test("nginx: serves HTTP/2 (HTTP/1.1 sends the sign-in pages into a session-fetch burst)", () => {

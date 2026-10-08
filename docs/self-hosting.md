@@ -35,6 +35,37 @@ Open **http://localhost:10254**, create your account, then create an agent,
 store a model key, grant it to the agent, and start talking. (Keep
 `SECRET_ENCRYPTION_KEY` safe — it encrypts your stored secrets.)
 
+## Kubernetes (Helm)
+
+To self-host on Kubernetes, install the Helm chart at
+`oci://ghcr.io/onecli/charts/onecli`. It is published with every release,
+beside the images it pulls and with the same version number. It runs the
+same images as compose; hosted agents become one Job + PVC per sandbox in a
+fenced `onecli-sandboxes` namespace, with no Docker daemon anywhere. Amazon
+EKS is the reference platform; any Kubernetes 1.30+ with a
+NetworkPolicy-enforcing CNI works.
+
+```sh
+kubectl create namespace onecli
+kubectl -n onecli create secret generic onecli-secrets \
+  --from-literal=BETTER_AUTH_SECRET="$(head -c 32 /dev/urandom | base64)" \
+  --from-literal=SECRET_ENCRYPTION_KEY="$(head -c 32 /dev/urandom | base64)" \
+  --from-literal=GATEWAY_INTERNAL_SECRET="$(head -c 32 /dev/urandom | base64)" \
+  --from-literal=RUNNER_TOKEN="rnr_$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+helm install onecli oci://ghcr.io/onecli/charts/onecli --namespace onecli \
+  --set externalUrl=https://onecli.example.com \
+  --set secrets.existingSecret=onecli-secrets \
+  --set httpRoute.enabled=true --set 'httpRoute.parentRefs[0].name=my-gateway'
+```
+
+That is an evaluation install on the chart's bundled PostgreSQL. For
+production, bring your own database (`database.enabled=false` and
+`database.external.existingSecret`). The chart's
+[README](../charts/onecli/README.md) covers secrets, the database, routing
+(Gateway API or Ingress), hosted agents and the fence, EKS prerequisites,
+upgrades, and Enterprise features. Every parameter, with its default and a
+description, is in [`values.yaml`](../charts/onecli/values.yaml).
+
 ## Upgrading
 
 Re-run the front door you installed with. Both refresh every image and then
@@ -177,9 +208,10 @@ URL people open OneCLI at. Every other address derives from it by one rule:
   TLS and routes `/v1`, `/auth` and `/scim/v2` to the api (`:10256`) and
   `/gw/*` (prefix-stripped) to the gateway (`:10255`); everything else goes
   to the dashboard (`:10254`). One exception: the dashboard's sign-in pages
-  also live under `/auth`, so page loads (`GET`/`HEAD`) of those pages go to
-  the dashboard. See [Reverse proxy](#reverse-proxy-proxy-mode) for
-  configs that handle it.
+  also live under `/auth`, so those page paths go to the dashboard (by path
+  only; the dashboard forwards the one form submit on them to the api
+  itself). See [Reverse proxy](#reverse-proxy-proxy-mode) for configs that
+  handle it.
 
 The cookie `Secure` flag, OAuth redirect URIs, the CLI's api-host, install
 snippets, emails, Slack buttons, and the links the gateway hands agents all
@@ -207,6 +239,12 @@ it), `API_URL`/`GATEWAY_API_URL` remain per-origin overrides, and
 `GATEWAY_BASE_URL` still feeds the agent proxy address under its new name,
 `ONECLI_AGENT_PROXY_ADDRESS`.
 
+Two more are internal, not advertised: `GATEWAY_INTERNAL_URL` (where the
+api and dashboard reach the gateway for cache flushes) and `API_INTERNAL_URL`
+(where the dashboard reaches the api to forward form submits that land on
+its own sign-in page paths). Both default to the public origin, which is
+right on a single host; compose points them at the service names.
+
 ### Tunnel access (no ingress)
 
 Services bind to localhost (or the docker bridge) by default, so a VM with no
@@ -227,19 +265,20 @@ target in `-L`.
 `/auth` is shared. The api serves the sign-in endpoints under it (sign-in,
 sign-up, sessions, the OAuth callback), and the dashboard serves its sign-in
 pages there: `/auth/login`, `/auth/signup`, `/auth/cli`,
-`/auth/forgot-password` and `/auth/reset-password`. Send page loads
-(`GET`/`HEAD`) of those paths to the dashboard and everything else under
-`/auth` to the api. The method check matters: the dashboard's reset-password
-form submits a `POST` to the same `/auth/reset-password` path, and the api
-answers it. Routing all of `/auth` to the api returns 404 for the sign-in
-pages.
+`/auth/forgot-password` and `/auth/reset-password`. Send those five paths
+(and anything under `/auth/login/`) to the dashboard and everything else
+under `/auth` to the api. The rule is by path only: the one form that
+submits to a page path (the reset-password form posts to
+`/auth/reset-password`, which the api answers) is forwarded to the api by
+the dashboard itself, server-side over `API_INTERNAL_URL` (compose sets it;
+unset, the dashboard uses the public api origin). Routing all of `/auth` to
+the api returns 404 for the sign-in pages.
 
 Caddy:
 
 ```caddy
 onecli.example.com {
     @dashboard_auth {
-        method GET HEAD
         path /auth/login /auth/login/* /auth/signup /auth/cli /auth/forgot-password /auth/reset-password
     }
     handle @dashboard_auth {
@@ -289,9 +328,6 @@ server {
     proxy_set_header X-Forwarded-For $remote_addr;
 
     location ~ ^/auth/(login(/.*)?|signup|cli|forgot-password|reset-password)$ {
-        if ($request_method !~ ^(GET|HEAD)$) {
-            proxy_pass http://127.0.0.1:10256;
-        }
         proxy_pass http://127.0.0.1:10254;
     }
     location /v1/ { proxy_pass http://127.0.0.1:10256; proxy_buffering off; }
