@@ -301,10 +301,17 @@ jobs:
             --app-version "${{ steps.version.outputs.value }}" \
             --destination /tmp/chart
 
+      # docker/login-action, like the image jobs, not `helm registry login`:
+      # helm writes its own registry config, which cosign never reads, so
+      # the push succeeded and the signature upload got UNAUTHORIZED
+      # (release 2.11.1). Docker's credential store is read by both (helm
+      # falls back to it).
       - name: Log in to the Container registry
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} \
-            --username ${{ github.actor }} --password-stdin
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push
         id: push

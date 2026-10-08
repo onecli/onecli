@@ -150,3 +150,20 @@ test("cosign-installer is pinned to an exact v4 release tag", () => {
     `cosign-installer@${refs[0]} is not an exact v4.x.y tag`,
   );
 });
+
+// `helm registry login` writes helm's own registry config, which cosign
+// does not read: the chart pushed and the signature upload came back
+// UNAUTHORIZED (release 2.11.1). docker/login-action writes the Docker
+// credential store, which helm falls back to and cosign reads, so one
+// login serves both tools.
+test("the chart job logs in through docker/login-action, never helm registry login", () => {
+  const chart = jobBlocks(publishYml).find(({ name }) => name === "chart");
+  assert.ok(chart, "publish.yml has a chart job");
+  const steps = chart.body
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+  assert.doesNotMatch(steps, /helm registry login/);
+  assert.match(steps, /uses: docker\/login-action@v\d+/);
+  assert.match(steps, /registry: \$\{\{ env\.REGISTRY \}\}/);
+});
