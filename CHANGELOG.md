@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.11.2](https://github.com/onecli/onecli/compare/v2.11.1...v2.11.2) (2026-10-08)
+
+
+### Bug Fixes
+
+* **publish:** log the chart job in through docker/login-action so cosign can sign ([#609](https://github.com/onecli/onecli/issues/609)) ([998e1fa](https://github.com/onecli/onecli/commit/998e1fa06c779ec0673680589d967c9d709990f0))
+
 ## [2.11.1](https://github.com/onecli/onecli/compare/v2.11.0...v2.11.1) (2026-10-08)
 
 
