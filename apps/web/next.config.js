@@ -42,6 +42,22 @@ const devGatewayUrl = (
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "standalone",
+  // `/settings` has no page of its own — it redirects to the first settings
+  // section. Do it at the routing layer instead of an in-render server
+  // `redirect()` in the page, which throws during render and can trip a React
+  // hook-count mismatch (#310) in Next's AppRouter on client soft-navigation.
+  // Cloud namespaces settings under /org/<id>, so this is OSS-only.
+  async redirects() {
+    return isCloud
+      ? []
+      : [
+          {
+            source: "/settings",
+            destination: "/settings/instance",
+            permanent: false,
+          },
+        ];
+  },
   poweredByHeader: false,
   // Cloud edition: the edge in front of it compresses. Onprem prod: Next.js
   // compresses.
