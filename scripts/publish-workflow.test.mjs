@@ -134,3 +134,19 @@ test("the latest tag is gated off prerelease refs", () => {
   );
   assert.doesNotMatch(publishYml, /type=raw,value=latest\s*$/m);
 });
+
+// sigstore/cosign-installer publishes floating major tags only up to v3.
+// `@v4` does not exist, so the chart job dies in "Set up job" before any
+// step runs (release 2.11.0). A tag-push job runs nowhere else first, so
+// this is the only gate between a floating pin and a broken release.
+test("cosign-installer is pinned to an exact v4 release tag", () => {
+  const refs = [
+    ...publishYml.matchAll(/uses: sigstore\/cosign-installer@(\S+)/g),
+  ].map((m) => m[1]);
+  assert.equal(refs.length, 1, "the chart job installs cosign exactly once");
+  assert.match(
+    refs[0],
+    /^v4\.\d+\.\d+$/,
+    `cosign-installer@${refs[0]} is not an exact v4.x.y tag`,
+  );
+});

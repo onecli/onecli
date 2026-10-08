@@ -277,8 +277,11 @@ jobs:
         with:
           version: v3.21.4
 
+      # Exact tag on purpose: sigstore publishes floating majors only up to
+      # v3; `@v4` does not resolve and fails the job at "Set up job"
+      # (release 2.11.0). publish-workflow.test.mjs pins the exact form.
       - name: Install cosign
-        uses: sigstore/cosign-installer@v4
+        uses: sigstore/cosign-installer@v4.1.2
 
       - name: Resolve chart version
         id: version
