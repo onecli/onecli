@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.11.0](https://github.com/onecli/onecli/compare/v2.10.0...v2.11.0) (2026-10-08)
+
+
+### Features
+
+* Helm chart for Kubernetes self-hosting, agent webhooks, evals and run history ([#605](https://github.com/onecli/onecli/issues/605)) ([9a730fb](https://github.com/onecli/onecli/commit/9a730fb592671b49654be18c62204dfa8d298a4d))
+
 ## [2.10.0](https://github.com/onecli/onecli/compare/v2.9.0...v2.10.0) (2026-10-07)
 
 
