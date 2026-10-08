@@ -106,4 +106,21 @@ describe("isLlmHost", () => {
     expect(isLlmHost("generativelanguage.googleapis.com")).toBe(true);
     expect(isLlmHost("gmail.googleapis.com")).toBe(false);
   });
+
+  it("rejects adversarial domains containing provider names", () => {
+    expect(isLlmHost("not-anthropic.com")).toBe(false);
+    expect(isLlmHost("anthropic.com.evil.test")).toBe(false);
+    expect(isLlmHost("evil-openai.com")).toBe(false);
+    expect(isLlmHost("openai.com.attacker.com")).toBe(false);
+    expect(isLlmHost("mygroq.com")).toBe(false);
+    expect(isLlmHost("fakeopenrouter.ai")).toBe(false);
+    expect(isLlmHost("deepseek.com.example.org")).toBe(false);
+    expect(isLlmHost("notchatgpt.com")).toBe(false);
+  });
+
+  it("matches subdomains of LLM providers", () => {
+    expect(isLlmHost("beta.openai.com")).toBe(true);
+    expect(isLlmHost("sub.api.deepseek.com")).toBe(true);
+    expect(isLlmHost("CHATGPT.COM")).toBe(true);
+  });
 });
