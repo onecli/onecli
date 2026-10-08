@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.12.0](https://github.com/onecli/onecli/compare/v2.11.2...v2.12.0) (2026-10-08)
+
+
+### Features
+
+* open tunnel lane for browsers, Runs and Network tabs in Activity ([#611](https://github.com/onecli/onecli/issues/611)) ([2174a54](https://github.com/onecli/onecli/commit/2174a54d1d48b26c0459bd612625584092a1c5c2))
+
 ## [2.11.2](https://github.com/onecli/onecli/compare/v2.11.1...v2.11.2) (2026-10-08)
 
 
