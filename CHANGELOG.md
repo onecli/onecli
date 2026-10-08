@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.11.1](https://github.com/onecli/onecli/compare/v2.11.0...v2.11.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* **publish:** pin cosign-installer to an exact v4 tag so the chart job can start ([#607](https://github.com/onecli/onecli/issues/607)) ([d7c7c5f](https://github.com/onecli/onecli/commit/d7c7c5f8b25b971097d53763077de9e4705341bb))
+
 ## [2.11.0](https://github.com/onecli/onecli/compare/v2.10.0...v2.11.0) (2026-10-08)
 
 
