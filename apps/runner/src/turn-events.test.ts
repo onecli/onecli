@@ -374,6 +374,25 @@ describe("size is bounded, not just count", () => {
     expect(event.output.includes(String.fromCharCode(0))).toBe(false);
   });
 
+  it("never cuts an emoji in half at the truncation limit", () => {
+    // A lone high surrogate serializes as "\ud83d", which jsonb refuses just
+    // like a NUL, so the whole batch would be lost.
+    const { posts, collector } = collect();
+    collector.add("sb-1", "cv-1", "t1", {
+      type: "tool.finished",
+      callId: "c1",
+      name: "cat",
+      output: `${"a".repeat(MAX_EVENT_TEXT_CHARS - 1)}😀 and more`,
+    });
+    collector.flush("t1");
+
+    const [event] = flatEvents(posts);
+    if (event?.type !== "tool.finished")
+      throw new Error("expected a tool event");
+    expect(event.output).toContain("truncated");
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(event.output)).toBe(false);
+  });
+
   it("leaves ordinary text completely alone", () => {
     const { posts, collector } = collect();
     collector.add("sb-1", "cv-1", "t1", text("a normal answer"));
