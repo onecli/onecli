@@ -96,7 +96,14 @@ const filesField = z
   .max(MAX_FILES_PER_SKILL)
   .refine((files) => new Set(files.map((f) => f.path)).size === files.length, {
     message: "File paths must be unique within a skill",
-  });
+  })
+  // `refs` and `refs/api.md` cannot both exist on disk: one path would have
+  // to be a file and a folder at once.
+  .refine(
+    (files) =>
+      !files.some((a) => files.some((b) => b.path.startsWith(`${a.path}/`))),
+    { message: "A file path cannot also be the folder of another file" },
+  );
 
 const totalWithinBudget = (body: {
   content?: string;
