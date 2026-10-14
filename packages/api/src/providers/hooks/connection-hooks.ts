@@ -16,6 +16,9 @@ const slot = createEditionSlot<ConnectionHooks>(
   noopConnectionHooks,
 );
 
+/** Test seam — the uniform slot override (`null` resets to the edition default). */
+export const initConnectionHooks = (h: ConnectionHooks | null) => slot.init(h);
+
 /** Package-internal: the edition-defaults injector. Not exported from the barrel. */
 export const setDefaultConnectionHooks = (h: ConnectionHooks) =>
   slot.setCloudDefault(h);
