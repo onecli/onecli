@@ -501,6 +501,15 @@ jobs:
       # The hosted-agents spine on the same infrastructure: real api-server
       # child, real runner, real sandbox containers. Runs after gateway-e2e so
       # a proxy-surface failure is never misattributed to the hosted path.
+      #
+      # The in-sandbox scenarios reach the stub upstream by NAME: inside a
+      # container 127.0.0.1 is the container's own loopback, exempt from the
+      # proxy, so only a hostname travels to the gateway, which resolves it on
+      # the runner. One hosts line is that resolution (the suite verifies it).
+      - name: Map the hosted E2E stub upstream
+        if: steps.changes.outputs.e2e == 'true'
+        run: echo "127.0.0.1 upstream.e2e.test" | sudo tee -a /etc/hosts
+
       - name: Hosted E2E
         if: steps.changes.outputs.e2e == 'true'
         run: pnpm --filter @onecli/hosted-e2e test:e2e:no-build
