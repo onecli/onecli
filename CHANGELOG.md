@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.13.0](https://github.com/onecli/onecli/compare/v2.12.0...v2.13.0) (2026-10-14)
+
+
+### Features
+
+* Send now, live replies, workspace timezone, desktop browser, shared connections ([#613](https://github.com/onecli/onecli/issues/613)) ([6297366](https://github.com/onecli/onecli/commit/6297366dbe4b35f7176526a7399e30dd82eead43))
+
 ## [2.12.0](https://github.com/onecli/onecli/compare/v2.11.2...v2.12.0) (2026-10-08)
 
 
