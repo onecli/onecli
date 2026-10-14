@@ -116,6 +116,27 @@ describe("spawn + tail", () => {
     expect(p.tail).toContain("AB");
     expect(p.tail ?? "").not.toContain(String.fromCharCode(0));
   });
+
+  it("a multibyte character split across two pipe writes reaches the tail and pattern watches whole", async () => {
+    const { manager, sent } = rig();
+    // ✅ is E2 9C 85: the first two bytes and the last one arrive as
+    // separate chunks, so a per-chunk decode garbles both halves.
+    const id = startId(
+      manager.start(
+        {
+          command: "printf '\\342\\234'; sleep 0.3; printf '\\205 done\\n'",
+        },
+        null,
+      ),
+    );
+    manager.watch(
+      { processId: id, kind: "pattern", pattern: "✅ done", prompt: "go" },
+      null,
+    );
+    const p = await waitFor(sent, id, (x) => x.status === "exited");
+    expect(p.tail).toBe("✅ done\n");
+    expect(p.watches[0]?.status).toBe("triggered");
+  });
 });
 
 describe("exit detection", () => {
