@@ -7,6 +7,14 @@ export const gitlabPermissions: AppPermissionDefinition = {
       category: "read",
       tools: [
         {
+          id: "get_current_user",
+          name: "Get authenticated user",
+          description: "Get details for the authenticated GitLab user",
+          hostPattern: "gitlab.com",
+          pathPattern: "/api/v4/user",
+          method: "GET",
+        },
+        {
           id: "list_projects",
           name: "List projects",
           description: "List projects accessible to the authenticated user",
@@ -28,6 +36,7 @@ export const gitlabPermissions: AppPermissionDefinition = {
           description: "List issues in a project",
           hostPattern: "gitlab.com",
           pathPattern: "/api/v4/projects/*/issues",
+          aliasPatterns: ["/api/v4/issues"],
           method: "GET",
         },
         {
