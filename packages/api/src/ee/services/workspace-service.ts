@@ -14,6 +14,7 @@ import {
   workspaceAccessBindingArms,
 } from "./authorization-service";
 import { invalidateGatewayCacheForKeys } from "../../lib/gateway-invalidate";
+import { requestWorkspaceSandboxRespawn } from "../../services/sandbox-service";
 import {
   enqueueWorkspaceCleanup,
   processChannelCleanups,
@@ -405,6 +406,7 @@ const API_WORKSPACE_SELECT = {
   id: true,
   name: true,
   slug: true,
+  timezone: true,
   createdAt: true,
 } as const;
 
@@ -504,15 +506,15 @@ export const createOrgWorkspace = async (
 export const updateOrgWorkspace = async (
   organizationId: string,
   targetId: string,
-  input: { name?: string },
+  input: { name?: string; timezone?: string | null },
 ) => {
   const workspace = await db.workspace.findFirst({
     where: { id: targetId, organizationId },
-    select: { id: true },
+    select: { id: true, timezone: true },
   });
   if (!workspace) throw new ServiceError("NOT_FOUND", "Workspace not found");
 
-  const data: Record<string, unknown> = {};
+  const data: { name?: string; slug?: string; timezone?: string | null } = {};
   if (input.name !== undefined) {
     const name = input.name.trim();
     const slug = slugify(name) || "workspace";
@@ -531,12 +533,22 @@ export const updateOrgWorkspace = async (
     data.name = name;
     data.slug = slug;
   }
+  // The zone is baked into every hosted agent's container environment at
+  // create, so a live sandbox keeps running the old one until it is
+  // replaced: the same treatment a model change gets (`updateAgent`), and
+  // under the same no-op guard. A settings form that re-sends the stored
+  // value must not cost every agent in the workspace its container.
+  const timezoneChanged =
+    input.timezone !== undefined && input.timezone !== workspace.timezone;
+  if (timezoneChanged) data.timezone = input.timezone;
 
-  return db.workspace.update({
+  const updated = await db.workspace.update({
     where: { id: targetId },
     data,
     select: API_WORKSPACE_SELECT,
   });
+  if (timezoneChanged) await requestWorkspaceSandboxRespawn(targetId);
+  return updated;
 };
 
 export const deleteOrgWorkspace = async (

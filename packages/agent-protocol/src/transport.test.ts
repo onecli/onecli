@@ -9,7 +9,10 @@ import {
   MAX_AGENT_CONNECTION_NAME_CHARS,
   MAX_AGENT_CONNECTIONS,
   MAX_SYNC_PART_BYTES,
+  SESSION_RESUME_BUDGET,
+  SESSION_RESUME_GRACE_MS,
   agentConnectionSchema,
+  sequencedFrameSchema,
   supervisorMessageSchema,
   syncFrameByteLength,
   workItemSchema,
@@ -158,6 +161,60 @@ describe("turn.deliver context", () => {
       someFutureField: "ignored",
     });
     expect(parsed).not.toHaveProperty("someFutureField");
+  });
+});
+
+/**
+ * SEND NOW on the supervisor wire: the follow-up and the run
+ * it waits on, nothing else.
+ */
+describe("turn.send_now", () => {
+  it("parses the ids, and refuses one without its target", () => {
+    const item = {
+      kind: "turn.send_now",
+      turnId: "f-1",
+      targetTurnId: "t-1",
+      conversationId: "conv-1",
+    };
+    expect(workItemSchema.parse(item)).toEqual(item);
+    expect(
+      workItemSchema.safeParse({ ...item, targetTurnId: undefined }).success,
+    ).toBe(false);
+  });
+});
+
+/**
+ * The steer's context: the "a new message arrived while you were working"
+ * frame a person's follow-up carries, under the same law as the turn's.
+ */
+describe("turn.message context", () => {
+  const base = {
+    kind: "turn.message",
+    turnId: "f-1",
+    targetTurnId: "t-1",
+    conversationId: "conv-1",
+    message: "also check the linter",
+  };
+
+  it("parses without context (an old control plane, an automation's follow-up)", () => {
+    expect(workItemSchema.parse(base)).not.toHaveProperty("context");
+  });
+
+  it("round-trips with context", () => {
+    const parsed = workItemSchema.parse({
+      ...base,
+      context: "[A new message arrived while you were working.]",
+    });
+    expect(parsed.kind === "turn.message" && parsed.context).toContain(
+      "new message",
+    );
+  });
+
+  it("rejects a context past its cap", () => {
+    expect(
+      workItemSchema.safeParse({ ...base, context: "x".repeat(16_001) })
+        .success,
+    ).toBe(false);
   });
 });
 
@@ -444,5 +501,85 @@ describe("the connections list on the sync frame", () => {
       host: worst.host,
     };
     expect(agentConnectionSchema.safeParse(legacy).success).toBe(true);
+  });
+});
+
+/**
+ * The resumable channel (runner restart survival). Three wire additions, each
+ * shaped so a STALE peer degrades to today's behaviour: an old supervisor
+ * never receives `session` (it drops the unknown kind), an old runner never
+ * receives an envelope (a supervisor only wraps frames once it HOLDS a
+ * session, which only a new runner hands out).
+ */
+describe("resumable channel wire", () => {
+  it("round-trips the session hand-off and the standalone ack", () => {
+    const session = workItemSchema.parse({
+      kind: "session",
+      credential: "v1.k1.deadbeef",
+      ack: 0,
+    });
+    expect(session).toEqual({
+      kind: "session",
+      credential: "v1.k1.deadbeef",
+      ack: 0,
+    });
+    expect(workItemSchema.parse({ kind: "ack", seq: 42 })).toEqual({
+      kind: "ack",
+      seq: 42,
+    });
+  });
+
+  it("refuses an empty credential and a negative or fractional ack", () => {
+    expect(
+      workItemSchema.safeParse({ kind: "session", credential: "", ack: 0 })
+        .success,
+    ).toBe(false);
+    expect(
+      workItemSchema.safeParse({ kind: "session", credential: "x", ack: -1 })
+        .success,
+    ).toBe(false);
+    expect(workItemSchema.safeParse({ kind: "ack", seq: 1.5 }).success).toBe(
+      false,
+    );
+  });
+
+  it("wraps a supervisor message in a sequenced envelope, and unwraps it", () => {
+    const inner = { kind: "ready", harness: "claude" } as const;
+    const envelope = sequencedFrameSchema.parse({ seq: 7, message: inner });
+    expect(envelope).toEqual({ seq: 7, message: inner });
+  });
+
+  it("an envelope is NOT a supervisor message: an old runner drops it whole rather than half-reading it", () => {
+    expect(
+      supervisorMessageSchema.safeParse({
+        seq: 7,
+        message: { kind: "ready", harness: "claude" },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("refuses an envelope whose seq is not a positive integer or whose message is not a frame", () => {
+    expect(
+      sequencedFrameSchema.safeParse({
+        seq: 0,
+        message: { kind: "ready", harness: "x" },
+      }).success,
+    ).toBe(false);
+    expect(
+      sequencedFrameSchema.safeParse({ seq: 1, message: { kind: "nope" } })
+        .success,
+    ).toBe(false);
+  });
+
+  it("derives the reconcile grace from the supervisor's own retry budget, so the two ends cannot drift", () => {
+    // 60 attempts, backoff doubling from 500 ms and capped at 15 s: the
+    // budget is dominated by the cap, so it is ~60 × 15 s. The grace must
+    // cover the WHOLE budget (a reconnect still inside it is not a death) and
+    // no more than one extra minute (past it, the supervisor has given up and
+    // the sandbox really is channelless).
+    const budgetMs =
+      SESSION_RESUME_BUDGET.maxAttempts * SESSION_RESUME_BUDGET.maxBackoffMs;
+    expect(SESSION_RESUME_GRACE_MS).toBeGreaterThanOrEqual(budgetMs);
+    expect(SESSION_RESUME_GRACE_MS).toBeLessThanOrEqual(budgetMs + 60_000);
   });
 });

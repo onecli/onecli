@@ -569,3 +569,119 @@ describe.skipIf(!PROOF_URL)(
     });
   },
 );
+
+describe.skipIf(!PROOF_URL)(
+  "a hosted agent's gateway token never reaches a person (real PostgreSQL)",
+  () => {
+    // Seeded directly: the rule is about what READS and ROTATIONS return, not
+    // about creation. A hosted agent's sandbox gets its token server-side;
+    // a BYO agent's customer must hold theirs to configure their runtime.
+    const HOSTED = `${P}token-hosted`;
+    const BYO = `${P}token-byo`;
+    const RUNNER = `${P}token-runner`;
+
+    const seed = async () => {
+      await db.runner.create({
+        data: {
+          id: RUNNER,
+          name: RUNNER,
+          token: `rnr_${RUNNER}`,
+          capabilities: {
+            maxSandboxes: 4,
+            backend: "docker",
+            homeDurability: "resident",
+          },
+          lastSeenAt: new Date(),
+        },
+      });
+      await db.agent.create({
+        data: {
+          id: HOSTED,
+          workspaceId: WORKSPACE,
+          name: HOSTED,
+          identifier: HOSTED,
+          accessToken: `aoc_${HOSTED}`,
+          kind: "hosted",
+          harness: "jcode",
+          sandbox: {
+            create: {
+              id: `${P}token-sbx`,
+              runnerId: RUNNER,
+              status: "running",
+            },
+          },
+        },
+      });
+      await db.agent.create({
+        data: {
+          id: BYO,
+          workspaceId: WORKSPACE,
+          name: BYO,
+          identifier: BYO,
+          accessToken: `aoc_${BYO}`,
+          kind: "byo",
+        },
+      });
+    };
+    const cleanup = async () => {
+      await db.sandbox.deleteMany({ where: { id: `${P}token-sbx` } });
+      await db.agent.deleteMany({ where: { id: { in: [HOSTED, BYO] } } });
+      await db.runner.deleteMany({ where: { id: RUNNER } });
+    };
+
+    it("lists a hosted agent WITHOUT its token, and a BYO agent with it", async () => {
+      await seed();
+      try {
+        const list = await agents.listAgents(WORKSPACE);
+        const hosted = list.find((a) => a.id === HOSTED);
+        const byo = list.find((a) => a.id === BYO);
+        expect(hosted).toBeDefined();
+        // Absent, not empty: a serialized response must not carry the key.
+        expect(hosted && "accessToken" in hosted).toBe(false);
+        expect(JSON.stringify(list)).not.toContain(`aoc_${HOSTED}`);
+        expect(byo?.accessToken).toBe(`aoc_${BYO}`);
+      } finally {
+        await cleanup();
+      }
+    });
+
+    it("rotates a hosted agent's token (and respawns it) without returning the new one", async () => {
+      await seed();
+      try {
+        const result = await agents.regenerateAgentToken(WORKSPACE, HOSTED);
+        expect(result).toEqual({ rotated: true });
+        const row = await db.agent.findUniqueOrThrow({
+          where: { id: HOSTED },
+          select: { accessToken: true },
+        });
+        // Rotated for real: the old token no longer authenticates.
+        expect(row.accessToken).not.toBe(`aoc_${HOSTED}`);
+        expect(row.accessToken).toMatch(/^aoc_[0-9a-f]{64}$/);
+        // The sandbox is told to pick the new one up: respawn re-provisions
+        // it, and the next start composes a payload with the new token.
+        const sandbox = await db.sandbox.findUniqueOrThrow({
+          where: { agentId: HOSTED },
+          select: { status: true },
+        });
+        expect(sandbox.status).toBe("unprovisioned");
+      } finally {
+        await cleanup();
+      }
+    });
+
+    it("still returns a rotated BYO token: the customer configures their runtime with it", async () => {
+      await seed();
+      try {
+        const result = await agents.regenerateAgentToken(WORKSPACE, BYO);
+        const row = await db.agent.findUniqueOrThrow({
+          where: { id: BYO },
+          select: { accessToken: true },
+        });
+        expect(result).toEqual({ accessToken: row.accessToken });
+        expect(row.accessToken).not.toBe(`aoc_${BYO}`);
+      } finally {
+        await cleanup();
+      }
+    });
+  },
+);

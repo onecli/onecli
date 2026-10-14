@@ -121,6 +121,12 @@ describe("SecretDialog provider guidance", () => {
       "Claude Subscription",
     ],
     ["a Console API key", "sk-ant-api03-", "API Key", "Anthropic API Key"],
+    [
+      "an identity-backed Console key",
+      "sk-ant-usr-",
+      "API Key",
+      "Anthropic API Key",
+    ],
   ])(
     "names %s by its kind: badge and auto-filled name",
     async (_name, prefix, badge, autoName) => {
@@ -140,8 +146,44 @@ describe("SecretDialog provider guidance", () => {
       expect(nameInput).toHaveValue(autoName);
       // No amber warning: the guidance hint is still the one showing.
       expect(screen.getByRole("status")).toHaveTextContent(
-        /Paste a subscription token from/,
+        /From claude setup-token, or an API key from the Claude Console/,
       );
+    },
+  );
+
+  it("names a TYPED subscription token by its final kind, not the API-key guess its `sk-ant-` stem allows", async () => {
+    renderDialog({ defaultType: "anthropic" });
+    const nameInput = screen.getByPlaceholderText(
+      "e.g. Anthropic Production Key",
+    );
+    await userEvent.clear(nameInput);
+    await userEvent.type(
+      screen.getByPlaceholderText("sk-ant-oat01-… or sk-ant-api03-…"),
+      `sk-ant-oat01-${"x".repeat(40)}`,
+    );
+
+    expect(nameInput).toHaveValue("Claude Subscription");
+  });
+
+  it.each([
+    ["anthropic", true],
+    ["openai", false],
+    ["generic", false],
+  ] as const)(
+    "%s: shows the Need help? guide link only for Anthropic",
+    (type, shown) => {
+      renderDialog({ defaultType: type });
+      const link = screen.queryByRole("link", { name: "Need help?" });
+      if (!shown) {
+        expect(link).not.toBeInTheDocument();
+        return;
+      }
+      expect(link).toHaveAttribute(
+        "href",
+        "https://onecli.sh/docs/integrations/anthropic",
+      );
+      expect(link).toHaveAttribute("target", "_blank");
+      expect(link).toHaveAttribute("rel", "noopener noreferrer");
     },
   );
 
@@ -151,6 +193,12 @@ describe("SecretDialog provider guidance", () => {
       "an Anthropic Admin key",
       `sk-ant-admin01-${"x".repeat(90)}`,
       /Admin API key, which can.t call Claude models/,
+    ],
+    [
+      "anthropic",
+      "a Claude OAuth refresh token",
+      `sk-ant-ort01-${"x".repeat(90)}`,
+      /refresh token, which can.t call Claude models/,
     ],
     [
       "anthropic",
@@ -188,12 +236,15 @@ describe("SecretDialog provider guidance", () => {
     },
   );
 
-  it("never badges an Anthropic Admin key as an API key: it is neither kind", async () => {
+  it.each([
+    ["an Anthropic Admin key", "sk-ant-admin01-"],
+    ["a Claude OAuth refresh token", "sk-ant-ort01-"],
+  ])("never badges %s: it is neither kind", async (_name, prefix) => {
     renderDialog({ defaultType: "anthropic" });
     await userEvent.click(
       screen.getByPlaceholderText("sk-ant-oat01-… or sk-ant-api03-…"),
     );
-    await userEvent.paste(`sk-ant-admin01-${"x".repeat(90)}`);
+    await userEvent.paste(`${prefix}${"x".repeat(90)}`);
 
     expect(screen.queryByText("Subscription")).not.toBeInTheDocument();
     expect(screen.queryByText("API Key")).not.toBeInTheDocument();

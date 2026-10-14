@@ -54,6 +54,7 @@ export const googleCalendar: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
     envDefaults: googleEnvDefaults,
   },
 };

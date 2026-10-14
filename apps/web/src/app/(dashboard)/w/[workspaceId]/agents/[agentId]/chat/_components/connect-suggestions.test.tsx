@@ -158,7 +158,7 @@ describe("ConnectorSuggestions card", () => {
     renderCard(GMAIL_CONNECT_URL);
     expect(
       screen.getByText(
-        /on for every agent in this workspace, with full access/,
+        /on for every agent in this workspace\. Its tools are allowed and anything else needs your approval \(an app with no tool list gets full access\)/,
       ),
     ).toBeInTheDocument();
   });
@@ -229,6 +229,87 @@ describe("ConnectorSuggestions card", () => {
     expect(
       screen.queryByRole("button", { name: "Manage Gmail for this agent" }),
     ).toBeNull();
+  });
+
+  const githubAccount = (
+    id: string,
+    githubOrgAccess?: Record<string, { reason: string }>,
+  ): Connection => ({
+    ...connectedGmail,
+    id,
+    provider: "github",
+    metadata: githubOrgAccess ? { githubOrgAccess } : null,
+  });
+
+  it("an org-access link names the organization and links to its fix steps", () => {
+    renderCard(
+      "https://app.onecli.sh/w/a/connections/apps/github?org_access=acme",
+      {
+        connections: [
+          githubAccount("conn-gh", { acme: { reason: "approval_required" } }),
+        ],
+        grantedConnectionIds: ["conn-gh"],
+      },
+    );
+    expect(screen.getByText(/Waiting for admin approval/)).toHaveTextContent(
+      "acme · Waiting for admin approval",
+    );
+    // Not the generic Connected row: no Reconnect / Manage doors.
+    expect(
+      screen.queryByRole("button", { name: "Reconnect GitHub" }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("link", { name: "Fix GitHub access for acme" }),
+    ).toHaveAttribute(
+      "href",
+      "/w/ws-1/connections/apps/github?org_access=acme",
+    );
+  });
+
+  it("an SSO refusal says sign-in, not approval", () => {
+    renderCard(
+      "https://app.onecli.sh/w/a/connections/apps/github?org_access=acme",
+      {
+        connections: [
+          githubAccount("conn-gh", { acme: { reason: "sso_required" } }),
+        ],
+      },
+    );
+    expect(screen.getByText(/SSO sign-in needed/)).toBeInTheDocument();
+    expect(screen.queryByText(/approval/)).toBeNull();
+  });
+
+  it("finds the refusal on whichever GitHub account recorded it", () => {
+    // The org refused the second account; the first is unaffected.
+    renderCard(
+      "https://app.onecli.sh/w/a/connections/apps/github?org_access=Acme",
+      {
+        connections: [
+          githubAccount("conn-personal"),
+          githubAccount("conn-work", { acme: { reason: "approval_required" } }),
+        ],
+      },
+    );
+    expect(
+      screen.getByRole("link", { name: "Fix GitHub access for acme" }),
+    ).toBeInTheDocument();
+  });
+
+  it("an org-access card from an older answer reads Connected once the org is cleared", () => {
+    // The gateway dropped acme's record (a reconnect, or the refused request
+    // went through): the old answer's card must not keep offering Fix Access.
+    renderCard(
+      "https://app.onecli.sh/w/a/connections/apps/github?org_access=acme",
+      {
+        connections: [githubAccount("conn-gh")],
+        grantedConnectionIds: ["conn-gh"],
+      },
+    );
+    expect(screen.queryByText(/admin approval/)).toBeNull();
+    expect(
+      screen.queryByRole("link", { name: "Fix GitHub access for acme" }),
+    ).toBeNull();
+    expect(screen.getByText(/Connected/)).toBeInTheDocument();
   });
 
   it("flips to Connected with Reconnect + Manage once a connection exists", () => {

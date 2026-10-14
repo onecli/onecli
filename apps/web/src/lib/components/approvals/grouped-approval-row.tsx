@@ -28,6 +28,10 @@ interface GroupRowLayout {
  * Contact <name>"), each leads with its own record, linked: that is what
  * the reviewer decides on. The rest are the first fields beside the title,
  * a first + last name read as one.
+ *
+ * After a record lead, a field is shown WITH its label ("Title: After"):
+ * the row already says which record, so a bare value would read like
+ * another name ("Batch Test04 · Batch Test") and hide what changes.
  */
 export const groupRowFields = (
   a: PendingApproval,
@@ -57,7 +61,10 @@ export const groupRowFields = (
           ...rest.filter((d) => d !== first && d !== last),
         ]
       : rest;
-  return [...lead, ...named].slice(0, ROW_FIELDS);
+  const labelled = lead.length
+    ? named.map((d) => ({ ...d, value: `${d.label}: ${d.value}` }))
+    : named;
+  return [...lead, ...labelled].slice(0, ROW_FIELDS);
 };
 
 const OUTCOME_BADGE: Record<

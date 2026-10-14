@@ -14,14 +14,12 @@ describe("ContactRowFrame", () => {
   it("no actions and no remove: no menu, column preserved", () => {
     render(
       <ContactRowFrame
-        label="Workspace members"
-        status={<span>Allowed</span>}
+        label="Alex Kim"
+        status={<span>Waiting in the bell</span>}
       />,
     );
     expect(screen.queryByRole("button", { name: /More for/ })).toBeNull();
-    expect(
-      screen.getByText("Workspace members").getAttribute("translate"),
-    ).toBe("no");
+    expect(screen.getByText("Alex Kim").getAttribute("translate")).toBe("no");
   });
 
   it("actions first, Remove last and destructive; Remove only calls back", async () => {
@@ -53,7 +51,7 @@ describe("ContactRowFrame", () => {
     render(
       <ContactRowFrame
         label="Ray"
-        status={<span>Asks first</span>}
+        status={<span>Asks you first</span>}
         actions={[
           {
             label: "View conversation",

@@ -11,6 +11,7 @@ import { CHECK_LABEL } from "./eval-copy";
 const DESCRIPTION: Record<EvalCheckKind, string> = {
   numeric: "Passes when any number in the answer is within 0.5%.",
   text: "Passes when every significant expected word appears.",
+  custom: "An AI judge checks the answer against your own success criteria.",
 };
 
 /**
@@ -31,7 +32,7 @@ export const CheckKindPicker = ({
   <div
     role="radiogroup"
     aria-labelledby={labelledBy}
-    className="grid gap-2 sm:grid-cols-2"
+    className="grid gap-2 sm:grid-cols-3"
     onKeyDown={(event) => {
       if (
         !["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp"].includes(event.key)

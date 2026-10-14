@@ -16,6 +16,8 @@ interface ContactRowFrameProps {
   label: string;
   /** Monospace for provider identifiers (#channel), plain for names. */
   mono?: boolean;
+  /** A quiet second line under the name (the provider handle). */
+  subtitle?: string | null;
   /** The row's standing decision: a badge, or a badge-as-trigger menu. */
   status: ReactNode;
   /**
@@ -29,7 +31,7 @@ interface ContactRowFrameProps {
     disabled?: boolean;
   }[];
   /** Opens the caller's confirm dialog; the frame never deletes. Omit for
-   *  rows nothing can remove (the members line). */
+   *  rows with nothing to remove (a pending ask, which the bell owns). */
   onRemove?: () => void;
   disabled?: boolean;
 }
@@ -45,6 +47,7 @@ interface ContactRowFrameProps {
 export const ContactRowFrame = ({
   label,
   mono = false,
+  subtitle = null,
   status,
   actions = [],
   onRemove,
@@ -53,11 +56,21 @@ export const ContactRowFrame = ({
   const hasMenu = actions.length > 0 || onRemove !== undefined;
   return (
     <div className="flex min-h-11 items-center gap-3 py-1.5">
-      <span
-        className={`min-w-0 flex-1 truncate text-sm ${mono ? "font-mono" : ""}`}
-        translate="no"
-      >
-        {label}
+      <span className="min-w-0 flex-1">
+        <span
+          className={`block truncate text-sm ${mono ? "font-mono" : ""}`}
+          translate="no"
+        >
+          {label}
+        </span>
+        {subtitle ? (
+          <span
+            className="text-muted-foreground block truncate text-xs"
+            translate="no"
+          >
+            {subtitle}
+          </span>
+        ) : null}
       </span>
       <div className="flex shrink-0 items-center gap-1">
         {status}

@@ -32,10 +32,11 @@ export const connectIntegrationSchema = z
   })
   .strict();
 
-/** POST /v1/org/channels/:provider/finish-install/inspect — the Slack
- * authorization code parked by a marketplace install. Opaque to us; bounded
- * because it rides a URL. */
-export const inspectInstallSchema = z
+/** POST /v1/org/channels/:provider/agent-install and
+ * POST /v1/org/channels/:provider/finish-install/inspect: the provider's
+ * authorization code from an install begun on the provider's side, parked
+ * on /slack/installed. Opaque to us; bounded because it rides a URL. */
+export const installCodeSchema = z
   .object({
     code: z.string().trim().min(1).max(2_000),
   })

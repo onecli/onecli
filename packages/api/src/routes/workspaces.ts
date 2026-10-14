@@ -128,7 +128,7 @@ export const workspaceRoutes = () => {
         action: AUDIT_ACTIONS.UPDATE,
         service: AUDIT_SERVICES.WORKSPACE,
         source: AUDIT_SOURCE.API,
-        metadata: { name: p.name },
+        metadata: { name: p.name, timezone: p.timezone },
       }),
     );
     return c.json(workspace);

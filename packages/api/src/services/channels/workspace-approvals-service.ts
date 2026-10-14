@@ -23,6 +23,11 @@ export interface PendingActionApprovalItem {
    * registry's answer, the same one the Slack card asks). False = the row
    * offers approve/reject only. */
   offersAlwaysAllow: boolean;
+  /** The conversation the asking turn ran in, when the hold is anchored on
+   * one: where the agent's chat renders the card inline. Null for holds
+   * with no asking turn (e.g. the receiving side of a cross-workspace
+   * agent message) - those live in the bell only. */
+  conversationId: string | null;
   /** ISO timestamps. */
   createdAt: string;
   expiresAt: string;
@@ -66,6 +71,7 @@ export const listWorkspacePendingChannelApprovals = async (
         agentId: true,
         action: true,
         summary: true,
+        conversationId: true,
         createdAt: true,
         expiresAt: true,
         agent: { select: { name: true } },
@@ -96,6 +102,7 @@ export const listWorkspacePendingChannelApprovals = async (
         agentName: a.agent.name,
         summary: a.summary,
         offersAlwaysAllow: actionSupportsAlwaysAllow(a.action),
+        conversationId: a.conversationId,
         createdAt: a.createdAt.toISOString(),
         expiresAt: a.expiresAt.toISOString(),
       }),

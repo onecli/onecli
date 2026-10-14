@@ -1,5 +1,9 @@
 import { getApp } from "@onecli/api/apps/registry";
 import type { AppDefinition } from "@onecli/api/apps/types";
+import {
+  GITHUB_OAUTH_PROVIDER,
+  isGitHubOrgLogin,
+} from "@onecli/api/lib/github-org-access";
 
 /**
  * Recognition of the gateway's "connect this app" links in agent output —
@@ -7,7 +11,7 @@ import type { AppDefinition } from "@onecli/api/apps/types";
  * renderer (which suppresses them in the chat) and the ConnectorSuggestions
  * card (which renders them as the call to action).
  *
- * THREE gateway refusals mint dashboard links the card can absorb:
+ * FOUR gateway refusals mint dashboard links the card can absorb:
  * - `app_not_connected` → `…/connections?connect=<provider>&source=agent…`
  *   (nothing connected: the card's Connect button opens the OAuth popup)
  * - `access_restricted` → `…/connections/apps/<provider>` (an account exists
@@ -16,6 +20,9 @@ import type { AppDefinition } from "@onecli/api/apps/types";
  * - `connection_needs_reconnect` → `…/connections/apps/<provider>?reconnect=<id>`
  *   (the provider rejected that account's saved login: the card's Reconnect
  *   button re-authorizes exactly that account in the OAuth popup)
+ * - `github_org_access_required` → `…/connections/apps/github?org_access=<org>`
+ *   (one GitHub organization refused the account: the card names the
+ *   organization and links to the account page, where its fix steps live)
  *
  * Only an app connection the registry can name gets the app-page link. Every
  * other restricted credential (a custom secret, an LLM key, an app connection
@@ -30,10 +37,13 @@ export interface ConnectSuggestion {
   agentName?: string;
   /** Why the gateway minted the link — decides the card's action verb:
    * "connect" opens the OAuth popup, "attach" opens the Manage dialog,
-   * "reconnect" re-authorizes `connectionId` in the OAuth popup. */
-  kind: "connect" | "attach" | "reconnect";
+   * "reconnect" re-authorizes `connectionId` in the OAuth popup,
+   * "org_access" sends the user to the fix steps for `org`. */
+  kind: "connect" | "attach" | "reconnect" | "org_access";
   /** The account to re-authorize (`reconnect` only). */
   connectionId?: string;
+  /** The GitHub organization that refused the account (`org_access` only). */
+  org?: string;
 }
 
 /** Connection ids are uuids today; bounded and charset-limited so a crafted
@@ -79,6 +89,16 @@ export const parseConnectLink = (href: string): ConnectSuggestion | null => {
         kind: "reconnect",
         connectionId: reconnect,
       };
+    }
+    // github_org_access_required: the GitHub app page, naming the
+    // organization. Only the GitHub OAuth app mints it.
+    const org = url.searchParams.get("org_access");
+    if (
+      attachMatch[1] === GITHUB_OAUTH_PROVIDER &&
+      org &&
+      isGitHubOrgLogin(org)
+    ) {
+      return { provider: attachMatch[1], kind: "org_access", org };
     }
     return { provider: attachMatch[1], kind: "attach" };
   }

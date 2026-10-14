@@ -14,6 +14,8 @@ const result = (patch: Partial<EvalResult> = {}): EvalResult => ({
   turnId: "t",
   conversationId: "c",
   error: null,
+  judgement: null,
+  judgeError: null,
   ...patch,
 });
 

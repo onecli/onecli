@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "./errors";
 import { getPolicyValidator, getRuleActionGate } from "../providers";
-import { assertToolIdsValid } from "../apps/app-permissions/validate";
+import {
+  assertToolIdsValid,
+  assertUnlistedChoicesValid,
+} from "../apps/app-permissions/validate";
 import {
   isSessionPolicy,
   type SessionPolicyInput,
@@ -24,13 +27,19 @@ import {
   compileConnectionStack,
   compileSecretGrant,
   conditionsCreateInput,
+  defaultConnectionGrant,
   GRANT_SOURCE,
   stackConditions,
   stackEquals,
   stackToGrant,
+  withStoredUnlisted,
   type CompiledRule,
 } from "./grants-compile";
-import type { ConnectionGrantInput } from "../validations/grants";
+import type {
+  ConnectionGrantInput,
+  ConnectionGrantRequest,
+  UnlistedChoice,
+} from "../validations/grants";
 import { requestSandboxRespawn } from "./sandbox-service";
 import { bumpHomeForAgent } from "./home-sync-service";
 import { logger } from "../lib/logger";
@@ -43,14 +52,14 @@ import { signalWork } from "./due-work";
  *
  * A grant is INTENT stored as a canonical, `source:"grant"` policy-rule stack —
  * the engine, org floor, and reflections keep operating on ordinary rules. Per
- * (agent, connection): the uncustomized attach is ONE whole-app allow rule
- * (empty tools — future catalog tools included); a customized attach is a fixed
- * first-match stack allow(A) → allow+approval(K) → block(D = catalog − A∪K) →
- * allow+approval over the whole app (requests the catalog does not describe;
- * a block for `unlisted: "block"` catalogs, see `compileConnectionStack`). A
- * secret grant is a single allow rule. Every rule carries exactly one agent
- * identity; empty identities never inject (the inject_select law), so the
- * identity IS the attachment.
+ * (agent, connection): full access is ONE whole-app allow rule (empty tools,
+ * so future catalog tools are included); a customized attach, which is also
+ * what a new attach writes (`defaultConnectionGrant`), is a fixed first-match
+ * stack allow(A) → allow+approval(K) → block(D = catalog − A∪K) → the
+ * catch-alls over the whole app (requests the catalog does not describe, see
+ * `compileConnectionStack`). A secret grant is a single allow rule. Every
+ * rule carries exactly one agent identity; empty identities never inject (the
+ * inject_select law), so the identity IS the attachment.
  *
  * Writes follow the blocklist-service precedent: one transaction under the
  * per-scope advisory lock — delete the old stack, append the new one at the
@@ -81,6 +90,10 @@ export interface AgentGrantConnection {
   access: "full" | "custom";
   allow: string[];
   ask: string[];
+  /** Requests the catalog does not describe: GET/HEAD ("All other reads")
+   * and the rest ("All other writes"). "allow" on a full grant. */
+  otherReads: UnlistedChoice;
+  otherWrites: UnlistedChoice;
   /** The grant's session policy ("Resources" — repositories/folders the
    * injected credential may reach), read off the stack's allow rows; null =
    * unrestricted. */
@@ -110,6 +123,10 @@ export interface ConnectionGrants {
     access: "full" | "custom";
     allow: string[];
     ask: string[];
+    otherReads: UnlistedChoice;
+    otherWrites: UnlistedChoice;
+    /** The grant's session policy, as on `AgentGrantConnection`. */
+    resources: SessionPolicyInput | null;
   }[];
 }
 
@@ -365,6 +382,10 @@ const connectionTarget = (
   kind: "connection",
   appConnection: { connect: { id: connectionId } },
   appTools: rule.tools,
+  // The "All other reads"/"All other writes" split's method narrowing
+  // (`GET,HEAD` / `!GET,HEAD`); absent on every other row (NULL = any
+  // method, the gateway's reading of every older row).
+  ...(rule.method ? { method: rule.method } : {}),
 });
 
 const secretTarget = (
@@ -491,7 +512,7 @@ export const getAgentGrants = async (
         provider: c.provider,
         label: c.label,
         scope: c.scope === "organization" ? "organization" : "workspace",
-        ...stackToGrant(stack),
+        ...stackToGrant(stack, c.provider),
         resources: grantResources(stack),
       };
     }),
@@ -508,7 +529,7 @@ export const getConnectionGrants = async (
   scope: GrantScope,
   connectionId: string,
 ): Promise<ConnectionGrants> => {
-  await requireConnection(scope, connectionId);
+  const connection = await requireConnection(scope, connectionId);
   const rows = await readGrantRows(db, scope, { connectionId });
   const byAgent = new Map<string, PolicyRuleRow[]>();
   for (const row of rows) {
@@ -522,7 +543,8 @@ export const getConnectionGrants = async (
     connectionId,
     agents: [...byAgent.entries()].map(([agentId, stack]) => ({
       agentId,
-      ...stackToGrant(stack),
+      ...stackToGrant(stack, connection.provider),
+      resources: grantResources(stack),
     })),
   };
 };
@@ -531,13 +553,24 @@ export const setConnectionGrant = async (
   scope: GrantScope,
   agentId: string,
   connectionId: string,
-  input: ConnectionGrantInput,
+  request: ConnectionGrantRequest,
   userId: string | null,
 ): Promise<GrantMutationResult> => {
   const [agent, connection] = await Promise.all([
     requireAgent(scope, agentId),
     requireConnection(scope, connectionId),
   ]);
+  // `default` is the attach toggles' request, resolved here per provider to
+  // the shape every new attach gets (all tools allowed, requests outside the
+  // tool list needing approval). It names its catch-alls explicitly, so it
+  // never inherits a stored choice; `resources` keeps its tri-state.
+  const input: ConnectionGrantInput =
+    request.access === "default"
+      ? {
+          ...defaultConnectionGrant(connection.provider),
+          resources: request.resources,
+        }
+      : request;
   if (input.access === "custom") {
     assertToolIdsValid(connection.provider, [...input.allow, ...input.ask]);
   }
@@ -547,6 +580,16 @@ export const setConnectionGrant = async (
     connection.label ?? connection.provider,
   );
   const existing = await readGrantRows(db, scope, { agentId, connectionId });
+  // Absent catch-all choices keep what the stack already says (the same
+  // preserve law as `resources` below); checked AFTER the merge, so a stored
+  // value is held to the same rules as a sent one.
+  const grant = withStoredUnlisted(input, existing, connection.provider);
+  if (grant.access === "custom") {
+    assertUnlistedChoicesValid(connection.provider, [
+      grant.otherReads,
+      grant.otherWrites,
+    ]);
+  }
   // The resources tri-state (validations/grants.ts): ABSENT preserves whatever
   // the existing stack carries — the step-5 conversion's carried policies and
   // every tools-only dialog save — while NULL clears and an OBJECT sets. The
@@ -580,7 +623,7 @@ export const setConnectionGrant = async (
   const desired = compileConnectionStack(
     nameBase,
     connection.provider,
-    input,
+    grant,
     conditions,
   );
   if (desired.some((rule) => rule.requireApproval)) {
@@ -754,8 +797,8 @@ export const removeSecretGrant = async (
   };
 };
 
-/** Default grants for `addDefaultGrants`: (agent × connection) whole-app
- * attaches and (agent × secret) attaches. */
+/** Default grants for `addDefaultGrants`: (agent × connection) default
+ * attaches (`defaultConnectionGrant`) and (agent × secret) attaches. */
 export interface DefaultGrantRequest {
   agentIds: string[];
   connectionIds: string[];
@@ -777,9 +820,9 @@ export interface DefaultGrantResult {
  * the scope lock.
  *
  * ADD-ONLY: a pair that already has any stack is left exactly as it is, so a
- * customized grant is never flattened back to full access. Uncustomized
- * whole-app attaches only, exactly what the dialog toggle writes, so turning
- * one off is the same single detach.
+ * customized grant is never flattened back to the default. Each pair gets the
+ * product-default attach (`defaultConnectionGrant`), exactly what the dialog
+ * toggle writes, so turning one off is the same single detach.
  *
  * Fenced like every grant write: agents must be the workspace's own, and
  * resources must be in the workspace+org pool; anything else is silently
@@ -815,6 +858,18 @@ export const addDefaultGrants = async (
       : Promise.resolve([]),
   ]);
   if (connections.length === 0 && secrets.length === 0) return empty;
+  // The default attach's catch-alls need approval: the same write-time gate
+  // as `setConnectionGrant`, checked before the lock (it reads the plan).
+  if (
+    connections.some(
+      (c) => defaultConnectionGrant(c.provider).access === "custom",
+    )
+  ) {
+    await getRuleActionGate().assertAllowed(
+      base(scope),
+      gatedActions({ requireApproval: true }),
+    );
+  }
 
   const scopeBase = base(scope);
   const result = await db.$transaction(
@@ -860,9 +915,11 @@ export const addDefaultGrants = async (
             agent.name,
             connection.label ?? connection.provider,
           );
-          for (const rule of compileConnectionStack(name, connection.provider, {
-            access: "full",
-          })) {
+          for (const rule of compileConnectionStack(
+            name,
+            connection.provider,
+            defaultConnectionGrant(connection.provider),
+          )) {
             creates.push({
               rule,
               agentId: agent.id,

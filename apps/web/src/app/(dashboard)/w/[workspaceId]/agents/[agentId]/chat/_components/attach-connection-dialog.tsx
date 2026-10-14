@@ -29,8 +29,10 @@ import { ManagePermissionsDialog } from "../../_components/manage-permissions-di
  * agent — because the reader arrived from "this agent lacks access", already
  * knowing which agent.
  *
- * Toggling on grants full access (the card's stated consent contract); the
- * agent page's Apps section remains the place to narrow tools afterwards.
+ * Toggling on writes the default attach (the card's stated consent contract:
+ * every tool allowed, anything else needing approval; full access for an app
+ * with no tool list); the agent page's Apps section remains the place to
+ * narrow tools afterwards.
  * The rows ARE the agent page's rows — ConnectionGrantRow, fed the same
  * per-connection derivation as AppsTab — so every law that surface enforces
  * (org-granted locked on, org-blocked frozen in the ON direction but still
@@ -68,7 +70,8 @@ export const AttachConnectionDialog = ({
   // Feeds the per-row org laws (org-granted provenance, org-blocked, status
   // pill) — part of the row-render gate for the same reason grants are.
   const credentialsQuery = useEffectiveCredentials(agentId);
-  const { data: definitions = [] } = useAppPermissionDefinitions();
+  const { data: definitions, isSuccess: definitionsKnown } =
+    useAppPermissionDefinitions();
 
   // The per-row Manage door: the agent page's permissions side drawer,
   // targeted at ONE connection. Same read-only law as every Manage surface.
@@ -106,7 +109,16 @@ export const AttachConnectionDialog = ({
   const credentialByConnection = new Map(
     (credentialsQuery.data?.connections ?? []).map((e) => [e.id, e]),
   );
-  const hasCatalog = definitions.some((d) => d.provider === provider);
+  const hasCatalog = (definitions ?? []).some((d) => d.provider === provider);
+  // What turning an account on grants: the default attach, or full access
+  // for an app with no tool list to split on (`defaultConnectionGrant`).
+  // Said only once the catalog is known, so a loading catalog never reads
+  // as "full access".
+  const grantLine = !definitionsKnown
+    ? ""
+    : hasCatalog
+      ? " Its tools are allowed and anything else needs your approval."
+      : " It gets full access.";
   // Until the pool resolves the dialog cannot know whether it is a Connect
   // or an Attach dialog, so the header names only the app: a cold deep-link
   // landing must not say "Attach" and then flip to "Connect" (the exact
@@ -143,13 +155,13 @@ export const AttachConnectionDialog = ({
                   // workspace, not only this one.
                   <>
                     A new account is on for every agent in this workspace, {who}{" "}
-                    included, with full access. Adjust access anytime from the
+                    included.{grantLine} Adjust access anytime from the
                     agent&apos;s Connections section.
                   </>
                 ) : (
                   <>
                     Turn on the {appName} accounts {who} should be able to use.
-                    Turning one on grants full access immediately. Adjust access
+                    Turning one on applies immediately.{grantLine} Adjust access
                     anytime from the agent&apos;s Connections section.
                   </>
                 )}

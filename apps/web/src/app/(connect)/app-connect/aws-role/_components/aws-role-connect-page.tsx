@@ -24,7 +24,7 @@ const app = getApp("aws-role")!;
  * neither `/w/<id>` nor `/org/<id>`, so `apiFetch`'s pathname-derived tenancy
  * headers come out empty — and a cloud session with no workspace and no org
  * resolves to no tenant at all, which 401s. The popup is opened from both the
- * workspace Connections page (`?workspaceId=`) and the org Global Connections
+ * workspace Connections page (`?workspaceId=`) and the org Shared Connections
  * page (`?orgId=`); both must work.
  */
 const AwsRoleConnectPage = () => {

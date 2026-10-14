@@ -11,6 +11,9 @@ export interface PendingActionApprovalItem {
   summary: string;
   /** Whether "approve + always allow" is a real choice for this action. */
   offersAlwaysAllow: boolean;
+  /** The asking turn's conversation, where the chat renders it inline;
+   * null = bell only. */
+  conversationId: string | null;
   /** ISO timestamps. */
   createdAt: string;
   expiresAt: string;

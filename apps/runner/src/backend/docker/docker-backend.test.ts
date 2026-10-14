@@ -83,6 +83,7 @@ const spec = {
   homeRef: "onecli-home-sb-1",
   limits: { memoryMb: 1024, cpus: 2, pids: 256 },
   payloadHash: "hash-1",
+  resumable: true,
 };
 
 describe("prepare", () => {
@@ -242,7 +243,7 @@ describe("createSandbox", () => {
     expect(securityOpt.some((opt) => opt.includes("seccomp"))).toBe(false);
   });
 
-  it("labels the container for reconcile, including the payload hash", async () => {
+  it("labels the container for reconcile, including the payload hash and the resumable mark", async () => {
     const { backend, calls } = makeBackend({ "/networks?": [] });
     await backend.prepare();
     await backend.createSandbox(spec);
@@ -256,9 +257,23 @@ describe("createSandbox", () => {
         "sh.onecli.sandbox-id": "sb-1",
         "sh.onecli.runner-id": "r-1",
         "sh.onecli.payload-hash": "hash-1",
+        "sh.onecli.resumable": "1",
         "sh.onecli.installation": "inst-abc",
       },
     );
+  });
+
+  it("omits the resumable label for a keyless spawn, so a keyed successor grants it no grace", async () => {
+    const { backend, calls } = makeBackend({ "/networks?": [] });
+    await backend.prepare();
+    await backend.createSandbox({ ...spec, resumable: false });
+
+    const create = calls.find((call) =>
+      call.path.includes("/containers/create"),
+    );
+    expect(
+      (create?.body as { Labels: Record<string, string> }).Labels,
+    ).not.toHaveProperty("sh.onecli.resumable");
   });
 
   it("writes the files into the container BEFORE it is started", async () => {
@@ -700,7 +715,7 @@ describe("lifecycle calls", () => {
     );
   });
 
-  it("lists only THIS runner's containers", async () => {
+  it("lists only THIS runner's containers, reading the resumable mark back (absent = a pre-feature spawn)", async () => {
     const { backend, calls } = makeBackend({
       "/networks?": [],
       "/containers/json": [
@@ -710,6 +725,15 @@ describe("lifecycle calls", () => {
           Labels: {
             "sh.onecli.sandbox-id": "sb-1",
             "sh.onecli.payload-hash": "hash-1",
+            "sh.onecli.resumable": "1",
+          },
+        },
+        {
+          Id: "cont-old",
+          State: "running",
+          Labels: {
+            "sh.onecli.sandbox-id": "sb-old",
+            "sh.onecli.payload-hash": "hash-0",
           },
         },
         { Id: "cont-unlabeled", State: "running", Labels: {} },
@@ -724,6 +748,14 @@ describe("lifecycle calls", () => {
         containerRef: "cont-1",
         running: true,
         payloadHash: "hash-1",
+        resumable: true,
+      },
+      {
+        sandboxId: "sb-old",
+        containerRef: "cont-old",
+        running: true,
+        payloadHash: "hash-0",
+        resumable: false,
       },
     ]);
     const list = calls.find((call) => call.path.includes("/containers/json"));

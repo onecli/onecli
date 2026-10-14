@@ -12,7 +12,8 @@
     "./turn-events": "./src/turn-events.ts",
     "./supervisor-messages": "./src/supervisor-messages.ts",
     "./backend/docker": "./src/backend/docker/docker-backend.ts",
-    "./ws/server": "./src/ws/server.ts"
+    "./ws/server": "./src/ws/server.ts",
+    "./ws/session": "./src/ws/session.ts"
   },
   "scripts": {
     "dev": "tsx src/index.ts",

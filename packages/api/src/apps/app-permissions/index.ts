@@ -79,6 +79,10 @@ import { stripePermissions } from "./stripe";
 import { salesforcePermissions } from "./salesforce";
 import { navanPermissions } from "./navan";
 import { pylonPermissions } from "./pylon";
+import { pagerdutyPermissions } from "./pagerduty";
+import { coralogixPermissions } from "./coralogix";
+import { onyxPermissions } from "./onyx";
+import { webflowPermissions } from "./webflow";
 
 const permissionRegistry = new Map<string, AppPermissionDefinition>();
 
@@ -160,3 +164,7 @@ register(stripePermissions);
 register(salesforcePermissions);
 register(navanPermissions);
 register(pylonPermissions);
+register(pagerdutyPermissions);
+register(coralogixPermissions);
+register(onyxPermissions);
+register(webflowPermissions);

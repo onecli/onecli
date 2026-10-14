@@ -47,6 +47,16 @@ describe("actionApprovalCardBlocks", () => {
     expect(actions?.elements?.map((e) => e.value)).toEqual(["a-3", "a-3"]);
   });
 
+  it("is just the ask and the buttons: no header, no how-it-works paragraph", () => {
+    const blocks = actionApprovalCardBlocks({
+      approvalId: "a-4",
+      agentName: "Donna",
+      summary: 'send @Dana: "hi"',
+    }) as { type: string; text?: { text: string } }[];
+    expect(blocks.map((b) => b.type)).toEqual(["section", "actions"]);
+    expect(blocks[0]?.text?.text).toBe('*Donna* asks: send @Dana: "hi"');
+  });
+
   it("the click vocabulary maps the three buttons and nothing else", () => {
     expect(ACTION_APPROVAL_DECISIONS).toEqual({
       action_approve: "approve",

@@ -67,6 +67,10 @@ import { stripe } from "./stripe";
 import { navan } from "./navan";
 import { salesforce } from "./salesforce";
 import { pylon } from "./pylon";
+import { pagerduty } from "./pagerduty";
+import { coralogix } from "./coralogix";
+import { onyx } from "./onyx";
+import { webflow } from "./webflow";
 
 const staticApps: AppDefinition[] = [
   salesforce,
@@ -134,6 +138,10 @@ const staticApps: AppDefinition[] = [
   stripe,
   navan,
   pylon,
+  pagerduty,
+  coralogix,
+  onyx,
+  webflow,
 ];
 
 export const getApps = (): AppDefinition[] => [...staticApps];

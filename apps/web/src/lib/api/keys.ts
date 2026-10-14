@@ -108,6 +108,7 @@ export const queryKeys = {
     // a route matching NEITHER regex would key to ["org","default","default"]
     // and must not trust that entry across org switches.
     all: () => ["org", ...scope()] as const,
+    membership: () => [...queryKeys.org.all(), "membership"] as const,
   },
   orgMembers: {
     all: () => ["org-members", ...scope()] as const,
@@ -138,6 +139,18 @@ export const queryKeys = {
       [...queryKeys.connections.all(), "list", pageScope] as const,
     byProvider: (provider: string) =>
       [...queryKeys.connections.all(), "provider", provider] as const,
+    githubInstallations: (pageScope: PageScope = "workspace") =>
+      [
+        ...queryKeys.connections.all(),
+        "github-installations",
+        pageScope,
+      ] as const,
+    githubInstallationRepos: (sourceConnectionId: string) =>
+      [
+        ...queryKeys.connections.all(),
+        "github-installation-repos",
+        sourceConnectionId,
+      ] as const,
   },
   workspaceAccess: {
     all: () => ["workspace-access", ...scope()] as const,
@@ -289,6 +302,8 @@ export const queryKeys = {
         transport ?? "default",
       ] as const,
     org: () => [...queryKeys.channels.all(), "org"] as const,
+    orgAgents: (provider: string) =>
+      [...queryKeys.channels.all(), "org-agents", provider] as const,
     // The agent's one-shot action approvals (the channels page section).
     contacts: (agentId: string) =>
       [...queryKeys.channels.all(), "contacts", agentId] as const,

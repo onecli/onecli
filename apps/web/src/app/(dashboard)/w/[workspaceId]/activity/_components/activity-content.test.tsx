@@ -25,6 +25,8 @@ vi.mock("@dashboard/page-header", () => ({
 const tabs = vi.hoisted(() => ({
   runs: null as null | {
     agentId?: string;
+    view: string;
+    onViewChange: (view: string) => void;
     onViewNetwork: (run: RunListItem) => void;
   },
   network: null as null | { scope: NetworkScope; onClearWindow: () => void },
@@ -162,5 +164,30 @@ describe("Activity tabs", () => {
       agent: "ag-1",
       from: "2026-09-01T09:59:58.000Z",
     });
+  });
+
+  it("opens Runs on the URL's filter, so a schedule's View runs lands on it", () => {
+    nav.search = "tab=runs&agent=ag-1&view=cron";
+    render(<ActivityContent />);
+    expect(tabs.runs).toMatchObject({ agentId: "ag-1", view: "cron" });
+  });
+
+  it("an unknown filter falls back to All", () => {
+    nav.search = "tab=runs&view=nonsense";
+    render(<ActivityContent />);
+    expect(tabs.runs?.view).toBe("all");
+  });
+
+  it("changing the filter keeps it in the URL with the agent; All drops it", () => {
+    nav.search = "tab=runs&agent=ag-1";
+    render(<ActivityContent />);
+    tabs.runs?.onViewChange("eval");
+    expect(lastUrl(replace).query).toEqual({
+      tab: "runs",
+      agent: "ag-1",
+      view: "eval",
+    });
+    tabs.runs?.onViewChange("all");
+    expect(lastUrl(replace).query).toEqual({ tab: "runs", agent: "ag-1" });
   });
 });

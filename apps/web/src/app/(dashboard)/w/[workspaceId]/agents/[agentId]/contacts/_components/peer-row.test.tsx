@@ -84,7 +84,7 @@ describe("PeerRow", () => {
   it("shows THIS side's policy as the badge, and nothing for a default other side", () => {
     renderRow(peer());
     expect(screen.getByText("Ray")).toBeDefined();
-    expect(screen.getByText("Asks first")).toBeDefined();
+    expect(screen.getByText("Asks you first")).toBeDefined();
     expect(screen.queryByText(/Their side/)).toBeNull();
   });
 

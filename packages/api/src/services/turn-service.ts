@@ -97,10 +97,15 @@ const DURABILITY = {
   "text.delta": false,
   "thinking.delta": false,
   // A control-plane state transition, not transcript content: the follow-up
-  // row settling `joined` is the durable record, and `turn.result.followUps`
-  // is how it gets there — this event is only the adapter's live confirmation
-  // riding the stream.
+  // row settling `joined` is the durable record. `applyTurnEvents` settles
+  // it the moment this event arrives (the live pickup signal), with
+  // `turn.result.followUps` as the close-time backstop, so the event itself
+  // is never stored.
   "message.joined": false,
+  // SEND NOW's answer: shown to whoever is watching when it
+  // arrives, and moot a moment later (the message joins, or the turn
+  // ends). The follow-up row's status is the record, so it is never stored.
+  "message.sent_now": false,
   // `satisfies` rather than a Set: a new event kind is then a COMPILE error
   // here until someone decides whether it persists, instead of silently
   // defaulting to "streams but is never recorded".
@@ -435,6 +440,14 @@ export const createTurn = async (
 export const promoteOldestParkedFollowUp = async (
   conversationId: string,
 ): Promise<boolean> => {
+  // A follow-up stopped while its run held it (`abortTurn` flags those) is
+  // never promoted: its run ended without settling it (it died, or a sweep
+  // failed it), and running the message now would break the Stop. It
+  // closes `aborted` instead, the outcome the person asked for.
+  await db.turn.updateMany({
+    where: { conversationId, status: "joining", abortRequested: true },
+    data: { status: "aborted", finishedAt: new Date() },
+  });
   const oldest = await db.turn.findFirst({
     where: { conversationId, status: "joining" },
     orderBy: { createdAt: "asc" },
@@ -646,6 +659,34 @@ const bridgeLabel = (message: string): string => {
     .slice(0, BRIDGE_LABEL_MAX_CHARS)
     .replace(/[\uD800-\uDBFF]$/, "")
     .trimEnd()}…`;
+};
+
+/**
+ * When the model last RAN in this conversation before the turn created at
+ * `before`: the previous turn's `startedAt`, counting only turns a harness
+ * actually picked up. The `turn.started` event is what tells a run apart
+ * from a born-done record or a greeting, which carry a `startedAt` (or none)
+ * but never reached a model. Null when the model has never run here.
+ *
+ * The window a per-turn note uses for "news since you were last here":
+ * anything that landed after this instant is something the model has not
+ * seen, and a record the platform wrote in between does not consume it.
+ */
+export const previousRunStartedAt = async (
+  conversationId: string,
+  before: Date,
+): Promise<Date | null> => {
+  const previousRun = await db.turn.findFirst({
+    where: {
+      conversationId,
+      createdAt: { lt: before },
+      startedAt: { not: null },
+      events: { some: { type: "turn.started" } },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { startedAt: true },
+  });
+  return previousRun?.startedAt ?? null;
 };
 
 /**
@@ -937,10 +978,15 @@ export const abortTurn = async (
     // Stop means silence (decided with the user): aborting the active turn
     // also cancels every follow-up still steering toward it. Swept here at
     // request time, and again on the aborted close (`finishTurn`) for any
-    // follow-up that lands in the request→confirm window.
-    const sweepFollowUps = () =>
+    // follow-up that lands in the request→confirm window or that the run
+    // was handed but never took in.
+    const sweepFollowUps = (where: Prisma.TurnWhereInput = {}) =>
       db.turn.updateMany({
-        where: { conversationId: turn.conversationId, status: "joining" },
+        where: {
+          ...where,
+          conversationId: turn.conversationId,
+          status: "joining",
+        },
         data: { status: "aborted", finishedAt: new Date() },
       });
 
@@ -951,6 +997,9 @@ export const abortTurn = async (
         data: { status: "aborted", finishedAt: new Date() },
       });
       if (count === 0) continue; // dispatched under us — the flag arm owns it
+      // No close will ever come for this turn, so this sweep is the only
+      // one: it takes everything, even a follow-up handed over on a run
+      // the cold-boot revival rolled back to `queued`.
       await sweepFollowUps();
       return { aborted: true, delivered: false };
     }
@@ -965,7 +1014,28 @@ export const abortTurn = async (
       where: { id: turn.id },
       data: { abortRequested: true },
     });
-    await sweepFollowUps();
+    // Everything the run was never handed (undelivered, or left over from
+    // an earlier run) dies now.
+    await sweepFollowUps({
+      NOT: { followUpOfTurnId: turn.id, steerDeliveredAt: { not: null } },
+    });
+    // A follow-up already handed to THIS run is in flight like the turn
+    // itself, so it gets the same treatment: the Stop is a REQUEST on it,
+    // and the close is the outcome. The agent may have read it and answered
+    // before the Stop, and that answer is kept (it was said), so the close
+    // settles it `joined`; anything the run never took in, the aborted
+    // close sweeps. If no close ever comes (the sandbox died, or a sweep
+    // failed the run), promotion finds the flag and aborts it instead of
+    // running it: Stop still means silence.
+    await db.turn.updateMany({
+      where: {
+        conversationId: turn.conversationId,
+        followUpOfTurnId: turn.id,
+        status: "joining",
+        steerDeliveredAt: { not: null },
+      },
+      data: { abortRequested: true },
+    });
     signalWork();
     return { aborted: false, delivered: true };
   }
@@ -975,6 +1045,95 @@ export const abortTurn = async (
   // and the honest answer is the in-flight shape (the flag write above) or
   // the retry the user will make.
   throw new ServiceError("CONFLICT", "This turn has already finished");
+};
+
+/**
+ * SEND NOW: ask the agent to read a waiting mid-run
+ * follow-up now, instead of after the tool its run is waiting on.
+ *
+ * Only a request, like Stop: the flag rides the runner's claim to the
+ * sandbox, which moves the running tool to the background and reports what
+ * actually happened as a live `message.sent_now` under the follow-up. The
+ * claim hands it over only once the follow-up was delivered to the run, so
+ * a request made before delivery simply waits for it, and the person never
+ * has to time the click.
+ *
+ * One fenced read and one guarded write, fenced like `abortTurn` (a person
+ * who can read the thread may act on it; a foreign direct thread's row
+ * reads NOT_FOUND), and conditional on the two facts that make the request
+ * meaningful: the row is still WAITING (`joining`) and the run it rides is
+ * still live. A message with files never steers, nor one queued behind
+ * it, so those are refused too.
+ * Anything else is a CONFLICT the caller can say plainly
+ * ("already read", "the agent finished"). Repeating it is harmless: the
+ * flag is already set. A row that moves between the read and the write
+ * (read, promoted, aborted) fails the write's status guard and answers
+ * CONFLICT rather than claiming a request that changed nothing.
+ */
+export const requestSendNow = async (
+  workspaceId: string,
+  followUpId: string,
+  viewerUserId: string,
+): Promise<{ requested: true }> => {
+  const row = await db.turn.findFirst({
+    where: {
+      id: followUpId,
+      conversation: {
+        agent: { workspaceId },
+        OR: [{ direct: false }, { userId: viewerUserId }],
+      },
+    },
+    select: {
+      status: true,
+      conversationId: true,
+      createdAt: true,
+      followUpOfTurnId: true,
+      _count: { select: { attachments: true } },
+    },
+  });
+  if (!row) throw new ServiceError("NOT_FOUND", "Message not found");
+  if (row.status !== "joining" || !row.followUpOfTurnId) {
+    throw new ServiceError("CONFLICT", "The agent already has this message");
+  }
+  // A message with files is never handed to a live run (the steer arm's
+  // attachment carve-out), and neither is one sent after it (the arm's
+  // FIFO guard keeps order): both run as their own turns once this one
+  // ends, so there is nothing to read now.
+  const behindFiles =
+    row._count.attachments > 0 ||
+    (await db.turn.count({
+      where: {
+        conversationId: row.conversationId,
+        status: "joining",
+        createdAt: { lt: row.createdAt },
+        attachments: { some: {} },
+      },
+    })) > 0;
+  if (behindFiles) {
+    throw new ServiceError(
+      "CONFLICT",
+      "Messages with files are read once the agent finishes",
+    );
+  }
+  const target = await db.turn.findUnique({
+    where: { id: row.followUpOfTurnId },
+    select: { status: true },
+  });
+  if (!target || !isActiveTurnStatus(target.status)) {
+    throw new ServiceError(
+      "CONFLICT",
+      "The agent finished before it could read this message",
+    );
+  }
+  const { count } = await db.turn.updateMany({
+    where: { id: followUpId, status: "joining" },
+    data: { sendNowRequested: true },
+  });
+  if (count === 0) {
+    throw new ServiceError("CONFLICT", "The agent already has this message");
+  }
+  signalWork();
+  return { requested: true };
 };
 
 /**
@@ -1015,6 +1174,41 @@ const turnBelongsToReporter = async (
     select: { id: true },
   });
   return turn !== null;
+};
+
+/**
+ * Settle steered follow-ups the run CONSUMED as `joined`. Called from two
+ * places with the same fence: live, as the adapter's `message.joined`
+ * events arrive (the row flips the moment the model has the
+ * message, not at turn end), and at the close from `turn.result.followUps`,
+ * the backstop for a join the live stream never carried (an older runner,
+ * a lost batch). Idempotent across the two: a row already `joined` no
+ * longer matches `status: "joining"`.
+ *
+ * Every clause of the where is load-bearing: the conversation + target
+ * binding reuses the reporter fence the caller just proved; `status:
+ * "joining"` means an abort that won the race sticks; `steerDeliveredAt`
+ * non-null means "joined" is only reachable through a claim the control
+ * plane itself stamped: a sandbox cannot swallow messages that were never
+ * delivered to it.
+ */
+const settleJoinedFollowUps = async (
+  tx: Prisma.TransactionClient,
+  conversationId: string,
+  targetTurnId: string,
+  followUpIds: readonly string[],
+): Promise<void> => {
+  if (followUpIds.length === 0) return;
+  await tx.turn.updateMany({
+    where: {
+      id: { in: [...followUpIds] },
+      conversationId,
+      followUpOfTurnId: targetTurnId,
+      status: "joining",
+      steerDeliveredAt: { not: null },
+    },
+    data: { status: "joined", finishedAt: new Date() },
+  });
 };
 
 /**
@@ -1100,6 +1294,18 @@ export const applyTurnEvents = async (
         data: { status: "running", startedAt: new Date() },
       });
     }
+
+    // The live pickup signal: the adapter confirmed the run consumed these
+    // steered follow-ups. Settled here, under the fence this batch just
+    // passed, so a reader sees `joined` while the turn still runs.
+    await settleJoinedFollowUps(
+      tx,
+      conversationId,
+      turnId,
+      clean.flatMap((event) =>
+        event.type === "message.joined" ? [event.followUpId] : [],
+      ),
+    );
 
     // A turn producing events is a live conversation: keep the idle reaper
     // away from a sandbox that is mid-answer.
@@ -1305,35 +1511,27 @@ export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
 
     // Settle steered follow-ups — same transaction, and ONLY when the close
     // won: the stale-dispatch window can hand a turn out twice, and a late
-    // duplicate's outcomes must not overrule the winning report's. Every
-    // clause of the where is load-bearing: the conversation + target binding
-    // reuses the reporter fence the close just proved; `status: "joining"`
-    // means an abort that won the race sticks; `steerDeliveredAt` non-null
-    // means "joined" is only reachable through a claim the control plane
-    // itself stamped — a sandbox cannot swallow messages that were never
-    // delivered to it. Missed outcomes need no write: anything left
+    // duplicate's outcomes must not overrule the winning report's. The
+    // backstop behind the live settle (`settleJoinedFollowUps`): normally
+    // every join already landed as its `message.joined` event arrived, and
+    // this matches nothing. Missed outcomes need no write: anything left
     // `joining` after the close is the promotion path's to run.
     if (result.count > 0) {
-      const joinedIds = (input.followUps ?? [])
-        .filter((entry) => entry.outcome === "joined")
-        .map((entry) => entry.turnId);
-      if (joinedIds.length > 0) {
-        await tx.turn.updateMany({
-          where: {
-            id: { in: joinedIds },
-            conversationId: input.conversationId,
-            followUpOfTurnId: input.turnId,
-            status: "joining",
-            steerDeliveredAt: { not: null },
-          },
-          data: { status: "joined", finishedAt: new Date() },
-        });
-      }
+      await settleJoinedFollowUps(
+        tx,
+        input.conversationId,
+        input.turnId,
+        (input.followUps ?? [])
+          .filter((entry) => entry.outcome === "joined")
+          .map((entry) => entry.turnId),
+      );
 
-      // Stop means silence: an aborted close also cancels follow-ups that
-      // landed in the abort's request→confirm window. After the settle, so
-      // a genuinely-consumed follow-up stays `joined` (the injection
-      // happened; the discarded answer is the abort's normal cost).
+      // Stop means silence: an aborted close also cancels what the
+      // request-time sweep left: follow-ups that landed in the abort's
+      // request→confirm window, and ones handed to the run that it never
+      // took in. After the settle, so a genuinely-consumed follow-up stays
+      // `joined` with its reply (the injection happened, and what the agent
+      // said back was said).
       if (input.status === "aborted") {
         await tx.turn.updateMany({
           where: { conversationId: input.conversationId, status: "joining" },

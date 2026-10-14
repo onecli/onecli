@@ -48,6 +48,7 @@ const spec = (overrides: Partial<SandboxSpec> = {}): SandboxSpec => ({
   homeRef: "home-sbx1",
   limits: { memoryMb: 2048, cpus: 1, pids: 512 },
   payloadHash: "a".repeat(64),
+  resumable: true,
   ...overrides,
 });
 
@@ -220,11 +221,24 @@ describe("lifecycle mapping", () => {
         containerRef: "pod-uid-1",
         running: true,
         payloadHash: "a".repeat(64),
+        // The spawn's resumable mark, round-tripped through the manager.
+        resumable: true,
         // The substrate phase rides along so the boot-crash classifier can tell a
         // terminal container from one still Pending behind an image pull.
         phase: "Running",
       },
     ]);
+  });
+
+  it("a snapshot from a manager that predates the resumable mark reads as not resumable", async () => {
+    // The manager is deployed separately from the runner; the field is
+    // optional on the wire and its absence must mean "no grace", never a
+    // crash or a true.
+    const backend = backendFor();
+    backend.identify("rnr1");
+    await backend.createSandbox(spec({ resumable: false }));
+    const snapshots = await backend.listSandboxes();
+    expect(snapshots[0]?.resumable).toBe(false);
   });
 
   it("same-home recreation: the ref is deterministic across provisions", async () => {

@@ -33,6 +33,14 @@ export const buildCsp = (nonce: string): string => {
   // Next.js uses eval in a production build.
   const isDev = process.env.NODE_ENV === "development";
 
+  // Human verification on the signup form (Cloudflare Turnstile): its script
+  // and its challenge iframe both come from this origin. Only when a sitekey
+  // is configured, so a deployment without the widget keeps the narrower
+  // policy. Literal read: Next.js inlines NEXT_PUBLIC_* into the build.
+  const turnstileOrigin = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY?.trim()
+    ? ["https://challenges.cloudflare.com"]
+    : [];
+
   // CSP3 browsers enforce the nonce + 'strict-dynamic' and ignore the host
   // allowlist; the hosts stay as the fallback for older CSP2 browsers, so no
   // browser gets a weaker policy than the pre-nonce one ('unsafe-inline'
@@ -45,6 +53,7 @@ export const buildCsp = (nonce: string): string => {
     "https://js.stripe.com",
     "https://t.1cli.sh",
     "https://cdn.usefathom.com",
+    ...turnstileOrigin,
   ];
 
   // Bare Cognito hosted-UI domain (e.g. auth.onecli.sh) — the same value
@@ -73,7 +82,7 @@ export const buildCsp = (nonce: string): string => {
     "font-src 'self' https://fonts.gstatic.com",
     "img-src 'self' data: blob: https:",
     `connect-src ${connectSrc.join(" ")}`,
-    "frame-src https://js.stripe.com",
+    `frame-src ${["https://js.stripe.com", ...turnstileOrigin].join(" ")}`,
     "frame-ancestors 'none'",
     "base-uri 'self'",
     "form-action 'self'",

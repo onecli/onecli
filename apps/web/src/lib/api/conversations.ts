@@ -3,6 +3,7 @@ import type {
   AbortTurnResult,
   Conversation,
   SendMessageOutcome,
+  SendNowResult,
   TranscriptPage,
   TurnsPage,
 } from "./types";
@@ -77,6 +78,13 @@ export const sendMessage = (
 
 export const abortTurn = (turnId: string) =>
   apiPost<AbortTurnResult>(`/v1/turns/${encodeURIComponent(turnId)}/abort`, {});
+
+/** Ask the agent to read a waiting mid-run follow-up now. */
+export const sendNow = (followUpId: string) =>
+  apiPost<SendNowResult>(
+    `/v1/turns/${encodeURIComponent(followUpId)}/send-now`,
+    {},
+  );
 
 /**
  * One page of the durable transcript. `since` is the highest `seq` already

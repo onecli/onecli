@@ -119,3 +119,20 @@ describe("GET /v1/org", () => {
     expect(state.orgQueries).toEqual([]);
   });
 });
+
+describe("GET /v1/org/membership", () => {
+  // Display-only signal for admin UI. Pinned onprem (no roles): every active
+  // member is an admin, the same flat-team answer `userIsOrgAdmin` gives the
+  // routes it guards. The RBAC arm is the checker's own suite.
+  it("answers exactly { isAdmin }, true for a flat-team member", async () => {
+    const res = await app.request("/v1/org/membership", authed);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ isAdmin: true });
+  });
+
+  it("401s an anonymous caller and 403s a departed member", async () => {
+    expect((await app.request("/v1/org/membership")).status).toBe(401);
+    state.membershipActive = false;
+    expect((await app.request("/v1/org/membership", authed)).status).toBe(403);
+  });
+});

@@ -60,6 +60,7 @@ export const youtube: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
     envDefaults: googleEnvDefaults,
   },
 };

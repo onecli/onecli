@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { ceilingWarningSteerId } from "@onecli/agent-protocol";
 
 import { proofDatabaseUrl } from "../testing/pg-proof.js";
 
@@ -183,6 +184,21 @@ const seedActiveTurn = async (
     true,
   );
   return turn;
+};
+
+/** Door → claim (stamps delivery) → the state a real steer reaches. */
+const seedDeliveredSteer = async (suffix: string) => {
+  const seeded = await seedTalkable(suffix);
+  const target = await seedActiveTurn(seeded.conversationId);
+  const sent = await followUps.sendConversationMessage(
+    WORKSPACE,
+    seeded.conversationId,
+    "delivered follow-up",
+    WEB_A,
+  );
+  const claimed = await dueWork.claimDueWork(RUNNER_A, 10);
+  expect(claimed.some((c) => c.kind === "turn.message")).toBe(true);
+  return { ...seeded, target, followUpId: sent.turn.id };
 };
 
 /** Back-date a turn column that only raw SQL can move. */
@@ -392,6 +408,8 @@ describe.skipIf(!PROOF_URL)("the steer claim arm", () => {
 
     const claimed = await dueWork.claimDueWork(RUNNER_A, 10);
 
+    // A person's words travel verbatim, with the "new message" frame riding
+    // the delivery-only context so the model knows what just landed.
     expect(claimed).toEqual([
       {
         kind: "turn.message",
@@ -400,11 +418,39 @@ describe.skipIf(!PROOF_URL)("the steer claim arm", () => {
         conversationId,
         sandboxId,
         message: "steer me",
+        context: V.STEERED_FOLLOW_UP_CONTEXT,
       },
     ]);
     const row = await db.turn.findUnique({ where: { id: sent.turn.id } });
     expect(row?.steerDeliveredAt).not.toBeNull();
     expect(row?.status).toBe("joining");
+  });
+
+  it("an AUTOMATION's follow-up (a wake joining its running turn) steers UNFRAMED", async () => {
+    // The watch-fire path's shape: a wake joins the running watch turn as a
+    // follow-up whose header already says it was triggered automatically.
+    // Telling the model "the user sent a new message" there would be a lie.
+    const { conversationId, sandboxId } = await seedTalkable("steer-wake");
+    const target = await seedActiveTurn(conversationId);
+    const wake = await turns.createFollowUp(
+      conversationId,
+      target.id,
+      "[Platform wake: a watched task finished]",
+      { source: "watch", userId: null },
+    );
+
+    const claimed = await dueWork.claimDueWork(RUNNER_A, 10);
+
+    expect(claimed).toEqual([
+      {
+        kind: "turn.message",
+        turnId: wake.id,
+        targetTurnId: target.id,
+        conversationId,
+        sandboxId,
+        message: "[Platform wake: a watched task finished]",
+      },
+    ]);
   });
 
   it("delivers AT MOST ONCE — a second poll returns nothing", async () => {
@@ -661,22 +707,110 @@ describe.skipIf(!PROOF_URL)("the steer claim arm", () => {
   });
 });
 
-describe.skipIf(!PROOF_URL)("the terminal settle", () => {
-  /** Door → claim (stamps delivery) → the state a real steer reaches. */
-  const seedDeliveredSteer = async (suffix: string) => {
-    const seeded = await seedTalkable(suffix);
-    const target = await seedActiveTurn(seeded.conversationId);
+describe.skipIf(!PROOF_URL)("the live settle", () => {
+  // The adapter's `message.joined` event rides the turn's event stream the
+  // moment the model has the message; the row flips `joined` right there,
+  // under the same fence the close uses, while the turn is still running.
+  it("marks a DELIVERED follow-up joined on the live event, while the target still runs", async () => {
+    const s = await seedDeliveredSteer("live-joined");
+
+    await turns.applyTurnEvents(
+      reporter(RUNNER_A, s.sandboxId),
+      s.conversationId,
+      s.target.id,
+      [
+        { type: "turn.started" },
+        { type: "message.joined", followUpId: s.followUpId },
+      ],
+    );
+
+    const row = await db.turn.findUnique({ where: { id: s.followUpId } });
+    expect(row?.status).toBe("joined");
+    expect(row?.finishedAt).not.toBeNull();
+    const target = await db.turn.findUnique({ where: { id: s.target.id } });
+    expect(target?.status).toBe("running");
+  });
+
+  it("the close is the backstop: a row already joined live is left alone, and the aborted sweep spares it", async () => {
+    const s = await seedDeliveredSteer("live-then-close");
+    await turns.applyTurnEvents(
+      reporter(RUNNER_A, s.sandboxId),
+      s.conversationId,
+      s.target.id,
+      [{ type: "message.joined", followUpId: s.followUpId }],
+    );
+    const live = await db.turn.findUnique({ where: { id: s.followUpId } });
+
+    // Stop right after: the close is aborted, and reports the join too.
+    await turns.finishTurn({
+      reporter: reporter(RUNNER_A, s.sandboxId),
+      conversationId: s.conversationId,
+      turnId: s.target.id,
+      status: "aborted",
+      followUps: [{ turnId: s.followUpId, outcome: "joined" }],
+    });
+
+    const row = await db.turn.findUnique({ where: { id: s.followUpId } });
+    expect(row?.status).toBe("joined");
+    // Settled once: the close did not rewrite the live settle's clock.
+    expect(row?.finishedAt?.getTime()).toBe(live?.finishedAt?.getTime());
+  });
+
+  it("an UNDELIVERED follow-up can never be joined live either", async () => {
+    // Same mutation-proof as the close's: the `steerDeliveredAt != null`
+    // clause stops a sandbox from terminalizing a message it was never
+    // handed, on the live path too.
+    const { conversationId, sandboxId } = await seedTalkable("live-undel");
+    const target = await seedActiveTurn(conversationId);
     const sent = await followUps.sendConversationMessage(
       WORKSPACE,
-      seeded.conversationId,
-      "delivered follow-up",
+      conversationId,
+      "never delivered",
       WEB_A,
     );
-    const claimed = await dueWork.claimDueWork(RUNNER_A, 10);
-    expect(claimed.some((c) => c.kind === "turn.message")).toBe(true);
-    return { ...seeded, target, followUpId: sent.turn.id };
-  };
 
+    await turns.applyTurnEvents(
+      reporter(RUNNER_A, sandboxId),
+      conversationId,
+      target.id,
+      [{ type: "message.joined", followUpId: sent.turn.id }],
+    );
+
+    const row = await db.turn.findUnique({ where: { id: sent.turn.id } });
+    expect(row?.status).toBe("joining");
+  });
+
+  it("is fenced to the reporting turn: a live event naming a foreign follow-up settles nothing", async () => {
+    const s = await seedDeliveredSteer("live-foreign");
+    const other = await seedDeliveredSteer("live-foreign-2");
+
+    await turns.applyTurnEvents(
+      reporter(RUNNER_A, s.sandboxId),
+      s.conversationId,
+      s.target.id,
+      [{ type: "message.joined", followUpId: other.followUpId }],
+    );
+
+    const row = await db.turn.findUnique({ where: { id: other.followUpId } });
+    expect(row?.status).toBe("joining");
+  });
+
+  it("a batch the reporter fence rejects settles nothing", async () => {
+    const s = await seedDeliveredSteer("live-fence");
+    const accepted = await turns.applyTurnEvents(
+      reporter(RUNNER_A, "not-this-sandbox"),
+      s.conversationId,
+      s.target.id,
+      [{ type: "message.joined", followUpId: s.followUpId }],
+    );
+
+    expect(accepted).toBe(false);
+    const row = await db.turn.findUnique({ where: { id: s.followUpId } });
+    expect(row?.status).toBe("joining");
+  });
+});
+
+describe.skipIf(!PROOF_URL)("the terminal settle", () => {
   it("marks a DELIVERED follow-up joined on the winning close", async () => {
     const s = await seedDeliveredSteer("settle-joined");
 
@@ -978,6 +1112,77 @@ describe.skipIf(!PROOF_URL)("Stop means silence", () => {
     expect(targetRow?.abortRequested).toBe(true);
   });
 
+  it("a follow-up already handed to the run is the close's to settle: Stop keeps an answered one", async () => {
+    // MUTATION-PROOF for the request-time sweep's exclusion: the agent may
+    // have read the message and answered before the Stop, and the aborted
+    // close then reports it joined. Swept at request time, that settle
+    // finds nothing and the stored reply hangs off an aborted row.
+    const s = await seedDeliveredSteer("abort-keeps-delivered");
+    const late = await followUps.sendConversationMessage(
+      WORKSPACE,
+      s.conversationId,
+      "never handed over",
+      WEB_A,
+    );
+
+    await turns.abortTurn(WORKSPACE, s.target.id, USER_A);
+
+    const delivered = await db.turn.findUnique({ where: { id: s.followUpId } });
+    const undelivered = await db.turn.findUnique({
+      where: { id: late.turn.id },
+    });
+    expect(delivered?.status).toBe("joining"); // the close decides
+    expect(undelivered?.status).toBe("aborted"); // never reached the run
+
+    await turns.finishTurn({
+      reporter: reporter(RUNNER_A, s.sandboxId),
+      conversationId: s.conversationId,
+      turnId: s.target.id,
+      status: "aborted",
+      followUps: [{ turnId: s.followUpId, outcome: "joined" }],
+    });
+
+    const settled = await db.turn.findUnique({ where: { id: s.followUpId } });
+    expect(settled?.status).toBe("joined");
+  });
+
+  it("a handed-over follow-up the run never took in dies with the aborted close", async () => {
+    const s = await seedDeliveredSteer("abort-delivered-missed");
+
+    await turns.abortTurn(WORKSPACE, s.target.id, USER_A);
+    await turns.finishTurn({
+      reporter: reporter(RUNNER_A, s.sandboxId),
+      conversationId: s.conversationId,
+      turnId: s.target.id,
+      status: "aborted",
+      followUps: [{ turnId: s.followUpId, outcome: "missed" }],
+    });
+
+    const row = await db.turn.findUnique({ where: { id: s.followUpId } });
+    expect(row?.status).toBe("aborted"); // never promoted into a new run
+  });
+
+  it("a handed-over follow-up whose stopped run never closes is NOT run later", async () => {
+    // The sandbox died (or a sweep failed the run) between the Stop and
+    // its confirmation: no close settles the follow-up. Promotion would run
+    // the message as its own turn, breaking the Stop. MUTATION-PROOF: drop
+    // the abort flag (or promotion's honoring of it) and the stopped
+    // message comes back as `queued`.
+    const s = await seedDeliveredSteer("abort-delivered-dead");
+
+    await turns.abortTurn(WORKSPACE, s.target.id, USER_A);
+    // The run is gone without a report: the strand law fails the target.
+    await db.turn.update({
+      where: { id: s.target.id },
+      data: { status: "failed", finishedAt: new Date() },
+    });
+    await followUps.promoteParkedFollowUps();
+
+    const row = await db.turn.findUnique({ where: { id: s.followUpId } });
+    expect(row?.status).toBe("aborted");
+    expect(row?.promotedAt).toBeNull();
+  });
+
   it("aborting a QUEUED turn abandons it AND its follow-ups outright", async () => {
     const { conversationId } = await seedTalkable("abort-queued");
     const queued = await turns.createTurn(
@@ -1039,13 +1244,15 @@ describe.skipIf(!PROOF_URL)("the ceiling-warning arm", () => {
 
     const claimed = await dueWork.claimDueWork(RUNNER_A, 10);
     const warning = claimed.find((c) => c.kind === "turn.message");
-    expect(warning).toMatchObject({
+    expect(warning).toEqual({
       kind: "turn.message",
-      turnId: `ceiling-warning:${target.id}`,
+      turnId: ceilingWarningSteerId(target.id),
       targetTurnId: target.id,
       conversationId,
       sandboxId,
       message: V.TURN_CEILING_WARNING_MESSAGE,
+      // The platform's own words carry their own header: never framed as
+      // a new message that arrived.
     });
     const row = await db.turn.findUnique({ where: { id: target.id } });
     expect(row?.ceilingWarnedAt).not.toBeNull();
@@ -1087,7 +1294,7 @@ describe.skipIf(!PROOF_URL)("the ceiling-warning arm", () => {
     await ageIntoWarningWindow(target.id);
     const claimed = await dueWork.claimDueWork(RUNNER_A, 10);
     const warning = claimed.find((c) => c.kind === "turn.message");
-    expect(warning?.turnId).toBe(`ceiling-warning:${target.id}`);
+    expect(warning?.turnId).toBe(ceilingWarningSteerId(target.id));
 
     // The close reports the warning "joined", the way a real supervisor
     // reports every steered id it consumed.
@@ -1097,7 +1304,7 @@ describe.skipIf(!PROOF_URL)("the ceiling-warning arm", () => {
       turnId: target.id,
       status: "done",
       followUps: [
-        { turnId: `ceiling-warning:${target.id}`, outcome: "joined" },
+        { turnId: ceilingWarningSteerId(target.id), outcome: "joined" },
       ],
     });
 

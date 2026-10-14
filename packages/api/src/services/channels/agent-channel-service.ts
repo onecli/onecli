@@ -13,6 +13,7 @@ import {
   type OAuthStatePayload,
 } from "../../lib/oauth-state";
 import { ServiceError } from "../errors";
+import { ChannelProviderApiError } from "./errors";
 import { createServiceApiKey, revokeServiceApiKey } from "../api-key-service";
 import { bumpHomeForAgent } from "../home-sync-service";
 import { channelProvider, isChannelProviderId } from "./registry";
@@ -55,9 +56,11 @@ const log = logger.child({ component: "agent-channel-service" });
  *
  * Two completion doors, one activation core: the socket arm and the paste
  * floor complete with pasted tokens (`completePresence`); the events arm
- * completes when the OAuth callback lands (`completePresenceFromOAuth`).
- * Both converge on `activatePresence`, which resolves the integration row,
- * stores credentials, and mints the approvals service key.
+ * completes when the OAuth callback lands (`completePresenceFromOAuth`), or,
+ * for an install begun on the provider's side, once someone signs in
+ * (`completeAgentInstallFromCode`). All converge on `activatePresence`,
+ * which resolves the integration row, stores credentials, and mints the
+ * approvals service key.
  */
 
 /** How long an install link (the signed OAuth state) stays valid. */
@@ -531,8 +534,9 @@ export interface CreatePresenceResult {
  * (events) or one token paste (socket) onto the existing app — never a
  * sibling app. Every other status is a live presence: detach first.
  */
+const RESUMABLE_STATUSES = ["pending_setup", "disabled"] as const;
 const isResumableStatus = (status: string): boolean =>
-  status === "pending_setup" || status === "disabled";
+  RESUMABLE_STATUSES.some((resumable) => resumable === status);
 
 /**
  * The guided arm: create the provider app from the org's automation
@@ -995,25 +999,8 @@ const completePresenceFromOAuthUnlocked = async (
   const provider = payload.provider as ChannelProviderId;
 
   const agent = await requireHostedAgent(payload.workspaceId, payload.agentId);
-  const presence = await db.agentChannel.findUnique({
-    where: { agentId_provider: { agentId: agent.id, provider } },
-    select: {
-      id: true,
-      integrationId: true,
-      integration: { select: { externalId: true } },
-      status: true,
-      externalId: true,
-      transport: true,
-      appMode: true,
-      credentials: true,
-      createdByUserId: true,
-    },
-  });
-  if (
-    !presence ||
-    !isResumableStatus(presence.status) ||
-    !presence.credentials
-  ) {
+  const presence = await findResumablePresence(agent.id, provider);
+  if (!presence) {
     throw new ServiceError("UNPROCESSABLE", "This install link is not valid");
   }
 
@@ -1035,7 +1022,84 @@ const completePresenceFromOAuthUnlocked = async (
     redirectUri: input.redirectUri,
     credentialsJson,
   });
+  const activated = await activateExchangedPresence({
+    agent: {
+      id: agent.id,
+      name: agent.name,
+      workspaceId: payload.workspaceId,
+      organizationId: agent.workspace.organizationId,
+    },
+    provider,
+    presence,
+    exchanged,
+    actorUserId: presence.createdByUserId,
+  });
 
+  // The callback route sends the browser home — to THIS agent's Channels
+  // section, resolved from the verified state, never from anything Slack (or
+  // the browser) chose.
+  return {
+    presence: activated,
+    agentId: agent.id,
+    workspaceId: payload.workspaceId,
+  };
+};
+
+/** What both OAuth doors read about the presence a code would finish. */
+const oauthPresenceSelect = {
+  id: true,
+  integrationId: true,
+  integration: { select: { externalId: true } },
+  status: true,
+  externalId: true,
+  transport: true,
+  appMode: true,
+  credentials: true,
+  createdByUserId: true,
+} satisfies Prisma.AgentChannelSelect;
+
+/** The agent's presence an OAuth code could finish, or null when there is
+ * nothing to finish: no presence, a live one, or no stored client
+ * credentials to exchange the code with. */
+const findResumablePresence = async (
+  agentId: string,
+  provider: ChannelProviderId,
+) => {
+  const presence = await db.agentChannel.findUnique({
+    where: { agentId_provider: { agentId, provider } },
+    select: oauthPresenceSelect,
+  });
+  const credentials = presence?.credentials;
+  if (!presence || !isResumableStatus(presence.status) || !credentials) {
+    return null;
+  }
+  return { ...presence, credentials };
+};
+type ResumablePresence = NonNullable<
+  Awaited<ReturnType<typeof findResumablePresence>>
+>;
+
+/** What a provider's code exchange yields. */
+type ExchangedGrant = { identity: PresenceIdentity; credentialsJson: string };
+
+/**
+ * The half both OAuth doors share once a code is exchanged: refuse a
+ * different workspace than the org's, persist the token before anything
+ * else can fail, then activate.
+ */
+const activateExchangedPresence = async (input: {
+  agent: {
+    id: string;
+    name: string;
+    workspaceId: string;
+    organizationId: string;
+  };
+  provider: ChannelProviderId;
+  presence: ResumablePresence;
+  exchanged: ExchangedGrant;
+  actorUserId: string;
+}) => {
+  const { agent, provider, presence, exchanged } = input;
   if (
     exchanged.identity.tenant.externalId !== presence.integration.externalId
   ) {
@@ -1048,8 +1112,8 @@ const completePresenceFromOAuthUnlocked = async (
   // failure. Lifecycle serialization means teardown will snapshot this token.
   const encrypted = await getCrypto().encrypt(exchanged.credentialsJson);
   const snapshot = {
-    organizationId: agent.workspace.organizationId,
-    workspaceId: payload.workspaceId,
+    organizationId: agent.organizationId,
+    workspaceId: agent.workspaceId,
     integrationId: presence.integrationId,
     teamId: presence.integration.externalId,
     sourcePresenceId: presence.id,
@@ -1071,27 +1135,196 @@ const completePresenceFromOAuthUnlocked = async (
     await preserveUnattachedChannelApp(snapshot);
     throw new ServiceError("CONFLICT", "This install is no longer attached");
   }
-  const activated = await activatePresence({
+  return activatePresence({
     presenceId: presence.id,
-    agent: { id: agent.id, name: agent.name, workspaceId: payload.workspaceId },
-    organizationId: agent.workspace.organizationId,
+    agent: { id: agent.id, name: agent.name, workspaceId: agent.workspaceId },
+    organizationId: agent.organizationId,
     provider,
     transport: presence.transport as ChannelTransport,
     appMode: presence.appMode as ChannelAppMode,
     externalId: presence.externalId,
     identity: exchanged.identity,
     credentialsJson: exchanged.credentialsJson,
-    actorUserId: presence.createdByUserId,
+    actorUserId: input.actorUserId,
+  });
+};
+
+/** How many waiting agent apps one stateless code is offered to. Each miss is
+ * one provider round trip; an org with more half-installed agents than this
+ * finishes the rest from each agent's own Channels page. */
+const MAX_STATELESS_CANDIDATES = 25;
+
+/** One candidate's answer to a stateless code: finished, or why not. */
+type CandidateOutcome =
+  | { matched: true; presenceId: string }
+  | { matched: false; reason: string };
+
+/**
+ * Offer a stateless code to ONE waiting agent app, inside its workspace's
+ * lifecycle lock. Every way this app can turn out not to be the code's owner
+ * is a miss, never an error: one candidate the code does not fit must not
+ * stop the search for the one it does.
+ *
+ * A miss leaves the candidate untouched. The reattach, which voids a finished
+ * cleanup's uninstall proof, waits for a match; only the reservation check
+ * runs up front, so an app held for remote cleanup is never offered the code.
+ */
+const offerCodeToCandidateUnlocked = async (
+  input: {
+    code: string;
+    redirectUri: string;
+    provider: ChannelProviderId;
+    actorUserId: string;
+  },
+  agent: {
+    id: string;
+    name: string;
+    workspaceId: string;
+    organizationId: string;
+  },
+): Promise<CandidateOutcome> => {
+  const { provider } = input;
+  // Re-read under the lock: the candidate list was read outside it, and the
+  // row may have finished, been detached, or been re-created since.
+  const presence = await findResumablePresence(agent.id, provider);
+  if (!presence || presence.transport !== "events") {
+    return { matched: false, reason: "no_longer_waiting" };
+  }
+  try {
+    await db.$transaction((tx) =>
+      assertChannelIdentityAvailable(
+        tx,
+        provider,
+        presence.externalId,
+        presence.id,
+      ),
+    );
+  } catch (err) {
+    if (err instanceof ServiceError) {
+      return { matched: false, reason: "reserved_for_cleanup" };
+    }
+    throw err;
+  }
+
+  const credentialsJson = await getCrypto().decrypt(presence.credentials);
+  await assertChannelLifecycleHeld();
+  let exchanged: ExchangedGrant;
+  try {
+    exchanged = await channelProvider(provider).exchangeOAuthCode({
+      code: input.code,
+      redirectUri: input.redirectUri,
+      credentialsJson,
+    });
+  } catch (err) {
+    // The provider refused: the code was minted for another app, or this
+    // app can no longer exchange at all (deleted, secret rotated). Nothing
+    // was issued. Offering a code to the wrong client leaves it spendable by
+    // its own (Slack, verified live 2026-10-08; not a documented guarantee).
+    // If that ever changes, this door finds no match and never binds the
+    // wrong app, but the code would then be spent before the page's
+    // shared-app fallback runs.
+    if (err instanceof ChannelProviderApiError) {
+      return { matched: false, reason: `refused:${err.code}` };
+    }
+    // The provider's own refusal to try: the stored credentials carry no
+    // OAuth client (an app made by hand on the paste floor). Nothing was sent.
+    if (err instanceof ServiceError) {
+      return { matched: false, reason: "no_oauth_client" };
+    }
+    throw err;
+  }
+
+  await db.$transaction((tx) =>
+    beginChannelReattach(tx, provider, presence.externalId, presence.id),
+  );
+  const activated = await activateExchangedPresence({
+    agent,
+    provider,
+    presence,
+    exchanged,
+    actorUserId: input.actorUserId,
+  });
+  return { matched: true, presenceId: activated.id };
+};
+
+/**
+ * The STATELESS agent door: an install of an agent's own app that began in
+ * Slack (the admin-approval message's install link, the app directory, or
+ * "Install to Workspace" in the app's settings) lands with a code and no
+ * signed state. Once someone signs in, offer the code to each of THEIR org's
+ * agent apps still waiting for an install, newest first, and finish the one
+ * the provider accepts it for, as the signed-in caller.
+ *
+ * TRUST: no confirmation step is owed here, unlike the shared-app finish.
+ * A match can only ever be one of this org's own agent apps (only we hold its
+ * client secret, and the candidates are fenced to the caller's org), and the
+ * activation refuses any team other than the workspace already connected to
+ * this org. So the worst a planted code can do is finish an install this
+ * org's own Slack admin already approved.
+ *
+ * Returns null when no waiting agent app accepts the code.
+ */
+export const completeAgentInstallFromCode = async (input: {
+  organizationId: string;
+  actorUserId: string;
+  provider: ChannelProviderId;
+  code: string;
+}): Promise<{
+  agentId: string;
+  workspaceId: string;
+  presenceId: string;
+} | null> => {
+  const apiUrl = publicApiUrl();
+  if (!apiUrl) return null;
+  // The SAME redirect the manifest baked: the provider checks it on exchange.
+  const redirectUri = `${apiUrl}/v1/channels/${input.provider}/oauth/callback`;
+
+  const candidates = await db.agentChannel.findMany({
+    where: {
+      provider: input.provider,
+      transport: "events",
+      status: { in: [...RESUMABLE_STATUSES] },
+      credentials: { not: null },
+      integration: { organizationId: input.organizationId },
+      agent: {
+        kind: "hosted",
+        workspace: { organizationId: input.organizationId },
+      },
+    },
+    orderBy: { updatedAt: "desc" },
+    take: MAX_STATELESS_CANDIDATES,
+    select: {
+      agent: { select: { id: true, name: true, workspaceId: true } },
+    },
   });
 
-  // The callback route sends the browser home — to THIS agent's Channels
-  // section, resolved from the verified state, never from anything Slack (or
-  // the browser) chose.
-  return {
-    presence: activated,
-    agentId: agent.id,
-    workspaceId: payload.workspaceId,
-  };
+  const misses: string[] = [];
+  for (const { agent } of candidates) {
+    const outcome = await withChannelLifecycle(agent.workspaceId, () =>
+      offerCodeToCandidateUnlocked(
+        {
+          code: input.code,
+          redirectUri,
+          provider: input.provider,
+          actorUserId: input.actorUserId,
+        },
+        { ...agent, organizationId: input.organizationId },
+      ),
+    );
+    if (outcome.matched) {
+      return {
+        agentId: agent.id,
+        workspaceId: agent.workspaceId,
+        presenceId: outcome.presenceId,
+      };
+    }
+    misses.push(outcome.reason);
+  }
+  log.info(
+    { organizationId: input.organizationId, provider: input.provider, misses },
+    "no waiting agent app accepted the install code",
+  );
+  return null;
 };
 
 /**

@@ -68,13 +68,17 @@ const log = logger.child({ service: "agent-link" });
  *   1. the link (created `ask`/`ask` on first contact);
  *   2. `blocked` on either side -> refused with the reason, terminal;
  *   3. every side `allow` -> delivered now;
- *   4. otherwise ONE HOLD PER `ask` SIDE (the 4b action-approval primitive):
- *      each side's owners get their card ("Donna wants to talk to Ray: …")
- *      in their bell and Slack DMs; the message is delivered when the LAST
- *      required approval executes; a rejection on either side fails the
- *      other pending card loudly ("the other agent's owner declined").
- *      "Approve + always allow" sets THE DECIDER'S side to `allow`.
- *   5. at execute the live link is re-read (a block after the card wins),
+ *   4. an agent's reply on a same-workspace pair with an OPEN task ->
+ *      delivered now (the task opened through an approved message; its
+ *      budget and idle clock meter the rest);
+ *   5. otherwise a HOLD (the 4b action-approval primitive), one per owner
+ *      group: a same-workspace pair gets ONE card, on the sender, carrying
+ *      both sides' consent; a cross-workspace pair gets one per `ask` side,
+ *      the message is delivered when the LAST required approval executes,
+ *      and a rejection on either side fails the other pending card loudly
+ *      ("the other agent's owner declined"). "Approve + always allow" sets
+ *      the decider's side to `allow` (both sides in one workspace);
+ *   6. at execute the live link is re-read (a block after the card wins),
  *      the 4a/5a verify-at-approve lesson.
  *
  * Delivery is a TURN on the receiver's pair conversation (`source: "agent"`,
@@ -116,11 +120,10 @@ export const AGENT_COMMUNICATE_ACTION = "agent.communicate";
 export const MAX_AGENT_MESSAGE_CHARS = 4000;
 
 /**
- * Pending holds one sender may have open toward one peer. A hold posts
- * cards to the OTHER side's owners too, so an agent looping on
- * message_agent would nag a tenant that never asked for it; past this many
- * unanswered asks the tool refuses until one is decided. Deterministic, no
- * model coaching.
+ * Pending holds one sender may have open toward one peer. An agent looping
+ * on message_agent would otherwise stack cards in its owners' (and, across
+ * workspaces, a foreign tenant's) DMs; past this many unanswered asks the
+ * tool refuses until one is decided. Deterministic, no model coaching.
  */
 export const MAX_PENDING_PER_PAIR = 3;
 
@@ -246,12 +249,14 @@ export const setLinkPolicy = async (input: {
 /**
  * Forget the relationship from THIS agent's side: the pair row (so the next
  * contact starts ask/ask again for both), this agent's pair conversation
- * (its turns and events cascade), and any of this agent's pending cards
- * about the pair (expired, so the bell and Slack cards settle; a sibling
- * hold on the other agent then fails on its own approve, as a decline
- * does). The OTHER agent keeps its own conversation: its transcript is its
- * owners' record, not ours to delete. Fenced on the caller's workspace
- * owning `agentId`. Not-found-shaped.
+ * (its turns and events cascade), and the pending cards about the pair
+ * that this workspace owns (expired, so the bell and Slack cards settle):
+ * this agent's, plus the peer's when it is a same-workspace agent. A
+ * foreign peer's card stays its owners' to settle, and then fails on its
+ * own approve (its sibling is expired), as a decline does. The OTHER agent
+ * keeps its own conversation: its transcript is its owners' record, not
+ * ours to delete. Fenced on the caller's workspace owning `agentId`.
+ * Not-found-shaped.
  */
 export const forgetLink = async (input: {
   workspaceId: string;
@@ -284,16 +289,35 @@ export const forgetLink = async (input: {
   ]);
   if (!link && !conversation) return false;
 
+  // Whose pending cards about the pair settle: always this agent's; the
+  // peer's too when it is in the SAME workspace - the caller owns that
+  // side as well, and a same-workspace message carries ONE hold on the
+  // sender, so leaving it would let an approve deliver into a pair that
+  // was just removed. A foreign peer's cards are its owners' to settle
+  // (they fail on approve anyway: the sibling is expired).
+  const peerSameWorkspace = await db.agent.findFirst({
+    where: { id: input.peerAgentId, workspaceId: input.workspaceId },
+    select: { id: true },
+  });
+  const pairPayload = (from: string, to: string) => ({
+    AND: [
+      { payload: { path: ["fromAgentId"], equals: from } },
+      { payload: { path: ["toAgentId"], equals: to } },
+    ],
+  });
   const pending = await db.actionApproval.findMany({
     where: {
-      agentId: input.agentId,
+      agentId: {
+        in: peerSameWorkspace
+          ? [input.agentId, input.peerAgentId]
+          : [input.agentId],
+      },
       action: AGENT_COMMUNICATE_ACTION,
       status: "pending",
+      // Holds about THIS pair, in either direction.
       OR: [
-        {
-          payload: { path: ["fromAgentId"], equals: input.peerAgentId },
-        },
-        { payload: { path: ["toAgentId"], equals: input.peerAgentId } },
+        pairPayload(input.agentId, input.peerAgentId),
+        pairPayload(input.peerAgentId, input.agentId),
       ],
     },
     select: { id: true },
@@ -411,14 +435,51 @@ export const requestCommunicate = async (input: {
     return { kind: "sent", to: peer.name, task: landed };
   }
 
+  // ONE OWNER GROUP: a same-workspace pair is the same owners on both sides.
+  const sameOwners = from.workspaceId === peer.workspaceId;
+
+  // An exchange the owners ALREADY consented to: an agent's message (not a
+  // person's new question) on a same-workspace pair with an open task. A
+  // task only opens through an approved first message (or allow/allow), and
+  // from then on the task budget and idle clock meter the back-and-forth -
+  // a card per reply would ask the same owners the same question again.
+  // Blocks were refused above, so a block since the approval still wins.
+  // NOT across workspaces: there each owner group approved one message
+  // crossing its tenant boundary, never the answers that follow it.
+  if (
+    sameOwners &&
+    origin.kind === "agent" &&
+    (await findOpenTask(from.id, peer.id))
+  ) {
+    const landed = await deliver(payload, { origin });
+    return { kind: "sent", to: peer.name, task: landed };
+  }
+
+  // ONE OWNER GROUP, ONE CARD: one hold on the sender (anchored on the
+  // asking turn) carries both sides' consent. Cross-workspace pairs keep
+  // one hold per `ask` side - two owner groups, two decisions.
+  const holdSides = sameOwners
+    ? [{ agentId: from.id, anchor: true }]
+    : [
+        { agentId: from.id, policy: mine, anchor: true },
+        { agentId: peer.id, policy: theirs, anchor: false },
+      ]
+        .filter((side) => side.policy === "ask")
+        .map(({ agentId, anchor }) => ({ agentId, anchor }));
+  // Never empty: allow/allow delivered above, and a same-workspace pair
+  // always holds on the sender.
+  const [firstHold] = holdSides;
+  if (!firstHold) throw new Error("no side holds this message");
+
   // The nag brake: unanswered asks from THIS sender to THIS peer, counted
-  // on the sender's own holds (or the peer's, when only the peer asks).
+  // on the first hold's agent (the sender's, or the peer's when only the
+  // peer asks).
   const pending = await db.actionApproval.count({
     where: {
       action: AGENT_COMMUNICATE_ACTION,
       status: "pending",
       expiresAt: { gt: new Date() },
-      agentId: mine === "ask" ? from.id : peer.id,
+      agentId: firstHold.agentId,
       payload: { path: ["fromAgentId"], equals: from.id },
       AND: { payload: { path: ["toAgentId"], equals: peer.id } },
     },
@@ -430,18 +491,12 @@ export const requestCommunicate = async (input: {
     );
   }
 
-  // One hold per `ask` side: the sender's owners decide from the sender's
-  // agent, the receiver's owners from the receiver's. Same owners on both
-  // sides is the common case, in which the two cards read as one question
-  // asked from each agent's point of view - and the second approve is the
-  // one that delivers.
+  // Cross-workspace: the sender's owners decide from the sender's agent, the
+  // receiver's owners from the receiver's, and the second approve is the
+  // one that delivers. Same workspace: the single hold delivers.
   const summary = `${cleanLabel(from.name)} wants to talk to ${cleanLabel(peer.name)}: "${cleanLabel(text, 200)}"`;
   const approvalIds: string[] = [];
-  for (const side of [
-    { agentId: from.id, policy: mine, anchor: true },
-    { agentId: peer.id, policy: theirs, anchor: false },
-  ]) {
-    if (side.policy !== "ask") continue;
+  for (const side of holdSides) {
     const held = await requestActionApproval({
       agentId: side.agentId,
       // The outcome notice anchors on the SENDER's asking turn only; the
@@ -910,9 +965,13 @@ const resolveOwnedTask = async (input: {
       "You have no open task to report on. complete_task is for a task a person gave you for another agent.",
     );
   }
+  // Name order, like the roster: without it `IN` returns rows in whatever
+  // order the plan produces, and the agent-facing text below changes from
+  // one call to the next.
   const peers = await db.agent.findMany({
     where: { id: { in: owned.map((task) => task.peerAgentId) } },
     select: { id: true, name: true },
+    orderBy: { name: "asc" },
   });
   const names = peers.map((p) => cleanLabel(p.name)).join(" and ");
   if (input.peer) {
@@ -1088,10 +1147,12 @@ const closePairTasks = async (
 // ── Approval replay ─────────────────────────────────────────────────────────
 
 /**
- * Approve = this side consents. Deliver only once BOTH sides have: re-read
- * the live link first (a block since the card wins), then the sibling hold
- * for the same message on the other agent. Fenced on the approval's own
- * agent: the payload must name it as one of the two.
+ * Approve = this side consents. Every approve re-reads the live link first
+ * (a block since the card wins). A same-workspace hold is the only one for
+ * its message and delivers on its own approve; across workspaces, delivery
+ * waits for the sibling hold for the same message on the other agent.
+ * Fenced on the approval's own agent: the payload must name it as one of
+ * the two.
  *
  * WHICH approve delivers is decided by ORDER, not by status: the two cards
  * may be approved within the same instant, and at handler time each still
@@ -1177,18 +1238,26 @@ registerActionHandler(
     });
   },
   {
-    // "Approve + always allow": THE DECIDER'S side flows from now on. The
-    // other side's standing is untouched - one relationship, two owners.
+    // "Approve + always allow": THE DECIDER'S side flows from now on. Across
+    // workspaces the other side's standing is untouched - one relationship,
+    // two owners. In ONE workspace the decider owns both sides (the card
+    // they just approved carried both consents), so both flip: otherwise
+    // the next message would still ask on the side nobody was shown.
     alwaysAllow: async (approval, deciderUserId) => {
       const payload = communicatePayloadSchema.parse(approval.payload);
+      const pair = await loadPair(payload.fromAgentId, payload.toAgentId);
       const link = await ensureLink(payload.fromAgentId, payload.toAgentId);
-      const side = sideOf(link, approval.agentId);
+      const sameOwners =
+        pair !== null && pair.from.workspaceId === pair.to.workspaceId;
+      const sideA = { policyA: "allow", decidedByAUserId: deciderUserId };
+      const sideB = { policyB: "allow", decidedByBUserId: deciderUserId };
       await db.agentLink.update({
         where: { id: link.id },
-        data:
-          side === "A"
-            ? { policyA: "allow", decidedByAUserId: deciderUserId }
-            : { policyB: "allow", decidedByBUserId: deciderUserId },
+        data: sameOwners
+          ? { ...sideA, ...sideB }
+          : sideOf(link, approval.agentId) === "A"
+            ? sideA
+            : sideB,
       });
     },
   },

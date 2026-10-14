@@ -703,6 +703,119 @@ mod tests {
         ));
     }
 
+    // Webflow nests items under collections, so a collection-level tool must
+    // never match an item path (that would let "Delete collection" approvals
+    // or blocks miss item deletes, or vice versa). The trailing-slash patterns
+    // in `webflow.ts` pin depth; this proves the gateway honours it.
+    #[test]
+    fn webflow_collection_tools_keep_their_depth() {
+        let host = "api.webflow.com";
+        assert!(matches(
+            "webflow",
+            &["delete_collection"],
+            host,
+            "DELETE",
+            "/v2/collections/abc"
+        ));
+        assert!(!matches(
+            "webflow",
+            &["delete_collection"],
+            host,
+            "DELETE",
+            "/v2/collections/abc/items"
+        ));
+        assert!(matches(
+            "webflow",
+            &["delete_items"],
+            host,
+            "DELETE",
+            "/v2/collections/abc/items"
+        ));
+        assert!(matches(
+            "webflow",
+            &["get_item"],
+            host,
+            "GET",
+            "/v2/collections/abc/items/def"
+        ));
+        assert!(!matches(
+            "webflow",
+            &["get_collection"],
+            host,
+            "GET",
+            "/v2/collections/abc/items/def"
+        ));
+        // Read tools never admit a write method on the same path.
+        assert!(!matches(
+            "webflow",
+            &["list_items"],
+            host,
+            "DELETE",
+            "/v2/collections/abc/items"
+        ));
+        assert!(matches(
+            "webflow",
+            &["publish_site"],
+            host,
+            "POST",
+            "/v2/sites/s1/publish"
+        ));
+        // Items addressed one at a time (`/items/<id>`, `/items/<id>/live`)
+        // belong to the same write tool as the bulk endpoints, and the
+        // single-item GET never admits them.
+        assert!(matches(
+            "webflow",
+            &["update_items"],
+            host,
+            "PATCH",
+            "/v2/collections/abc/items/def"
+        ));
+        assert!(matches(
+            "webflow",
+            &["delete_items"],
+            host,
+            "DELETE",
+            "/v2/collections/abc/items/def/live"
+        ));
+        assert!(!matches(
+            "webflow",
+            &["get_item"],
+            host,
+            "DELETE",
+            "/v2/collections/abc/items/def"
+        ));
+        // The older create endpoints Webflow still serves.
+        assert!(matches(
+            "webflow",
+            &["create_items"],
+            host,
+            "POST",
+            "/v2/collections/abc/items"
+        ));
+        assert!(matches(
+            "webflow",
+            &["create_items"],
+            host,
+            "POST",
+            "/v2/collections/abc/items/bulk"
+        ));
+        // Form submissions in the site-less spelling the official SDK uses.
+        assert!(matches(
+            "webflow",
+            &["delete_form_submission"],
+            host,
+            "DELETE",
+            "/v2/form_submissions/fs1"
+        ));
+        assert!(!matches(
+            "webflow",
+            &["get_form_submission"],
+            host,
+            "DELETE",
+            "/v2/form_submissions/fs1"
+        ));
+    }
+
     // Gateway-side twin of `salesforce-path-scope.test.ts`. The TS catalog is
     // authored and this JSON is derived from it, but the GATEWAY is what
     // enforces a grant — so the exclusion is pinned on both sides of the
@@ -736,6 +849,45 @@ mod tests {
             "/services/data/v66.0/graphql",
             "/services/data/v66.0/tooling/query",
             "/services/apexrest/custom",
+        ] {
+            for method in ["GET", "POST", "PATCH", "DELETE"] {
+                assert!(
+                    !matches("salesforce", all, host, method, path),
+                    "{method} {path} reached a tool"
+                );
+            }
+        }
+        // sObject Collections is the single-record update/delete in bulk, in
+        // both documented spellings; a POST (create, or any `_HttpMethod`
+        // override) reaches no tool, nor does any deeper collections path.
+        for path in [
+            "/services/data/v66.0/composite/sobjects",
+            "/services/data/v66.0/composite/sobjects/",
+        ] {
+            assert!(matches(
+                "salesforce",
+                &["update_record"],
+                host,
+                "PATCH",
+                path
+            ));
+            assert!(matches(
+                "salesforce",
+                &["delete_record"],
+                host,
+                "DELETE",
+                path
+            ));
+            for method in ["GET", "POST"] {
+                assert!(
+                    !matches("salesforce", all, host, method, path),
+                    "{method} {path} reached a tool"
+                );
+            }
+        }
+        for path in [
+            "/services/data/v66.0/composite/sobjects/Contact",
+            "/services/data/v66.0/composite/sobjects/Contact/Ext_Id__c",
         ] {
             for method in ["GET", "POST", "PATCH", "DELETE"] {
                 assert!(

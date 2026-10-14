@@ -1,14 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import {
-  Check,
-  ChevronDown,
-  Loader2,
-  ShieldCheck,
-  Slash,
-  UserCheck,
-} from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -20,98 +13,33 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@onecli/ui/components/alert-dialog";
-import { Badge } from "@onecli/ui/components/badge";
-import { Button, buttonVariants } from "@onecli/ui/components/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@onecli/ui/components/dropdown-menu";
+import { buttonVariants } from "@onecli/ui/components/button";
 import type { AgentContact } from "@/lib/api";
-import { useDeleteContact, useSetContactPolicy } from "@/hooks/use-channels";
+import { useDeleteContact } from "@/hooks/use-channels";
 import { ContactRowFrame } from "./contact-row-frame";
+import { OutboundControl } from "./outbound-control";
 
 interface ContactRowProps {
   agentId: string;
+  agentName: string;
   contact: AgentContact;
 }
 
-type Policy = AgentContact["policy"];
-
-/** One policy's face: the badge word, its tone, and the menu line. */
-const POLICIES: Record<
-  Policy,
-  {
-    badge: string;
-    badgeClass: string;
-    Icon: typeof Check;
-    menu: string;
-    hint: string;
-    toast: string;
-  }
-> = {
-  allow: {
-    badge: "Always allowed",
-    badgeClass:
-      "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-    Icon: UserCheck,
-    menu: "Always allow",
-    hint: "No approval needed.",
-    toast: "always allowed",
-  },
-  ask: {
-    badge: "Asks first",
-    badgeClass: "",
-    Icon: ShieldCheck,
-    menu: "Ask me first",
-    hint: "You approve each message.",
-    toast: "asks first",
-  },
-  blocked: {
-    badge: "Blocked",
-    badgeClass:
-      "border-destructive/30 bg-destructive/10 text-destructive dark:text-red-400",
-    Icon: Slash,
-    menu: "Block",
-    hint: "No messages, no mentions.",
-    toast: "blocked",
-  },
-};
-
-const ORDER: readonly Policy[] = ["allow", "ask", "blocked"];
-
 /**
- * One row of the agent's OUTBOUND address book: someone the agent messaged
- * on its own with send_message, and the standing decision that send left
- * behind. The same shape as every other Contacts row (the shared frame):
- * the badge is the reading and, pressed, offers the other two words; the
- * `…` holds Remove. The kind (person / channel / app) is said by the group
- * the row sits in, never repeated per row.
+ * One OUTBOUND-only row: an app the agent messaged. An app has no inbound
+ * setting of its own (in a channel it follows the channel's), so it has
+ * one half; people and channels use the two-way row instead. The badge
+ * says whether the agent may message it without asking; the `…` holds
+ * Remove.
  */
-export const ContactRow = ({ agentId, contact }: ContactRowProps) => {
-  const setPolicy = useSetContactPolicy(agentId);
+export const ContactRow = ({
+  agentId,
+  agentName,
+  contact,
+}: ContactRowProps) => {
   const remove = useDeleteContact(agentId);
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const mine = POLICIES[contact.policy];
-  const busy =
-    (setPolicy.isPending && setPolicy.variables?.contactId === contact.id) ||
-    (remove.isPending && remove.variables === contact.id);
-
-  const choose = (policy: Policy) => {
-    if (policy === contact.policy) return;
-    setPolicy.mutate(
-      { contactId: contact.id, policy },
-      {
-        onSuccess: () =>
-          toast.success(`${contact.displayName}: ${POLICIES[policy].toast}`),
-        onError: (err) =>
-          toast.error(err instanceof Error ? err.message : "Update failed"),
-      },
-    );
-  };
+  const busy = remove.isPending && remove.variables === contact.id;
 
   const confirmRemove = () =>
     remove.mutate(contact.id, {
@@ -132,58 +60,12 @@ export const ContactRow = ({ agentId, contact }: ContactRowProps) => {
         disabled={busy}
         onRemove={() => setConfirmOpen(true)}
         status={
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild disabled={busy}>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="gap-1.5 px-2"
-                aria-label={`Whether the agent may message ${contact.displayName} on its own: ${mine.badge.toLowerCase()}. Change`}
-              >
-                {setPolicy.isPending &&
-                setPolicy.variables?.contactId === contact.id ? (
-                  <Loader2
-                    className="size-3.5 animate-spin motion-reduce:hidden"
-                    aria-hidden
-                  />
-                ) : null}
-                <Badge variant="secondary" className={mine.badgeClass}>
-                  <mine.Icon className="size-3" aria-hidden />
-                  {mine.badge}
-                </Badge>
-                <ChevronDown
-                  className="text-muted-foreground size-3.5"
-                  aria-hidden
-                />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-72">
-              <DropdownMenuLabel className="font-normal text-pretty">
-                Message <span translate="no">{contact.displayName}</span>
-              </DropdownMenuLabel>
-              <DropdownMenuSeparator />
-              {ORDER.map((policy) => (
-                <DropdownMenuItem
-                  key={policy}
-                  onSelect={() => choose(policy)}
-                  className="items-start gap-2"
-                >
-                  <Check
-                    className={`mt-0.5 size-3.5 shrink-0 ${contact.policy === policy ? "" : "invisible"}`}
-                    aria-hidden
-                  />
-                  <span className="min-w-0">
-                    <span className="block text-sm">
-                      {POLICIES[policy].menu}
-                    </span>
-                    <span className="text-muted-foreground block text-xs text-pretty">
-                      {POLICIES[policy].hint}
-                    </span>
-                  </span>
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
+          <OutboundControl
+            agentId={agentId}
+            agentName={agentName}
+            subject={contact.displayName}
+            contact={contact}
+          />
         }
       />
 

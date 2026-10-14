@@ -38,6 +38,8 @@ DATABASE_URL=postgresql://postgres:postgres@localhost:5461/onecli_he2e_template 
 docker build -f docker/agent-base.Dockerfile -t onecli-agent-base:local .
 docker build -f docker/agent.Dockerfile -t onecli-agent:he2e .
 cargo build --manifest-path apps/gateway/Cargo.toml --bin onecli-gateway
+# The stub upstream is addressed by name (see law 4); map it once.
+echo "127.0.0.1 upstream.e2e.test" | sudo tee -a /etc/hosts
 
 E2E_ADMIN_DATABASE_URL=postgresql://postgres:postgres@localhost:5461/postgres \
 E2E_TEMPLATE_DB=onecli_he2e_template \
@@ -47,6 +49,8 @@ E2E_AGENT_IMAGE=onecli-agent:he2e \
 
 Unset variables **skip locally and throw in CI** — the gateway-e2e law: a
 silently-skipping proof suite is exactly the rot this package replaces.
+A missing hosts line fails the first scenario that starts a stub upstream,
+with the line to add in the error.
 
 One scenario is opt-in in BOTH places: `tests/send-file-scale.test.ts` pushes
 100 concurrent 25 MB uploads through the api child (2.5 GB over loopback,
@@ -54,7 +58,7 @@ about half a minute) and runs only with `HOSTED_E2E_SCALE=1`; otherwise it
 registers as skipped. Run it after touching the attachment door, the blob
 store, or the pool.
 
-## The three laws worth knowing before writing a scenario
+## The four laws worth knowing before writing a scenario
 
 1. **Door 2 is seeded from day one.** A sandbox will not start without a
    stored LLM secret **and** a published grant rule naming the agent
@@ -70,6 +74,14 @@ store, or the pool.
    that transits the gateway from inside the sandbox (the injection/approval
    witness), platform-tool dials, scripted deaths. Non-directive messages take
    the fake's default echo path.
+4. **A sandbox reaches the stub upstream by name, never by `127.0.0.1`.**
+   Inside the container that address is the container's own loopback, and
+   the sandbox env exempts it from the proxy (`NO_PROXY`, so an agent can
+   reach its own open proxy, DevTools port, or dev server). A request to it
+   dials the container itself and never meets the gateway. Use
+   `upstream.url(path)` and `upstream.host` (`upstream.e2e.test`, resolved on
+   the host by the `/etc/hosts` line above); the gateway's skip-verify and
+   private-destination allowances name exactly that host.
 
 ## Isolation model
 

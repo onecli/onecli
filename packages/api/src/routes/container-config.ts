@@ -50,6 +50,21 @@ export const containerConfigRoutes = () => {
         agentIdentifier,
       );
 
+      if (resolution.outcome === "hosted-agent") {
+        // A hosted agent runs only in the platform's sandbox, which gets its
+        // config server-side; the config carries the agent's gateway token,
+        // which is never handed to a person. Not a 404: the agent exists,
+        // and a caller should learn why it cannot have it.
+        return c.json(
+          {
+            error:
+              "This agent runs in OneCLI's hosted sandbox; its gateway credentials are never handed out. Use a bring-your-own agent to run on your own machine.",
+            code: "HOSTED_AGENT",
+          },
+          403,
+        );
+      }
+
       if (resolution.outcome === "identifier-not-found") {
         // Fail loud: a container was started for an agent that isn't
         // registered (its POST /v1/agents create was rejected or never ran).

@@ -77,6 +77,41 @@ describe("parseConnectLink: the connection_needs_reconnect shape", () => {
   });
 });
 
+describe("parseConnectLink: the github_org_access_required shape", () => {
+  it("names the GitHub organization that refused the account", () => {
+    expect(
+      parseConnectLink(
+        "https://app.onecli.sh/w/abc/connections/apps/github?org_access=Acme-Labs",
+      ),
+    ).toEqual({ provider: "github", kind: "org_access", org: "Acme-Labs" });
+  });
+
+  it("falls back to attach for anything that is not an org login", () => {
+    expect(
+      parseConnectLink(
+        "https://app.onecli.sh/connections/apps/github?org_access=a%2Fb",
+      ),
+    ).toEqual({ provider: "github", kind: "attach" });
+  });
+
+  it("is GitHub's alone: another app's page ignores the parameter", () => {
+    expect(
+      parseConnectLink(
+        "https://app.onecli.sh/w/abc/connections/apps/gitlab?org_access=acme",
+      ),
+    ).toEqual({ provider: "gitlab", kind: "attach" });
+  });
+
+  it("renders as a card row with the org", () => {
+    const text =
+      "Ask the user to open https://app.onecli.sh/w/a/connections/apps/github?org_access=acme. Then retry.";
+    const [row] = extractConnectSuggestions(text);
+    expect(row?.app.id).toBe("github");
+    expect(row?.kind).toBe("org_access");
+    expect(row?.org).toBe("acme");
+  });
+});
+
 describe("parseConnectLink — the access_restricted (attach) shape", () => {
   it("parses the manage URL the gateway mints when the agent lacks a grant", () => {
     expect(

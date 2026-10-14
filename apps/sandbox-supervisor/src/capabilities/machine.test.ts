@@ -13,7 +13,7 @@ import { machineFragment } from "./machine";
  */
 
 describe("the machine fragment", () => {
-  const flat = machineFragment.body.replace(/\s+/g, " ");
+  const flat = machineFragment(null).body.replace(/\s+/g, " ");
 
   it("names both durable roots — the volume and the POSIX home", () => {
     // MUTATION-PROOF: teaching only /workspace would leave the agent
@@ -149,6 +149,57 @@ describe("the machine fragment", () => {
   it("never names a runtime vendor", () => {
     // Same law as the platform prompt and the preamble: naming the runtime —
     // even to steer away from it — leaks the identity the platform withholds.
-    expect(machineFragment.body).not.toMatch(/jcode/i);
+    expect(machineFragment(null).body).not.toMatch(/jcode/i);
+    expect(machineFragment(":1").body).not.toMatch(/jcode/i);
+  });
+});
+
+describe("the machine fragment with a desktop", () => {
+  const flat = machineFragment(":1").body.replace(/\s+/g, " ");
+  const headless = machineFragment(null).body.replace(/\s+/g, " ");
+
+  it("teaches the launcher and attaching, and forbids launching a browser of its own", () => {
+    // The desktop is the supervisor's (desktop.ts): one browser, on the
+    // persistent profile, under the window manager and the policy. An agent
+    // that launches its own gets a headless-looking process that sites
+    // refuse, and loses the logins the desktop browser holds. Each clause
+    // is load-bearing: the launcher, the attach, the README that carries
+    // the snippet, the prohibition.
+    expect(flat).toContain("this machine has a desktop");
+    expect(flat).toContain("onecli-browser [url]");
+    expect(flat).toContain("connectOverCDP");
+    expect(flat).toContain("/etc/onecli/README.browser");
+    expect(flat).toContain("Never launch a browser of your own");
+    // The headless path's launch guidance is gone, not merely joined by the
+    // desktop's: two ways to open a browser is one too many.
+    expect(flat).not.toContain("point it at that binary");
+    expect(flat).not.toContain("the sandbox flag for self-hosted");
+  });
+
+  it("keeps the proxy law and the sign-in mechanics in both shapes", () => {
+    for (const body of [flat, headless]) {
+      expect(body).toContain("open proxy in $OPEN_PROXY");
+      expect(body).toContain(
+        "never the gateway proxy in HTTPS_PROXY, which is for APIs and CLIs",
+      );
+      expect(body).toContain("login a person gave you: through the open proxy");
+      expect(body).not.toMatch(/127\.0\.0\.1:\d+/);
+    }
+  });
+
+  it("never teaches a desktop the sandbox does not have", () => {
+    expect(headless).not.toContain("onecli-browser");
+    expect(headless).not.toContain("has a desktop");
+  });
+
+  it("names no chromium where the desktop's image carries none", () => {
+    // The desktop image has one browser, the launcher's; the shared
+    // image's headless Chromium is purged from it. An inventory that still
+    // listed `chromium` would send the agent to a binary that is not there,
+    // the exact "no browser" failure the headless shape's pin guards
+    // against, in reverse.
+    expect(flat).not.toContain("chromium");
+    expect(flat).toContain("a browser (desktop, below)");
+    expect(headless).toContain("chromium (headless browser)");
   });
 });

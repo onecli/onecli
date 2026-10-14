@@ -2,6 +2,7 @@ import {
   ACTIVE_TURN_STATUSES,
   AUTOMATION_SOURCES,
   UNSETTLED_TURN_STATUSES,
+  isAutomationSource,
   isPlatformAuthoredSource,
 } from "@onecli/api/validations/conversation";
 import type { Turn, TurnStatus } from "@/lib/api/types";
@@ -66,7 +67,7 @@ export const isPlatformAuthoredTurn = (turn: Turn): boolean =>
 export const isAutomationTurn = (
   turn: Turn,
 ): turn is Turn & { source: AutomationSource } =>
-  (AUTOMATION_SOURCES as readonly string[]).includes(turn.source);
+  isAutomationSource(turn.source);
 
 /** The one in-flight turn, if any. `undefined` input reads as "none". */
 export const activeTurn = (turns: Turn[] | undefined): Turn | undefined =>

@@ -19,7 +19,7 @@ import { parseSlackPresenceCredentials } from "./types";
  * same neutralize-and-clamp treatment as a subject label.
  *
  * Reason capture is dashboard-only in v1 (Slack buttons cannot carry text;
- * the modal flow is a recorded follow-up) — the card says so.
+ * the modal flow is a recorded follow-up).
  */
 
 export const ACTION_APPROVE_ACTION = "action_approve";
@@ -52,23 +52,15 @@ export const actionApprovalCardBlocks = (input: {
 }): unknown[] => {
   const agent = clampHeader(escapeSlackText(input.agentName));
   const summary = clampLabel(neutralizeSummary(escapeSlackText(input.summary)));
+  // Just the ask and the buttons: a header and a how-it-works paragraph
+  // read as noise around a one-line question. Reject-with-reason stays on
+  // the dashboard.
   return [
-    {
-      type: "header",
-      text: {
-        type: "plain_text",
-        text: `Approval \u00b7 ${clampHeader(input.agentName)}`,
-        emoji: false,
-      },
-    },
     {
       type: "section",
       text: {
         type: "mrkdwn",
-        text:
-          `${agent} asks: *${summary}*\n` +
-          `_Nothing happens until you decide. To reject with a reason, use` +
-          ` the dashboard \u2014 the reason is passed back to ${agent}._`,
+        text: `*${agent}* asks: ${summary}`,
       },
     },
     {
@@ -110,7 +102,7 @@ export const actionApprovalCardBlocks = (input: {
   ];
 };
 
-const settledText = (input: {
+export const settledActionCardText = (input: {
   summary: string;
   outcome: string;
   decidedByName: string;
@@ -119,15 +111,15 @@ const settledText = (input: {
   const by = escapeSlackText(input.decidedByName);
   switch (input.outcome) {
     case "executed":
-      return `\u2705 *${summary}* - approved by ${by} and done.`;
+      return `\u2705 Approved by ${by}: ${summary}`;
     case "rejected":
-      return `\u26d4 *${summary}* - rejected by ${by}.`;
+      return `\u26d4 Rejected by ${by}: ${summary}`;
     case "failed":
-      return `\u26a0\ufe0f *${summary}* - approved by ${by}, but it FAILED. The agent was told.`;
+      return `\u26a0\ufe0f Approved by ${by}, but it failed: ${summary}`;
     case "expired":
-      return `*${summary}* - expired without an answer. The agent can ask again.`;
+      return `Expired: ${summary}`;
     default:
-      return `*${summary}* - ${escapeSlackText(input.outcome)}.`;
+      return `${escapeSlackText(input.outcome)}: ${summary}`;
   }
 };
 
@@ -151,6 +143,7 @@ export const slackActionApprovalCard = {
       channel: im.channel.id,
       text: `${input.agentName} asks for approval: ${input.summary}`,
       blocks: actionApprovalCardBlocks(input),
+      noUnfurl: true,
     });
     return { channel: posted.channel, ts: posted.ts };
   },
@@ -165,7 +158,7 @@ export const slackActionApprovalCard = {
   }): Promise<void> {
     const creds = parseSlackPresenceCredentials(input.credentialsJson);
     if (!creds.botToken) return;
-    const text = settledText(input);
+    const text = settledActionCardText(input);
     await updateBlocksMessage(creds.botToken, {
       channel: input.channel,
       ts: input.ts,

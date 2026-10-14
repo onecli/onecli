@@ -94,6 +94,7 @@ test("every ENV the sandbox runs with is declared in exactly one of the two file
     "EDITOR",
     "PAGER",
     "LESS",
+    "LANG",
     "ONECLI_JCODE_BINARY",
   ];
   const inBase = envKeys(base);

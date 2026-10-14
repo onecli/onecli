@@ -269,7 +269,10 @@ describe("AttachConnectionDialog", () => {
 
   it("empty pool with a connect door: reads as Connect, not Attach", async () => {
     const onConnectNew = vi.fn();
-    renderDialog({}, { onConnectNew, agentName: "Arik" });
+    renderDialog(
+      { definitions: [{ provider: "gmail" }] },
+      { onConnectNew, agentName: "Arik" },
+    );
     const dialog = screen.getByRole("dialog");
     expect(
       screen.getByRole("heading", { name: "Connect Gmail" }),
@@ -279,7 +282,7 @@ describe("AttachConnectionDialog", () => {
     // account to EVERY agent of the workspace, so the copy must not imply
     // only this one gets it.
     expect(dialog).toHaveTextContent(
-      "A new account is on for every agent in this workspace, Arik included, with full access.",
+      "A new account is on for every agent in this workspace, Arik included. Its tools are allowed and anything else needs your approval.",
     );
     // One action, no "another" (nothing exists yet), and no empty-state
     // filler under a header that already says what to do.
@@ -307,14 +310,23 @@ describe("AttachConnectionDialog", () => {
     expect(screen.getByRole("button", { name: "Done" })).toBeInTheDocument();
   });
 
-  it("attaches with FULL access on toggle-on — the stated consent contract", async () => {
+  it("says full access for an app with no tool list (what the server writes)", () => {
+    renderDialog({ connections: [gmailConnection("conn-1")], definitions: [] });
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveTextContent(
+      "Turning one on applies immediately. It gets full access.",
+    );
+    expect(dialog).not.toHaveTextContent(/needs your approval/);
+  });
+
+  it("attaches with the DEFAULT access on toggle-on: the stated consent contract", async () => {
     renderDialog({ connections: [gmailConnection("conn-1")] });
     await userEvent.click(screen.getByRole("switch", { name: "Attach Gmail" }));
     await waitFor(() =>
       expect(grants.setConnectionGrant).toHaveBeenCalledWith(
         "agent-1",
         "conn-1",
-        { access: "full" },
+        { access: "default" },
       ),
     );
   });

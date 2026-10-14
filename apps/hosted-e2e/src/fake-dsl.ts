@@ -19,6 +19,7 @@ export type FakeStep =
       timeoutMs?: number;
     }
   | { op: "tool"; name: string; args?: unknown }
+  | { op: "bash"; ms: number }
   | { op: "error"; message: string }
   | { op: "failNextStart"; reason?: string };
 
@@ -38,6 +39,8 @@ export const tool = (name: string, args?: unknown): FakeStep => ({
   name,
   ...(args !== undefined && { args }),
 });
+/** A long-running harness tool that SEND NOW can move to the background. */
+export const bash = (ms: number): FakeStep => ({ op: "bash", ms });
 export const scriptedError = (message: string): FakeStep => ({
   op: "error",
   message,

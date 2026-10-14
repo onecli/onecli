@@ -1,4 +1,4 @@
-import { apiDelete, apiGet, apiPost, apiPut } from "./client";
+import { apiDelete, apiGet, apiPost, apiPut, workspaceScope } from "./client";
 
 /**
  * Channels (plans/hosted-agents-v2.md step 6): the agent-level presence
@@ -289,6 +289,52 @@ export const detach = (
 
 export const orgView = () => apiGet<OrgChannelsView>("/v1/org/channels");
 
+/** Where one agent stands in a provider, on the org Channels page. */
+export type OrgChannelAgentState = "none" | "pending" | "active" | "attention";
+
+export interface OrgChannelAgent {
+  id: string;
+  name: string;
+  imageUrl: string | null;
+  state: OrgChannelAgentState;
+  /** `pending` only: the transport the half-finished app was stamped with.
+   * A socket app finishes by pasting tokens on the agent's own page. */
+  pendingTransport: ChannelTransport | null;
+  /** Live in Slack: where to open it and how to @mention it. */
+  slack: { appId: string; teamId: string; handle: string | null } | null;
+}
+
+export interface OrgChannelWorkspace {
+  id: string;
+  name: string | null;
+  agents: OrgChannelAgent[];
+}
+
+export interface OrgChannelAgents {
+  /** What a fresh add from the org page would be stamped with. */
+  posture: { transport: ChannelTransport };
+  workspaces: OrgChannelWorkspace[];
+}
+
+/** Every hosted agent in the org, by workspace, with its Slack state. */
+export const orgAgents = (provider: ChannelProvider) =>
+  apiGet<OrgChannelAgents>(
+    `/v1/org/channels/${encodeURIComponent(provider)}/agents`,
+  );
+
+/** The org page's one-click attach: the agent's own guided create, scoped
+ * to the agent's workspace explicitly (the org page's URL carries none). */
+export const attachInWorkspace = (
+  workspaceId: string,
+  agentId: string,
+  provider: ChannelProvider,
+) =>
+  apiPost<CreatePresenceResult>(
+    agentBase(agentId, `/${provider}`),
+    {},
+    workspaceScope(workspaceId),
+  );
+
 /** Connect or refresh the org's automation credential (Slack: the
  * app-configuration refresh token). The server rotates it to validate. */
 export const putCredentials = (provider: ChannelProvider, credential: string) =>
@@ -329,6 +375,23 @@ export const inspectSharedInstall = (
 ) =>
   apiPost<{ team: { externalId: string; name: string | null }; claim: string }>(
     `/v1/org/channels/${provider}/finish-install/inspect`,
+    { code },
+    { headers: { "X-Organization-Id": organizationId } },
+  );
+
+/** Finish an AGENT's own app install that began in Slack (no state names the
+ * agent): the server offers the code to the org's waiting agent apps. A miss
+ * leaves the code spendable for the shared-app inspect. */
+export const finishAgentInstall = (
+  provider: ChannelProvider,
+  code: string,
+  organizationId: string,
+) =>
+  apiPost<{
+    agent: { id: string; workspaceId: string } | null;
+    sharedAppConfigured: boolean;
+  }>(
+    `/v1/org/channels/${provider}/agent-install`,
     { code },
     { headers: { "X-Organization-Id": organizationId } },
   );

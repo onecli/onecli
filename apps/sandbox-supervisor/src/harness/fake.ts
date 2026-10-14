@@ -1,8 +1,9 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
-  AgentEvent,
+  BackgroundedTool,
+  HarnessEvent,
   Harness,
   HarnessSession,
   StartSessionOptions,
@@ -27,7 +28,7 @@ import { parseFakeDirective, runDirective } from "./fake-directives";
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export type FakeScript = (input: TurnInput) => AgentEvent[];
+export type FakeScript = (input: TurnInput) => HarnessEvent[];
 
 const defaultScript: FakeScript = (input) => [
   { type: "tool.started", callId: "fake-1", name: "echo" },
@@ -130,6 +131,8 @@ class FakeSession implements HarnessSession {
   private turnActive = false;
   /** Steers accepted for the LIVE turn, injected at the next event gap. */
   private pendingSteers: SteerInput[] = [];
+  /** The directive tool running right now, movable by SEND NOW. */
+  private runningTool: { name: string; move: () => void } | undefined;
 
   constructor(
     ref: string,
@@ -153,7 +156,7 @@ class FakeSession implements HarnessSession {
    * one, the legacy script otherwise (byte-identical path — what keeps the
    * conformance suite and every in-process consumer green).
    */
-  private async *eventsFor(input: TurnInput): AsyncGenerator<AgentEvent> {
+  private async *eventsFor(input: TurnInput): AsyncGenerator<HarnessEvent> {
     const parsed = parseFakeDirective(input.message);
     if (parsed === null) {
       yield* this.deps.script(input);
@@ -172,10 +175,17 @@ class FakeSession implements HarnessSession {
       turnsRun: () => this.state.turnsRun,
       toolsSocketPath: this.deps.toolsSocketPath,
       armLaunchFailure: this.deps.armLaunchFailure,
+      markRunningTool: (name, move) => {
+        const tool = { name, move };
+        this.runningTool = tool;
+        return () => {
+          if (this.runningTool === tool) this.runningTool = undefined;
+        };
+      },
     });
   }
 
-  async *runTurn(input: TurnInput): AsyncIterable<AgentEvent> {
+  async *runTurn(input: TurnInput): AsyncIterable<HarnessEvent> {
     this.aborted = false;
     this.pendingSteers = [];
     this.turnActive = true;
@@ -183,8 +193,6 @@ class FakeSession implements HarnessSession {
       this.state.turnsRun += 1;
       this.deps.persist?.();
       yield { type: "turn.started" };
-      /** Steers the run consumed — confirmed just before the terminal. */
-      const joined: string[] = [];
       for await (const event of this.eventsFor(input)) {
         // A real harness is async between events; the gap is what makes the
         // conformance abort test meaningful.
@@ -198,25 +206,17 @@ class FakeSession implements HarnessSession {
           yield { type: "turn.done" };
           return;
         }
-        // The event gap IS the fake's safe injection point: a queued steer
-        // surfaces as a text delta echoing it — deterministic, observable,
-        // and shaped like the real thing (the message joins the same run).
-        for (const steer of this.pendingSteers.splice(0)) {
-          joined.push(steer.id);
-          yield { type: "text.delta", text: `\n[steered: ${steer.message}]` };
-        }
+        yield* this.injectSteers();
         if (event.type === "turn.done" || event.type === "error") {
-          for (const followUpId of joined.splice(0)) {
-            yield { type: "message.joined", followUpId };
-          }
           yield event;
           return;
         }
         yield event;
       }
-      for (const followUpId of joined.splice(0)) {
-        yield { type: "message.joined", followUpId };
-      }
+      // The run finishing is an injection point too (jcode's point B: a
+      // message queued as the model finishes extends the turn), so a steer
+      // that arrived during a directive's last step still joins.
+      if (!this.aborted) yield* this.injectSteers();
       yield { type: "turn.done" };
     } finally {
       this.turnActive = false;
@@ -226,12 +226,50 @@ class FakeSession implements HarnessSession {
     }
   }
 
+  /**
+   * The fake's safe injection point: each queued steer is confirmed joined
+   * RIGHT THERE, the way a runtime with the live pickup signal confirms it,
+   * then surfaces as the agent's reply to it, its own framed message like a
+   * real runtime's next message after an injection, tagged as that steer's
+   * reply (so it streams under the follow-up, as the real adapter's does),
+   * and finally as the finished reply. Deterministic and observable: the
+   * reply echoes the steered text.
+   */
+  private *injectSteers(): Generator<HarnessEvent> {
+    for (const steer of this.pendingSteers.splice(0)) {
+      const reply = `[steered: ${steer.message}]`;
+      // The real order: the join the moment the message is in, the reply
+      // streaming under it, then the finished reply.
+      yield { type: "message.joined", followUpId: steer.id };
+      yield {
+        type: "text.delta",
+        text: reply,
+        messageId: randomUUID(),
+        replyTo: steer.id,
+      };
+      yield { type: "message.replied", followUpId: steer.id, reply };
+    }
+  }
+
   steer(input: SteerInput): Promise<void> {
     if (!this.turnActive) {
       return Promise.reject(new Error("no turn in flight"));
     }
     this.pendingSteers.push(input);
     return Promise.resolve();
+  }
+
+  /**
+   * SEND NOW: end the running directive tool's wait (the `bash` step), the
+   * way jcode moves its tool to the background, and say what moved. Nothing
+   * running is the honest `moved: false`.
+   */
+  backgroundRunningTool(): Promise<BackgroundedTool> {
+    const tool = this.turnActive ? this.runningTool : undefined;
+    if (!tool) return Promise.resolve({ moved: false });
+    this.runningTool = undefined;
+    tool.move();
+    return Promise.resolve({ moved: true, toolName: tool.name });
   }
 
   abort(): Promise<void> {
@@ -298,6 +336,7 @@ export const createFakeHarness = (options?: {
       thinking: false,
       toolEvents: true,
       steer: true,
+      backgroundTool: true,
       skillsDir: ".agents/skills",
       instructionFiles: ["CLAUDE.md", "AGENTS.md"],
       // No MCP bridge by default: the fake serves scripted events, so it

@@ -78,6 +78,10 @@ export default async function ConnectPage({ params, searchParams }: Props) {
             ? app.connectionMethod.fileImport
             : undefined,
         apiKeyFields,
+        accessLevels:
+          app.connectionMethod.type === "oauth"
+            ? app.connectionMethod.accessLevels
+            : undefined,
       }}
       hasDefaults={hasEnvDefaults || hasAppConfig}
       status={status === "success" || status === "error" ? status : undefined}

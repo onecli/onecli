@@ -104,8 +104,10 @@ fn target_matches(
             id,
             provider,
             tools,
+            methods,
         } => {
             request.winning_connection_id.as_deref() == Some(id.as_str())
+                && (!tools.is_empty() || methods.allows(&request.method))
                 && super::catalog::app_target_matches(
                     provider,
                     tools,

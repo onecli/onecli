@@ -48,7 +48,9 @@ export interface AgentWithGrantsSummary {
   id: string;
   name: string;
   identifier: string;
-  accessToken: string;
+  /** BYO agents only: a hosted agent's token is never user-visible
+   * (`agentTokenIsUserVisible`). */
+  accessToken?: string;
   kind: string;
   createdAt: Date;
   /** Attached channel presences — what deletion also removes from the

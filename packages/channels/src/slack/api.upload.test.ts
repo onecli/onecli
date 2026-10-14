@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   isSlackUploadUrl,
+  shareFileWithBlocks,
+  SharedMessageUnknownError,
   SLACK_MAX_UPLOAD_BYTES,
   SlackApiError,
+  updateBlocksMessage,
   uploadFiles,
 } from "./api";
 import { startFakeSlackServer, type FakeSlackServer } from "./testing";
@@ -213,5 +216,118 @@ describe("isSlackUploadUrl", () => {
 
   it("pins Slack's documented ceiling", () => {
     expect(SLACK_MAX_UPLOAD_BYTES).toBe(1024 ** 3);
+  });
+});
+
+describe("a file attached to an existing message", () => {
+  it("uploads privately (no channel, so nothing is posted), then chat.update attaches it by id", async () => {
+    const { fileIds } = await uploadFiles("xoxb-1", {
+      files: [
+        {
+          name: "46-contact-changes.csv",
+          title: "46 contacts",
+          bytes: Buffer.from("a,b\n"),
+        },
+      ],
+    });
+    expect(fileIds).toEqual(["F0001"]);
+    const done = slack.callsTo("files.completeUploadExternal")[0]!.form;
+    expect("channel_id" in done).toBe(false);
+    expect(JSON.parse(done.files!)).toEqual([
+      { id: "F0001", title: "46 contacts" },
+    ]);
+
+    const blocks = [{ type: "section", text: { type: "mrkdwn", text: "x" } }];
+    await updateBlocksMessage("xoxb-1", {
+      channel: "D1",
+      ts: "1700.0042",
+      text: "Approval needed",
+      blocks,
+      fileIds,
+    });
+    const update = slack.callsTo("chat.update")[0]!.form;
+    expect(update.file_ids).toBe('["F0001"]');
+    // Slack replaces blocks on update: the card is re-sent with the file.
+    expect(JSON.parse(update.blocks!)).toEqual(blocks);
+  });
+
+  it("an update without files leaves the message's files alone; [] detaches them", async () => {
+    await updateBlocksMessage("xoxb-1", { channel: "D1", ts: "1", text: "a" });
+    await updateBlocksMessage("xoxb-1", {
+      channel: "D1",
+      ts: "1",
+      text: "b",
+      fileIds: [],
+    });
+    const [keep, drop] = slack.callsTo("chat.update");
+    expect("file_ids" in keep!.form).toBe(false);
+    expect(drop!.form.file_ids).toBe("[]");
+  });
+});
+
+describe("shareFileWithBlocks: a card with its table in one message", () => {
+  it("shares the file WITH the blocks, then reads the message ts back from the file", async () => {
+    let infoCalls = 0;
+    slack.respond("files.info", () => {
+      infoCalls += 1;
+      // The share shows up on the second look, as it can in Slack.
+      return infoCalls < 2
+        ? { ok: true, file: { id: "F0001" } }
+        : {
+            ok: true,
+            file: {
+              id: "F0001",
+              shares: { private: { D1: [{ ts: "1700.0042" }] } },
+            },
+          };
+    });
+    const blocks = [
+      { type: "section", text: { type: "mrkdwn", text: "Card" } },
+    ];
+    const ref = await shareFileWithBlocks("xoxb-1", {
+      channel: "D1",
+      blocks,
+      file: {
+        name: "46-contact-changes.csv",
+        title: "46 contacts",
+        bytes: Buffer.from("a,b\n"),
+      },
+    });
+    expect(ref).toEqual({ channel: "D1", ts: "1700.0042" });
+    const done = slack.callsTo("files.completeUploadExternal")[0]!.form;
+    expect(done.channel_id).toBe("D1");
+    expect(JSON.parse(done.blocks!)).toEqual(blocks);
+    expect(JSON.parse(done.files!)).toEqual([
+      { id: "F0001", title: "46 contacts" },
+    ]);
+    expect(slack.callsTo("upload/v1/1")[0]!.bytes.toString()).toBe("a,b\n");
+  });
+
+  it("a refused upload throws Slack's code BEFORE anything posts, so the caller may post the card alone", async () => {
+    slack.respond("files.getUploadURLExternal", () => ({
+      ok: false,
+      error: "missing_scope",
+    }));
+    const err = await shareFileWithBlocks("xoxb-1", {
+      channel: "D1",
+      blocks: [],
+      file: { name: "x.csv", bytes: Buffer.from("x") },
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SlackApiError);
+    expect(err).not.toBeInstanceOf(SharedMessageUnknownError);
+    expect(slack.callsTo("files.completeUploadExternal")).toHaveLength(0);
+  });
+
+  it("a share whose message can't be read back says the card IS posted, so nobody posts it again", async () => {
+    // MUTATION-TESTED: rethrow the raw files.info refusal and the caller
+    // can't tell it from a refused upload, so it posts a second card.
+    slack.respond("files.info", () => ({ ok: false, error: "missing_scope" }));
+    const err = await shareFileWithBlocks("xoxb-1", {
+      channel: "D1",
+      blocks: [],
+      file: { name: "x.csv", bytes: Buffer.from("x") },
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SharedMessageUnknownError);
+    expect(slack.callsTo("files.completeUploadExternal")).toHaveLength(1);
   });
 });

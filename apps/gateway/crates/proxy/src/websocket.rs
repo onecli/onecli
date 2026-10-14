@@ -107,13 +107,27 @@ pub async fn handle_websocket(
         .path_and_query()
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
+    // Upgrades routinely carry their token in the query: log lines get this.
+    let log_path = super::log_redact::redact_for_log(&path);
+
+    // An upgrade is judged as GET everywhere below; one asking the upstream to
+    // run another method is refused (the HTTP path does the same in forward.rs).
+    if let Some(resp) = super::method_override::refuse(
+        proxy_ctx,
+        policy_host,
+        &hyper::Method::GET,
+        &path,
+        req.headers(),
+    ) {
+        return Ok(resp);
+    }
 
     let has_injections = rules.injects();
 
     // An empty resource scope reaches nothing — refuse the upgrade outright
     // (the HTTP path does the same in forward.rs).
     if let Some(resp) = hooks::refuse_empty_scope(rules, proxy_ctx, policy_host, "GET", &path) {
-        warn!(host = %policy_host, path = %path, "empty resource scope — WebSocket upgrade denied");
+        warn!(host = %policy_host, path = %log_path, "empty resource scope — WebSocket upgrade denied");
         return Ok(resp);
     }
 
@@ -124,7 +138,7 @@ pub async fn handle_websocket(
     if let Some(provider) =
         ee::principals::app_availability_block(policy_host, &path, &rules.available_apps)
     {
-        warn!(host = %policy_host, path = %path, provider = %provider, "WebSocket app unavailable to workspace — refusing request");
+        warn!(host = %policy_host, path = %log_path, provider = %provider, "WebSocket app unavailable to workspace — refusing request");
         return Ok(ee::response::app_unavailable(
             &provider,
             "GET",
@@ -152,7 +166,7 @@ pub async fn handle_websocket(
 
     match &decision {
         PolicyDecision::BlockedByDefaultPolicy => {
-            warn!(host = %host, path = %path, "WebSocket BLOCKED by default deny policy");
+            warn!(host = %host, path = %log_path, "WebSocket BLOCKED by default deny policy");
             return Ok(response::blocked_by_default_policy(
                 "GET",
                 &path,
@@ -161,7 +175,7 @@ pub async fn handle_websocket(
             ));
         }
         PolicyDecision::Blocked { rule_name } => {
-            warn!(host = %host, path = %path, rule = %rule_name, "WebSocket BLOCKED by policy rule");
+            warn!(host = %host, path = %log_path, rule = %rule_name, "WebSocket BLOCKED by policy rule");
             return Ok(response::blocked_by_policy(
                 "GET",
                 &path,
@@ -175,11 +189,11 @@ pub async fn handle_websocket(
             retry_after_secs,
             ..
         } => {
-            warn!(host = %host, path = %path, limit, window, "WebSocket RATE LIMITED");
+            warn!(host = %host, path = %log_path, limit, window, "WebSocket RATE LIMITED");
             return Ok(response::rate_limited(*limit, window, *retry_after_secs));
         }
         PolicyDecision::ManualApproval { .. } => {
-            warn!(host = %host, path = %path, "WebSocket blocked: manual approval not supported for WebSocket");
+            warn!(host = %host, path = %log_path, "WebSocket blocked: manual approval not supported for WebSocket");
             return Ok(response::blocked_by_policy(
                 "GET",
                 &path,
@@ -389,10 +403,11 @@ fn emit_telemetry(
     injection_count: usize,
     start: std::time::Instant,
 ) {
+    let log_path = super::log_redact::redact_for_log(path);
     info!(
         method = "WEBSOCKET",
         host = %host,
-        path = %path,
+        path = %log_path,
         injections_applied = injection_count,
         latency_ms = start.elapsed().as_millis() as u32,
         "WebSocket upgrade"

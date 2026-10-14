@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import type { AgentEvent, Harness } from "@onecli/agent-protocol";
+import type { HarnessEvent, Harness } from "@onecli/agent-protocol";
 import { parseFakeDirective } from "./fake-directives";
 import { createFakeHarness } from "./fake";
 import { startPlatformTools, type PlatformTools } from "../platform-tools";
@@ -19,14 +19,14 @@ const directiveMessage = (steps: unknown[]): string =>
   `@fake:v1 ${JSON.stringify({ steps })}`;
 
 const collect = async (
-  iterable: AsyncIterable<AgentEvent>,
-): Promise<AgentEvent[]> => {
-  const events: AgentEvent[] = [];
+  iterable: AsyncIterable<HarnessEvent>,
+): Promise<HarnessEvent[]> => {
+  const events: HarnessEvent[] = [];
   for await (const event of iterable) events.push(event);
   return events;
 };
 
-const texts = (events: AgentEvent[]): string[] =>
+const texts = (events: HarnessEvent[]): string[] =>
   events.flatMap((event) => (event.type === "text.delta" ? [event.text] : []));
 
 describe("parseFakeDirective", () => {
@@ -86,6 +86,15 @@ describe("parseFakeDirective", () => {
       directive: { steps: [{ op: "sleep", ms: 30_000 }] },
     });
   });
+
+  it("parses a bash step, clamped like sleep, and refuses one without ms", () => {
+    expect(
+      parseFakeDirective(directiveMessage([{ op: "bash", ms: 999_999 }])),
+    ).toEqual({ directive: { steps: [{ op: "bash", ms: 30_000 }] } });
+    expect(parseFakeDirective(directiveMessage([{ op: "bash" }]))).toEqual({
+      error: 'step 0: "bash" needs a numeric ms',
+    });
+  });
 });
 
 describe("directive turns", () => {
@@ -133,6 +142,61 @@ describe("directive turns", () => {
     expect(texts(all)).toEqual(["before"]);
   });
 
+  it("a bash step is a running tool SEND NOW can move: the move ends its wait and says so", async () => {
+    const harness = createFakeHarness();
+    const session = await harness.startSession({ homeDir: "" });
+    // Nothing running before the turn, so nothing to move.
+    expect(await session.backgroundRunningTool?.()).toEqual({ moved: false });
+    const iterator = session
+      .runTurn({
+        message: directiveMessage([
+          { op: "bash", ms: 20_000 },
+          { op: "text", text: "after" },
+        ]),
+      })
+      [Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toEqual({ type: "turn.started" });
+    const startedTool = await iterator.next();
+    expect(startedTool.value).toMatchObject({
+      type: "tool.started",
+      name: "bash",
+    });
+
+    const began = Date.now();
+    expect(await session.backgroundRunningTool?.()).toEqual({
+      moved: true,
+      toolName: "bash",
+    });
+    // Moved once: a second ask finds nothing running.
+    expect(await session.backgroundRunningTool?.()).toEqual({ moved: false });
+
+    const rest: HarnessEvent[] = [];
+    for (;;) {
+      const next = await iterator.next();
+      if (next.done) break;
+      rest.push(next.value);
+    }
+    expect(Date.now() - began).toBeLessThan(2_000);
+    expect(rest[0]).toMatchObject({
+      type: "tool.finished",
+      name: "bash",
+      output: "[bash moved to background]",
+    });
+    expect(texts(rest)).toContain("after");
+  });
+
+  it("a bash step that runs its course reports done and is no longer movable", async () => {
+    const harness = createFakeHarness();
+    const session = await harness.startSession({ homeDir: "" });
+    const events = await collect(
+      session.runTurn({ message: directiveMessage([{ op: "bash", ms: 20 }]) }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "tool.finished", output: "[bash done]" }),
+    );
+    expect(await session.backgroundRunningTool?.()).toEqual({ moved: false });
+  });
+
   it("injects a steer during a sleep step's runway", async () => {
     const harness = createFakeHarness();
     const session = await harness.startSession({ homeDir: "" });
@@ -149,20 +213,84 @@ describe("directive turns", () => {
     expect(first.value).toEqual({ type: "turn.started" });
     await session.steer?.({ id: "steer-1", message: "mid-flight" });
 
-    const rest: AgentEvent[] = [];
+    const rest: HarnessEvent[] = [];
     for (;;) {
       const next = await iterator.next();
       if (next.done) break;
       rest.push(next.value);
     }
     const deltas = texts(rest);
-    expect(deltas.indexOf("\n[steered: mid-flight]")).toBeLessThan(
+    expect(deltas.indexOf("[steered: mid-flight]")).toBeLessThan(
       deltas.indexOf("after"),
     );
-    expect(rest).toContainEqual({
+    // The echo is the agent's reply to the steer: its own framed message,
+    // tagged as that steer's reply, joined BEFORE its first word and
+    // reported back once complete.
+    const echo = rest.find(
+      (event) =>
+        event.type === "text.delta" && event.text === "[steered: mid-flight]",
+    );
+    expect(echo).toMatchObject({
+      messageId: expect.any(String),
+      replyTo: "steer-1",
+    });
+    const joinedAt = rest.findIndex((event) => event.type === "message.joined");
+    expect(rest[joinedAt]).toEqual({
       type: "message.joined",
       followUpId: "steer-1",
     });
+    expect(joinedAt).toBeLessThan(rest.indexOf(echo as HarnessEvent));
+    expect(rest).toContainEqual({
+      type: "message.replied",
+      followUpId: "steer-1",
+      reply: "[steered: mid-flight]",
+    });
+  });
+
+  it("joins a steer that arrives during the LAST step, after the closing words (point B)", async () => {
+    // jcode injects a message queued as the model finishes and the turn goes
+    // on: the agent's closing words, then its reply. The fake mirrors that
+    // so the full stack can exercise point B. MUTATION-PROOF: drop the
+    // end-of-run injection and the steer is never injected (missed).
+    const harness = createFakeHarness();
+    const session = await harness.startSession({ homeDir: "" });
+    const iterator = session
+      .runTurn({
+        message: directiveMessage([
+          { op: "text", text: "the closing words" },
+          { op: "sleep", ms: 300 },
+        ]),
+      })
+      [Symbol.asyncIterator]();
+
+    const seen: HarnessEvent[] = [];
+    for (;;) {
+      const next = await iterator.next();
+      if (next.done) break;
+      seen.push(next.value);
+      if (next.value.type === "text.delta") {
+        await session.steer?.({ id: "steer-1", message: "one more thing" });
+      }
+    }
+    expect(texts(seen)).toEqual([
+      "the closing words",
+      "[steered: one more thing]",
+    ]);
+    expect(seen.slice(-4)).toEqual([
+      { type: "message.joined", followUpId: "steer-1" },
+      {
+        type: "text.delta",
+        text: "[steered: one more thing]",
+        messageId: expect.any(String),
+        replyTo: "steer-1",
+      },
+      {
+        type: "message.replied",
+        followUpId: "steer-1",
+        reply: "[steered: one more thing]",
+      },
+      { type: "turn.done" },
+    ]);
   });
 
   it("performs an http step and echoes status + body excerpt", async () => {

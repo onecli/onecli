@@ -1,5 +1,8 @@
 import { LLM_HOST_FRAGMENTS } from "../../lib/llm-hosts";
-import type { PlatformLlmProvider } from "../../providers/platform-llm";
+import type {
+  PlatformLlmProvider,
+  TrialCreditOwner,
+} from "../../providers/platform-llm";
 
 /**
  * Platform-provided Anthropic trial credit — the control-plane half (licensed,
@@ -47,13 +50,75 @@ const isLlmSecret = (secret: { type: string; hostPattern: string }): boolean =>
   secret.type === "openai" ||
   LLM_HOST_FRAGMENTS.some((fragment) => secret.hostPattern.includes(fragment));
 
+/**
+ * Consumer mailbox domains the trial credit is NOT granted on. They are
+ * handed out free, in bulk, with no phone check, which makes them the
+ * cheapest way for a signup farm to collect the credit over and over. Every
+ * country variant counts (`outlook.co.uk`, `hotmail.fr`, `live.com.au`): the
+ * label before the public suffix is what matters.
+ *
+ * Everything else is trusted: the mainstream providers (Gmail, iCloud, Yahoo,
+ * Proton, ...) and any company or personal domain (`person@company.example`).
+ * The Rust twin is `platform_llm.rs::UNTRUSTED_MAIL`; `platform-llm.test.ts`
+ * and its Rust counterpart pin the same table.
+ */
+const UNTRUSTED_MAIL_LABELS: ReadonlySet<string> = new Set([
+  "outlook",
+  "hotmail",
+  "live",
+  "msn",
+]);
+
+/**
+ * Whether `email` is at an untrusted consumer mailbox: its domain's first
+ * label is one of UNTRUSTED_MAIL_LABELS and the rest is a short public
+ * suffix (`com`, `fr`, `co.uk`, `com.au`). `outlook.acme.com` (a company
+ * subdomain) and `liveperson.com` stay trusted. Normalized exactly as the
+ * Rust twin does it: whitespace trimmed, every trailing dot dropped, ASCII
+ * lowercased (a non-ASCII label never matches the plain-ASCII list).
+ */
+const atUntrustedMailbox = (email: string): boolean => {
+  const domain = email
+    .slice(email.lastIndexOf("@") + 1)
+    .trim()
+    .replace(/\.+$/, "")
+    .replace(/[A-Z]/g, (c) => c.toLowerCase());
+  const [first, ...suffix] = domain.split(".");
+  return (
+    first !== undefined &&
+    UNTRUSTED_MAIL_LABELS.has(first) &&
+    suffix.length >= 1 &&
+    suffix.length <= 2 &&
+    suffix.every((label) => /^[a-z]{2,3}$/.test(label))
+  );
+};
+
+/**
+ * Whether the org's founding owner may receive the trial credit. A
+ * Google-federated owner always may, whatever the address: a Google account
+ * is not something a signup farm can mint by the hundred. Otherwise the
+ * address decides. An org with no active owner gets none: there is nobody to
+ * judge, and the credit is meant for a person.
+ */
+export const ownerTrustedForTrialCredit = (
+  owner: TrialCreditOwner | null,
+): boolean => {
+  if (!owner) return false;
+  if (owner.signInProvider === "Google") return true;
+  return !atUntrustedMailbox(owner.email);
+};
+
 export const eePlatformLlm: PlatformLlmProvider = {
   /**
    * Whether the platform trial credit applies to an org/workspace whose
-   * UNFILTERED secret pool is `pool`. The pool must be the org+workspace
-   * fenced pool BEFORE grant narrowing — an existing-but-restricted LLM key
-   * counts as present, so a restriction is never bypassed with free credit
-   * (the same rule the gateway applies at connect).
+   * UNFILTERED secret pool is `pool` and whose founding owner is `owner`.
+   * The pool must be the org+workspace fenced pool BEFORE grant narrowing —
+   * an existing-but-restricted LLM key counts as present, so a restriction is
+   * never bypassed with free credit (the same rule the gateway applies at
+   * connect), and the owner must be trusted (ownerTrustedForTrialCredit).
    */
-  trialCreditApplies: (pool) => configured() && !pool.some(isLlmSecret),
+  trialCreditApplies: (pool, owner) =>
+    configured() &&
+    !pool.some(isLlmSecret) &&
+    ownerTrustedForTrialCredit(owner),
 };

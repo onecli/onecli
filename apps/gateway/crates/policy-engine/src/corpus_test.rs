@@ -10,7 +10,9 @@
 use serde::Deserialize;
 
 use super::evaluate::{evaluate_new, evaluate_outcome, Outcome};
-use super::types::{Action, Decision, Identity, NewRule, PolicyRequest, RateWindow, Scope, Target};
+use super::types::{
+    Action, Decision, Identity, MethodFilter, NewRule, PolicyRequest, RateWindow, Scope, Target,
+};
 use policy::ConditionBody;
 
 // The corpus lives in the API package (the TS spec's home). `include_str!`
@@ -83,13 +85,16 @@ enum CorpusTarget {
     },
     // A RESOLVED connection target (the corpus authors the post-assemble
     // shape): binds to the request's winning injected connection. The JSON
-    // field is `connectionId`, mirroring the TS `NewTarget`.
+    // field is `connectionId`, mirroring the TS `NewTarget`; `method` is the
+    // stored whole-app narrowing (`GET,HEAD` / `!GET,HEAD`), absent = any.
     Connection {
         #[serde(rename = "connectionId")]
         id: String,
         provider: String,
         #[serde(default)]
         tools: Vec<String>,
+        #[serde(default)]
+        method: Option<String>,
     },
     Secret {
         host_patterns: Vec<String>,
@@ -132,10 +137,12 @@ impl CorpusRule {
                         id,
                         provider,
                         tools,
+                        method,
                     } => Target::Connection {
                         id,
                         provider,
                         tools,
+                        methods: MethodFilter::parse(method.as_deref()),
                     },
                     CorpusTarget::Secret { host_patterns } => Target::Secret { host_patterns },
                 })
@@ -214,7 +221,7 @@ fn corpus_keeps_the_workspace_only_reduction_slice() {
 #[test]
 fn corpus_engine_matches_expected() {
     let cases: Vec<Case> = serde_json::from_str(CORPUS).expect("parse policy-cases.json");
-    assert_eq!(cases.len(), 42, "corpus case count changed");
+    assert_eq!(cases.len(), 49, "corpus case count changed");
 
     for case in cases {
         let request = PolicyRequest {

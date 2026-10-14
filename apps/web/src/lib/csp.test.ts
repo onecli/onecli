@@ -33,6 +33,7 @@ describe("buildCsp", () => {
     vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.onecli.sh");
     vi.stubEnv("NEXT_PUBLIC_GATEWAY_API_URL", "https://api.onecli.sh");
     vi.stubEnv("COGNITO_DOMAIN", "auth.onecli.sh");
+    vi.stubEnv("NEXT_PUBLIC_TURNSTILE_SITE_KEY", "");
   });
 
   afterEach(() => {
@@ -109,5 +110,24 @@ describe("buildCsp", () => {
     const connectSrc = directives(buildCsp("n")).get("connect-src")!;
     expect(connectSrc).not.toContain("https://auth.onecli.sh");
     expect(connectSrc).not.toMatch(/https:\/\/\s/);
+  });
+
+  it("allows the human-verification widget's script and frame only when its sitekey is set", () => {
+    vi.stubEnv("NEXT_PUBLIC_TURNSTILE_SITE_KEY", "");
+    expect(buildCsp("n")).not.toContain("challenges.cloudflare.com");
+
+    vi.stubEnv("NEXT_PUBLIC_TURNSTILE_SITE_KEY", "0x4AAAAAAAexample");
+    const map = directives(buildCsp("n"));
+    // script-src: the CSP2 fallback host (CSP3 trusts it via strict-dynamic).
+    expect(map.get("script-src")).toContain(
+      "https://challenges.cloudflare.com",
+    );
+    // frame-src: required in every browser; the challenge runs in an iframe.
+    expect(map.get("frame-src")).toBe(
+      "https://js.stripe.com https://challenges.cloudflare.com",
+    );
+    // Nothing else loosens: no wildcard, and the nonce policy is intact.
+    expect(map.get("script-src")).not.toContain("*.cloudflare.com");
+    expect(map.get("script-src")).not.toContain("unsafe-inline");
   });
 });

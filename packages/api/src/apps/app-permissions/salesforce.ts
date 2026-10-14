@@ -137,22 +137,43 @@ export const salesforcePermissions: AppPermissionDefinition = {
           // this would also cover record-ID paths, where a `_HttpMethod`
           // override could turn a create grant into an update or delete.
           pathPattern: "/services/data/v*/sobjects/*/",
+          // NOT the bulk create (`POST /composite/sobjects`): a POST there
+          // can carry a `_HttpMethod` override that Salesforce honors, so a
+          // create grant would also allow a bulk DELETE. It stays outside
+          // every tool (held for a human, its card still lists every new
+          // record) until the gateway judges method overrides.
           method: "POST",
         },
         {
           id: "update_record",
           name: "Update a record",
-          description: "Update or upsert an existing CRM record",
+          description:
+            "Update or upsert an existing CRM record, or up to 200 in one request",
           hostPattern: HOST,
           pathPattern: "/services/data/v*/sobjects/*/*",
+          // The same update for up to 200 records in one request (sObject
+          // Collections, documented with a trailing slash; both spellings).
+          // One grant covers both on purpose: allowing record updates allows
+          // them one by one anyway, and a block on updates must stop the bulk
+          // form too. A rate limit counts requests, not records.
+          aliasPatterns: [
+            "/services/data/v*/composite/sobjects",
+            "/services/data/v*/composite/sobjects/",
+          ],
           method: "PATCH",
         },
         {
           id: "delete_record",
           name: "Delete a record",
-          description: "Delete a CRM record",
+          description: "Delete a CRM record, or up to 200 in one request",
           hostPattern: HOST,
           pathPattern: "/services/data/v*/sobjects/*/*",
+          // Up to 200 records in one request (`?ids=`), both spellings of
+          // the path; same reasoning as update_record.
+          aliasPatterns: [
+            "/services/data/v*/composite/sobjects",
+            "/services/data/v*/composite/sobjects/",
+          ],
           method: "DELETE",
         },
       ],

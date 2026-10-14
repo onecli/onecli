@@ -11,7 +11,7 @@
 //!
 //! Design decisions:
 //! - **Per-user, not per-org, credit pool**: the spend subject is the org's
-//!   earliest active OWNER (`grant_subject`), so a user who spends the credit
+//!   earliest active OWNER (`founding_owner`), so a user who spends the credit
 //!   and creates a second org shares the same pool — the `budget_spends` row
 //!   keys on `(platform:anthropic, user:<id>, total)`. `BudgetPeriod::Total`
 //!   means it never resets.
@@ -175,14 +175,15 @@ pub fn pool_has_llm_credential(secrets: &[db::SecretRow]) -> bool {
 
 /// The user whose lifetime credit pool this org draws from: the earliest
 /// active owner (creation order breaks ties, so the founding owner keeps the
-/// subject stable even after later ownership grants). Falls back to an
-/// org-attributed subject when no owner resolves (fail-safe: still capped,
-/// just per-org).
-async fn grant_subject(pool: &PgPool, org_id: &str) -> BudgetSubject {
-    let owner = sqlx::query_scalar::<_, String>(
-        r#"SELECT user_id FROM organization_members
-           WHERE organization_id = $1 AND role = 'owner' AND status = 'active'
-           ORDER BY created_at ASC, user_id ASC
+/// subject stable even after later ownership grants), with what the trust
+/// rule needs to judge them. `None` when no owner resolves.
+async fn founding_owner(pool: &PgPool, org_id: &str) -> Option<FoundingOwner> {
+    sqlx::query_as::<_, (String, String, Option<String>)>(
+        r#"SELECT m.user_id, u.email, u.sign_in_provider
+           FROM organization_members m
+           JOIN users u ON u.id = m.user_id
+           WHERE m.organization_id = $1 AND m.role = 'owner' AND m.status = 'active'
+           ORDER BY m.created_at ASC, m.user_id ASC
            LIMIT 1"#,
     )
     .bind(org_id)
@@ -191,10 +192,74 @@ async fn grant_subject(pool: &PgPool, org_id: &str) -> BudgetSubject {
     .unwrap_or_else(|e| {
         tracing::warn!(error = ?e, org_id, "platform_llm: owner lookup failed");
         None
-    });
+    })
+    .map(|(user_id, email, sign_in_provider)| FoundingOwner {
+        user_id,
+        email,
+        sign_in_provider,
+    })
+}
+
+/// The org's founding owner, as the trial credit sees them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FoundingOwner {
+    user_id: String,
+    email: String,
+    /// `users.sign_in_provider`: `Some("Google")` once they signed in with Google.
+    sign_in_provider: Option<String>,
+}
+
+/// Consumer mailbox domains the trial credit is NOT granted on, by the label
+/// before the public suffix (`outlook.com`, `hotmail.fr`, `live.co.uk`).
+/// They are handed out free, in bulk, with no phone check, which makes them
+/// the cheapest way for a signup farm to collect the credit over and over.
+/// Everything else is trusted: the mainstream providers and any company or
+/// personal domain. The TypeScript twin is
+/// `ee/services/platform-llm.ts::UNTRUSTED_MAIL_LABELS`; both test suites pin
+/// the same table.
+const UNTRUSTED_MAIL: &[&str] = &["outlook", "hotmail", "live", "msn"];
+
+/// Whether `email` is at an untrusted consumer mailbox: its domain's first
+/// label is in [`UNTRUSTED_MAIL`] and the rest is a short public suffix
+/// (`com`, `fr`, `co.uk`, `com.au`). A company subdomain such as
+/// `outlook.acme.com`, or `liveperson.com`, stays trusted. The TypeScript
+/// twin normalizes the same way: whitespace trimmed, every trailing dot
+/// dropped, ASCII lowercased.
+fn at_untrusted_mailbox(email: &str) -> bool {
+    let domain = email
+        .rsplit_once('@')
+        .map_or(email, |(_, d)| d)
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let mut labels = domain.split('.');
+    let Some(first) = labels.next() else {
+        return false;
+    };
+    if !UNTRUSTED_MAIL.contains(&first) {
+        return false;
+    }
+    let mut suffix_len = 0;
+    for label in labels {
+        suffix_len += 1;
+        let short_alpha =
+            (2..=3).contains(&label.len()) && label.bytes().all(|b| b.is_ascii_lowercase());
+        if suffix_len > 2 || !short_alpha {
+            return false;
+        }
+    }
+    suffix_len >= 1
+}
+
+/// Whether the founding owner may receive the trial credit. A Google-federated
+/// owner always may, whatever the address: a Google account is not something
+/// a signup farm can mint by the hundred. Otherwise the address decides. An
+/// org with no active owner gets none: the credit is meant for a person.
+fn owner_trusted(owner: Option<&FoundingOwner>) -> bool {
     match owner {
-        Some(user_id) => BudgetSubject::User(user_id),
-        None => BudgetSubject::Org(org_id.to_string()),
+        None => false,
+        Some(o) if o.sign_in_provider.as_deref() == Some("Google") => true,
+        Some(o) => !at_untrusted_mailbox(&o.email),
     }
 }
 
@@ -203,11 +268,12 @@ async fn grant_subject(pool: &PgPool, org_id: &str) -> BudgetSubject {
 /// budget binding that the existing engine enforces and meters.
 ///
 /// Applies only when ALL hold: cloud + key configured, the CONNECT host is
-/// `api.anthropic.com`, and the org/workspace pool has no LLM credential of
+/// `api.anthropic.com`, the org/workspace pool has no LLM credential of
 /// its own (`pool_has_llm` — computed by the caller against the unfiltered
-/// pool). `entitled` gates like every licensed feature: the budget engine
-/// this rides is licensed, and an unenforceable cap must never hand out the
-/// key.
+/// pool), and the org's founding owner is trusted (`owner_trusted`: a
+/// Google sign-in, or an address that is not a consumer Microsoft mailbox).
+/// `entitled` gates like every licensed feature: the budget engine this rides
+/// is licensed, and an unenforceable cap must never hand out the key.
 pub async fn platform_credential(
     pool: &PgPool,
     org_id: &str,
@@ -225,7 +291,20 @@ pub async fn platform_credential(
     if pool_has_llm {
         return None;
     }
-    let subject = grant_subject(pool, org_id).await;
+    let owner = founding_owner(pool, org_id).await;
+    if !owner_trusted(owner.as_ref()) {
+        // One structured line per refused grant: the operator's view of how
+        // often the rule holds back the credit (never the address itself).
+        tracing::info!(
+            org_id,
+            has_owner = owner.is_some(),
+            "platform_llm: trial credit withheld (owner not trusted)"
+        );
+        return None;
+    }
+    // `owner_trusted` refuses an owner-less org, so the subject is always the
+    // founding owner's user: the per-user lifetime pool.
+    let subject = BudgetSubject::User(owner?.user_id);
     let rule = inject::InjectionRule {
         path_pattern: "*".to_string(),
         injections: inject::secret_inject::build_injections("anthropic", &key.api_key, None, None),
@@ -374,5 +453,49 @@ mod tests {
             secret("generic", "internal.example.com"),
         ];
         assert!(!pool_has_llm_credential(&secrets));
+    }
+
+    // The owner-trust table lives in the API package beside the TypeScript
+    // rule; both suites read the SAME file, so the control plane (advertise)
+    // and the gateway (inject) can never disagree. `include_str!` resolves
+    // from apps/gateway/crates/ee/ee/src/, so six `..` reach the repo root.
+    const OWNER_CASES: &str = include_str!(
+        "../../../../../../packages/api/src/ee/services/trial-credit-owner-cases.json"
+    );
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct OwnerCase {
+        name: String,
+        email: String,
+        sign_in_provider: Option<String>,
+        trusted: bool,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct OwnerCases {
+        cases: Vec<OwnerCase>,
+    }
+
+    #[test]
+    fn owner_trust_matches_the_shared_table() {
+        let table: OwnerCases = serde_json::from_str(OWNER_CASES).unwrap();
+        assert!(
+            table.cases.len() >= 15,
+            "the shared table must not be empty"
+        );
+        for case in table.cases {
+            let owner = FoundingOwner {
+                user_id: "u1".into(),
+                email: case.email,
+                sign_in_provider: case.sign_in_provider,
+            };
+            assert_eq!(owner_trusted(Some(&owner)), case.trusted, "{}", case.name);
+        }
+    }
+
+    #[test]
+    fn an_org_without_an_owner_gets_no_credit() {
+        assert!(!owner_trusted(None));
     }
 }

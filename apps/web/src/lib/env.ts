@@ -75,6 +75,15 @@ export const COGNITO_USER_POOL_ID =
   process.env.NEXT_PUBLIC_COGNITO_USER_POOL_ID ??
   "";
 
+/**
+ * The PUBLIC sitekey of the human-verification widget (Cloudflare
+ * Turnstile) on the Cognito signup form, baked at build time. Empty renders
+ * no widget and sends no token: the server's own setting decides whether a
+ * signup without one is accepted.
+ */
+export const TURNSTILE_SITE_KEY =
+  process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY?.trim() ?? "";
+
 // The server-only cloud vars (Stripe, Resend, Discord, KMS, Redis, gateway
 // TLS) are deliberately NOT re-exported here: nothing in the dashboard reads
 // them — the live reads are in `@onecli/api`, which the web server process

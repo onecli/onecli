@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import config from "../next.config.js";
 
-// Org-wide administration moved under Organization Settings (Global
+// Org-wide administration moved under Organization Settings (Shared
 // Connections, Global Policy) and Domains folded into the Single sign-on
 // page. Every old URL must keep landing: bookmarks, links pasted into docs
-// and chat, and the deep links INSIDE the moved trees (a Global Connections
+// and chat, and the deep links INSIDE the moved trees (a Shared Connections
 // tab, an app's page), not only the section roots.
 
 interface Redirect {

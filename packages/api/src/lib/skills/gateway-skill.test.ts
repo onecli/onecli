@@ -30,9 +30,33 @@ describe("gateway approval guidance", () => {
         "`connection_needs_reconnect` (401)",
         "the request was NOT sent and no approval was requested",
         "Show the user the `connect_url`",
+        "`github_org_access_required` (403)",
+        "never paste GitHub's own SSO or authorization links",
+        "give them the `connect_url`",
       ])
         expect(text).toContain(guidance);
       expect(text).not.toContain("policy error (403 with a JSON body)");
+      // The skill is served to every surface (web chat, terminal, Slack):
+      // it must not point at a button only the web chat renders.
+      expect(text).not.toContain("Fix Access button");
+    },
+  );
+
+  it.each([undefined, "claude", "hermes"])(
+    "teaches doing what was asked or stopping to ask, for every app (%s)",
+    (agent) => {
+      const text = getGatewaySkill(agent).replace(/\s+/g, " ");
+      for (const guidance of [
+        "## Do What Was Asked, or Stop and Ask",
+        "stop after the first failure",
+        "offer what you could do instead, and wait for a yes",
+        "Never swap in a different change on your own",
+        "Before a write the user didn't spell out, say in one line what will change on which record",
+        "Don't guess endpoints",
+        "Never send a write to a URL you made up",
+      ]) {
+        expect(text).toContain(guidance);
+      }
     },
   );
 
@@ -43,15 +67,30 @@ describe("gateway approval guidance", () => {
       for (const guidance of [
         "`X-OneCLI-Batch: <id>`",
         "`X-OneCLI-Batch-Label:",
-        "`X-OneCLI-Batch-Total:",
-        "at most 10 at a time",
-        "don't fold them into one bulk call",
+        "`X-OneCLI-Batch-Total: <how many requests in this group>`",
+        "split the list into groups of 25 and say how many cards to expect",
+        "Each group of 25 is its own batch: a new id",
+        "(2 of 5)",
+        "the total counting only that group, never the whole list",
+        "Wait until that group is decided before sending the next",
+        "Updating a list of Salesforce records: send ONE bulk update** of up to 200 records",
+        "PATCH /services/data/v62.0/composite/sobjects",
+        "so ONE approval for the whole list",
+        "stop if they all failed",
+        "the number started must equal the group's size",
+        "loop over a file skips its last line",
+        "read the records back and confirm each change landed",
+        "with the same `X-OneCLI-Batch` headers as their group, so they join its card",
         "Never re-send a denied request unless the user asks",
         "`FirstPublishLocationId`",
         "one request, one approval",
       ]) {
         expect(text).toContain(guidance);
       }
+      // The old cap split a 20-record task across two cards, and one batch
+      // for a whole 105-record list left each card waiting for the rest.
+      expect(text).not.toContain("at most 10 at a time");
+      expect(text).not.toContain("up to 25 at once");
     },
   );
 
@@ -67,6 +106,28 @@ describe("gateway approval guidance", () => {
         "on the org host the gateway gave you for that connection",
         "Never guess a URL or copy an example hostname",
         "show the id instead",
+      ]) {
+        expect(text).toContain(guidance);
+      }
+    },
+  );
+
+  it.each([undefined, "claude", "hermes"])(
+    "teaches naming fields by their screen label and people by name, never bare ids (%s)",
+    (agent) => {
+      // Mirrors the supervisor's connections fragment, which points at this
+      // skill and must never diverge from it.
+      const text = getGatewaySkill(agent).replace(/\s+/g, " ");
+      for (const guidance of [
+        "the way the user sees them in the app",
+        "a field by the label on its screen",
+        "taken from the app's own field metadata",
+        "`GET /services/data/vXX.X/sobjects/<Object>/describe`",
+        "never its API name",
+        "or a guess",
+        "a person or record by name",
+        "tell them apart by something the user recognizes",
+        "never by a bare id",
       ]) {
         expect(text).toContain(guidance);
       }

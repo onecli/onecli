@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   isTerminalEvent,
-  type AgentEvent,
+  type HarnessEvent,
   type Harness,
 } from "@onecli/agent-protocol";
 
@@ -33,9 +33,9 @@ export interface ConformanceTarget {
 }
 
 const collect = async (
-  iterable: AsyncIterable<AgentEvent>,
-): Promise<AgentEvent[]> => {
-  const events: AgentEvent[] = [];
+  iterable: AsyncIterable<HarnessEvent>,
+): Promise<HarnessEvent[]> => {
+  const events: HarnessEvent[] = [];
   for await (const event of iterable) events.push(event);
   return events;
 };
@@ -161,7 +161,7 @@ export const runHarnessConformance = (target: ConformanceTarget): void => {
             })
             [Symbol.asyncIterator]();
 
-          const events: AgentEvent[] = [];
+          const events: HarnessEvent[] = [];
           const first = await iterator.next();
           if (!first.done && first.value) events.push(first.value);
 
@@ -225,7 +225,7 @@ export const runHarnessConformance = (target: ConformanceTarget): void => {
             })
             [Symbol.asyncIterator]();
 
-          const events: AgentEvent[] = [];
+          const events: HarnessEvent[] = [];
           const first = await iterator.next();
           if (!first.done && first.value) events.push(first.value);
 
@@ -253,8 +253,8 @@ export const runHarnessConformance = (target: ConformanceTarget): void => {
               e.type === "message.joined" ? e.followUpId : "",
             ),
           ).toContain("conformance-steer-1");
-          expect(events.indexOf(joined[0] as AgentEvent)).toBeLessThan(
-            events.indexOf(terminal as AgentEvent),
+          expect(events.indexOf(joined[0] as HarnessEvent)).toBeLessThan(
+            events.indexOf(terminal as HarnessEvent),
           );
         } finally {
           await harness.dispose();

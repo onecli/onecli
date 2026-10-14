@@ -144,8 +144,8 @@ const personCardBlocks = (input: {
           ` account I can match. May I help them?\n` +
           `_They can only reach me in this direct message - this says` +
           ` nothing about any channel. Until you choose, I don't answer` +
-          ` them. You can change this anytime from ${agent}'s Channels` +
-          ` page._`,
+          ` them. You can change this anytime from ${agent}'s Contacts` +
+          ` page in OneCLI._`,
       },
     },
     {
@@ -201,7 +201,7 @@ const spaceCardBlocks = (input: {
           ` teammates.\n` +
           `\u2022 *Don't allow* - I stay silent in that channel.\n` +
           `_Until you choose, I answer nobody there. You can change this` +
-          ` anytime from ${agent}'s Channels page._`,
+          ` anytime from ${agent}'s Contacts page in OneCLI._`,
       },
     },
     {

@@ -8,7 +8,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Loader2, Settings2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
-import type { Connection, PageScope } from "@/lib/api";
+import { cn } from "@onecli/ui/lib/utils";
+import type { PageScope } from "@/lib/api";
 import type { OAuthConfigField } from "@onecli/api/apps/types";
 import { queryKeys } from "@/lib/api/keys";
 import {
@@ -28,9 +29,16 @@ import { AppConfigForm, type AppConfigFormHandle } from "./app-config-form";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
 import { ConnectionAgentsReflection } from "@/lib/components/policy-reflect";
 import { SetupGuideLink } from "@/lib/components/setup-guide-link";
+import { groupMembers, groupOf } from "@onecli/api/apps/oauth/groups";
 import { ConnectionAccountCard } from "./connection-account-card";
 import { InheritedConnectionCard } from "./inherited-connection-card";
 import { AppBlocklist } from "./app-blocklist";
+import { GitHubAppConnectDialog } from "./github-app-connect-dialog";
+import type { AccountCardConnection } from "./account-card-connection";
+import {
+  GITHUB_APP_PROVIDER,
+  useSharedGitHubInstallations,
+} from "@/hooks/use-github-app-share";
 
 interface AppDetailProps {
   app: {
@@ -58,10 +66,6 @@ interface AppDetailProps {
   backPath?: string;
 }
 
-type ConnectionData = Omit<Connection, "metadata"> & {
-  metadata: Record<string, unknown> | null;
-};
-
 export const AppDetail = ({
   app,
   configurable,
@@ -81,7 +85,7 @@ export const AppDetail = ({
   const { data: allConnections = [], isPending: loading } =
     useConnections(pageScope);
   const { connections, inheritedConnections } = useMemo(() => {
-    const forProvider: ConnectionData[] = allConnections
+    const forProvider: AccountCardConnection[] = allConnections
       .filter((c) => c.provider === app.id && c.status === "connected")
       .map((c) => ({
         ...c,
@@ -138,6 +142,9 @@ export const AppDetail = ({
   // account to reconnect while it still needs it; the popup itself needs the
   // user's click.
   const reconnectParam = searchParams.get("reconnect");
+  // `?org_access=<org>`: the agent's `github_org_access_required` link. Marks
+  // that organization's notice on the account that recorded it.
+  const orgAccessParam = searchParams.get("org_access");
   const consumedConnectedParam = useRef(false);
   useEffect(() => {
     if (consumedConnectedParam.current) return;
@@ -181,9 +188,23 @@ export const AppDetail = ({
   const popupOpts =
     app.connectionType === "credentials_import" ? { height: 820 } : undefined;
 
+  // GitHub App: an org admin can reuse an installation connected anywhere in
+  // the org (another workspace or the org level) with a repo subset, since
+  // GitHub won't offer a second install on the same account.
+  const isGitHubApp = app.id === GITHUB_APP_PROVIDER;
+  const [githubDialogOpen, setGithubDialogOpen] = useState(false);
+  const { data: sharedInstallations = [] } = useSharedGitHubInstallations(
+    pageScope,
+    isGitHubApp,
+  );
+
   const handleConnect = () => {
     if (!hasCredentials && configurable?.fields && !app.hasApiKeyAlternate) {
       setConfigDialogOpen(true);
+      return;
+    }
+    if (isGitHubApp && sharedInstallations.length > 0) {
+      setGithubDialogOpen(true);
       return;
     }
     openPopup(undefined, popupOpts);
@@ -191,6 +212,17 @@ export const AppDetail = ({
 
   const connectionCount = connections.length + inheritedConnections.length;
   const isConnected = connectionCount > 0;
+  // A vendor-shared client serves every app of its vendor, so changing it
+  // disconnects all of them: the config form confirms when ANY is connected
+  // (counted the way `isConnected` counts this app's own accounts).
+  const clientInUse = useMemo(() => {
+    const group = groupOf(app.id);
+    if (!group) return isConnected;
+    const members = new Set(groupMembers(group));
+    return allConnections.some(
+      (c) => members.has(c.provider) && c.status === "connected",
+    );
+  }, [allConnections, app.id, isConnected]);
 
   return (
     <div className="space-y-6">
@@ -288,6 +320,11 @@ export const AppDetail = ({
                 Connect
               </Button>
             </div>
+            {connections.length > 0 && inheritedConnections.length > 0 && (
+              <p className="text-xs font-medium text-muted-foreground">
+                Workspace accounts
+              </p>
+            )}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
               {connections.map((conn) => (
                 <ConnectionAccountCard
@@ -299,17 +336,32 @@ export const AppDetail = ({
                   highlighted={
                     conn.id === reconnectParam && !!conn.reauthRequiredAt
                   }
-                />
-              ))}
-              {inheritedConnections.map((conn) => (
-                <InheritedConnectionCard
-                  key={conn.id}
-                  connection={conn}
-                  appName={app.name}
-                  pageScope={pageScope}
+                  highlightedOrg={orgAccessParam}
                 />
               ))}
             </div>
+            {inheritedConnections.length > 0 && (
+              <>
+                <p
+                  className={cn(
+                    "text-xs font-medium text-muted-foreground",
+                    connections.length > 0 && "pt-3",
+                  )}
+                >
+                  Organization accounts
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                  {inheritedConnections.map((conn) => (
+                    <InheritedConnectionCard
+                      key={conn.id}
+                      connection={conn}
+                      pageScope={pageScope}
+                      highlightedOrg={orgAccessParam}
+                    />
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         )
       )}
@@ -323,7 +375,7 @@ export const AppDetail = ({
           hint={configurable.hint}
           setupGuideUrl={app.setupGuideUrl}
           hasEnvDefaults={hasEnvDefaults}
-          isConnected={isConnected}
+          isConnected={clientInUse}
           pageScope={pageScope}
         />
       )}
@@ -356,6 +408,18 @@ export const AppDetail = ({
         />
       )}
 
+      {isGitHubApp && (
+        <GitHubAppConnectDialog
+          open={githubDialogOpen}
+          onOpenChange={setGithubDialogOpen}
+          pageScope={pageScope}
+          onInstallNew={() => openPopup(undefined, popupOpts)}
+          onConnected={(id) => {
+            if (canAttachAgents) openJustConnected(id);
+          }}
+        />
+      )}
+
       {/* Rendered here rather than from the account card: the card for a
           just-created account doesn't exist until the connections query
           refetches, and this dialog's own queries are keyed on the id, so it
@@ -365,13 +429,7 @@ export const AppDetail = ({
         <ConnectionAgentsReflection
           key={justConnectedId}
           connectionId={justConnectedId}
-          // Only the neutral header renders this; the success header titles on
-          // the app, precisely so it doesn't wait on the refetch.
-          connectionLabel={
-            connections.find((c) => c.id === justConnectedId)?.label ?? ""
-          }
           appName={app.name}
-          justConnected
           open={justConnectedOpen}
           onOpenChange={setJustConnectedOpen}
         />

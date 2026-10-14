@@ -320,7 +320,7 @@ describe.skipIf(!PROOF_URL)("the full cycle", () => {
         decision: "approve",
         clickerExternalUserId: "U-OWNER",
       });
-      expect(outcome).toEqual({ kind: "decided", status: "executed" });
+      expect(outcome).toMatchObject({ kind: "decided", status: "executed" });
 
       // The handler received the FROZEN row's payload, exactly once.
       expect(executed).toEqual([
@@ -369,7 +369,7 @@ describe.skipIf(!PROOF_URL)("the full cycle", () => {
         deciderUserId: OWNER,
         reason: "not before the QA pass finishes",
       });
-      expect(outcome).toEqual({ kind: "decided", status: "rejected" });
+      expect(outcome).toMatchObject({ kind: "decided", status: "rejected" });
       expect(ran).toBe(0);
 
       const notice = await db.turnEvent.findFirst({
@@ -402,7 +402,7 @@ describe.skipIf(!PROOF_URL)("the full cycle", () => {
         decision: "approve",
         deciderUserId: OWNER,
       });
-      expect(outcome).toEqual({ kind: "decided", status: "failed" });
+      expect(outcome).toMatchObject({ kind: "decided", status: "failed" });
       const row = await db.actionApproval.findUniqueOrThrow({
         where: { id: request.id },
       });
@@ -668,3 +668,249 @@ describe.skipIf(!PROOF_URL)("fences", () => {
     ).rejects.toThrow(/No handler registered/);
   });
 });
+
+describe.skipIf(!PROOF_URL)(
+  "the approval-outcome note (what the MODEL reads next turn)",
+  () => {
+    // An owner approves a held send_message, the message goes out, and the
+    // agent keeps answering "still waiting for approval": the outcome notice
+    // reached the transcript but never the model's context. This note is
+    // that missing half.
+
+    /** Mark a turn as one the model actually ran: what `applyTurnEvents`
+     * writes on `turn.started` (the event row and `startedAt`). */
+    const markRan = async (conversationId: string, turnId: string) => {
+      const { lastSeq } = await db.conversation.update({
+        where: { id: conversationId },
+        data: { lastSeq: { increment: 1 } },
+        select: { lastSeq: true },
+      });
+      await db.turnEvent.create({
+        data: {
+          conversationId,
+          turnId,
+          seq: lastSeq,
+          type: "turn.started",
+          payload: { type: "turn.started" },
+        },
+      });
+      await db.turn.update({
+        where: { id: turnId },
+        data: { startedAt: new Date() },
+      });
+    };
+
+    /** A queued turn: the one whose dispatch builds the note. */
+    const nextTurn = (conversationId: string) =>
+      db.turn.create({
+        data: { conversationId, message: "any news?", source: "slack" },
+        select: { id: true, createdAt: true },
+      });
+
+    const ask = (
+      stage: { agentId: string; conversationId: string; turnId: string },
+      action: string,
+      summary: string,
+    ) =>
+      approvals.requestActionApproval({
+        agentId: stage.agentId,
+        conversationId: stage.conversationId,
+        originTurnId: stage.turnId,
+        action,
+        payload: {},
+        summary,
+      });
+
+    it("an approval decided after the asking run reaches the NEXT run as done", async () => {
+      const stage = await seedStage("note-done");
+      await markRan(stage.conversationId, stage.turnId);
+      approvals.registerActionHandler("test.note.done", async () => {});
+      try {
+        const request = await ask(
+          stage,
+          "test.note.done",
+          'send @Dana: "hello"',
+        );
+        const turn = await nextTurn(stage.conversationId);
+
+        // Before anyone decides: the honest answer is "still waiting".
+        expect(
+          await approvals.buildApprovalOutcomeNote(
+            stage.conversationId,
+            turn.createdAt,
+          ),
+        ).toContain(
+          'Still waiting for the owner\'s decision: send @Dana: "hello".',
+        );
+
+        // Decided while the next turn sits in the queue: still news for it.
+        await approvals.decideActionApproval({
+          approvalId: request.id,
+          decision: "approve",
+          deciderUserId: OWNER,
+        });
+        const note = await approvals.buildApprovalOutcomeNote(
+          stage.conversationId,
+          turn.createdAt,
+        );
+        expect(note).toContain('Approved and done: send @Dana: "hello".');
+        expect(note).not.toContain("Still waiting");
+      } finally {
+        approvals.unregisterActionHandler("test.note.done");
+      }
+    });
+
+    it("a rejection carries its reason; the news is shown for ONE run only", async () => {
+      const stage = await seedStage("note-reject");
+      await markRan(stage.conversationId, stage.turnId);
+      approvals.registerActionHandler("test.note.reject", async () => {});
+      try {
+        const request = await ask(
+          stage,
+          "test.note.reject",
+          "send #ops: deploy now",
+        );
+        await approvals.decideActionApproval({
+          approvalId: request.id,
+          decision: "reject",
+          deciderUserId: OWNER,
+          reason: "not during the freeze",
+        });
+
+        const turn = await nextTurn(stage.conversationId);
+        const note = await approvals.buildApprovalOutcomeNote(
+          stage.conversationId,
+          turn.createdAt,
+        );
+        expect(note).toContain("Rejected: send #ops: deploy now.");
+        expect(note).toContain("not during the freeze");
+
+        // That turn ran (it read the news) and finished; the one after
+        // starts clean.
+        await markRan(stage.conversationId, turn.id);
+        await db.turn.update({
+          where: { id: turn.id },
+          data: { status: "done", finishedAt: new Date() },
+        });
+        const after = await nextTurn(stage.conversationId);
+        expect(
+          await approvals.buildApprovalOutcomeNote(
+            stage.conversationId,
+            after.createdAt,
+          ),
+        ).toBeNull();
+      } finally {
+        approvals.unregisterActionHandler("test.note.reject");
+      }
+    });
+
+    it("a turn the model never ran (a platform report) does not swallow the news", async () => {
+      const stage = await seedStage("note-report");
+      await markRan(stage.conversationId, stage.turnId);
+      approvals.registerActionHandler("test.note.report", async () => {});
+      try {
+        const request = await ask(stage, "test.note.report", "send @Dana: hi");
+        await approvals.decideActionApproval({
+          approvalId: request.id,
+          decision: "approve",
+          deciderUserId: OWNER,
+        });
+        // A born-done report lands after the decision: the platform wrote
+        // it, no harness ran, so it carries no `turn.started`.
+        await db.turn.create({
+          data: {
+            conversationId: stage.conversationId,
+            message: "Daily digest",
+            source: "cron",
+            status: "done",
+            startedAt: new Date(),
+            finishedAt: new Date(),
+          },
+        });
+        const turn = await nextTurn(stage.conversationId);
+        expect(
+          await approvals.buildApprovalOutcomeNote(
+            stage.conversationId,
+            turn.createdAt,
+          ),
+        ).toContain("Approved and done: send @Dana: hi.");
+      } finally {
+        approvals.unregisterActionHandler("test.note.report");
+      }
+    });
+
+    it("an ask past its deadline is never 'still waiting'", async () => {
+      const stage = await seedStage("note-expired");
+      await markRan(stage.conversationId, stage.turnId);
+      approvals.registerActionHandler("test.note.expired", async () => {});
+      try {
+        const request = await ask(stage, "test.note.expired", "send @Dana: hi");
+        // Past its deadline, not yet parked by the sweep.
+        await db.actionApproval.update({
+          where: { id: request.id },
+          data: { expiresAt: new Date(Date.now() - 1000) },
+        });
+        const turn = await nextTurn(stage.conversationId);
+        expect(
+          await approvals.buildApprovalOutcomeNote(
+            stage.conversationId,
+            turn.createdAt,
+          ),
+        ).toBeNull();
+      } finally {
+        approvals.unregisterActionHandler("test.note.expired");
+      }
+    });
+
+    it("past the cap, the NEWEST waiting asks are the ones listed", async () => {
+      const stage = await seedStage("note-cap");
+      await markRan(stage.conversationId, stage.turnId);
+      approvals.registerActionHandler("test.note.cap", async () => {});
+      try {
+        for (let i = 1; i <= 12; i += 1) {
+          await ask(stage, "test.note.cap", `ask number ${i}`);
+        }
+        const turn = await nextTurn(stage.conversationId);
+        const note = await approvals.buildApprovalOutcomeNote(
+          stage.conversationId,
+          turn.createdAt,
+        );
+        expect(note).toContain("ask number 12.");
+        expect(note).toContain("ask number 3.");
+        expect(note).not.toContain("ask number 2.");
+        expect(note).not.toContain("ask number 1.");
+      } finally {
+        approvals.unregisterActionHandler("test.note.cap");
+      }
+    });
+
+    it("never leaks another conversation's approvals", async () => {
+      const stage = await seedStage("note-fence");
+      await markRan(stage.conversationId, stage.turnId);
+      const other = await seedConversationWithTurn(
+        stage.agentId,
+        "note-fence-other",
+      );
+      approvals.registerActionHandler("test.note.fence", async () => {});
+      try {
+        await approvals.requestActionApproval({
+          agentId: stage.agentId,
+          conversationId: other.conversationId,
+          originTurnId: other.turnId,
+          action: "test.note.fence",
+          payload: {},
+          summary: "send @Dana: secret plan",
+        });
+        const turn = await nextTurn(stage.conversationId);
+        expect(
+          await approvals.buildApprovalOutcomeNote(
+            stage.conversationId,
+            turn.createdAt,
+          ),
+        ).toBeNull();
+      } finally {
+        approvals.unregisterActionHandler("test.note.fence");
+      }
+    });
+  },
+);

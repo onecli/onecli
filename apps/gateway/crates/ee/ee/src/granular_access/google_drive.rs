@@ -50,6 +50,14 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::Value;
 
+// Method-override headers, the list shared with the proxy. Google executes
+// `X-HTTP-Method-Override` instead of the request line's method (so a
+// "create" POST could run as an unconfined files.list); the others are
+// honored by other front ends and refused alike: no legitimate Drive client
+// sends any of them. The proxy refuses an override naming ANOTHER method;
+// this guard refuses any at all, as its classification allows no doubt.
+use common::method_override::HEADERS as METHOD_OVERRIDE_HEADERS;
+
 use super::{RequestGuard, ResourceAxis};
 
 /// How a Drive folder scope works, for the agent's self-correction. Each
@@ -185,17 +193,6 @@ fn params(query: &str) -> Result<HashMap<String, String>, String> {
     }
     Ok(out)
 }
-
-/// Method-override headers. Google executes `X-HTTP-Method-Override` instead
-/// of the request line's method (so a "create" POST could run as an unconfined
-/// files.list); the others are honored by other front ends and refused alike —
-/// no legitimate Drive client sends any of them.
-const METHOD_OVERRIDE_HEADERS: &[&str] = &[
-    "x-http-method-override",
-    "x-http-method",
-    "x-method-override",
-    "x-goog-http-method-override",
-];
 
 /// Refuses every header through which Google would execute or decode something
 /// other than what [`classify`] reads. `Some` = deny, with why.

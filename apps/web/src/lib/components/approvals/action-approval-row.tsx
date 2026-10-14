@@ -24,7 +24,7 @@ interface ActionApprovalRowProps {
 
 /**
  * One pending one-shot action approval in the bell — THE decide surface for
- * these (the agent's channels page keeps settings only). Approve/Reject
+ * these (the agent's Contacts page keeps settings only). Approve/Reject
  * inline; the dialog carries the full ask plus the two decisions Slack's
  * buttons can't: Approve + always allow, and Reject with a reason.
  */

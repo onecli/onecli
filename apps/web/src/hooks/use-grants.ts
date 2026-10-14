@@ -147,10 +147,8 @@ export const useDetachConnectionForAgent = () => {
       connectionId: string;
       agentId: string;
     }) => grants.detachForConnection(connectionId, agentId),
-    onSuccess: () => {
-      invalidate();
-      toast.success("Access removed");
-    },
+    // Callers word their own confirmation (the account card offers Undo).
+    onSuccess: () => invalidate(),
     onError: (err: Error) => toast.error(err.message),
   });
 };

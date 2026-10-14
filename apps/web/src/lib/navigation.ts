@@ -1,3 +1,5 @@
+import type { RunsView } from "@/lib/agents/runs/runs-view";
+
 /**
  * Matches `/w/<workspaceId>` at the start of a pathname and captures the id.
  * Shared across sidebar, header, and navigation helpers so the pattern stays
@@ -96,6 +98,17 @@ export const agentSectionPath = (
   return section === "" ? base : `${base}/${section}`;
 };
 
+/** Activity's Runs tab for one agent, opened on one of its filters. */
+export const agentRunsPath = (
+  currentPathname: string,
+  agentId: string,
+  view: RunsView,
+): string =>
+  withWorkspacePrefix(
+    currentPathname,
+    `/activity?${new URLSearchParams({ tab: "runs", agent: agentId, view }).toString()}`,
+  );
+
 /**
  * Where "Get Started" lands: the workspace's agent roster with its create flow
  * already open (`?new=1`). Creating the first agent IS getting started — the
@@ -153,7 +166,7 @@ export const readDefaultOrgCookie = (): string | undefined =>
     ?.split("=")[1];
 
 /**
- * The org's Global Connections root, under Organization Settings. The single
+ * The org's Shared Connections root, under Organization Settings. The single
  * definition every org-scope connections surface (tabs, apps grid, connected
  * rows, the app page's back link, the settings nav) builds on, so a future
  * move cannot strand one of them on the old URL.

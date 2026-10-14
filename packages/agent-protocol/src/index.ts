@@ -4,6 +4,7 @@ export {
   errorEventSchema,
   isTerminalEvent,
   messageJoinedEventSchema,
+  messageSentNowEventSchema,
   noticeEventSchema,
   PEER_TASK_OUTCOMES,
   peerMessageStampSchema,
@@ -40,10 +41,12 @@ export type {
 export { AGENT_EFFORTS, KNOWN_AGENT_HARNESSES } from "./harness";
 export type {
   AgentEffort,
+  BackgroundedTool,
   Harness,
   HarnessBackgroundTask,
   HarnessBackgroundTasks,
   HarnessCapabilities,
+  HarnessEvent,
   HarnessSession,
   KnownAgentHarness,
   StartSessionOptions,
@@ -139,11 +142,14 @@ export {
   agentPeerSchema,
   attachmentManifestEntrySchema,
   processStateSchema,
+  sequencedFrameSchema,
   supervisorMessageSchema,
   syncFrameByteLength,
   workItemSchema,
   homeRelativePathSchema,
   homeSyncFileSchema,
+  SESSION_RESUME_BUDGET,
+  SESSION_RESUME_GRACE_MS,
 } from "./transport";
 export type {
   AgentChannelPresenceWire,
@@ -154,12 +160,16 @@ export type {
   HomeSyncFile,
 } from "./transport";
 export type {
+  SequencedFrame,
   SupervisorMessage,
   SupervisorTransport,
+  SupervisorWorkItem,
   WorkItem,
 } from "./transport";
 
 export {
+  ceilingWarningSteerId,
+  isPlatformSteerId,
   MAX_RUNNER_EVENTS_PER_POST,
   MAX_SANDBOX_CHECK_IDS,
   runnerCapabilitiesSchema,
@@ -231,6 +241,9 @@ export {
   adapterReachDecisionResponseSchema,
   adapterRegisterRequestSchema,
   adapterRegisterResponseSchema,
+  adapterReplyClaimSchema,
+  adapterReplyClaimResponseSchema,
+  adapterReplyItemSchema,
   adapterTranscriptEventSchema,
   adapterTranscriptResponseSchema,
   adapterUnsettledPromptSchema,
@@ -258,6 +271,8 @@ export type {
   AdapterReachDecisionRequest,
   AdapterReachDecisionResponse,
   AdapterRegisterRequest,
+  AdapterReplyClaim,
+  AdapterReplyItem,
   AdapterWorkItem,
   AdapterWorkResponse,
   AdapterWorkTurn,

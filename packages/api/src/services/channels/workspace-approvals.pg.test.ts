@@ -176,6 +176,8 @@ describe.skipIf(!PROOF_URL)("workspace pending channel approvals (4d)", () => {
       summary: 'send @Tomer: "hello"',
       agentName: "wab agent main",
       offersAlwaysAllow: false,
+      // No asking conversation on this hold: the bell only, never inline.
+      conversationId: null,
     });
     expect(items[1]).toMatchObject({
       kind: "reach",

@@ -9,6 +9,7 @@ import { createDockerBackend } from "@onecli/runner/backend/docker";
 import { installationFingerprint } from "@onecli/runner/installation";
 import { createRunner } from "@onecli/runner/runner";
 import { createRunnerWsServer } from "@onecli/runner/ws/server";
+import { parseSessionKeyring } from "@onecli/runner/ws/session";
 import { createSupervisorMessageHandler } from "@onecli/runner/supervisor-messages";
 import { createTurnEventCollector } from "@onecli/runner/turn-events";
 import type { HostedE2EConfig } from "./env.js";
@@ -46,8 +47,24 @@ export interface TestRunnerHandle {
   pump(): void;
   pausePump(): Promise<void>;
   containerRefOf(sandboxId: string): string | undefined;
+  /**
+   * Whether the sandbox's live container carries the `resumable` mark (read
+   * from the substrate, the way a restarted runner would), or undefined
+   * when it has no container.
+   */
+  resumableOf(sandboxId: string): Promise<boolean | undefined>;
+  /** Does this runner hold a live supervisor channel for the sandbox? */
+  hasConnection(sandboxId: string): boolean;
+  /** Every event this runner posted to the control plane, in order. */
+  readonly posted: readonly RunnerEvent[];
   /** Stop the loop + ws server (leaves sandboxes running, like production). */
   stop(): Promise<void>;
+  /**
+   * The CRASH shape: the process vanishes with no graceful close. Every
+   * supervisor socket is destroyed at the TCP level (no close frame), the
+   * loop is abandoned, nothing is drained. What a SIGKILL or an OOM leaves.
+   */
+  crash(): Promise<void>;
   /** Stop AND remove every container/volume this runner's label owns. */
   reap(): Promise<void>;
 }
@@ -59,12 +76,40 @@ export interface StartRunnerOptions {
   maxSandboxes?: number;
   orphanGraceSeconds?: number;
   orphanReap?: boolean;
+  /**
+   * The supervisor-session signing keyring (`RUNNER_SESSION_KEY` shape).
+   * Absent = resumption off, the pre-feature posture every other scenario
+   * runs under; the resume scenarios set it on BOTH the first runner and
+   * its replacement, exactly like a fleet sharing one secret.
+   */
+  sessionKey?: string;
+  /** Override the agent image (the old-supervisor compatibility scenario). */
+  agentImage?: string;
+  /**
+   * Override the inherited-resume grace (production: 3 min) so the
+   * "supervisor never came back" legs fit a test.
+   */
+  inheritedResumeGraceMs?: number;
+  /**
+   * Listen on THIS port instead of a fresh free one. A replacement runner
+   * must sit where the sandboxes were told to dial (production: the stable
+   * address the deployment hands its sandboxes), or no supervisor can ever
+   * find it again.
+   */
+  wsPort?: number;
+  /**
+   * Reproduce the CLOUD backend's ordering on Docker: `createSandbox` returns
+   * only after the container is running and its supervisor has dialled in
+   * (the cloud backend's image watch), so the runner records the container
+   * ref AFTER the connect. The resumable session must still be handed out.
+   */
+  createReturnsAfterConnect?: boolean;
 }
 
 export const startTestRunner = async (
   opts: StartRunnerOptions,
 ): Promise<TestRunnerHandle> => {
-  const wsPort = await freePort();
+  const wsPort = opts.wsPort ?? (await freePort());
 
   const runnerConfig: RunnerConfig = {
     token: opts.ids.runnerToken,
@@ -73,7 +118,7 @@ export const startTestRunner = async (
     backend: "docker",
     // 1 = the self-host serialization posture; the e2e pins today's behavior.
     lifecycleConcurrency: 1,
-    agentImage: opts.config.agentImage,
+    agentImage: opts.agentImage ?? opts.config.agentImage,
     sandboxNetwork: opts.ids.network,
     networkInternal: false,
     wsPort,
@@ -89,12 +134,13 @@ export const startTestRunner = async (
     // Cloud-backend settings — inert here: hosted-e2e is the DOCKER path.
     sandboxManagerUrl: null,
     sandboxManagerToken: null,
+    sessionKey: opts.sessionKey ?? null,
     cloudParkWaitSeconds: 120,
     cloudWakeWaitSeconds: 900,
     cloudImageWaitSeconds: 240,
   };
 
-  const backend = createDockerBackend({
+  const docker = createDockerBackend({
     runnerId: randomUUID(),
     installationId: installationFingerprint(runnerConfig.token),
     network: runnerConfig.sandboxNetwork,
@@ -102,11 +148,39 @@ export const startTestRunner = async (
     socketPath: runnerConfig.dockerSocket,
     extraHosts: runnerConfig.sandboxExtraHosts,
   });
+  // The cloud ordering: start inside create, and return only once the
+  // supervisor is connected. `wsServer` is assigned below, before any start.
+  const backend: typeof docker = opts.createReturnsAfterConnect
+    ? {
+        ...docker,
+        createSandbox: async (spec) => {
+          const ref = await docker.createSandbox(spec);
+          await docker.startSandbox(ref);
+          const deadline = Date.now() + 60_000;
+          while (!wsServer.connection(spec.sandboxId)) {
+            if (Date.now() > deadline) break;
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          return ref;
+        },
+      }
+    : docker;
 
-  const controlPlane = createControlPlaneClient({
+  const client = createControlPlaneClient({
     baseUrl: runnerConfig.controlPlaneUrl,
     token: runnerConfig.token,
   });
+  // Every event that reaches the control plane, whichever runner path posted
+  // it (the message handler's report chain or reconcile's own batch): the
+  // observable a scenario asserts on.
+  const posted: RunnerEvent[] = [];
+  const controlPlane: typeof client = {
+    ...client,
+    postEvents: (events) => {
+      posted.push(...events);
+      return client.postEvents(events);
+    },
+  };
 
   // The production report chain, condensed: serialized, error-tolerant.
   let reportChain: Promise<void> = Promise.resolve();
@@ -123,8 +197,17 @@ export const startTestRunner = async (
     false;
   let containerRefOf: (sandboxId: string) => string | undefined = () =>
     undefined;
+  // The production composition root's wiring, condensed: the keyring parsed
+  // once, handed to the server beside the runner's container map.
+  const keyring = parseSessionKeyring(runnerConfig.sessionKey ?? undefined);
   const wsServer = createRunnerWsServer({
     port: wsPort,
+    ...(keyring && {
+      sessions: {
+        keyring,
+        containerRefOf: (sandboxId) => containerRefOf(sandboxId),
+      },
+    }),
     onMessage: createSupervisorMessageHandler({
       report,
       collector,
@@ -184,6 +267,9 @@ export const startTestRunner = async (
     backend,
     controlPlane,
     wsServer,
+    ...(opts.inheritedResumeGraceMs !== undefined && {
+      inheritedResumeGraceMs: opts.inheritedResumeGraceMs,
+    }),
   });
   containerRefOf = (sandboxId) => runner.containerRefOf(sandboxId);
 
@@ -218,10 +304,21 @@ export const startTestRunner = async (
     pump,
     pausePump,
     containerRefOf: (sandboxId) => runner.containerRefOf(sandboxId),
+    resumableOf: async (sandboxId) =>
+      (await backend.listSandboxes()).find(
+        (snapshot) => snapshot.sandboxId === sandboxId && snapshot.running,
+      )?.resumable,
+    hasConnection: (sandboxId) => wsServer.connection(sandboxId) !== undefined,
+    posted,
     stop: async () => {
       await pausePump();
       await runner.stop();
       await reportChain;
+    },
+    crash: async () => {
+      pumping = false;
+      await wsServer.crash();
+      // The pump's in-flight tick settles on its own; nothing else runs.
     },
     reap: async () => {
       // `runner.stop()` deliberately leaves sandboxes running (production

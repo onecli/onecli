@@ -9,13 +9,16 @@ import { ExpandableText } from "./expandable-text";
 import { OUTCOME_TONE, OutcomeIcon } from "./outcome-icon";
 import { ResultAppChecks } from "./result-app-checks";
 import { ResultChange } from "./result-change";
+import { ResultJudgement } from "./result-judgement";
 
 /**
  * One question's result as a card: the question and its outcome, then what
  * was expected next to what the agent answered (stacked on narrow screens),
- * then the app checks, and the actions to inspect the run or edit the test.
+ * then a custom check's verdict, the app checks, and the actions to inspect
+ * the run or edit the test.
  *
- * SECURITY: the answer and error are untrusted model text, rendered as text.
+ * SECURITY: the answer, the error and the judge's verdict are untrusted
+ * model text, rendered as text.
  */
 export const ResultCard = ({
   result,
@@ -50,10 +53,10 @@ export const ResultCard = ({
       <dl className="grid gap-3 text-sm sm:grid-cols-2">
         <div className="bg-muted/40 min-w-0 rounded-md p-3">
           <dt className="text-muted-foreground text-xs font-medium">
-            Expected
+            {result.kind === "custom" ? "Success criteria" : "Expected"}
           </dt>
-          <dd className="mt-1 break-words whitespace-pre-wrap">
-            {result.expected}
+          <dd className="mt-1">
+            <ExpandableText text={result.expected} />
           </dd>
         </div>
         <div className="bg-muted/40 min-w-0 rounded-md p-3">
@@ -76,6 +79,8 @@ export const ResultCard = ({
           </dd>
         </div>
       </dl>
+
+      {result.kind === "custom" && <ResultJudgement result={result} />}
 
       <div className="flex flex-wrap items-end justify-between gap-2">
         <ResultAppChecks result={result} appLabel={appLabel} />

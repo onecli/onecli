@@ -47,6 +47,18 @@ export interface ForwardProxyOptions {
    * it does has landed before the gateway sees the refusal.
    */
   readonly onConnect?: (authority: string) => Promise<void>;
+  /**
+   * Answer a plain proxied request as the real provider would (a status, its
+   * headers, a raw body). Without it every request gets `200 {}`.
+   */
+  readonly respond?: (request: ProxiedRequest) => ProxiedResponse;
+}
+
+/** A scripted provider answer for {@link ForwardProxyOptions.respond}. */
+export interface ProxiedResponse {
+  readonly status: number;
+  readonly headers?: Readonly<Record<string, string>>;
+  readonly body?: string | Buffer;
 }
 
 export interface ForwardProxy {
@@ -69,17 +81,24 @@ export const startForwardProxy = async (
   const server: Server = createServer(
     (req: IncomingMessage, res: ServerResponse) => {
       const headers = flattenHeaders(req.headers);
-      requests.push({
+      const recorded: ProxiedRequest = {
         method: req.method ?? "GET",
         url: req.url ?? "/",
         headers,
         header: (name: string) => headers[name.toLowerCase()],
-      });
-      // Drain the body, then answer like a healthy upstream.
+      };
+      requests.push(recorded);
+      // Drain the body, then answer like the provider (scripted) or a
+      // healthy upstream.
       req.resume();
       req.on("end", () => {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end("{}");
+        const answer = options.respond?.(recorded) ?? {
+          status: 200,
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        };
+        res.writeHead(answer.status, answer.headers);
+        res.end(answer.body ?? "");
       });
     },
   );

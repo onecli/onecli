@@ -29,8 +29,9 @@ import { auditAutoGrants, autoAttachScope } from "./llm-autoattach-service";
  *  - **Live resources, no LLM keys.** Disconnected connections are skipped;
  *    LLM keys follow `llm-autoattach-service`, which only fills an agent that
  *    has none (a second key would re-point the agent's provider).
- *  - **Uncustomized, whole-app grants.** Exactly what the dialog's toggle
- *    writes, so turning one off is the same single detach.
+ *  - **The default attach.** Every catalog tool allowed and requests outside
+ *    the tool list needing approval (`defaultConnectionGrant`), exactly what
+ *    the dialog's toggle writes, so turning one off is the same single detach.
  *  - **Org policy still wins.** A grant is a workspace rule, and org rules stay
  *    a hard ceiling in the engine: an org block still blocks.
  *

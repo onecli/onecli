@@ -10,7 +10,9 @@ set -e
 # Prereqs:
 #   - dev api (:10256) and gateway (:10255) running, GATEWAY_CA_PEM_FILE set
 #     for the api so /v1/container-config can serve the CA
-#   - an agent (identifier below) granted an Anthropic secret in the workspace
+#   - an agent (identifier below) granted an Anthropic secret in the workspace.
+#     A BYO agent: the container config is never served for a hosted one,
+#     whose sandbox receives its config from the platform instead
 #   - the image: pnpm agent:build (the OS base, then the app on it)
 #   - jq
 #

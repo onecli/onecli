@@ -180,6 +180,7 @@ export const createFakeBackend = (): FakeBackend => {
         containerRef: record.containerRef,
         running: record.running,
         payloadHash: record.spec.payloadHash,
+        resumable: record.spec.resumable,
       }));
     },
 

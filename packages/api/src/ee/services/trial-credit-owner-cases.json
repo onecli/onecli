@@ -1,0 +1,143 @@
+{
+  "_comment": "The platform trial credit's owner-trust rule, asserted byte-for-byte by BOTH implementations: packages/api/src/ee/services/platform-llm.test.ts (TypeScript, the control plane that advertises the credit) and apps/gateway/crates/ee/ee/src/platform_llm.rs (Rust, the gateway that injects it). A divergence would let one side offer free credit the other refuses, or the reverse. Every address here is made up.",
+  "cases": [
+    {
+      "name": "gmail is trusted",
+      "email": "person@gmail.com",
+      "signInProvider": null,
+      "trusted": true
+    },
+    {
+      "name": "a company domain is trusted",
+      "email": "person@company.example",
+      "signInProvider": null,
+      "trusted": true
+    },
+    {
+      "name": "another company domain is trusted",
+      "email": "someone@acme.example",
+      "signInProvider": null,
+      "trusted": true
+    },
+    {
+      "name": "icloud is trusted",
+      "email": "person@icloud.com",
+      "signInProvider": null,
+      "trusted": true
+    },
+    {
+      "name": "proton is trusted",
+      "email": "person@proton.me",
+      "signInProvider": null,
+      "trusted": true
+    },
+    {
+      "name": "outlook.com is not trusted",
+      "email": "AlexKim123@outlook.com",
+      "signInProvider": null,
+      "trusted": false
+    },
+    {
+      "name": "hotmail.com is not trusted",
+      "email": "person@hotmail.com",
+      "signInProvider": null,
+      "trusted": false
+    },
+    {
+      "name": "live.com is not trusted",
+      "email": "person@live.com",
+      "signInProvider": null,
+      "trusted": false
+    },
+    {
+      "name": "msn.com is not trusted",
+      "email": "person@msn.com",
+      "signInProvider": null,
+      "trusted": false
+    },
+    {
+      "name": "a country variant is not trusted",
+      "email": "person@hotmail.fr",
+      "signInProvider": null,
+      "trusted": false
+    },
+    {
+      "name": "a two-label country variant is not trusted",
+      "email": "person@outlook.co.uk",
+      "signInProvider": null,
+      "trusted": false
+    },
+    {
+      "name": "another two-label variant is not trusted",
+      "email": "person@live.com.au",
+      "signInProvider": null,
+      "trusted": false
+    },
+    {
+      "name": "case does not matter",
+      "email": "Person@OUTLOOK.COM",
+      "signInProvider": null,
+      "trusted": false
+    },
+    {
+      "name": "a trailing dot does not matter",
+      "email": "person@outlook.com.",
+      "signInProvider": null,
+      "trusted": false
+    },
+    {
+      "name": "several trailing dots do not matter",
+      "email": "person@outlook.com..",
+      "signInProvider": null,
+      "trusted": false
+    },
+    {
+      "name": "surrounding whitespace does not matter",
+      "email": "person@outlook.com ",
+      "signInProvider": null,
+      "trusted": false
+    },
+    {
+      "name": "a non-ASCII suffix never matches the plain-ASCII list",
+      "email": "person@outlook.İt",
+      "signInProvider": null,
+      "trusted": true
+    },
+    {
+      "name": "a company subdomain named outlook is trusted",
+      "email": "person@outlook.acme.com",
+      "signInProvider": null,
+      "trusted": true
+    },
+    {
+      "name": "a brand that only starts with live is trusted",
+      "email": "person@liveperson.com",
+      "signInProvider": null,
+      "trusted": true
+    },
+    {
+      "name": "a domain containing hotmail is trusted",
+      "email": "person@myhotmail.com",
+      "signInProvider": null,
+      "trusted": true
+    },
+    {
+      "name": "a Google sign-in with an outlook address is trusted",
+      "email": "AlexKim123@outlook.com",
+      "signInProvider": "Google",
+      "trusted": true
+    },
+    {
+      "name": "a Google sign-in with gmail is trusted",
+      "email": "person@gmail.com",
+      "signInProvider": "Google",
+      "trusted": true
+    },
+    {
+      "name": "another federated provider does not lift outlook",
+      "email": "person@outlook.com",
+      "signInProvider": "SomeOtherIdp",
+      "trusted": false
+    }
+  ]
+}

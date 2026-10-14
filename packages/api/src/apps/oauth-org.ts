@@ -1,8 +1,15 @@
-import { setCookie } from "hono/cookie";
+import { generateCookie, setCookie } from "hono/cookie";
+import { parse as parseCookies } from "hono/utils/cookie";
 import type { Context } from "hono";
 import { resolveOrgAppCredentials } from "./resolve-org-credentials";
 import { saveAppConfigWithoutDisconnect } from "../services/app-config-service";
 import { getApp } from "./registry";
+import {
+  authorizeScopesFor,
+  redirectPathFor,
+  signedRedirectPath,
+} from "./oauth/groups";
+import { accessLevelFromState, resolveAccessLevel } from "./access-level";
 import { extractLabel } from "../lib/connection-display";
 import {
   createConnection,
@@ -10,7 +17,6 @@ import {
   linkConnectionToAppConfig,
   listConnectionsByProvider,
 } from "../services/connection-service";
-import { NODE_ENV } from "../lib/env";
 import { getApiCallbackOrigin, getAppOrigin } from "../lib/request-origin";
 import { invalidateGatewayCacheForOrg } from "../lib/gateway-invalidate";
 import { initBlocklistDefaults } from "../services/app-blocklist-service";
@@ -18,6 +24,8 @@ import {
   signOAuthState,
   generateNonce,
   verifyOAuthState,
+  OAUTH_STATE_COOKIE,
+  oauthStateCookieOptions,
 } from "../lib/oauth-state";
 import { logger } from "../lib/logger";
 import { db } from "@onecli/db";
@@ -72,8 +80,10 @@ const requireOrgDoor = async (
  * interceptor on the workspace authorize endpoint (`tryHandleOrgAuthorize`) —
  * responses are byte-identical between the two entry points.
  *
- * The redirect URI stays the shared `/v1/apps/:provider/callback` (the single
- * registered callback per provider); the org scope rides the signed state.
+ * The redirect URI is the per-app `/v1/apps/:provider/callback`, or, when the
+ * org's credentials are a vendor-shared client (e.g. its Google client), the
+ * vendor's single `/v1/apps/oauth/:group/callback`. The org scope and the
+ * exact redirect path ride the signed state.
  */
 export const orgAuthorize = async (
   auth: AuthContext,
@@ -94,18 +104,13 @@ export const orgAuthorize = async (
 
   const connectionId = c.req.query("connectionId");
 
-  // Same reasoning as the workspace-scoped authorize in `routes/apps.ts`: decide
-  // the post-consent destination here, where the caller is authenticated, and
-  // sign it — the shared callback that reads it back is not.
-  const state = signOAuthState({
-    ...(auth.workspaceId ? { workspaceId: auth.workspaceId } : {}),
-    organizationId: orgId,
-    provider,
-    scope: "organization",
-    nonce: generateNonce(),
-    origin: getAppOrigin(c.req.raw),
-    ...(connectionId ? { connectionId } : {}),
-  });
+  const accessLevel = resolveAccessLevel(
+    app.connectionMethod,
+    c.req.query("access_level"),
+  );
+  if (!accessLevel.ok) {
+    return Response.json({ error: accessLevel.error }, { status: 400 });
+  }
 
   const resolved = await resolveOrgAppCredentials(orgId, app);
   if (!resolved) {
@@ -116,29 +121,45 @@ export const orgAuthorize = async (
   }
 
   const { values: creds } = resolved;
+  const redirectPath = redirectPathFor(provider, resolved.configKey);
+
+  // Same reasoning as the workspace-scoped authorize in `routes/apps.ts`: decide
+  // the post-consent destination here, where the caller is authenticated, and
+  // sign it — the shared callback that reads it back is not.
+  const state = signOAuthState({
+    ...(auth.workspaceId ? { workspaceId: auth.workspaceId } : {}),
+    organizationId: orgId,
+    provider,
+    scope: "organization",
+    nonce: generateNonce(),
+    origin: getAppOrigin(c.req.raw),
+    redirectPath,
+    ...(connectionId ? { connectionId } : {}),
+    ...(accessLevel.value ? { accessLevel: accessLevel.value } : {}),
+  });
 
   // The API origin the provider must send the browser back to — same rule as
   // the workspace-scoped legs in routes/apps.ts: an explicitly configured
   // API_URL wins, else the origin this request arrived on. Never the DEFAULTED
   // selfUrl constant, which strands a remote self-host on localhost.
   const baseUrl = getApiCallbackOrigin(c.req.raw);
-  const redirectUri = `${baseUrl}/v1/apps/${provider}/callback`;
-  const scopes = app.connectionMethod.defaultScopes ?? [];
+  const redirectUri = `${baseUrl}${redirectPath}`;
+  const scopes = authorizeScopesFor(app, resolved.configKey);
 
   const authUrl = await app.connectionMethod.buildAuthUrl({
     appCredentials: creds,
     redirectUri,
     scopes,
     state,
+    ...(accessLevel.value ? { accessLevel: accessLevel.value } : {}),
   });
 
-  setCookie(c, "oauth_state", state, {
-    httpOnly: true,
-    secure: NODE_ENV === "production",
-    sameSite: "Lax",
-    path: `/v1/apps/${provider}/callback`,
-    maxAge: 600,
-  });
+  setCookie(
+    c,
+    OAUTH_STATE_COOKIE,
+    state,
+    oauthStateCookieOptions(redirectPath),
+  );
 
   return c.redirect(authUrl);
 };
@@ -198,16 +219,46 @@ export const tryHandleOrgCallback = async (
     // fails — both call getApiCallbackOrigin, and the provider sends the
     // browser back to the same origin the authorize leg derived.
     const baseUrl = getApiCallbackOrigin(request);
-    const redirectUri = `${baseUrl}/v1/apps/${provider}/callback`;
+    const redirectPath = signedRedirectPath(state, provider);
+    const redirectUri = `${baseUrl}${redirectPath}`;
     const callbackParams = Object.fromEntries(url.searchParams.entries());
 
-    const result = await app.connectionMethod.exchangeCode({
+    const accessLevel = accessLevelFromState(
+      app.connectionMethod,
+      state.accessLevel,
+    );
+    const exchangeParams = {
       appCredentials: resolved.values,
       callbackParams,
       redirectUri,
-    });
+      ...(accessLevel ? { accessLevel } : {}),
+      state,
+      stateCookie: parseCookies(
+        request.headers.get("cookie") ?? "",
+        OAUTH_STATE_COOKIE,
+      )[OAUTH_STATE_COOKIE],
+    };
 
-    const { credentials, scopes, metadata } = result;
+    // One more provider round trip before anything is stored: the next leg
+    // returns to this same callback path, bound to this browser's cookie.
+    const continuation =
+      await app.connectionMethod.continueCallback?.(exchangeParams);
+    if (continuation) {
+      return new Response(null, {
+        status: 302,
+        headers: {
+          location: continuation.continueAt,
+          "set-cookie": generateCookie(
+            OAUTH_STATE_COOKIE,
+            continuation.state,
+            oauthStateCookieOptions(redirectPath),
+          ),
+        },
+      });
+    }
+
+    const { credentials, scopes, metadata } =
+      await app.connectionMethod.exchangeCode(exchangeParams);
 
     let reconnectId = state.connectionId as string | undefined;
 

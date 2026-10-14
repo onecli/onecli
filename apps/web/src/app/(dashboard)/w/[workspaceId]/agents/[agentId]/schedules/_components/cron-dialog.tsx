@@ -24,6 +24,7 @@ import {
 import { Textarea } from "@onecli/ui/components/textarea";
 import { useCreateCron, useDeleteCron, useUpdateCron } from "@/hooks/use-crons";
 import type { AgentCron } from "@/lib/api";
+import { browserTimezone } from "@/lib/agents/schedule-timezone";
 
 /**
  * Create/edit a schedule. No date libraries exist in this app, deliberately —
@@ -51,9 +52,6 @@ const timeOf = (schedule: string): string => {
   if (!daily) return "09:00";
   return `${daily[2]!.padStart(2, "0")}:${daily[1]!.padStart(2, "0")}`;
 };
-
-const browserTimezone = (): string =>
-  Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 
 export interface CronDialogProps {
   agentId: string;

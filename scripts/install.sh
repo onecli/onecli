@@ -163,6 +163,14 @@ generate_channel_adapter_token() {
   printf 'cha_%s' "$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 }
 
+# The runner's supervisor-session signing key, as a one-entry keyring
+# (`kid.secret`): the runner reads a comma-separated list, FIRST entry signs,
+# all verify, so rotation is `k2.<new>,k1.<old>` then `k2.<new>`. Only the
+# runner reads it; it is what keeps every sandbox channel across a restart.
+generate_runner_session_key() {
+  printf 'k1.%s' "$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+}
+
 # The group that owns the docker socket, which the (unprivileged) runner needs
 # to spawn sandboxes.
 #
@@ -654,6 +662,8 @@ main() {
     # one-line change rather than a secret-generation exercise. Provisioning
     # them does NOT start a runner — that needs COMPOSE_PROFILES=runner.
     ensure_env_secret RUNNER_TOKEN "$(generate_runner_token)"
+    # Same opt-in posture: the key the runner signs supervisor sessions with.
+    ensure_env_secret RUNNER_SESSION_KEY "$(generate_runner_session_key)"
     # Channels (opt-in, same posture): the Slack adapter's anchor. Provisioned
     # up front; starting the adapter needs COMPOSE_PROFILES=channel-adapter.
     ensure_env_secret CHANNEL_ADAPTER_TOKEN "$(generate_channel_adapter_token)"

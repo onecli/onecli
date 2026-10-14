@@ -1,8 +1,10 @@
 import {
+  SESSION_RESUME_BUDGET,
   workItemSchema,
+  type SequencedFrame,
   type SupervisorMessage,
   type SupervisorTransport,
-  type WorkItem,
+  type SupervisorWorkItem,
 } from "@onecli/agent-protocol";
 import { log } from "../log";
 
@@ -31,7 +33,7 @@ import { log } from "../log";
  * process, which stops the container, which is the state an operator can
  * actually see and clean up.
  */
-export const DEFAULT_MAX_ATTEMPTS = 60;
+export const DEFAULT_MAX_ATTEMPTS = SESSION_RESUME_BUDGET.maxAttempts;
 
 /**
  * How many messages may queue while the channel is down. The control plane's
@@ -50,6 +52,12 @@ export interface WsTransportOptions {
   url: string;
   /** Single-use bootstrap token minted by the runner for this sandbox. */
   token: string;
+  /**
+   * This sandbox's id, presented beside a session credential on reconnect so
+   * the runner knows which container to verify it against. Never trusted
+   * for attribution: the runner attributes by the credential it verifies.
+   */
+  sandboxId: string;
   /** Injectable for tests; defaults to the global WebSocket. */
   socketFactory?: (url: string) => WebSocket;
   /** Reconnect backoff bounds. */
@@ -77,13 +85,35 @@ export const createWsTransport = (
   const {
     url,
     token,
+    sandboxId,
     socketFactory = (target) => new WebSocket(target),
-    minBackoffMs = 500,
-    maxBackoffMs = 15_000,
+    minBackoffMs = SESSION_RESUME_BUDGET.minBackoffMs,
+    maxBackoffMs = SESSION_RESUME_BUDGET.maxBackoffMs,
     maxAttempts = DEFAULT_MAX_ATTEMPTS,
   } = options;
 
-  const target = `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+  const separator = url.includes("?") ? "&" : "?";
+  const bootstrapTarget = `${url}${separator}token=${encodeURIComponent(token)}`;
+
+  /**
+   * THE RESUMABLE SESSION. Handed over by the runner on every successful
+   * connect (`session` work item), consumed here and never surfaced to the
+   * supervisor loop: it is a transport fact. While held, every connect
+   * presents it instead of the (spent) bootstrap token, every outbound
+   * frame is numbered, and the buffer below keeps frames until the runner
+   * ACKS them rather than until they are merely sent.
+   */
+  let session: string | undefined;
+  /**
+   * A refused session (the key rotated away, the container was recreated
+   * under us) falls back to the bootstrap token exactly once: if the runner
+   * is the same process that minted it, the token is spent and the ordinary
+   * finite budget ends things; if a brand-new sandbox start is under way,
+   * the recreate makes this process irrelevant anyway.
+   */
+  let bootstrapFallbackUsed = false;
+  /** Monotonic per process; a frame keeps its seq for life, replays included. */
+  let nextSeq = 0;
 
   let socket: WebSocket | undefined;
   /** No more reconnects: a shutdown arrived or we gave up. */
@@ -97,17 +127,25 @@ export const createWsTransport = (
    * Messages produced before the socket opened, sent in order once it does.
    *
    * BOUNDED, because the sandbox keeps working while the channel is down: a
-   * runner restart invalidates this sandbox's single-use token, so the retry
-   * usually cannot succeed at all, and a tool-heavy turn would buffer
-   * megabytes for the whole ~15-minute budget inside a container capped at a
-   * couple of gigabytes — then discard the lot. Dropping the oldest keeps the
-   * newest, which is what a reader reconnecting from history actually needs.
+   * tool-heavy turn would buffer megabytes for the whole retry budget inside
+   * a container capped at a couple of gigabytes, then discard the lot.
+   * Dropping the oldest keeps the newest, which is what a reader
+   * reconnecting from history actually needs.
+   *
+   * Without a session a frame waits only until the socket is open (sent =
+   * gone), as before. With one, every frame is numbered and STAYS queued
+   * until the runner acks it, so a reconnect replays the unacked tail.
+   * Un-numbered frames queued before the session arrived are sent once and
+   * never replayed: the runner that receives them is the one that handed
+   * the session over.
    */
-  const outbound: string[] = [];
-  const inbound: WorkItem[] = [];
-  let pending: ReturnType<typeof deferred<WorkItem | null>> | undefined;
+  const outbound: Array<{ seq: number | undefined; raw: string }> = [];
+  const inbound: SupervisorWorkItem[] = [];
+  let pending:
+    | ReturnType<typeof deferred<SupervisorWorkItem | null>>
+    | undefined;
 
-  const deliver = (item: WorkItem | null) => {
+  const deliver = (item: SupervisorWorkItem | null) => {
     if (item === null) ended = true;
     if (pending) {
       const waiter = pending;
@@ -118,12 +156,44 @@ export const createWsTransport = (
     if (item) inbound.push(item);
   };
 
+  /**
+   * Write cursor for the CURRENT socket: the highest numbered frame written
+   * to it. Set from the runner's hand-off on every connect (its ack) and
+   * nowhere else, so a fresh socket replays exactly what the runner lacks.
+   */
+  let sentUpTo = 0;
+
   const flush = () => {
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
-    while (outbound.length > 0) {
-      const next = outbound.shift();
-      if (next !== undefined) socket.send(next);
+    if (session === undefined) {
+      while (outbound.length > 0) {
+        const next = outbound.shift();
+        if (next !== undefined) socket.send(next.raw);
+      }
+      return;
     }
+    for (const entry of outbound) {
+      if (entry.seq === undefined) {
+        socket.send(entry.raw);
+      } else if (entry.seq > sentUpTo) {
+        socket.send(entry.raw);
+        sentUpTo = entry.seq;
+      }
+    }
+    for (let i = outbound.length - 1; i >= 0; i -= 1) {
+      if (outbound[i]!.seq === undefined) outbound.splice(i, 1);
+    }
+  };
+
+  /** Drop every acked frame: the runner has applied them. */
+  const acknowledge = (ack: number) => {
+    let acked = 0;
+    while (acked < outbound.length) {
+      const seq = outbound[acked]!.seq;
+      if (seq === undefined || seq > ack) break;
+      acked += 1;
+    }
+    if (acked > 0) outbound.splice(0, acked);
   };
 
   /**
@@ -166,10 +236,15 @@ export const createWsTransport = (
     }, delay);
   };
 
+  const target = (): string => {
+    if (session === undefined) return bootstrapTarget;
+    return `${url}${separator}session=${encodeURIComponent(session)}&sandbox=${encodeURIComponent(sandboxId)}`;
+  };
+
   const connect = (): void => {
     if (closed) return;
     attempts += 1;
-    const ws = socketFactory(target);
+    const ws = socketFactory(target());
     socket = ws;
 
     // Every handler below belongs to THIS socket. A superseded one must not
@@ -180,12 +255,16 @@ export const createWsTransport = (
     // guard does not cover this — it is cleared before `connect()` runs.
     const isCurrent = () => socket === ws;
 
+    let opened = false;
     ws.addEventListener("open", () => {
       if (!isCurrent()) return;
+      opened = true;
       attempts = 0;
       warnedOutbound = false;
-      log("info", "runner channel open");
-      flush();
+      log("info", "runner channel open", { resumed: session !== undefined });
+      // With a session, the replay waits for the runner's hand-off (its
+      // cursor decides what to resend); without one, drain as before.
+      if (session === undefined) flush();
     });
 
     ws.addEventListener("message", (event: MessageEvent) => {
@@ -206,6 +285,32 @@ export const createWsTransport = (
         });
         return;
       }
+      // The two transport-level items. Neither reaches the supervisor loop.
+      if (item.data.kind === "session") {
+        const resumed = session !== undefined;
+        session = item.data.credential;
+        bootstrapFallbackUsed = false;
+        // The runner's cursor is the truth about what it holds (a process
+        // that restarted says 0): everything it acked is dropped, and the
+        // write cursor for this socket starts there, so exactly the gap
+        // replays. The one place the cursor is set.
+        acknowledge(item.data.ack);
+        sentUpTo = item.data.ack;
+        log(
+          "info",
+          resumed ? "runner session resumed" : "runner session held",
+          {
+            ack: item.data.ack,
+            pending: outbound.length,
+          },
+        );
+        flush();
+        return;
+      }
+      if (item.data.kind === "ack") {
+        acknowledge(item.data.seq);
+        return;
+      }
       deliver(item.data);
       if (item.data.kind === "shutdown") closed = true;
     });
@@ -224,6 +329,17 @@ export const createWsTransport = (
         deliver(null);
         return;
       }
+      // A session that was presented and never opened was refused. Try the
+      // bootstrap token once (see `bootstrapFallbackUsed`), then let the
+      // ordinary budget decide.
+      if (session !== undefined && !opened && !bootstrapFallbackUsed) {
+        log(
+          "warn",
+          "runner session refused; retrying with the bootstrap token",
+        );
+        session = undefined;
+        bootstrapFallbackUsed = true;
+      }
       scheduleReconnect();
     });
   };
@@ -231,7 +347,7 @@ export const createWsTransport = (
   connect();
 
   return {
-    async *incoming(): AsyncIterable<WorkItem> {
+    async *incoming(): AsyncIterable<SupervisorWorkItem> {
       for (;;) {
         const queued = inbound.shift();
         if (queued) {
@@ -240,7 +356,7 @@ export const createWsTransport = (
           continue;
         }
         if (ended) return;
-        pending = deferred<WorkItem | null>();
+        pending = deferred<SupervisorWorkItem | null>();
         const next = await pending.promise;
         if (!next) return;
         yield next;
@@ -261,7 +377,13 @@ export const createWsTransport = (
       ) {
         return;
       }
-      outbound.push(JSON.stringify(message));
+      if (session === undefined) {
+        outbound.push({ seq: undefined, raw: JSON.stringify(message) });
+      } else {
+        nextSeq += 1;
+        const frame: SequencedFrame = { seq: nextSeq, message };
+        outbound.push({ seq: nextSeq, raw: JSON.stringify(frame) });
+      }
       if (outbound.length > MAX_OUTBOUND_MESSAGES) {
         const dropped = outbound.length - MAX_OUTBOUND_MESSAGES;
         outbound.splice(0, dropped);

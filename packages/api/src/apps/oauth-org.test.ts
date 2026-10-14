@@ -40,12 +40,21 @@ const store = vi.hoisted(() => ({
   members: [] as { organizationId: string; userId: string; role: string }[],
   // The OAuth legs' inputs, captured so the tests pin what actually leaves
   // for the provider (redirect URI, code) — not just the stored row.
-  authUrlArgs: null as { redirectUri: string; state: string } | null,
+  authUrlArgs: null as {
+    redirectUri: string;
+    state: string;
+    accessLevel?: string;
+  } | null,
   exchangeArgs: null as {
     redirectUri: string;
     callbackParams: Record<string, string>;
+    accessLevel?: string;
+    state?: Record<string, unknown>;
+    stateCookie?: string;
   } | null,
   throwOnExchange: false,
+  // When set, the fixture asks for one more provider round trip.
+  continueAt: null as string | null,
   connections: [] as {
     id: string;
     organizationId?: string;
@@ -191,25 +200,55 @@ vi.mock("./registry", () => ({
               buildAuthUrl: ({
                 state,
                 redirectUri,
+                accessLevel,
               }: {
                 state: string;
                 redirectUri: string;
+                accessLevel?: string;
               }) => {
-                store.authUrlArgs = { redirectUri, state };
+                store.authUrlArgs = { redirectUri, state, accessLevel };
                 return `https://provider.example/auth?state=${encodeURIComponent(state)}`;
               },
+              continueCallback: async () =>
+                store.continueAt
+                  ? { continueAt: store.continueAt, state: "next-leg-state" }
+                  : null,
               exchangeCode: async ({
                 redirectUri,
                 callbackParams,
+                accessLevel,
+                state,
+                stateCookie,
               }: {
                 redirectUri: string;
                 callbackParams: Record<string, string>;
+                accessLevel?: string;
+                state?: Record<string, unknown>;
+                stateCookie?: string;
               }) => {
                 if (store.throwOnExchange) {
                   throw new Error("exchange refused by provider");
                 }
-                store.exchangeArgs = { redirectUri, callbackParams };
+                store.exchangeArgs = {
+                  redirectUri,
+                  callbackParams,
+                  ...(accessLevel ? { accessLevel } : {}),
+                  state,
+                  stateCookie,
+                };
                 return { credentials: { access_token: "xchg-1" } };
+              },
+              accessLevels: {
+                label: "Access level",
+                defaultValue: "workspace",
+                options: [
+                  {
+                    value: "workspace",
+                    label: "Workspace",
+                    description: "All.",
+                  },
+                  { value: "user", label: "Personal", description: "You." },
+                ],
               },
             },
             configurable: {
@@ -263,6 +302,7 @@ beforeEach(() => {
   store.authUrlArgs = null;
   store.exchangeArgs = null;
   store.throwOnExchange = false;
+  store.continueAt = null;
   caps.rbac = false;
 });
 
@@ -411,6 +451,25 @@ describe("orgAuthorize", () => {
     const res = await orgAuthorize(auth, ctx, "keyapp", "org-1");
     expect(res.status).toBe(400);
   });
+
+  it("signs the chosen access level and asks the provider for it", async () => {
+    const { ctx } = fakeContext({ access_level: "user" });
+    const res = await orgAuthorize(auth, ctx, "oauthapp", "org-1");
+
+    expect(res.status).toBe(302);
+    expect(store.authUrlArgs?.accessLevel).toBe("user");
+    expect(verifyOAuthState(store.authUrlArgs!.state)?.accessLevel).toBe(
+      "user",
+    );
+  });
+
+  it("rejects an access level the app does not declare", async () => {
+    const { ctx } = fakeContext({ access_level: "admin" });
+    const res = await orgAuthorize(auth, ctx, "oauthapp", "org-1");
+
+    expect(res.status).toBe(400);
+    expect(store.authUrlArgs).toBeNull();
+  });
 });
 
 describe("tryHandleOrgAuthorize (compat interceptor)", () => {
@@ -482,6 +541,10 @@ describe("tryHandleOrgCallback (shared-callback interceptor)", () => {
     expect(store.exchangeArgs).toEqual({
       redirectUri: "http://api.example/v1/apps/oauthapp/callback",
       callbackParams: expect.objectContaining({ code: "abc" }),
+      // A state minted before the level existed exchanges at the default.
+      accessLevel: "workspace",
+      state: expect.objectContaining({ organizationId: "org-1" }),
+      stateCookie: undefined,
     });
     expect(store.connections).toHaveLength(1);
     expect(store.connections[0]).toMatchObject({
@@ -493,6 +556,59 @@ describe("tryHandleOrgCallback (shared-callback interceptor)", () => {
       credentials: 'enc:{"access_token":"xchg-1"}',
     });
     expect(store.orgFlushes).toEqual(["org-1"]);
+  });
+
+  it("exchanges with the level signed into the state", async () => {
+    const res = await tryHandleOrgCallback(
+      callbackRequest(orgState({ accessLevel: "user" })),
+      "oauthapp",
+    );
+
+    expect(res?.status).toBe(302);
+    expect(store.exchangeArgs?.accessLevel).toBe("user");
+  });
+
+  it("a continuation redirects with the next leg's state cookie and stores nothing", async () => {
+    store.continueAt = "https://provider.example/next";
+    const state = orgState();
+
+    const res = await tryHandleOrgCallback(
+      new Request(
+        `http://api.example/v1/apps/oauthapp/callback?installation_id=1&state=${encodeURIComponent(state)}`,
+        { headers: { host: "api.example" } },
+      ),
+      "oauthapp",
+    );
+
+    expect(res?.status).toBe(302);
+    expect(res?.headers.get("location")).toBe("https://provider.example/next");
+    const cookie = res?.headers.get("set-cookie") ?? "";
+    expect(cookie).toContain("oauth_state=next-leg-state");
+    // Scoped to the callback path the next leg returns to.
+    expect(cookie).toContain("Path=/v1/apps/oauthapp/callback");
+    expect(cookie).toContain("HttpOnly");
+    expect(cookie).toContain("SameSite=Lax");
+    expect(store.exchangeArgs).toBeNull();
+    expect(store.connections).toHaveLength(0);
+    expect(store.orgFlushes).toEqual([]);
+  });
+
+  it("hands the exchange this browser's state cookie for the callback", async () => {
+    const state = orgState();
+    await tryHandleOrgCallback(
+      new Request(
+        `http://api.example/v1/apps/oauthapp/callback?code=abc&state=${encodeURIComponent(state)}`,
+        {
+          headers: {
+            host: "api.example",
+            cookie: `other=1; oauth_state=${encodeURIComponent(state)}`,
+          },
+        },
+      ),
+      "oauthapp",
+    );
+
+    expect(store.exchangeArgs?.stateCookie).toBe(state);
   });
 
   it("redirects to the error page instead of minting when the exchange fails", async () => {

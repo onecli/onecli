@@ -57,6 +57,8 @@ export interface Cx {
 export const scenario = (
   name: string,
   body: (cx: Cx) => Promise<void>,
+  /** Per-scenario ceiling; the suite default (vitest.config) otherwise. */
+  timeoutMs?: number,
 ): void => {
   const config = e2eConfig();
   if (config === null) {
@@ -64,102 +66,109 @@ export const scenario = (
     return;
   }
 
-  test(name, async () => {
-    const ids = newTestIds();
-    const db = await createTestDatabase(ids, config);
-    const gateways: GatewayHandle[] = [];
-    const apis: ApiServerHandle[] = [];
-    const runners: TestRunnerHandle[] = [];
-    const upstreams: StubUpstream[] = [];
+  test(
+    name,
+    async () => {
+      const ids = newTestIds();
+      const db = await createTestDatabase(ids, config);
+      const gateways: GatewayHandle[] = [];
+      const apis: ApiServerHandle[] = [];
+      const runners: TestRunnerHandle[] = [];
+      const upstreams: StubUpstream[] = [];
 
-    const cx: Cx = {
-      ids,
-      db,
-      config,
-      prisma: db.prisma,
-      startStack: async (options = {}) => {
-        const gateway = await startGateway({
-          databaseUrl: db.url,
-          ...(options.gatewayEnv && { env: options.gatewayEnv }),
-        });
-        gateways.push(gateway);
-        const api = await startApiServer({
-          databaseUrl: db.url,
-          gateway,
-          runnerToken: ids.runnerToken,
-          port: await freePort(),
-          config,
-          ...(options.apiEnv && { env: options.apiEnv }),
-        });
-        apis.push(api);
-        let runner: TestRunnerHandle | null = null;
-        if (options.withRunner !== false) {
-          runner = await startTestRunner({
-            controlPlaneUrl: api.origin,
-            ids,
-            config,
-            ...(options.maxSandboxes !== undefined && {
-              maxSandboxes: options.maxSandboxes,
-            }),
-            ...(options.orphanGraceSeconds !== undefined && {
-              orphanGraceSeconds: options.orphanGraceSeconds,
-            }),
-            ...(options.orphanReap !== undefined && {
-              orphanReap: options.orphanReap,
-            }),
+      const cx: Cx = {
+        ids,
+        db,
+        config,
+        prisma: db.prisma,
+        startStack: async (options = {}) => {
+          const gateway = await startGateway({
+            databaseUrl: db.url,
+            ...(options.gatewayEnv && { env: options.gatewayEnv }),
           });
-          runners.push(runner);
-        }
-        return {
-          gateway,
-          api,
-          runner,
-          v1: v1Client(api.origin, ids.apiKey, ids.workspace),
-        };
-      },
-      upstreamTls: async () => {
-        const stub = await startStubUpstream({ tls: true });
-        upstreams.push(stub);
-        return stub;
-      },
-      v1For: (apiOrigin, which) =>
-        which === "first"
-          ? v1Client(apiOrigin, ids.apiKey, ids.workspace)
-          : v1Client(apiOrigin, ids.secondApiKey, ids.secondWorkspace),
-    };
+          gateways.push(gateway);
+          const api = await startApiServer({
+            databaseUrl: db.url,
+            gateway,
+            runnerToken: ids.runnerToken,
+            port: await freePort(),
+            config,
+            ...(options.apiEnv && { env: options.apiEnv }),
+          });
+          apis.push(api);
+          let runner: TestRunnerHandle | null = null;
+          if (options.withRunner !== false) {
+            runner = await startTestRunner({
+              controlPlaneUrl: api.origin,
+              ids,
+              config,
+              ...(options.maxSandboxes !== undefined && {
+                maxSandboxes: options.maxSandboxes,
+              }),
+              ...(options.orphanGraceSeconds !== undefined && {
+                orphanGraceSeconds: options.orphanGraceSeconds,
+              }),
+              ...(options.orphanReap !== undefined && {
+                orphanReap: options.orphanReap,
+              }),
+            });
+            runners.push(runner);
+          }
+          return {
+            gateway,
+            api,
+            runner,
+            v1: v1Client(api.origin, ids.apiKey, ids.workspace),
+          };
+        },
+        upstreamTls: async () => {
+          const stub = await startStubUpstream({ tls: true });
+          upstreams.push(stub);
+          return stub;
+        },
+        v1For: (apiOrigin, which) =>
+          which === "first"
+            ? v1Client(apiOrigin, ids.apiKey, ids.workspace)
+            : v1Client(apiOrigin, ids.secondApiKey, ids.secondWorkspace),
+      };
 
-    try {
-      await body(cx);
-    } catch (error) {
-      const logs = [
-        ...gateways.map(
-          (g, i) => `--- gateway #${i + 1} ---\n${g.logs.text()}`,
-        ),
-        ...apis.map(
-          (a, i) => `--- api-server #${i + 1} ---\n${a.service.logs.text()}`,
-        ),
-      ].join("\n");
-      if (logs !== "") {
-        const detail = error instanceof Error ? error.message : String(error);
-        throw new Error(`${detail}\n\n${logs}\n--- database: ${db.name} ---`, {
-          cause: error,
-        });
-      }
-      throw error;
-    } finally {
-      // Waves: runner loop first (nothing new spawns), then its sandboxes
-      // and homes (runner.stop leaves them by design), then the children,
-      // then the per-test network, then — unconditionally — the database.
-      await Promise.allSettled(runners.map((r) => r.stop()));
-      await Promise.allSettled(runners.map((r) => r.reap()));
-      await Promise.allSettled(apis.map((a) => a.stop()));
-      await Promise.allSettled(gateways.map((g) => g.stop()));
-      await Promise.allSettled(upstreams.map((u) => u.close()));
       try {
-        await dockerNetworkRm(ids.network);
+        await body(cx);
+      } catch (error) {
+        const logs = [
+          ...gateways.map(
+            (g, i) => `--- gateway #${i + 1} ---\n${g.logs.text()}`,
+          ),
+          ...apis.map(
+            (a, i) => `--- api-server #${i + 1} ---\n${a.service.logs.text()}`,
+          ),
+        ].join("\n");
+        if (logs !== "") {
+          const detail = error instanceof Error ? error.message : String(error);
+          throw new Error(
+            `${detail}\n\n${logs}\n--- database: ${db.name} ---`,
+            {
+              cause: error,
+            },
+          );
+        }
+        throw error;
       } finally {
-        await db.drop();
+        // Waves: runner loop first (nothing new spawns), then its sandboxes
+        // and homes (runner.stop leaves them by design), then the children,
+        // then the per-test network, then — unconditionally — the database.
+        await Promise.allSettled(runners.map((r) => r.stop()));
+        await Promise.allSettled(runners.map((r) => r.reap()));
+        await Promise.allSettled(apis.map((a) => a.stop()));
+        await Promise.allSettled(gateways.map((g) => g.stop()));
+        await Promise.allSettled(upstreams.map((u) => u.close()));
+        try {
+          await dockerNetworkRm(ids.network);
+        } finally {
+          await db.drop();
+        }
       }
-    }
-  });
+    },
+    timeoutMs,
+  );
 };

@@ -54,6 +54,7 @@ export const googleDrive: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
     envDefaults: googleEnvDefaults,
   },
 };

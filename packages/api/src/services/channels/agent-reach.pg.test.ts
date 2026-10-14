@@ -1,6 +1,14 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 import { proofDatabaseUrl } from "../../testing/pg-proof.js";
 
@@ -65,15 +73,18 @@ const startSlackFake = (): Promise<string> =>
       let raw = "";
       req.on("data", (chunk: Buffer) => (raw += chunk.toString("utf8")));
       req.on("end", () => {
-        const method = (req.url ?? "/").slice(1);
-        const call: SlackCall = { method, form: new URLSearchParams(raw) };
-        slackCalls.push(call);
-        const handler = slackHandlers[method];
-        const body = handler
-          ? handler(call)
-          : { ok: false, error: `test_unscripted_${method}` };
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ ok: true, ...(body as object) }));
+        void (async () => {
+          const method = (req.url ?? "/").slice(1);
+          const call: SlackCall = { method, form: new URLSearchParams(raw) };
+          slackCalls.push(call);
+          const handler = slackHandlers[method];
+          // Awaited, so a test can hold a call open (the card-race proof).
+          const body = handler
+            ? await handler(call)
+            : { ok: false, error: `test_unscripted_${method}` };
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ok: true, ...(body as object) }));
+        })();
       });
     });
     slackServer.listen(0, "127.0.0.1", () => {
@@ -282,15 +293,29 @@ const sweepFencedTo = async (agentId: string): Promise<void> => {
   }
 };
 
+/**
+ * Wait for the ingest door's detached work to land. By default: at least
+ * one owner card went out (the fake recorded `chat.postMessage`) AND its
+ * ref is persisted on a grant. The second half is the point: the fake
+ * records the call BEFORE it answers, and the service still has to read
+ * the answer, write `cardRefs`, and COMMIT the advisory-lock transaction
+ * that wraps the posting pass (postReachCards). A fixed sleep after the
+ * post was measured short on a loaded CI runner (observed: `cardRefs: []`
+ * read 15 ms after the post). A custom `done` is awaited as given, and a
+ * "nothing should happen" case simply times out.
+ */
 const settleDetached = async (
-  done: () => boolean = () => slackCallsFor("chat.postMessage").length > 0,
+  done: () => Promise<boolean> | boolean = async () =>
+    slackCallsFor("chat.postMessage").length > 0 &&
+    (await db.agentReachGrant.count({
+      where: {
+        agent: { workspaceId: WORKSPACE },
+        NOT: { cardRefs: { equals: [] } },
+      },
+    })) > 0,
 ) => {
-  for (let i = 0; i < 40; i += 1) {
-    if (done()) {
-      // One extra macrotask so the cardRefs write AFTER the post lands.
-      await new Promise((resolve) => setTimeout(resolve, 15));
-      return;
-    }
+  for (let i = 0; i < 100; i += 1) {
+    if (await done()) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 };
@@ -421,14 +446,15 @@ describe.skipIf(!PROOF_URL)("reach — the guest lane", () => {
     await settleDetached();
 
     // The waiting line, not the harsh not-linked refusal - and it NAMES
-    // the decider and carries the dashboard link, so the room knows who to
-    // nudge instead of hearing an ownerless "someone must approve".
+    // the decider, so the room knows who to nudge instead of hearing an
+    // ownerless "someone must approve". One short sentence, no link.
     expect(result.kind).toBe("message");
     if (result.kind !== "message") throw new Error("unreachable");
     expect(result.outcome.kind).toBe("refused");
     if (result.outcome.kind !== "refused") throw new Error("unreachable");
-    expect(result.outcome.message).toContain("needs to approve me");
-    expect(result.outcome.message).toContain(`/agents/${agentId}/channels`);
+    expect(result.outcome.message).toBe(
+      "I can't reply here yet. I've asked Olive Owner to approve me.",
+    );
     // It NAMES the owner (so the room knows who to nudge)...
     expect(result.outcome.message).toContain("Olive Owner");
     // ...but NEVER their email. This line is posted into a channel that by
@@ -771,6 +797,44 @@ describe.skipIf(!PROOF_URL)("reach — deciding", () => {
     });
     return { ...seeded, grantId: grant.id };
   };
+
+  it("two posters racing on a fresh grant post ONE card per owner; the busy one skips instead of waiting", async () => {
+    // The ingest door and the retry sweep can both reach a new grant within
+    // milliseconds and both read `cardRefs: []`. Without the per-grant lock
+    // each posts, the owner sees two identical cards, and a decision
+    // rewrites only the one whose ref survived.
+    const { integrationId, grantId } = await plantPending("race");
+    await linkUser(integrationId, "U-OWNER", OWNER);
+    let n = 0;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    slackHandlers["chat.postMessage"] = async () => {
+      // Hold the first post open until the second poster has come and gone.
+      await held;
+      n += 1;
+      return { channel: "D-OWNER-IM", ts: `999.${n}` };
+    };
+
+    const first = reach.postReachCards(grantId);
+    await vi.waitFor(() =>
+      expect(slackCallsFor("chat.postMessage")).toHaveLength(1),
+    );
+    // The lock is busy: the second poster returns without posting and
+    // without waiting for the first (no stacked transaction behind a slow
+    // Slack call).
+    await reach.postReachCards(grantId);
+    expect(slackCallsFor("chat.postMessage")).toHaveLength(1);
+    release();
+    await first;
+
+    expect(slackCallsFor("chat.postMessage")).toHaveLength(1);
+    const grant = await db.agentReachGrant.findUniqueOrThrow({
+      where: { id: grantId },
+    });
+    expect(grant.cardRefs).toEqual([
+      { channel: "D-OWNER-IM", ts: "999.1", userId: OWNER },
+    ]);
+  });
 
   it("a workspace-linked clicker approves from the card; the decision audits and rewrites posted cards", async () => {
     const { integrationId, presenceId, grantId } = await plantPending("decide");
@@ -1259,7 +1323,7 @@ describe.skipIf(!PROOF_URL)("reach — the person lane (DM knock)", () => {
     if (result.kind !== "message") throw new Error("unreachable");
     expect(result.outcome.kind).toBe("refused");
     if (result.outcome.kind !== "refused") throw new Error("unreachable");
-    expect(result.outcome.message).toContain("needs to approve me");
+    expect(result.outcome.message).toContain("to approve me");
 
     // The row is a PERSON row, addressed by the provider's stable user id.
     const grant = await db.agentReachGrant.findUniqueOrThrow({
@@ -1395,7 +1459,7 @@ describe.skipIf(!PROOF_URL)("reach — the person lane (DM knock)", () => {
     if (result.kind !== "message") throw new Error("unreachable");
     expect(result.outcome.kind).toBe("refused");
     if (result.outcome.kind !== "refused") throw new Error("unreachable");
-    expect(result.outcome.message).not.toContain("needs to approve me");
+    expect(result.outcome.message).not.toContain("to approve me");
     // No row, and no card: an outsider cannot make the owner's phone buzz.
     expect(await db.agentReachGrant.count({ where: { agentId } })).toBe(0);
     expect(slackCallsFor("chat.postMessage")).toHaveLength(0);

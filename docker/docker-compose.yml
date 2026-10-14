@@ -316,6 +316,10 @@ services:
       # for everyone, runner or not. The runner refuses to start without it
       # (see apps/runner/src/config.ts), which is the right place to fail.
       RUNNER_TOKEN: ${RUNNER_TOKEN:-}
+      # The supervisor-session signing keyring (installer-generated). Optional
+      # at the compose layer for the same reason as above; without it the
+      # runner boots with resumption off and logs so.
+      RUNNER_SESSION_KEY: ${RUNNER_SESSION_KEY:-}
       RUNNER_CONTROL_PLANE_URL: http://api:10256
       RUNNER_NAME: ${RUNNER_NAME:-compose}
       RUNNER_BACKEND: docker

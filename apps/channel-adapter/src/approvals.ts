@@ -1,7 +1,11 @@
 import { z } from "zod";
 import type { AdapterLink, AdapterPresence } from "@onecli/agent-protocol";
 import { APPROVAL_GROUP_ID_RE, APPROVAL_GROUP_MAX_IDS } from "@onecli/channels";
-import { approvalGroupKey } from "@onecli/api/lib/approval-groups";
+import {
+  approvalGroupKey,
+  batchArrival,
+} from "@onecli/api/lib/approval-groups";
+import { CELL_OPS } from "@onecli/api/lib/record-change";
 import type { ControlPlaneClient } from "./control-plane";
 import {
   replyTargetForLink,
@@ -41,6 +45,10 @@ const recordUrl = z
   .optional()
   .catch(undefined);
 
+/** A bulk table's column: a change (`fields`) or a read-only context
+ *  column (`context`). */
+const bulkField = z.object({ api: z.string(), label: z.string() });
+
 const pendingResponse = z.object({
   requests: z.array(
     z.object({
@@ -53,7 +61,17 @@ const pendingResponse = z.object({
           action: z.string().optional(),
           // The title's action without its record: grouping keys on it, so
           // per-record titles ("Delete Contact Ada") still share a card.
-          subject: z.object({ verb: z.string() }).partial().nullish(),
+          // `record` and `row` let a row lead with its record and label the
+          // change beside it ("Batch Test04 · Title: After"), and sort by it.
+          subject: z
+            .object({
+              verb: z.string(),
+              record: z.string(),
+              row: z.number().int().nonnegative(),
+            })
+            .partial()
+            .nullish()
+            .catch(undefined),
           details: z
             .array(
               z.object({
@@ -63,6 +81,40 @@ const pendingResponse = z.object({
               }),
             )
             .optional(),
+          // One request that changes a whole list of records. Every link is
+          // re-checked as https, like a detail's; a malformed bulk is dropped
+          // (the card falls back to its detail rows), never fatal.
+          bulk: z
+            .object({
+              objectLabel: z.string(),
+              hiddenFields: z.array(z.string()).optional().catch(undefined),
+              kind: z
+                .enum(["update", "create", "delete"])
+                .optional()
+                .catch(undefined),
+              fields: z.array(bulkField),
+              rows: z.array(
+                z.object({
+                  id: z.string(),
+                  name: z.string().optional(),
+                  url: recordUrl,
+                  new: z.array(z.string().nullable()),
+                  old: z.array(z.string().nullable()).optional(),
+                  ops: z.array(z.enum(CELL_OPS)).optional().catch(undefined),
+                  op: z.enum(CELL_OPS).optional().catch(undefined),
+                  context: z
+                    .array(z.string().nullable())
+                    .optional()
+                    .catch(undefined),
+                }),
+              ),
+              oldValuesRead: z.boolean().optional(),
+              // Read-only "who is this" columns (account, title). Malformed:
+              // dropped, the card still renders without them.
+              context: z.array(bulkField).optional().catch(undefined),
+            })
+            .nullish()
+            .catch(undefined),
         })
         .nullish(),
       agent: z.object({ id: z.string(), name: z.string() }).partial().nullish(),
@@ -83,6 +135,11 @@ const pendingResponse = z.object({
 export type PendingApproval = z.infer<
   typeof pendingResponse
 >["requests"][number];
+
+/** One request over many records, outside a tagged batch: its own card,
+ *  with its table and CSV (`bulkCardBlocks`), never a row on a task card. */
+const isOwnTable = (a: PendingApproval): boolean =>
+  !((a.batch?.total ?? 0) > 1) && (a.summary?.bulk?.rows.length ?? 0) > 1;
 
 export class ApprovalsAuthError extends Error {}
 
@@ -122,7 +179,15 @@ export interface ApprovalCardUi {
   /** Post the card for a pending approval; returns the channel-native
    * message ref. Throws on failure (the caller owns retry semantics). */
   post(
-    input: ChannelPostTarget & { approval: PendingApproval },
+    input: ChannelPostTarget & {
+      approval: PendingApproval;
+      /** The rest of a tagged batch arriving with it: the card posts with
+       *  every row at once instead of growing from one. */
+      batch?: PendingApproval[];
+      /** Where the request can be reviewed in OneCLI (the agent's web
+       *  chat: a batch row by row, a record change as its table). */
+      reviewUrl?: string;
+    },
   ): Promise<{ channel: string; ts: string }>;
   /** Rewrite a posted card with plain settled text, prefixed by the
    * approval's action title when one is known — a settled card must still
@@ -174,7 +239,13 @@ export interface GroupCardView {
     label?: string;
     outcome: GroupOutcome;
     by?: string;
+    /** When it arrived: a batch counts its decided members as arrived. */
+    createdAt?: string;
   }[];
+  /** The render's clock (ms epoch); tests pin it, production omits it. */
+  now?: number;
+  /** The agent's web chat, where the card can be reviewed row by row. */
+  reviewUrl?: string;
 }
 
 interface TrackedPrompt {
@@ -201,6 +272,8 @@ export interface ApprovalsManagerDeps {
   controlPlane: ControlPlaneClient;
   gatewayUrl: string;
   approvalsPollSeconds: number;
+  /** The web app's base URL (no trailing slash); empty when not configured. */
+  appUrl?: string;
   /** Resolve a presence's card rendering (the channel's business — Slack:
    * slack/approval-card.ts, handed out via the provider registry). Null for
    * a provider this build cannot serve — its prompts stay tracked untouched,
@@ -260,6 +333,17 @@ const approvalCardLink = (
   return links.find((l) => l.id === approvalsLinkId);
 };
 
+/** The agent's web chat, where a card can be reviewed row by row and a
+ *  record change seen as its table. Built only from server config and the
+ *  presence's own ids (never payload text); none without a web app URL. */
+const reviewUrlFor = (
+  appUrl: string | undefined,
+  presence: AdapterPresence,
+): string | undefined =>
+  appUrl
+    ? `${appUrl}/w/${encodeURIComponent(presence.agent.workspaceId)}/agents/${encodeURIComponent(presence.agent.id)}/chat`
+    : undefined;
+
 /**
  * The per-adapter approvals manager: one poll loop per presence that holds a
  * service key, plus the shared prompt ledger.
@@ -293,8 +377,12 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
     prompt.messageRef ? groups.get(prompt.messageRef) : undefined;
 
   /** A grouped card is RENDERED by the group path once it has held more
-   * than one approval; a card of one keeps the classic single rendering. */
-  const isMulti = (g: GroupCard): boolean => g.live.size + g.settled.length > 1;
+   * than one approval, or from the start for a request the agent tagged as
+   * one of several (it posts as the batch card); a lone untagged request
+   * keeps the classic single rendering. */
+  const isMulti = (g: GroupCard): boolean =>
+    g.live.size + g.settled.length > 1 ||
+    [...g.live.values()].some((a) => (a?.batch?.total ?? 0) > 1);
 
   const renderGroupNow = async (g: GroupCard): Promise<void> => {
     const credential = tokenFor.get(g.presenceId);
@@ -310,11 +398,17 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
     if (live.length !== g.live.size) {
       throw new Error("group card waiting on recovered details");
     }
+    const presence = presenceById.get(g.presenceId);
+    const reviewUrl = presence && reviewUrlFor(deps.appUrl, presence);
     await cardUi.renderGroup({
       credential,
       channel: ref.channel,
       ts: ref.ts,
-      view: { live, settled: [...g.settled] },
+      view: {
+        live,
+        settled: [...g.settled],
+        ...(reviewUrl && { reviewUrl }),
+      },
     });
   };
 
@@ -334,13 +428,35 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
     if (g.timer) return;
     g.timer = setTimeout(() => {
       g.timer = null;
-      flushGroup(g).catch((err: unknown) =>
-        deps.onLog("group card render failed; next change retries", {
-          err: String(err),
-        }),
-      );
+      flushGroup(g)
+        .then(() => scheduleSettleRender(g))
+        .catch((err: unknown) =>
+          deps.onLog("group card render failed; next change retries", {
+            err: String(err),
+          }),
+        );
     }, deps.groupDebounceMs ?? 2_000);
     g.timer.unref?.();
+  };
+
+  /** A card holding Approve all for a batch still arriving re-renders once
+   *  the batch goes quiet, so Approve all appears even if nothing else
+   *  changes (a miscounted total never blocks the reviewer). */
+  const scheduleSettleRender = (g: GroupCard): void => {
+    const live = [...g.live.values()].filter(
+      (a): a is PendingApproval => a !== null,
+    );
+    const total = live.find((a) => a.batch?.total)?.batch?.total ?? null;
+    const { settlesAt } = batchArrival(
+      total,
+      [...live.map((a) => a.createdAt), ...g.settled.map((s) => s.createdAt)],
+      Date.now(),
+    );
+    if (settlesAt === null) return;
+    const wait = Math.max(0, settlesAt - Date.now()) + 50;
+    setTimeout(() => {
+      if (g.live.size > 0) scheduleGroupRender(g);
+    }, wait).unref?.();
   };
 
   const outcomeOf = (
@@ -368,7 +484,19 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
     ...(approval?.batch?.label && { label: approval.batch.label }),
     outcome,
     ...(by && { by }),
+    ...(approval?.createdAt && { createdAt: approval.createdAt }),
   });
+
+  /** Put a row on its card's done list once. Overlapping sweeps (a large
+   *  batch's ledger writes can outlast the 5s expiry interval) and the
+   *  absence arm can each reach the same id; counting it again would
+   *  over-count the expired total. */
+  const markSettled = (
+    g: GroupCard,
+    row: GroupCardView["settled"][number],
+  ): void => {
+    if (!g.settled.some((s) => s.id === row.id)) g.settled.push(row);
+  };
 
   /** Stop tracking a prompt and drop it from its card's live rows, so a
    * later render of that card never offers (or Approve-alls) an id that is
@@ -415,7 +543,8 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
       }));
       for (const { prompt, approval } of removed) {
         g.live.delete(prompt.approvalId);
-        g.settled.push(
+        markSettled(
+          g,
           settledRow(
             prompt.approvalId,
             prompt,
@@ -461,10 +590,17 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
   ): GroupCard | undefined => {
     if (!cardUiFor.get(presenceId)?.renderGroup) return undefined;
     if (!APPROVAL_GROUP_ID_RE.test(approval.id)) return undefined;
+    // A request that is itself a list (one bulk call over many records) is
+    // its own card: its table and CSV are the review. Joining a task card
+    // would flatten it to one line per request and drop the CSV.
+    if (isOwnTable(approval)) return undefined;
     const key = approvalGroupKey(approval);
     for (const g of groups.values()) {
       if (g.presenceId !== presenceId || g.key !== key) continue;
       if (g.externalThreadId !== externalThreadId) continue;
+      if ([...g.live.values()].some((a) => a !== null && isOwnTable(a))) {
+        continue;
+      }
       // A card carries at most one click's worth of ids (the shared group
       // decide cap); the next arrival opens a fresh card.
       if (g.live.size === 0 || g.live.size >= APPROVAL_GROUP_MAX_IDS) continue;
@@ -559,7 +695,8 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
       const approval = g?.live.get(prompt.approvalId) ?? null;
       untrack(prompt);
       if (g && grouped) {
-        g.settled.push(
+        markSettled(
+          g,
           settledRow(prompt.approvalId, prompt, approval, "decided"),
         );
         touched.add(g);
@@ -640,7 +777,8 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
       if (!g) continue;
       const approval = g.live.get(id) ?? null;
       g.live.delete(id);
-      g.settled.push(
+      markSettled(
+        g,
         settledRow(id, prompt, approval, outcome.outcome, outcome.by),
       );
       touched.add(g);
@@ -658,6 +796,7 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
   const postCard = async (
     presenceId: string,
     approval: PendingApproval,
+    batch: PendingApproval[] = [],
   ): Promise<void> => {
     // Read the CURRENT presence, not a snapshot captured when the loop began —
     // a card that arrives before the agent's first DM must find its home once
@@ -705,18 +844,21 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
       return;
     }
 
+    const reviewUrl = reviewUrlFor(deps.appUrl, presence);
     const posted = await cardUi.post({
       credential,
       channel: target.channel,
       ...(target.threadTs && { threadTs: target.threadTs }),
       ...(presence.agent.imageUrl && { iconUrl: presence.agent.imageUrl }),
       approval,
+      ...(batch.length > 1 && { batch }),
+      ...(reviewUrl && { reviewUrl }),
     });
     const messageRef = cardUi.packMessageRef(posted);
     await deps.controlPlane.recordPromptMessage(approval.id, messageRef);
     track(messageRef);
     if (cardUi.renderGroup) {
-      groups.set(messageRef, {
+      const g: GroupCard = {
         presenceId,
         key: approvalGroupKey(approval),
         messageRef,
@@ -725,7 +867,11 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
         settled: [],
         timer: null,
         chain: Promise.resolve(),
-      });
+      };
+      groups.set(messageRef, g);
+      // A batch card posted on its first row offers Approve all once the
+      // batch goes quiet, even if no other row ever arrives.
+      if (isMulti(g)) scheduleSettleRender(g);
     }
   };
 
@@ -838,7 +984,29 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
               approvalAgentId !== presence.agent.id
             )
               continue;
-            await postCard(presenceId, approval);
+            // A tagged batch posts once it is all here (or has gone quiet),
+            // like the web card: the reviewer never sees "1 of 20" grow.
+            // A batch whose card is already up is never held back. Siblings
+            // match on the group key (agent + app + batch), never the batch
+            // id alone: it is the agent's claim, and the pending set is the
+            // whole workspace's.
+            const key = approvalGroupKey(approval);
+            const siblings = approval.batch?.total
+              ? pending.filter((a) => approvalGroupKey(a) === key)
+              : [];
+            if (
+              approval.batch?.total &&
+              ![...groups.values()].some(
+                (g) => g.presenceId === presenceId && g.key === key,
+              ) &&
+              batchArrival(
+                approval.batch.total,
+                siblings.map((a) => a.createdAt),
+                Date.now(),
+              ).arriving
+            )
+              continue;
+            await postCard(presenceId, approval, siblings);
           }
           // Pace on what the fetch actually did: the gateway long-polls only
           // when the pending set is EMPTY, so any non-empty answer came back

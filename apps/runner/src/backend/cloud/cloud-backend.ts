@@ -287,6 +287,7 @@ export const createCloudBackend = (
         homeRef: spec.homeRef,
         limits: spec.limits,
         payloadHash: spec.payloadHash,
+        resumable: spec.resumable,
       });
 
       /**
@@ -352,6 +353,7 @@ export const createCloudBackend = (
         containerRef: snapshot.containerRef,
         running: snapshot.running,
         payloadHash: snapshot.payloadHash,
+        resumable: snapshot.resumable === true,
         phase: snapshot.phase,
       }));
     },

@@ -23,7 +23,6 @@ interface AgentCardProps {
     id: string;
     name: string;
     identifier: string;
-    accessToken: string;
     /** Prisma types the column as `string`; the card only asks "hosted?". */
     kind: string;
     createdAt: Date;

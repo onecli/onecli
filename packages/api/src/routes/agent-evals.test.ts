@@ -21,6 +21,10 @@ const mocks = vi.hoisted(() => ({
   archiveQuestion: vi.fn(),
   startRun: vi.fn(),
   getRun: vi.fn(),
+  getEvalSchedule: vi.fn(),
+  saveEvalSchedule: vi.fn(),
+  deleteEvalSchedule: vi.fn(),
+  runEvalScheduleNow: vi.fn(),
   auditCreate:
     vi.fn<(arg: { data: Record<string, unknown> }) => Promise<unknown>>(),
 }));
@@ -64,6 +68,13 @@ vi.mock("../services/agent-eval-service", () => ({
   getRun: mocks.getRun,
 }));
 
+vi.mock("../services/eval-schedule-service", () => ({
+  getEvalSchedule: mocks.getEvalSchedule,
+  saveEvalSchedule: mocks.saveEvalSchedule,
+  deleteEvalSchedule: mocks.deleteEvalSchedule,
+  runEvalScheduleNow: mocks.runEvalScheduleNow,
+}));
+
 const { createApiApp } = await import("../app");
 const { ServiceError } = await import("../services/errors");
 
@@ -100,6 +111,10 @@ beforeEach(() => {
   mocks.archiveQuestion.mockResolvedValue(undefined);
   mocks.startRun.mockResolvedValue({ id: "run-1", total: 3 });
   mocks.getRun.mockResolvedValue({ id: "run-1" });
+  mocks.getEvalSchedule.mockResolvedValue(null);
+  mocks.saveEvalSchedule.mockResolvedValue({ schedule: "0 9 * * *" });
+  mocks.deleteEvalSchedule.mockResolvedValue(undefined);
+  mocks.runEvalScheduleNow.mockResolvedValue({ schedule: "0 9 * * *" });
 });
 
 describe("authentication", () => {
@@ -110,6 +125,9 @@ describe("authentication", () => {
     ["/v1/agents/ag-1/evals/questions/q-1", "DELETE"],
     ["/v1/agents/ag-1/evals/runs", "POST"],
     ["/v1/agents/ag-1/evals/runs/run-1", "GET"],
+    ["/v1/agents/ag-1/evals/schedule", "PUT"],
+    ["/v1/agents/ag-1/evals/schedule", "DELETE"],
+    ["/v1/agents/ag-1/evals/schedule/run", "POST"],
   ])("refuses %s %s without credentials", async (path, method) => {
     const res = await app.request(path, { method });
     expect(res.status).toBe(401);
@@ -143,10 +161,12 @@ describe("questions", () => {
     expect(await res.json()).toEqual({
       questions: [],
       runs: [],
+      schedule: null,
       maxQuestions: 50,
     });
     expect(mocks.listQuestions).toHaveBeenCalledWith("p1", "ag-1");
     expect(mocks.listRuns).toHaveBeenCalledWith("p1", "ag-1");
+    expect(mocks.getEvalSchedule).toHaveBeenCalledWith("p1", "ag-1");
   });
 
   it("creates with 201 and audits IDs only, never the question text", async () => {
@@ -244,5 +264,69 @@ describe("runs", () => {
     const res = await send("/v1/agents/ag-1/evals/runs/run-1", "GET");
     expect(res.status).toBe(200);
     expect(mocks.getRun).toHaveBeenCalledWith("p1", "ag-1", "run-1");
+  });
+});
+
+describe("schedule", () => {
+  const SCHEDULE = { schedule: "0 9 * * 1-5", timezone: "Asia/Jerusalem" };
+
+  it("saves with PUT as the acting user, defaulting to enabled, and audits it", async () => {
+    const res = await send("/v1/agents/ag-1/evals/schedule", "PUT", SCHEDULE);
+    expect(res.status).toBe(200);
+    expect(mocks.saveEvalSchedule).toHaveBeenCalledWith(
+      "p1",
+      "ag-1",
+      "user-1",
+      { ...SCHEDULE, enabled: true },
+    );
+    expect(auditRows()).toEqual([
+      expect.objectContaining({
+        action: "update",
+        service: "eval",
+        metadata: { agentId: "ag-1", ...SCHEDULE, enabled: true },
+      }),
+    ]);
+  });
+
+  it.each([
+    ["no body", undefined],
+    ["an empty schedule", { ...SCHEDULE, schedule: " " }],
+    ["no timezone", { schedule: "0 9 * * *" }],
+    ["an unknown field", { ...SCHEDULE, createdByUserId: "someone-else" }],
+  ])("refuses %s with 422 before reaching the service", async (_, body) => {
+    const res = await send("/v1/agents/ag-1/evals/schedule", "PUT", body);
+    expect(res.status).toBe(422);
+    expect(mocks.saveEvalSchedule).not.toHaveBeenCalled();
+    expect(mocks.auditCreate).not.toHaveBeenCalled();
+  });
+
+  it("maps an expression croner refuses to 422 with its message", async () => {
+    mocks.saveEvalSchedule.mockRejectedValue(
+      new ServiceError("UNPROCESSABLE", "Invalid schedule expression: bad"),
+    );
+    const res = await send("/v1/agents/ag-1/evals/schedule", "PUT", SCHEDULE);
+    expect(res.status).toBe(422);
+    expect(mocks.auditCreate).not.toHaveBeenCalled();
+  });
+
+  it("removes with 204 and fires now with 202, both audited", async () => {
+    expect(
+      (await send("/v1/agents/ag-1/evals/schedule", "DELETE")).status,
+    ).toBe(204);
+    expect(mocks.deleteEvalSchedule).toHaveBeenCalledWith("p1", "ag-1");
+    expect(
+      (await send("/v1/agents/ag-1/evals/schedule/run", "POST")).status,
+    ).toBe(202);
+    expect(mocks.runEvalScheduleNow).toHaveBeenCalledWith("p1", "ag-1");
+    expect(auditRows().map((row) => row.action)).toEqual(["delete", "run"]);
+  });
+
+  it("maps a missing schedule to 404", async () => {
+    mocks.deleteEvalSchedule.mockRejectedValue(
+      new ServiceError("NOT_FOUND", "No eval schedule"),
+    );
+    const res = await send("/v1/agents/ag-1/evals/schedule", "DELETE");
+    expect(res.status).toBe(404);
+    expect(mocks.auditCreate).not.toHaveBeenCalled();
   });
 });

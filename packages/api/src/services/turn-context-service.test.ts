@@ -27,6 +27,7 @@ const bridge = vi.hoisted(() => ({
   buildContinuityBridge: vi.fn(),
   buildOpenPromiseNote: vi.fn(),
 }));
+const sentNote = vi.hoisted(() => ({ buildSentContext: vi.fn() }));
 
 vi.mock("@onecli/db", () => ({
   Prisma: {},
@@ -71,6 +72,16 @@ vi.mock("./turn-service", () => ({
   buildOpenPromiseNote: bridge.buildOpenPromiseNote,
 }));
 
+// The approval note has its own pg proof; here it is out of frame.
+vi.mock("./channels/action-approval-service", () => ({
+  buildApprovalOutcomeNote: async () => null,
+}));
+
+// The sent-message note has its own pg proof; here only its slot is pinned.
+vi.mock("./channels/send-message-service", () => ({
+  buildSentContext: sentNote.buildSentContext,
+}));
+
 const { buildTurnContext, MEMORY_INJECT_MAX, MEMORY_INJECT_RANK_FLOOR } =
   await import("./turn-context-service");
 
@@ -92,6 +103,8 @@ beforeEach(() => {
   bridge.buildContinuityBridge.mockResolvedValue(null);
   bridge.buildOpenPromiseNote.mockReset();
   bridge.buildOpenPromiseNote.mockResolvedValue(null);
+  sentNote.buildSentContext.mockReset();
+  sentNote.buildSentContext.mockResolvedValue(null);
 });
 
 describe("the index", () => {
@@ -256,6 +269,44 @@ describe("the continuity bridge (human-only, rides context)", () => {
   });
 });
 
+describe("the sent-message note (human-only)", () => {
+  it("a HUMAN turn gets it, ahead of the bridge", async () => {
+    state.turn = {
+      createdAt: new Date("2026-08-09T00:00:00Z"),
+      source: "slack",
+    };
+    sentNote.buildSentContext.mockResolvedValue("SENT-NOTE");
+    bridge.buildContinuityBridge.mockResolvedValue("BRIDGE-BLOCK");
+
+    const context = (await build("ag-1", "yes, tomorrow")) ?? "";
+
+    expect(sentNote.buildSentContext).toHaveBeenCalledWith(
+      "c-1",
+      new Date("2026-08-09T00:00:00Z"),
+    );
+    expect(context.indexOf("SENT-NOTE")).toBeGreaterThanOrEqual(0);
+    expect(context.indexOf("SENT-NOTE")).toBeLessThan(
+      context.indexOf("BRIDGE-BLOCK"),
+    );
+  });
+
+  it("an automation RUN never builds it (a run is not a reply)", async () => {
+    state.turn = {
+      createdAt: new Date("2026-08-09T00:00:00Z"),
+      source: "cron",
+    };
+    await build("ag-1", "run report");
+    expect(sentNote.buildSentContext).not.toHaveBeenCalled();
+  });
+
+  it("a failing builder ships the turn without it", async () => {
+    state.memories = [memory("k")];
+    sentNote.buildSentContext.mockRejectedValue(new Error("db down"));
+    const context = await build("ag-1", "hello");
+    expect(context).toContain("[Your memory");
+  });
+});
+
 describe("the budget", () => {
   it("maximal inputs never exceed MAX_TURN_CONTEXT_CHARS", async () => {
     // Worst case everywhere: full memory cap + max snippets + a maximal bridge.
@@ -278,6 +329,7 @@ describe("the budget", () => {
     // ever changes — a context past the ceiling is silently truncated, and
     // the tail is where the newest information sits.
     bridge.buildOpenPromiseNote.mockResolvedValue("p".repeat(50_000));
+    sentNote.buildSentContext.mockResolvedValue("n".repeat(50_000));
     const context = await build("ag-1", "m".repeat(50_000));
     expect(context).not.toBeNull();
     expect((context as string).length).toBeLessThanOrEqual(

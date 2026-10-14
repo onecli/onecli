@@ -1,4 +1,5 @@
 import type { ChannelPresenceStatus } from "./channels";
+import type { UnlistedChoice } from "@onecli/api/validations/grants";
 
 export type AgentKind = "byo" | "hosted";
 
@@ -21,7 +22,9 @@ export interface Agent {
   id: string;
   name: string;
   identifier: string;
-  accessToken: string;
+  /** BYO agents only: a hosted agent's gateway token never leaves the
+   * platform, so the API omits it. */
+  accessToken?: string;
   /** "byo" (bring-your-own: laptops, CI) | "hosted" (a platform-run sandbox). */
   kind: AgentKind;
   createdAt: string;
@@ -109,9 +112,10 @@ export interface Secret {
   metadata: Record<string, unknown> | null;
   scope: string | null;
   createdAt: string;
-  /** Latest injected upstream call failed with a status that indicts the key
-   * itself (401/403 auth, 402 billing, 429 limits). Cleared once a newer call
-   * lands with any other status. LLM keys only. */
+  /** Latest injected inference or model-list call to the key's host failed
+   * with a status that indicts the key itself (401/403 auth, 402 billing,
+   * 429 limits). Cleared once a newer such call lands with any other status,
+   * and never older than the key's last write. LLM keys only. */
   lastError: { status: number; at: string } | null;
 }
 
@@ -140,6 +144,8 @@ export interface Connection {
   connectedAt: string;
   /** Set when the provider refused the saved login: reconnect to clear it. */
   reauthRequiredAt?: string | null;
+  /** Built on another connection's grant (a shared GitHub App installation). */
+  sourceConnectionId?: string | null;
 }
 
 // A workspace row as returned by the workspace CRUD routes (rename / create).
@@ -148,6 +154,8 @@ export interface Workspace {
   name: string | null;
   slug: string | null;
   createdAt: string;
+  /** IANA zone the workspace's hosted agents keep time in; null = platform default. */
+  timezone: string | null;
 }
 
 // Workspace access bindings (the human sharing surface for a workspace). `role` is
@@ -507,6 +515,9 @@ export interface AgentGrantConnection {
   access: "full" | "custom";
   allow: string[];
   ask: string[];
+  /** Requests the catalog does not describe: GET/HEAD and the rest. */
+  otherReads: UnlistedChoice;
+  otherWrites: UnlistedChoice;
   /** Null = unrestricted. */
   resources: GrantResources | null;
 }
@@ -533,17 +544,33 @@ export interface ConnectionGrants {
     access: "full" | "custom";
     allow: string[];
     ask: string[];
+    otherReads: UnlistedChoice;
+    otherWrites: UnlistedChoice;
+    /** Null = unrestricted. */
+    resources: GrantResources | null;
   }[];
 }
+
+/** What a customized grant does with requests its catalog does not
+ * describe ("All other reads" / "All other writes"). */
+export type { UnlistedChoice };
 
 /** `resources` is tri-state: ABSENT = preserve what the stack carries, NULL =
  * clear, OBJECT = set (server-validated per provider + edition). */
 export type ConnectionGrantInput =
   | { access: "full"; resources?: GrantResources | null }
+  /** The attach toggles: the server writes the product default for the
+   * provider (every tool allowed, requests outside the tool list needing
+   * approval; full access for an app with no tool list). */
+  | { access: "default"; resources?: GrantResources | null }
   | {
       access: "custom";
       allow: string[];
       ask: string[];
+      /** Absent = keep what the grant says (the provider's default on a
+       * first customization: needs approval; never for AWS). */
+      otherReads?: UnlistedChoice;
+      otherWrites?: UnlistedChoice;
       resources?: GrantResources | null;
     };
 
@@ -579,6 +606,12 @@ export interface OrgInfo {
   slug: string;
   byoLegacy: boolean;
   byoEnabled: boolean;
+}
+
+/** `GET /v1/org/membership`: whether the caller is an org admin (always true
+ * where roles aren't enforced). Display only; admin routes re-check. */
+export interface OrgMembership {
+  isAdmin: boolean;
 }
 
 /** Runtime instance metadata (`GET /v1/instance`) — the browser's only
@@ -829,10 +862,29 @@ export type TurnEventKind =
   | "turn.done"
   | "error";
 
+/**
+ * Kinds that reach the live stream but never become rows: the streamed
+ * deltas, `message.joined`, the live pickup signal for a mid-run
+ * follow-up (its row flips to `joined` instead; the event is what tells an
+ * open tab to refetch now), and `message.sent_now`, the answer
+ * to a SEND NOW under that follow-up.
+ */
+export type LiveOnlyTurnEventKind =
+  | "text.delta"
+  | "thinking.delta"
+  | "message.joined"
+  | "message.sent_now";
+
+/** `POST /v1/turns/:id/send-now`: accepted; the outcome arrives on the
+ *  stream as `message.sent_now`. */
+export interface SendNowResult {
+  requested: true;
+}
+
 export interface TurnEvent {
   seq: number;
   turnId: string;
-  type: TurnEventKind | "text.delta" | "thinking.delta";
+  type: TurnEventKind | LiveOnlyTurnEventKind;
   payload: Record<string, unknown>;
 }
 

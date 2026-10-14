@@ -3,7 +3,11 @@
 import { useState } from "react";
 import { AlertTriangle, Check, X } from "lucide-react";
 import {
+  batchArrival,
   isOddOneOut,
+  orderGroupRows,
+  recordNounOf,
+  summarizeChanges,
   type ApprovalGroup,
 } from "@onecli/api/lib/approval-groups";
 import { Button } from "@onecli/ui/components/button";
@@ -15,14 +19,19 @@ import type {
   SettledOutcome,
 } from "@/lib/api/approvals";
 import { ApprovalAppIcon } from "./approval-app-icon";
+import { ApprovalChangeSummary, NAMES_SHOWN } from "./approval-change-summary";
 import { ApprovalDetailsDialog } from "./approval-details-dialog";
-import { shareOneRecord } from "./approval-rows";
+import { shareOneRecord, subjectRow } from "./approval-rows";
 import { ApprovalTitle } from "./approval-title";
 import { GroupedApprovalRow, groupRowFields } from "./grouped-approval-row";
-import { formatCountdown, useCountdown } from "./use-countdown";
+import { formatCountdown, secondsUntil, useNow } from "./use-countdown";
 
-/** Rows shown before "Show all"; the rest stay one click away. */
+/** Rows shown before "Show all" on a long batch. A batch of up to
+ *  `OPEN_ROWS` shows every row at once, so Approve all is one click: a
+ *  reviewer is never asked to approve rows they haven't seen, and a
+ *  20-record task fits on screen. */
 const COLLAPSED_ROWS = 5;
+const OPEN_ROWS = 25;
 
 /** A member decided already, kept on the card with its outcome. */
 export interface SettledMember {
@@ -87,13 +96,18 @@ export const GroupedApprovalCard = ({
 }) => {
   const decide = useDecideApprovals();
   const [expanded, setExpanded] = useState(false);
+  // "Show each request": the summary's per-request view, opened on demand.
+  const [eachShown, setEachShown] = useState(false);
   const [details, setDetails] = useState<PendingApproval | null>(null);
+  // One clock for the countdown and the batch hold.
+  const now = useNow();
   // A row decided here keeps its outcome until the thread's own settled
   // record catches up: the pending list drops a decided id at once, so the
   // row's approval is snapshotted too, or it would vanish from the card.
   const [local, setLocal] = useState<Record<string, SettledMember>>({});
-  const remaining = useCountdown(
+  const remaining = secondsUntil(
     group.expiresAt ? new Date(group.expiresAt).toISOString() : "",
+    now,
   );
   const urgent = remaining <= 30;
   const busy = decide.isPending;
@@ -104,21 +118,59 @@ export const GroupedApprovalCard = ({
     outcomeOf.set(s.approval.id, s.outcome);
     if (!rowById.has(s.approval.id)) rowById.set(s.approval.id, s.approval);
   }
-  // Odd actions first (a delete among creates can't hide), then arrival.
-  const rows = [...rowById.values()].sort(
-    (a, b) =>
-      Number(isOddOneOut(group, b)) - Number(isOddOneOut(group, a)) ||
-      Date.parse(a.createdAt) - Date.parse(b.createdAt),
-  );
+  // Odd actions first (a delete among creates can't hide), then by the
+  // record's name ("Test01 … Test20"), the same order Slack lists.
+  const rows = orderGroupRows(group, [...rowById.values()]);
   const shown = rows.slice(
     0,
-    expanded ? rows.length : compact ? 0 : COLLAPSED_ROWS,
+    expanded || (!compact && rows.length <= OPEN_ROWS)
+      ? rows.length
+      : compact
+        ? 0
+        : COLLAPSED_ROWS,
   );
   const hidden = rows.length - shown.length;
   const ids = group.approvals
     .map((a) => a.id)
     .filter((id) => !outcomeOf.has(id));
+  // A tagged batch still arriving holds Approve all, so the reviewer never
+  // approves part of a list believing it is the whole task. `now` ticks
+  // every second, so the hold lifts on its own once the batch is complete
+  // or goes quiet.
+  const arrival = batchArrival(
+    group.total,
+    rows.map((a) => a.createdAt),
+    now,
+  );
   const first = group.approvals[0];
+
+  // A batch of several requests reads as the changes it makes ("Title →
+  // After · 20 contacts") unless the reviewer asks for each request, or a
+  // summary would hide something: an odd action, a decided row, rows that
+  // all act on ONE record (then what differs is each row, not the record:
+  // three files uploaded to one account), or rows that differ too much
+  // (then `summarizeChanges` returns null).
+  const pending = rows.filter((a) => !outcomeOf.has(a.id));
+  const lines =
+    !compact &&
+    rows.length > 1 &&
+    pending.length === rows.length &&
+    group.otherActions.length === 0 &&
+    !shareOneRecord(rows)
+      ? summarizeChanges(rows)
+      : null;
+  // Only when it shortens the card: if every row is its own change, the
+  // rows already read as well as any summary.
+  const changeLines = lines && lines.length < rows.length ? lines : null;
+  // The reviewer can flip between the summary and each request for as long
+  // as a summary stays honest (no row decided yet).
+  const summarizable = changeLines !== null;
+  const summarized = summarizable && !eachShown;
+  // Every record is named on the summary, so Approve all needs no reveal.
+  const unseen = summarized
+    ? changeLines.some((l) => l.rows.length > NAMES_SHOWN)
+    : hidden > 0;
+  const noun = recordNounOf(first);
 
   // Every row acts on one record ("Upload file to Account Acme"): the title
   // names it once, linked. Otherwise the title is the verb and each row
@@ -167,7 +219,9 @@ export const GroupedApprovalCard = ({
   // collapsed behind "Show all", the approve button reveals them instead.
   // Denying is the safe direction, so Deny all stays one click.
   const decideAll = (decision: ApprovalDecisionInput) => {
-    if (decision === "approve" && hidden > 0) {
+    if (decision === "approve" && arrival.arriving) return;
+    if (decision === "approve" && unseen) {
+      setEachShown(true);
       setExpanded(true);
       return;
     }
@@ -274,6 +328,16 @@ export const GroupedApprovalCard = ({
           {group.total ? ` · ${group.total} requests in total` : ""}
         </p>
       )}
+      {!compact && (arrival.arriving || arrival.missing > 0) && (
+        <p
+          role="status"
+          className="mx-4 mb-2 rounded-md bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-800 dark:text-sky-300"
+        >
+          {arrival.arriving
+            ? `${arrival.arrived} of ${arrival.total} here, waiting for the rest…`
+            : `${arrival.missing} of ${arrival.total} never arrived. Approve all covers the ${arrival.arrived} shown.`}
+        </p>
+      )}
 
       {group.otherActions.length > 0 && (
         <p className="mx-4 mb-2 flex items-center gap-1.5 rounded-md bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-800 dark:text-amber-300">
@@ -301,24 +365,70 @@ export const GroupedApprovalCard = ({
         </p>
       )}
 
-      {shown.length > 0 && (
-        <ul className="px-2 pb-1">
-          {shown.map((a) => (
-            <GroupedApprovalRow
-              key={a.id}
-              approval={a}
-              layout={layoutOf(a)}
-              odd={isOddOneOut(group, a)}
-              busy={busy}
-              outcome={outcomeOf.get(a.id)}
-              onDecide={(decision) => decideRow(a, decision)}
-              onDetails={() => setDetails(a)}
-            />
-          ))}
-        </ul>
+      {summarized ? (
+        <>
+          <ApprovalChangeSummary
+            lines={changeLines ?? []}
+            noun={noun}
+            nameOf={(a) =>
+              (layoutOf(a).disambiguate && subjectRow(a.summary)?.value) ||
+              a.summary?.subject?.record ||
+              ""
+            }
+          />
+          <div className="px-4 pb-2">
+            <Button
+              variant="ghost"
+              size="xs"
+              onClick={() => {
+                setEachShown(true);
+                setExpanded(true);
+              }}
+              className="text-muted-foreground hover:text-foreground -ms-2"
+            >
+              {`Show each request (${rows.length})`}
+            </Button>
+          </div>
+        </>
+      ) : (
+        shown.length > 0 && (
+          <ul
+            className={cn(
+              "px-2 pb-1",
+              // A long batch scrolls inside the card, so Approve all stays in
+              // view beside the rows it decides.
+              shown.length > 10 && "max-h-96 overflow-y-auto",
+            )}
+          >
+            {shown.map((a) => (
+              <GroupedApprovalRow
+                key={a.id}
+                approval={a}
+                layout={layoutOf(a)}
+                odd={isOddOneOut(group, a)}
+                busy={busy}
+                outcome={outcomeOf.get(a.id)}
+                onDecide={(decision) => decideRow(a, decision)}
+                onDetails={() => setDetails(a)}
+              />
+            ))}
+          </ul>
+        )
+      )}
+      {summarizable && eachShown && (
+        <div className="px-4 pb-2">
+          <Button
+            variant="ghost"
+            size="xs"
+            onClick={() => setEachShown(false)}
+            className="text-muted-foreground hover:text-foreground -ms-2"
+          >
+            Show summary
+          </Button>
+        </div>
       )}
       {/* The bell's collapsed card expands through "Review all" alone. */}
-      {hidden > 0 && shown.length > 0 && (
+      {!summarized && hidden > 0 && shown.length > 0 && (
         <div className="px-4 pb-2">
           <Button
             variant="ghost"
@@ -340,7 +450,7 @@ export const GroupedApprovalCard = ({
         {!compact && (
           <p className="text-muted-foreground min-w-0 truncate text-xs">
             <span className="hidden group-focus/card:inline">
-              {hidden > 0 ? "↵ show all" : "↵ approve all"} · esc deny all
+              {unseen ? "↵ show all" : "↵ approve all"} · esc deny all
             </span>
             <span className="group-focus/card:hidden">
               Undecided means denied.
@@ -360,13 +470,15 @@ export const GroupedApprovalCard = ({
           </Button>
           <Button
             size="xs"
-            disabled={busy || ids.length === 0}
+            disabled={busy || ids.length === 0 || arrival.arriving}
             onClick={() => decideAll("approve")}
           >
             <Check aria-hidden="true" className="size-3.5" />
-            {hidden > 0
-              ? `Review all ${ids.length}`
-              : `Approve all ${ids.length}`}
+            {arrival.arriving
+              ? `Waiting for ${(arrival.total ?? 0) - arrival.arrived} more`
+              : unseen
+                ? `Review all ${ids.length}`
+                : `Approve all ${ids.length}`}
           </Button>
         </div>
       </div>

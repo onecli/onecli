@@ -49,11 +49,12 @@ const createFakeSocket = (url: string): FakeSocket => {
   return target;
 };
 
-const setup = (options: { maxAttempts?: number } = {}) => {
+const setup = (options: { maxAttempts?: number; sandboxId?: string } = {}) => {
   const sockets: FakeSocket[] = [];
   const transport = createWsTransport({
     url: "ws://runner:8484",
     token: "boot-token",
+    sandboxId: options.sandboxId ?? "sb-test",
     socketFactory: (url) => {
       const socket = createFakeSocket(url);
       sockets.push(socket);
@@ -434,5 +435,193 @@ describe("the shared transport laws", () => {
 
       expect(sockets).toHaveLength(1);
     });
+  });
+});
+
+/**
+ * The resumable channel. Once the runner hands this supervisor a session, the
+ * transport (and only the transport: the supervisor loop never sees it)
+ * reconnects WITH it, numbers every outbound frame, trims its buffer on the
+ * runner's acks, and replays exactly the unacked tail after a gap. Before a
+ * session exists the wire is byte-for-byte what it was: a bare bootstrap
+ * token and bare frames, so an old runner notices nothing.
+ */
+describe("resumable session", () => {
+  const session = (credential: string, ack = 0) =>
+    JSON.stringify({ kind: "session", credential, ack });
+  const envelopes = (socket: FakeSocket) =>
+    socket.sent.map(
+      (raw) => JSON.parse(raw) as { seq?: number; kind?: string },
+    );
+
+  it("sends BARE frames and never an envelope until a session is held", () => {
+    const { transport, sockets } = setup();
+    sockets[0]!.open();
+    transport.send({ kind: "ready", harness: "h" });
+    expect(envelopes(sockets[0]!)).toEqual([{ kind: "ready", harness: "h" }]);
+  });
+
+  it("reconnects with the session, not the spent bootstrap token, and keeps the sandbox id beside it", async () => {
+    const { transport, sockets } = setup({ sandboxId: "sb-1" });
+    sockets[0]!.open();
+    sockets[0]!.emit(session("v1.k1.cred"));
+    sockets[0]!.fail();
+    await vi.waitFor(() => expect(sockets.length).toBe(2));
+    const url = new URL(sockets[1]!.url);
+    expect(url.searchParams.get("session")).toBe("v1.k1.cred");
+    expect(url.searchParams.get("sandbox")).toBe("sb-1");
+    expect(url.searchParams.get("token")).toBeNull();
+    void transport;
+  });
+
+  it("the session item is consumed by the transport: the supervisor loop never sees it", async () => {
+    const { transport, sockets } = setup();
+    sockets[0]!.open();
+    sockets[0]!.emit(session("v1.k1.cred"));
+    sockets[0]!.emit(JSON.stringify({ kind: "shutdown" }));
+    const items = await collect(transport.incoming(), 1);
+    expect(items).toEqual([{ kind: "shutdown" }]);
+  });
+
+  it("numbers every frame once a session is held, monotonically", () => {
+    const { transport, sockets } = setup();
+    sockets[0]!.open();
+    sockets[0]!.emit(session("v1.k1.cred"));
+    transport.send({ kind: "ready", harness: "a" });
+    transport.send({ kind: "ready", harness: "b" });
+    expect(envelopes(sockets[0]!).map((e) => e.seq)).toEqual([1, 2]);
+  });
+
+  it("a session handed LATE on the live socket (the cloud order) leaves the bare frames already sent alone and numbers from 1 after it", async () => {
+    // On the cloud backend the runner learns the container ref only after the
+    // supervisor has connected, so the session arrives mid-socket. What went
+    // out bare was applied bare (the runner's passthrough) and must never be
+    // replayed or renumbered; from the hand-off on, frames are sequenced and
+    // a reconnect replays only those.
+    const { transport, sockets } = setup({ sandboxId: "sb-1" });
+    sockets[0]!.open();
+    transport.send({ kind: "ready", harness: "bare" });
+    sockets[0]!.emit(session("v1.k1.late"));
+    transport.send({ kind: "ready", harness: "after" });
+    expect(envelopes(sockets[0]!)).toEqual([
+      { kind: "ready", harness: "bare" },
+      { seq: 1, message: { kind: "ready", harness: "after" } },
+    ]);
+
+    sockets[0]!.fail();
+    await vi.waitFor(() => expect(sockets.length).toBe(2));
+    sockets[1]!.open();
+    sockets[1]!.emit(session("v1.k1.late", 0));
+    expect(envelopes(sockets[1]!)).toEqual([
+      { seq: 1, message: { kind: "ready", harness: "after" } },
+    ]);
+    void transport;
+  });
+
+  it("replays exactly the unacked tail after a reconnect, in order, with the same seqs", async () => {
+    const { transport, sockets } = setup({ sandboxId: "sb-1" });
+    sockets[0]!.open();
+    sockets[0]!.emit(session("v1.k1.cred"));
+    transport.send({ kind: "ready", harness: "a" }); // seq 1
+    transport.send({ kind: "ready", harness: "b" }); // seq 2
+    sockets[0]!.emit(JSON.stringify({ kind: "ack", seq: 1 }));
+    transport.send({ kind: "ready", harness: "c" }); // seq 3
+    sockets[0]!.fail();
+    await vi.waitFor(() => expect(sockets.length).toBe(2));
+    sockets[1]!.open();
+    // The runner's hand-off on reconnect carries its cursor; here it saw 1.
+    sockets[1]!.emit(session("v1.k1.cred", 1));
+    const replayed = envelopes(sockets[1]!);
+    expect(replayed.map((e) => e.seq)).toEqual([2, 3]);
+  });
+
+  it("trusts the runner's cursor on reconnect over its own acks: a runner that lost state replays from zero", async () => {
+    // A runner that RESTARTED applied nothing it does not remember: its
+    // hand-off says ack 0 even though the old process acked 2. Everything
+    // unacked by THIS process must be re-sent; the runner dedupes nothing
+    // here because it genuinely has nothing.
+    const { transport, sockets } = setup({ sandboxId: "sb-1" });
+    sockets[0]!.open();
+    sockets[0]!.emit(session("v1.k1.cred"));
+    transport.send({ kind: "ready", harness: "a" }); // 1
+    transport.send({ kind: "ready", harness: "b" }); // 2
+    sockets[0]!.emit(JSON.stringify({ kind: "ack", seq: 2 }));
+    transport.send({ kind: "ready", harness: "c" }); // 3
+    sockets[0]!.fail();
+    await vi.waitFor(() => expect(sockets.length).toBe(2));
+    sockets[1]!.open();
+    sockets[1]!.emit(session("v1.k1.cred", 0));
+    // Acked frames are gone from the buffer (that is what an ack means), so
+    // only 3 can be replayed; the control plane's history covers 1 and 2.
+    expect(envelopes(sockets[1]!).map((e) => e.seq)).toEqual([3]);
+  });
+
+  it("replays from the runner's cursor even when it is behind the last in-flight ack", async () => {
+    // seq 1..3 sent; the runner acked 3 on the OLD socket; then it restarted
+    // and its hand-off says 2 (it persisted nothing past 2). 3 must replay:
+    // the local ack is not the truth, the hand-off is.
+    const { transport, sockets } = setup({ sandboxId: "sb-1" });
+    sockets[0]!.open();
+    sockets[0]!.emit(session("v1.k1.cred"));
+    transport.send({ kind: "ready", harness: "a" });
+    transport.send({ kind: "ready", harness: "b" });
+    transport.send({ kind: "ready", harness: "c" });
+    sockets[0]!.emit(JSON.stringify({ kind: "ack", seq: 2 }));
+    sockets[0]!.fail();
+    await vi.waitFor(() => expect(sockets.length).toBe(2));
+    sockets[1]!.open();
+    sockets[1]!.emit(session("v1.k1.cred", 2));
+    expect(envelopes(sockets[1]!).map((e) => e.seq)).toEqual([3]);
+    // And a SECOND reconnect replays 3 again if still unacked: the write
+    // cursor is per socket, not per process.
+    sockets[1]!.fail();
+    await vi.waitFor(() => expect(sockets.length).toBe(3));
+    sockets[2]!.open();
+    sockets[2]!.emit(session("v1.k1.cred", 2));
+    expect(envelopes(sockets[2]!).map((e) => e.seq)).toEqual([3]);
+  });
+
+  it("falls back to the bootstrap token ONCE when the session is refused, then gives up normally", async () => {
+    // Budget: the open resets attempts to 0; session refused = 1, bootstrap
+    // refused = 2, and 2 is the limit, so the stream ends right after.
+    const { transport, sockets } = setup({ sandboxId: "sb-1", maxAttempts: 2 });
+    sockets[0]!.open();
+    sockets[0]!.emit(session("v1.k1.cred"));
+    sockets[0]!.fail();
+    await vi.waitFor(() => expect(sockets.length).toBe(2));
+    expect(new URL(sockets[1]!.url).searchParams.get("session")).toBe(
+      "v1.k1.cred",
+    );
+    // Refused (the key rotated away, or the container was recreated).
+    sockets[1]!.fail();
+    await vi.waitFor(() => expect(sockets.length).toBe(3));
+    // One bootstrap attempt with the original token …
+    expect(new URL(sockets[2]!.url).searchParams.get("token")).toBe(
+      "boot-token",
+    );
+    expect(new URL(sockets[2]!.url).searchParams.get("session")).toBeNull();
+    sockets[2]!.fail();
+    // … and then the ordinary finite budget ends the stream.
+    const items: WorkItem[] = [];
+    for await (const item of transport.incoming()) items.push(item);
+    expect(items).toEqual([]);
+    expect(sockets).toHaveLength(3);
+  });
+
+  it("still drops liveness heartbeats while down, session or not", () => {
+    const { transport, sockets } = setup();
+    sockets[0]!.open();
+    sockets[0]!.emit(session("v1.k1.cred"));
+    sockets[0]!.fail();
+    transport.send({ kind: "progress", turnId: "t", conversationId: "c" });
+    transport.send({ kind: "ready", harness: "x" });
+    // Only the ready is buffered (it replays); the beat is gone.
+    return vi
+      .waitFor(() => expect(sockets.length).toBe(2))
+      .then(() => {
+        sockets[1]!.open();
+        sockets[1]!.emit(session("v1.k1.cred", 0));
+        expect(envelopes(sockets[1]!).map((e) => e.seq)).toEqual([1]);
+      });
   });
 });

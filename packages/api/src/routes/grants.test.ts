@@ -166,6 +166,61 @@ describe("agent grants routes", () => {
     );
   });
 
+  it("PUT carries the catch-all choices through, and rejects an unknown one", async () => {
+    const put = (body: unknown) =>
+      app.request("/v1/agents/a1/grants/connections/c1", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    const custom = { access: "custom", allow: ["t"], ask: [] };
+
+    expect(
+      (await put({ ...custom, otherReads: "allow", otherWrites: "never" }))
+        .status,
+    ).toBe(200);
+    expect(services.setConnectionGrant).toHaveBeenLastCalledWith(
+      SCOPE,
+      "a1",
+      "c1",
+      { ...custom, otherReads: "allow", otherWrites: "never" },
+      "user-1",
+    );
+
+    services.setConnectionGrant.mockClear();
+    expect((await put({ ...custom, otherReads: "sometimes" })).status).toBe(
+      422,
+    );
+    expect(services.setConnectionGrant).not.toHaveBeenCalled();
+  });
+
+  it("PUT maps the service's AWS-style refusal to a 422 with the standard error shape", async () => {
+    const { ServiceError } = await import("../services/errors");
+    services.setConnectionGrant.mockRejectedValueOnce(
+      new ServiceError(
+        "UNPROCESSABLE",
+        '"aws" keeps requests outside its tool list closed',
+      ),
+    );
+    const res = await app.request("/v1/agents/a1/grants/connections/c1", {
+      method: "PUT",
+      headers: { ...AUTH, "content-type": "application/json" },
+      body: JSON.stringify({
+        access: "custom",
+        allow: ["t"],
+        ask: [],
+        otherReads: "allow",
+      }),
+    });
+    expect(res.status).toBe(422);
+    expect(await res.json()).toMatchObject({
+      error: {
+        type: "validation_error",
+        message: expect.stringContaining("closed"),
+      },
+    });
+  });
+
   it("DELETE detaches with 204", async () => {
     const res = await app.request("/v1/agents/a1/grants/connections/c1", {
       method: "DELETE",

@@ -46,5 +46,6 @@ export const googleMeet: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
   },
 };

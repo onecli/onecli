@@ -470,3 +470,37 @@ describe("GET /auth/session sessionThrottle seam", () => {
     expect(state.upserts).toHaveLength(1);
   });
 });
+
+// The platform trial credit trusts a Google-federated owner whatever the
+// address (ee/platform_llm.rs), so the session sync must record it.
+describe("GET /auth/session records the sign-in provider", () => {
+  const upserted = () =>
+    state.upserts[0] as {
+      create: Record<string, unknown>;
+      update: Record<string, unknown>;
+    };
+
+  it("records Google on create and update for a Google-federated session", async () => {
+    state.session = {
+      id: "sub-g",
+      email: "guy@acme.com",
+      name: "Guy",
+      federatedProvider: "Google",
+      identityProviders: ["Google"],
+    };
+
+    const res = await app.request("/");
+    expect(res.status).toBe(200);
+    expect(upserted().create.signInProvider).toBe("Google");
+    expect(upserted().update.signInProvider).toBe("Google");
+  });
+
+  it("leaves it untouched for a native email session (never clears an earlier Google login)", async () => {
+    state.session = { id: "sub-e", email: "guy@acme.com", name: "Guy" };
+
+    const res = await app.request("/");
+    expect(res.status).toBe(200);
+    expect(upserted().create).not.toHaveProperty("signInProvider");
+    expect(upserted().update).not.toHaveProperty("signInProvider");
+  });
+});

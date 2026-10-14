@@ -69,6 +69,7 @@ export const confluence: AppDefinition = {
   },
   configurable: {
     fields: atlassianConfigFields,
+    group: "atlassian",
     envDefaults: atlassianEnvDefaults,
   },
 };

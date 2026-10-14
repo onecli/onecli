@@ -87,6 +87,15 @@ export interface SandboxSpec {
    * "credentials changed, recreate it".
    */
   payloadHash: string;
+  /**
+   * Whether the runner that spawned this sandbox hands out supervisor
+   * sessions (the resumable channel). Persisted ON the container, because
+   * the fact outlives the process: a restarted runner must grant the
+   * resume grace only to a sandbox whose supervisor can actually hold a
+   * session. One spawned by a keyless runner is retrying a token that died
+   * with that process, and waiting for it only delays the old recovery.
+   */
+  resumable: boolean;
 }
 
 /** What the backend currently holds for a sandbox — the reconcile input. */
@@ -95,6 +104,9 @@ export interface SandboxSnapshot {
   containerRef: ContainerRef;
   running: boolean;
   payloadHash: string | null;
+  /** The spawn-time `SandboxSpec.resumable` mark; false when the container
+   * predates it (spawned by a pre-feature runner) or the substrate lost it. */
+  resumable: boolean;
   /**
    * The substrate's own lifecycle phase, when it has one (an orchestrator's
    * pod phase). Absent/null on substrates without the concept — consumers must

@@ -6,7 +6,8 @@ import { SlackInstalledFinish } from "./_components/slack-installed-finish";
 
 /**
  * Landing for an install that began in SLACK — the app directory's "Add to
- * Slack" button, or the app's sharable URL.
+ * Slack" button, the app's sharable URL, or an agent app's own install link
+ * (the admin-approval message, "Install to Workspace").
  *
  * Those installs carry no signed state (no OneCLI session existed when the
  * install started), so the OAuth callback cannot know which organization the
@@ -18,9 +19,11 @@ import { SlackInstalledFinish } from "./_components/slack-installed-finish";
  * browser hands out nothing on its own — the same reasoning that lets the
  * invitation token ride the URL on `/join`.
  *
- * What the code's presence in a URL DOES enable is login CSRF, so the finish
- * step below takes an explicit click rather than binding on mount — see the
- * security note in `slack-installed-finish.tsx`.
+ * What the code's presence in a URL DOES enable is login CSRF, so binding a
+ * workspace to the org takes an explicit click rather than happening on
+ * mount (see the security note in `slack-installed-finish.tsx`). Finishing
+ * one of the org's own waiting agent apps binds nothing new, so that arm
+ * needs no click.
  *
  * Slack's Marketplace review exercises exactly this path, so it is a
  * submission requirement rather than a convenience.

@@ -135,7 +135,7 @@ pub async fn pre_forward(
     )
     .await
     {
-        warn!(host = %common::util::strip_port(host), %path, reason = %denial.reason, "granular access denied");
+        warn!(host = %common::util::strip_port(host), path = %super::log_redact::redact_for_log(path), reason = %denial.reason, "granular access denied");
         // The block returns before forward.rs emits telemetry, so log it here —
         // surfaces as a "Blocked" row in the activity feed.
         emit_block_telemetry(proxy_ctx, host, method, path, denial.rule_name);
@@ -306,7 +306,7 @@ pub(crate) fn attribute_to_connection(
 /// denial would be invisible in the activity feed. Mirrors the policy-refusal
 /// rows in `forward.rs`; renders as a red "Blocked" row attributed to
 /// `rule_name`.
-fn emit_block_telemetry(
+pub(crate) fn emit_block_telemetry(
     proxy_ctx: &ProxyContext,
     host: &str,
     method: &str,

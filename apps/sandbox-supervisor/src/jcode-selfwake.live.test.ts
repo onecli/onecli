@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   SupervisorMessage,
   SupervisorTransport,
-  WorkItem,
+  SupervisorWorkItem,
 } from "@onecli/agent-protocol";
 
 /**
@@ -22,17 +22,21 @@ import type {
  * invisible turn at all. Scenario 1 proves that at the live boundary — a
  * completion with the runtime's wake flag produces ZERO extra model calls,
  * and the wake intent rides the platform's own mirror/watch machinery
- * instead. Scenario 2 pins the message separator (text → tool batch → text
- * renders as paragraphs, not glue) and the swarm-prompt override reaching
- * the model-visible tool description. Scenario 3 pins the disabled-tool
- * list at the same boundary: every name in JCODE_DISABLED_TOOLS_VALUE is
- * absent from the tool definitions the model receives, and the tools the
- * platform relies on are present.
+ * instead. Scenario 2 pins the answer boundary (text → tool batch → text
+ * stores the closing message alone) and the swarm-prompt override reaching
+ * the model-visible tool description. The MESSAGE FRAMING scenarios pin the
+ * runtime's own message ids at the same boundary: a provider attempt cut
+ * mid-answer is retracted from the stored answer, and two messages written
+ * back to back (a mid-turn message answered as the model finishes) stay
+ * whole, as paragraphs. Scenario 3 pins the disabled-tool list: every name
+ * in JCODE_DISABLED_TOOLS_VALUE is absent from the tool definitions the
+ * model receives, and the tools the platform relies on are present.
  *
- * Env-gated like the incident suite — it needs a jcode runtime AT THE PIN
- * (v0.81.1; older binaries lack external wake mode):
+ * Env-gated like the incident suite. It needs a jcode runtime AT THE PIN
+ * (docker/agent.Dockerfile's JCODE_VERSION; external wake mode needs
+ * v0.81+, message framing v0.86+):
  *
- *   JCODE_LIVE_TEST=1 ONECLI_JCODE_BINARY=<v0.81.1 binary> \
+ *   JCODE_LIVE_TEST=1 ONECLI_JCODE_BINARY=<pinned binary> \
  *     pnpm --filter @onecli/sandbox-supervisor \
  *     exec vitest run src/jcode-selfwake.live.test.ts
  */
@@ -74,11 +78,11 @@ interface Stamped {
 
 const createTransport = () => {
   const sent: Stamped[] = [];
-  const queue: WorkItem[] = [];
+  const queue: SupervisorWorkItem[] = [];
   let notify: (() => void) | undefined;
   return {
     sent,
-    push(item: WorkItem) {
+    push(item: SupervisorWorkItem) {
       queue.push(item);
       notify?.();
       notify = undefined;
@@ -131,7 +135,7 @@ const createTransport = () => {
       throw new Error(`timed out waiting for ${label}`);
     },
     transport: {
-      async *incoming(): AsyncIterable<WorkItem> {
+      async *incoming(): AsyncIterable<SupervisorWorkItem> {
         for (;;) {
           while (queue.length > 0) {
             const item = queue.shift();
@@ -178,6 +182,7 @@ const supervisorConfig = (homeDir: string) => ({
   harness: "jcode",
   runnerWsUrl: undefined,
   bootstrapToken: undefined,
+  sandboxId: undefined,
   outboundAttachments: false,
 });
 
@@ -185,7 +190,12 @@ const deliver = (
   turnId: string,
   conversationId: string,
   message: string,
-): WorkItem => ({ kind: "turn.deliver", turnId, conversationId, message });
+): SupervisorWorkItem => ({
+  kind: "turn.deliver",
+  turnId,
+  conversationId,
+  message,
+});
 
 const withMock = async (
   script: MockScript,
@@ -402,6 +412,268 @@ describe.skipIf(!LIVE)("external wake ownership (live jcode)", () => {
     });
   }, 240_000);
 
+  it("a provider attempt cut mid-answer is retracted: the stored answer is the replay alone", async () => {
+    // MESSAGE FRAMING, at the live boundary. The model's first response
+    // drops mid-stream; the runtime rolls the partial back (`text_replace`
+    // with no text) and replays the request. Before framing was read, the
+    // retracted partial stayed glued in front of the replayed answer.
+    let calls = 0;
+    const script: MockScript = ({ lastUser }) => {
+      if (!lastUser.includes("CUT-CHECK")) return undefined;
+      calls += 1;
+      return calls === 1
+        ? { kind: "cut", partial: "PARTIAL-ATTEMPT ", tag: "cut-first" }
+        : { kind: "text", text: "The replayed answer.", tag: "cut-replay" };
+    };
+
+    await withMock(script, async (mock) => {
+      const t = createTransport();
+      const run = runSupervisor(
+        supervisorConfig(shortHome()),
+        createJcodeHarness(),
+        t.transport,
+        { memoryHarvester: stubHarvester },
+      );
+      try {
+        t.push(deliver("t-cut", "cv-cut", "CUT-CHECK say something"));
+        await t.until(
+          () => t.resultsOf("t-cut").some((r) => r.result.status === "done"),
+          "the cut turn to finish",
+          90_000,
+        );
+        expect(mock.requests.some((r) => r.tag === "cut-replay")).toBe(true);
+        // The live tail DID stream the partial (it is ephemeral)...
+        expect(t.textOf("t-cut")).toContain("PARTIAL-ATTEMPT");
+        // ...but the record is the replay, alone.
+        expect(t.answerOf("t-cut")).toBe("The replayed answer.");
+      } finally {
+        t.push({ kind: "shutdown" });
+        await run;
+      }
+    });
+  }, 240_000);
+
+  it("a mid-turn message answered with no tool between: its reply is stored under it, the answer stays whole", async () => {
+    // The lost-reply shape at point B, live: the user's follow-up is
+    // injected as the model finishes (no tool call left to wait for), so the
+    // reply to it is the NEXT message of the same turn, written back to back
+    // with the first. The reply is the follow-up's own answer; the turn keeps
+    // its own words, whole. Before framing it was glued mid-sentence; before
+    // replies it was stored under the turn as a second paragraph.
+    const script: MockScript = ({ lastUser }) => {
+      if (lastUser.includes("ALSO-EMAIL")) {
+        return {
+          kind: "text",
+          text: "Yes, I can also email it.",
+          tag: "pb-reply",
+        };
+      }
+      if (!lastUser.includes("PB-CHECK")) return undefined;
+      return {
+        kind: "text",
+        text: "report.md.",
+        slow: {
+          chunks: ["Done: ", "the report ", "is in "],
+          intervalMs: 1_000,
+        },
+        tag: "pb-first",
+      };
+    };
+
+    await withMock(script, async (mock) => {
+      const t = createTransport();
+      const run = runSupervisor(
+        supervisorConfig(shortHome()),
+        createJcodeHarness(),
+        t.transport,
+        { memoryHarvester: stubHarvester },
+      );
+      try {
+        t.push(deliver("t-pb", "cv-pb", "PB-CHECK write the report"));
+        await t.until(
+          () => mock.requests.some((r) => r.tag === "pb-first"),
+          "the first reply to start streaming",
+          60_000,
+        );
+        t.push({
+          kind: "turn.message",
+          turnId: "f-pb",
+          targetTurnId: "t-pb",
+          conversationId: "cv-pb",
+          message: "ALSO-EMAIL can you email it too?",
+        });
+        await t.until(
+          () => t.resultsOf("t-pb").some((r) => r.result.status === "done"),
+          "the steered turn to finish",
+          90_000,
+        );
+        expect(mock.requests.some((r) => r.tag === "pb-reply")).toBe(true);
+        const [result] = t.resultsOf("t-pb");
+        expect(result?.result.followUps).toEqual([
+          { turnId: "f-pb", outcome: "joined" },
+        ]);
+        expect(t.answerOf("f-pb")).toBe("Yes, I can also email it.");
+        expect(t.answerOf("t-pb")).toBe("Done: the report is in report.md.");
+      } finally {
+        t.push({ kind: "shutdown" });
+        await run;
+      }
+    });
+  }, 240_000);
+
+  it("a mid-turn message answered between tool calls: its reply is stored under it, not lost", async () => {
+    // The lost-reply shape at point D, live: the follow-up lands while
+    // a tool runs, the agent answers it in its next message (with its next
+    // tool call), keeps working, and closes with the original task's answer.
+    // Before replies, only the closing words survived and the follow-up read
+    // as ignored. The follow-up travels with the control plane's frame, so
+    // this also proves what the MODEL saw: the frame in front of the words,
+    // and the prompt's rule for it in the system text.
+    const FRAME = "[A new message arrived while you were working.]";
+    let calls = 0;
+    const script: MockScript = ({ lastUser }) => {
+      if (!lastUser.includes("PD-CHECK") && !lastUser.includes("ALSO-LINT")) {
+        return undefined;
+      }
+      calls += 1;
+      if (calls === 1) {
+        return {
+          kind: "tool_call",
+          name: "bash",
+          argsJson: JSON.stringify({ command: "sleep 4 && echo built" }),
+          textBefore: "Running the build.",
+          tag: "pd-build",
+        };
+      }
+      if (calls === 2) {
+        return {
+          kind: "tool_call",
+          name: "bash",
+          argsJson: JSON.stringify({ command: "echo linted" }),
+          textBefore: "Sure, I'll check the linter too.",
+          tag: "pd-reply",
+        };
+      }
+      return {
+        kind: "text",
+        text: "Build and lint both passed.",
+        tag: "pd-final",
+      };
+    };
+
+    await withMock(script, async (mock) => {
+      const t = createTransport();
+      const run = runSupervisor(
+        supervisorConfig(shortHome()),
+        createJcodeHarness(),
+        t.transport,
+        { memoryHarvester: stubHarvester },
+      );
+      try {
+        t.push(deliver("t-pd", "cv-pd", "PD-CHECK run the build"));
+        await t.until(
+          () => mock.requests.some((r) => r.tag === "pd-build"),
+          "the build tool call",
+          60_000,
+        );
+        t.push({
+          kind: "turn.message",
+          turnId: "f-pd",
+          targetTurnId: "t-pd",
+          conversationId: "cv-pd",
+          message: "ALSO-LINT also check the linter output",
+          context: FRAME,
+        });
+        await t.until(
+          () => t.resultsOf("t-pd").some((r) => r.result.status === "done"),
+          "the steered turn to finish",
+          90_000,
+        );
+        const reply = mock.requests.find((r) => r.tag === "pd-reply");
+        expect(reply).toBeDefined();
+        // The model's view of the injection: the frame, then the words, as
+        // one user message, and the rule that tells it what to do with
+        // such a message, in the system text it was answering under. jcode
+        // prefixes every user message with a `[<UTC timestamp>] ` tag at
+        // request time (`message_timestamps`, default on; the stored history
+        // is untouched, which is why the reconcile still matches), so the
+        // assertion looks past exactly that tag.
+        expect(reply?.lastUser).toMatch(/^\[\d{4}-\d{2}-\d{2}T[^\]]+\] /);
+        expect(reply?.lastUser.replace(/^\[[^\]]+\] /, "")).toBe(
+          `${FRAME}\n\nALSO-LINT also check the linter output`,
+        );
+        expect(reply?.systemText.replace(/\s+/g, " ")).toContain(
+          "a message marked as having arrived while you were working",
+        );
+        expect(mock.requests.some((r) => r.tag === "pd-final")).toBe(true);
+        const [result] = t.resultsOf("t-pd");
+        expect(result?.result.followUps).toEqual([
+          { turnId: "f-pd", outcome: "joined" },
+        ]);
+        expect(t.answerOf("f-pd")).toBe("Sure, I'll check the linter too.");
+        expect(t.answerOf("t-pd")).toBe("Build and lint both passed.");
+        // THE LIVE PICKUP, on the real daemon: with the
+        // `soft_interrupt_ids` capability the join reaches the wire the
+        // moment the injection lands, BEFORE the reply's first word and
+        // before the second tool call that followed it, not held for the
+        // terminal. THE REPLY STREAMS: its deltas ride under the
+        // follow-up's id as they are written, before that tool call, and
+        // the stored reply lands under the follow-up the moment the agent
+        // goes back to work (the second tool call: the handover is sent
+        // just ahead of it), long before the turn's final answer. On a
+        // daemon without the capability the join and the reply still
+        // arrive, at the terminal (the history reconcile) and nothing
+        // streams under the follow-up, so the ordering pins apply only when
+        // the adapter actually runs the live path.
+        const frames = t.sent.map((s) => s.message);
+        const joinedAt = frames.findIndex(
+          (m) => m.kind === "event" && m.event.type === "message.joined",
+        );
+        const replyDeltaAt = frames.findIndex(
+          (m) =>
+            m.kind === "event" &&
+            m.turnId === "f-pd" &&
+            m.event.type === "text.delta",
+        );
+        const replyAt = frames.findIndex(
+          (m) =>
+            m.kind === "event" &&
+            m.turnId === "f-pd" &&
+            m.event.type === "text",
+        );
+        const toolStarts = frames.flatMap((m, i) =>
+          m.kind === "event" && m.event.type === "tool.started" ? [i] : [],
+        );
+        const secondToolAt = toolStarts[1] ?? -1;
+        const finalAnswerAt = frames.findIndex(
+          (m) =>
+            m.kind === "event" &&
+            m.turnId === "t-pd" &&
+            m.event.type === "text",
+        );
+        expect(joinedAt).toBeGreaterThan(-1);
+        expect(replyAt).toBeGreaterThan(-1);
+        expect(secondToolAt).toBeGreaterThan(-1);
+        expect(replyAt).toBeLessThan(finalAnswerAt);
+        if (process.env.JCODE_LIVE_EXPECT_LIVE_PICKUP !== "0") {
+          expect(replyDeltaAt).toBeGreaterThan(-1);
+          expect(joinedAt).toBeLessThan(replyDeltaAt);
+          expect(replyDeltaAt).toBeLessThan(secondToolAt);
+          // Handed over by the second tool call, and sent just ahead of it
+          // (the supervisor settles the answer before it forwards the
+          // event), so the reply sits right before the work that freed it,
+          // not at the end.
+          expect(replyAt).toBe(secondToolAt - 1);
+        } else {
+          expect(replyDeltaAt).toBe(-1);
+        }
+      } finally {
+        t.push({ kind: "shutdown" });
+        await run;
+      }
+    });
+  }, 240_000);
+
   it("the disabled tools are ABSENT from what the model sees; the load-bearing ones are present", async () => {
     // Scenario 3 — the JCODE_DISABLED_TOOLS pin at the live boundary. The
     // unit pins assert the STRING the launch env carries; only the real
@@ -412,15 +684,12 @@ describe.skipIf(!LIVE)("external wake ownership (live jcode)", () => {
     // `browser`, whose removal is the 2026-09-09 trap fix). Captured off the
     // real request bodies, same tripwire shape as the swarm description.
     //
-    // TWO turns, asserted on the second: the daemon connects the platform-
-    // tools MCP server asynchronously (~100 ms, measured) and "locks the
-    // tool list for cache stability" per turn, so a fresh session's FIRST
-    // request carries only the native tools (23 at v0.81.1) and the
-    // platform's 17 join once the bridge is up (40). A real turn takes
-    // seconds and never notices; this scripted mock answers in ~5 ms, so
-    // the test waits for the bridge before the second turn — the same
-    // ordering production gets for free. The disabled-list law holds on
-    // both requests; the platform-tool presence law is the second-turn fact.
+    // TWO turns: the daemon connects the platform-tools MCP server
+    // asynchronously and "locks the tool list for cache stability" per
+    // turn. The supervisor holds a new session's first turn until the
+    // harness has taken the list, so BOTH requests must carry the
+    // platform tools; the second turn proves the list is stable once the
+    // bridge is up. The disabled-list law holds on both requests.
     const script: MockScript = ({ lastUser }) =>
       lastUser.includes("TOOLS-CHECK")
         ? {
@@ -508,9 +777,11 @@ describe.skipIf(!LIVE)("external wake ownership (live jcode)", () => {
             true,
           );
         }
-        // And the platform tools genuinely joined (23 native → 40 total at
-        // the pin); a stuck-at-native second turn means the bridge is down.
-        expect(names.size).toBeGreaterThan(first?.toolNames.length ?? 0);
+        // And the platform tools reach the FIRST turn too: since the
+        // supervisor holds a new session's first turn until the harness has
+        // taken the tool list, turn one already carries all of them.
+        // A first turn stuck at the native tools means that wait regressed.
+        expect(new Set(first?.toolNames)).toEqual(names);
       } finally {
         t.push({ kind: "shutdown" });
         await run;

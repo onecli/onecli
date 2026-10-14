@@ -45,5 +45,6 @@ export const googlePhotos: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
   },
 };

@@ -39,8 +39,12 @@ export interface AuthContextValue {
     email: string;
     password: string;
   }) => Promise<void>;
-  // Email OTP flow (cloud-only, undefined in OSS mode)
-  signUpWithEmail?: (email: string) => Promise<EmailOtpStep>;
+  // Email OTP flow (cloud-only, undefined in OSS mode). `verificationToken`
+  // is the signup form's human-verification token, when it has one.
+  signUpWithEmail?: (
+    email: string,
+    verificationToken?: string,
+  ) => Promise<EmailOtpStep>;
   signInWithEmail?: (email: string) => Promise<EmailOtpStep>;
   confirmEmailSignUp?: (email: string, code: string) => Promise<boolean>;
   confirmEmailSignIn?: (code: string) => Promise<boolean>;

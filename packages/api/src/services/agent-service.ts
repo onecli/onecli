@@ -2,6 +2,7 @@ import { randomBytes } from "crypto";
 import { db, Prisma } from "@onecli/db";
 import type { AgentEffort } from "@onecli/agent-protocol";
 import { ServiceError } from "./errors";
+import { agentTokenIsUserVisible } from "./agent-token-visibility";
 import { agentImageUrlOrNull } from "./agent-image-service";
 import { LAST_SEEN_WINDOW_MS } from "../lib/agent-activity";
 import { agentIdsWithLiveBackgroundWork, signalWork } from "./due-work";
@@ -39,6 +40,13 @@ const logAgentConflict = createLogAgentConflict(logger);
 
 export const generateAccessToken = () =>
   `aoc_${randomBytes(32).toString("hex")}`;
+
+/** The `accessToken` field for an agent row, present only when visible. */
+const exposedAccessToken = (
+  kind: string,
+  accessToken: string,
+): { accessToken?: string } =>
+  agentTokenIsUserVisible(kind) ? { accessToken } : {};
 
 export interface CreateAgentInput {
   name: string;
@@ -101,8 +109,9 @@ export const listAgents = async (workspaceId: string) => {
     lastSeenRows.map((r) => [r.agentId, r._max.createdAt]),
   );
 
-  return agents.map(({ imageKey, ...a }) => ({
+  return agents.map(({ imageKey, accessToken, ...a }) => ({
     ...a,
+    ...exposedAccessToken(a.kind, accessToken),
     channels: a.channels.map((c) => ({
       ...c,
       settingsUrl: presenceSettingsUrlFor(c.provider, c.externalId),
@@ -613,7 +622,7 @@ export const updateAgent = async (
 export const regenerateAgentToken = async (
   workspaceId: string,
   agentId: string,
-) => {
+): Promise<{ accessToken: string } | { rotated: true }> => {
   const agent = await db.agent.findFirst({
     where: { id: agentId, workspaceId },
     select: { id: true, kind: true },
@@ -638,7 +647,11 @@ export const regenerateAgentToken = async (
     signalWork();
   }
 
-  return { accessToken: updated.accessToken };
+  // Rotation still revokes a hosted agent's token (its sandbox picks up the
+  // new one on respawn); only the value stays server-side.
+  return agentTokenIsUserVisible(agent.kind)
+    ? { accessToken: updated.accessToken }
+    : { rotated: true };
 };
 
 /**

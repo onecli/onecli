@@ -30,6 +30,9 @@ describe("agentEventSchema", () => {
       usage: { inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 2 },
     },
     { type: "error", message: "provider unreachable", code: "internal" },
+    // SEND NOW's answer: moved with a name, or nothing moved.
+    { type: "message.sent_now", moved: true, toolName: "bash" },
+    { type: "message.sent_now", moved: false },
   ])("round-trips %j", (event) => {
     expect(agentEventSchema.parse(event)).toEqual(event);
   });
@@ -41,6 +44,9 @@ describe("agentEventSchema", () => {
     expect(agentEventSchema.safeParse({ type: "text.delta" }).success).toBe(
       false,
     );
+    expect(
+      agentEventSchema.safeParse({ type: "message.sent_now" }).success,
+    ).toBe(false);
     expect(
       agentEventSchema.safeParse({
         type: "turn.done",

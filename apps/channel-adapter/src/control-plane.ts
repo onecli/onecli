@@ -10,6 +10,7 @@ import {
   adapterPromptClaimResponseSchema,
   adapterReachDecisionResponseSchema,
   adapterRegisterResponseSchema,
+  adapterReplyClaimResponseSchema,
   adapterMentionResolveResponseSchema,
   adapterTranscriptResponseSchema,
   type AdapterMentionReportRequest,
@@ -103,6 +104,10 @@ export interface ControlPlaneClient {
     next: string,
     turnId?: string,
   ): Promise<boolean>;
+  /** Claim a mid-run follow-up's reply before posting it: true on the
+   * winning compare-and-set, false when a twin or the completion pass got
+   * there first (post nothing then). */
+  claimReply(followUpId: string): Promise<boolean>;
   reportApprovalHealth(presenceId: string, healthy: boolean): Promise<void>;
   /** The proactive credential sweep — staleness is decided server-side.
    * `deferred` counts pairs a transient provider refusal left in place for
@@ -355,6 +360,16 @@ export const createControlPlane = (options: {
         { body: { linkId, expect, next, ...(turnId && { turnId }) } },
       );
       return parsed.advanced;
+    },
+
+    async claimReply(followUpId) {
+      const parsed = await call(
+        "POST",
+        "/channel-adapter/replies/claim",
+        adapterReplyClaimResponseSchema,
+        { body: { followUpId } },
+      );
+      return parsed.claimed;
     },
 
     async reportApprovalHealth(presenceId, healthy) {

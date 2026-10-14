@@ -104,6 +104,7 @@ export const createFakeControlPlane = (
   settlePrompt: async () => {},
   listUnsettledPrompts: async () => [],
   advanceCursor: async () => true,
+  claimReply: async () => true,
   reportApprovalHealth: async () => {},
   rotateIntegrations: async () => ({ rotated: 0, failed: 0 }),
   expireReach: async () => ({ expired: 0 }),

@@ -27,9 +27,9 @@ pub trait RecordResolver: Sync {
     /// the display names of `ids`, all of type `object`.
     fn names_read(&self, object: &str, ids: &[&str]) -> String;
 
-    /// `(id, name)` pairs from the answer to [`names_read`](Self::names_read).
-    /// An answer it can't parse yields none.
-    fn parse_names(&self, body: &[u8]) -> Vec<(String, String)>;
+    /// `(id, name)` pairs from the answer to [`names_read`](Self::names_read)
+    /// for `object`. An answer it can't parse yields none.
+    fn parse_names(&self, object: &str, body: &[u8]) -> Vec<(String, String)>;
 
     /// The record's page on the connection's `host` (https). `None` for an id
     /// it can't link.
@@ -40,6 +40,62 @@ pub trait RecordResolver: Sync {
     fn canonical_id<'a>(&self, id: &'a str) -> &'a str {
         id
     }
+
+    /// The read that answers, for a bulk change, each record's name, the
+    /// CURRENT value of every field in `fields` (none: names only), and
+    /// every `context` column (from [`context_fields`](Self::context_fields)).
+    /// `None` when this provider can't build one safely (the card then shows
+    /// new values only).
+    fn current_values_read(
+        &self,
+        _object: &str,
+        _fields: &[&str],
+        _context: &[&str],
+        _ids: &[&str],
+    ) -> Option<String> {
+        None
+    }
+
+    /// What the answer to [`current_values_read`](Self::current_values_read)
+    /// for `object` says of each record.
+    fn parse_current_values(
+        &self,
+        _object: &str,
+        _body: &[u8],
+        _fields: &[&str],
+        _context: &[&str],
+    ) -> Vec<CurrentRecord> {
+        Vec::new()
+    }
+
+    /// Read-only columns a bulk card of `object` shows beside the changes so
+    /// a reviewer can tell WHICH record each row is (a contact's account and
+    /// title). Fixed per object, never from the request. A column the change
+    /// itself covers is left off: a field in `changed` is already a change
+    /// column, and a column read through a lookup in `changed` would show
+    /// the old record beside the new one.
+    fn context_fields(&self, _object: &str, _changed: &[&str]) -> Vec<ContextField> {
+        Vec::new()
+    }
+}
+
+/// A read-only column on a bulk card: its read path (`Account.Name`) and
+/// label (`Account`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextField {
+    pub api: &'static str,
+    pub label: &'static str,
+}
+
+/// One record of a bulk change's current-values read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentRecord {
+    pub id: String,
+    pub name: Option<String>,
+    /// Value now per changed field, aligned with the read's `fields`.
+    pub values: Vec<Option<String>>,
+    /// Value per context column, aligned with the read's `context`.
+    pub context: Vec<Option<String>>,
 }
 
 /// A detail row that names a record by id.
@@ -53,6 +109,21 @@ pub(crate) struct RecordRef {
     pub(crate) id: String,
     /// Its display name, once the gateway resolved it.
     pub(crate) name: Option<String>,
+    /// How its row reads once named.
+    pub(crate) named: Named,
+}
+
+/// How a record row reads once the gateway has named its record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Named {
+    /// `Initech (001QO…)`: the id keeps two same-named records apart, which
+    /// a card leading with its record relies on (two `Plan.docx` deleted in
+    /// one batch must not read as one file).
+    WithId,
+    /// The name alone, for a record its name already identifies and no
+    /// title leads with: the person behind a Drive permission, shown with
+    /// their email.
+    Alone,
 }
 
 /// The record an action is about, and how the title joins it.
@@ -116,17 +187,41 @@ impl ApprovalSummary {
         }
     }
 
-    /// Show each resolved record by name, keeping the id after it
-    /// (`Initech (001QO…)`) so two same-named records stay apart.
+    /// Show each resolved record by name, as its row says ([`Named`]).
     pub fn name_refs<'n>(&mut self, name_of: impl Fn(&str) -> Option<&'n str>) {
         for r in &mut self.refs {
             let Some(name) = name_of(&r.id).map(str::trim).filter(|n| !n.is_empty()) else {
                 continue;
             };
             if let Some(d) = self.details.get_mut(r.detail_index) {
-                d.value = clamp(&format!("{name} ({})", r.id), MAX_VALUE_LEN);
+                d.value = match r.named {
+                    Named::WithId => clamp(&format!("{name} ({})", r.id), MAX_VALUE_LEN),
+                    Named::Alone => clamp(name, MAX_VALUE_LEN),
+                };
             }
             r.name = Some(clamp(name, MAX_VALUE_LEN));
+        }
+    }
+
+    /// The change table names the records its values point at, as the
+    /// detail rows do: a lookup set to a record id reads "Alex Kim (005…)".
+    /// Runs once each cell's op is set, so ops still compare ids, never a
+    /// name against an id.
+    pub fn name_change_values(&mut self) {
+        let Self { refs, bulk, .. } = self;
+        let Some(bulk) = bulk.as_mut() else { return };
+        for r in refs.iter() {
+            let Some(name) = r.name.as_deref() else {
+                continue;
+            };
+            let shown = clamp(&format!("{name} ({})", r.id), MAX_VALUE_LEN);
+            for row in &mut bulk.rows {
+                for v in row.new.iter_mut().chain(row.old.iter_mut()).flatten() {
+                    if *v == r.id {
+                        v.clone_from(&shown);
+                    }
+                }
+            }
         }
     }
 

@@ -25,6 +25,8 @@ const result = (patch: Partial<EvalResultView> = {}): EvalResultView => ({
   turnId: "turn-pass",
   conversationId: "conv-pass",
   error: null,
+  judgement: null,
+  judgeError: null,
   change: "same",
   ...patch,
 });
@@ -32,6 +34,7 @@ const result = (patch: Partial<EvalResultView> = {}): EvalResultView => ({
 const run = (patch: Partial<EvalRunDetail> = {}): EvalRunDetail => ({
   id: "run-1",
   status: "done",
+  trigger: "manual",
   configVersion: "cfg-2",
   total: 2,
   counts: { pending: 0, passed: 1, mismatch: 1, error: 0, inconclusive: 0 },
@@ -292,5 +295,62 @@ describe("RunResults", () => {
       "aria-expanded",
       "true",
     );
+  });
+
+  const customRun = (patch: Partial<EvalResultView>) =>
+    run({
+      total: 1,
+      counts: { pending: 0, passed: 0, mismatch: 1, error: 0, inconclusive: 0 },
+      results: [
+        result({
+          kind: "custom",
+          expected: "- Currency moved to USD\n- Pass at 70%",
+          outcome: "mismatch",
+          ...patch,
+        }),
+      ],
+    });
+
+  it("shows a custom check's verdict criterion by criterion, in words", async () => {
+    api.getRun.mockResolvedValue(
+      customRun({
+        judgement: {
+          passed: false,
+          summary: "One of two facts present, below the 70% rule.",
+          criteria: [
+            { criterion: "Currency moved to USD", met: true, note: "“USD”" },
+            {
+              criterion: "Moved in late 2025",
+              met: false,
+              note: "No date given",
+            },
+          ],
+          model: "claude-sonnet-5",
+        },
+      }),
+    );
+    mount();
+    await screen.findByRole("list", { name: "Results" });
+    expect(screen.getByText("Success criteria")).toBeInTheDocument();
+    expect(screen.getByText("failed it")).toBeInTheDocument();
+    expect(screen.getByText(/1 of 2 criteria met/)).toBeInTheDocument();
+    const criteria = screen.getByRole("list", { name: "Criteria" });
+    expect(criteria).toHaveTextContent("Met: Currency moved to USD");
+    expect(criteria).toHaveTextContent("Not met: Moved in late 2025");
+    expect(criteria).toHaveTextContent("No date given");
+  });
+
+  it("says why a custom check could not be judged", async () => {
+    api.getRun.mockResolvedValue(
+      customRun({
+        outcome: "inconclusive",
+        judgeError: "The judge timed out",
+      }),
+    );
+    mount();
+    await screen.findByRole("list", { name: "Results" });
+    expect(
+      screen.getByText("The answer could not be judged: The judge timed out"),
+    ).toBeInTheDocument();
   });
 });

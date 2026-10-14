@@ -51,12 +51,15 @@ describe("channelsFragment", () => {
     expect(body).toContain("use send_message (below)");
   });
 
-  it("a live presence: carries the recipients teaching (find_recipient, @[Name], sent/held)", () => {
+  it("a live presence: carries the recipients teaching (find_recipient, @[Name], sent/held/not_sent)", () => {
     const body = flat(channelsFragment([live])!.body);
     expect(body).toContain("find_recipient");
     expect(body).toContain("@[app]");
     expect(body).toContain('"sent" = delivered. "held" =');
-    expect(body).toContain("never promise to follow up on your own");
+    expect(body).toContain("never promise to report the decision on your own");
+    expect(body).toContain('"not_sent" = an earlier message');
+    expect(body).toContain("pass the answer on yourself with send_message");
+    expect(body).toContain("Never ask anyone to check back later");
   });
 
   it("a live presence: the platform's formatting sentence rides along", () => {

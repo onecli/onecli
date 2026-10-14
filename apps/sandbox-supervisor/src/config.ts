@@ -58,6 +58,12 @@ export interface SupervisorConfig {
   runnerWsUrl: string | undefined;
   /** Single-use bootstrap token for that channel (§5.1). */
   bootstrapToken: string | undefined;
+  /**
+   * This sandbox's id, presented beside a session credential when the
+   * channel reconnects after a runner restart (the resumable channel).
+   * Absent only under the stdio dev driver.
+   */
+  sandboxId: string | undefined;
   /** The runner relays files the agent sends back (send_file). False under
    * an older runner or the stdio dev driver: the tool is then not offered. */
   outboundAttachments: boolean;
@@ -122,6 +128,7 @@ export const loadConfig = (): SupervisorConfig => ({
   harness: process.env.AGENT_HARNESS || undefined,
   runnerWsUrl: process.env.RUNNER_WS_URL || undefined,
   bootstrapToken: process.env.SANDBOX_WS_TOKEN || undefined,
+  sandboxId: process.env.SANDBOX_ID || undefined,
   /** The runner can relay files the agent sends back (send_file). Set by a
    * runner that advertises outboundAttachments; absent under an older
    * runner or the stdio dev driver, where the tool must not be offered. */

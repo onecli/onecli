@@ -43,6 +43,7 @@ export const outlookCalendar: AppDefinition = {
   },
   configurable: {
     fields: microsoftConfigFields,
+    group: "microsoft",
     envDefaults: microsoftEnvDefaults,
   },
 };

@@ -103,6 +103,14 @@ describe("ConnectAppPickerDialog", () => {
     pushMock.mockClear();
   });
 
+  it("states what a new account gets: the default attach, never full access for a catalogued app", () => {
+    renderPicker();
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveTextContent(
+      "A new account is on for every agent in this workspace. Its tools are allowed and anything else needs your approval (an app with no tool list gets full access).",
+    );
+  });
+
   it("honors the org app-availability restriction — only allowed providers listed", () => {
     renderPicker({ availability: { restricted: true, providers: ["gmail"] } });
     expect(screen.getByText("Gmail")).toBeInTheDocument();

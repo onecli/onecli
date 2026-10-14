@@ -14,7 +14,17 @@ import {
 } from "./open-proxy";
 import { createStdioTransport } from "./transport/stdio";
 import { createWsTransport } from "./transport/ws";
-import { runSignalCleanup, runSupervisor } from "./supervisor";
+import {
+  runSignalCleanup,
+  runSupervisor,
+  registerSignalCleanup,
+} from "./supervisor";
+import {
+  alignChromePolicyProxy,
+  desktopAvailable,
+  publishDisplay,
+  startDesktop,
+} from "./desktop";
 
 /**
  * Entrypoint of the in-sandbox supervisor. The ONLY place an adapter id maps
@@ -28,14 +38,15 @@ import { runSignalCleanup, runSupervisor } from "./supervisor";
  */
 const selectTransport = (config: SupervisorConfig): SupervisorTransport => {
   if (!config.runnerWsUrl) return createStdioTransport();
-  if (!config.bootstrapToken) {
+  if (!config.bootstrapToken || !config.sandboxId) {
     throw new Error(
-      "RUNNER_WS_URL is set but SANDBOX_WS_TOKEN is missing — the runner channel cannot be authenticated.",
+      "RUNNER_WS_URL is set but SANDBOX_WS_TOKEN or SANDBOX_ID is missing — the runner channel cannot be authenticated.",
     );
   }
   return createWsTransport({
     url: config.runnerWsUrl,
     token: config.bootstrapToken,
+    sandboxId: config.sandboxId,
   });
 };
 
@@ -103,6 +114,7 @@ const main = async (): Promise<void> => {
       const openProxy = await startOpenProxy(gateway);
       process.env.OPEN_PROXY = openProxy.url;
       publishOpenProxyUrl(openProxy.url);
+      alignChromePolicyProxy(openProxy.url);
       log("info", "open proxy listening", { url: openProxy.url });
     } catch (error) {
       log("warn", "open proxy did not start", { error: String(error) });
@@ -111,7 +123,37 @@ const main = async (): Promise<void> => {
     log("info", "open proxy not started: no gateway proxy URL in HTTPS_PROXY");
   }
 
-  await runSupervisor(config, harness, selectTransport(config));
+  // The desktop (desktop.ts): a screen with a window manager, for a browser
+  // that runs the way it does on a person's computer. Only where the image
+  // has one (probed, never assumed); started BEFORE the harness for the
+  // same reason as the open proxy, so `DISPLAY` is in the environment every
+  // child inherits. Best-effort: a sandbox whose desktop fails to come up
+  // runs without one, as an image without the pieces does. Taken down on
+  // both exits: the signal path (below) and the clean one (after the loop).
+  let closeDesktop = () => {};
+  if (desktopAvailable(process.env)) {
+    try {
+      const desktop = await startDesktop(process.env);
+      process.env.DISPLAY = desktop.display;
+      if (desktop.dbusAddress) {
+        process.env.DBUS_SESSION_BUS_ADDRESS = desktop.dbusAddress;
+      }
+      publishDisplay(desktop.display);
+      closeDesktop = () => desktop.close();
+      registerSignalCleanup(closeDesktop);
+      log("info", "desktop ready", { display: desktop.display });
+    } catch (error) {
+      log("warn", "desktop did not start", { error: String(error) });
+    }
+  } else {
+    log("info", "desktop not started: this image has no window manager");
+  }
+
+  try {
+    await runSupervisor(config, harness, selectTransport(config));
+  } finally {
+    closeDesktop();
+  }
   log("info", "supervisor exited cleanly");
 };
 

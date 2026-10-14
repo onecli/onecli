@@ -133,6 +133,14 @@ const seedPair = async () => {
   return { donna, ray };
 };
 
+/** Donna here, Ray in ANOTHER workspace (two owner groups): a message
+ * reaches him by id, and each side's owners decide on their own card. */
+const seedFarPair = async () => {
+  const donna = await seedAgent("Donna");
+  const ray = await seedAgent("Ray", OTHER_WORKSPACE);
+  return { donna, ray };
+};
+
 const message = (from: { id: string }, to: string, text = "hello there") =>
   links.requestCommunicate({
     fromAgentId: from.id,
@@ -264,19 +272,17 @@ afterAll(async () => {
 // ── The consent walk ────────────────────────────────────────────────────────
 
 describe.skipIf(!PROOF_URL)("agent links (5b) — the consent walk", () => {
-  it("ask/ask: one message opens TWO holds (one per agent), same frozen payload, nothing lands", async () => {
+  it("same workspace, ask/ask: one message opens ONE hold, on the sender (one owner group, one card); nothing lands", async () => {
     const { donna, ray } = await seedPair();
     const outcome = await message(donna, "Ray", "can you check the deploy?");
     expect(outcome.kind).toBe("held");
     if (outcome.kind !== "held") throw new Error("unreachable");
     expect(outcome.to).toBe("Ray");
-    expect(outcome.approvalIds).toHaveLength(2);
+    expect(outcome.approvalIds).toHaveLength(1);
 
     const [mine] = await holdsFor(donna.id);
-    const [theirs] = await holdsFor(ray.id);
+    expect(await holdsFor(ray.id)).toHaveLength(0);
     expect(mine?.status).toBe("pending");
-    expect(theirs?.status).toBe("pending");
-    expect(mine?.payload).toEqual(theirs?.payload);
     expect(mine?.payload).toEqual({
       fromAgentId: donna.id,
       toAgentId: ray.id,
@@ -298,21 +304,61 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the consent walk", () => {
     expect([link.policyA, link.policyB]).toEqual(["ask", "ask"]);
   });
 
-  it("both approve: the SECOND approve delivers one framed turn on the receiver's pair conversation, and the streak counts it", async () => {
+  it("same workspace: the ONE approve delivers; one-sided allow still asks once, on the sender", async () => {
     const { donna, ray } = await seedPair();
     await message(donna, "Ray", "ping");
+    const [mine] = await holdsFor(donna.id);
+    expect(await approve(mine!.id)).toMatchObject({
+      kind: "decided",
+      status: "executed",
+    });
+    expect((await turnsOf(ray.id)).map((t) => t.message)).toEqual([
+      "Donna (agent): ping",
+    ]);
+
+    // Ray allows Donna; Donna's side still asks: still exactly one card,
+    // and it is the sender's (anchored where the ask was made).
+    await links.setLinkPolicy({
+      workspaceId: WORKSPACE,
+      agentId: ray.id,
+      peerAgentId: donna.id,
+      policy: "allow",
+      deciderUserId: OWNER,
+    });
+    expect((await message(donna, "Ray", "again")).kind).toBe("held");
+    expect(await holdsFor(donna.id)).toHaveLength(2);
+    expect(await holdsFor(ray.id)).toHaveLength(0);
+  });
+
+  it("across workspaces, ask/ask: one message opens TWO holds (one per owner group), same frozen payload, nothing lands", async () => {
+    const { donna, ray } = await seedFarPair();
+    const outcome = await message(donna, ray.id, "can you check the deploy?");
+    expect(outcome.kind).toBe("held");
+    if (outcome.kind !== "held") throw new Error("unreachable");
+    expect(outcome.approvalIds).toHaveLength(2);
+    const [mine] = await holdsFor(donna.id);
+    const [theirs] = await holdsFor(ray.id);
+    expect(mine?.status).toBe("pending");
+    expect(theirs?.status).toBe("pending");
+    expect(mine?.payload).toEqual(theirs?.payload);
+    expect(await turnsOf(ray.id)).toHaveLength(0);
+  });
+
+  it("across workspaces, both approve: the SECOND approve delivers one framed turn on the receiver's pair conversation, and the streak counts it", async () => {
+    const { donna, ray } = await seedFarPair();
+    await message(donna, ray.id, "ping");
     const [mine] = await holdsFor(donna.id);
     const [theirs] = await holdsFor(ray.id);
 
     // First approve (the sender's side): waits for the sibling.
-    expect(await approve(mine!.id)).toEqual({
+    expect(await approve(mine!.id)).toMatchObject({
       kind: "decided",
       status: "executed",
     });
     expect(await turnsOf(ray.id)).toHaveLength(0);
 
     // Second approve (the receiver's side): delivers.
-    expect(await approve(theirs!.id)).toEqual({
+    expect(await approve(theirs!.id)).toMatchObject({
       kind: "decided",
       status: "executed",
     });
@@ -338,7 +384,7 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the consent walk", () => {
       where: { id: inbox!.id },
       data: { appTurnStreak: 3 },
     });
-    await message(donna, "Ray", "again");
+    await message(donna, ray.id, "again");
     const [, mine2] = await holdsFor(donna.id);
     const [, theirs2] = await holdsFor(ray.id);
     await approve(mine2!.id);
@@ -430,8 +476,8 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the consent walk", () => {
     // the other as `approved` (flipped, not yet executed). "The other will
     // deliver" would make both defer; "deliver if the other approved" would
     // make both deliver. The later decision delivers, by decidedAt then id.
-    const { donna, ray } = await seedPair();
-    await message(donna, "Ray", "race");
+    const { donna, ray } = await seedFarPair();
+    await message(donna, ray.id, "race");
     const [mine] = await holdsFor(donna.id);
     const [theirs] = await holdsFor(ray.id);
     const results = await Promise.all([approve(mine!.id), approve(theirs!.id)]);
@@ -447,8 +493,8 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the consent walk", () => {
   it("the deliverer is the LATER decision, whichever side it is", async () => {
     // Sequential, receiver first then sender: the sender's approve (later)
     // must deliver - the rule is order, not side.
-    const { donna, ray } = await seedPair();
-    await message(donna, "Ray", "order");
+    const { donna, ray } = await seedFarPair();
+    await message(donna, ray.id, "order");
     const [mine] = await holdsFor(donna.id);
     const [theirs] = await holdsFor(ray.id);
     await approve(theirs!.id);
@@ -457,13 +503,13 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the consent walk", () => {
     expect(await turnsOf(ray.id)).toHaveLength(1);
   });
 
-  it("one side rejects: the other side's approve cannot deliver alone", async () => {
-    const { donna, ray } = await seedPair();
-    await message(donna, "Ray");
+  it("across workspaces, one side rejects: the other side's approve cannot deliver alone", async () => {
+    const { donna, ray } = await seedFarPair();
+    await message(donna, ray.id);
     const [mine] = await holdsFor(donna.id);
     const [theirs] = await holdsFor(ray.id);
 
-    expect(await approve(theirs!.id, "reject")).toEqual({
+    expect(await approve(theirs!.id, "reject")).toMatchObject({
       kind: "decided",
       status: "rejected",
     });
@@ -499,16 +545,20 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the consent walk", () => {
     ]);
   });
 
-  it("allow on ONE side only: exactly one hold, on the asking side", async () => {
-    const { donna, ray } = await seedPair();
-    await links.setLinkPolicy({
-      workspaceId: WORKSPACE,
-      agentId: donna.id,
-      peerAgentId: ray.id,
-      policy: "allow",
-      deciderUserId: OWNER,
+  it("across workspaces, allow on ONE side only: exactly one hold, on the asking side", async () => {
+    const { donna, ray } = await seedFarPair();
+    // The dashboard can't name a foreign agent before first contact, so the
+    // pair row is seeded with Donna's side already allowing.
+    const [a, b] = donna.id < ray.id ? [donna, ray] : [ray, donna];
+    await db.agentLink.create({
+      data: {
+        agentAId: a.id,
+        agentBId: b.id,
+        policyA: a.id === donna.id ? "allow" : "ask",
+        policyB: b.id === donna.id ? "allow" : "ask",
+      },
     });
-    const outcome = await message(donna, "Ray");
+    const outcome = await message(donna, ray.id);
     expect(outcome.kind).toBe("held");
     expect(await holdsFor(donna.id)).toHaveLength(0);
     expect(await holdsFor(ray.id)).toHaveLength(1);
@@ -522,8 +572,10 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the consent walk", () => {
     await expect(message(donna, "Ray", "one more")).rejects.toThrow(
       /already waiting for approval/,
     );
-    // Two holds per ask (both sides asked): none for the refused one.
-    expect(await holdsFor(ray.id)).toHaveLength(links.MAX_PENDING_PER_PAIR);
+    // One hold per ask (same workspace, on the sender): none for the
+    // refused one.
+    expect(await holdsFor(donna.id)).toHaveLength(links.MAX_PENDING_PER_PAIR);
+    expect(await holdsFor(ray.id)).toHaveLength(0);
     // The brake is per DIRECTION: Ray asking Donna is not counted.
     expect((await message(ray, "Donna", "reverse")).kind).toBe("held");
     // Deciding one frees a slot.
@@ -554,9 +606,27 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the consent walk", () => {
     );
   });
 
-  it('"approve + always allow" sets the DECIDER\'s side only', async () => {
+  it('same workspace: "approve + always allow" on the one card sets BOTH sides (the decider owns both)', async () => {
     const { donna, ray } = await seedPair();
     await message(donna, "Ray");
+    const [mine] = await holdsFor(donna.id);
+    await approve(mine!.id, "approve_always");
+
+    const peersOfDonna = await links.listPeers({
+      workspaceId: WORKSPACE,
+      agentId: donna.id,
+    });
+    const ray_ = peersOfDonna.find((p) => p.agentId === ray.id);
+    expect(ray_?.myPolicy).toBe("allow");
+    expect(ray_?.theirPolicy).toBe("allow");
+    // And the next message flows with no card at all.
+    expect((await message(donna, "Ray", "next")).kind).toBe("sent");
+    expect(await holdsFor(donna.id)).toHaveLength(1);
+  });
+
+  it('across workspaces: "approve + always allow" sets the DECIDER\'s side only', async () => {
+    const { donna, ray } = await seedFarPair();
+    await message(donna, ray.id);
     const [mine] = await holdsFor(donna.id);
     await approve(mine!.id, "approve_always");
 
@@ -569,7 +639,7 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the consent walk", () => {
     expect(ray_?.theirPolicy).toBe("ask");
 
     const peersOfRay = await links.listPeers({
-      workspaceId: WORKSPACE,
+      workspaceId: OTHER_WORKSPACE,
       agentId: ray.id,
     });
     const donna_ = peersOfRay.find((p) => p.agentId === donna.id);
@@ -577,14 +647,32 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the consent walk", () => {
     expect(donna_?.theirPolicy).toBe("allow");
   });
 
-  it("verify at replay: a block landing AFTER the cards refuses the approve, no turn", async () => {
+  it("verify at replay: a block landing AFTER the card refuses the approve, no turn (same workspace)", async () => {
     const { donna, ray } = await seedPair();
     await message(donna, "Ray");
+    const [mine] = await holdsFor(donna.id);
+    await links.setLinkPolicy({
+      workspaceId: WORKSPACE,
+      agentId: ray.id,
+      peerAgentId: donna.id,
+      policy: "blocked",
+      deciderUserId: OWNER,
+    });
+    const result = await approve(mine!.id);
+    expect(result.kind).toBe("decided");
+    if (result.kind !== "decided") throw new Error("unreachable");
+    expect(result.status).toBe("failed");
+    expect(await turnsOf(ray.id)).toHaveLength(0);
+  });
+
+  it("verify at replay: a block landing AFTER the cards refuses the approve, no turn (across workspaces)", async () => {
+    const { donna, ray } = await seedFarPair();
+    await message(donna, ray.id);
     const [mine] = await holdsFor(donna.id);
     const [theirs] = await holdsFor(ray.id);
     await approve(mine!.id);
     await links.setLinkPolicy({
-      workspaceId: WORKSPACE,
+      workspaceId: OTHER_WORKSPACE,
       agentId: ray.id,
       peerAgentId: donna.id,
       policy: "blocked",
@@ -717,8 +805,8 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the fence", () => {
       policy: "ask",
       deciderUserId: OWNER,
     });
-    await message(donna, "Ray", "one more"); // holds on Ray only (Donna allows)
-    expect(await holdsFor(ray.id)).toHaveLength(1);
+    await message(donna, "Ray", "one more"); // one hold, on Donna (same workspace)
+    expect(await holdsFor(donna.id)).toHaveLength(1);
     expect(await pairConversationOf(donna.id, ray.id)).not.toBeNull();
     expect(await pairConversationOf(ray.id, donna.id)).not.toBeNull();
 
@@ -738,9 +826,14 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the fence", () => {
         peerAgentId: donna.id,
       }),
     ).toBe(true);
-    // Ray's side: conversation gone, card expired.
+    // Ray's side: conversation gone. The pending card about the pair is
+    // expired even though it sits on Donna: same workspace, so the caller
+    // owns that side too, and an approve must not deliver into a pair that
+    // was just removed.
     expect(await pairConversationOf(ray.id, donna.id)).toBeNull();
-    expect((await holdsFor(ray.id)).map((h) => h.status)).toEqual(["expired"]);
+    expect((await holdsFor(donna.id)).map((h) => h.status)).toEqual([
+      "expired",
+    ]);
     // Donna's side untouched: her transcript is her owners' record.
     expect(await pairConversationOf(donna.id, ray.id)).not.toBeNull();
     // The pair row is gone: the roster shows Ray at ask/ask again.
@@ -763,6 +856,23 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the fence", () => {
         peerAgentId: donna.id,
       }),
     ).toBe(false);
+  });
+
+  it("forgetLink across workspaces never touches the FOREIGN side's cards (they are its owners' to settle)", async () => {
+    const { donna, ray } = await seedFarPair();
+    await message(donna, ray.id, "hello far");
+    expect(
+      await links.forgetLink({
+        workspaceId: WORKSPACE,
+        agentId: donna.id,
+        peerAgentId: ray.id,
+      }),
+    ).toBe(true);
+    expect((await holdsFor(donna.id)).map((h) => h.status)).toEqual([
+      "expired",
+    ]);
+    // The planted control: Ray's card in the other tenant stays pending.
+    expect((await holdsFor(ray.id)).map((h) => h.status)).toEqual(["pending"]);
   });
 
   it("listPeers: the workspace's other agents (pristine) plus linked peers from elsewhere, with the pair conversation once they talked", async () => {
@@ -914,6 +1024,7 @@ describe.skipIf(!PROOF_URL)("agent links — peer tasks", () => {
     donna: { id: string },
     ask = "ask Ray if he can ship by Friday",
     opener = "Can you ship by Friday?",
+    to = "Ray",
   ) => {
     const home = await homeFor(donna);
     // One active turn per conversation: an earlier ask still "running" in
@@ -925,7 +1036,7 @@ describe.skipIf(!PROOF_URL)("agent links — peer tasks", () => {
     const turn = await runningHumanTurn(home.id, ask);
     const outcome = await links.requestCommunicate({
       fromAgentId: donna.id,
-      to: "Ray",
+      to,
       text: opener,
       originConversationId: home.id,
       originTurnId: turn.id,
@@ -1578,10 +1689,11 @@ describe.skipIf(!PROOF_URL)("agent links — peer tasks", () => {
 
   it("held then approved: the task opener frozen into the hold opens the person's task at replay; an agent-driven hold opens none", async () => {
     const { donna, ray } = await seedPair();
-    // ask/ask: both cards.
+    // ask/ask, same workspace: one card, on Donna.
     const { home, outcome } = await openTask(donna);
     expect(outcome).toMatchObject({ kind: "held", to: "Ray" });
     expect(await tasksOn(donna, ray)).toHaveLength(0);
+    expect(await holdsFor(ray.id)).toHaveLength(0);
     const [donnaHold] = await holdsFor(donna.id);
     expect(donnaHold!.payload).toMatchObject({
       task: {
@@ -1590,9 +1702,7 @@ describe.skipIf(!PROOF_URL)("agent links — peer tasks", () => {
         createdByUserId: OWNER,
       },
     });
-    const [rayHold] = await holdsFor(ray.id);
     await approve(donnaHold!.id);
-    await approve(rayHold!.id);
     expect((await tasksOn(donna, ray))[0]).toMatchObject({
       status: "open",
       homeConversationId: home.id,
@@ -1602,17 +1712,74 @@ describe.skipIf(!PROOF_URL)("agent links — peer tasks", () => {
     expect((await turnsOf(ray.id)).at(-1)?.message).toBe(
       "Donna (agent): Can you ship by Friday?",
     );
-    // Ray's reply from the pair thread while both sides still ask: two
-    // holds again; approving both delivers it as an agent message ON the
-    // task (no second task, the peer's budget spent).
-    await message(ray, "Donna", "yes");
-    const [, rayHold2] = await holdsFor(ray.id);
-    const [, donnaHold2] = await holdsFor(donna.id);
-    expect(rayHold2!.payload).not.toHaveProperty("task");
-    await approve(rayHold2!.id);
-    await approve(donnaHold2!.id);
+    // Ray's reply from the pair thread while both sides still ask: the
+    // owners already consented to this exchange (the task is open), so it
+    // is delivered with NO new card, as an agent message ON the task (no
+    // second task, the peer's budget spent).
+    expect(await message(ray, "Donna", "yes")).toEqual({
+      kind: "sent",
+      to: "Donna",
+      task: "ongoing",
+    });
+    expect(await holdsFor(ray.id)).toHaveLength(0);
+    expect(await holdsFor(donna.id)).toHaveLength(1);
     expect(await tasksOn(donna, ray)).toHaveLength(1);
     expect((await tasksOn(donna, ray))[0]).toMatchObject({ peerSent: 1 });
+
+    // Once the task closes, the pair is back to asking: a fresh agent
+    // message is a new question and holds again.
+    await db.peerTask.updateMany({
+      where: { agentId: donna.id },
+      data: { status: "done", outcome: "reported", closedAt: new Date() },
+    });
+    expect((await message(ray, "Donna", "anything else?")).kind).toBe("held");
+    expect(await holdsFor(ray.id)).toHaveLength(1);
+  });
+
+  it("across workspaces, an open task is NOT standing consent: the foreign peer's reply still asks both owner groups", async () => {
+    const { donna, ray } = await seedFarPair();
+    const { outcome } = await openTask(
+      donna,
+      "ask Ray if he can ship",
+      "Ship?",
+      ray.id,
+    );
+    expect(outcome.kind).toBe("held");
+    const [mine] = await holdsFor(donna.id);
+    const [theirs] = await holdsFor(ray.id);
+    await approve(mine!.id);
+    await approve(theirs!.id);
+    expect(await tasksOn(donna, ray)).toMatchObject([{ status: "open" }]);
+    // Ray (another tenant) answers: each owner group approved ONE message
+    // crossing its boundary, never the answers after it.
+    const reply = await message(ray, donna.id, "yes");
+    expect(reply.kind).toBe("held");
+    if (reply.kind !== "held") throw new Error("unreachable");
+    expect(reply.approvalIds).toHaveLength(2);
+  });
+
+  it("an open task never outranks a block: the reply is refused up front, no card, no turn", async () => {
+    const { donna, ray } = await seedPair();
+    const { outcome } = await openTask(donna);
+    expect(outcome.kind).toBe("held");
+    const [hold] = await holdsFor(donna.id);
+    if (!hold) throw new Error("expected a hold on the sender");
+    await approve(hold.id);
+    // Block WITHOUT the policy door's task close, so the task is still open
+    // when Ray answers: the tool door's own check must refuse. Scoped to
+    // this pair: the proof database is shared with every other suite.
+    await db.agentLink.updateMany({
+      where: {
+        agentAId: { in: [donna.id, ray.id] },
+        agentBId: { in: [donna.id, ray.id] },
+      },
+      data: { policyA: "blocked", policyB: "blocked" },
+    });
+    expect(await tasksOn(donna, ray)).toMatchObject([{ status: "open" }]);
+    const before = (await turnsOf(donna.id)).length;
+    await expect(message(ray, "Donna", "yes")).rejects.toThrow(/blocked/);
+    expect(await holdsFor(ray.id)).toHaveLength(0);
+    expect(await turnsOf(donna.id)).toHaveLength(before);
   });
 
   it("a 5b hold (home only, no `task`) approved after the upgrade opens a task with the message as the ask", async () => {
@@ -2296,13 +2463,13 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the tool door", () => {
         args,
       });
 
-    // held: ask/ask.
+    // held: ask/ask, same workspace - one card, on the sender.
     const held = await call({ to: "Ray", text: "hello" });
     expect(held.ok).toBe(true);
     expect(held).toMatchObject({
       result: { status: "held", to: "Ray" },
     });
-    expect(await holdsFor(ray.id)).toHaveLength(1);
+    expect(await holdsFor(donna.id)).toHaveLength(1);
 
     // unknown name: the roster in the error.
     const unknown = await call({ to: "Rey", text: "hello" });

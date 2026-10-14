@@ -3,14 +3,16 @@
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
-import type { ConnectNote } from "@onecli/api/apps/types";
+import type { ConnectNote, OAuthAccessLevels } from "@onecli/api/apps/types";
 import { Button } from "@onecli/ui/components/button";
 import { IS_CLOUD } from "@/lib/env";
 import { API_ORIGIN, getAuthToken, getWorkspaceId } from "@/lib/api-fetch";
 import { SetupGuideLink } from "@/lib/components/setup-guide-link";
+import { AccessLevelSelect } from "./access-level-select";
 import { ConnectLayout } from "./connect-layout";
 import { ConnectSuccess } from "./connect-success";
 import { CredentialsFlow } from "./credentials-flow";
+import { OrDivider } from "./or-divider";
 
 type FlowState = "ready" | "redirecting" | "success" | "error";
 
@@ -34,6 +36,8 @@ interface ConnectFlowProps {
       group?: string;
       helpUrl?: string;
       helpLabel?: string;
+      options?: { value: string; label: string }[];
+      defaultValue?: string;
     }[];
     fileImport?: {
       label: string;
@@ -50,7 +54,10 @@ interface ConnectFlowProps {
       group?: string;
       helpUrl?: string;
       helpLabel?: string;
+      options?: { value: string; label: string }[];
+      defaultValue?: string;
     }[];
+    accessLevels?: OAuthAccessLevels;
   };
   hasDefaults: boolean;
   status?: "success" | "error";
@@ -92,15 +99,20 @@ export const ConnectFlow = ({
     string | undefined
   >(undefined);
   const hasApiKeyAlternate = !!app.apiKeyFields?.length;
+  const [accessLevel, setAccessLevel] = useState(
+    app.accessLevels?.defaultValue,
+  );
   // Whether the ready screen counts down and redirects on its own. Off when
   // the user has something to decide or read first: an API-key alternate to
-  // pick instead of OAuth, or a connect note (e.g. an admin-only prerequisite)
-  // that must not race a 3-second redirect. The timer and the "Auto-connecting"
-  // label both key off this, so neither can show without the other.
+  // pick instead of OAuth, an access level to choose, or a connect note (e.g.
+  // an admin-only prerequisite) that must not race a 3-second redirect. The
+  // timer and the "Auto-connecting" label both key off this, so neither can
+  // show without the other.
   const autoRedirects =
     hasDefaults &&
     app.connectionType === "oauth" &&
     !hasApiKeyAlternate &&
+    !app.accessLevels &&
     !app.connectNote;
 
   const doRedirect = useCallback(async () => {
@@ -110,6 +122,7 @@ export const ConnectFlow = ({
     const params = new URLSearchParams();
     if (connectionId) params.set("connectionId", connectionId);
     if (agentName) params.set("agent_name", agentName);
+    if (accessLevel) params.set("access_level", accessLevel);
 
     const token = await getAuthToken();
     if (token) params.set("_token", token);
@@ -120,7 +133,14 @@ export const ConnectFlow = ({
     const qs = params.toString();
     const authorizeUrl = `${API_ORIGIN}/v1/apps/${app.id}/authorize${qs ? `?${qs}` : ""}`;
     window.location.href = authorizeUrl;
-  }, [app.id, connectionId, agentName, explicitWorkspaceId, orgId]);
+  }, [
+    app.id,
+    connectionId,
+    agentName,
+    accessLevel,
+    explicitWorkspaceId,
+    orgId,
+  ]);
 
   // Countdown timer for auto-redirect
   useEffect(() => {
@@ -289,13 +309,7 @@ export const ConnectFlow = ({
           )}
           {!IS_CLOUD && (
             <>
-              <div className="flex items-center gap-3 pt-1">
-                <div className="bg-border h-px flex-1" />
-                <span className="text-muted-foreground/60 text-[10px] uppercase tracking-widest">
-                  or
-                </span>
-                <div className="bg-border h-px flex-1" />
-              </div>
+              <OrDivider label="or" className="pt-1" />
               <p className="text-muted-foreground text-xs">
                 Skip setup with{" "}
                 <a
@@ -332,20 +346,27 @@ export const ConnectFlow = ({
       progress={progress}
     >
       <div className="flex flex-col items-center gap-6 py-4">
-        <div className="text-center">
-          <p className="text-sm text-muted-foreground">
-            {isRedirecting
-              ? `Redirecting to ${app.name}...`
-              : `Taking you to ${app.name}`}
-          </p>
-          {isRedirecting ? null : (
-            <p className="text-sm text-muted-foreground mt-0.5">
-              {connectionId
-                ? "Re-authenticate to refresh your credentials"
-                : "Please authenticate to continue"}
+        {isRedirecting ? null : (
+          <SetupGuideLink appName={app.name} url={app.setupGuideUrl} />
+        )}
+        {/* An app with an access-level choice shows that choice instead of
+            the generic "Taking you to" text. */}
+        {isRedirecting || !app.accessLevels ? (
+          <div className="text-center">
+            <p className="text-sm text-muted-foreground">
+              {isRedirecting
+                ? `Redirecting to ${app.name}...`
+                : `Taking you to ${app.name}`}
             </p>
-          )}
-        </div>
+            {isRedirecting ? null : (
+              <p className="text-sm text-muted-foreground mt-0.5">
+                {connectionId
+                  ? "Re-authenticate to refresh your credentials"
+                  : "Please authenticate to continue"}
+              </p>
+            )}
+          </div>
+        ) : null}
 
         {isRedirecting ? (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -373,6 +394,13 @@ export const ConnectFlow = ({
                 )}
               </div>
             )}
+            {app.accessLevels && accessLevel && (
+              <AccessLevelSelect
+                levels={app.accessLevels}
+                value={accessLevel}
+                onChange={setAccessLevel}
+              />
+            )}
             <Button className="w-full" onClick={doRedirect}>
               Connect to {app.name}
             </Button>
@@ -382,13 +410,16 @@ export const ConnectFlow = ({
               </p>
             )}
             {hasApiKeyAlternate && (
-              <button
-                type="button"
-                onClick={() => setMode("apikey")}
-                className="w-full text-center text-xs text-muted-foreground underline decoration-muted-foreground/40 underline-offset-2 transition-colors hover:text-foreground hover:decoration-foreground/60"
-              >
-                Use an API key instead
-              </button>
+              <>
+                <OrDivider label="or" />
+                <Button
+                  variant="outline"
+                  className="w-full"
+                  onClick={() => setMode("apikey")}
+                >
+                  Use an API key instead
+                </Button>
+              </>
             )}
           </div>
         )}

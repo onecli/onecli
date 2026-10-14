@@ -54,6 +54,7 @@ export const jira: AppDefinition = {
   },
   configurable: {
     fields: atlassianConfigFields,
+    group: "atlassian",
     envDefaults: atlassianEnvDefaults,
   },
 };

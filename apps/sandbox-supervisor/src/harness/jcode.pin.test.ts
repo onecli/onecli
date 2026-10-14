@@ -23,10 +23,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const sdk = vi.hoisted(() => ({
   bundled: undefined as string | undefined,
+  /** How often the SDK's bundled lookup ran: a pinned boot must never ask. */
+  bundledLookups: 0,
 }));
 
 vi.mock("@1jehuang/jcode-sdk", () => ({
-  bundledJcodeBinary: () => sdk.bundled,
+  bundledJcodeBinary: () => {
+    sdk.bundledLookups += 1;
+    return sdk.bundled;
+  },
   JcodeClient: class {},
   launchInstance: () => Promise.reject(new Error("not launched in this suite")),
 }));
@@ -47,6 +52,7 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "jcode-home-"));
   outside = mkdtempSync(join(tmpdir(), "jcode-outside-"));
   sdk.bundled = undefined;
+  sdk.bundledLookups = 0;
   delete process.env.ONECLI_JCODE_BINARY;
 });
 
@@ -65,6 +71,11 @@ describe("resolveJcodeBinary", () => {
     sdk.bundled = bundled;
 
     expect(resolveJcodeBinary()).toBe(pinned);
+    // The image installs the SDK's platform package and deletes its binary
+    // (docker/agent.Dockerfile), so the SDK's lookup is never consulted
+    // under a pin: a boot on the vendored runtime cannot be steered by
+    // whatever the npm package happens to ship.
+    expect(sdk.bundledLookups).toBe(0);
   });
 
   it("a pin pointing at a missing file is a LOUD boot failure, never a fallback", () => {

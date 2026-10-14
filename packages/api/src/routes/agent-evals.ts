@@ -16,12 +16,25 @@ import {
   AUDIT_SOURCE,
   recordAuditEvent,
 } from "../services/audit-service";
-import { EVAL_QUESTIONS_MAX, evalQuestionSchema } from "../validations/evals";
+import {
+  EVAL_QUESTIONS_MAX,
+  evalQuestionSchema,
+  evalScheduleSchema,
+} from "../validations/evals";
+import {
+  deleteEvalSchedule,
+  getEvalSchedule,
+  runEvalScheduleNow,
+  saveEvalSchedule,
+} from "../services/eval-schedule-service";
 
 /**
  * The agent's EVALS surface, composed onto /agents like memories and crons:
  *
- *   GET    /agents/:agentId/evals                       questions + run history
+ *   GET    /agents/:agentId/evals                       questions + run history + schedule
+ *   PUT    /agents/:agentId/evals/schedule              create or replace the schedule
+ *   DELETE /agents/:agentId/evals/schedule              remove the schedule
+ *   POST   /agents/:agentId/evals/schedule/run          fire the schedule now (202)
  *   POST   /agents/:agentId/evals/questions             add a question
  *   PUT    /agents/:agentId/evals/questions/:questionId edit an active question
  *   DELETE /agents/:agentId/evals/questions/:questionId archive a question
@@ -55,11 +68,86 @@ export const agentEvalRoutes = () => {
   app.get("/:agentId/evals", async (c) => {
     const workspaceId = requireWorkspaceId(c.get("auth"));
     const agentId = c.req.param("agentId");
-    const [questions, runs] = await Promise.all([
+    const [questions, runs, schedule] = await Promise.all([
       listQuestions(workspaceId, agentId),
       listRuns(workspaceId, agentId),
+      getEvalSchedule(workspaceId, agentId),
     ]);
-    return c.json({ questions, runs, maxQuestions: EVAL_QUESTIONS_MAX });
+    return c.json({
+      questions,
+      runs,
+      schedule,
+      maxQuestions: EVAL_QUESTIONS_MAX,
+    });
+  });
+
+  // The eval schedule: one per agent, so a singular sub-resource.
+  app.put("/:agentId/evals/schedule", async (c) => {
+    const a = c.get("auth");
+    const workspaceId = requireWorkspaceId(a);
+    const agentId = c.req.param("agentId");
+    const body = evalScheduleSchema.safeParse(await parseBody(c.req.raw));
+    if (!body.success)
+      throw new ServiceError(
+        "UNPROCESSABLE",
+        body.error.issues[0]?.message ?? "Invalid eval schedule",
+      );
+    const schedule = await saveEvalSchedule(
+      workspaceId,
+      agentId,
+      a.userId,
+      body.data,
+    );
+    await recordAuditEvent({
+      workspaceId,
+      userId: a.userId,
+      userEmail: a.userEmail,
+      action: AUDIT_ACTIONS.UPDATE,
+      service: AUDIT_SERVICES.EVAL,
+      source: AUDIT_SOURCE.API,
+      metadata: {
+        agentId,
+        schedule: body.data.schedule,
+        timezone: body.data.timezone,
+        enabled: body.data.enabled,
+      },
+    });
+    return c.json(schedule);
+  });
+
+  app.delete("/:agentId/evals/schedule", async (c) => {
+    const a = c.get("auth");
+    const workspaceId = requireWorkspaceId(a);
+    const agentId = c.req.param("agentId");
+    await deleteEvalSchedule(workspaceId, agentId);
+    await recordAuditEvent({
+      workspaceId,
+      userId: a.userId,
+      userEmail: a.userEmail,
+      action: AUDIT_ACTIONS.DELETE,
+      service: AUDIT_SERVICES.EVAL,
+      source: AUDIT_SOURCE.API,
+      metadata: { agentId, schedule: null },
+    });
+    return c.body(null, 204);
+  });
+
+  // Fire on the next poll, through the same path a timed fire takes.
+  app.post("/:agentId/evals/schedule/run", async (c) => {
+    const a = c.get("auth");
+    const workspaceId = requireWorkspaceId(a);
+    const agentId = c.req.param("agentId");
+    const schedule = await runEvalScheduleNow(workspaceId, agentId);
+    await recordAuditEvent({
+      workspaceId,
+      userId: a.userId,
+      userEmail: a.userEmail,
+      action: AUDIT_ACTIONS.RUN,
+      service: AUDIT_SERVICES.EVAL,
+      source: AUDIT_SOURCE.API,
+      metadata: { agentId, via: "schedule" },
+    });
+    return c.json(schedule, 202);
   });
 
   app.post("/:agentId/evals/questions", async (c) => {

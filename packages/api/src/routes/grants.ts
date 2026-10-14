@@ -11,7 +11,7 @@ import {
 } from "../services/audit-service";
 import {
   connectionGrantSchema,
-  type ConnectionGrantInput,
+  type ConnectionGrantRequest,
 } from "../validations/grants";
 import {
   getAgentGrants,
@@ -59,7 +59,7 @@ const parseGrantBody = async (c: { req: { json: () => Promise<unknown> } }) => {
 /** Audit marker for the grant's resources tri-state — never the values
  * themselves (repo/folder names stay out of the audit log). */
 const resourcesAudit = (
-  input: ConnectionGrantInput,
+  input: ConnectionGrantRequest,
 ): "preserved" | "cleared" | "set" =>
   input.resources === undefined
     ? "preserved"

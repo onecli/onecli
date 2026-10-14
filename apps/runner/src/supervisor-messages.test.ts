@@ -108,6 +108,44 @@ describe("supervisor message handler", () => {
     expect(flushed).toEqual([]);
   });
 
+  it("flushes the follow-ups' replies, then the turn, before reporting the close", () => {
+    // A reply is stored under its FOLLOW-UP's id, so it buffers apart from
+    // the turn. The close is what the channel mirror waits on, so every
+    // reply must be on its way first. MUTATION-PROOF: flushing only the
+    // turn leaves a reply buffered behind the close (posted late, or never).
+    const order: string[] = [];
+    const handle = createSupervisorMessageHandler({
+      report: (event) => order.push(`report:${event.kind}`),
+      collector: {
+        add: () => {},
+        flush: (turnId) => order.push(`flush:${turnId}`),
+      },
+      toolCall: async () => ({ ok: true, result: null }),
+      memoryWrite: async () => ({ ok: true }),
+      uploadAttachment: async () => ({ ok: true, attachmentId: "att-1" }),
+      sendToSandbox: () => true,
+      containerRefOf: () => "cont-default",
+    });
+
+    handle("sb-1", {
+      kind: "turn.result",
+      turnId: "t1",
+      conversationId: "cv-1",
+      status: "done",
+      followUps: [
+        { turnId: "f1", outcome: "joined" },
+        { turnId: "f2", outcome: "missed" },
+      ],
+    });
+
+    expect(order).toEqual([
+      "flush:f1",
+      "flush:f2",
+      "flush:t1",
+      "report:turn.finished",
+    ]);
+  });
+
   it("attributes every message to the AUTHENTICATED sandbox", () => {
     // A supervisor may only ever speak for itself: the id comes from the
     // channel, never from a body it chose.

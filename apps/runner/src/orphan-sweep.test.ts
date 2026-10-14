@@ -45,6 +45,7 @@ const baseConfig: RunnerConfig = {
   orphanGraceSeconds: 3600,
   sandboxManagerUrl: null,
   sandboxManagerToken: null,
+  sessionKey: null,
   cloudParkWaitSeconds: 120,
   cloudWakeWaitSeconds: 900,
   cloudImageWaitSeconds: 240,
@@ -103,13 +104,18 @@ beforeEach(() => {
 
   wsServer = {
     issueToken: () => "boot-token",
+    resumable: true,
     revokeToken: () => {},
     awaitingConnection: () => false,
+    disconnectedAt: () => undefined,
+    forgetSession: () => {},
+    containerKnown: () => {},
     connection: ():
       | { sandboxId: string; send(item: WorkItem): void }
       | undefined => undefined,
     listen: async () => {},
     close: async () => {},
+    crash: async () => {},
   };
 });
 

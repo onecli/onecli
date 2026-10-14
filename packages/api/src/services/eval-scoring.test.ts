@@ -129,3 +129,46 @@ describe("scoreEval", () => {
     },
   );
 });
+
+describe("scoreEval for a custom check", () => {
+  const custom = { expected: "criteria", kind: "custom" as const };
+  const done = { answer: "anything", error: null, appsUsed: [] };
+
+  it.each([
+    [true, "passed"],
+    [false, "mismatch"],
+    [null, "inconclusive"],
+    [undefined, "inconclusive"],
+  ] as const)("judged %s is %s", (judged, outcome) => {
+    expect(
+      scoreEval({ ...custom, expectedApps: [] }, { ...done, judged }),
+    ).toEqual({ outcome, missingApps: null });
+  });
+
+  it("fails on a missing app even when the judge could not decide", () => {
+    expect(
+      scoreEval(
+        { ...custom, expectedApps: ["example-app"] },
+        { ...done, judged: null },
+      ),
+    ).toEqual({ outcome: "mismatch", missingApps: ["example-app"] });
+  });
+
+  it("is inconclusive when the judge passed it but app evidence is unknown", () => {
+    expect(
+      scoreEval(
+        { ...custom, expectedApps: ["example-app"] },
+        { ...done, appsUsed: null, judged: true },
+      ),
+    ).toEqual({ outcome: "inconclusive", missingApps: null });
+  });
+
+  it("is an error for an unfinished turn whatever the judge says", () => {
+    expect(
+      scoreEval(
+        { ...custom, expectedApps: [] },
+        { ...done, error: "Failed", judged: true },
+      ),
+    ).toEqual({ outcome: "error", missingApps: null });
+  });
+});

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useTheme } from "next-themes";
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
 import {
@@ -15,10 +16,16 @@ import { useAuth } from "@/providers/auth-provider";
 import { BrandLogo } from "@/lib/components/brand-logo";
 import { GoogleIcon } from "@/lib/components/google-icon";
 import { apiFetch } from "@/lib/api-fetch";
+import { TURNSTILE_SITE_KEY } from "@/lib/env";
 import {
   lookupSsoProvider,
   isPlausibleEmail,
 } from "@/ee/auth/sso-lookup-client";
+import {
+  SIGNUP_VERIFICATION_ACTION,
+  isSignupVerificationError,
+} from "@/ee/auth/signup-verification";
+import { useTurnstile } from "@/ee/auth/use-turnstile";
 
 type Step = "providers" | "verification";
 type OtpKind = "sign_up" | "sign_in";
@@ -49,6 +56,25 @@ export const LoginContent = () => {
   const [verifying, setVerifying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [resendTimer, setResendTimer] = useState(0);
+  // The signup half of "Continue with email" was refused by human
+  // verification. Shown neutrally on the code screen: the sign-in fallback
+  // still ran, so an existing account's code is on its way regardless.
+  const [signupUnverified, setSignupUnverified] = useState(false);
+
+  const { resolvedTheme } = useTheme();
+  const {
+    containerRef: humanCheckRef,
+    getToken: getVerificationToken,
+    consume: consumeVerificationToken,
+    needsInteraction: humanCheckNeedsInteraction,
+  } = useTurnstile({
+    siteKey: TURNSTILE_SITE_KEY,
+    action: SIGNUP_VERIFICATION_ACTION,
+    theme:
+      resolvedTheme === "dark" || resolvedTheme === "light"
+        ? resolvedTheme
+        : "auto",
+  });
 
   const hasEmailAuth = !!signUpWithEmail;
   const isEmailValid = isPlausibleEmail(email);
@@ -152,6 +178,7 @@ export const LoginContent = () => {
   const handleEmailContinue = useCallback(async () => {
     if (!email || !signUpWithEmail || !signInWithEmail) return;
     setError(null);
+    setSignupUnverified(false);
     setSendingCode(true);
 
     try {
@@ -182,12 +209,25 @@ export const LoginContent = () => {
         }
       }
 
+      // Human verification for the signup attempt: the token is usually
+      // ready (the widget solved on page load); a visitor Cloudflare wants
+      // to challenge sees a checkbox in the form until they complete it.
+      // Missing is not fatal here: the server decides, and existing users
+      // still sign in below.
+      const verificationToken = await getVerificationToken();
+
       try {
-        const result = await signUpWithEmail(email);
+        const result = await signUpWithEmail(email, verificationToken);
         if (result === "CONFIRM_SIGN_UP") {
           setOtpKind("sign_up");
         }
-      } catch {
+      } catch (signUpError) {
+        // Human verification runs before Cognito checks whether the email
+        // is taken, so a refusal says nothing about the account: fall back
+        // to sign-in exactly as for any other signUp failure.
+        if (isSignupVerificationError(signUpError)) {
+          setSignupUnverified(true);
+        }
         // signUp failed — user likely already exists.
         // Always try signIn as fallback (PreventUserExistenceErrors
         // hides the real error, so we can't check the message).
@@ -199,6 +239,9 @@ export const LoginContent = () => {
         } catch {
           // Both failed — silently proceed to verification step
         }
+      } finally {
+        // Single-use: never offer the same token to a second request.
+        consumeVerificationToken();
       }
 
       // Always move to verification step — never reveal if the email
@@ -212,7 +255,14 @@ export const LoginContent = () => {
     } finally {
       setSendingCode(false);
     }
-  }, [email, signUpWithEmail, signInWithEmail, signInWithSso]);
+  }, [
+    email,
+    signUpWithEmail,
+    signInWithEmail,
+    signInWithSso,
+    getVerificationToken,
+    consumeVerificationToken,
+  ]);
 
   // Verify the OTP code
   const handleVerify = useCallback(async () => {
@@ -255,6 +305,7 @@ export const LoginContent = () => {
     setStep("providers");
     setCode("");
     setError(null);
+    setSignupUnverified(false);
   }, []);
 
   // ── Render ──
@@ -338,14 +389,24 @@ export const LoginContent = () => {
                   }}
                   className="space-y-3"
                 >
-                  <Input
-                    type="email"
-                    placeholder="name@example.com"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    autoComplete="email"
-                    disabled={sendingCode}
-                  />
+                  <div>
+                    <Input
+                      type="email"
+                      placeholder="name@example.com"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      autoComplete="email"
+                      disabled={sendingCode}
+                    />
+                    {/* Human verification. Invisible unless Cloudflare asks
+                        this visitor to complete a challenge. */}
+                    <div
+                      ref={humanCheckRef}
+                      className={
+                        humanCheckNeedsInteraction ? "mt-3" : undefined
+                      }
+                    />
+                  </div>
                   <Button
                     size="lg"
                     type="submit"
@@ -355,9 +416,11 @@ export const LoginContent = () => {
                   >
                     {redirectingSso
                       ? "Redirecting to SSO..."
-                      : sendingCode
-                        ? "Sending code..."
-                        : "Continue with email"}
+                      : sendingCode && humanCheckNeedsInteraction
+                        ? "Complete the check above..."
+                        : sendingCode
+                          ? "Sending code..."
+                          : "Continue with email"}
                   </Button>
                 </form>
               </>
@@ -406,6 +469,18 @@ export const LoginContent = () => {
               <span className="text-foreground font-medium">{email}</span> to
               finish signing up.
             </p>
+
+            {signupUnverified && (
+              <p
+                role="status"
+                aria-live="polite"
+                className="text-muted-foreground rounded-md border border-border px-3 py-2 text-center text-xs"
+              >
+                Signing up for the first time? We couldn&apos;t verify this
+                sign-up, so no account was created. Try again, use a different
+                email address, or continue with Google.
+              </p>
+            )}
 
             <div className="grid w-full items-center gap-2.5">
               <InputOTP

@@ -6,6 +6,7 @@ import {
   hostPatternSchema,
   injectionConfigSchema,
   isAnthropicAdminKey,
+  isAnthropicRefreshToken,
   isOpenaiAdminKey,
   isPathInjection,
   isPathRegexInjection,
@@ -175,12 +176,21 @@ const body = (n: number) => "x".repeat(n);
 describe("Anthropic credential kinds", () => {
   it.each([
     ["a Console API key", `sk-ant-api03-${body(90)}`, "api-key"],
+    // An identity-backed personal key: an API key (x-api-key), never OAuth.
+    [
+      "a Console personal key (sk-ant-usr)",
+      `sk-ant-usr-${body(90)}`,
+      "api-key",
+    ],
+    // An unknown future Console prefix must keep working as an API key.
+    ["an unknown sk-ant- prefix", `sk-ant-sa01-${body(90)}`, "api-key"],
     [
       "a claude setup-token subscription token",
       `sk-ant-oat01-${body(90)}`,
       "oauth",
     ],
     ["an Admin API key", `sk-ant-admin01-${body(90)}`, null],
+    ["an OAuth refresh token", `sk-ant-ort01-${body(90)}`, null],
     ["an OpenAI key", `sk-proj-${body(90)}`, null],
   ] as const)("classifies %s", (_name, value, mode) => {
     expect(detectAnthropicAuthMode(value)).toBe(mode);
@@ -191,6 +201,11 @@ describe("Anthropic credential kinds", () => {
     const admin = `sk-ant-admin01-${body(90)}`;
     expect(isAnthropicAdminKey(admin)).toBe(true);
     expect(looksLikeAnthropicKey(admin)).toBe(false);
+  });
+
+  it("flags an OAuth refresh token: it only mints access tokens, so it is never a usable key", () => {
+    expect(isAnthropicRefreshToken(`sk-ant-ort01-${body(90)}`)).toBe(true);
+    expect(isAnthropicRefreshToken(`sk-ant-oat01-${body(90)}`)).toBe(false);
   });
 
   it.each([

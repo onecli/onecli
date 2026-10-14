@@ -11,10 +11,18 @@ import {
 } from "@onecli/ui/components/collapsible";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@onecli/ui/components/select";
 import { SecretInput } from "@/components/secret-input";
 import { SetupGuideLink } from "@/lib/components/setup-guide-link";
 import { apiFetch } from "@/lib/api-fetch";
 import { ConnectLayout } from "./connect-layout";
+import { OrDivider } from "./or-divider";
 
 interface FileImportConfig {
   label: string;
@@ -32,7 +40,24 @@ interface CredentialsFlowField {
   group?: string;
   helpUrl?: string;
   helpLabel?: string;
+  /** Fixed choices: rendered as a dropdown instead of a text input. */
+  options?: { value: string; label: string }[];
+  /** Pre-selected option value. */
+  defaultValue?: string;
 }
+
+/** Starting values: every option field begins on its default, so a field the
+ * user never touches is still submitted (and counts as filled). */
+const initialValues = (
+  fields: CredentialsFlowField[],
+): Record<string, string> =>
+  Object.fromEntries(
+    fields.flatMap((f) =>
+      f.options && f.defaultValue !== undefined
+        ? [[f.name, f.defaultValue]]
+        : [],
+    ),
+  );
 
 export interface CredentialsFlowProps {
   app: {
@@ -73,7 +98,9 @@ export const CredentialsFlow = ({
   method,
   onBack,
 }: CredentialsFlowProps) => {
-  const [values, setValues] = useState<Record<string, string>>({});
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    initialValues(fields),
+  );
   const [connectionLabel, setConnectionLabel] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -119,7 +146,7 @@ export const CredentialsFlow = ({
           }
         }
 
-        setValues(mapped);
+        setValues({ ...initialValues(fields), ...mapped });
       } catch {
         onError("Invalid JSON file");
       }
@@ -130,7 +157,7 @@ export const CredentialsFlow = ({
 
   const switchGroup = (group: string) => {
     setActiveGroup(group);
-    setValues({});
+    setValues(initialValues(fields));
   };
 
   const hasInput = visibleFields.every((f) => !!values[f.name]?.trim());
@@ -213,13 +240,7 @@ export const CredentialsFlow = ({
                 {fileImport.label}
               </Button>
             </div>
-            <div className="flex items-center gap-3">
-              <div className="bg-border h-px flex-1" />
-              <span className="text-muted-foreground/60 text-[10px] uppercase tracking-widest">
-                or fill manually
-              </span>
-              <div className="bg-border h-px flex-1" />
-            </div>
+            <OrDivider label="or fill manually" />
           </>
         )}
         {visibleFields.map((field, i) => (
@@ -346,8 +367,25 @@ const FieldInput = ({
         )}
       </p>
     )}
-    {field.secret === true ||
-    (field.secret === undefined && connectionType === "api_key") ? (
+    {field.options ? (
+      <Select value={value || undefined} onValueChange={onChange}>
+        <SelectTrigger
+          id={`connect-${field.name}`}
+          className="w-full text-sm"
+          autoFocus={autoFocus}
+        >
+          <SelectValue placeholder={field.placeholder} />
+        </SelectTrigger>
+        <SelectContent>
+          {field.options.map((option) => (
+            <SelectItem key={option.value} value={option.value}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    ) : field.secret === true ||
+      (field.secret === undefined && connectionType === "api_key") ? (
       <SecretInput
         id={`connect-${field.name}`}
         value={value}

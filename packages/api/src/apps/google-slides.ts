@@ -54,5 +54,6 @@ export const googleSlides: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
   },
 };

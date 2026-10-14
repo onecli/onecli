@@ -152,6 +152,15 @@ export const clamp = (event: AgentEvent): AgentEvent => {
       // A control-plane row id, not sandbox prose — but bounded anyway: the
       // supervisor relays what a harness adapter handed it.
       return { ...event, followUpId: clean(event.followUpId) };
+    case "message.sent_now":
+      // The moved tool's name is the harness's report, shown to the person:
+      // bounded like any tool name on this wire.
+      return {
+        ...event,
+        ...(event.toolName !== undefined && {
+          toolName: clean(event.toolName),
+        }),
+      };
     case "turn.started":
     case "turn.done":
       // No strings to bound; `usage` is numbers.
@@ -250,6 +259,15 @@ export const createTurnEventCollector = ({
     }
   };
 
+  /** Flush every OTHER turn of a conversation, in buffering order. */
+  const flushConversation = (conversationId: string, except: string): void => {
+    for (const [turnId, buffered] of [...buffers]) {
+      if (turnId !== except && buffered.conversationId === conversationId) {
+        flush(turnId);
+      }
+    }
+  };
+
   return {
     add(sandboxId, conversationId, turnId, event) {
       const buffered = buffers.get(turnId) ?? {
@@ -261,8 +279,14 @@ export const createTurnEventCollector = ({
       buffers.set(turnId, buffered);
 
       // A turn's last event must not wait on a timer — the reader is watching
-      // for exactly this to know the answer is complete.
+      // for exactly this to know the answer is complete. Everything the
+      // same conversation still holds goes first: a mid-run follow-up's
+      // reply streams under ITS OWN id (its deltas, then the durable `text`
+      // the supervisor hands over), buffered apart from the turn it rode,
+      // and a reply handed over a moment before the close would otherwise
+      // commit after the marker that says the turn ended.
       if (isTerminalEvent(event)) {
+        flushConversation(conversationId, turnId);
         flush(turnId);
         return;
       }

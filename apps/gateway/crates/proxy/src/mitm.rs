@@ -314,6 +314,11 @@ pub struct ResolvedRules {
     /// two apps on one host stay distinguishable in the activity feed. Same
     /// attribution law as `winning_connection_id`.
     pub winning_provider: Option<String>,
+    /// The `githubOrgAccess` record of the winning connection (as of the
+    /// connect cache), set only when it is the GitHub OAuth connection (see
+    /// `github_org_access::record_for`). Advisory: it lets the hot path skip a
+    /// write the database would also have skipped.
+    pub github_org_access: Option<serde_json::Value>,
     /// Cloud-only: spend budgets governing the effective credential for this host
     /// (0/1 in practice).
     pub budget_bindings: Vec<ee::budget::BudgetBinding>,
@@ -570,6 +575,10 @@ async fn resolve_rules(
             finalizer,
             body_transform,
             session_policy,
+            github_org_access: crate::github_org_access::record_for(
+                &resp.app_connections,
+                winning_connection_id.as_deref(),
+            ),
             winning_connection_id,
             winning_provider,
             budget_bindings: resp.budget_bindings,

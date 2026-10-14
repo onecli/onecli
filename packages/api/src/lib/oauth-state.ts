@@ -1,5 +1,10 @@
 import { createHmac, randomBytes, timingSafeEqual } from "crypto";
-import { IS_CLOUD, OAUTH_STATE_SECRET, SECRET_ENCRYPTION_KEY } from "./env";
+import {
+  IS_CLOUD,
+  NODE_ENV,
+  OAUTH_STATE_SECRET,
+  SECRET_ENCRYPTION_KEY,
+} from "./env";
 
 export interface OAuthStatePayload {
   workspaceId?: string;
@@ -59,3 +64,18 @@ export const verifyOAuthState = (raw: string): OAuthStatePayload | null => {
 };
 
 export const generateNonce = (): string => randomBytes(16).toString("hex");
+
+/** Cookie carrying this browser's OAuth state on the callback path. */
+export const OAUTH_STATE_COOKIE = "oauth_state";
+
+/**
+ * Options for {@link OAUTH_STATE_COOKIE}, scoped to the exact callback path.
+ * `Lax` so the provider's top-level redirect back still carries it.
+ */
+export const oauthStateCookieOptions = (path: string) => ({
+  httpOnly: true,
+  secure: NODE_ENV === "production",
+  sameSite: "Lax" as const,
+  path,
+  maxAge: 600,
+});

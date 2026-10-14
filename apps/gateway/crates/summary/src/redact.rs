@@ -6,12 +6,16 @@
 //! - the raw request view masks the body text as sent ([`mask_secrets`]),
 //!   which may be cut mid-value by the gateway's peek, so it scans text
 //!   instead of parsing.
+//!
+//! The gateway's log lines start from the same list ([`is_sensitive_key`])
+//! when they mask a request URL's query.
 
 use serde_json::Value;
 
 /// Whether a JSON / form key names a secret (`password`, `client_secret`,
 /// `api_key`, …).
-pub(crate) fn is_sensitive_key(k: &str) -> bool {
+#[must_use]
+pub fn is_sensitive_key(k: &str) -> bool {
     let k = k.to_ascii_lowercase();
     [
         "authorization",

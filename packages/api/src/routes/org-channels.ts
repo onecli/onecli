@@ -8,10 +8,12 @@ import {
   connectIntegration,
   disconnectIntegration,
   getIntegrationView,
+  listOrgChannelAgents,
   listUserLinks,
   removeUserLink,
 } from "../services/channels/channel-integration-service";
 import { adapterLiveness } from "../services/channels/channel-adapter-service";
+import { completeAgentInstallFromCode } from "../services/channels/agent-channel-service";
 import {
   channelProvider,
   CHANNEL_PROVIDERS,
@@ -25,7 +27,7 @@ import {
   addUserLinkSchema,
   connectIntegrationSchema,
   finishInstallSchema,
-  inspectInstallSchema,
+  installCodeSchema,
 } from "../validations/channels";
 import {
   AUDIT_ACTIONS,
@@ -105,6 +107,17 @@ export const orgChannelRoutes = () => {
     return c.json({ integrations, userLinks, adapter, sharedApp });
   });
 
+  // GET /org/channels/:provider/agents - every hosted agent in the org,
+  // grouped by workspace, with where it stands in this provider, plus the
+  // transport a fresh add would use: the Channels page's one-click "Add to
+  // Slack" list. Admin-only like the rest of this surface (an admin sees
+  // every workspace in the org).
+  app.get("/:provider/agents", async (c) => {
+    const { organizationId } = c.get("auth");
+    const provider = parseProvider(c.req.param("provider"));
+    return c.json(await listOrgChannelAgents({ organizationId, provider }));
+  });
+
   // POST /org/channels/:provider/shared-install — mint the "Add to Slack"
   // consent URL for the deployment's shared app. Side-effect free; the
   // install lands (possibly days later, behind Slack admin approval) on the
@@ -129,6 +142,58 @@ export const orgChannelRoutes = () => {
     return c.json(result);
   });
 
+  // POST /org/channels/:provider/agent-install: the stateless arm for an
+  // AGENT's own app. An install begun in Slack (the admin-approval message,
+  // the app directory, "Install to Workspace") carries no state naming the
+  // agent. Offer the code to this org's waiting agent apps and finish the one
+  // the provider accepts it for. Tried BEFORE the shared-app inspect below:
+  // a miss leaves the code spendable, while the inspect spends it.
+  // `agent: null` means no agent app took it; the page then tries the
+  // shared-app finish when `sharedAppConfigured`, and shows guidance
+  // otherwise.
+  app.post("/:provider/agent-install", async (c) => {
+    const a = c.get("auth");
+    const provider = parseProvider(c.req.param("provider"));
+    const body = installCodeSchema.safeParse(await parseBody(c.req.raw));
+    if (!body.success) {
+      throw new ServiceError(
+        "UNPROCESSABLE",
+        "This install link is not valid.",
+      );
+    }
+    const completed = await completeAgentInstallFromCode({
+      organizationId: a.organizationId,
+      actorUserId: a.userId,
+      provider,
+      code: body.data.code,
+    });
+    if (completed) {
+      await recordAuditEvent({
+        workspaceId: completed.workspaceId,
+        userId: a.userId,
+        userEmail: a.userEmail,
+        action: AUDIT_ACTIONS.UPDATE,
+        service: AUDIT_SERVICES.CHANNEL,
+        source: AUDIT_SOURCE.API,
+        metadata: {
+          provider,
+          agentId: completed.agentId,
+          presenceId: completed.presenceId,
+          completed: true,
+          finishedFromProvider: true,
+        },
+      });
+    }
+    return c.json({
+      agent: completed && {
+        id: completed.agentId,
+        workspaceId: completed.workspaceId,
+      },
+      sharedAppConfigured:
+        channelProvider(provider).sharedApp?.configured() ?? false,
+    });
+  });
+
   // POST /org/channels/:provider/finish-install — spend a code parked by a
   // MARKETPLACE install (one begun in Slack's directory, where no OneCLI
   // session existed to sign a state into). The org is this caller's, so the
@@ -139,7 +204,7 @@ export const orgChannelRoutes = () => {
   app.post("/:provider/finish-install/inspect", async (c) => {
     const a = c.get("auth");
     const sharedApp = requireSharedApp(c.req.param("provider"));
-    const body = inspectInstallSchema.safeParse(await parseBody(c.req.raw));
+    const body = installCodeSchema.safeParse(await parseBody(c.req.raw));
     if (!body.success) {
       throw new ServiceError(
         "UNPROCESSABLE",

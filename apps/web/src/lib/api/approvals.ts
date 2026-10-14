@@ -3,6 +3,7 @@
 // base URL + auth) rather than the typed JSON API, so they use
 // getGatewayApiUrl() + getGatewayFetchOptions() (edition-aware: Cognito Bearer +
 // X-Workspace-Id in cloud, cookie credentials in OSS).
+import type { CellOp } from "@onecli/api/lib/record-change";
 import { getGatewayApiUrl } from "@/hooks/use-vault-status";
 import { getGatewayFetchOptions } from "@/lib/gateway-auth";
 
@@ -24,6 +25,52 @@ export interface ApprovalSummary {
   /** The title split around the record it names, for a linked title:
    *  `lead + record` equals `action`. Absent when it names no record. */
   subject?: ApprovalSubject;
+  /** One request that changes a whole list of records (one approval for
+   *  all of them): every record, its new values, and its current ones when
+   *  the gateway could read them. */
+  bulk?: ApprovalBulkChange;
+}
+
+export interface ApprovalBulkChange {
+  object: string;
+  objectLabel: string;
+  fields: ApprovalBulkField[];
+  rows: ApprovalBulkRow[];
+  /** The records' current values were read: `old` and each cell's op are
+   *  meaningful. */
+  oldValuesRead: boolean;
+  /** What the request does to every record (default update). */
+  kind?: "update" | "create" | "delete";
+  /** Fields the request also sets that the table leaves out, as labels. */
+  hiddenFields?: string[];
+  /** Read-only columns that say which record each row is (a contact's
+   *  account and title). Never changed, never counted. */
+  context?: ApprovalBulkField[];
+}
+
+/** A table column: its API name and label. */
+export interface ApprovalBulkField {
+  api: string;
+  label: string;
+}
+
+/** What a change does to one field (shared with Slack's card). */
+export type ApprovalCellOp = CellOp;
+
+export interface ApprovalBulkRow {
+  id: string;
+  name?: string;
+  /** Gateway-built, https only; render through `ApprovalLink`. */
+  url?: string;
+  /** Aligned with `fields`; `null` = this row doesn't set it. */
+  new: (string | null)[];
+  old?: (string | null)[];
+  /** What happens to each field, aligned with `fields`. */
+  ops?: CellOp[];
+  /** The row's strongest op (clear > overwrite > fill > same). */
+  op?: CellOp;
+  /** Value per `context` column, aligned with it. */
+  context?: (string | null)[];
 }
 
 export interface ApprovalSubject {

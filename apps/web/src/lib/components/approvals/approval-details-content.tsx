@@ -47,8 +47,12 @@ export const ApprovalDetailsContent = ({
           {formatCountdown(remaining)}
         </DialogDescription>
       </DialogHeader>
-      {showSummary && details.length > 0 && (
-        <ApprovalPreview kind={approval.summary?.kind} details={details} />
+      {showSummary && (details.length > 0 || approval.summary?.bulk) && (
+        <ApprovalPreview
+          kind={approval.summary?.kind}
+          details={details}
+          bulk={approval.summary?.bulk}
+        />
       )}
       <ApprovalRawRequest approval={approval} />
       <DialogFooter>

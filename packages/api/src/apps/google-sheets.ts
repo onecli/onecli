@@ -54,6 +54,7 @@ export const googleSheets: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
     envDefaults: googleEnvDefaults,
   },
 };

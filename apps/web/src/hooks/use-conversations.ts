@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { conversations } from "@/lib/api";
+import { ApiError } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/keys";
 import type {
   AttachmentMeta,
@@ -220,5 +221,32 @@ export const useAbortTurn = (conversationId: string) => {
       });
     },
     onError: (err) => toast.error(err.message || "Failed to stop"),
+  });
+};
+
+/**
+ * SEND NOW on a waiting mid-run follow-up. The answer comes
+ * back on the stream. A 409 is a state, not a failure: the message was read
+ * or the run ended a moment before the click landed (another tab, a race
+ * with the run itself), so it is said quietly with the server's own words.
+ * Either way the turns list is refreshed, and the bubble catches up with
+ * the row.
+ */
+export const useSendNow = (conversationId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: conversations.sendNow,
+    onError: (err) => {
+      if (err instanceof ApiError && err.status === 409) {
+        toast.info(err.message);
+        return;
+      }
+      toast.error(err.message || "Failed to send now");
+    },
+    onSettled: () => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.conversations.turns(conversationId),
+      });
+    },
   });
 };

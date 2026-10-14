@@ -593,6 +593,33 @@ export const requestSandboxRespawn = async (
 };
 
 /**
+ * Respawn every live sandbox in a workspace: the workspace-scoped twin of
+ * `requestSandboxRespawn`, for a setting that is baked into every container's
+ * environment at create (the workspace timezone) rather than one agent's.
+ * Only sandboxes that are up are touched; a parked or never-started one picks
+ * the new value up on its next start anyway. Each respawn flips its sandbox
+ * to `unprovisioned`, which the runner's start arm claims unconditionally on
+ * its next poll; the wake below makes that poll now.
+ */
+export const requestWorkspaceSandboxRespawn = async (
+  workspaceId: string,
+): Promise<void> => {
+  const live = await db.sandbox.findMany({
+    where: { agent: { workspaceId }, status: { in: ["starting", "running"] } },
+    select: { agentId: true },
+  });
+  for (const { agentId } of live) {
+    await requestSandboxRespawn(agentId, workspaceId);
+  }
+  if (live.length === 0) return;
+  signalWork();
+  log.info(
+    { workspaceId, count: live.length },
+    "respawning a workspace's live sandboxes for a settings change",
+  );
+};
+
+/**
  * Restart an agent from scratch (the person's "Restart agent"): every one of
  * its conversations forgets its harness session, whatever is in flight ends,
  * and a running sandbox is stopped NOW, so the next message cold-starts a

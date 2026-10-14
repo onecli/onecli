@@ -160,6 +160,15 @@ user **with access to the agent's workspace** get answers — everyone else gets
 a polite refusal before anything reaches the agent. Accounts are matched by
 verified email automatically; explicit links live on the org's Channels page.
 
+**Workspaces that require admin approval:** the **Allow** click becomes a
+request, and the agent waits as not finished. Once the Slack admin approves,
+finish either way: click **Resume setup** on the agent's Slack page, or
+install from Slack's side (the approval message's install link, or **Install
+to Workspace** in the app's settings). An install from Slack's side lands on
+`/slack/installed`: sign in as an org admin and OneCLI offers the install to
+your organization's waiting agent apps and finishes the one Slack issued it
+for (falling back to the shared-app confirmation above when none match).
+
 When a message is accepted you'll see an emoji reaction land on it — the
 "seen" mark, picked to fit what you wrote. The full answer arrives as one
 message when the agent finishes, and the reaction comes off. (No partial or

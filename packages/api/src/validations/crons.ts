@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TIMEZONE_MAX_LENGTH } from "./timezone";
 
 /**
  * Zod surfaces for the agent-cron routes and the schedule_task MCP tool
@@ -28,13 +29,14 @@ export type CronOutcome = (typeof CRON_OUTCOMES)[number];
 export const CRON_NAME_MAX_LENGTH = 100;
 export const CRON_PROMPT_MAX_LENGTH = 10_000;
 export const CRON_SCHEDULE_MAX_LENGTH = 100;
-export const CRON_TIMEZONE_MAX_LENGTH = 100;
 
 const cronFields = {
   name: z.string().trim().min(1).max(CRON_NAME_MAX_LENGTH),
   prompt: z.string().trim().min(1).max(CRON_PROMPT_MAX_LENGTH),
   schedule: z.string().trim().min(1).max(CRON_SCHEDULE_MAX_LENGTH),
-  timezone: z.string().trim().min(1).max(CRON_TIMEZONE_MAX_LENGTH),
+  // Shape only here; the service resolves the zone and answers 422 with the
+  // reason, which the dashboard and the MCP tool both surface verbatim.
+  timezone: z.string().trim().min(1).max(TIMEZONE_MAX_LENGTH),
 };
 
 /** POST /v1/agents/:agentId/crons */

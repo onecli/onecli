@@ -20,6 +20,36 @@ export const useOrgChannels = () =>
     staleTime: 0,
   });
 
+/** Every hosted agent in the org, by workspace, with its Slack state: the
+ * Channels page's one-click list. Mounted only once the workspace is
+ * connected (the section gates it), so no `enabled` flag. */
+export const useOrgChannelAgents = (provider: ChannelProvider) =>
+  useQuery({
+    queryKey: queryKeys.channels.orgAgents(provider),
+    queryFn: () => channels.orgAgents(provider),
+    // The install finishes in Slack's popup; refetch on return to the tab.
+    staleTime: 0,
+  });
+
+/** One-click "Add to Slack" from the org page: the agent's guided create,
+ * scoped to the agent's own workspace. Headless; the row owns the popup. */
+export const useAttachAgentFromOrg = (provider: ChannelProvider) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      workspaceId,
+      agentId,
+    }: {
+      workspaceId: string;
+      agentId: string;
+    }) => channels.attachInWorkspace(workspaceId, agentId, provider),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
+      qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
+    },
+  });
+};
+
 /** Connect or refresh the org automation credential (Slack: the
  * app-configuration refresh token — validated server-side by rotating it). */
 export const useConnectChannelIntegration = () => {
@@ -105,6 +135,30 @@ export const useInspectSharedInstall = () =>
         input.organizationId,
       ),
   });
+
+/** Finish an agent's own app install that began in Slack. A match spends the
+ * single-use code (a miss leaves it for the shared-app inspect), so the
+ * caller fires it once. */
+export const useFinishAgentInstall = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: {
+      provider: ChannelProvider;
+      code: string;
+      organizationId: string;
+    }) =>
+      channels.finishAgentInstall(
+        input.provider,
+        input.code,
+        input.organizationId,
+      ),
+    onSuccess: (result) => {
+      if (result.agent) {
+        qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
+      }
+    },
+  });
+};
 
 /** Bind an inspected workspace claim to the named org. */
 export const useFinishSharedInstall = () => {

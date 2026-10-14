@@ -12,6 +12,12 @@ describe("connectionGrantSchema", () => {
     });
   });
 
+  it("accepts the default attach, stripping anything customized on it", () => {
+    expect(
+      connectionGrantSchema.parse({ access: "default", allow: ["x"] }),
+    ).toEqual({ access: "default" });
+  });
+
   it("accepts a custom tri-state with disjoint sets", () => {
     expect(
       connectionGrantSchema.parse({

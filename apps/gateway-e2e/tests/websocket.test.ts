@@ -41,6 +41,24 @@ const WS_HOST = "ws.example.invalid:443";
 const WS_PATH = "/ws/v1/stream";
 
 describe("websocket policy", () => {
+  scenario("refuses an upgrade that carries a method override", async (cx) => {
+    // An upgrade is judged as GET; an override would let the app run
+    // something else. Refused before any rule is consulted (no rules seeded,
+    // so a 403 here can only be the override refusal).
+    await cx.seed({});
+    const gw = await cx.startGateway();
+
+    const res = await websocketUpgrade(gw.origin, {
+      authority: WS_HOST,
+      path: `${WS_PATH}?_HttpMethod=DELETE`,
+      token: cx.ids.agentToken,
+      caPath: gw.caPath,
+    });
+
+    expect(res.status).toBe(403);
+    expect(res.json()).toMatchObject({ error: "method_override_refused" });
+  });
+
   scenario("refuses an upgrade blocked by a rule", async (cx) => {
     await cx.seed({
       rules: [

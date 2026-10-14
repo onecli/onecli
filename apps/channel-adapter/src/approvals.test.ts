@@ -9,7 +9,12 @@ import {
   fetchPendingApprovals,
   type PendingApproval,
 } from "./approvals";
-import { approvalCardBlocks, slackApprovalCardUi } from "./slack/approval-card";
+import {
+  approvalCardBlocks,
+  bulkCsv,
+  bulkCsvName,
+  slackApprovalCardUi,
+} from "./slack/approval-card";
 import { botTokenOf } from "./slack/credentials";
 import { unpackThreadAddress } from "@onecli/channels/slack";
 import {
@@ -286,6 +291,482 @@ describe("fetchPendingApprovals", () => {
   });
 });
 
+describe("the bulk approval card", () => {
+  type Op = "same" | "fill" | "overwrite" | "clear";
+  const row = (i: number, old: string, next: string, op: Op) => ({
+    id: `003AA00000AbCd${String(i).padStart(4, "0")}`,
+    name: `Contact ${i}`,
+    url: `https://acme.my.salesforce.com/003AA00000AbCd${String(i).padStart(4, "0")}`,
+    new: [next],
+    old: [old],
+    ops: [op],
+    op,
+  });
+  type Bulk = NonNullable<NonNullable<PendingApproval["summary"]>["bulk"]>;
+  const bulkOf = (rows: ReturnType<typeof row>[]): Bulk => ({
+    objectLabel: "Contact",
+    fields: [{ api: "MailingCountry", label: "Mailing country" }],
+    rows,
+    oldValuesRead: true,
+  });
+  const bulkApproval = (
+    rows: ReturnType<typeof row>[],
+    label?: string,
+  ): PendingApproval => ({
+    id: "app-bulk",
+    method: "PATCH",
+    host: "acme.my.salesforce.com",
+    path: "/services/data/v60.0/composite/sobjects",
+    summary: { action: "Update Contacts", details: [], bulk: bulkOf(rows) },
+    agent: { id: "ag1", name: "Bot" },
+    ...(label && { batch: { id: "b1", label, total: 1 } }),
+  });
+  const rows = [
+    row(1, "Israel", "", "clear"),
+    row(2, "Canada", "Germany", "overwrite"),
+    ...Array.from({ length: 42 }, (_, i) => row(i + 3, "", "Canada", "fill")),
+    row(45, "Canada", "Canada", "same"),
+    row(46, "Canada", "Canada", "same"),
+  ];
+  type Block = {
+    type: string;
+    text?: { text: string };
+    elements?: { text?: string | { text: string } }[];
+  };
+
+  it("is short: the counts by kind, each with its dot, Approve all, and one way to OneCLI", () => {
+    const blocks = approvalCardBlocks(
+      bulkApproval(rows),
+      "https://app.example/a/1",
+    ) as Block[];
+    expect(blocks.map((b) => b.type)).toEqual([
+      "header",
+      "section",
+      "context",
+      "actions",
+    ]);
+    const text = JSON.stringify(blocks);
+    expect(text).toContain(
+      "🔴 Clears *1* · 🔵 Updates *1* · 🟢 Fills *42* · ⚪ No change *2*",
+    );
+    expect(text).toContain("One approval covers all 46");
+    // One way to the table: the View table button, not a second link.
+    expect(text).not.toContain("|See all");
+    const actions = blocks.find((b) => b.type === "actions")!;
+    expect(
+      actions.elements!.map((e) => (e.text as { text: string }).text),
+    ).toEqual(["Approve all 46", "Deny", "View table"]);
+  });
+
+  it("says which part of a split list it is (once) and how many follow", () => {
+    const text = JSON.stringify(
+      approvalCardBlocks(bulkApproval(rows, "Set mailing country (2 of 5)")),
+    );
+    expect(text).toContain("Update 46 Contacts (part 2 of 5)");
+    expect(text).toContain("This approves these 46 only. 3 more cards follow.");
+    expect(text.match(/part 2 of 5/g)).toHaveLength(1);
+    const lastPart = JSON.stringify(
+      approvalCardBlocks(bulkApproval(rows, "Set mailing country (5 of 5)")),
+    );
+    expect(lastPart).toContain("This approves these 46 only.");
+    expect(lastPart).not.toContain("follow");
+  });
+
+  it("lists every record in the CSV, each value marked with what happens to it", () => {
+    const lines = bulkCsv(bulkOf(rows)).trimEnd().split("\n");
+    expect(lines).toHaveLength(47);
+    expect(lines[0]).toBe('"Contact","Mailing country"');
+    expect(lines[1]).toBe('"Contact 1","🔴 Israel → empty"');
+    expect(lines[2]).toBe('"Contact 2","🔵 Canada → Germany"');
+    expect(lines[3]).toBe('"Contact 3","🟢 Canada"');
+    expect(lines[46]).toBe('"Contact 46","⚪ Canada"');
+    expect(bulkCsvName(bulkOf(rows))).toBe("46-contact-changes.csv");
+  });
+
+  it("puts who each record is (account, title) right after its name in the CSV, values inert", () => {
+    // MUTATION-TESTED: without the context columns the CSV has only the
+    // name and the change, the reviewer can't tell which Dana it is.
+    const base = bulkOf([row(1, "Israel", "Canada", "overwrite")]);
+    const lines = bulkCsv({
+      ...base,
+      context: [
+        { api: "Account.Name", label: "Account" },
+        { api: "Title", label: "Title" },
+      ],
+      rows: base.rows.map((r) => ({ ...r, context: ["=Acme", null] })),
+    })
+      .trimEnd()
+      .split("\n");
+    expect(lines[0]).toBe('"Contact","Account","Title","Mailing country"');
+    expect(lines[1]).toBe('"Contact 1","\'=Acme","","🔵 Israel → Canada"');
+  });
+
+  it("never lets a value act as a spreadsheet formula or break a row", () => {
+    const csv = bulkCsv(
+      bulkOf([
+        { ...row(1, "", '=HYPERLINK("x")', "fill"), name: "@evil\nname" },
+      ]),
+    );
+    // The name and every value stay inert in a spreadsheet: a value marked
+    // with its dot can't start a formula, and a bare name is quoted.
+    expect(csv).toContain(`"'@evil name","🟢 =HYPERLINK(""x"")"`);
+    expect(csv.trimEnd().split("\n")).toHaveLength(2);
+    const plain = bulkCsv({
+      ...bulkOf([{ ...row(1, "", "=1+1", "fill"), name: "Ana" }]),
+      oldValuesRead: false,
+    });
+    expect(plain).toContain(`"Ana","'=1+1"`);
+  });
+
+  it("a bulk delete says Delete in words, its CSV the values that go", () => {
+    const del: PendingApproval = {
+      ...bulkApproval([]),
+      summary: {
+        action: "Delete 2 Contacts",
+        details: [],
+        bulk: {
+          kind: "delete",
+          objectLabel: "Contact",
+          fields: [
+            { api: "Title", label: "Title" },
+            { api: "Email", label: "Email" },
+          ],
+          rows: [
+            {
+              id: "003AA00000AbCd0001",
+              name: "Contact 1",
+              new: [],
+              old: ["CTO", "a@example.com"],
+              ops: ["clear", "clear"],
+              op: "clear",
+            },
+            {
+              id: "003AA00000AbCd0002",
+              name: "Contact 2",
+              new: [],
+              old: [null, null],
+              ops: ["clear", "clear"],
+              op: "clear",
+            },
+          ],
+          oldValuesRead: true,
+        },
+      },
+    };
+    const text = JSON.stringify(approvalCardBlocks(del));
+    expect(text).toContain("Approval needed · Delete 2 Contacts");
+    expect(text).toContain("🔴 Deletes *2*");
+    expect(text).toContain("Delete all 2");
+    const lines = bulkCsv(del.summary!.bulk!).trimEnd().split("\n");
+    expect(lines[0]).toBe('"Contact","Title","Email"');
+    // A deleted record is marked on its name; its values are what goes.
+    expect(lines[1]).toBe('"🔴 Contact 1","CTO","a@example.com"');
+    expect(lines[2]).toBe('"🔴 Contact 2","",""');
+  });
+
+  it("a bulk create says Create in words, its CSV each new record's values", () => {
+    const create: PendingApproval = {
+      ...bulkApproval([]),
+      summary: {
+        action: "Create 2 Contacts",
+        details: [],
+        bulk: {
+          kind: "create",
+          objectLabel: "Contact",
+          fields: [
+            { api: "LastName", label: "Last name" },
+            { api: "Title", label: "Title" },
+          ],
+          rows: [
+            {
+              id: "1",
+              name: "Reyes",
+              new: ["Reyes", "CTO"],
+              ops: ["fill", "fill"],
+              op: "fill",
+            },
+            {
+              id: "2",
+              new: ["Okafor", null],
+              ops: ["fill", "untouched"],
+              op: "fill",
+            },
+          ],
+          oldValuesRead: false,
+        },
+      },
+    };
+    const text = JSON.stringify(approvalCardBlocks(create));
+    expect(text).toContain("Approval needed · Create 2 Contacts");
+    expect(text).toContain("🟢 Creates *2*");
+    expect(text).toContain("Approve all 2");
+    const lines = bulkCsv(create.summary!.bulk!).trimEnd().split("\n");
+    expect(lines[1]).toBe('"🟢 Reyes","Reyes","CTO"');
+    expect(lines[2]).toBe('"🟢 New contact 2","Okafor",""');
+  });
+
+  type Cell = {
+    type: string;
+    text?: string;
+    elements?: { elements: { text: string; style?: object }[] }[];
+  };
+  const cellText = (c: Cell) => c.text ?? c.elements![0]!.elements[0]!.text;
+  const cellStyle = (c: Cell) => c.elements?.[0]?.elements[0]?.style;
+  const tableOf = (blocks: unknown[]) =>
+    (blocks as { type: string; rows?: Cell[][] }[]).find(
+      (b) => b.type === "table",
+    )!.rows!;
+
+  it("one record updated: a Field | Now | New table, each field with its change's dot", () => {
+    const one: PendingApproval = {
+      ...bulkApproval([]),
+      summary: {
+        action: "Update Contact Marcus Delgado",
+        details: [],
+        bulk: {
+          kind: "update",
+          objectLabel: "Contact",
+          fields: [
+            { api: "Title", label: "Title" },
+            { api: "Fax", label: "Fax" },
+            { api: "AssistantName", label: "Assistant name" },
+            { api: "Department", label: "Department" },
+          ],
+          rows: [
+            {
+              id: "003AA00000AbCd0001",
+              name: "Marcus Delgado",
+              new: ["VP of Procurement", "(617) 555-0100", "", "Ops"],
+              old: ["Director of Procurement", null, "Leo Park", "Ops"],
+              ops: ["overwrite", "fill", "clear", "same"],
+              op: "clear",
+            },
+          ],
+          oldValuesRead: true,
+        },
+      },
+    };
+    const blocks = approvalCardBlocks(one);
+    expect(JSON.stringify(blocks)).toContain("*Contact:* Marcus Delgado");
+    const [head, title, fax, assistant, dept] = tableOf(blocks);
+    expect(head!.map(cellText)).toEqual(["Field", "Now", "New"]);
+    // Overwrite: the old value struck through, the new one bold.
+    expect(title!.map(cellText)).toEqual([
+      "🔵 Title",
+      "Director of Procurement",
+      "VP of Procurement",
+    ]);
+    expect(cellStyle(title![1]!)).toEqual({ strike: true });
+    expect(cellStyle(title![2]!)).toEqual({ bold: true });
+    // Fill: nothing there now, said in words.
+    expect(fax!.map(cellText)).toEqual(["🟢 Fax", "empty", "(617) 555-0100"]);
+    // Clear and no change: said in words too, not by the dot alone.
+    expect(assistant!.map(cellText)).toEqual([
+      "🔴 Assistant name",
+      "Leo Park",
+      "cleared",
+    ]);
+    expect(dept!.map(cellText)).toEqual(["⚪ Department", "Ops", "no change"]);
+    expect(JSON.stringify(blocks)).toContain('"Approve"');
+  });
+
+  it("one record created or deleted: named by the header and button, its values in a table", () => {
+    const make = (kind: "create" | "delete"): PendingApproval => ({
+      ...bulkApproval([]),
+      summary: {
+        action: kind === "create" ? "Create Contact" : "Delete Contact",
+        details: [],
+        bulk: {
+          kind,
+          objectLabel: "Contact",
+          fields: [{ api: "Title", label: "Title" }],
+          rows: [
+            {
+              id: kind === "create" ? "1" : "003AA00000AbCd0001",
+              name: "Ava Demo01",
+              new: kind === "create" ? ["CTO"] : [],
+              old: kind === "delete" ? ["CTO"] : undefined,
+              ops: kind === "create" ? ["fill"] : ["clear"],
+              op: kind === "create" ? "fill" : "clear",
+            },
+          ],
+          oldValuesRead: kind === "delete",
+        },
+      },
+    });
+    const created = approvalCardBlocks(make("create"));
+    expect(JSON.stringify(created)).toContain("*New contact:* Ava Demo01");
+    expect(tableOf(created)[1]!.map(cellText)).toEqual(["Title", "CTO"]);
+    const deleted = approvalCardBlocks(make("delete"));
+    expect(JSON.stringify(deleted)).toContain("*Deletes contact:* Ava Demo01");
+    expect(tableOf(deleted)[1]!.map(cellText)).toEqual(["Title", "CTO"]);
+    expect(JSON.stringify(deleted)).toContain('"Delete"');
+  });
+
+  it("without the table block, one record falls back to the classic detail rows", () => {
+    const one: PendingApproval = {
+      ...bulkApproval([]),
+      summary: {
+        action: "Update Contact Ava",
+        details: [{ label: "Title", value: "CTO" }],
+        bulk: {
+          objectLabel: "Contact",
+          fields: [{ api: "Title", label: "Title" }],
+          rows: [{ id: "003AA00000AbCd0001", new: ["CTO"] }],
+          oldValuesRead: false,
+        },
+      },
+    };
+    const blocks = approvalCardBlocks(one, undefined, false);
+    expect(JSON.stringify(blocks)).not.toContain('"table"');
+    expect(JSON.stringify(blocks)).toContain("*Title:* CTO");
+  });
+
+  it("offers View table, a link to OneCLI's colored table (Slack's phone app shows a CSV as text)", () => {
+    const blocks = approvalCardBlocks(
+      bulkApproval(rows),
+      "https://app.example/a/1",
+    ) as {
+      type: string;
+      elements?: { text?: { text: string }; url?: string; value?: string }[];
+    }[];
+    const buttons = blocks.find((b) => b.type === "actions")!.elements!;
+    const view = buttons.find((e) => e.text?.text === "View table")!;
+    expect(view.url).toBe("https://app.example/a/1");
+    expect(view.value).toBeUndefined();
+    // No review URL configured: no dead button.
+    const bare = approvalCardBlocks(bulkApproval(rows)) as typeof blocks;
+    expect(JSON.stringify(bare)).not.toContain("View table");
+  });
+
+  it("names the fields the table leaves out", () => {
+    const a = bulkApproval(rows);
+    a.summary!.bulk!.hiddenFields = ["Fax", "Other city"];
+    const text = JSON.stringify(approvalCardBlocks(a));
+    expect(text).toContain(
+      "The table shows 1 of 3 fields. Also set, not shown: Fax, Other city.",
+    );
+    expect(
+      JSON.stringify(approvalCardBlocks(bulkApproval(rows))),
+    ).not.toContain("not shown");
+  });
+
+  it("a settled card (expired too) is one line: its CSV table is dropped", async () => {
+    await slackApprovalCardUi.settle({
+      credential: "xoxb-1",
+      channel: "D1",
+      ts: "1700.0001",
+      title: "Update 20 Contacts",
+      text: "Expired (no response) · denied",
+    } as never);
+    const form = slack.callsTo("chat.update")[0]!.form;
+    expect(form.file_ids).toBe("[]");
+    expect(JSON.parse(form.blocks!)).toHaveLength(1);
+  });
+
+  const post = (approval: PendingApproval) =>
+    slackApprovalCardUi.post({
+      credential: "xoxb-1",
+      channel: "D1",
+      approval,
+      reviewUrl: "https://app.example/a/1",
+    } as never);
+
+  /** Every message Slack shows for these calls: each post, plus each upload
+   *  completed INTO a channel (Slack posts a share message for it). */
+  const messagesPosted = () =>
+    slack.callsTo("chat.postMessage").length +
+    slack
+      .callsTo("files.completeUploadExternal")
+      .filter((c) => "channel_id" in c.form).length;
+
+  it("posts the card and its CSV as ONE message, the file shared with it", async () => {
+    // MUTATION-TESTED: attaching the CSV afterwards (chat.update file_ids)
+    // was accepted by Slack but never shown on the message (measured live);
+    // only a file shared WITH its message shows.
+    const ref = await post(bulkApproval(rows));
+    expect(messagesPosted()).toBe(1);
+    expect(slack.callsTo("chat.postMessage")).toHaveLength(0);
+    const share = slack.callsTo("files.completeUploadExternal")[0]!.form;
+    expect(share.channel_id).toBe("D1");
+    // The card's blocks ride the share itself.
+    expect(JSON.stringify(JSON.parse(share.blocks!))).toContain(
+      "Approve all 46",
+    );
+    // Its ts is the share's message, read back from the file.
+    expect(ref).toEqual({ channel: "D1", ts: expect.any(String) });
+    expect(slack.callsTo("chat.update")).toHaveLength(0);
+  });
+
+  it("a refused upload still posts exactly one card, without the CSV", async () => {
+    slack.respond("files.getUploadURLExternal", () => ({
+      ok: false,
+      error: "missing_scope",
+    }));
+    await post(bulkApproval(rows));
+    expect(messagesPosted()).toBe(1);
+    expect(slack.callsTo("chat.postMessage")).toHaveLength(1);
+  });
+
+  it("an install without files:read gets one card, never a duplicate", async () => {
+    // The share posted the card but its ts can't be read back: posting
+    // again would put a second card with live buttons in the channel.
+    // MUTATION-TESTED: treat this like a refused upload and a second card
+    // posts.
+    slack.respond("files.info", () => ({ ok: false, error: "missing_scope" }));
+    await expect(post(bulkApproval(rows))).rejects.toThrow(
+      "could not be read back",
+    );
+    expect(messagesPosted()).toBe(1);
+    expect(slack.callsTo("chat.postMessage")).toHaveLength(0);
+  });
+
+  it("a Slack that refuses the table block gets the card as detail rows", async () => {
+    let tries = 0;
+    slack.respond("chat.postMessage", (form) => {
+      tries += 1;
+      return form.blocks?.includes('"table"')
+        ? { ok: false, error: "invalid_blocks" }
+        : { ok: true, channel: "D1", ts: "1700.0100" };
+    });
+    const one: PendingApproval = {
+      ...bulkApproval([]),
+      summary: {
+        action: "Update Contact Ava",
+        details: [{ label: "Title", value: "CTO" }],
+        bulk: {
+          objectLabel: "Contact",
+          fields: [{ api: "Title", label: "Title" }],
+          rows: [{ id: "003AA00000AbCd0001", new: ["CTO"] }],
+          oldValuesRead: false,
+        },
+      },
+    };
+    await expect(post(one)).resolves.toEqual({
+      channel: "D1",
+      ts: "1700.0100",
+    });
+    expect(tries).toBe(2);
+  });
+
+  it("claims no current values it could not read", () => {
+    const csv = bulkCsv({ ...bulkOf(rows), oldValuesRead: false });
+    expect(csv).not.toMatch(/[🔴🔵🟢⚪]|→/u);
+    expect(
+      JSON.stringify(
+        approvalCardBlocks({
+          ...bulkApproval(rows),
+          summary: {
+            action: "Update Contacts",
+            details: [],
+            bulk: { ...bulkOf(rows), oldValuesRead: false },
+          },
+        }),
+      ),
+    ).toContain("Current values couldn't be read");
+  });
+});
+
 describe("the approval card", () => {
   const approval: PendingApproval = {
     id: "app-7",
@@ -364,9 +845,49 @@ describe("the approval card", () => {
     expect(rendered).toContain("POST api.example.com/v1/emails");
   });
 
-  it("says undecided-means-denied when there is no expiry", () => {
-    const rendered = JSON.stringify(approvalCardBlocks(approval));
-    expect(rendered).toContain("Undecided means denied.");
+  it("names the record the action is about without its id, still linked", () => {
+    // MUTATION-TESTED: the row read "Contact: Dana Reyes (003QO…)", the id
+    // noise on a one-record card.
+    const rendered = JSON.stringify(
+      approvalCardBlocks({
+        ...approval,
+        summary: {
+          action: "Update Contact Dana Reyes",
+          subject: { verb: "Update Contact", record: "Dana Reyes", row: 0 },
+          details: [
+            {
+              label: "Contact",
+              value: "Dana Reyes (003QO00000AbCdEfGh)",
+              url: "https://example.my.salesforce.com/003QO00000AbCdEfGh",
+            },
+            { label: "Title", value: "VP Sales" },
+          ],
+        },
+      }),
+    );
+    expect(rendered).toContain(
+      "*Contact:* <https://example.my.salesforce.com/003QO00000AbCdEfGh|Dana Reyes>",
+    );
+    expect(rendered).not.toContain("Dana Reyes (003QO00000AbCdEfGh)");
+  });
+
+  it("ends with one calm line: who asked, the host without its port, and when it expires", () => {
+    // MUTATION-TESTED: the old footer was a robot emoji, the host in a red
+    // code span with ":443", and "Undecided means denied." It read as an alarm.
+    const rendered = JSON.stringify(
+      approvalCardBlocks({
+        ...approval,
+        agent: { id: "ag1", name: "Sales bot" },
+        host: "acme.my.salesforce.com:443",
+        expiresAt: "2026-10-09T21:45:00.000Z",
+      }),
+    );
+    expect(rendered).toContain(
+      "Requested by *Sales bot* · acme.my.salesforce.com · expires <!date^",
+    );
+    expect(rendered).not.toContain(":443");
+    expect(rendered).not.toContain("robot_face");
+    expect(rendered).not.toContain("Undecided means denied");
   });
 
   it("clamps an oversized detail value (and the header action) with a trailing ellipsis", () => {
@@ -464,6 +985,10 @@ describe("posting a card", () => {
     const card = slack.callsTo("chat.postMessage")[0]!;
     expect(card.token).toBe("xoxb-bot");
     expect(card.form.channel).toBe("D100");
+    // MUTATION-TESTED: no link previews under an approval card (a linked
+    // Salesforce record would get the Salesforce app's own preview).
+    expect(card.form.unfurl_app_links).toBe("false");
+    expect(card.form.unfurl_links).toBe("false");
     // No avatar on this presence — no icon_url key on the card either.
     expect("icon_url" in card.form).toBe(false);
     const blocks = cardBlocksSchema.parse(JSON.parse(card.form.blocks!));
@@ -1383,6 +1908,193 @@ describe("grouped approval cards", () => {
     return JSON.stringify(JSON.parse(update.form.blocks!));
   };
 
+  it("a bulk request never joins a task card: each keeps its table and CSV", async () => {
+    // Two "Update 2 Contacts" requests used to merge into one task card
+    // (same agent, app and action), which flattened each to a line
+    // ("Title → QA Lead · 1 record") and dropped both CSVs.
+    const bulkOf = (id: string, title: string) => ({
+      id,
+      method: "PATCH",
+      host: "acme.my.salesforce.com",
+      path: "/services/data/v62.0/composite/sobjects",
+      app: "salesforce",
+      summary: {
+        action: "Update 2 Contacts",
+        details: [],
+        bulk: {
+          objectLabel: "Contact",
+          fields: [{ api: "Title", label: "Title" }],
+          rows: ["Ada", "Grace"].map((name, i) => ({
+            id: `003${i}`,
+            name,
+            new: [title],
+            old: ["Old"],
+            ops: ["overwrite"],
+          })),
+          oldValuesRead: true,
+        },
+      },
+      agent: { id: "ag1", name: "Deploy Agent" },
+    });
+    gateway.script.push({
+      status: 200,
+      body: { requests: [bulkOf("ap-1", "CTO")] },
+    });
+    // The second arrives while the first card is open, like live.
+    gateway.script.push({
+      status: 200,
+      body: { requests: [bulkOf("ap-1", "CTO"), bulkOf("ap-2", "CEO")] },
+    });
+    groupedManager(createFakeControlPlane()).reconcile([presence()]);
+    // Each bulk card ships as its own CSV share carrying its own blocks
+    // (the card IS that message); joined, the second would be a row on the
+    // first card's task view with no CSV.
+    await waitReal(
+      () => slack.callsTo("files.completeUploadExternal").length >= 2,
+      "a card + CSV per request",
+    );
+    for (const share of slack.callsTo("files.completeUploadExternal")) {
+      expect(share.form.blocks).toContain(
+        "Approval needed · Update 2 Contacts",
+      );
+    }
+    expect(slack.callsTo("chat.update")).toEqual([]);
+  });
+
+  it("a one-record request never joins a bulk card either: it posts its own", async () => {
+    // MUTATION-TESTED: without the open-card guard, the single request
+    // joins the bulk card (same agent, app and action) and turns its table
+    // into a task view with no CSV.
+    const update = (id: string, rows: string[]) => ({
+      id,
+      method: "PATCH",
+      host: "acme.my.salesforce.com",
+      app: "salesforce",
+      summary: {
+        action: "Update Contacts",
+        details: [],
+        bulk: {
+          objectLabel: "Contact",
+          fields: [{ api: "Title", label: "Title" }],
+          rows: rows.map((name, i) => ({
+            id: `003${id}${i}`,
+            name,
+            new: ["CTO"],
+          })),
+        },
+      },
+      agent: { id: "ag1", name: "Deploy Agent" },
+    });
+    gateway.script.push({
+      status: 200,
+      body: { requests: [update("ap-1", ["Ada", "Grace"])] },
+    });
+    gateway.script.push({
+      status: 200,
+      body: {
+        requests: [update("ap-1", ["Ada", "Grace"]), update("ap-2", ["Lin"])],
+      },
+    });
+    groupedManager(createFakeControlPlane()).reconcile([presence()]);
+    await waitReal(
+      () => slack.callsTo("chat.postMessage").length >= 1,
+      "the one-record request's own card",
+    );
+    expect(slack.callsTo("files.completeUploadExternal")).toHaveLength(1);
+    expect(slack.callsTo("chat.update")).toEqual([]);
+  });
+
+  it("counts each expired row once, even when expiry sweeps overlap", async () => {
+    // MUTATION-TESTED: without the once-per-id done list, a sweep that
+    // starts while the last one is still settling (a large batch's ledger
+    // writes can outlast the 5s interval) adds the same rows again and
+    // over-counts the expired total.
+    const past = new Date(Date.now() - 1_000).toISOString();
+    const recorded: string[] = [];
+    const controlPlane = createFakeControlPlane({
+      recordPromptMessage: async (approvalId) => {
+        recorded.push(approvalId);
+      },
+      listUnsettledPrompts: ledgerPending("ap-1", "ap-2", "ap-3"),
+      settlePrompt: () => new Promise((r) => setTimeout(r, 30)),
+    });
+    gateway.script.push({
+      status: 200,
+      body: {
+        requests: ["Ada", "Grace", "Linus"].map((name, i) =>
+          contact(`ap-${i + 1}`, name, { expiresAt: past }),
+        ),
+      },
+    });
+    const manager = groupedManager(controlPlane);
+    manager.reconcile([presence()]);
+    await waitReal(() => recorded.length === 3, "card posted and recorded");
+
+    await Promise.all([manager.sweepExpired(), manager.sweepExpired()]);
+    await waitReal(
+      () => lastBlocks().includes("expired"),
+      "card rewritten as expired",
+    );
+    expect(lastBlocks()).toContain("3 requests");
+    expect(lastBlocks()).toContain("3 expired");
+    expect(lastBlocks()).not.toContain("6 ");
+  });
+
+  it("holds a tagged batch until it is all here, then posts ONE card with every row", async () => {
+    // MUTATION-TESTED: post on the first row and the reviewer sees a
+    // "1 of 3" card grow (or a single card turn into a batch).
+    const now = new Date().toISOString();
+    const row = (id: string, name: string) =>
+      contact(id, name, { createdAt: now });
+    gateway.script.push({
+      status: 200,
+      body: { requests: [row("ap-1", "Ada")] },
+    });
+    gateway.script.push({
+      status: 200,
+      body: {
+        requests: [
+          row("ap-1", "Ada"),
+          row("ap-2", "Grace"),
+          row("ap-3", "Linus"),
+        ],
+      },
+    });
+    // Inside the batch-settle window: still arriving, never posted early.
+    groupedManager(createFakeControlPlane()).reconcile([presence()]);
+    await waitReal(
+      () => slack.callsTo("chat.postMessage").length >= 1,
+      "card posted once complete",
+    );
+    const posts = slack.callsTo("chat.postMessage");
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.form.blocks!).not.toContain("1 of 3 here");
+  });
+
+  it("never counts another agent's request toward a batch, even with the same batch id", async () => {
+    // MUTATION-TESTED: match siblings on the batch id alone (the agent's
+    // claim) and another agent's request counts as arrived, so a 3-request
+    // batch with 2 of its own rows posts early as if complete.
+    const now = new Date().toISOString();
+    gateway.script.push({
+      status: 200,
+      body: {
+        requests: [
+          contact("ap-1", "Ada", { createdAt: now }),
+          contact("ap-2", "Grace", { createdAt: now }),
+          contact("ap-9", "Mallory", {
+            createdAt: now,
+            agent: { id: "ag-other", name: "Other" },
+          }),
+        ],
+      },
+    });
+    groupedManager(createFakeControlPlane()).reconcile([presence()]);
+    // 2 of its 3 are here and the batch is fresh: nothing posts yet.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(slack.callsTo("chat.postMessage")).toHaveLength(0);
+  });
+
   it("posts ONE message for a task's burst, every ledger row sharing its ref", async () => {
     const recorded: [string, string][] = [];
     const controlPlane = createFakeControlPlane({
@@ -1781,6 +2493,208 @@ describe("grouped approval cards", () => {
     const blocks = lastBlocks();
     expect(blocks).toContain('"value":"ap-1,ap-2"');
     expect(blocks).toContain("1 decided");
+  });
+});
+
+describe("grouped Slack card: a record per row", () => {
+  /** "Update Contact <name>": the record's row first, then the change. */
+  const update = (id: string, name: string, title = "After") =>
+    contact(id, name, {
+      method: "PATCH",
+      summary: {
+        action: `Update Contact ${name}`,
+        subject: { verb: "Update Contact", record: name, row: 0 },
+        details: [
+          {
+            label: "Contact",
+            value: `${name} (003QO00000Upd0pxAA)`,
+            url: `https://example.my.salesforce.com/${id}`,
+          },
+          { label: "Title", value: title },
+        ],
+      },
+    }) as PendingApproval;
+
+  const rowTexts = (blocks: unknown[]): string[] =>
+    (blocks as { type: string; text?: { text: string }; accessory?: unknown }[])
+      .filter((b) => b.type === "section" && b.accessory)
+      .map((b) => b.text!.text);
+
+  const plain = (row: string) => row.replace(/<[^|>]+\|([^>]+)>/g, "$1");
+
+  it("an update row leads with its record and names the field it changes", async () => {
+    // MUTATION-TESTED: the old row text read "Batch Test04 (003…) · After".
+    // Different changes, so each request gets its own row.
+    const { groupCardBlocks } = await import("./slack/approval-card");
+    const rows = rowTexts(
+      groupCardBlocks({
+        live: [
+          update("ap-1", "Batch Test04", "After"),
+          update("ap-2", "Batch Test05", "Before"),
+        ],
+        settled: [],
+      }),
+    ).map(plain);
+    expect(rows).toEqual([
+      "Batch Test04 · Title: After",
+      "Batch Test05 · Title: Before",
+    ]);
+  });
+
+  it("two records with the same name show their ids, so no two rows look alike", async () => {
+    // MUTATION-TESTED: lead with the bare name and both rows read
+    // "Alex Kim · Title: …", which can't be told apart.
+    const { groupCardBlocks } = await import("./slack/approval-card");
+    const twin = (id: string, recordId: string, title: string) =>
+      contact(id, "Alex Kim", {
+        method: "PATCH",
+        summary: {
+          action: "Update Contact Alex Kim",
+          subject: { verb: "Update Contact", record: "Alex Kim", row: 0 },
+          details: [
+            { label: "Contact", value: `Alex Kim (${recordId})` },
+            { label: "Title", value: title },
+          ],
+        },
+      }) as PendingApproval;
+    const rows = rowTexts(
+      groupCardBlocks({
+        live: [
+          twin("ap-1", "003QO00000AbCdEfGh", "A"),
+          twin("ap-2", "003QO00000QrStUvWx", "B"),
+        ],
+        settled: [],
+      }),
+    );
+    expect(rows).toEqual([
+      "Alex Kim (003QO00000AbCdEfGh) · Title: A",
+      "Alex Kim (003QO00000QrStUvWx) · Title: B",
+    ]);
+  });
+
+  it("shows a uniform batch as the change it makes, every record linked, no per-row list", async () => {
+    // MUTATION-TESTED: list the rows too and the card is the long wall of
+    // near-identical requests the summary replaces.
+    const { groupCardBlocks } = await import("./slack/approval-card");
+    const blocks = groupCardBlocks({
+      live: [
+        update("ap-1", "Batch Test01"),
+        update("ap-2", "Batch Test02"),
+        update("ap-3", "Batch Test03"),
+      ],
+      settled: [],
+      reviewUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+    const text = JSON.stringify(blocks);
+    expect(text).toContain("*Title → After* · 3 contacts");
+    expect(text).toContain(
+      "<https://example.my.salesforce.com/ap-1|Batch Test01>, <https://example.my.salesforce.com/ap-2|Batch Test02>",
+    );
+    expect(rowTexts(blocks)).toHaveLength(0);
+    expect(text).toContain(
+      "<https://app.example.com/w/ws1/agents/ag1/chat|review each request in OneCLI>",
+    );
+    // Approve all covers every summarized record.
+    expect(text).toContain('"value":"ap-1,ap-2,ap-3"');
+  });
+
+  it("links the review page on the batch card's FIRST post, not only on a re-render", async () => {
+    // The first post used to render the batch without its review link,
+    // which only appeared once something else changed the card.
+    const batch = { id: "b1", label: "Set Title", total: 3 };
+    const live = [
+      { ...update("ap-1", "Batch Test01"), batch },
+      { ...update("ap-2", "Batch Test02"), batch },
+      { ...update("ap-3", "Batch Test03"), batch },
+    ];
+    await slackApprovalCardUi.post({
+      credential: "xoxb-1",
+      channel: "D1",
+      approval: live[0]!,
+      batch: live,
+      reviewUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    } as never);
+    expect(slack.callsTo("chat.postMessage")[0]!.form.blocks).toContain(
+      "<https://app.example.com/w/ws1/agents/ag1/chat|review each request in OneCLI>",
+    );
+  });
+
+  it("lists rows by record name in natural order, like the web card", async () => {
+    // MUTATION-TESTED: arrival order lists 10 before 02.
+    const { groupCardBlocks } = await import("./slack/approval-card");
+    const rows = rowTexts(
+      groupCardBlocks({
+        live: [
+          update("ap-1", "Batch Test10", "A"),
+          update("ap-2", "Batch Test02", "B"),
+          update("ap-3", "Batch Test9", "C"),
+        ],
+        settled: [],
+      }),
+    );
+    expect(rows.map((r) => plain(r).split(" · ")[0])).toEqual([
+      "Batch Test02",
+      "Batch Test9",
+      "Batch Test10",
+    ]);
+  });
+});
+
+describe("grouped Slack card: waits for the whole batch", () => {
+  const t0 = Date.UTC(2026, 9, 1, 10, 0, 0);
+  const tagged = (n: number, total: number) =>
+    Array.from(
+      { length: n },
+      (_, i) =>
+        contact(`ap-${i}`, `Batch Test${String(i + 1).padStart(2, "0")}`, {
+          batch: { id: "t9", label: "Set Title", total },
+          createdAt: new Date(t0 + i * 10).toISOString(),
+        }) as PendingApproval,
+    );
+  const buttons = (blocks: unknown[]): string[] =>
+    (
+      (blocks as { type: string; elements?: { action_id?: string }[] }[]).find(
+        (b) => b.type === "actions",
+      )?.elements ?? []
+    ).map((e) => e.action_id ?? "");
+
+  it("offers no Approve all while a tagged batch is still arriving", async () => {
+    // MUTATION-TESTED: without the hold, Approve all 12 decides part of a
+    // 20-record task the reviewer believes is the whole of it.
+    const { groupCardBlocks } = await import("./slack/approval-card");
+    const blocks = groupCardBlocks({
+      live: tagged(12, 20),
+      settled: [],
+      now: t0 + 1_000,
+    });
+    expect(buttons(blocks)).toEqual(["channel_group_deny"]);
+    expect(JSON.stringify(blocks)).toContain("12 of 20 here, waiting");
+  });
+
+  it("offers Approve all once the whole batch is in", async () => {
+    const { groupCardBlocks } = await import("./slack/approval-card");
+    const blocks = groupCardBlocks({
+      live: tagged(20, 20),
+      settled: [],
+      now: t0 + 1_000,
+    });
+    expect(buttons(blocks)).toEqual([
+      "channel_group_approve",
+      "channel_group_deny",
+    ]);
+    expect(JSON.stringify(blocks)).not.toContain("waiting for the rest");
+  });
+
+  it("offers Approve all once the batch goes quiet, saying what never came", async () => {
+    const { BATCH_SETTLE_MS } = await import("@onecli/api/lib/approval-groups");
+    const { groupCardBlocks } = await import("./slack/approval-card");
+    const blocks = groupCardBlocks({
+      live: tagged(19, 20),
+      settled: [],
+      now: t0 + 190 + BATCH_SETTLE_MS,
+    });
+    expect(buttons(blocks)).toContain("channel_group_approve");
+    expect(JSON.stringify(blocks)).toContain("1 of 20 never arrived");
   });
 });
 

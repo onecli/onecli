@@ -119,7 +119,7 @@ export const getNavItems = (
   // RBAC builds (cloud) and once the runtime entitlement is known either way.
   // App Availability is org administration and lives under Organization
   // Settings (`getSettingsSections`), beside the other org-wide controls.
-  // Global Connections and Global Policy live there too, for the same reason.
+  // Shared Connections and Global Policy live there too, for the same reason.
   // Usage + Billing need billing.
   const adminGroup: NavItem[] = [
     // "Members" (not "Team"/"Users"): for humans OneCLI is the SP — the label
@@ -213,7 +213,7 @@ export const getSettingsSections = (orgId?: string): SettingsNavSection[] => {
           icon: LayoutGrid,
         },
         {
-          title: "Global Connections",
+          title: "Shared Connections",
           url: `${p}/settings/global-connections`,
           icon: Plug,
         },
@@ -231,7 +231,7 @@ export const getSettingsSections = (orgId?: string): SettingsNavSection[] => {
 /**
  * The settings entry the user is ON: the longest item URL that is `pathname`
  * itself or a segment-boundary prefix of it. Exact matching left every page
- * BELOW an entry (a Global Connections tab, an app's page) with no active
+ * BELOW an entry (a Shared Connections tab, an app's page) with no active
  * item, and a bare `startsWith` would let `/settings/policy` claim a sibling
  * like `/settings/policy-x`. One resolver for the desktop pane, the mobile
  * strip and the header breadcrumb, so the three can never disagree.

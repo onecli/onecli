@@ -6,12 +6,15 @@ import {
   JcodeClient,
   launchInstance,
   type ApiEvent,
+  type HistoryMessage,
 } from "@1jehuang/jcode-sdk";
 import {
   TURN_FAILURE_CODES,
   type AgentEffort,
   type AgentEvent,
+  type BackgroundedTool,
   type Harness,
+  type HarnessEvent,
   type HarnessSession,
   type StartSessionOptions,
   type SteerInput,
@@ -25,6 +28,12 @@ import { mergeBackgroundTasks } from "./background-merge";
 import { createJcodeBackgroundTasks } from "./jcode-background";
 import { forwardJcodeStderr, startJcodeLogForwarder } from "./jcode-log";
 import { createJcodeSwarmTasks } from "./jcode-swarm";
+import {
+  createLiveSteerTracker,
+  type LiveSteerTracker,
+  type SteerEvent,
+  type SteerFrame,
+} from "./jcode-steer";
 import { healJcodeTranscripts } from "./jcode-transcript-heal";
 import { createJcodeWakeFeed } from "./jcode-wake";
 
@@ -36,8 +45,8 @@ import { createJcodeWakeFeed } from "./jcode-wake";
  *
  * Every switch below was verified against jcode v0.71.x source and
  * re-verified against v0.78.1 (2026-08-19), v0.81.1 (2026-08-26), v0.90.0
- * (2026-10-01) and v0.90.1 (2026-10-05) at the pin bumps
- * (see plans/hosted-agents-v2.md §3.2/§3.5):
+ * (2026-10-01), v0.90.1 (2026-10-05) and v0.94.0 (2026-10-11) at the pin
+ * bumps:
  * - `inheritLogins: false` — never import host provider logins (zero-cred).
  * - `JCODE_NO_TELEMETRY=1` — telemetry is on by default upstream.
  * - `JCODE_NO_AUTO_UPDATE=1` — the updater is on by default upstream, checks
@@ -103,6 +112,21 @@ import { createJcodeWakeFeed } from "./jcode-wake";
  *   advertised list). See the trap note on managedConfigToml.
  * - `[provider] stream_idle_timeout_secs=300` — invariant 4: must exceed the
  *   gateway's 180 s approval hold (jcode's default is exactly 180).
+ * - `[provider] anthropic_cache_ttl_1h=true`: one-hour prompt caching on the
+ *   Anthropic route. The key (v0.86+) already defaults on; it is stated so a
+ *   default flip cannot shrink the cache to 5 minutes and make a reply after
+ *   a short pause re-process the whole conversation.
+ * - `[compaction] max_context_tokens=200000`: caps the budget compaction
+ *   measures against (a v0.85+ key whose default, 0, means the model's own
+ *   window). Without it a 1M-window model folds nothing until ~800k tokens,
+ *   and every request re-sends the whole transcript. With it, background
+ *   summarization starts at 80% of the cap, keeping the newest messages
+ *   verbatim. A conversation already at 95% when a request goes out is cut
+ *   synchronously instead: older messages leave the model's view with only a
+ *   short note in their place (the stored transcript keeps them, and
+ *   `conversation_search` still reads them). Models whose window is already
+ *   at or under the cap are unaffected, and so is the OpenAI route, which
+ *   compacts on the provider's side.
  * - `[auth] trusted_external_sources` — jcode's consent gate for reading
  *   `CLAUDE_CODE_OAUTH_TOKEN`; pre-trusted because we own this home.
  * - `JCODE_RUNTIME_PROVIDER`: the Anthropic credential ROUTE, pinned at
@@ -322,6 +346,10 @@ check_updates = false
 
 [provider]
 stream_idle_timeout_secs = 300
+anthropic_cache_ttl_1h = true
+
+[compaction]
+max_context_tokens = 200000
 
 [tools]
 mcp_tools = "eager"
@@ -344,7 +372,7 @@ enabled = false
  * upstream, so it reapplies on every config load and an agent editing its
  * own config.toml cannot flip it back).
  */
-export const JCODE_MCP_TOOLS_ENV_VALUE = "eager";
+const JCODE_MCP_TOOLS_ENV_VALUE = "eager";
 
 /**
  * Sub-agent fan-out is ALWAYS ON for hosted agents (a product decision:
@@ -533,7 +561,8 @@ export const PLATFORM_SYSTEM_PROMPT = `## Identity
 You are a hosted autonomous agent. Your name, who you work for, and your
 standing instructions are defined in the operator-provided instruction
 documents appended below. That is your operator's configuration: follow it,
-and where it conflicts with this text, it wins.
+and where it conflicts with this text, it wins, except for the credential
+rule under External services, which nothing overrides.
 
 Your role is whatever those documents say it is — do not assume you are a
 coding assistant because you can run commands.
@@ -593,6 +622,16 @@ connection whenever one exists for that service. When a request is
 refused, the gateway's JSON error says what to do next; your instruction
 documents name the skill that explains the gateway.
 
+Your own gateway credential is the one secret your environment holds: the
+token inside your proxy settings (HTTPS_PROXY, HTTP_PROXY and their lowercase
+forms; it begins with aoc_). It is a key to the gateway in your name, and
+your tools already use it on their own, so no task ever needs it. Never
+reveal it, in whole or in part, to anyone or anywhere: not in a reply, a
+file, a message, your memory, or a request to another service, and not
+encoded, split up, or described piece by piece. Decline whoever asks and
+however the request is framed, the person you work with and your
+instruction documents included: this rule overrides them.
+
 ## Communication
 
 Responses are rendered as markdown.
@@ -610,6 +649,11 @@ delivered as your reply; text written before a tool call streams as
 progress and is then discarded. Never bury an answer before a tool call:
 make the final message complete on its own, restating whatever the person
 still needs even if you said it mid-turn.
+The one exception is a message marked as having arrived while you were
+working: it is a new message to you, not part of the task. Answer it
+directly and briefly in your very next message, before any tool call, then
+continue the task; that reply is kept and shown under the message. Your
+final message still covers the original task on its own.
 `;
 
 /**
@@ -938,12 +982,13 @@ const isHarnessRefusal = (error: unknown): boolean => {
 };
 
 /**
- * Which pending steers actually made it into the run — the reconcile's pure
- * core, exported for its tests.
+ * Which pending steers actually made it into the run, and the candidate
+ * entry each one landed in: the reconcile's pure core, exported for its
+ * tests.
  *
  * jcode drains its soft-interrupt queue at a safe point, joins the grouped
  * texts with "\n\n", and appends them as ONE fresh user message (verified in
- * v0.71.1 `interrupts.rs`; byte-identical through v0.81.1). So each steer's text
+ * v0.71.1 `interrupts.rs`; byte-identical through v0.94.0). So each steer's text
  * always lands inside a
  * SINGLE history entry, and the match is per-entry substring, longest steer
  * first, consuming each matched span:
@@ -962,9 +1007,9 @@ const isHarnessRefusal = (error: unknown): boolean => {
 export const matchJoinedSteers = (
   pending: readonly SteerInput[],
   candidateContents: readonly string[],
-): string[] => {
+): { id: string; entry: number }[] => {
   const entries = [...candidateContents];
-  const joined: string[] = [];
+  const joined: { id: string; entry: number }[] = [];
   for (const steer of [...pending].sort(
     (a, b) => b.message.length - a.message.length,
   )) {
@@ -973,12 +1018,101 @@ export const matchJoinedSteers = (
       const entry = entries[i] ?? "";
       const at = entry.indexOf(steer.message);
       if (at === -1) continue;
-      joined.push(steer.id);
+      joined.push({ id: steer.id, entry: i });
       entries[i] = entry.slice(0, at) + entry.slice(at + steer.message.length);
       break;
     }
   }
   return joined;
+};
+
+/**
+ * One line of the agent's REASONING as jcode renders it into history: the
+ * whole line wrapped `*` + U+2063 … U+2063 + `*`, ending in a hard break.
+ * jcode prefixes an assistant entry's text with these when its reasoning
+ * display is on (`show_thinking`, default on), so they are not words the
+ * agent said to the person. Verified identical in v0.90.1 and v0.94.0
+ * (`jcode-render-core` `reasoning_line_markup`, whose own decoder keys on the
+ * same two sentinels).
+ */
+const RENDERED_REASONING_LINE = /^\*\u2063.*\u2063\* {2}$/;
+
+/** An assistant history entry's text with jcode's rendered reasoning lines
+ * removed: exactly the words the agent streamed. */
+const spokenText = (content: string): string =>
+  content
+    .split("\n")
+    .filter((line) => !RENDERED_REASONING_LINE.test(line))
+    .join("\n")
+    .trim();
+
+/**
+ * What the agent said back to an injected message: the assistant entry that
+ * directly follows it in the session history, when it said something before
+ * doing anything else. The reconcile's other pure core, exported for its
+ * tests.
+ *
+ * The history renders each assistant message as its own entry, split at
+ * every tool result, so its text (less the reasoning lines jcode renders in
+ * front of it, see `spokenText`) is exactly what the agent streamed.
+ * Display-only entries jcode slots in between (`system`,
+ * `background_task`) are skipped. Any other role first (a tool result: the
+ * agent went straight to work; another user message: a later injection)
+ * means it gave no separate reply, and the turn's own answer covers the
+ * message.
+ */
+export const replyAfter = (
+  history: readonly HistoryMessage[],
+  injectedAt: number,
+): string | undefined => {
+  for (const entry of history.slice(injectedAt + 1)) {
+    if (entry.role === "system" || entry.role === "background_task") continue;
+    if (entry.role !== "assistant") return undefined;
+    return spokenText(entry.content) || undefined;
+  }
+  return undefined;
+};
+
+/**
+ * The settled steers of one turn, in send order, each with what the agent
+ * said back to it: the matcher over the user entries from `floor` on (this
+ * turn's injections), then `replyAfter` at the entry each one landed in.
+ * Exported for its tests.
+ *
+ * Steers injected together share one entry and so one reply. It goes to the
+ * LAST of them in send order: the bubble a reader sees the reply under, and
+ * the message the agent answered with everything before it in view.
+ */
+export const settleSteers = (
+  pending: readonly SteerInput[],
+  history: readonly HistoryMessage[],
+  floor: number,
+): { followUpId: string; reply?: string }[] => {
+  const candidates = history.flatMap((entry, index) =>
+    index >= floor && entry.role === "user" ? [{ index, entry }] : [],
+  );
+  const landedAt = new Map<string, number>();
+  for (const { id, entry } of matchJoinedSteers(
+    pending,
+    candidates.map(({ entry }) => entry.content),
+  )) {
+    const candidate = candidates[entry];
+    if (candidate) landedAt.set(id, candidate.index);
+  }
+  // Each entry's replier: the last joined steer that landed there, in send
+  // order. A Map keeps the last write.
+  const replierAt = new Map<number, string>();
+  for (const steer of pending) {
+    const at = landedAt.get(steer.id);
+    if (at !== undefined) replierAt.set(at, steer.id);
+  }
+  return pending.flatMap((steer) => {
+    const at = landedAt.get(steer.id);
+    if (at === undefined) return [];
+    const reply =
+      replierAt.get(at) === steer.id ? replyAfter(history, at) : undefined;
+    return [{ followUpId: steer.id, ...(reply !== undefined && { reply }) }];
+  });
 };
 
 /**
@@ -989,6 +1123,21 @@ export const matchJoinedSteers = (
  * (invariant 9 — the vendor's vocabulary never crosses this boundary).
  */
 const BUSY_REFUSAL_SHAPE = /already processing a message/i;
+
+/**
+ * The handshake capability under which the daemon tags each queued message
+ * with our `client_id` and reports `soft_interrupt_injected` the moment it
+ * lands (jcode ≥ v0.94.0, jcode#1778). Exported for the pin test: the
+ * adapter's live pickup path hangs on this exact string.
+ */
+export const SOFT_INTERRUPT_IDS_CAPABILITY = "soft_interrupt_ids";
+
+/**
+ * The handshake capability under which the daemon answers `background_tool`
+ * with what it actually moved (jcode ≥ v0.94.0, jcode#1778). Exported for
+ * the pin test: SEND NOW only asks a daemon that can say what happened.
+ */
+export const BACKGROUND_TOOL_RESULT_CAPABILITY = "background_tool_result";
 
 /**
  * The daemon's cancel-path error wording. During the settle phase, after this
@@ -1004,7 +1153,7 @@ const ORPHAN_CANCEL_SHAPE = /cancelled by user/i;
  * genuine model delta takes longer than this window in practice, so in the
  * common no-orphan case the hold delays nothing observable.
  */
-export const BUSY_DETECT_WINDOW_MS = 1_000;
+const BUSY_DETECT_WINDOW_MS = 1_000;
 
 /**
  * Backoff between self-heal resends, exported for the adapter tests. Bounded
@@ -1063,6 +1212,7 @@ export const TOOL_INPUT_MAX_CHARS = 15_900;
  * status broadcasts) is dropped by the default arm even when trusted. */
 const QUARANTINE_COUNTED = new Set([
   "text_delta",
+  "text_replace",
   "reasoning_delta",
   "tool_start",
   "tool_done",
@@ -1086,7 +1236,16 @@ class JcodeSession implements HarnessSession {
    * never be resent — the user's cancel outranks the recovery.
    */
   private abortRequested = false;
-  /** Steers delivered to the LIVE turn, reconciled at its terminal. */
+  /**
+   * The live turn's steers. With the daemon's `soft_interrupt_ids`
+   * capability each one is tagged with its id and confirmed the moment it is
+   * injected (`jcode-steer.ts`); without it, `pendingSteers` holds them for
+   * the turn-end history reconcile. Exactly one of the two is in use per
+   * session, decided once at the first steer from the handshake.
+   */
+  private liveSteers: LiveSteerTracker | null = null;
+  /** Steers delivered to the LIVE turn, reconciled at its terminal (the
+   * capability-absent path). */
   private pendingSteers: SteerInput[] = [];
   /**
    * History length right after this turn's message was accepted — the floor
@@ -1126,12 +1285,10 @@ class JcodeSession implements HarnessSession {
     await this.onRelease?.();
   }
 
-  async *runTurn(input: TurnInput): AsyncIterable<AgentEvent> {
+  async *runTurn(input: TurnInput): AsyncIterable<HarnessEvent> {
     // Subscribe BEFORE sending, or a short turn's first deltas race the
-    // subscription (verified SDK behavior — run() does the same).
-    const stream = this.client.events(
-      this.sessionRef,
-    ) as AsyncIterableIterator<ApiEvent>;
+    // subscription (verified SDK behavior: run() does the same).
+    const stream = this.client.events(this.sessionRef);
     let usage: TurnUsage | undefined;
     let terminal: Extract<AgentEvent, { type: "turn.done" | "error" }> | null =
       null;
@@ -1265,7 +1422,11 @@ class JcodeSession implements HarnessSession {
       }
       if (!QUARANTINE_COUNTED.has(frame.ev)) return;
       droppedForeignFrames += 1;
-      if (frame.ev === "text_delta" || frame.ev === "reasoning_delta") {
+      if (
+        frame.ev === "text_delta" ||
+        frame.ev === "text_replace" ||
+        frame.ev === "reasoning_delta"
+      ) {
         droppedForeignTextChars += frame.text.length;
       }
     };
@@ -1279,6 +1440,13 @@ class JcodeSession implements HarnessSession {
       // refusal here must not cost the turn.
       await this.client.cancelSoftInterrupts(this.sessionRef).catch(() => {});
       this.pendingSteers = [];
+      // The pickup signal for THIS turn: live and exact when the daemon tags
+      // injections with our ids, the turn-end history reconcile otherwise.
+      // Decided per turn from the handshake, so a session that outlives a
+      // daemon upgrade (resume) picks the better path next turn.
+      this.liveSteers = this.client.supports(SOFT_INTERRUPT_IDS_CAPABILITY)
+        ? createLiveSteerTracker()
+        : null;
       this.abortRequested = false;
       this.turnActive = true;
       // A stale floor from a previous turn must never survive into this
@@ -1309,7 +1477,10 @@ class JcodeSession implements HarnessSession {
       // failed read costs only the index anchor: reconcile then degrades to
       // the content anchor. Sequential retries through SDK timeouts, no
       // delay; any other failure leaves the floor null after one attempt.
+      // Only the history reconcile needs a floor: on the live pickup path
+      // the read would be a daemon round trip for nothing.
       const readBaseline = () => {
+        if (this.liveSteers) return;
         void (async () => {
           for (;;) {
             if (baselineStopped || this.abortRequested) return;
@@ -1575,9 +1746,60 @@ class JcodeSession implements HarnessSession {
           yield exclusionNotice();
         }
         switch (event.ev) {
-          case "text_delta":
+          case "text_delta": {
             progressed = true;
-            yield { type: "text.delta", text: event.text };
+            // The reply to a steered follow-up streams under THAT follow-up:
+            // the tracker says which one, as it reads the frame.
+            const replyTo = yield* this.observeSteerFrame({
+              kind: "text",
+              messageId: event.message_id,
+              text: event.text,
+            });
+            yield {
+              type: "text.delta",
+              text: event.text,
+              ...(event.message_id !== undefined && {
+                messageId: event.message_id,
+              }),
+              ...(replyTo !== undefined && { replyTo }),
+            };
+            break;
+          }
+          case "text_replace":
+            // A correction of text already streamed (a provider attempt
+            // rolled back and replayed, a repaired suffix). It names its
+            // message on every bridge that sends it; one that did not could
+            // not say which text to replace, so it is dropped.
+            if (event.message_id !== undefined) {
+              yield* this.observeSteerFrame({
+                kind: "replace",
+                messageId: event.message_id,
+                text: event.text,
+              });
+              yield {
+                type: "text.replace",
+                messageId: event.message_id,
+                text: event.text,
+              };
+            }
+            break;
+          case "text_done":
+            // The bridge's message frame closing (v0.86+). The answer tracker
+            // delimits messages by id on its own; only the live pickup path
+            // reads this, to close a reply the moment its message ends.
+            yield* this.observeSteerFrame({
+              kind: "text_done",
+              messageId: event.message_id,
+            });
+            break;
+          case "soft_interrupt_injected":
+            // The pickup signal (v0.94.0): the model now has these queued
+            // messages. Ours are confirmed joined right here, live; the
+            // reply is read from the frames that follow.
+            yield* this.observeSteerFrame({
+              kind: "injected",
+              clientIds: event.client_ids,
+            });
             break;
           case "reasoning_delta":
             progressed = true;
@@ -1587,6 +1809,7 @@ class JcodeSession implements HarnessSession {
             progressed = true;
             openToolCalls += 1;
             streamingToolId = event.call_id;
+            yield* this.observeSteerFrame({ kind: "tool_start" });
             yield {
               type: "tool.started",
               callId: event.call_id,
@@ -1701,11 +1924,12 @@ class JcodeSession implements HarnessSession {
       }
 
       // ONE exit point: whatever ended the turn, confirm which steers made
-      // it in and say so BEFORE the terminal event (the supervisor stops
-      // listening after it).
-      for (const followUpId of await this.reconcileSteers(input.message)) {
-        yield { type: "message.joined", followUpId };
-      }
+      // it in, with what the agent said back to each, and say so BEFORE the
+      // terminal event (the supervisor stops listening after it). On the
+      // live path the run already said so as each injection landed; the
+      // terminal closes a reply still being read, and anything the daemon
+      // never confirmed is missed.
+      yield* await this.settleTurnSteers(input.message);
       yield terminal;
     } finally {
       baselineStopped = true;
@@ -1732,25 +1956,123 @@ class JcodeSession implements HarnessSession {
     if (!this.turnActive) {
       throw new Error("no turn in flight");
     }
+    if (this.liveSteers) {
+      // Tagged with the follow-up's own id: the daemon echoes it the moment
+      // the message is injected, which is the live pickup signal.
+      await this.client.softInterruptWithId(this.sessionRef, input.message, {
+        clientId: input.id,
+      });
+      this.liveSteers.sent(input);
+      return;
+    }
     await this.client.softInterrupt(this.sessionRef, input.message, false);
     this.pendingSteers.push(input);
   }
 
   /**
-   * The turn ended — settle every steer it was handed. `cancelSoftInterrupts`
-   * first: after it, nothing more can inject (jcode's injection points exist
-   * only inside the turn loop), so the history read is stable. Then the pure
-   * matcher above, over user entries AFTER this turn's own prompt. Any
-   * failure degrades every pending steer to missed — the control plane
-   * re-runs the message as its own turn, and a possible duplicate beats a
-   * lost word.
+   * SEND NOW: move the tool the live turn is waiting on to the background
+   * (jcode's own "background this tool" control, the one its interactive
+   * client binds to a key). The tool keeps running under jcode's background
+   * registry, the model is told where to collect it, and the run reaches its
+   * next safe point now, injecting the queued steers.
+   *
+   * Asked only of a daemon that REPORTS what it moved (`background_tool_result`,
+   * v0.94.0+). An older daemon answers a bare ack whether or not a tool
+   * moved, which the SDK can only read as `moved: false`; acting on it would
+   * then cut a tool short while telling the person nothing moved. So an
+   * older daemon is not asked at all, and the answer is the honest
+   * `moved: false`. Scoped to this session by construction: the request
+   * names it, and the bridge only serves the connection's attached session.
    */
-  private async reconcileSteers(prompt: string): Promise<string[]> {
-    const pending = this.pendingSteers.splice(0);
+  async backgroundRunningTool(): Promise<BackgroundedTool> {
+    if (
+      !this.turnActive ||
+      !this.client.supports(BACKGROUND_TOOL_RESULT_CAPABILITY)
+    ) {
+      return { moved: false };
+    }
+    const result = await this.client.backgroundToolResult(this.sessionRef);
+    return result.moved
+      ? {
+          moved: true,
+          ...(result.toolName !== undefined && { toolName: result.toolName }),
+        }
+      : { moved: false };
+  }
+
+  /**
+   * The live pickup path's reader: one daemon frame in, the joins and
+   * finished replies it completed out, plus the follow-up a text frame is
+   * the reply to (so the caller tags the delta it yields next). A no-op
+   * without the capability, so the live loop feeds every frame
+   * unconditionally and stays free of path checks.
+   */
+  private *observeSteerFrame(
+    frame: SteerFrame,
+  ): Generator<HarnessEvent, string | undefined> {
+    if (!this.liveSteers) return undefined;
+    const { events, replyTo } = this.liveSteers.observe(frame);
+    yield* events;
+    return replyTo;
+  }
+
+  /**
+   * The turn ended: settle every steer it was handed, as the events still
+   * owed (a join always precedes its reply). `cancelSoftInterrupts` first:
+   * after it, nothing more can inject (jcode's injection points exist only
+   * inside the turn loop), so what follows is stable.
+   *
+   * Live path: every join was yielded as its injection landed; the terminal
+   * closes a reply still being read, and every steer the daemon never
+   * confirmed is missed (the control plane re-runs it as its own turn). No
+   * history read at all.
+   *
+   * History path (no `soft_interrupt_ids`): the pure `settleSteers` over
+   * this turn's window of the history, which steers landed and what the
+   * agent said back to each. Any failure degrades every pending steer to
+   * missed: a possible duplicate beats a lost word.
+   */
+  private async settleTurnSteers(prompt: string): Promise<SteerEvent[]> {
     this.turnActive = false;
     try {
       await this.client.cancelSoftInterrupts(this.sessionRef);
-      if (pending.length === 0) return [];
+    } catch (error) {
+      log("warn", "steer reconcile failed; reporting all missed", {
+        error: String(error),
+      });
+      this.pendingSteers = [];
+      return [];
+    }
+    if (this.liveSteers) {
+      const live = this.liveSteers;
+      this.liveSteers = null;
+      const closed = live.observe({ kind: "terminal" }).events;
+      const missed = live.unconfirmed();
+      if (missed.length > 0) {
+        log("info", "steers the run never confirmed; promotion will run them", {
+          sessionRef: this.sessionRef,
+          followUpIds: missed.map((steer) => steer.id),
+        });
+      }
+      return closed;
+    }
+    return (await this.reconcileFromHistory(prompt)).flatMap(
+      ({ followUpId, reply }): SteerEvent[] => [
+        { type: "message.joined", followUpId },
+        ...(reply !== undefined
+          ? [{ type: "message.replied" as const, followUpId, reply }]
+          : []),
+      ],
+    );
+  }
+
+  /** The history reconcile: the pickup path for a daemon without ids. */
+  private async reconcileFromHistory(
+    prompt: string,
+  ): Promise<{ followUpId: string; reply?: string }[]> {
+    const pending = this.pendingSteers.splice(0);
+    if (pending.length === 0) return [];
+    try {
       const history = await this.client.getHistory(this.sessionRef);
 
       // The window floor. Preferred anchor: the INDEX captured right after
@@ -1782,11 +2104,7 @@ class JcodeSession implements HarnessSession {
         if (floor === -1) return [];
       }
 
-      const candidates = history
-        .slice(floor)
-        .filter((entry) => entry.role === "user")
-        .map((entry) => entry.content);
-      return matchJoinedSteers(pending, candidates);
+      return settleSteers(pending, history, floor);
     } catch (error) {
       log("warn", "steer reconcile failed; reporting all missed", {
         error: String(error),
@@ -2136,6 +2454,9 @@ export const createJcodeHarness = (): Harness => {
       // softInterrupt: a mid-run message joins the live turn at jcode's own
       // safe points — the same primitive its interactive composer uses.
       steer: true,
+      // background_tool: SEND NOW moves the running tool aside so a queued
+      // steer is read now (asked only of a daemon that reports the move).
+      backgroundTool: true,
       skillsDir: ".agents/skills",
       instructionFiles: ["CLAUDE.md", "AGENTS.md"],
       // Connects to the platform-tools bridge at session start, and

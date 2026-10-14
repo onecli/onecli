@@ -62,5 +62,6 @@ export const googleDocs: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
   },
 };

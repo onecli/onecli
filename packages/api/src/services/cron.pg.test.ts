@@ -927,6 +927,11 @@ describe.skipIf(!PROOF_URL)("settling and delivery", () => {
         status: "done",
         source: "watch",
         userId: null,
+        // A second in the past: `created_at` is millisecond-precision and
+        // the bridge window is strictly `createdAt < before`, so a wake
+        // inserted in the same millisecond as the person's next turn falls
+        // outside it and the report vanishes from the context (flaked here).
+        createdAt: new Date(Date.now() - 1000),
         startedAt: new Date(),
         finishedAt: new Date(),
       },

@@ -45,6 +45,7 @@ export const microsoftWord: AppDefinition = {
   },
   configurable: {
     fields: microsoftConfigFields,
+    group: "microsoft",
     envDefaults: microsoftEnvDefaults,
   },
 };

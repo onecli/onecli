@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { TurnEvent } from "@/lib/api/types";
-import { foldTranscript, highestSeq, mergeEvents } from "./transcript";
+import {
+  foldTranscript,
+  highestSeq,
+  mergeEvents,
+  movesTurnStatus,
+} from "./transcript";
 
 /**
  * The reader's logic, tested where it can be: `apps/web` has no component
@@ -16,6 +21,22 @@ const event = (
 ): TurnEvent => ({ seq: (seq += 1), turnId, type, payload });
 
 describe("foldTranscript", () => {
+  it("folds SEND NOW's answer under the follow-up's own id, never under the turn", () => {
+    const [turn, followUp] = foldTranscript([
+      event("t1", "tool.started", { callId: "c1", name: "bash" }),
+      event("f1", "message.sent_now", { moved: true, toolName: "bash" }),
+    ]);
+    expect(turn?.sentNow).toBeUndefined();
+    expect(followUp?.sentNow).toEqual({ moved: true, toolName: "bash" });
+
+    // Only a literal `true` is a move, and a missing or non-string name is
+    // simply absent: the payload is sandbox-reported.
+    const [odd] = foldTranscript([
+      event("f2", "message.sent_now", { moved: "yes", toolName: 7 }),
+    ]);
+    expect(odd?.sentNow).toEqual({ moved: false });
+  });
+
   it("REPLACES delta text with the durable answer instead of appending", () => {
     // A live tail receives both the deltas and the final `text`. Appending
     // renders every answer twice — the single most likely way to get this
@@ -389,5 +410,42 @@ describe("highestSeq", () => {
         { seq: 9, turnId: "t", type: "turn.done", payload: {} },
       ]),
     ).toBe(9);
+  });
+});
+
+describe("movesTurnStatus", () => {
+  const event = (type: TurnEvent["type"]): TurnEvent => ({
+    seq: 1,
+    turnId: "t",
+    type,
+    payload: {},
+  });
+
+  it("is true for the events that change a turn row's status", () => {
+    // A turn opening or closing, and a mid-run follow-up the run picked
+    // up (its row flips joined live, so the bubble under it
+    // must stop saying "folding it in" without waiting for the poll).
+    for (const type of [
+      "turn.started",
+      "turn.done",
+      "error",
+      "message.joined",
+    ] as const) {
+      expect(movesTurnStatus(event(type)), type).toBe(true);
+    }
+  });
+
+  it("is false for streamed content", () => {
+    for (const type of [
+      "text.delta",
+      "text",
+      "tool.started",
+      "tool.finished",
+      "notice",
+      // SEND NOW's answer: the row is still waiting; its join follows.
+      "message.sent_now",
+    ] as const) {
+      expect(movesTurnStatus(event(type)), type).toBe(false);
+    }
   });
 });

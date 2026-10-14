@@ -521,7 +521,14 @@ export const createSupervisorMessageHandler = ({
         });
         break;
       case "turn.result":
-        // Anything still buffered belongs before the terminal report.
+        // Anything still buffered belongs before the terminal report: the
+        // turn's own events, and the replies to the follow-ups it reports
+        // (each stored under its follow-up's own id, so buffered apart). The
+        // close is what the channel mirror waits on to post a turn, so a
+        // reply that landed after it would miss its post.
+        for (const followUp of message.followUps ?? []) {
+          collector.flush(followUp.turnId);
+        }
         collector.flush(message.turnId);
         report({
           kind: "turn.finished",

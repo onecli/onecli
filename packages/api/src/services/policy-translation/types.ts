@@ -141,6 +141,11 @@ export type NewTarget =
        * absent = unresolved → never matches. */
       provider?: string;
       tools: string[];
+      /** Narrows a WHOLE-APP target (empty `tools`) by HTTP method, as
+       * stored: `GET,HEAD` = only those, `!GET,HEAD` = every other method.
+       * Absent/empty = any method; ignored when tools are named. Mirrors
+       * `Target::Connection`'s `MethodFilter`. */
+      method?: string | null;
     }
   // Step 8: a secret target gates its host — resolved (at the gateway, at connect)
   // to the secret's host pattern(s): a specific secret → its one host; a level

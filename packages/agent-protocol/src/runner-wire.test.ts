@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  ceilingWarningSteerId,
+  isPlatformSteerId,
+  runnerCapabilitiesSchema,
   runnerEventSchema,
   runnerEventsRequestSchema,
   runnerHeartbeatRequestSchema,
@@ -16,6 +19,18 @@ const capabilities = {
   backend: "docker",
   homeDurability: "resident" as const,
 };
+
+describe("the platform's own steer id", () => {
+  it("is recognized, and a follow-up row's id never is", () => {
+    // The supervisor stores a reply under a follow-up's id, and must never
+    // try to under the warning's (no row behind it). The two helpers are
+    // the only place that rule is spelled, so they must agree.
+    expect(isPlatformSteerId(ceilingWarningSteerId("t1"))).toBe(true);
+    expect(isPlatformSteerId("3f2c9a1e-7b4d-4e8a-9c6f-1d2e3f4a5b6c")).toBe(
+      false,
+    );
+  });
+});
 
 const payload = {
   env: {
@@ -378,6 +393,63 @@ describe("turn.deliver context (runner wire)", () => {
     expect(
       runnerWorkItemSchema.parse({ ...base, someFutureField: "x" }),
     ).not.toHaveProperty("someFutureField");
+  });
+});
+
+/** The steer arm's context (the "a new message arrived" frame for a person's
+ * follow-up): the same field, the same bound, the same stale-peer drop. */
+describe("turn.message context (runner wire)", () => {
+  const base = {
+    kind: "turn.message",
+    sandboxId: "sb-1",
+    conversationId: "conv-1",
+    turnId: "f-1",
+    targetTurnId: "t-1",
+    message: "also check the linter",
+  };
+
+  it("parses with and without context; an automation's follow-up carries none", () => {
+    expect(runnerWorkItemSchema.parse(base)).not.toHaveProperty("context");
+    const parsed = runnerWorkItemSchema.parse({ ...base, context: "[new]" });
+    expect(parsed.kind === "turn.message" && parsed.context).toBe("[new]");
+  });
+
+  it("rejects a context past its cap", () => {
+    expect(
+      runnerWorkItemSchema.safeParse({ ...base, context: "x".repeat(16_001) })
+        .success,
+    ).toBe(false);
+  });
+});
+
+/** SEND NOW: ids only, nothing a sandbox did not already
+ * have; and a runner advertises that it can forward it. */
+describe("turn.send_now (runner wire)", () => {
+  const item = {
+    kind: "turn.send_now",
+    sandboxId: "sb-1",
+    conversationId: "conv-1",
+    turnId: "f-1",
+    targetTurnId: "t-1",
+  };
+
+  it("round-trips, and refuses one missing its target", () => {
+    expect(runnerWorkItemSchema.parse(item)).toEqual(item);
+    const { targetTurnId: _target, ...missing } = item;
+    void _target;
+    expect(runnerWorkItemSchema.safeParse(missing).success).toBe(false);
+  });
+
+  it("the capability is optional: an older runner simply never says it", () => {
+    const base = {
+      maxSandboxes: 1,
+      backend: "docker",
+      homeDurability: "resident",
+    };
+    expect(runnerCapabilitiesSchema.parse(base)).not.toHaveProperty("sendNow");
+    expect(
+      runnerCapabilitiesSchema.parse({ ...base, sendNow: true }).sendNow,
+    ).toBe(true);
   });
 });
 

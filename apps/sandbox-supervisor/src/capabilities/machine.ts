@@ -34,8 +34,20 @@ import type { CapabilityFragment } from "../home/renderer";
  *
  * Vendor-name-free (pinned by the test): naming the runtime, even to steer
  * around it, leaks the identity the platform withholds.
+ *
+ * The browsing bullet has two shapes, chosen by whether the supervisor
+ * brought a desktop up (desktop.ts; `display` is its `DISPLAY`). With one,
+ * the agent is told to open the image's browser with the launcher and
+ * attach, never to launch its own; without one, the shared image's
+ * headless Chromium path. An agent must never be taught a desktop it does
+ * not have, nor steered to headless flags when a desktop is right there.
+ * The inventory line follows the same switch: an image with a desktop
+ * carries the desktop's browser and not the headless one, so naming
+ * `chromium` there would send the agent to a binary that is not present.
  */
-export const machineFragment: CapabilityFragment = {
+export const machineFragment = (
+  display: string | null,
+): CapabilityFragment => ({
   id: "machine",
   title: "Your machine",
   body: `Your machine is replaced routinely; its disk is not. Your working
@@ -46,18 +58,33 @@ are gone after a restart.
 
 What is installed (baked into the image, not from apt): node 22 (npm),
 python 3 (pip, venv), git, ripgrep, curl, wget, jq, zip/unzip, ps, nano,
-less, an ssh client, podman (with a \`docker\` CLI), chromium (headless
-browser), ffmpeg, Xvfb, and a C toolchain (gcc, g++, make) so native npm
+less, an ssh client, podman (with a \`docker\` CLI), ${
+    display ? "a browser (desktop, below)" : "chromium (headless browser)"
+  }, ffmpeg, Xvfb, and a C toolchain (gcc, g++, make) so native npm
 and pip modules build.
 
-- Browsing and video: chromium is at /usr/bin/chromium. Install
+${
+  display
+    ? `- Browsing: this machine has a desktop (a screen on $DISPLAY, a window
+  manager, a browser). Open the browser with \`onecli-browser [url]\`: it
+  prints the DevTools endpoint to attach to. Read /etc/onecli/README.browser
+  FIRST: it has the attach snippet (Patchright's \`connectOverCDP\`, using
+  the existing context so logins persist), the real-cursor fallback
+  (xdotool on $DISPLAY), and the proxy rules. Never launch a browser of
+  your own: it would have none of the desktop's profile, window manager,
+  or policy, and sites refuse it. A browser here goes through the open
+  proxy in $OPEN_PROXY, never the gateway proxy in HTTPS_PROXY, which is
+  for APIs and CLIs. Video: Playwright records .webm natively; ffmpeg
+  stitches frames and captures the screen.`
+    : `- Browsing and video: chromium is at /usr/bin/chromium. Install
   Playwright or Puppeteer (\`npm install -g playwright\`, or
   \`pip install --user playwright\`) and point it at that binary. Read
   /etc/onecli/README.browser FIRST: a browser here goes through the open
   proxy in $OPEN_PROXY (\`proxy: { server: process.env.OPEN_PROXY }\`),
   never the gateway proxy in HTTPS_PROXY, which is for APIs and CLIs. The
   README has the launch snippet and the sandbox flag for self-hosted
-  deployments. Playwright records .webm natively; ffmpeg stitches frames.
+  deployments. Playwright records .webm natively; ffmpeg stitches frames.`
+}
 - Signing in to a website with a login a person gave you: through the
   open proxy, pass it to your script through a file (never a command-line
   argument), delete the file once signed in, and save the session
@@ -88,4 +115,4 @@ and pip modules build.
 Before telling anyone something cannot be done on this machine, check
 for an npm or pip package, a container image, and the tools listed above.
 Try at least one. If it still fails, say what you tried.`,
-};
+});

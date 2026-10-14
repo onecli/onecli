@@ -70,7 +70,7 @@ describe("App Availability lives under Organization Settings", () => {
   });
 });
 
-describe("Global Connections and Global Policy live under Organization Settings", () => {
+describe("Shared Connections and Global Policy live under Organization Settings", () => {
   const settingsItems = () =>
     getSettingsSections("org-1").flatMap((section) => section.items);
   const orgTitles = () =>
@@ -80,16 +80,16 @@ describe("Global Connections and Global Policy live under Organization Settings"
 
   it("are settings entries, not top-level org nav entries", () => {
     const titles = settingsItems().map((item) => item.title);
-    expect(titles).toContain("Global Connections");
+    expect(titles).toContain("Shared Connections");
     expect(titles).toContain("Global Policy");
-    expect(orgTitles()).not.toContain("Global Connections");
+    expect(orgTitles()).not.toContain("Shared Connections");
     expect(orgTitles()).not.toContain("Global Policy");
   });
 
   it("point at the settings URLs", () => {
     const byTitle = (title: string) =>
       settingsItems().find((entry) => entry.title === title)?.url;
-    expect(byTitle("Global Connections")).toBe(
+    expect(byTitle("Shared Connections")).toBe(
       "/org/org-1/settings/global-connections",
     );
     expect(byTitle("Global Policy")).toBe("/org/org-1/settings/policy");
@@ -100,7 +100,7 @@ describe("Global Connections and Global Policy live under Organization Settings"
     // orgConnectionsPath; the nav entry drifting from it is how the moved
     // section once kept linking to the old top-level URL.
     const entry = settingsItems().find(
-      (item) => item.title === "Global Connections",
+      (item) => item.title === "Shared Connections",
     );
     expect(entry?.url).toBe(orgConnectionsPath("org-1"));
   });
@@ -119,10 +119,10 @@ describe("activeSettingsItem", () => {
 
   it("keeps the entry active on every page below it", () => {
     const root = "/org/org-1/settings/global-connections";
-    expect(active(root)).toBe("Global Connections");
-    expect(active(`${root}/custom`)).toBe("Global Connections");
-    expect(active(`${root}/connected`)).toBe("Global Connections");
-    expect(active(`${root}/apps/github`)).toBe("Global Connections");
+    expect(active(root)).toBe("Shared Connections");
+    expect(active(`${root}/custom`)).toBe("Shared Connections");
+    expect(active(`${root}/connected`)).toBe("Shared Connections");
+    expect(active(`${root}/apps/github`)).toBe("Shared Connections");
   });
 
   it("matches on a segment boundary, never a bare string prefix", () => {

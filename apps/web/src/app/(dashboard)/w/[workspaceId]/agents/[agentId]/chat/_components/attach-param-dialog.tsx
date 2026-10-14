@@ -61,9 +61,10 @@ export const AttachParamDialog = () => {
       if (!connected || !claimed.current.has(connected)) return;
       claimed.current.delete(connected);
       // The pool changed even without a fresh id, and a fresh account arrives
-      // already granted, with full access, to every agent of the workspace
-      // (the API's workspace auto-attach): refresh the list, the grant views
-      // and the count badges, like the in-chat card does.
+      // already attached (every tool allowed, anything else needing
+      // approval) to every agent of the workspace (the API's workspace
+      // auto-attach): refresh the list, the grant views and the count badges,
+      // like the in-chat card does.
       invalidateGrants();
       void queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
     },

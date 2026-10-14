@@ -5,11 +5,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentChannelsView, AgentContact, AgentPeer } from "@/lib/api";
 
 /**
- * The Contacts section (PR 5b) composes rows from three existing queries
- * into four kind groups. Acceptance behaviors: every row lands in the group
- * of its kind (a channel contact under Channels, a person reach row under
- * People, never mixed), reach rows come only from LIVE presences, an empty
- * group says so, and loading is a skeleton (never an empty group).
+ * The Contacts section composes rows from three existing queries into four
+ * kind groups. Acceptance behaviors: a person's inbound reach row and
+ * outbound contact merge into ONE row (the duplicate "@akim" / "Alex Kim"
+ * was the bug), every row lands in the group of its kind, reach rows come
+ * only from LIVE presences, workspace members are a sentence (not a row
+ * with a fake setting), an empty group says so, and loading is a skeleton.
  */
 
 const state = vi.hoisted(() => ({
@@ -44,15 +45,20 @@ vi.mock("@/hooks/use-channels", () => ({
 }));
 
 // The rows are each their own tested component; here they are stubs that
-// say which group they landed in.
-vi.mock("./person-reach-row", () => ({
-  PersonReachRow: ({ person }: { person: { externalRef: string } }) => (
-    <div data-testid="person-reach">{person.externalRef}</div>
-  ),
-}));
-vi.mock("./space-reach-row", () => ({
-  SpaceReachRow: ({ space }: { space: { externalRef: string } }) => (
-    <div data-testid="space-reach">{space.externalRef}</div>
+// say which group they landed in and which halves they carry.
+vi.mock("./two-way-row", () => ({
+  directionHeadings: (kind: string) =>
+    kind === "person"
+      ? { inbound: "Can message Donna", outbound: "Donna can message them" }
+      : { inbound: "Donna answers", outbound: "Donna can post" },
+  TwoWayRow: ({
+    entry,
+  }: {
+    entry: { key: string; reach: unknown; contact: unknown };
+  }) => (
+    <div data-testid="two-way">
+      {entry.key}:{entry.reach ? "in" : "-"}/{entry.contact ? "out" : "-"}
+    </div>
   ),
 }));
 vi.mock("./contact-row", () => ({
@@ -112,10 +118,11 @@ const view = (presences: AgentChannelsView["presences"]): AgentChannelsView =>
 const contact = (
   kind: AgentContact["kind"],
   displayName: string,
+  externalRef: string = displayName,
 ): AgentContact => ({
   id: `c-${displayName}`,
   kind,
-  externalRef: displayName,
+  externalRef,
   displayName,
   policy: "ask",
   updatedAt: "2026-09-16T00:00:00Z",
@@ -165,13 +172,19 @@ describe("ContactsSection", () => {
     renderSection();
 
     const people = within(group("People"));
-    expect(people.getByText("Workspace members")).toBeDefined();
-    expect(people.getByTestId("person-reach").textContent).toBe("U-active");
-    expect(people.getByTestId("contact").textContent).toBe("Dana");
+    expect(
+      people.getByText(/Members of this workspace can always message/),
+    ).toBeDefined();
+    expect(
+      people.getAllByTestId("two-way").map((el) => el.textContent),
+    ).toEqual(["U-active:in/-", "Dana:-/out"]);
+    expect(people.getByText("Can message Donna")).toBeDefined();
+    expect(people.getByText("Donna can message them")).toBeDefined();
 
     const channels = within(group("Channels"));
-    expect(channels.getByTestId("space-reach").textContent).toBe("C-active");
-    expect(channels.getByTestId("contact").textContent).toBe("#ops");
+    expect(
+      channels.getAllByTestId("two-way").map((el) => el.textContent),
+    ).toEqual(["C-active:in/-", "#ops:-/out"]);
 
     expect(within(group("Agents")).getByTestId("peer").textContent).toBe("Ray");
     expect(within(group("Apps")).getByTestId("contact").textContent).toBe(
@@ -179,17 +192,39 @@ describe("ContactsSection", () => {
     );
   });
 
+  it("the same person, written to AND writing in, is ONE row with both halves", () => {
+    state.view = view([presence("active")]);
+    state.contacts = [
+      contact("person", "Alex Kim", "U-active"),
+      contact("channel", "#room", "C-active"),
+    ];
+    renderSection();
+    expect(
+      within(group("People"))
+        .getAllByTestId("two-way")
+        .map((el) => el.textContent),
+    ).toEqual(["U-active:in/out"]);
+    expect(
+      within(group("Channels"))
+        .getAllByTestId("two-way")
+        .map((el) => el.textContent),
+    ).toEqual(["C-active:in/out"]);
+  });
+
   it("reach rows come from LIVE presences only — a removed app's rows are moot", () => {
     state.view = view([presence("disabled")]);
     renderSection();
-    expect(screen.queryByTestId("person-reach")).toBeNull();
-    expect(screen.queryByTestId("space-reach")).toBeNull();
+    expect(screen.queryByTestId("two-way")).toBeNull();
   });
 
-  it("an empty group says so, and People always has the members line", () => {
+  it("an empty group says so, and People always explains workspace members", () => {
     state.view = view([]);
     renderSection();
-    expect(screen.getByText("Workspace members")).toBeDefined();
+    expect(
+      screen.getByText(/Members of this workspace can always message/),
+    ).toBeDefined();
+    expect(screen.queryByText("Workspace members")).toBeNull();
+    expect(screen.getByText("No one yet.")).toBeDefined();
     expect(
       screen.getByText("Mention the agent in a channel to add it here."),
     ).toBeDefined();

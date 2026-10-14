@@ -26,6 +26,7 @@ interface WorkspaceRow {
   createdByUserId: string;
   createdByUserEmail: string;
   createdAt: Date;
+  timezone?: string | null;
 }
 
 const store = vi.hoisted(() => ({
@@ -38,10 +39,13 @@ const store = vi.hoisted(() => ({
     createdByUserId: string;
     createdByUserEmail: string;
     createdAt: Date;
+    timezone?: string | null;
   }[],
   apiKeys: [] as { key: string; userId: string; workspaceId: string }[],
   agents: [] as { workspaceId: string }[],
   flushedKeys: [] as string[],
+  // Workspace ids whose live sandboxes were asked for (the timezone respawn).
+  sandboxLookups: [] as string[],
 }));
 
 vi.mock("@onecli/db", () => {
@@ -221,6 +225,18 @@ vi.mock("@onecli/db", () => {
         ? [{ locked: true }]
         : [],
     agentChannel: { findMany: async () => [] },
+    // The timezone respawn asks for the workspace's live sandboxes; none
+    // here, so it records the ask and respawns nothing.
+    sandbox: {
+      findMany: async ({
+        where,
+      }: {
+        where: { agent: { workspaceId: string } };
+      }) => {
+        store.sandboxLookups.push(where.agent.workspaceId);
+        return [];
+      },
+    },
     apiKey: apiKeyModel(),
     agent: agentModel(),
     workspace: workspaceModel(),
@@ -332,6 +348,7 @@ beforeEach(() => {
   store.apiKeys = [{ key: "oc_a", userId: "user-1", workspaceId: "ws-a" }];
   store.agents = [{ workspaceId: "ws-a" }];
   store.flushedKeys = [];
+  store.sandboxLookups = [];
 });
 
 describe("GET /v1/workspaces (org key)", () => {
@@ -424,6 +441,40 @@ describe("PATCH + DELETE /v1/workspaces/:id (org key)", () => {
       name: "Renamed Team",
       slug: "renamed-team",
     });
+    expect(store.sandboxLookups).toEqual([]);
+  });
+
+  it("sets the timezone and reaches for the workspace's live sandboxes", async () => {
+    const res = await app.request("/v1/workspaces/ws-b", {
+      method: "PATCH",
+      headers: orgKeyHeaders,
+      body: JSON.stringify({ timezone: "Asia/Jerusalem" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      id: "ws-b",
+      timezone: "Asia/Jerusalem",
+    });
+    expect(store.sandboxLookups).toEqual(["ws-b"]);
+  });
+
+  it("refuses a zone the sandbox could not resolve, before anything is written", async () => {
+    for (const timezone of ["PST", "Mars/Olympus", "america/new_york"]) {
+      const res = await app.request("/v1/workspaces/ws-b", {
+        method: "PATCH",
+        headers: orgKeyHeaders,
+        body: JSON.stringify({ timezone }),
+      });
+      expect(res.status, timezone).toBe(400);
+      expect(await res.json()).toMatchObject({
+        error: expect.stringContaining("Unknown timezone"),
+      });
+    }
+    expect(store.workspaces.find((p) => p.id === "ws-b")?.timezone).toBe(
+      undefined,
+    );
+    expect(store.sandboxLookups).toEqual([]);
   });
 
   it("deletes a workspace transactionally and flushes its keys", async () => {

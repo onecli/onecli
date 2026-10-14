@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   agentEvalRun: {
     findFirst: vi.fn(),
     create: vi.fn(),
+    findMany: vi.fn(),
     updateMany: vi.fn(),
   },
   turn: { findFirst: vi.fn(), findUniqueOrThrow: vi.fn() },
@@ -18,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   createTurn: vi.fn(),
   abortTurn: vi.fn(),
   getEvalRunEvidence: vi.fn(),
+  judgeAnswer: vi.fn(),
 }));
 vi.mock("@onecli/db", () => ({
   db: {
@@ -37,11 +39,14 @@ vi.mock("./turn-service", () => ({
 vi.mock("./agent-runs-service", () => ({
   getEvalRunEvidence: mocks.getEvalRunEvidence,
 }));
+vi.mock("./eval-judge", () => ({
+  judgeAnswer: mocks.judgeAnswer,
+}));
 vi.mock("../lib/logger", () => ({
   logger: { child: () => ({ error: vi.fn(), warn: vi.fn() }) },
 }));
 
-import { startRun } from "./agent-eval-service";
+import { NoEvalQuestionsError, listRuns, startRun } from "./agent-eval-service";
 
 const question = {
   id: "q1",
@@ -115,6 +120,38 @@ afterEach(() => {
 });
 
 describe("run admission", () => {
+  it("lists a run stored in an older format as failed, instead of failing the screen", async () => {
+    mocks.agentEvalRun.findMany.mockResolvedValue([
+      {
+        id: "old",
+        status: "done",
+        configVersion: "cfg",
+        total: 2,
+        results: [{ itemId: "gq_1", pass: false, scores: {} }],
+        error: null,
+        createdAt: new Date(),
+        startedAt: null,
+        finishedAt: null,
+      },
+    ]);
+    const [run] = await listRuns("workspace", "agent");
+    expect(run).toMatchObject({
+      status: "failed",
+      error: expect.stringMatching(/older format/),
+      counts: { pending: 0, passed: 0 },
+    });
+  });
+  it("refuses a run with no questions: the same 422 a person always got, typed for the schedule", async () => {
+    mocks.agentEvalQuestion.findMany.mockResolvedValue([]);
+    const refusal = start();
+    await expect(refusal).rejects.toBeInstanceOf(NoEvalQuestionsError);
+    await expect(refusal).rejects.toMatchObject({
+      code: "UNPROCESSABLE",
+      message: "Add a test question first",
+    });
+    expect(mocks.agentEvalRun.create).not.toHaveBeenCalled();
+  });
+
   it("refuses a second run while one is active, without asking anything", async () => {
     mocks.agentEvalRun.findFirst.mockResolvedValue({ id: "busy" });
     await expect(start()).rejects.toMatchObject({ code: "CONFLICT" });
@@ -178,6 +215,88 @@ describe("the worker", () => {
       "turn1",
       ["example-app"],
     );
+  });
+
+  describe("a custom check", () => {
+    const custom = {
+      ...question,
+      kind: "custom",
+      expected: "Mentions 42. Pass when every fact is there.",
+      expectedApps: [],
+    };
+    const judgement = {
+      passed: true,
+      summary: "All facts present.",
+      criteria: [{ criterion: "Mentions 42", met: true, note: "“42”" }],
+      model: "judge-model",
+    };
+
+    it("asks the judge with the question, the criteria and the answer, and keeps its verdict", async () => {
+      mocks.agentEvalQuestion.findMany.mockResolvedValue([custom]);
+      mocks.judgeAnswer.mockResolvedValue({ ok: true, judgement });
+      await start();
+      await finish();
+      expect(mocks.judgeAnswer).toHaveBeenCalledWith({
+        agent: { id: "agent", workspaceId: "workspace" },
+        organizationId: "org",
+        question: custom.question,
+        criteria: custom.expected,
+        answer: "42",
+      });
+      expect(saved.results[0]).toMatchObject({
+        outcome: "passed",
+        judgement,
+        judgeError: null,
+      });
+    });
+
+    it("is a mismatch when the judge fails it", async () => {
+      mocks.agentEvalQuestion.findMany.mockResolvedValue([custom]);
+      mocks.judgeAnswer.mockResolvedValue({
+        ok: true,
+        judgement: { ...judgement, passed: false },
+      });
+      await start();
+      await finish();
+      expect(saved.results[0]).toMatchObject({ outcome: "mismatch" });
+    });
+
+    it("is inconclusive, never a pass, when the judge could not run", async () => {
+      mocks.agentEvalQuestion.findMany.mockResolvedValue([custom]);
+      mocks.judgeAnswer.mockResolvedValue({
+        ok: false,
+        error: "The judge timed out",
+      });
+      await start();
+      await finish();
+      expect(saved.results[0]).toMatchObject({
+        outcome: "inconclusive",
+        judgement: null,
+        judgeError: "The judge timed out",
+      });
+    });
+
+    it("never judges an unfinished turn", async () => {
+      mocks.agentEvalQuestion.findMany.mockResolvedValue([custom]);
+      mocks.turn.findUniqueOrThrow.mockResolvedValue({
+        status: "failed",
+        error: null,
+      });
+      await start();
+      await finish();
+      expect(mocks.judgeAnswer).not.toHaveBeenCalled();
+      expect(saved.results[0]).toMatchObject({ outcome: "error" });
+    });
+
+    it("never calls the judge for the simple checks", async () => {
+      await start();
+      await finish();
+      expect(mocks.judgeAnswer).not.toHaveBeenCalled();
+      expect(saved.results[0]).toMatchObject({
+        judgement: null,
+        judgeError: null,
+      });
+    });
   });
 
   it("keeps consecutive questions' evidence windows apart", async () => {

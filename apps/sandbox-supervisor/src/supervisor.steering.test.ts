@@ -5,10 +5,13 @@ import { describe, expect, it } from "vitest";
 import type {
   AgentEvent,
   Harness,
+  HarnessEvent,
   SupervisorMessage,
   SupervisorTransport,
-  WorkItem,
+  SupervisorWorkItem,
 } from "@onecli/agent-protocol";
+import { ceilingWarningSteerId } from "@onecli/agent-protocol";
+import { MAX_ANSWER_CHARS } from "./answer";
 import { createFakeHarness } from "./harness/fake";
 import { runSupervisor } from "./supervisor";
 
@@ -41,6 +44,7 @@ const config = (homeDir: string) => ({
   harness: "fake",
   runnerWsUrl: undefined,
   bootstrapToken: undefined,
+  sandboxId: undefined,
   outboundAttachments: false,
 });
 
@@ -48,12 +52,12 @@ const home = (prefix: string) => mkdtempSync(join(tmpdir(), prefix));
 
 const createTestTransport = () => {
   const sent: SupervisorMessage[] = [];
-  const queue: WorkItem[] = [];
+  const queue: SupervisorWorkItem[] = [];
   let notify: (() => void) | undefined;
 
   const api = {
     sent,
-    push(item: WorkItem) {
+    push(item: SupervisorWorkItem) {
       queue.push(item);
       notify?.();
       notify = undefined;
@@ -75,7 +79,7 @@ const createTestTransport = () => {
       await run;
     },
     transport: {
-      async *incoming(): AsyncIterable<WorkItem> {
+      async *incoming(): AsyncIterable<SupervisorWorkItem> {
         for (;;) {
           while (queue.length > 0) {
             const item = queue.shift();
@@ -103,19 +107,26 @@ const deliver = (
   turnId: string,
   conversationId: string,
   message = "long task",
-): WorkItem => ({ kind: "turn.deliver", turnId, conversationId, message });
+): SupervisorWorkItem => ({
+  kind: "turn.deliver",
+  turnId,
+  conversationId,
+  message,
+});
 
 const steer = (
   turnId: string,
   targetTurnId: string,
   conversationId: string,
   message = "also do this",
-): WorkItem => ({
+  context?: string,
+): SupervisorWorkItem => ({
   kind: "turn.message",
   turnId,
   targetTurnId,
   conversationId,
   message,
+  ...(context && { context }),
 });
 
 /** A long turn, so a steer sent mid-run has room to land inside it. */
@@ -131,6 +142,60 @@ type TestTransport = ReturnType<typeof createTestTransport>;
 
 const followUpsOf = (t: TestTransport, turnId: string) =>
   t.of("turn.result").find((r) => r.turnId === turnId)?.followUps;
+
+/**
+ * Run one turn on the fake harness, but with a scripted stream that waits
+ * for a steer to arrive before playing `afterSteer`: what the harness
+ * reports back about the follow-up (`message.joined`, then
+ * `message.replied` with its reply) is the test's to write. Returns every
+ * `text` the supervisor sent, by turn.
+ */
+const runScriptedSteer = async (
+  afterSteer: HarnessEvent[],
+): Promise<{ turnId: string; event: AgentEvent }[]> => {
+  const base = createFakeHarness();
+  let steered: (() => void) | undefined;
+  const steeredIn = new Promise<void>((resolve) => {
+    steered = resolve;
+  });
+  const startSession: Harness["startSession"] = async (options) => {
+    const session = await base.startSession(options);
+    return {
+      sessionRef: session.sessionRef,
+      abort: session.abort.bind(session),
+      steer: async () => steered?.(),
+      async *runTurn(input) {
+        void input;
+        yield { type: "turn.started" };
+        await steeredIn;
+        yield* afterSteer;
+      },
+    };
+  };
+  const harness: Harness = {
+    ...base,
+    startSession,
+    onFailure: base.onFailure.bind(base),
+    dispose: base.dispose.bind(base),
+  };
+  const t = createTestTransport();
+  const run = runSupervisor(config(home("sup-steer-")), harness, t.transport);
+
+  t.push(deliver("t1", "cv-a"));
+  await t.until(
+    () => t.of("event").some((m) => m.event.type === "turn.started"),
+    "the turn to start",
+  );
+  t.push(steer("f1", "t1", "cv-a", "and the other thing"));
+  await t.until(() => t.of("turn.result").length === 1, "the turn to end");
+  await t.finish(run);
+
+  expect(followUpsOf(t, "t1")).toEqual([{ turnId: "f1", outcome: "joined" }]);
+  return t
+    .of("event")
+    .filter((m) => m.event.type === "text")
+    .map((m) => ({ turnId: m.turnId, event: m.event }));
+};
 
 describe("steering into the live turn", () => {
   it("a steer for the ACTIVE turn joins it and reports joined on turn.result", async () => {
@@ -153,17 +218,21 @@ describe("steering into the live turn", () => {
     await t.finish(run);
 
     expect(followUpsOf(t, "t1")).toEqual([{ turnId: "f1", outcome: "joined" }]);
-    // The fake injects the steered text into the same run — the message
-    // visibly joined THIS turn, not a later one.
-    const injected = t
-      .of("event")
-      .some(
-        (m) =>
-          m.turnId === "t1" &&
-          m.event.type === "text.delta" &&
-          m.event.text.includes("fold this in"),
-      );
-    expect(injected).toBe(true);
+    // The fake injects the steered text into the same run, and its reply
+    // streams under the FOLLOW-UP it answers: the delta carrying
+    // the echo rides the follow-up's id, never the target's, so a reader
+    // sees the reply being written under the message it answers.
+    const echoed = (turnId: string) =>
+      t
+        .of("event")
+        .some(
+          (m) =>
+            m.turnId === turnId &&
+            m.event.type === "text.delta" &&
+            m.event.text.includes("fold this in"),
+        );
+    expect(echoed("f1")).toBe(true);
+    expect(echoed("t1")).toBe(false);
     // The confirmation event precedes the terminal (stream coherence).
     const kinds = t
       .of("event")
@@ -173,6 +242,47 @@ describe("steering into the live turn", () => {
     expect(kinds.indexOf("message.joined")).toBeLessThan(
       kinds.lastIndexOf("turn.done"),
     );
+  });
+
+  it("a steer's frame is composed in front of the words at the harness boundary, and only when sent", async () => {
+    // The control plane marks a PERSON's follow-up with a delivery-only
+    // context ("a new message arrived while you were working"); the
+    // supervisor hands the harness `context + words`, like a turn's memory
+    // context, and the words alone when there is none (an automation's
+    // wake). The fake echoes exactly what it was handed, so the echo is the
+    // proof of what the model would see.
+    const t = createTestTransport();
+    const run = runSupervisor(
+      config(home("sup-steer-")),
+      createFakeHarness({ script: () => longScript() }),
+      t.transport,
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(
+      () => t.of("event").some((m) => m.event.type === "text.delta"),
+      "the turn to start streaming",
+    );
+    t.push(steer("f1", "t1", "cv-a", "fold this in", "[a new message]"));
+    t.push(steer("f2", "t1", "cv-a", "a wake, unframed"));
+    await t.until(() => t.of("turn.result").length === 1, "the turn to end");
+    await t.finish(run);
+
+    // Each echo streams under ITS follow-up (the reply's own row).
+    const echoOf = (turnId: string) =>
+      t
+        .of("event")
+        .filter((m) => m.turnId === turnId && m.event.type === "text.delta")
+        .map((m) => (m.event.type === "text.delta" ? m.event.text : ""))
+        .filter((text) => text.startsWith("[steered: "));
+    expect(echoOf("f1")).toEqual([
+      "[steered: [a new message]\n\nfold this in]",
+    ]);
+    expect(echoOf("f2")).toEqual(["[steered: a wake, unframed]"]);
+    expect(followUpsOf(t, "t1")).toEqual([
+      { turnId: "f1", outcome: "joined" },
+      { turnId: "f2", outcome: "joined" },
+    ]);
   });
 
   it("a steer arriving BEFORE its turn's deliver drains at the first event", async () => {
@@ -299,6 +409,178 @@ describe("steering into the live turn", () => {
     expect(followUpsOf(t, "t1")).toBeUndefined();
   });
 
+  it("stores a joined follow-up's reply under the follow-up, before the turn closes", async () => {
+    // The lost-reply bug at the supervisor: the agent answered the mid-turn
+    // message, then kept working, and the turn kept only its closing words.
+    // Now the reply is the follow-up's own `text`, sent under ITS id, ahead
+    // of the turn's terminal frames; the turn's answer is untouched.
+    const t = createTestTransport();
+    const run = runSupervisor(
+      config(home("sup-steer-")),
+      createFakeHarness({
+        script: () => [
+          ...longScript().slice(0, -1),
+          { type: "tool.started", callId: "c1", name: "bash" },
+          { type: "tool.finished", callId: "c1", name: "bash", output: "ok" },
+          { type: "text.delta", text: "THE-FINAL-ANSWER", messageId: "m-end" },
+          { type: "turn.done" },
+        ],
+      }),
+      t.transport,
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(
+      () => t.of("event").some((m) => m.event.type === "text.delta"),
+      "the turn to start streaming",
+    );
+    t.push(steer("f1", "t1", "cv-a", "fold this in"));
+    await t.until(() => t.of("turn.result").length === 1, "the turn to end");
+    await t.finish(run);
+
+    const texts = t
+      .of("event")
+      .filter((m) => m.event.type === "text")
+      .map((m) => ({ turnId: m.turnId, event: m.event }));
+    expect(texts).toEqual([
+      {
+        turnId: "f1",
+        event: { type: "text", text: "[steered: fold this in]" },
+      },
+      { turnId: "t1", event: { type: "text", text: "THE-FINAL-ANSWER" } },
+    ]);
+    // Ordered ahead of the turn's terminal report, on the one socket, and
+    // LIVE: ahead of the work the turn did after the injection,
+    // not held for the terminal. The harness confirmed the join as it
+    // happened, so the reply and the join reach the wire before the tool
+    // call that followed them.
+    const replyAt = t.sent.findIndex(
+      (m) => m.kind === "event" && m.turnId === "f1",
+    );
+    const joinedAt = t.sent.findIndex(
+      (m) => m.kind === "event" && m.event.type === "message.joined",
+    );
+    const laterToolAt = t.sent.findIndex(
+      (m) => m.kind === "event" && m.event.type === "tool.started",
+    );
+    const resultAt = t.sent.findIndex((m) => m.kind === "turn.result");
+    expect(replyAt).toBeGreaterThan(-1);
+    // The join is on the wire BEFORE the first word of the reply: a reader
+    // sees the message picked up, then the reply grow under it.
+    expect(joinedAt).toBeGreaterThan(-1);
+    expect(joinedAt).toBeLessThan(replyAt);
+    expect(replyAt).toBeLessThan(laterToolAt);
+    expect(replyAt).toBeLessThan(resultAt);
+    // The reply never rides the wire's `message.joined`, and the harness's
+    // `message.replied` has no wire form at all.
+    expect(
+      t
+        .of("event")
+        .filter((m) => m.event.type === "message.joined")
+        .map((m) => m.event),
+    ).toEqual([{ type: "message.joined", followUpId: "f1" }]);
+    expect(
+      t.of("event").some((m) => String(m.event.type) === "message.replied"),
+    ).toBe(false);
+  });
+
+  it("keeps a reply that is the turn's closing words as the TURN's answer", async () => {
+    // One message answering both: storing it under the follow-up would leave
+    // the turn with no answer, so it stays where it was, said once.
+    expect(
+      await runScriptedSteer([
+        { type: "message.joined", followUpId: "f1" },
+        { type: "text.delta", text: "Both done.", messageId: "m1" },
+        { type: "message.replied", followUpId: "f1", reply: "Both done." },
+        { type: "turn.done" },
+      ]),
+    ).toEqual([{ turnId: "t1", event: { type: "text", text: "Both done." } }]);
+  });
+
+  it("ignores a reply for an id this supervisor never delivered", async () => {
+    // A reply names a follow-up the harness never joined under this
+    // supervisor (a forged or stale id): it is not stored under anything,
+    // and the turn's answer is untouched. The delivered follow-up still
+    // joins, with no reply of its own.
+    expect(
+      await runScriptedSteer([
+        { type: "message.joined", followUpId: "f1" },
+        { type: "text.delta", text: "Both done.", messageId: "m1" },
+        { type: "message.replied", followUpId: "forged", reply: "Both done." },
+        { type: "turn.done" },
+      ]),
+    ).toEqual([{ turnId: "t1", event: { type: "text", text: "Both done." } }]);
+  });
+
+  it("a delta tagged for an id this supervisor never delivered stays under the TURN", async () => {
+    // The same honor guard on the live stream: an adapter cannot stream
+    // words under a row it was never handed (a forged `replyTo`), and a
+    // row not yet confirmed joined gets nothing either. MUTATION-PROOF: key
+    // the wire delta on `replyTo` alone and "Both done." streams under
+    // "forged" below.
+    const base = createFakeHarness();
+    const startSession: Harness["startSession"] = async (options) => {
+      const session = await base.startSession(options);
+      return {
+        sessionRef: session.sessionRef,
+        abort: session.abort.bind(session),
+        steer: session.steer?.bind(session),
+        async *runTurn(input) {
+          void input;
+          yield { type: "turn.started" };
+          yield {
+            type: "text.delta",
+            text: "Both done.",
+            messageId: "m1",
+            replyTo: "forged",
+          };
+          yield { type: "turn.done" };
+        },
+      };
+    };
+    const harness: Harness = {
+      ...base,
+      startSession,
+      onFailure: base.onFailure.bind(base),
+      dispose: base.dispose.bind(base),
+    };
+    const t = createTestTransport();
+    const run = runSupervisor(config(home("sup-steer-")), harness, t.transport);
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the turn to end");
+    await t.finish(run);
+
+    expect(
+      t
+        .of("event")
+        .filter((m) => m.event.type === "text.delta")
+        .map((m) => m.turnId),
+    ).toEqual(["t1"]);
+  });
+
+  it("caps a runaway reply at the answer's own ceiling", async () => {
+    // A reply is stored like an answer, so the same memory/wire guard
+    // applies. MUTATION-PROOF: send it unsliced and the oversized text
+    // reaches the transport whole.
+    const huge = "r".repeat(MAX_ANSWER_CHARS + 50);
+    const texts = await runScriptedSteer([
+      { type: "message.joined", followUpId: "f1" },
+      { type: "tool.started", callId: "c1", name: "bash" },
+      { type: "tool.finished", callId: "c1", name: "bash", output: "" },
+      { type: "text.delta", text: "Done.", messageId: "m2" },
+      { type: "message.replied", followUpId: "f1", reply: huge },
+      { type: "turn.done" },
+    ]);
+    expect(texts).toEqual([
+      {
+        turnId: "f1",
+        event: { type: "text", text: huge.slice(0, MAX_ANSWER_CHARS) },
+      },
+      { turnId: "t1", event: { type: "text", text: "Done." } },
+    ]);
+  });
+
   it("NEVER delivers one steer twice — the inline arm and the turn drain serialize", async () => {
     // MUTATION-PROOF for the steerDrain chain: unserialized, the reader
     // loop's inline arm and the turn's first-event drain both pick the same
@@ -420,13 +702,15 @@ describe("steering into the live turn", () => {
       () => t.of("event").some((m) => m.event.type === "text.delta"),
       "the turn to start streaming",
     );
-    t.push(steer("ceiling-warning:t1", "t1", "cv-a", "[system] wrap up now"));
+    t.push(
+      steer(ceilingWarningSteerId("t1"), "t1", "cv-a", "[system] wrap up now"),
+    );
 
     await t.until(() => t.of("turn.result").length === 1, "the turn to end");
     await t.finish(run);
 
     expect(followUpsOf(t, "t1")).toEqual([
-      { turnId: "ceiling-warning:t1", outcome: "joined" },
+      { turnId: ceilingWarningSteerId("t1"), outcome: "joined" },
     ]);
     const injected = t
       .of("event")
@@ -436,6 +720,23 @@ describe("steering into the live turn", () => {
           m.event.type === "text.delta" &&
           m.event.text.includes("[system] wrap up now"),
       );
+    // Streamed under the TURN: no row behind the id, so its reply deltas
+    // never re-key to the synthetic id (a stream the control plane could
+    // not fence to a row). MUTATION-PROOF: drop the platform-steer guard in
+    // `replyTargetOf` and the echo goes out under the warning id.
     expect(injected).toBe(true);
+    expect(
+      t.of("event").some((m) => m.turnId === ceilingWarningSteerId("t1")),
+    ).toBe(false);
+    // No row behind the id, so nothing to store an answer under: the
+    // agent's reply to the platform's warning stays the TURN's own words,
+    // never a `text` sent under the synthetic id (a write the control
+    // plane would refuse, losing the wrap-up). MUTATION-PROOF: drop the
+    // platform-steer guard and the reply goes out under the warning id.
+    const texts = t
+      .of("event")
+      .filter((m) => m.event.type === "text")
+      .map((m) => m.turnId);
+    expect(texts).toEqual(["t1"]);
   });
 });

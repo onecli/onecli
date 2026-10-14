@@ -2,6 +2,7 @@
 
 import { Bubble } from "@onecli/ui/components/bubble";
 import { Message, MessageContent } from "@onecli/ui/components/message";
+import { cn } from "@onecli/ui/lib/utils";
 import type { AttachmentMeta } from "@/lib/api/types";
 import { AttachmentChips } from "./attachment-chips";
 import { TextBubbleContent } from "./text-bubble-content";
@@ -15,7 +16,8 @@ import { TextBubbleContent } from "./text-bubble-content";
  * through another door; the optimistic pending row never passes it — a
  * message typed here is by definition from the web. `hint` is the quiet
  * status line under a mid-run follow-up ("Received, folding it in") — same
- * visual register as the chip, joined with it when both apply.
+ * visual register as the chip, joined with it when both apply. `action` is
+ * a control on that same line (SEND NOW), after the words.
  *
  * `attachments` render under the bubble (or alone, for a file-only message —
  * an empty bubble would read as a glitch); the optimistic row passes local
@@ -25,12 +27,14 @@ export const UserBubble = ({
   text,
   origin,
   hint,
+  action,
   conversationId,
   attachments,
 }: {
   text: string;
   origin?: string;
   hint?: string;
+  action?: React.ReactNode;
   conversationId?: string;
   attachments?: (AttachmentMeta & { objectUrl?: string })[];
 }) => (
@@ -47,9 +51,21 @@ export const UserBubble = ({
           attachments={attachments}
         />
       )}
-      {(origin || hint) && (
+      {(origin || hint || action) && (
         <span className="text-muted-foreground self-end text-xs">
           {[origin, hint].filter(Boolean).join(" · ")}
+          {action && (
+            // `empty:hidden`: an action may render nothing for now (SEND
+            // NOW between tools), and its separator must go with it.
+            <span
+              className={cn(
+                "empty:hidden",
+                (origin || hint) && "before:px-1 before:content-['·']",
+              )}
+            >
+              {action}
+            </span>
+          )}
         </span>
       )}
     </MessageContent>

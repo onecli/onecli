@@ -172,13 +172,16 @@ describe("unconnected", () => {
 });
 
 describe("connected", () => {
-  it("shows the workspace, presence count and Disconnect — no paste field", () => {
+  it("names the workspace and offers Disconnect — no paste field, no agent count", () => {
     state.view = view({ integrations: [integration()] });
     render(<SlackIntegrationCard />);
 
-    expect(screen.getByText(/Acme/)).toBeInTheDocument();
-    expect(screen.getByText(/T123/)).toBeInTheDocument();
-    expect(screen.getByText(/3 agent apps/)).toBeInTheDocument();
+    // The NAME leads ("Connected to Acme."); the raw T… id only shows when
+    // there is no name, and the agent count lives in the agents list below.
+    expect(screen.getByText(/Connected to/)).toBeInTheDocument();
+    expect(screen.getByText("Acme")).toBeInTheDocument();
+    expect(screen.queryByText(/T123/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/agent apps?/)).not.toBeInTheDocument();
     expect(screen.getByText("Connected")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Disconnect" }),
@@ -186,6 +189,17 @@ describe("connected", () => {
     expect(
       screen.queryByLabelText("App Configuration refresh token"),
     ).not.toBeInTheDocument();
+  });
+
+  it("falls back to the T… id when the workspace has no name, Disconnect still on the line", () => {
+    state.view = view({ integrations: [integration({ name: null })] });
+    render(<SlackIntegrationCard />);
+
+    expect(screen.getByText(/Connected to/)).toBeInTheDocument();
+    expect(screen.getByText("T123")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Disconnect" }),
+    ).toBeInTheDocument();
   });
 });
 

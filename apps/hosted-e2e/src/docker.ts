@@ -96,3 +96,9 @@ export const assertDockerReady = async (agentImage: string): Promise<void> => {
     );
   });
 };
+
+/** The container's stdout+stderr so far: the supervisor's own log lines. */
+export const dockerLogs = async (container: string): Promise<string> => {
+  const { stdout, stderr } = await exec("docker", ["logs", container]);
+  return `${stdout}${stderr}`;
+};

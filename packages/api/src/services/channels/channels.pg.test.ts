@@ -10,6 +10,7 @@ import {
   vi,
 } from "vitest";
 
+import type { AgentEvent } from "@onecli/agent-protocol";
 import { proofDatabaseUrl } from "../../testing/pg-proof.js";
 
 /**
@@ -2746,6 +2747,343 @@ describe.skipIf(!PROOF_URL)(
           where: { userId: ADMIN, workspaceId: WORKSPACE, kind: "service" },
         }),
       ).toBe(0);
+    });
+  },
+);
+
+describe.skipIf(!PROOF_URL)(
+  "completeAgentInstallFromCode (an install begun in Slack, no state)",
+  () => {
+    /** A waiting events presence whose stored client creds are `client-<tag>`
+     * (or `credentials`, for an app with no OAuth client). `updatedAt` pins
+     * the newest-first order the door offers the code in. */
+    const seedWaitingApp = async (
+      agentId: string,
+      integrationId: string,
+      tag: string,
+      options: {
+        credentials?: Record<string, string>;
+        updatedAt?: Date;
+      } = {},
+    ) =>
+      db.agentChannel.create({
+        data: {
+          agentId,
+          integrationId,
+          provider: "slack",
+          externalId: `A-${tag}`,
+          transport: "events",
+          status: "pending_setup",
+          credentials: await getCrypto().encrypt(
+            JSON.stringify(
+              options.credentials ?? {
+                clientId: `client-${tag}`,
+                clientSecret: `secret-${tag}`,
+                signingSecret: `signing-${tag}`,
+              },
+            ),
+          ),
+          createdByUserId: ADMIN,
+          ...(options.updatedAt && { updatedAt: options.updatedAt }),
+        },
+        select: { id: true },
+      });
+
+    /** Slack's real behavior (verified live 2026-10-08): a code offered to
+     * the WRONG app answers `invalid_code` and stays spendable; only the app
+     * it was minted for gets the token. `refusals` scripts other answers per
+     * client (a deleted app's `invalid_client_id`). */
+    const scriptCodeFor = (
+      tag: string,
+      team = { id: "T111", name: "Acme" },
+      refusals: Record<string, string> = {},
+    ) => {
+      slackHandlers["oauth.v2.access"] = (call) => {
+        const basic = Buffer.from(
+          call.authorization!.slice("Basic ".length),
+          "base64",
+        ).toString("utf8");
+        const refusal = refusals[basic.split(":")[0]!];
+        if (refusal) return { ok: false, error: refusal };
+        return basic === `client-${tag}:secret-${tag}`
+          ? {
+              ok: true,
+              access_token: `xoxb-${tag}`,
+              bot_user_id: `UBOT-${tag}`,
+              team,
+            }
+          : { ok: false, error: "invalid_code" };
+      };
+      scriptAuthTest(team.id, team.name ?? "Acme", `UBOT-${tag}`, tag);
+    };
+
+    const exchangedClients = () =>
+      slackCallsFor("oauth.v2.access").map(
+        (c) =>
+          Buffer.from(c.authorization!.slice("Basic ".length), "base64")
+            .toString("utf8")
+            .split(":")[0],
+      );
+
+    const statusOf = async (agentId: string) =>
+      (
+        await db.agentChannel.findUniqueOrThrow({
+          where: { agentId_provider: { agentId, provider: "slack" } },
+        })
+      ).status;
+
+    const OLDER = new Date(Date.now() - 60_000);
+    const NEWER = new Date();
+
+    it("finishes the ONE waiting agent app the code belongs to, as the signed-in admin, leaving the others untouched", async () => {
+      initSelfUrl(EVENTS_SELF_URL);
+      const integration = await seedIntegration();
+      const first = await seedAgent("stateless-first");
+      const second = await seedAgent("stateless-second");
+      // The miss is offered the code FIRST (newest first), and its finished
+      // keep-app cleanup tombstone must survive the miss untouched.
+      // MUTATION-TESTED: run the reattach before the exchange (the signed
+      // door's order) and the missed app's uninstall proof is voided
+      // (`completed` → `installation_pending`) by a code that was never its.
+      const missedApp = await seedWaitingApp(first, integration.id, "first", {
+        updatedAt: NEWER,
+      });
+      await db.channelCleanup.create({
+        data: {
+          organizationId: ORG,
+          workspaceId: WORKSPACE,
+          integrationId: integration.id,
+          teamId: "T111",
+          sourcePresenceId: missedApp.id,
+          provider: "slack",
+          externalId: "A-first",
+          deleteRemote: false,
+          stage: "completed",
+          state: "completed",
+          expiresAt: new Date(Date.now() + 3_600_000),
+        },
+      });
+      await seedWaitingApp(second, integration.id, "second", {
+        updatedAt: OLDER,
+      });
+      scriptCodeFor("second");
+
+      const result = await agentChannels.completeAgentInstallFromCode({
+        organizationId: ORG,
+        actorUserId: ADMIN,
+        provider: "slack",
+        code: "code-from-slack",
+      });
+
+      expect(result).toMatchObject({ agentId: second, workspaceId: WORKSPACE });
+      expect(exchangedClients()).toEqual(["client-first", "client-second"]);
+      const won = await db.agentChannel.findUniqueOrThrow({
+        where: { agentId_provider: { agentId: second, provider: "slack" } },
+      });
+      expect(won.status).toBe("active");
+      expect(won.identityRef).toBe("UBOT-second");
+      expect(
+        JSON.parse(await getCrypto().decrypt(won.credentials!)),
+      ).toMatchObject({ botToken: "xoxb-second", clientId: "client-second" });
+      // The approvals key borrows the signed-in caller's authority.
+      expect(
+        await db.apiKey.findUniqueOrThrow({ where: { id: won.apiKeyId! } }),
+      ).toMatchObject({ userId: ADMIN, kind: "service" });
+
+      const missed = await db.agentChannel.findUniqueOrThrow({
+        where: { agentId_provider: { agentId: first, provider: "slack" } },
+      });
+      expect(missed.status).toBe("pending_setup");
+      expect(
+        JSON.parse(await getCrypto().decrypt(missed.credentials!)),
+      ).not.toHaveProperty("botToken");
+      expect(
+        await db.channelCleanup.findUniqueOrThrow({
+          where: {
+            provider_externalId: { provider: "slack", externalId: "A-first" },
+          },
+        }),
+      ).toMatchObject({ stage: "completed", state: "completed" });
+    });
+
+    it("a waiting app Slack refuses outright (deleted) is skipped, and the search goes on to the code's own app", async () => {
+      // MUTATION-TESTED: narrow the miss back to `invalid_code` only and the
+      // deleted app's `invalid_client_id` aborts the whole finish as a 422.
+      initSelfUrl(EVENTS_SELF_URL);
+      const integration = await seedIntegration();
+      const deleted = await seedAgent("stateless-deleted");
+      const live = await seedAgent("stateless-live");
+      await seedWaitingApp(deleted, integration.id, "deleted", {
+        updatedAt: NEWER,
+      });
+      await seedWaitingApp(live, integration.id, "live", {
+        updatedAt: OLDER,
+      });
+      scriptCodeFor("live", undefined, {
+        "client-deleted": "invalid_client_id",
+      });
+
+      const result = await agentChannels.completeAgentInstallFromCode({
+        organizationId: ORG,
+        actorUserId: ADMIN,
+        provider: "slack",
+        code: "code-from-slack",
+      });
+
+      expect(result).toMatchObject({ agentId: live });
+      expect(exchangedClients()).toEqual(["client-deleted", "client-live"]);
+      expect(await statusOf(live)).toBe("active");
+      expect(await statusOf(deleted)).toBe("pending_setup");
+    });
+
+    it("a waiting app with no OAuth client (made by hand) is skipped without calling Slack", async () => {
+      // MUTATION-TESTED: let the provider's no-client refusal propagate and
+      // the hand-made app aborts the whole finish as a 422.
+      initSelfUrl(EVENTS_SELF_URL);
+      const integration = await seedIntegration();
+      const handMade = await seedAgent("stateless-handmade");
+      const live = await seedAgent("stateless-live2");
+      await seedWaitingApp(handMade, integration.id, "handmade", {
+        credentials: { signingSecret: "signing-handmade" },
+        updatedAt: NEWER,
+      });
+      await seedWaitingApp(live, integration.id, "live2", {
+        updatedAt: OLDER,
+      });
+      scriptCodeFor("live2");
+
+      const result = await agentChannels.completeAgentInstallFromCode({
+        organizationId: ORG,
+        actorUserId: ADMIN,
+        provider: "slack",
+        code: "code-from-slack",
+      });
+
+      expect(result).toMatchObject({ agentId: live });
+      expect(exchangedClients()).toEqual(["client-live2"]);
+      expect(await statusOf(handMade)).toBe("pending_setup");
+    });
+
+    it("an app reserved for remote cleanup is never offered the code, even one it would match", async () => {
+      // MUTATION-TESTED: drop the reservation check and the reserved app is
+      // offered the code before anything else and comes back to life.
+      initSelfUrl(EVENTS_SELF_URL);
+      const integration = await seedIntegration();
+      const agentId = await seedAgent("stateless-reserved");
+      const presence = await seedWaitingApp(
+        agentId,
+        integration.id,
+        "reserved",
+      );
+      await db.channelCleanup.create({
+        data: {
+          organizationId: ORG,
+          workspaceId: WORKSPACE,
+          integrationId: integration.id,
+          teamId: "T111",
+          sourcePresenceId: presence.id,
+          provider: "slack",
+          externalId: "A-reserved",
+          deleteRemote: true,
+          expiresAt: new Date(Date.now() + 3_600_000),
+        },
+      });
+      scriptCodeFor("reserved");
+
+      await expect(
+        agentChannels.completeAgentInstallFromCode({
+          organizationId: ORG,
+          actorUserId: ADMIN,
+          provider: "slack",
+          code: "code-from-slack",
+        }),
+      ).resolves.toBeNull();
+      expect(exchangedClients()).toEqual([]);
+      expect(await statusOf(agentId)).toBe("pending_setup");
+    });
+
+    it("NEVER offers the code to another org's waiting app — even one it would match", async () => {
+      // MUTATION-TESTED (the tenant fence): drop the organization filters on
+      // the candidate query and the foreign app below is offered the code,
+      // matches, and goes live in ITS org from THIS org's session.
+      initSelfUrl(EVENTS_SELF_URL);
+      await seedIntegration();
+      const foreignIntegration = await seedIntegration({
+        organizationId: OTHER_ORG,
+        externalId: "T222",
+      });
+      const foreign = await db.agent.create({
+        data: {
+          workspaceId: OTHER_WORKSPACE,
+          name: "foreign agent",
+          identifier: `${P}stateless-foreign`,
+          accessToken: `aoc_${P}stateless-foreign`,
+          kind: "hosted",
+          harness: "fake",
+        },
+        select: { id: true },
+      });
+      await seedWaitingApp(foreign.id, foreignIntegration.id, "foreign");
+      scriptCodeFor("foreign", { id: "T222", name: "Elsewhere" });
+
+      const result = await agentChannels.completeAgentInstallFromCode({
+        organizationId: ORG,
+        actorUserId: ADMIN,
+        provider: "slack",
+        code: "code-from-slack",
+      });
+
+      expect(result).toBeNull();
+      expect(exchangedClients()).not.toContain("client-foreign");
+      const row = await db.agentChannel.findUniqueOrThrow({
+        where: { agentId_provider: { agentId: foreign.id, provider: "slack" } },
+      });
+      expect(row.status).toBe("pending_setup");
+      expect(row.apiKeyId).toBeNull();
+    });
+
+    it("answers null when no waiting app claims the code — nothing changes", async () => {
+      initSelfUrl(EVENTS_SELF_URL);
+      const integration = await seedIntegration();
+      const agentId = await seedAgent("stateless-nomatch");
+      await seedWaitingApp(agentId, integration.id, "mine");
+      scriptCodeFor("somebody-else");
+
+      await expect(
+        agentChannels.completeAgentInstallFromCode({
+          organizationId: ORG,
+          actorUserId: ADMIN,
+          provider: "slack",
+          code: "shared-app-code",
+        }),
+      ).resolves.toBeNull();
+      const row = await db.agentChannel.findUniqueOrThrow({
+        where: { agentId_provider: { agentId, provider: "slack" } },
+      });
+      expect(row.status).toBe("pending_setup");
+      expect(row.apiKeyId).toBeNull();
+    });
+
+    it("refuses a matching app installed into a DIFFERENT Slack workspace — nothing activates", async () => {
+      initSelfUrl(EVENTS_SELF_URL);
+      const integration = await seedIntegration();
+      const agentId = await seedAgent("stateless-wrongteam");
+      await seedWaitingApp(agentId, integration.id, "wrongteam");
+      scriptCodeFor("wrongteam", { id: "T999", name: "Somewhere Else" });
+
+      await expect(
+        agentChannels.completeAgentInstallFromCode({
+          organizationId: ORG,
+          actorUserId: ADMIN,
+          provider: "slack",
+          code: "code-from-slack",
+        }),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
+      const row = await db.agentChannel.findUniqueOrThrow({
+        where: { agentId_provider: { agentId, provider: "slack" } },
+      });
+      expect(row.status).toBe("pending_setup");
+      expect(row.apiKeyId).toBeNull();
     });
   },
 );
@@ -6276,7 +6614,7 @@ describe.skipIf(!PROOF_URL)("getAdapterWork", () => {
       },
       select: { id: true },
     });
-    await db.turn.create({
+    const followUp = await db.turn.create({
       data: {
         conversationId: conversation.id,
         message: "and check the pager",
@@ -6284,7 +6622,9 @@ describe.skipIf(!PROOF_URL)("getAdapterWork", () => {
         source: "web",
         userId: ADMIN,
         followUpOfTurnId: asked.id,
+        sourceThreadId: "1700000000.000200",
       },
+      select: { id: true },
     });
 
     const caller = await seedClaimedCaller();
@@ -6297,6 +6637,193 @@ describe.skipIf(!PROOF_URL)("getAdapterWork", () => {
     // identity must not travel there.
     expect(item?.followUps.map((f) => f.userName)).toEqual([null]);
     expect(JSON.stringify(item)).not.toContain(`${ADMIN}@example.com`);
+    // Each follow-up names its own row (where its reply is stored) and the
+    // thread it was asked in (where that reply posts).
+    expect(item?.followUps.map((f) => [f.id, f.sourceThreadId])).toEqual([
+      [followUp.id, "1700000000.000200"],
+    ]);
+  });
+
+  describe("the reply feed (a reply posts while the turn still runs)", () => {
+    /** A running turn with a joined follow-up and, optionally, the reply
+     * `text` stored under the follow-up's id. */
+    const seedLiveExchange = async (
+      suffix: string,
+      options: {
+        reply?: string;
+        targetStatus?: string;
+        source?: string;
+        replyPostedAt?: Date;
+      } = {},
+    ) => {
+      const seeded = await seedLinkedConversation(suffix);
+      const target = await db.turn.create({
+        data: {
+          conversationId: seeded.conversation.id,
+          message: "run the report",
+          status: options.targetStatus ?? "running",
+          source: "slack",
+          userId: MEMBER,
+        },
+        select: { id: true },
+      });
+      const followUp = await db.turn.create({
+        data: {
+          conversationId: seeded.conversation.id,
+          message: "also check the linter",
+          status: "joined",
+          source: options.source ?? "slack",
+          userId: MEMBER,
+          followUpOfTurnId: target.id,
+          sourceThreadId: "1700000000.000300",
+          steerDeliveredAt: new Date(),
+          ...(options.replyPostedAt && {
+            replyPostedAt: options.replyPostedAt,
+          }),
+        },
+        select: { id: true },
+      });
+      if (options.reply !== undefined) {
+        await db.turnEvent.create({
+          data: {
+            conversationId: seeded.conversation.id,
+            turnId: followUp.id,
+            seq: 1,
+            type: "text",
+            payload: { type: "text", text: options.reply },
+          },
+        });
+      }
+      return { ...seeded, target, followUp };
+    };
+
+    it("serves a joined follow-up's stored reply while its turn is RUNNING, with its words and author, addressed to where it was asked", async () => {
+      const { conversation, link, presenceId, target, followUp } =
+        await seedLiveExchange("reply-live", { reply: "Sure, I'll do that." });
+      const caller = await seedClaimedCaller();
+
+      const work = await adapters.getAdapterWork(caller.adapterId);
+
+      expect(work.finished).toEqual([]);
+      expect(work.replies).toEqual([
+        {
+          linkId: link.id,
+          presenceId,
+          conversationId: conversation.id,
+          externalThreadId: "C-reply-live:1.1",
+          kind: "group",
+          turnId: target.id,
+          followUp: {
+            id: followUp.id,
+            message: "also check the linter",
+            source: "slack",
+            // The author's display name, resolved like a finished turn's:
+            // a web-sourced follow-up posts attributed ahead of its reply.
+            userName: "Morgan Member",
+            sourceThreadId: "1700000000.000300",
+          },
+          reply: "Sure, I'll do that.",
+        },
+      ]);
+    });
+
+    it("serves NOTHING for a follow-up without a reply of its own, a finished turn, an automation, or one already posted", async () => {
+      // Each negative control alone would keep the feed quiet; together they
+      // pin every clause of the query. MUTATION-PROOF: drop any one clause
+      // and its row below appears.
+      await seedLiveExchange("reply-none"); // no `text` under the follow-up
+      await seedLiveExchange("reply-done", {
+        reply: "late",
+        targetStatus: "done", // the completion pass owns it now
+      });
+      await seedLiveExchange("reply-wake", {
+        reply: "a wake's reply",
+        source: "watch", // an automation's reply is its caption body
+      });
+      await seedLiveExchange("reply-posted", {
+        reply: "already there",
+        replyPostedAt: new Date(),
+      });
+      const caller = await seedClaimedCaller();
+
+      const work = await adapters.getAdapterWork(caller.adapterId);
+
+      expect(work.replies).toEqual([]);
+    });
+
+    it("is fenced to the caller's links: another adapter's conversation never shows", async () => {
+      await seedLiveExchange("reply-foreign", { reply: "not yours" });
+      // A caller that owns NO links (never claimed the config feed).
+      const stranger = await seedAdapterCaller();
+
+      const work = await adapters.getAdapterWork(stranger.adapterId);
+
+      expect(work.replies).toEqual([]);
+    });
+
+    it("the claim is exactly-once: the first caller wins, a twin and a stranger lose", async () => {
+      const { followUp } = await seedLiveExchange("reply-claim", {
+        reply: "mine",
+      });
+      const caller = await seedClaimedCaller();
+      const stranger = await seedAdapterCaller();
+
+      // A stranger (no links) cannot claim what it does not serve.
+      expect(
+        await adapters.claimFollowUpReply(stranger.adapterId, followUp.id),
+      ).toBe(false);
+      expect(
+        await adapters.claimFollowUpReply(caller.adapterId, followUp.id),
+      ).toBe(true);
+      // The twin's identical claim finds the stamp and writes nothing.
+      expect(
+        await adapters.claimFollowUpReply(caller.adapterId, followUp.id),
+      ).toBe(false);
+      const row = await db.turn.findUniqueOrThrow({
+        where: { id: followUp.id },
+        select: { replyPostedAt: true },
+      });
+      expect(row.replyPostedAt).not.toBeNull();
+      // Claimed rows leave the feed.
+      const work = await adapters.getAdapterWork(caller.adapterId);
+      expect(work.replies).toEqual([]);
+    });
+
+    it("a finished turn's follow-ups say whether their reply was already posted", async () => {
+      // The completion pass reads this to post the follow-up's words but
+      // not its reply again. MUTATION-PROOF: derive the flag from anything
+      // but the stamp and the posted one reads as unposted.
+      const { conversation, link, target, followUp } = await seedLiveExchange(
+        "reply-flag",
+        { reply: "posted early", replyPostedAt: new Date() },
+      );
+      await db.$executeRaw`UPDATE channel_thread_links SET created_at = now() - interval '10 minutes' WHERE id = ${link.id}`;
+      const unposted = await db.turn.create({
+        data: {
+          conversationId: conversation.id,
+          message: "and this",
+          status: "joined",
+          source: "slack",
+          userId: MEMBER,
+          followUpOfTurnId: target.id,
+          steerDeliveredAt: new Date(),
+        },
+        select: { id: true },
+      });
+      await db.turn.update({
+        where: { id: target.id },
+        data: { status: "done", finishedAt: new Date() },
+      });
+      const caller = await seedClaimedCaller();
+
+      const work = await adapters.getAdapterWork(caller.adapterId);
+
+      const item = work.finished.find((w) => w.turn.id === target.id);
+      expect(item?.followUps.map((f) => [f.id, f.replyPosted])).toEqual([
+        [followUp.id, true],
+        [unposted.id, false],
+      ]);
+    });
   });
 });
 
@@ -6512,14 +7039,11 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
     const statusCalls = slackCallsFor("agents.sessions.setStatus").length;
     const addsBefore = slackCallsFor("reactions.add").length;
 
-    await receipts.moveTurnReceipt({
+    await receipts.attachFollowUpReceipt({
       presenceId,
       followUpTurnId: followUp.id,
-      conversationId: conversation.id,
       channel: "C902",
       messageTs: "700.0003",
-      threadTs: "700.0001",
-      text: "and also",
     });
 
     // No provider traffic — the loader on the thread already covers the
@@ -6588,14 +7112,11 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
       threadTs: "701.0001",
       text: "start",
     });
-    await receipts.moveTurnReceipt({
+    await receipts.attachFollowUpReceipt({
       presenceId,
       followUpTurnId: followUp.id,
-      conversationId: conversation.id,
       channel: "C903",
       messageTs: "701.0003",
-      threadTs: "701.0001",
-      text: "and also",
     });
     // The turn finishes and the answer posts.
     await db.turn.update({
@@ -6663,14 +7184,11 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
       threadTs: "702.0001",
       text: "start",
     });
-    await receipts.moveTurnReceipt({
+    await receipts.attachFollowUpReceipt({
       presenceId,
       followUpTurnId: followUp.id,
-      conversationId: conversation.id,
       channel: "C904",
       messageTs: "702.0003",
-      threadTs: "702.0001",
-      text: "and also",
     });
     // The target closes first, then the unconsumed follow-up PROMOTES to its
     // own queued turn (that order is forced: a partial unique index allows
@@ -7135,18 +7653,20 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
     return { conversationId: conversation.id, target, followUp };
   };
 
-  it("MOVES the mark to a mid-run follow-up: same emoji, new message, old one unmarked", async () => {
-    const { agentId, presenceId } = await seedChannelAgent("receipt-move", {
+  it("a mid-run follow-up gets its OWN waiting mark: no chooser, nothing moved", async () => {
+    // One mark per message, never moved. The first message keeps its
+    // AI-chosen emoji; the follow-up gets the fixed waiting glyph on its
+    // own message, with no model call spent on it. MUTATION-PROOF: move
+    // the parent's mark instead and the parent's row vanishes; call the
+    // chooser and the completions count rises.
+    const { agentId, presenceId } = await seedChannelAgent("receipt-fu", {
       presenceCredentials: await getCrypto().encrypt(
-        JSON.stringify({ botToken: "xoxb-move" }),
+        JSON.stringify({ botToken: "xoxb-fu" }),
       ),
     });
     slackHandlers["reactions.add"] = () => ({ ok: true });
     slackHandlers["reactions.remove"] = () => ({ ok: true });
-    const { conversationId, target, followUp } = await seedMoveFamily(
-      agentId,
-      "D901",
-    );
+    const { target, followUp } = await seedMoveFamily(agentId, "D901");
     await receipts.attachTurnReceipt({
       presenceId,
       turnId: target.id,
@@ -7155,130 +7675,297 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
       text: "the first message",
     });
     const addsBefore = slackCallsFor("reactions.add").length;
+    // The chooser's inference lands on the same recording fake.
+    const inferencesBefore = slackCallsFor("v1/messages").length;
 
-    await receipts.moveTurnReceipt({
+    await receipts.attachFollowUpReceipt({
       presenceId,
       followUpTurnId: followUp.id,
-      conversationId,
       channel: "D901",
       messageTs: "600.0002",
-      text: "the follow-up",
     });
 
-    // The mark travelled: same reaction (no second chooser inference), new
-    // owner row, new message marked, old message unmarked, old row gone.
-    const moved = await db.channelTurnReceipt.findUniqueOrThrow({
+    const mark = await db.channelTurnReceipt.findUniqueOrThrow({
       where: { turnId: followUp.id },
     });
-    expect(moved.reaction).toBe("eyes");
-    expect(moved.messageTs).toBe("600.0002");
-    expect(
-      await db.channelTurnReceipt.findUnique({
-        where: { turnId: target.id },
-      }),
-    ).toBeNull();
+    expect(mark.kind).toBe("reaction");
+    expect(mark.reaction).toBe(receipts.FOLLOW_UP_WAITING_REACTION);
+    expect(mark.messageTs).toBe("600.0002");
+    // The parent's mark is untouched: same row, same emoji, same message.
+    const parent = await db.channelTurnReceipt.findUniqueOrThrow({
+      where: { turnId: target.id },
+    });
+    expect(parent.reaction).toBe("eyes");
+    expect(parent.messageTs).toBe("600.0001");
     const add = slackCallsFor("reactions.add").at(-1)!;
     expect(add.form.get("timestamp")).toBe("600.0002");
-    expect(add.form.get("name")).toBe("eyes");
+    expect(add.form.get("name")).toBe(receipts.FOLLOW_UP_WAITING_REACTION);
     expect(slackCallsFor("reactions.add")).toHaveLength(addsBefore + 1);
-    const remove = slackCallsFor("reactions.remove").at(-1)!;
-    expect(remove.form.get("timestamp")).toBe("600.0001");
+    expect(slackCallsFor("reactions.remove")).toHaveLength(0);
+    expect(slackCallsFor("v1/messages")).toHaveLength(inferencesBefore);
   });
 
-  it("the move survives a PROMOTION CHAIN — the mark can sit generations away from the direct target", async () => {
-    // t1's follow-up f1 carried the mark, got promoted, and the new message
-    // targets f1 — a one-level sibling walk would miss the mark and attach a
-    // second one. Conversation-wide resolution finds it wherever it sits.
-    const { agentId, presenceId } = await seedChannelAgent("receipt-chain", {
+  it("the pickup flips the follow-up's mark from waiting to read, and is idempotent", async () => {
+    // The live pickup signal (`message.joined`) says the agent has the
+    // message: the waiting glyph comes off, the read glyph goes on, the
+    // ledger says so. A second call finds no waiting mark and does nothing.
+    // MUTATION-PROOF: add the new mark without updating the row and the
+    // answer-post clear removes the wrong emoji (the clear reads the row).
+    const { agentId, presenceId } = await seedChannelAgent("receipt-read", {
       presenceCredentials: await getCrypto().encrypt(
-        JSON.stringify({ botToken: "xoxb-chain" }),
+        JSON.stringify({ botToken: "xoxb-read" }),
       ),
     });
     slackHandlers["reactions.add"] = () => ({ ok: true });
     slackHandlers["reactions.remove"] = () => ({ ok: true });
-    const {
-      conversationId,
-      target: t1,
-      followUp: f1,
-    } = await seedMoveFamily(agentId, "D905");
-    // t1 closed; f1 was promoted and now runs; the mark sits on ITS message.
-    await db.turn.update({
-      where: { id: t1.id },
-      data: { status: "done", finishedAt: new Date() },
-    });
-    await db.turn.update({
-      where: { id: f1.id },
-      data: { status: "running", promotedAt: new Date() },
-    });
-    await receipts.attachTurnReceipt({
+    const { followUp } = await seedMoveFamily(agentId, "D905");
+    await receipts.attachFollowUpReceipt({
       presenceId,
-      turnId: f1.id,
-      channel: "D905",
-      messageTs: "900.0001",
-      text: "promoted predecessor",
-    });
-    const f2 = await db.turn.create({
-      data: {
-        conversationId,
-        message: "newest message",
-        status: "joining",
-        followUpOfTurnId: f1.id,
-        source: "slack",
-      },
-      select: { id: true },
-    });
-
-    await receipts.moveTurnReceipt({
-      presenceId,
-      followUpTurnId: f2.id,
-      conversationId,
+      followUpTurnId: followUp.id,
       channel: "D905",
       messageTs: "900.0002",
-      text: "newest message",
     });
+    const addsBefore = slackCallsFor("reactions.add").length;
 
-    const moved = await db.channelTurnReceipt.findUniqueOrThrow({
-      where: { turnId: f2.id },
+    await receipts.markFollowUpRead(followUp.id);
+
+    const read = await db.channelTurnReceipt.findUniqueOrThrow({
+      where: { turnId: followUp.id },
     });
-    expect(moved.messageTs).toBe("900.0002");
-    expect(
-      await db.channelTurnReceipt.findUnique({ where: { turnId: f1.id } }),
-    ).toBeNull();
+    expect(read.reaction).toBe(receipts.FOLLOW_UP_READ_REACTION);
+    expect(read.messageTs).toBe("900.0002");
+    const add = slackCallsFor("reactions.add").at(-1)!;
+    expect(add.form.get("timestamp")).toBe("900.0002");
+    expect(add.form.get("name")).toBe(receipts.FOLLOW_UP_READ_REACTION);
+    expect(slackCallsFor("reactions.add")).toHaveLength(addsBefore + 1);
+    const remove = slackCallsFor("reactions.remove").at(-1)!;
+    expect(remove.form.get("timestamp")).toBe("900.0002");
+    expect(remove.form.get("name")).toBe(receipts.FOLLOW_UP_WAITING_REACTION);
+
+    // Idempotent: nothing waiting any more, so nothing changes.
+    await receipts.markFollowUpRead(followUp.id);
+    expect(slackCallsFor("reactions.add")).toHaveLength(addsBefore + 1);
+    expect(slackCallsFor("reactions.remove")).toHaveLength(1);
   });
 
-  it("a move with nothing to move falls back to a plain attach", async () => {
-    // The web-opened case: the target turn never had a mark (web sends get
-    // no receipt), so the follow-up gets a fresh one, chooser and all.
+  it("a clear that lands as the mark flips leaves NO read mark behind", async () => {
+    // The answer posts (and its clear removes the waiting mark and deletes
+    // the row) in the window between the read mark going on and the ledger
+    // flip. The flip finds no row to flip and takes its own read mark back
+    // off, so the message ends the exchange bare. MUTATION-PROOF: flip with
+    // an unconditional update and the read mark stays on the message for
+    // good (the clear already ran, nothing removes it).
     const { agentId, presenceId } = await seedChannelAgent(
-      "receipt-move-fresh",
+      "receipt-read-race",
       {
         presenceCredentials: await getCrypto().encrypt(
-          JSON.stringify({ botToken: "xoxb-move-fresh" }),
+          JSON.stringify({ botToken: "xoxb-read-race" }),
         ),
       },
     );
+    slackHandlers["reactions.remove"] = () => ({ ok: true });
     slackHandlers["reactions.add"] = () => ({ ok: true });
-    const { conversationId, followUp } = await seedMoveFamily(agentId, "D902");
-
-    await receipts.moveTurnReceipt({
+    const { target, followUp } = await seedMoveFamily(agentId, "D906");
+    await receipts.attachFollowUpReceipt({
       presenceId,
       followUpTurnId: followUp.id,
-      conversationId,
-      channel: "D902",
-      messageTs: "700.0002",
-      text: "hello",
+      channel: "D906",
+      messageTs: "906.0002",
+    });
+    // The clear fires INSIDE the read mark's add: the answer posted at that
+    // exact moment. The follow-up is `joined` by then (the pickup is what
+    // triggered the flip), so the family clear walks it.
+    slackHandlers["reactions.add"] = async () => {
+      slackHandlers["reactions.add"] = () => ({ ok: true });
+      await db.turn.update({
+        where: { id: followUp.id },
+        data: { status: "joined" },
+      });
+      await receipts.clearTurnReceipts(target.id);
+      return { ok: true };
+    };
+
+    await receipts.markFollowUpRead(followUp.id);
+
+    expect(
+      await db.channelTurnReceipt.findUnique({
+        where: { turnId: followUp.id },
+      }),
+    ).toBeNull();
+    const removed = slackCallsFor("reactions.remove")
+      .filter((c) => c.form.get("timestamp") === "906.0002")
+      .map((c) => c.form.get("name"));
+    // The clear took the waiting mark off; the flip took its read mark off.
+    expect(removed).toEqual([
+      receipts.FOLLOW_UP_WAITING_REACTION,
+      receipts.FOLLOW_UP_READ_REACTION,
+    ]);
+  });
+
+  it("the pickup leaves a follow-up with no mark alone (a web-sent message)", async () => {
+    const { agentId } = await seedChannelAgent("receipt-read-none", {
+      presenceCredentials: await getCrypto().encrypt(
+        JSON.stringify({ botToken: "xoxb-read-none" }),
+      ),
+    });
+    slackHandlers["reactions.add"] = () => ({ ok: true });
+    const { followUp } = await seedMoveFamily(agentId, "D902");
+
+    await receipts.markFollowUpRead(followUp.id);
+
+    expect(
+      await db.channelTurnReceipt.findUnique({
+        where: { turnId: followUp.id },
+      }),
+    ).toBeNull();
+    expect(slackCallsFor("reactions.add")).toHaveLength(0);
+  });
+
+  it("END TO END through the real doors: a Slack message typed mid-run gets ⏳ on ingest, 👀 on the runner's message.joined, and nothing after the answer posts", async () => {
+    // The whole Slack-side story of per-message marks and live replies on
+    // one message, with every piece the real deployment runs: the Slack
+    // dispatch door accepts a second DM as a follow-up of the running turn
+    // (the ingest-side ⏳);
+    // the runner's event batch carrying `message.joined` settles the row
+    // and flips the mark (the route's hook, `markJoinedFollowUpsRead`);
+    // the completion pass's family clear takes it off. Pinned as one proof
+    // so a change to any door that breaks the chain shows up here, not only
+    // in a real workspace.
+    const { agentId, integrationId, presenceId } = await seedChannelAgent(
+      "receipt-e2e",
+      {
+        presenceCredentials: await getCrypto().encrypt(
+          JSON.stringify({ botToken: "xoxb-e2e" }),
+        ),
+      },
+    );
+    await linkUser(integrationId, "U909", MEMBER);
+    // The reporter the runner route authenticates as: this agent's sandbox.
+    const sandbox = await db.sandbox.create({
+      data: { agentId, runnerId: RUNNER, status: "running" },
+      select: { id: true },
+    });
+    const reporter = { runnerId: RUNNER, sandboxId: sandbox.id };
+    slackHandlers["reactions.add"] = () => ({ ok: true });
+    slackHandlers["reactions.remove"] = () => ({ ok: true });
+    // The first message's own mark is the model's pick; a refused chooser
+    // falls back to a fixed reaction, which is all this proof needs.
+    slackHandlers["v1/messages"] = () => ({ error: "refused" });
+    const turnService = await import("../turn-service");
+
+    // 1. The person's first DM opens a turn; the runner starts it.
+    const first = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: dmEvent("U909", "D909", "run the report"),
+      eventId: "Ev-e2e-1",
+    });
+    if (first.kind !== "message" || first.outcome.kind !== "turn") {
+      throw new Error("unreachable");
+    }
+    const turnId = first.outcome.turn.id;
+    const conversationId = first.outcome.conversationId;
+    await db.turn.update({
+      where: { id: turnId },
+      data: { status: "dispatched" },
+    });
+    expect(
+      await turnService.applyTurnEvents(reporter, conversationId, turnId, [
+        { type: "turn.started" },
+      ]),
+    ).toBe(true);
+
+    // 2. A second DM while the turn runs: a follow-up, marked ⏳ on ITS
+    //    message by the ingest door (detached: poll the ledger).
+    const second = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: { ...dmEvent("U909", "D909", "also the linter"), ts: "1000.0002" },
+      eventId: "Ev-e2e-2",
+    });
+    if (second.kind !== "message" || second.outcome.kind !== "followUp") {
+      throw new Error("unreachable");
+    }
+    const followUpId = second.outcome.turn.id;
+    await vi.waitFor(async () => {
+      const row = await db.channelTurnReceipt.findUnique({
+        where: { turnId: followUpId },
+      });
+      expect(row?.reaction).toBe(receipts.FOLLOW_UP_WAITING_REACTION);
+    });
+    const waiting = slackCallsFor("reactions.add").find(
+      (c) => c.form.get("timestamp") === "1000.0002",
+    );
+    expect(waiting?.form.get("name")).toBe(receipts.FOLLOW_UP_WAITING_REACTION);
+
+    // 3. The supervisor delivered it and the daemon confirmed the join: the
+    //    runner's batch settles the row (the control plane's fence) and the
+    //    route's hook flips the mark to 👀.
+    await db.turn.update({
+      where: { id: followUpId },
+      data: { steerDeliveredAt: new Date() },
+    });
+    const events: AgentEvent[] = [
+      { type: "message.joined", followUpId },
+      { type: "text.delta", text: "Sure, " },
+    ];
+    expect(
+      await turnService.applyTurnEvents(
+        reporter,
+        conversationId,
+        turnId,
+        events,
+      ),
+    ).toBe(true);
+    const { markJoinedFollowUpsRead } = await import("../../routes/runner");
+    markJoinedFollowUpsRead(events);
+    expect(
+      (await db.turn.findUniqueOrThrow({ where: { id: followUpId } })).status,
+    ).toBe("joined");
+    await vi.waitFor(async () => {
+      const row = await db.channelTurnReceipt.findUnique({
+        where: { turnId: followUpId },
+      });
+      expect(row?.reaction).toBe(receipts.FOLLOW_UP_READ_REACTION);
+    });
+    const onSecond = (method: string) =>
+      slackCallsFor(method)
+        .filter((c) => c.form.get("timestamp") === "1000.0002")
+        .map((c) => c.form.get("name"));
+    // `markFollowUpRead` is detached and runs add → ledger flip → remove:
+    // the row reading 👀 does NOT mean the ⏳ came off yet. Wait on the
+    // calls themselves, the last thing the hook does, not on the ledger.
+    await vi.waitFor(() => {
+      expect(onSecond("reactions.add")).toEqual([
+        receipts.FOLLOW_UP_WAITING_REACTION,
+        receipts.FOLLOW_UP_READ_REACTION,
+      ]);
+      expect(onSecond("reactions.remove")).toEqual([
+        receipts.FOLLOW_UP_WAITING_REACTION,
+      ]);
     });
 
-    const row = await db.channelTurnReceipt.findUniqueOrThrow({
-      where: { turnId: followUp.id },
+    // 4. The answer posts: the completion pass's family clear (what the
+    //    adapter's cursor claim triggers) takes the read mark off and the
+    //    row with it. The message ends the exchange bare.
+    await db.turn.update({
+      where: { id: turnId },
+      data: { status: "done", finishedAt: new Date() },
     });
-    expect(row.messageTs).toBe("700.0002");
+    await receipts.clearTurnReceipts(turnId);
+    expect(
+      await db.channelTurnReceipt.findUnique({ where: { turnId: followUpId } }),
+    ).toBeNull();
+    expect(onSecond("reactions.remove")).toEqual([
+      receipts.FOLLOW_UP_WAITING_REACTION,
+      receipts.FOLLOW_UP_READ_REACTION,
+    ]);
   });
 
   it("the answer-post clear takes the WHOLE family off: the turn's mark and its joined follow-ups'", async () => {
-    // The mark may sit on a follow-up's message by post time (it moved
-    // there) — clearing only the finished turn's id would leave a stale
-    // "seen" on the last follow-up forever.
+    // Every message in the exchange carries its own mark by post time (the
+    // follow-up's read glyph, the turn's emoji): clearing only the finished
+    // turn's id would leave a stale mark on each follow-up forever.
     const { agentId, presenceId } = await seedChannelAgent("receipt-family", {
       presenceCredentials: await getCrypto().encrypt(
         JSON.stringify({ botToken: "xoxb-family" }),
@@ -7821,8 +8508,9 @@ describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
     // put the row out of `narrateTurnActivity`'s reach and it returned
     // silently (no log, no error: it looked exactly like a healthy no-op).
     //
-    // MUTATION-PROOF: re-key the session row in `moveTurnReceipt` and this
-    // fails — no `chat.update` is made and the card stops at "Reading a file".
+    // MUTATION-PROOF: re-key the session row in `attachFollowUpReceipt` (or
+    // mark the follow-up under a session thread) and this fails: no
+    // `chat.update` is made and the card stops at "Reading a file".
     const { agentId, presenceId } = await seedChannelAgent("narrate-followup", {
       appMode: "agent",
       presenceCredentials: await getCrypto().encrypt(
@@ -7873,16 +8561,11 @@ describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
     await receipts.narrateTurnActivity(target.id, "Reading a file");
     expect(slackCallsFor("chat.postMessage")).toHaveLength(1);
 
-    await receipts.moveTurnReceipt({
+    await receipts.attachFollowUpReceipt({
       presenceId,
       followUpTurnId: followUp.id,
-      conversationId: conversation.id,
       channel: "C960",
       messageTs: "960.0002",
-      threadTs: "960.0001",
-      replyThreadTs: "960.0001",
-      unthreaded: false,
-      text: "the follow-up",
     });
 
     // Wind the card's clock back so the 1.5s narration throttle cannot be
@@ -7960,16 +8643,11 @@ describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
       text: "hey",
     });
     // The follow-up arrives before any tool has run.
-    await receipts.moveTurnReceipt({
+    await receipts.attachFollowUpReceipt({
       presenceId,
       followUpTurnId: followUp.id,
-      conversationId: conversation.id,
       channel: "D961",
       messageTs: "961.0002",
-      threadTs: "961.0001",
-      replyThreadTs: null,
-      unthreaded: true,
-      text: "and this too",
     });
 
     const postsBefore = slackCallsFor("chat.postMessage").length;

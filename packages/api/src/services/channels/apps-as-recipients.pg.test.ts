@@ -419,7 +419,7 @@ describe.skipIf(!PROOF_URL)("apps as recipients (4e)", () => {
       deciderUserId: OWNER,
     });
     // Approved, but execution fails closed — nothing posted to the wire.
-    expect(decided).toEqual({ kind: "decided", status: "failed" });
+    expect(decided).toMatchObject({ kind: "decided", status: "failed" });
     const posts = slackCalls.filter((c) => c.method === "chat.postMessage");
     expect(
       posts.filter((c) => c.form.get("text")?.includes("held before")),

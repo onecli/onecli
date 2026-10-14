@@ -2,7 +2,10 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { isActiveEvalRun } from "@onecli/api/validations/evals";
-import type { EvalQuestionInput } from "@onecli/api/validations/evals";
+import type {
+  EvalQuestionInput,
+  EvalScheduleInput,
+} from "@onecli/api/validations/evals";
 import { evals, type EvalRunDetail } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 
@@ -82,6 +85,24 @@ export const useStartEvalRun = (agentId: string) => {
   const invalidate = useInvalidateEvals(agentId);
   return useMutation({
     mutationFn: () => evals.startRun(agentId),
+    onSuccess: invalidate,
+  });
+};
+
+/** The schedule rides the evals view, so every write refreshes that. */
+export const useSaveEvalSchedule = (agentId: string) => {
+  const invalidate = useInvalidateEvals(agentId);
+  return useMutation({
+    mutationFn: (input: EvalScheduleInput) =>
+      evals.saveSchedule(agentId, input),
+    onSuccess: invalidate,
+  });
+};
+
+export const useDeleteEvalSchedule = (agentId: string) => {
+  const invalidate = useInvalidateEvals(agentId);
+  return useMutation({
+    mutationFn: () => evals.deleteSchedule(agentId),
     onSuccess: invalidate,
   });
 };

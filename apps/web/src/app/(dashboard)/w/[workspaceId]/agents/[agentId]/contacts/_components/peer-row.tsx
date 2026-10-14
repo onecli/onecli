@@ -70,7 +70,7 @@ const POLICIES: Record<
     hint: "No approval needed.",
   },
   ask: {
-    badge: "Asks first",
+    badge: "Asks you first",
     badgeClass: "",
     Icon: ShieldCheck,
     menu: "Ask me first",
@@ -202,7 +202,7 @@ export const PeerRow = ({ agentId, agentName, peer }: PeerRowProps) => {
               </Badge>
             )}
             {/* The OTHER owner's word, only when it is not the default: two
-                "Asks first" badges side by side would read as one setting. */}
+                "Asks you first" badges side by side would read as one setting. */}
             {peer.theirPolicy !== "ask" && (
               <Badge
                 variant="outline"

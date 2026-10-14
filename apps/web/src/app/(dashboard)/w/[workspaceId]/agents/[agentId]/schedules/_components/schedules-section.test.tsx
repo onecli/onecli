@@ -18,6 +18,8 @@ const state = vi.hoisted(() => ({
   isError: false,
   runNow: vi.fn(),
   update: vi.fn(),
+  evalSchedule: null as unknown,
+  evalsError: false,
 }));
 
 vi.mock("@/hooks/use-crons", () => ({
@@ -30,6 +32,19 @@ vi.mock("@/hooks/use-crons", () => ({
   useUpdateCron: () => ({ mutate: state.update, isPending: false }),
   useRunCronNow: () => ({ mutate: state.runNow, isPending: false }),
   useDeleteCron: () => ({ mutate: vi.fn(), isPending: false }),
+}));
+
+vi.mock("@/hooks/use-evals", () => ({
+  useEvals: () => ({
+    data: state.evalsError
+      ? undefined
+      : { questions: [], runs: [], schedule: state.evalSchedule },
+    isError: state.evalsError,
+  }),
+}));
+
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/w/ws-1/agents/ag-1/schedules",
 }));
 
 vi.mock("../../_components/agent-page-frame", () => ({
@@ -68,6 +83,8 @@ beforeEach(() => {
   state.isError = false;
   state.runNow.mockReset();
   state.update.mockReset();
+  state.evalSchedule = null;
+  state.evalsError = false;
 });
 afterEach(cleanup);
 
@@ -189,5 +206,82 @@ describe("actions", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     const tz = screen.getByLabelText("Timezone") as HTMLInputElement;
     expect(tz.value).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
+  });
+});
+
+describe("the eval schedule", () => {
+  const evalSchedule = {
+    schedule: "0 9 * * *",
+    timezone: "Asia/Jerusalem",
+    enabled: true,
+    disabledReason: null,
+    nextFireAt: "2026-10-12T06:00:00.000Z",
+    lastFiredAt: null,
+    lastOutcome: "started",
+  };
+
+  it("is listed with the agent's schedules, read-only, linking to Evals", () => {
+    state.evalSchedule = evalSchedule;
+    renderSection();
+    expect(screen.queryByText("No schedules yet")).not.toBeInTheDocument();
+    expect(screen.getByText("Run evals")).toBeInTheDocument();
+    expect(screen.getByText("Daily at 09:00")).toBeInTheDocument();
+    expect(screen.getByText("Asia/Jerusalem")).toBeInTheDocument();
+    expect(screen.getByText("Last scheduled run started")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Manage in Evals" }),
+    ).toHaveAttribute("href", "/w/ws-1/agents/ag-1/evals");
+    // It carries none of the cron row's controls, and with no crons there
+    // are no cron runs to open.
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: /View scheduled runs/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /New schedule/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("sits alongside the crons, under one link to all of the scheduled runs", () => {
+    state.evalSchedule = evalSchedule;
+    state.crons = [cron(), cron({ id: "cr-2", name: "Weekly digest" })];
+    renderSection();
+    expect(screen.getByText("Run evals")).toBeInTheDocument();
+    expect(screen.getByText("Daily inbox check")).toBeInTheDocument();
+    const runs = screen.getAllByRole("link", { name: /View scheduled runs/ });
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toHaveAttribute(
+      "href",
+      "/w/ws-1/activity?tab=runs&agent=ag-1&view=cron",
+    );
+  });
+
+  it("says when its last run fired", () => {
+    state.evalSchedule = {
+      ...evalSchedule,
+      lastFiredAt: "2026-10-12T06:03:00.000Z",
+    };
+    renderSection();
+    expect(
+      screen.getByText(/^Last scheduled run started .*2026/),
+    ).toBeInTheDocument();
+  });
+
+  it("says why the platform paused it", () => {
+    state.evalSchedule = {
+      ...evalSchedule,
+      enabled: false,
+      disabledReason: "authorization",
+    };
+    renderSection();
+    expect(screen.getByText(/no longer has access/)).toBeInTheDocument();
+  });
+
+  it("an evals failure never hides the crons", () => {
+    state.evalsError = true;
+    state.crons = [cron()];
+    renderSection();
+    expect(screen.getByText("Daily inbox check")).toBeInTheDocument();
+    expect(screen.queryByText("Run evals")).not.toBeInTheDocument();
   });
 });

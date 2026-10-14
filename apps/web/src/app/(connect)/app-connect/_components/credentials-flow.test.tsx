@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { guideHref } from "@/lib/components/setup-guide-link";
 import { CredentialsFlow } from "./credentials-flow";
@@ -87,5 +87,72 @@ describe("CredentialsFlow field hint", () => {
     expect(help.parentElement?.textContent).toBe(
       `${field.description} ${field.helpLabel}`,
     );
+  });
+});
+
+// A field with fixed choices (a region) is a dropdown, starts on its default,
+// and that default is submitted even if the user never opens the dropdown.
+describe("CredentialsFlow option fields", () => {
+  const regionFields = [
+    {
+      name: "apiKey",
+      label: "API key",
+      placeholder: "key",
+      secret: true,
+    },
+    {
+      name: "region",
+      label: "Region",
+      placeholder: "Select a region",
+      secret: false,
+      options: [
+        { value: "us", label: "US (api.pagerduty.com)" },
+        { value: "eu", label: "EU (api.eu.pagerduty.com)" },
+      ],
+      defaultValue: "us",
+    },
+  ];
+
+  it("renders a dropdown showing the default, not a text box", () => {
+    render(
+      <CredentialsFlow
+        app={{ ...app, connectionType: "api_key" }}
+        fields={regionFields}
+        onSuccess={() => {}}
+        onError={() => {}}
+      />,
+    );
+    const trigger = screen.getByRole("combobox");
+    expect(trigger.id).toBe("connect-region");
+    expect(trigger.textContent).toContain("US (api.pagerduty.com)");
+    expect(document.getElementById("connect-region")?.tagName).not.toBe(
+      "INPUT",
+    );
+  });
+
+  it("submits the default region without the user touching it", async () => {
+    const { apiFetch } = await import("@/lib/api-fetch");
+    const fetchMock = vi.mocked(apiFetch);
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ id: "c1", label: null }), { status: 200 }),
+    );
+    render(
+      <CredentialsFlow
+        app={{ ...app, name: "PagerDuty", connectionType: "api_key" }}
+        fields={regionFields}
+        onSuccess={() => {}}
+        onError={() => {}}
+      />,
+    );
+    const key = document.getElementById("connect-apiKey") as HTMLInputElement;
+    fireEvent.change(key, { target: { value: "pd-key" } });
+    const button = screen.getByRole("button", { name: "Connect PagerDuty" });
+    expect(button.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(button);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const body = JSON.parse(
+      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+    ) as { fields: Record<string, string> };
+    expect(body.fields).toEqual({ apiKey: "pd-key", region: "us" });
   });
 });

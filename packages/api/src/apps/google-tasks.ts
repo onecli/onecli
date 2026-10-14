@@ -45,5 +45,6 @@ export const googleTasks: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
   },
 };

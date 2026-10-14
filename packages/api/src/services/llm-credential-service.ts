@@ -107,7 +107,9 @@ const byPrecedence = (
  * Eligibility is decided on the UNFILTERED org+workspace pool — NOT the
  * grant-narrowed `where` — mirroring the gateway exactly: an
  * existing-but-restricted LLM key counts as present, so a restriction is
- * never bypassed with free credit.
+ * never bypassed with free credit. The org's founding owner must also be
+ * trusted (Google sign-in, or a non-consumer-Microsoft address), the same
+ * owner and the same rule the gateway applies before injecting.
  *
  * The shape is honest about what the control plane holds: `hasReadableValue:
  * false` (the key lives only in the gateway's env; the models catalog serves
@@ -120,11 +122,22 @@ const platformTrialCredential = async (
 ): Promise<ResolvedLlmCredential | null> => {
   const platform = getPlatformLlm();
   if (!platform) return null;
-  const pool = await db.secret.findMany({
-    where: { OR: [{ workspaceId }, { organizationId, scope: "organization" }] },
-    select: { type: true, hostPattern: true },
-  });
-  if (!platform.trialCreditApplies(pool)) return null;
+  const [pool, owner] = await Promise.all([
+    db.secret.findMany({
+      where: {
+        OR: [{ workspaceId }, { organizationId, scope: "organization" }],
+      },
+      select: { type: true, hostPattern: true },
+    }),
+    // The credit's subject: the org's founding owner, picked exactly as the
+    // gateway's `founding_owner` picks it (earliest active owner, then id).
+    db.organizationMember.findFirst({
+      where: { organizationId, role: "owner", status: "active" },
+      orderBy: [{ createdAt: "asc" }, { userId: "asc" }],
+      select: { user: { select: { email: true, signInProvider: true } } },
+    }),
+  ]);
+  if (!platform.trialCreditApplies(pool, owner?.user ?? null)) return null;
   return {
     provider: "anthropic",
     secretId: PLATFORM_LLM_SECRET_ID,

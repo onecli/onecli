@@ -13,6 +13,9 @@ import { z } from "zod";
 export const EVAL_QUESTIONS_MAX = 50;
 /** Longest question or expected answer, in characters. */
 export const EVAL_TEXT_MAX_LENGTH = 4_000;
+/** Longest custom success criteria, in characters: room for a full list of
+ * facts plus the pass rule. */
+export const EVAL_CRITERIA_MAX_LENGTH = 10_000;
 /** Apps one question may require. */
 export const EVAL_APPS_MAX = 20;
 /** Longest app ID: a catalog provider ID or a `host:` token. */
@@ -20,8 +23,45 @@ export const EVAL_APP_ID_MAX_LENGTH = 100;
 /** Runs the dashboard lists, newest first. */
 export const EVAL_RUNS_LISTED = 30;
 
-/** How an answer is checked. */
-export const EVAL_CHECK_KINDS = ["numeric", "text"] as const;
+/** What started a run: a person, or the agent's eval schedule. */
+export const EVAL_RUN_TRIGGERS = ["manual", "scheduled"] as const;
+export type EvalRunTrigger = (typeof EVAL_RUN_TRIGGERS)[number];
+
+// ── The schedule ───────────────────────────────────────────────────────────
+
+/** Why the platform turned a schedule off. */
+export const EVAL_SCHEDULE_DISABLED_REASONS = [
+  "authorization",
+  "completed",
+] as const;
+export type EvalScheduleDisabledReason =
+  (typeof EVAL_SCHEDULE_DISABLED_REASONS)[number];
+
+/** What the schedule's last fire did. */
+export const EVAL_SCHEDULE_OUTCOMES = [
+  "started",
+  "skipped_busy",
+  "skipped_no_questions",
+  "failed",
+] as const;
+export type EvalScheduleOutcome = (typeof EVAL_SCHEDULE_OUTCOMES)[number];
+
+/** PUT /v1/agents/:agentId/evals/schedule: create or replace. The schedule
+ * string is validated by croner in the service (the engine that computes
+ * occurrences), never by a regex here. Strict, so a client can never set
+ * the creator or any server-owned field. */
+export const evalScheduleSchema = z.strictObject({
+  schedule: z.string().trim().min(1, "Enter a schedule.").max(100),
+  timezone: z.string().trim().min(1, "Enter a timezone.").max(100),
+  enabled: z.boolean().default(true),
+});
+export type EvalScheduleInput = z.input<typeof evalScheduleSchema>;
+export type EvalScheduleBody = z.output<typeof evalScheduleSchema>;
+
+/** How an answer is checked. `custom` hands the answer and the author's own
+ * success criteria (facts to cover, a pass threshold, auto-fail rules) to an
+ * AI judge. */
+export const EVAL_CHECK_KINDS = ["numeric", "text", "custom"] as const;
 export type EvalCheckKind = (typeof EVAL_CHECK_KINDS)[number];
 
 /** A run's lifecycle. Only `queued` and `running` occupy the agent. */
@@ -46,7 +86,8 @@ export const isActiveEvalRun = (status: EvalRunStatus): boolean =>
  * - `mismatch`: the answer check failed, or a required app was not reached;
  * - `error`: the agent did not finish the turn (failed, stopped, timed out);
  * - `inconclusive`: the answer passed but app evidence was unavailable, so
- *   the required apps could not be checked either way.
+ *   the required apps could not be checked either way; or a custom check's
+ *   judge could not run, so the answer could not be judged either way.
  */
 export const EVAL_OUTCOMES = [
   "pending",
@@ -56,6 +97,25 @@ export const EVAL_OUTCOMES = [
   "inconclusive",
 ] as const;
 export type EvalOutcome = (typeof EVAL_OUTCOMES)[number];
+
+/** One criterion the AI judge checked, in the judge's own words. */
+const evalCriterionCheckSchema = z.object({
+  criterion: z.string(),
+  met: z.boolean(),
+  /** Why: a short quote or note from the answer, or what was missing. */
+  note: z.string(),
+});
+
+/** A custom check's verdict, kept with the result so a reader can see WHY
+ * it passed or failed, criterion by criterion. */
+export const evalJudgementSchema = z.object({
+  passed: z.boolean(),
+  summary: z.string(),
+  criteria: z.array(evalCriterionCheckSchema),
+  /** The model that judged, for comparing runs. */
+  model: z.string(),
+});
+export type EvalJudgement = z.infer<typeof evalJudgementSchema>;
 
 /** One question's result, as stored on the run and returned on the wire.
  * It snapshots the question, so history survives later edits. */
@@ -73,6 +133,12 @@ export const evalResultSchema = z.object({
   conversationId: z.string().nullable(),
   /** Why an `error` outcome happened. */
   error: z.string().nullable(),
+  /** A custom check's verdict; null for other checks, or when the judge
+   * could not run. Absent on runs stored before custom checks existed. */
+  judgement: evalJudgementSchema.nullable().default(null),
+  /** Why a custom check could not be judged (the result is then
+   * `inconclusive`, never a pass). */
+  judgeError: z.string().nullable().default(null),
 });
 export type EvalResult = z.infer<typeof evalResultSchema>;
 
@@ -178,6 +244,10 @@ const normalizeEvalApps = (apps: readonly string[]): string[] => [
 
 export const NUMERIC_EXPECTED_MESSAGE =
   "Enter one number, such as 3200000 or $3.2M, not a sentence or date.";
+const EXPECTED_TOO_LONG_MESSAGE =
+  "Keep the expected answer to 4,000 characters or fewer.";
+const CRITERIA_TOO_LONG_MESSAGE =
+  "Keep the success criteria to 10,000 characters or fewer.";
 
 export const evalQuestionSchema = z
   .object({
@@ -189,14 +259,10 @@ export const evalQuestionSchema = z
         EVAL_TEXT_MAX_LENGTH,
         "Keep the question to 4,000 characters or fewer.",
       ),
-    expected: z
-      .string()
-      .trim()
-      .min(1, "Enter the expected answer.")
-      .max(
-        EVAL_TEXT_MAX_LENGTH,
-        "Keep the expected answer to 4,000 characters or fewer.",
-      ),
+    // Holds the expected number, the keywords, or a custom check's success
+    // criteria. The length limit depends on the kind, so it is refined below
+    // rather than fixed here.
+    expected: z.string().trim().min(1, "Enter the expected answer."),
     kind: z.enum(EVAL_CHECK_KINDS),
     expectedApps: z
       .array(
@@ -211,6 +277,17 @@ export const evalQuestionSchema = z
       .default([])
       .transform(normalizeEvalApps),
   })
+  .refine(
+    (input) =>
+      input.kind !== "custom" ||
+      input.expected.length <= EVAL_CRITERIA_MAX_LENGTH,
+    { path: ["expected"], message: CRITERIA_TOO_LONG_MESSAGE },
+  )
+  .refine(
+    (input) =>
+      input.kind === "custom" || input.expected.length <= EVAL_TEXT_MAX_LENGTH,
+    { path: ["expected"], message: EXPECTED_TOO_LONG_MESSAGE },
+  )
   .refine(
     (input) =>
       input.kind !== "numeric" || parseNumericExpected(input.expected) !== null,

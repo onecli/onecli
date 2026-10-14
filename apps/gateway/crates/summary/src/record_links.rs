@@ -32,6 +32,11 @@ impl ApprovalSummary {
         let Some(row) = path_record(provider, host, method, path) else {
             return;
         };
+        // A card that already names this record (with its name, once
+        // resolved) needs no second row repeating its id.
+        if self.refs.iter().any(|r| r.id == row.value) {
+            return;
+        }
         self.details.insert(0, row);
         // Every row moved down one: each record keeps naming its own row.
         for r in &mut self.refs {
@@ -101,7 +106,7 @@ fn is_number(s: &str) -> bool {
 /// An opaque id (Trello, Todoist, Google): letters, digits, `-`, `_`. At
 /// least 6 long, so a fixed endpoint in an id's place (Drive's
 /// `files/trash`, Todoist's `tasks/quick`) never reads as a record.
-fn is_token(s: &str) -> bool {
+pub(crate) fn is_token(s: &str) -> bool {
     (6..=128).contains(&s.len())
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))

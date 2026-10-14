@@ -44,11 +44,11 @@ export interface RenderedTurn {
    * usually the plan ("I'll fetch the docs."). Kept above the work while the
    * turn runs. Narration between later tool calls is not kept: it is
    * transient progress, and the run header already says what is happening.
-   * The SUPERVISOR's segment rule decides where it ends (supervisor.ts,
-   * 2026-08-31): a tool call is the one structural break the model cannot
-   * write across, so the first one closes the opening sentence. Thinking is
-   * NOT a boundary: reasoning interleaves inside one message, and cutting
-   * there would publish half a sentence.
+   * The SUPERVISOR's answer rule decides where it ends (the sandbox
+   * supervisor's answer.ts, 2026-08-31): a tool call is the one structural
+   * break the model cannot write across, so the first one closes the opening
+   * sentence. Thinking is NOT a boundary: reasoning interleaves inside one
+   * message, and cutting there would publish half a sentence.
    *
    * Live-tail only in practice. History carries no deltas, so a reader who
    * joins late gets tools without it, which is exactly what the transcript
@@ -108,6 +108,19 @@ export interface RenderedTurn {
   peerTaskClosed?: PeerTaskOutcome;
   /** True once a terminal event landed, so the composer can re-enable. */
   ended: boolean;
+  /**
+   * SEND NOW's answer for a waiting mid-run follow-up,
+   * folded under the follow-up's own id. Live-only: a reader who arrives
+   * later never sees it, and by then the row's status says the rest.
+   */
+  sentNow?: SentNowOutcome;
+}
+
+/** What SEND NOW did: `toolName` is untrusted sandbox text, never shown
+ *  raw (see `TOOL_PHRASES` in agent-protocol's activity.ts). */
+export interface SentNowOutcome {
+  moved: boolean;
+  toolName?: string;
 }
 
 const str = (payload: Record<string, unknown>, key: string): string =>
@@ -163,9 +176,10 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
         break;
       case "tool.started": {
         // The tool call CLOSES the current narration segment (the
-        // supervisor's segment rule, mirrored). Only the segment the FIRST
-        // tool closes is kept, as the lead; a blank one is never kept, so
-        // a model's stray newline cannot become the turn's opening line.
+        // supervisor's answer rule in answer.ts, mirrored). Only the segment
+        // the FIRST tool closes is kept, as the lead; a blank one is never
+        // kept, so a model's stray newline cannot become the turn's opening
+        // line.
         if (turn.tools.length === 0 && turn.liveText.trim()) {
           turn.lead = turn.liveText;
         }
@@ -238,6 +252,14 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
         if (said) turn.activity = said;
         break;
       }
+      case "message.sent_now": {
+        const toolName = str(event.payload, "toolName");
+        turn.sentNow = {
+          moved: event.payload.moved === true,
+          ...(toolName !== "" && { toolName }),
+        };
+        break;
+      }
       default:
         // `turn.started`, `approval.pending` — nothing to fold here.
         // Approvals render from the live approvals API, which carries the
@@ -280,3 +302,16 @@ export const mergeEvents = (
 /** The cursor to resume a stream from: the highest `seq` we hold. */
 export const highestSeq = (events: TurnEvent[]): number =>
   events.reduce((max, e) => (e.seq > max ? e.seq : max), 0);
+
+/**
+ * Whether a live event moves a turn ROW's status, so the turns list (the
+ * poll view) should refetch now instead of on its next interval: a turn
+ * opened or closed (`turn.started`, `turn.done`, `error`), or a mid-run
+ * follow-up the run just picked up (`message.joined`: its row flips from
+ * `joining` to `joined` the moment the agent has the message).
+ */
+export const movesTurnStatus = (event: TurnEvent): boolean =>
+  event.type === "turn.started" ||
+  event.type === "turn.done" ||
+  event.type === "error" ||
+  event.type === "message.joined";

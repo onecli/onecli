@@ -314,6 +314,30 @@ export type AttachmentManifestEntry = z.infer<
   typeof attachmentManifestEntrySchema
 >;
 
+/**
+ * The supervisor's reconnect budget: attempts and the backoff cap. ONE place
+ * for both ends: the supervisor's transport retries exactly this, and the
+ * runner's reconcile grace (`SESSION_RESUME_GRACE_MS`) is derived from it, so
+ * a sandbox still inside its own retry budget is never reported dead.
+ */
+export const SESSION_RESUME_BUDGET = {
+  maxAttempts: 60,
+  minBackoffMs: 500,
+  maxBackoffMs: 15_000,
+} as const;
+
+/**
+ * How long the runner keeps treating a sandbox whose session dropped as
+ * alive-and-reconnecting: the whole retry budget plus one reconcile tick
+ * (30 s), so the boundary is "the supervisor has given up", never earlier.
+ * For a drop the runner process SAW. A restarted runner gives the sandboxes
+ * it inherited a much shorter grace of its own: their supervisors redial
+ * the moment it is reachable.
+ */
+export const SESSION_RESUME_GRACE_MS =
+  SESSION_RESUME_BUDGET.maxAttempts * SESSION_RESUME_BUDGET.maxBackoffMs +
+  30_000;
+
 export const workItemSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("turn.deliver"),
@@ -368,6 +392,33 @@ export const workItemSchema = z.discriminatedUnion("kind", [
     targetTurnId: z.string().min(1),
     conversationId: z.string().min(1),
     message: z.string(),
+    /**
+     * Delivery-only prompt context, prepended by the supervisor when handing
+     * the harness the message, under the same law as `turn.deliver`'s: NEVER
+     * stored, so the row keeps the sender's exact words. Here it is the
+     * control plane's "a new message arrived while you were working" frame,
+     * set for a follow-up someone sent (a person, a peer agent) and never
+     * for an automation's, which carries its own header. A stale
+     * supervisor's non-strict parse silently drops it: the words still join
+     * the run, bare, as before.
+     */
+    context: z.string().max(MAX_TURN_CONTEXT_CHARS).optional(),
+  }),
+  /**
+   * SEND NOW: read the waiting follow-up `turnId` now. It was
+   * delivered into `targetTurnId`'s live run and sits in the harness's queue
+   * behind the tool the run is waiting on; the supervisor asks the harness
+   * to move that tool to the background, which lets the run reach its next
+   * safe point and inject the message. The outcome is reported as a
+   * `message.sent_now` event under the follow-up's id. An OLD supervisor
+   * image drops this on schema validation: the request stays a request and
+   * the message is read after the tool, as before.
+   */
+  z.object({
+    kind: z.literal("turn.send_now"),
+    turnId: z.string().min(1),
+    targetTurnId: z.string().min(1),
+    conversationId: z.string().min(1),
   }),
   /**
    * One chunk of one user attachment's bytes, sent by the runner BEFORE the
@@ -497,8 +548,37 @@ export const workItemSchema = z.discriminatedUnion("kind", [
     error: z.string().max(MAX_TOOL_ERROR_CHARS).optional(),
   }),
   z.object({ kind: z.literal("shutdown") }),
+  /**
+   * The resumable channel (runner restart survival). Sent by the runner on
+   * every successful connect, bootstrap or resumed, when it holds a session
+   * keyring: the credential the supervisor presents on its NEXT connect
+   * (an HMAC over this sandbox and its container under the fleet key: any
+   * runner process can verify it, no process memory involved), and the
+   * highest sequenced frame the runner has applied for this sandbox, so the
+   * supervisor replays exactly the gap. An old supervisor drops the unknown
+   * kind and keeps its bootstrap-only behaviour.
+   */
+  z.object({
+    kind: z.literal("session"),
+    // `v1.<kid>.<hmac-sha256-hex>` is ~80 chars; the cap only bounds abuse.
+    credential: z.string().min(1).max(256),
+    ack: z.number().int().nonnegative(),
+  }),
+  /**
+   * The in-flight ack: the runner's cursor over the supervisor's sequenced
+   * frames, sent while connected so a long turn's buffer trims as it goes
+   * rather than only on reconnect.
+   */
+  z.object({ kind: z.literal("ack"), seq: z.number().int().positive() }),
 ]);
 export type WorkItem = z.infer<typeof workItemSchema>;
+/**
+ * What the supervisor's work loop receives: every work item except the two
+ * transport-level ones (`session`, `ack`), which the WS driver consumes. The
+ * type is the promise: a driver cannot leak them, and the loop's exhaustive
+ * `never` check cannot be asked to handle them.
+ */
+export type SupervisorWorkItem = Exclude<WorkItem, { kind: "session" | "ack" }>;
 
 /**
  * Cap on an `unhealthy` report's reason.
@@ -731,9 +811,24 @@ export const supervisorMessageSchema = z
   });
 export type SupervisorMessage = z.infer<typeof supervisorMessageSchema>;
 
+/**
+ * The sequenced envelope a session-holding supervisor wraps EVERY message
+ * in: `seq` is monotonic per supervisor process, and the runner's ack is a
+ * cursor over it. An envelope is deliberately NOT a member of the message
+ * union: an old runner (no sessions) fails the whole parse and drops the
+ * frame, which cannot happen anyway, since a supervisor only wraps once it
+ * holds a session, and only a new runner hands one out. A new runner accepts
+ * both shapes: bare frames from old supervisors, envelopes from new ones.
+ */
+export const sequencedFrameSchema = z.object({
+  seq: z.number().int().positive(),
+  message: supervisorMessageSchema,
+});
+export type SequencedFrame = z.infer<typeof sequencedFrameSchema>;
+
 export interface SupervisorTransport {
   /** Work items in arrival order; the iterable ends when the peer closes. */
-  incoming(): AsyncIterable<WorkItem>;
+  incoming(): AsyncIterable<SupervisorWorkItem>;
   send(message: SupervisorMessage): void;
   /**
    * Release the channel and end `incoming()`.

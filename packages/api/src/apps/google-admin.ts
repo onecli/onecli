@@ -46,5 +46,6 @@ export const googleAdmin: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
   },
 };

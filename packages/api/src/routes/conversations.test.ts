@@ -24,6 +24,7 @@ const services = vi.hoisted(() => ({
   createTurn: vi.fn(),
   listTurns: vi.fn(),
   abortTurn: vi.fn(),
+  requestSendNow: vi.fn(),
   readTranscript: vi.fn(),
   sendConversationMessage: vi.fn(),
   createPendingAttachment: vi.fn(),
@@ -78,6 +79,7 @@ vi.mock("../services/turn-service", () => ({
   createTurn: services.createTurn,
   listTurns: services.listTurns,
   abortTurn: services.abortTurn,
+  requestSendNow: services.requestSendNow,
   readTranscript: services.readTranscript,
 }));
 
@@ -187,6 +189,7 @@ beforeEach(() => {
     oldestSeq: 1,
   });
   services.abortTurn.mockResolvedValue({ aborted: true, delivered: false });
+  services.requestSendNow.mockResolvedValue({ requested: true });
   services.readTranscript.mockResolvedValue({
     events: [],
     nextSince: 0,
@@ -207,6 +210,7 @@ describe("authentication", () => {
       { method: "POST", body: '{"message":"hi"}' },
     ],
     ["/v1/turns/t-1/abort", { method: "POST" }],
+    ["/v1/turns/t-1/send-now", { method: "POST" }],
     ["/v1/agents/ag-1/conversations/direct", { method: "PUT" }],
   ];
 
@@ -490,6 +494,35 @@ describe("turns", () => {
     });
     expect(res.status).toBe(409);
   });
+
+  it("accepts SEND NOW with 202: the outcome arrives on the stream", async () => {
+    const res = await app.request("/v1/turns/f-1/send-now", {
+      method: "POST",
+      headers: AUTH,
+    });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ requested: true });
+    // Fenced like Stop: the viewer travels with the call.
+    expect(services.requestSendNow).toHaveBeenCalledWith("p1", "f-1", "user-1");
+  });
+
+  it.each([
+    ["CONFLICT", 409, "The agent already has this message"],
+    ["NOT_FOUND", 404, "Message not found"],
+  ] as const)(
+    "maps a SEND NOW %s to %i with the error shape",
+    async (code, status, message) => {
+      services.requestSendNow.mockRejectedValue(
+        new ServiceError(code, message),
+      );
+      const res = await app.request("/v1/turns/f-1/send-now", {
+        method: "POST",
+        headers: AUTH,
+      });
+      expect(res.status).toBe(status);
+      expect(await res.json()).toMatchObject({ error: { message } });
+    },
+  );
 });
 
 describe("attachments", () => {

@@ -34,7 +34,10 @@ import {
 import { decideReachFromChannel } from "../services/channels/agent-reach-service";
 import { REACH_ACTION_DECISIONS } from "../services/channels/providers/slack/reach-card";
 import { decideActionApprovalFromChannel } from "../services/channels/action-approval-service";
-import { ACTION_APPROVAL_DECISIONS } from "../services/channels/providers/slack/action-approval-card";
+import {
+  ACTION_APPROVAL_DECISIONS,
+  settledActionCardText,
+} from "../services/channels/providers/slack/action-approval-card";
 import { agentImageUrlOrNull } from "../services/agent-image-service";
 import { publicApiUrl } from "../services/channels/posture";
 import { logger } from "../lib/logger";
@@ -215,17 +218,22 @@ const fireReply = (fn: () => Promise<unknown>): void => {
 };
 
 /** A grouped click's outcome, for the clicker: "✅ 3 approved by Ada ·
- * 1 already decided · 1 couldn't be decided, try again". */
+ * 1 already decided · 1 couldn't be decided, try again". A click that
+ * decided nothing (all of it was decided elsewhere first, e.g. on the web)
+ * says just that, never "⛔ 0 denied by Ada". */
 const groupDecisionText = (
   decision: "approve" | "deny",
   outcome: Extract<ChannelGroupDecisionResult, { kind: "decided" }>,
 ): string =>
   [
-    `${decision === "approve" ? "✅" : "⛔"} ${outcome.decided.length} ${
-      decision === "approve" ? "approved" : "denied"
-    } by ${escapeSlackText(outcome.decidedByName)}`,
+    outcome.decided.length > 0 &&
+      `${decision === "approve" ? "✅" : "⛔"} ${outcome.decided.length} ${
+        decision === "approve" ? "approved" : "denied"
+      } by ${escapeSlackText(outcome.decidedByName)}`,
     outcome.alreadySettled.length > 0 &&
-      `${outcome.alreadySettled.length} already decided`,
+      (outcome.decided.length > 0
+        ? `${outcome.alreadySettled.length} already decided`
+        : `☑️ ${outcome.alreadySettled.length === 1 ? "It was" : `All ${outcome.alreadySettled.length} were`} already decided`),
     outcome.failed.length > 0 &&
       `${outcome.failed.length} couldn't be decided, try again`,
   ]
@@ -756,11 +764,13 @@ export const channelInboundSlackRoutes = () => {
         const responseUrl = payload.response_url;
         const text =
           outcome.kind === "decided"
-            ? outcome.status === "executed"
-              ? "✅ Approved and done."
-              : outcome.status === "rejected"
-                ? "⛔ Rejected."
-                : "⚠️ Approved, but it failed - the agent was told."
+            ? // The clicked card reads exactly like every other settled
+              // card: WHAT was decided and by whom.
+              settledActionCardText({
+                summary: outcome.summary,
+                outcome: outcome.status,
+                decidedByName: outcome.decidedByName,
+              })
             : outcome.kind === "already_settled"
               ? "This request was already decided."
               : escapeSlackText(outcome.message);
@@ -912,12 +922,14 @@ export const channelInboundSlackRoutes = () => {
     if (!apiUrl) return fallback("This deployment cannot complete installs.");
     const redirectUri = `${apiUrl}/v1/channels/slack/oauth/callback`;
 
-    // ── The MARKETPLACE arm: no state, so the install began OUTSIDE OneCLI
-    // (Slack's app directory, or the app's sharable URL). Nobody is signed
-    // in yet, so there is no org to bind to — hand the browser to the app
-    // carrying the code, and let the finish page bind it once the person
-    // signs in. Slack requires this path to work: the directory's own
-    // "Add to Slack" button mints exactly this stateless callback. ──
+    // ── The STATELESS arm: no state, so the install began OUTSIDE OneCLI:
+    // the shared app from Slack's directory or its sharable URL, or an
+    // agent's own app from the admin-approval message or "Install to
+    // Workspace". Nobody is signed in yet, so there is no org to bind to.
+    // Hand the browser to the app carrying the code, and let the finish page
+    // resolve it once the person signs in. Slack requires this path to work:
+    // the directory's own "Add to Slack" button mints exactly this stateless
+    // callback. ──
     if (!state) {
       const appUrl = configuredAppUrl();
       if (!appUrl) {

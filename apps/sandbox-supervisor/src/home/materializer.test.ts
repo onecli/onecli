@@ -91,6 +91,7 @@ beforeEach(() => {
       thinking: false,
       toolEvents: true,
       steer: true,
+      backgroundTool: true,
       skillsDir: ".agents/skills",
       instructionFiles: ["CLAUDE.md", "AGENTS.md"],
       platformTools: true,

@@ -80,5 +80,6 @@ export const googleChat: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
   },
 };

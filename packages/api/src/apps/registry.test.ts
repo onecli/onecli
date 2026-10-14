@@ -113,6 +113,29 @@ describe("setup guides", () => {
   });
 });
 
+// The connect window renders `accessLevels` as a choice preselected on the
+// default, and the authorize routes accept only the declared values. A default
+// outside the options would preselect nothing and submit a value every route
+// rejects; a lone option is a choice with nothing to choose.
+describe("OAuth access levels", () => {
+  it("offer two or more distinct, labelled options and default to one", () => {
+    for (const app of getApps()) {
+      if (app.connectionMethod.type !== "oauth") continue;
+      const levels = app.connectionMethod.accessLevels;
+      if (!levels) continue;
+      const values = levels.options.map((o) => o.value);
+      expect(values.length, app.id).toBeGreaterThan(1);
+      expect(new Set(values).size, app.id).toBe(values.length);
+      expect(values, app.id).toContain(levels.defaultValue);
+      expect(levels.label.trim(), app.id).toBeTruthy();
+      for (const option of levels.options) {
+        expect(option.label.trim(), app.id).toBeTruthy();
+        expect(option.description.trim(), app.id).toBeTruthy();
+      }
+    }
+  });
+});
+
 describe("connect notes", () => {
   // The connect window renders these verbatim and opens the link in a new
   // tab, so an empty line would be a blank box and a foreign URL would send

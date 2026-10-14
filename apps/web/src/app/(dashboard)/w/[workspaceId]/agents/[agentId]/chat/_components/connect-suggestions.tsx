@@ -1,6 +1,7 @@
 "use client";
 
 import { memo, useRef, useState } from "react";
+import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { Plug, RefreshCw, Settings2 } from "lucide-react";
@@ -28,6 +29,10 @@ import type { Connection } from "@/lib/api";
 import { ManagePermissionsDialog } from "../../_components/manage-permissions-dialog";
 import { AttachConnectionDialog } from "./attach-connection-dialog";
 import { ConnectAppPickerDialog } from "../../_components/connect-app-picker-dialog";
+import {
+  findGitHubOrgAccess,
+  githubOrgAccessStatus,
+} from "@onecli/api/lib/github-org-access";
 
 /**
  * The chat's rendering of a gateway "connect this app" link — a card in
@@ -43,9 +48,9 @@ import { ConnectAppPickerDialog } from "../../_components/connect-app-picker-dia
  * "Connected" with Reconnect and Manage (the agent page's own permissions
  * dialog, opened in place, under the same read-only law —
  * `useManageConnectionState`). A connect started FROM this card lands already
- * attached, with full access, to every agent of the workspace, this one
- * included (the API's workspace auto-attach); scoping down afterwards is
- * exactly what Manage is for.
+ * attached (every tool allowed, anything else needing approval) to every
+ * agent of the workspace, this one included (the API's workspace
+ * auto-attach); scoping down afterwards is exactly what Manage is for.
  */
 
 /** The card under an agent answer that carried connect links. Memoized on
@@ -211,9 +216,9 @@ export const ConnectorSuggestionsCard = ({
         {/* The TITLE is what `hideHeader` drops (the greeting's own words
             already say why the card is there). The CONSENT LINE is not part
             of that trade: a new account is on for every agent of the
-            workspace with full access, and that has to be said where the
-            click happens. Most of all on the greeting card, which is the
-            first connect UI a new user ever meets. */}
+            workspace, and that has to be said where the click happens. Most
+            of all on the greeting card, which is the first connect UI a new
+            user ever meets. */}
         {(!hideHeader || hasUnconnected) && (
           <div className="border-b px-4 py-2.5">
             {!hideHeader && (
@@ -231,24 +236,46 @@ export const ConnectorSuggestionsCard = ({
                   !hideHeader && "mt-0.5",
                 )}
               >
-                A new account is on for every agent in this workspace, with full
-                access. Adjust it anytime under Manage.
+                A new account is on for every agent in this workspace. Its tools
+                are allowed and anything else needs your approval (an app with
+                no tool list gets full access). Adjust it anytime under Manage.
               </p>
             )}
           </div>
         )}
-        {suggestions.map(({ app, agentName, kind, connectionId }) => {
-          // A reconnect link names the dead account: act on THAT one, not
-          // whichever of the app's accounts happens to be listed first.
+        {suggestions.map(({ app, agentName, kind, connectionId, org }) => {
+          // One GitHub organization refused an account (the gateway's
+          // `github_org_access_required`): the account is fine, the fix is
+          // per-organization and lives on the app page (request access, an
+          // admin message, or SSO + reconnect). Read LIVE from whichever of
+          // the app's accounts records it, not from the answer: once the
+          // gateway clears the org (a reconnect, or the refused request went
+          // through), this row falls back to the normal Connected state.
+          const orgAccess =
+            kind === "org_access" && org
+              ? findGitHubOrgAccess(
+                  connections.filter(
+                    (c) =>
+                      c.provider === app.id &&
+                      c.status === "connected" &&
+                      !c.reauthRequiredAt,
+                  ),
+                  org,
+                )
+              : undefined;
+          // A reconnect link names the dead account, an org-access link the
+          // account the org refused: act on THAT one, not whichever of the
+          // app's accounts happens to be listed first.
           const connection =
-            (kind === "reconnect" &&
+            orgAccess?.connection ??
+            ((kind === "reconnect" &&
               connections.find(
                 (c) =>
                   c.id === connectionId &&
                   c.provider === app.id &&
                   c.status === "connected",
               )) ||
-            connectionFor(app.id);
+              connectionFor(app.id));
           // The provider refused this account's saved login (the gateway's
           // `connection_needs_reconnect`): nothing works until it is
           // re-authorized, so that becomes the row's only primary action.
@@ -292,7 +319,12 @@ export const ConnectorSuggestionsCard = ({
               </div>
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium">{app.name}</p>
-                {connection && needsReconnect ? (
+                {orgAccess ? (
+                  <p className="truncate text-xs font-medium text-amber-700 dark:text-amber-400">
+                    <span translate="no">{orgAccess.issue.org}</span> &middot;{" "}
+                    {githubOrgAccessStatus(orgAccess.issue.reason)}
+                  </p>
+                ) : connection && needsReconnect ? (
                   <p className="text-destructive truncate text-xs font-medium">
                     Needs reconnect
                     {connection.label ? ` · ${connection.label}` : ""}
@@ -333,7 +365,19 @@ export const ConnectorSuggestionsCard = ({
                   )
                 )}
               </div>
-              {connection && needsReconnect ? (
+              {orgAccess ? (
+                <Button size="xs" className="shrink-0" asChild>
+                  <Link
+                    aria-label={`Fix ${app.name} access for ${orgAccess.issue.org}`}
+                    href={connectionsPath(
+                      { pathname },
+                      `/apps/${encodeURIComponent(app.id)}?org_access=${encodeURIComponent(orgAccess.issue.org)}`,
+                    )}
+                  >
+                    Fix Access
+                  </Link>
+                </Button>
+              ) : connection && needsReconnect ? (
                 <div className="flex shrink-0 items-center gap-1.5">
                   {reconnectableHere ? (
                     <Button
@@ -484,7 +528,7 @@ export const ConnectorSuggestionsCard = ({
           open={pickerOpen}
           onOpenChange={setPickerOpen}
           onConnected={() =>
-            toast.success("Connected. Every agent now has full access.")
+            toast.success("Connected. Every agent can now use it.")
           }
         />
       )}

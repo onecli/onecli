@@ -42,6 +42,9 @@ export interface ManagerSandboxSnapshot {
   containerRef: string;
   running: boolean;
   payloadHash: string | null;
+  /** The spawn's `resumable` mark. Optional on the wire: a manager that
+   * predates it omits the field, which reads as false. */
+  resumable?: boolean;
   phase: string | null;
   waitingReason: string | null;
 }
@@ -80,6 +83,7 @@ export interface ManagerCreateSandboxRequest {
   homeRef: string;
   limits: { memoryMb: number; cpus: number; pids: number };
   payloadHash: string;
+  resumable: boolean;
 }
 
 export interface ManagerClientOptions {

@@ -126,7 +126,7 @@ export const DashboardHeader = () => {
   const effectiveOrgId = orgId ?? workspaceOrgId;
   const isAccount = pathname.startsWith("/account");
   // Inside Organization Settings the section is the settings ENTRY the user is
-  // on ("Global Connections", "Single sign-on"), not the generic "Organization
+  // on ("Shared Connections", "Single sign-on"), not the generic "Organization
   // Settings" parent with title-cased URL slugs under it.
   const settingsItem =
     !workspaceId && !isAccount && orgId
@@ -149,7 +149,7 @@ export const DashboardHeader = () => {
     ? pathname.slice(navItem.url.length).replace(/^\//, "")
     : "";
   // Below a connections root (the workspace's Connections or the org's
-  // Global Connections) the segments are tabs and app ids with real names.
+  // Shared Connections) the segments are tabs and app ids with real names.
   const inConnections =
     !!navItem &&
     (navItem.url.endsWith("/connections") ||

@@ -1,25 +1,27 @@
 import {
   MAX_OUTBOUND_ATTACHMENT_BYTES,
+  type AdapterReplyItem,
   type AdapterWorkItem,
 } from "@onecli/agent-protocol";
 // The client-safe app catalog (pure data, no Node builtins at import) — the
 // card gate below must agree with the web's isCardConnectLink.
 import { getApp } from "@onecli/api/apps/registry";
-// The one definition of "automated turn" — shared with the control plane's
-// continuity bridge, so a new automation source lands in both in one edit.
+// The one definition of "automated turn" and its predicate, shared with the
+// control plane's continuity bridge, so a new automation source lands in both
+// in one edit.
 import {
-  AUTOMATION_SOURCES,
   GREETING_SOURCE,
   TURN_FAILED_PARTIAL_MESSAGE,
   TURN_FAILED_RAW_ERROR_MESSAGE,
   TURN_FAILED_SILENT_MESSAGE,
   TURN_STOPPED_MESSAGE,
+  isAutomationSource,
   isRawErrorPayload,
   type AutomationSource,
 } from "@onecli/api/validations/conversation";
 import { mentionNamesOf, plainMentionCandidatesOf } from "@onecli/channels";
 import type { AdapterMentionReportRequest } from "@onecli/agent-protocol";
-import type { ControlPlaneClient } from "./control-plane";
+import { ControlPlaneError, type ControlPlaneClient } from "./control-plane";
 import {
   replyTargetForTurn,
   type ChannelPostTarget,
@@ -28,11 +30,17 @@ import {
 
 /**
  * The gateway's "connect this app" dashboard links, recognized in an answer
- * so the channel can render them as a card with a button — the web chat's
+ * so the channel can render them as a card with a button: the web chat's
  * ConnectorSuggestions, translated to the channel's native blocks. Two
- * shapes (the same two `parseConnectLink` reads on the web):
- * - `…/connections?connect=<provider>…` — nothing connected yet
- * - `…/connections/apps/<provider>` — connected, not attached to this agent
+ * shapes (the two of `parseConnectLink`'s shapes this card can act on):
+ * - `…/connections?connect=<provider>…`: nothing connected yet
+ * - `…/connections/apps/<provider>`: connected, not attached to this agent
+ *
+ * The app page also carries two refusals whose fix is NOT an attach:
+ * `?reconnect=<id>` (the saved login was rejected) and `?org_access=<org>`
+ * (a GitHub organization refused the account). An Attach card would send
+ * the user to the wrong dialog, so those links stay in the prose, where
+ * they open the app page that walks through the actual fix.
  */
 // The prefix is LAZY: greedy would swallow across two adjacent URLs (the
 // `](` between a markdown label's link and its target is in the allowed
@@ -63,6 +71,18 @@ interface ConnectLinkMatch extends ConnectLink {
   end: number;
 }
 
+/** App-page parameters that name a refusal an Attach card cannot fix. */
+const NON_ATTACH_PARAMS = ["reconnect", "org_access"] as const;
+
+const namesNonAttachRefusal = (url: string): boolean => {
+  try {
+    const { searchParams } = new URL(url);
+    return NON_ATTACH_PARAMS.some((param) => searchParams.has(param));
+  } catch {
+    return false;
+  }
+};
+
 /** Every connect-link occurrence in the answer, in order, with spans. */
 const findConnectLinkMatches = (answer: string): ConnectLinkMatch[] => {
   const matches: ConnectLinkMatch[] = [];
@@ -71,6 +91,8 @@ const findConnectLinkMatches = (answer: string): ConnectLinkMatch[] => {
     if (!provider) continue;
     // Shed trailing punctuation the model may have glued on.
     const url = match[0].replace(/[.,;:!?)\]]+$/, "");
+    const kind = match[1] ? "connect" : "attach";
+    if (kind === "attach" && namesNonAttachRefusal(url)) continue;
     let start = match.index;
     let end = match.index + url.length;
     // A markdown-form link ("[label](url)") is lifted out whole — removing
@@ -84,7 +106,7 @@ const findConnectLinkMatches = (answer: string): ConnectLinkMatch[] => {
     matches.push({
       url,
       provider,
-      kind: match[1] ? "connect" : "attach",
+      kind,
       start,
       end,
     });
@@ -413,6 +435,9 @@ const PROVIDER_DOMAINS: Record<string, string> = {
   timeless: "timeless.day",
   circleback: "circleback.ai",
   pylon: "usepylon.com",
+  pagerduty: "pagerduty.com",
+  coralogix: "coralogix.com",
+  onyx: "onyx.app",
 };
 
 /** The app's favicon via Google's resolver — Slack's image elements accept
@@ -445,11 +470,21 @@ export const providerIconUrl = (provider: string): string => {
  * posts nothing.
  */
 
+/** What the transcript holds for one finished turn: its answer, its
+ * durable error, and the replies stored under the follow-ups it consumed. */
+interface TranscriptOutcome {
+  text: string | null;
+  error: string | null;
+  /** Follow-up id → the agent's reply to that message. */
+  replies: ReadonlyMap<string, string>;
+}
+
 const transcriptOutcome = async (
   controlPlane: ControlPlaneClient,
   conversationId: string,
   turnId: string,
-): Promise<{ text: string | null; error: string | null }> => {
+  followUpIds: readonly string[],
+): Promise<TranscriptOutcome> => {
   let since: number | undefined;
   let text: string | null = null;
   // The turn's durable `error` event — the harness's terminal message, which
@@ -457,21 +492,31 @@ const transcriptOutcome = async (
   // sends no `turn.result.error` then, so `turn.error` is NULL). Last one
   // wins, matching the `text` semantics and the web's transcript fold.
   let error: string | null = null;
+  // Same pass: a follow-up's reply is a `text` stored under its own id.
+  const wanted = new Set(followUpIds);
+  const replies = new Map<string, string>();
   for (let page = 0; page < 100; page += 1) {
     const history = await controlPlane.readTranscript(conversationId, since);
     for (const event of history.events) {
-      if (event.turnId !== turnId) continue;
       const payload = (event.payload ?? {}) as {
         text?: string;
         message?: string;
       };
-      if (event.type === "text" && payload.text) text = payload.text;
-      if (event.type === "error" && payload.message) error = payload.message;
+      if (event.turnId === turnId) {
+        if (event.type === "text" && payload.text) text = payload.text;
+        if (event.type === "error" && payload.message) error = payload.message;
+      } else if (
+        wanted.has(event.turnId) &&
+        event.type === "text" &&
+        payload.text
+      ) {
+        replies.set(event.turnId, payload.text);
+      }
     }
     since = history.nextSince;
     if (!history.hasMore) break;
   }
-  return { text, error };
+  return { text, error, replies };
 };
 
 /**
@@ -630,13 +675,124 @@ export interface MirrorDeps {
 }
 
 /**
- * Whether a turn or follow-up came from an automation rather than a person.
- * `AUTOMATION_SOURCES` is the control plane's own definition (its
- * continuity bridge branches on the same constant), so a new automation
- * source lands in both places in one edit.
+ * The outbound-mention map for every piece of model text one mirror pass
+ * posts (the turn's answer and its follow-ups' replies), in ONE resolve
+ * call, plus the failures the next turn's context should learn about.
+ *
+ * `mentions` stays undefined when no text names anyone: the renderer then
+ * prints `@[Name]` tokens as literal text, the pre-feature behavior.
  */
-const isAutomationSource = (source: string): source is AutomationSource =>
-  (AUTOMATION_SOURCES as readonly string[]).includes(source);
+const resolveMentionsIn = async (
+  deps: Pick<MirrorDeps, "controlPlane" | "onLog"> & {
+    item: Pick<AdapterWorkItem, "presenceId" | "conversationId">;
+  },
+  texts: readonly (string | null)[],
+): Promise<{
+  mentions: ReadonlyMap<string, string> | undefined;
+  failures: AdapterMentionReportRequest["failures"];
+}> => {
+  const said = texts.filter((text): text is string => Boolean(text));
+  const names = [...new Set(said.flatMap(mentionNamesOf))];
+  // NEAR-MISS candidates: plain `@name` prose runs. A candidate that
+  // RESOLVES names a linked teammate the model addressed without the
+  // grammar - it pinged nobody while reading like it worked, so it is
+  // reported (the token path's failures are visible in the posted text;
+  // this one is invisible without the report). Only resolve calls carry
+  // them; they never enter the render map.
+  const plainCandidates = [
+    ...new Set(said.flatMap(plainMentionCandidatesOf)),
+  ].filter((candidate) => !names.includes(candidate));
+  if (names.length === 0 && plainCandidates.length === 0) {
+    return { mentions: undefined, failures: [] };
+  }
+  try {
+    const resolutions = await deps.controlPlane.resolveMentions(
+      deps.item.presenceId,
+      // One call, tokens first: the service caps at 20 and tokens are
+      // the ones that must not lose their slot to prose candidates.
+      [...names, ...plainCandidates].slice(0, 20),
+      deps.item.conversationId,
+    );
+    const map = new Map<string, string>();
+    const failures: AdapterMentionReportRequest["failures"] = [];
+    const tokenNames = new Set(names);
+    for (const resolution of resolutions) {
+      if (resolution.kind === "resolved") {
+        if (tokenNames.has(resolution.name)) {
+          map.set(resolution.name, resolution.externalUserId);
+        } else {
+          // Plain prose named a real linked teammate: the near-miss.
+          failures.push({ kind: "near_miss", name: resolution.name });
+        }
+      } else if (tokenNames.has(resolution.name)) {
+        // Failures only matter for real tokens - an unresolvable
+        // prose candidate ("@ symbol in a sentence") is noise.
+        failures.push(
+          resolution.kind === "ambiguous"
+            ? {
+                kind: "ambiguous",
+                name: resolution.name,
+                candidates: resolution.candidates,
+              }
+            : { kind: "unknown", name: resolution.name },
+        );
+      }
+    }
+    return { mentions: map, failures };
+  } catch (err) {
+    deps.onLog("mention resolve failed; posting degraded", { err });
+    // Unresolved ≠ unknown: report nothing on an outage.
+    return { mentions: new Map(), failures: [] };
+  }
+};
+
+/**
+ * Post one piece of the agent's own markdown (the turn's answer, or its
+ * reply to a mid-turn message) the way the web renders it: connect links
+ * as a card with a button, everything else as the plain answer.
+ *
+ * Card buttons are built only from the configured chat URL: a button hides
+ * its domain, so it must never carry a model-authored URL. No chat URL (or
+ * no links) → the plain answer, raw link visible in the prose. The 40k
+ * ceiling matches mrkdwn's hostile-input fence and keeps the link scan's
+ * worst case bounded, so a text past it posts plain.
+ */
+const postModelText = async (
+  deps: Pick<MirrorDeps, "posts" | "chatUrl">,
+  target: ChannelPostTarget,
+  markdown: string,
+  mentions: ReadonlyMap<string, string> | undefined,
+): Promise<void> => {
+  const chatUrl = deps.chatUrl;
+  const matches =
+    chatUrl && markdown.length <= 40_000
+      ? findConnectLinkMatches(markdown)
+      : [];
+  const connectLinks = cardLinks(matches);
+  if (chatUrl && connectLinks.length > 0) {
+    const carded = new Set(connectLinks.map((link) => link.provider));
+    // The adapter mints chatUrl query-free today, but the invariant
+    // lives here, not at the construction site, so join accordingly.
+    const sep = chatUrl.includes("?") ? "&" : "?";
+    await deps.posts.connectCards({
+      ...target,
+      ...(mentions && { mentions }),
+      markdown: proseWithoutCardedLinks(markdown, matches, carded),
+      fullMarkdown: markdown,
+      links: connectLinks.map((link) => ({
+        ...link,
+        // Deep-link into the chat's attach dialog over the conversation.
+        url: `${chatUrl}${sep}attach=${encodeURIComponent(link.provider)}`,
+      })),
+    });
+    return;
+  }
+  await deps.posts.answer({
+    ...target,
+    ...(mentions && { mentions }),
+    markdown,
+  });
+};
 
 /**
  * Handle one finished turn: post what the provider surface is missing, then
@@ -647,15 +803,22 @@ export const mirrorFinishedTurn = async (
   deps: MirrorDeps,
 ): Promise<string | null> => {
   const { item } = deps;
+  /** Where a message's answer goes: the link's address, narrowed to the
+   * thread that message was asked in when it was asked in one. */
+  const targetFor = (asked: {
+    sourceThreadId?: string | null;
+  }): ChannelPostTarget => {
+    const address = replyTargetForTurn(deps.threadAddress, item, asked);
+    return {
+      credential: deps.credential,
+      channel: address.channel,
+      ...(address.threadTs && { threadTs: address.threadTs }),
+      ...(deps.iconUrl && { iconUrl: deps.iconUrl }),
+    };
+  };
   // The turn's own address when it has one (a DM thread), else the link's —
   // so an answer lands in the thread its question was asked in.
-  const link = replyTargetForTurn(deps.threadAddress, item, item.turn);
-  const target: ChannelPostTarget = {
-    credential: deps.credential,
-    channel: link.channel,
-    ...(link.threadTs && { threadTs: link.threadTs }),
-    ...(deps.iconUrl && { iconUrl: deps.iconUrl }),
-  };
+  const target = targetFor(item.turn);
 
   // Claim FIRST: the CAS is the exactly-once gate, so the post happens only
   // on the winning side. (Claim-then-post means a crash between the two can
@@ -689,7 +852,37 @@ export const mirrorFinishedTurn = async (
       deps.controlPlane,
       item.conversationId,
       item.turn.id,
+      (item.followUps ?? []).flatMap((followUp) =>
+        followUp.id ? [followUp.id] : [],
+      ),
     );
+    /** A joined follow-up's reply, when the agent wrote one. */
+    const replyTo = (followUp: { id?: string }): string | undefined =>
+      followUp.id ? outcome.replies.get(followUp.id) : undefined;
+    /** Claim a follow-up's reply for THIS post. True when there is a reply
+     * and the claim won. An older control plane without the claim route
+     * (404) never served the reply early either, so the pre-feed behavior
+     * holds and this pass posts it; any other failure posts NOTHING: the
+     * claim is the only thing standing between this pass and a reply feed
+     * poll that may already have posted, and a missing reply the person
+     * can still read on the web beats a duplicate in their thread. */
+    const claimReplyOf = async (followUp: {
+      id?: string;
+    }): Promise<boolean> => {
+      if (!followUp.id || replyTo(followUp) === undefined) return false;
+      try {
+        return await deps.controlPlane.claimReply(followUp.id);
+      } catch (err) {
+        if (err instanceof ControlPlaneError && err.status === 404) {
+          return true;
+        }
+        deps.onLog("reply claim failed at close; reply not posted", {
+          err: String(err),
+          followUpId: followUp.id,
+        });
+        return false;
+      }
+    };
     // Precedence mirrors the web (turn-block prefers `turn.error`): the
     // agent's own text first; then the canonical/raw `turn.error`; then the
     // transcript's durable error event — the only record an UNCODED harness
@@ -706,72 +899,25 @@ export const mirrorFinishedTurn = async (
       null;
 
     // OUTBOUND MENTIONS (plan: platform-rendered, loud failure). Scan the
-    // answer for `@[Name]` tokens and ask the control plane to resolve them
-    // against linked teammates BEFORE rendering; the renderer emits `<@U…>`
-    // for resolved names and visible plain `@Name` for the rest — never a
-    // silent drop, never a guess. Fail OPEN: a resolve outage posts the
-    // answer with every token degraded (empty map) rather than blocking it,
-    // and the failure report is best-effort — the post always wins.
-    let mentions: ReadonlyMap<string, string> | undefined;
-    let mentionFailures: AdapterMentionReportRequest["failures"] = [];
-    if (answer && !automated) {
-      const names = mentionNamesOf(answer);
-      // NEAR-MISS candidates: plain `@name` prose runs. A candidate that
-      // RESOLVES names a linked teammate the model addressed without the
-      // grammar - it pinged nobody while reading like it worked, so it is
-      // reported (the token path's failures are visible in the posted text;
-      // this one is invisible without the report). Only resolve calls carry
-      // them; they never enter the render map.
-      const plainCandidates = plainMentionCandidatesOf(answer).filter(
-        (candidate) => !names.includes(candidate),
-      );
-      if (names.length > 0 || plainCandidates.length > 0) {
-        mentions = new Map();
-        try {
-          const resolutions = await deps.controlPlane.resolveMentions(
-            item.presenceId,
-            // One call, tokens first: the service caps at 20 and tokens are
-            // the ones that must not lose their slot to prose candidates.
-            [...names, ...plainCandidates].slice(0, 20),
-            item.conversationId,
-          );
-          const map = new Map<string, string>();
-          const tokenNames = new Set(names);
-          for (const resolution of resolutions) {
-            if (resolution.kind === "resolved") {
-              if (tokenNames.has(resolution.name)) {
-                map.set(resolution.name, resolution.externalUserId);
-              } else {
-                // Plain prose named a real linked teammate: the near-miss.
-                mentionFailures.push({
-                  kind: "near_miss",
-                  name: resolution.name,
-                });
-              }
-            } else if (tokenNames.has(resolution.name)) {
-              // Failures only matter for real tokens - an unresolvable
-              // prose candidate ("@ symbol in a sentence") is noise.
-              if (resolution.kind === "ambiguous") {
-                mentionFailures.push({
-                  kind: "ambiguous",
-                  name: resolution.name,
-                  candidates: resolution.candidates,
-                });
-              } else {
-                mentionFailures.push({
-                  kind: "unknown",
-                  name: resolution.name,
-                });
-              }
-            }
-          }
-          mentions = map;
-        } catch (err) {
-          deps.onLog("mention resolve failed; posting degraded", { err });
-          mentionFailures = []; // unresolved ≠ unknown: report nothing on an outage
-        }
-      }
-    }
+    // model text the mirror posts (the answer and every follow-up reply) for
+    // `@[Name]` tokens and ask the control plane to resolve them against
+    // linked teammates BEFORE rendering; the renderer emits `<@U…>` for
+    // resolved names and visible plain `@Name` for the rest: never a silent
+    // drop, never a guess. One call for all of it. Fail OPEN: a resolve
+    // outage posts with every token degraded (empty map) rather than
+    // blocking, and the failure report is best-effort. The post always wins.
+    // An automation's text (the report, and a joined wake's reply as its
+    // caption body) is chrome-framed and never resolves.
+    const repliesPosted = automated
+      ? []
+      : (item.followUps ?? []).flatMap((followUp) => {
+          const reply = replyTo(followUp);
+          return reply && !isAutomationSource(followUp.source) ? [reply] : [];
+        });
+    const { mentions, failures: mentionFailures } = await resolveMentionsIn(
+      deps,
+      automated ? [] : [answer, ...repliesPosted],
+    );
     // A failed turn whose post is its PARTIAL answer text must not read as a
     // normal reply — the failure line rides after it. When the answer came
     // from `turn.error` or the error event, that text IS the failure message
@@ -826,6 +972,87 @@ export const mirrorFinishedTurn = async (
       });
     };
 
+    // Words the provider thread has not seen: the turn's own message when
+    // it came from elsewhere, and the mid-run follow-ups the turn consumed,
+    // each followed by the agent's own reply to it when it wrote one (the
+    // answer covers the rest, so without these lines the thread shows an
+    // answer to questions it never saw). Provider-sourced messages are
+    // already in the channel: posting them again would echo the user.
+    // (A peer agent's words never reach a person's thread since peer
+    // tasks: the exchange stays on the pair conversations, and only the
+    // agent's own report comes home, as an automation post.)
+    const postSourced = async (line: {
+      userName: string | null;
+      message: string;
+    }) => {
+      await deps.posts.webSourced({
+        ...target,
+        userName: line.userName,
+        message: line.message,
+      });
+    };
+    const postFollowUps = async (
+      replyMentions: ReadonlyMap<string, string> | undefined,
+    ): Promise<void> => {
+      for (const followUp of item.followUps ?? []) {
+        // A follow-up whose reply the feed already posted mid-run is fully
+        // in the channel (a web-sourced one's words went ahead of its
+        // reply): nothing of it posts again. Otherwise claim first (the
+        // same compare-and-set the feed uses), so a feed poll racing this
+        // close can never post the reply twice. A follow-up with no reply
+        // of its own has nothing to claim.
+        if (followUp.replyPosted) continue;
+        const reply = (await claimReplyOf(followUp))
+          ? replyTo(followUp)
+          : undefined;
+        // A provider-sourced follow-up is already in the channel: only its
+        // reply is missing there.
+        if (followUp.source === deps.provider) {
+          // Answered where that message was asked: the turn's own rule,
+          // per message.
+          if (reply) {
+            await postModelText(
+              deps,
+              targetFor(followUp),
+              reply,
+              replyMentions,
+            );
+          }
+          continue;
+        }
+        // A wake that joined this turn is the platform's instruction, not a
+        // person's words: it posts as its automation caption (never "(from
+        // the web)"), and what the agent said back to it, when it wrote
+        // something, is the caption's body. Otherwise the answer is its
+        // report.
+        if (isAutomationSource(followUp.source)) {
+          await deps.posts.automation({
+            ...target,
+            source: followUp.source,
+            title: followUp.message,
+            body: reply ?? null,
+          });
+          continue;
+        }
+        // Attributed by the follow-up's OWN author. An older control plane
+        // sends no per-follow-up name (field absent), so fall back to the
+        // turn's asker, the pre-field behavior, exact on direct threads.
+        // Null means the control plane resolved and found nothing (deleted
+        // user): unnamed.
+        await postSourced({
+          userName:
+            followUp.userName === undefined
+              ? (item.turn.userName ?? null)
+              : followUp.userName,
+          message: followUp.message,
+        });
+        // What the agent said back to it, right under it: the web's layout.
+        if (reply) {
+          await postModelText(deps, targetFor(followUp), reply, replyMentions);
+        }
+      }
+    };
+
     if (item.turn.source === GREETING_SOURCE) {
       // The agent's first words on a brand-new thread. The instruction the
       // platform posted is not a person's question (no "(from the web)"),
@@ -840,6 +1067,10 @@ export const mirrorFinishedTurn = async (
     }
 
     if (automated) {
+      // A wake that joined this one (a batch finishing seconds apart) and
+      // what the agent said back to it, ahead of the report: the web's
+      // layout. Automation text never resolves mentions (see below).
+      await postFollowUps(undefined);
       await deps.posts.automation({
         ...target,
         source: automated,
@@ -850,24 +1081,6 @@ export const mirrorFinishedTurn = async (
       return item.turn.createdAt;
     }
 
-    // Words the provider thread has not seen: the turn's own message when
-    // it came from elsewhere, and the mid-run follow-ups the turn consumed
-    // (the answer below covers them, so without these lines the thread
-    // shows an answer to questions it never saw). Provider-sourced ones are
-    // already in the channel — posting them again would echo the user.
-    // (A peer agent's words never reach a person's thread since peer
-    // tasks: the exchange stays on the pair conversations, and only the
-    // agent's own report comes home, as an automation post above.)
-    const postSourced = async (line: {
-      userName: string | null;
-      message: string;
-    }) => {
-      await deps.posts.webSourced({
-        ...target,
-        userName: line.userName,
-        message: line.message,
-      });
-    };
     if (!fromProvider) {
       await postSourced({
         // By name when the control plane resolved one.
@@ -875,32 +1088,7 @@ export const mirrorFinishedTurn = async (
         message: item.turn.message,
       });
     }
-    for (const followUp of item.followUps ?? []) {
-      if (followUp.source === deps.provider) continue;
-      // A wake that joined this turn is the platform's instruction, not a
-      // person's words: it posts as its automation caption (never "(from the
-      // web)"), with no body of its own. The answer below is its report.
-      if (isAutomationSource(followUp.source)) {
-        await deps.posts.automation({
-          ...target,
-          source: followUp.source,
-          title: followUp.message,
-          body: null,
-        });
-        continue;
-      }
-      // Attributed by the follow-up's OWN author. An older control plane
-      // sends no per-follow-up name (field absent) — fall back to the turn's
-      // asker, the pre-field behavior, exact on direct threads. Null means
-      // the control plane resolved and found nothing (deleted user): unnamed.
-      await postSourced({
-        userName:
-          followUp.userName === undefined
-            ? (item.turn.userName ?? null)
-            : followUp.userName,
-        message: followUp.message,
-      });
-    }
+    await postFollowUps(mentions);
 
     if (answer) {
       // A key-problem failure gets the web's same call to action. Only when
@@ -931,43 +1119,7 @@ export const mirrorFinishedTurn = async (
           answer,
         });
       } else {
-        // Connect links render as a card with a button (the web chat's
-        // treatment): the raw URL leaves the prose, and each app gets a
-        // context row + button. Card buttons are built only from the
-        // configured chat URL — a button hides its domain, so it must never
-        // carry a model-authored URL. No chat URL (or no links) → the plain
-        // answer as before, raw link visible in the prose.
-        // The 40k ceiling matches mrkdwn's hostile-input fence and keeps the
-        // link scan's worst case bounded — an answer past it posts plain.
-        const chatUrl = deps.chatUrl;
-        const matches =
-          chatUrl && answer.length <= 40_000
-            ? findConnectLinkMatches(answer)
-            : [];
-        const connectLinks = cardLinks(matches);
-        if (chatUrl && connectLinks.length > 0) {
-          const carded = new Set(connectLinks.map((link) => link.provider));
-          // The adapter mints chatUrl query-free today, but the invariant
-          // lives here, not at the construction site — join accordingly.
-          const sep = chatUrl.includes("?") ? "&" : "?";
-          await deps.posts.connectCards({
-            ...target,
-            ...(mentions && { mentions }),
-            markdown: proseWithoutCardedLinks(answer, matches, carded),
-            fullMarkdown: answer,
-            links: connectLinks.map((link) => ({
-              ...link,
-              // Deep-link into the chat's attach dialog over the conversation.
-              url: `${chatUrl}${sep}attach=${encodeURIComponent(link.provider)}`,
-            })),
-          });
-        } else {
-          await deps.posts.answer({
-            ...target,
-            ...(mentions && { mentions }),
-            markdown: answer,
-          });
-        }
+        await postModelText(deps, target, answer, mentions);
         if (failedWithPartialText) {
           await deps.posts.failureNotice({
             ...target,
@@ -1040,4 +1192,87 @@ export const mirrorFinishedTurn = async (
   }
 
   return item.turn.createdAt;
+};
+
+/**
+ * What the early reply post needs: the completion pass's deps minus the
+ * finished-turn item and its cursor, plus the reply item itself.
+ */
+export type ReplyMirrorDeps = Omit<MirrorDeps, "item" | "knownCursor"> & {
+  item: AdapterReplyItem;
+};
+
+/**
+ * THE EARLY REPLY POST: the agent's reply to a mid-run
+ * message, posted the moment the agent has written it, while the turn still
+ * runs. One post, never edited (the de-streaming decision stands); the
+ * completion pass later posts the turn's own answer and skips this reply.
+ *
+ * Claim FIRST: the compare-and-set on the follow-up row is the exactly-once
+ * gate, so the post happens only on the winning side (a twin, or the
+ * completion pass of a turn that just closed, loses and posts nothing). The
+ * same claim-then-post trade-off as the cursor: a crash between the two
+ * loses one Slack post, which beats a duplicate in a human thread.
+ *
+ * A follow-up typed on another surface (the web) is not in the channel
+ * yet: its attributed words post first, then the reply, the same exchange
+ * the completion pass would have mirrored at the close. Rendered exactly as
+ * the completion pass renders it (`postModelText`: mentions resolved,
+ * connect links carded), where the follow-up was asked.
+ */
+export const mirrorFollowUpReply = async (
+  deps: ReplyMirrorDeps,
+): Promise<void> => {
+  const { item } = deps;
+  const claimed = await deps.controlPlane.claimReply(item.followUp.id);
+  if (!claimed) return;
+
+  const address = replyTargetForTurn(deps.threadAddress, item, item.followUp);
+  const target: ChannelPostTarget = {
+    credential: deps.credential,
+    channel: address.channel,
+    ...(address.threadTs && { threadTs: address.threadTs }),
+    ...(deps.iconUrl && { iconUrl: deps.iconUrl }),
+  };
+  try {
+    if (item.followUp.source !== deps.provider) {
+      await deps.posts.webSourced({
+        ...target,
+        userName: item.followUp.userName,
+        message: item.followUp.message,
+      });
+    }
+    const { mentions, failures } = await resolveMentionsIn(deps, [item.reply]);
+    await postModelText(deps, target, item.reply, mentions);
+    if (failures.length > 0) {
+      await deps.controlPlane
+        .reportMentionFailures(item.turnId, failures)
+        .catch((err: unknown) =>
+          deps.onLog("mention failure report failed", { err }),
+        );
+    }
+  } catch (err) {
+    // Claimed, so never retried into a double post: the web remains the
+    // complete record. A dead-credential refusal is relayed exactly as the
+    // completion pass relays it.
+    deps.onLog("reply post failed after claim", {
+      err: String(err),
+      followUpId: item.followUp.id,
+    });
+    const removal = deps.removalEventFor(err);
+    if (removal !== null) {
+      await deps.controlPlane
+        .ingest({
+          presenceId: item.presenceId,
+          eventId: `dead-credential:${item.followUp.id}`,
+          event: removal,
+        })
+        .catch((reportErr: unknown) =>
+          deps.onLog("dead credential report failed", {
+            err: String(reportErr),
+            presenceId: item.presenceId,
+          }),
+        );
+    }
+  }
 };

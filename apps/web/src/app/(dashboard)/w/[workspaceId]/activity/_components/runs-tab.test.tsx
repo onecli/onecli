@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useState, type ComponentProps } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { RunListItem, RunsPage } from "@/lib/api/runs";
 
@@ -37,6 +38,18 @@ vi.mock("next/image", () => ({
 }));
 
 const { RunsTab } = await import("./runs-tab");
+
+/** RunsTab's filter lives in the URL (owned by ActivityContent); the
+ * harness holds it in state the same way, starting from `initialView`. */
+const Harness = ({
+  initialView = "all",
+  ...props
+}: Omit<ComponentProps<typeof RunsTab>, "view" | "onViewChange"> & {
+  initialView?: ComponentProps<typeof RunsTab>["view"];
+}) => {
+  const [view, setView] = useState(initialView);
+  return <RunsTab {...props} view={view} onViewChange={setView} />;
+};
 
 const facts = {
   conversationId: "c1",
@@ -80,12 +93,12 @@ beforeEach(() => {
 
 describe("Activity Runs tab", () => {
   it("starts on All, scoped to the URL's agent", () => {
-    render(<RunsTab agentId="ag-1" onViewNetwork={vi.fn()} />);
+    render(<Harness agentId="ag-1" onViewNetwork={vi.fn()} />);
     expect(last()).toEqual({ agentId: "ag-1" });
   });
 
   it("one segmented filter: a source, or Failed", () => {
-    render(<RunsTab onViewNetwork={vi.fn()} />);
+    render(<Harness onViewNetwork={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Webhooks" }));
     expect(last()).toEqual({ source: "webhook" });
     fireEvent.click(screen.getByRole("button", { name: "Failed" }));
@@ -95,7 +108,7 @@ describe("Activity Runs tab", () => {
   });
 
   it("the Live switch toggles the list's Live mode", () => {
-    render(<RunsTab onViewNetwork={vi.fn()} />);
+    render(<Harness onViewNetwork={vi.fn()} />);
     const live = screen.getByRole("button", { name: "Live" });
     expect(live).toHaveAttribute("aria-pressed", "true");
     fireEvent.click(live);
@@ -103,7 +116,7 @@ describe("Activity Runs tab", () => {
   });
 
   it("renders a run as a row: agent, source, question, status, duration", () => {
-    render(<RunsTab onViewNetwork={vi.fn()} />);
+    render(<Harness onViewNetwork={vi.fn()} />);
     expect(screen.getByText("Donna")).toBeInTheDocument();
     expect(screen.getByText("Webhook")).toBeInTheDocument();
     expect(screen.getByText("Summarize the meeting")).toBeInTheDocument();
@@ -121,13 +134,13 @@ describe("Activity Runs tab", () => {
         private: true,
       },
     ]);
-    render(<RunsTab onViewNetwork={vi.fn()} />);
+    render(<Harness onViewNetwork={vi.fn()} />);
     expect(screen.getByText("Private chat. Open to read it.")).toBeVisible();
     expect(screen.getByText("Donna")).toBeInTheDocument();
   });
 
   it("hides the Apps column when app evidence is withheld", () => {
-    render(<RunsTab onViewNetwork={vi.fn()} />);
+    render(<Harness onViewNetwork={vi.fn()} />);
     expect(
       screen.queryByRole("columnheader", { name: "Apps" }),
     ).not.toBeInTheDocument();
@@ -143,7 +156,7 @@ describe("Activity Runs tab", () => {
       ],
       false,
     );
-    render(<RunsTab onViewNetwork={vi.fn()} />);
+    render(<Harness onViewNetwork={vi.fn()} />);
     expect(screen.getByRole("columnheader", { name: "Apps" })).toBeVisible();
     expect(
       screen.getAllByRole("img", { name: "Gmail" }).length,
@@ -154,8 +167,19 @@ describe("Activity Runs tab", () => {
 
   it("an empty filter says so in the table", () => {
     hook.page = page([]);
-    render(<RunsTab onViewNetwork={vi.fn()} />);
+    render(<Harness onViewNetwork={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Failed" }));
     expect(screen.getByText("No failed runs.")).toBeInTheDocument();
+  });
+
+  it("opens on the view it is given, so a link can land on Schedules or Tests", () => {
+    render(
+      <Harness agentId="ag-1" initialView="cron" onViewNetwork={vi.fn()} />,
+    );
+    expect(last()).toEqual({ agentId: "ag-1", source: "cron" });
+    expect(screen.getByRole("button", { name: "Schedules" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
   });
 });

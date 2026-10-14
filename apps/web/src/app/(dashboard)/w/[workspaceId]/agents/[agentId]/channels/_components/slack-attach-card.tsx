@@ -19,6 +19,7 @@ import {
 } from "@onecli/ui/components/card";
 import type { ChannelTransport } from "@/lib/api";
 import { useAttachChannel, useDetachChannel } from "@/hooks/use-channels";
+import { openInstallPopup } from "@/lib/agents/install-popup";
 import { SlackDetachDialog } from "./slack-detach-dialog";
 import { SlackGuidedSocketSteps } from "./slack-guided-socket-steps";
 import { SlackManifestFloor } from "./slack-manifest-floor";
@@ -55,27 +56,6 @@ interface SlackAttachCardProps {
    */
   removedAppId?: string | null;
 }
-
-/**
- * Opens a centered, *blank* popup (the app-connect sizing) synchronously inside
- * a click — to be pointed at the install URL once the create resolves. Opening
- * it blank up front is the only way `window.open` survives a popup blocker: the
- * events-arm create round-trips through Slack's `apps.manifest.create`, so
- * `onSuccess` fires long after the click's transient activation is gone.
- * Returns `null` when the browser blocked it even here — the caller then offers
- * the URL as a plain link, whose click is a fresh gesture the blocker allows.
- */
-const openInstallPopup = (): Window | null => {
-  const w = 520;
-  const h = 700;
-  const left = Math.round(window.screenX + (window.outerWidth - w) / 2);
-  const top = Math.round(window.screenY + (window.outerHeight - h) / 2);
-  return window.open(
-    "",
-    "_blank",
-    `width=${w},height=${h},left=${left},top=${top},scrollbars=yes,resizable=yes`,
-  );
-};
 
 /**
  * The unattached (and resume) face of the Slack card. Three arms, decided by
@@ -231,8 +211,11 @@ export const SlackAttachCard = ({
         )}
         {resuming && !removed && (
           <div className="flex flex-wrap items-center justify-between gap-2">
+            {/* Slack never tells us a request is waiting on an admin, so the
+                hint names that case instead of claiming to know. */}
             <p className="text-muted-foreground text-sm">
-              Setup was started but not finished. Pick up where it left off.
+              Not finished yet. If your Slack admin has to approve the app,
+              click Resume setup once they do.
             </p>
             {/* The escape hatch: without it a half-finished setup pins the
                 agent to its stamped transport forever (posture changes and

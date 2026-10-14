@@ -1,6 +1,88 @@
 import type { AgentEvent } from "./events";
 
 /**
+ * A text delta as a harness reports it: the canonical `text.delta`, plus the
+ * MESSAGE it belongs to when the harness frames its output, and the
+ * FOLLOW-UP it answers when the harness can tell.
+ *
+ * `messageId` is the harness's own id for one assistant message. Deltas that
+ * share it are one message; a new id starts the next one. A harness that does
+ * not frame its output omits it, and its whole stream then reads as one
+ * message per tool-free stretch (the supervisor's unframed rule). Opaque:
+ * only equality means anything.
+ *
+ * `replyTo` names the steered follow-up this delta is the agent's reply to:
+ * the first message after that follow-up was injected, as it streams. The
+ * supervisor forwards such a delta under the follow-up's own id, so the
+ * reply is read live under the message it answers, and the durable `text`
+ * the handover stores there replaces it (the delta law). Absent on every
+ * delta that is the turn's own narration, and on a harness that cannot see
+ * where an injection landed.
+ */
+interface HarnessTextDelta {
+  type: "text.delta";
+  text: string;
+  messageId?: string;
+  replyTo?: string;
+}
+
+/**
+ * The harness CORRECTED a message it already streamed: replace that
+ * message's text with this. Empty text retracts it. Harnesses emit it when a
+ * provider attempt is rolled back mid-stream and replayed, or when output is
+ * repaired after the fact, so text the model never really said must not stay
+ * in the answer.
+ */
+interface HarnessTextReplace {
+  type: "text.replace";
+  messageId: string;
+  text: string;
+}
+
+/**
+ * A steered follow-up the run CONSUMED (the canonical `message.joined`):
+ * the harness confirmed the model has the message. Emitted the moment the
+ * harness can tell (at the injection, on a runtime with the live pickup
+ * signal), so the join precedes every delta of the reply, or just before
+ * the terminal event on a runtime that can only tell at the end.
+ */
+interface HarnessMessageJoined {
+  type: "message.joined";
+  followUpId: string;
+}
+
+/**
+ * What the agent said back to a steered follow-up, once the reply is
+ * complete: its first message after the follow-up was injected, written
+ * before it did anything else, as the harness recorded it. Never emitted
+ * when the agent went straight to a tool, when the harness cannot see where
+ * the injection landed, or when it cannot say. Always after that
+ * follow-up's `message.joined`. The supervisor stores it as the follow-up's
+ * own answer, so a mid-turn question is answered under itself rather than
+ * lost to the turn's closing words. Harness-to-supervisor only: no wire
+ * form (the reply reaches the transcript as a durable `text` event).
+ */
+interface HarnessMessageReplied {
+  type: "message.replied";
+  followUpId: string;
+  reply: string;
+}
+
+/**
+ * What `HarnessSession.runTurn` yields: the canonical vocabulary, with message
+ * framing and follow-up replies on top. Both are harness-to-supervisor
+ * concerns only. The supervisor reads them to build the turn's answers, then
+ * forwards each event in the wire vocabulary (`AgentEvent`), which carries
+ * neither: a reply travels as its own durable `text` event instead.
+ */
+export type HarnessEvent =
+  | Exclude<AgentEvent, { type: "text.delta" | "message.joined" }>
+  | HarnessTextDelta
+  | HarnessTextReplace
+  | HarnessMessageJoined
+  | HarnessMessageReplied;
+
+/**
  * The vendor-neutral harness interface (plans/hosted-agents-v2.md §3.5).
  * Defined entirely in OUR vocabulary; an adapter translates a vendor's
  * surface onto it and nothing above the adapter may know which vendor ran
@@ -35,6 +117,14 @@ export interface HarnessCapabilities {
    * control plane owns.
    */
   steer: boolean;
+  /**
+   * Can move the tool an in-flight turn is waiting on to the background
+   * (`HarnessSession.backgroundRunningTool`), so queued steers are read now
+   * instead of after the tool (SEND NOW). Absent it, a
+   * steered follow-up is read at the run's next safe point as before, and
+   * SEND NOW answers `moved: false`.
+   */
+  backgroundTool: boolean;
   /**
    * Home-relative directory the harness natively scans for skills
    * (e.g. ".agents/skills"), or null when it loads none. The materializer
@@ -118,6 +208,14 @@ export interface TurnInput {
   images?: TurnImage[];
 }
 
+/** What `HarnessSession.backgroundRunningTool` did. */
+export interface BackgroundedTool {
+  /** A running tool was moved to the background. */
+  moved: boolean;
+  /** The moved tool's name, when the harness reports it. */
+  toolName?: string;
+}
+
 export interface SteerInput {
   /**
    * Opaque correlation token (control-plane side: the follow-up row's id).
@@ -125,7 +223,12 @@ export interface SteerInput {
    * the live turn consumed this message.
    */
   id: string;
-  /** The user's words, verbatim — injected as a user message. */
+  /**
+   * The model-facing text, injected verbatim as a user message: the person's
+   * words as the supervisor composed them at its boundary (a delivery-only
+   * frame in front, when the control plane sent one). The adapter never
+   * rewrites it, and confirms the join by finding it in the run.
+   */
   message: string;
 }
 
@@ -136,11 +239,11 @@ export interface HarnessSession {
    */
   readonly sessionRef: string | null;
   /**
-   * Run one turn. The iterable yields canonical events in order and always
+   * Run one turn. The iterable yields harness events in order and always
    * terminates with exactly one terminal event (`turn.done` or `error`) —
    * including after `abort()`.
    */
-  runTurn(input: TurnInput): AsyncIterable<AgentEvent>;
+  runTurn(input: TurnInput): AsyncIterable<HarnessEvent>;
   /**
    * Queue a user message into the IN-FLIGHT turn, to be injected at the
    * harness's next safe point. Present only when `capabilities.steer`.
@@ -154,6 +257,17 @@ export interface HarnessSession {
    * re-runs the message as its own turn.
    */
   steer?(input: SteerInput): Promise<void>;
+  /**
+   * Move the tool the in-flight turn is waiting on to the BACKGROUND, so the
+   * run reaches its next safe point now and injects whatever steers are
+   * queued (SEND NOW). The tool keeps running; the model is
+   * told where to collect it. Resolves with what actually happened, and
+   * only says `moved` when the harness confirmed a tool was moved: a
+   * harness that cannot tell resolves `{ moved: false }` rather than guess,
+   * because the answer is shown to the person who asked. Present only when
+   * `capabilities.backgroundTool`.
+   */
+  backgroundRunningTool?(): Promise<BackgroundedTool>;
   /** Stop the in-flight turn; the runTurn iterable still ends cleanly. */
   abort(): Promise<void>;
   /**

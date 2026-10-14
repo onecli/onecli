@@ -19,7 +19,7 @@ export const SettingsNav = () => {
   const sections = workspaceId
     ? getWorkspaceSettingsSections(workspaceId)
     : getSettingsSections(orgId);
-  // Pages below an entry (a Global Connections tab, an app's page) keep it
+  // Pages below an entry (a Shared Connections tab, an app's page) keep it
   // highlighted.
   const activeUrl = activeSettingsItem(sections, pathname)?.url;
 

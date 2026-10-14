@@ -9,8 +9,8 @@ export default function GlobalConnectionsTabsLayout({
   return (
     <>
       <PageHeader
-        title="Global Connections"
-        description="Organization-wide app integrations, custom secrets, and LLM keys shared across all workspaces."
+        title="Shared Connections"
+        description="Apps, secrets, and LLM keys connected once and shared with every workspace. Each workspace chooses which of its agents use them."
       />
       <div className="space-y-6">
         <GlobalConnectionsTabs />

@@ -8,6 +8,7 @@ import {
 import type { SessionUser } from "../providers/types";
 import { withLegacyProjectId } from "../lib/legacy-project-compat";
 import { logger } from "../lib/logger";
+import { recordableSignInProvider } from "../lib/sign-in-provider";
 import {
   findUserDefaultWorkspace,
   ensureUserOrganization,
@@ -166,6 +167,7 @@ export const authSessionRoutes = () => {
           }
         }
 
+        const signInProvider = recordableSignInProvider(user);
         const dbUser = await db.user.upsert({
           where: { email: user.email },
           create: {
@@ -173,12 +175,14 @@ export const authSessionRoutes = () => {
             email: user.email,
             name: user.name,
             lastLoginAt: new Date(),
+            ...(signInProvider && { signInProvider }),
             ...extra,
           },
           update: {
             externalAuthId: user.id,
             name: user.name,
             lastLoginAt: new Date(),
+            ...(signInProvider && { signInProvider }),
             ...extra,
           },
           select: { id: true, email: true, name: true },

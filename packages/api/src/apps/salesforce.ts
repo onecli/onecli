@@ -1,5 +1,5 @@
 import type { AppDefinition } from "./types";
-import { OAUTH_STATE_SECRET, SECRET_ENCRYPTION_KEY } from "../lib/env";
+import { pkceChallenge, pkceVerifier } from "./oauth/pkce";
 
 // Salesforce serves every org from its own My Domain host under
 // `my.salesforce.com` — production (`acme.my.salesforce.com`), sandboxes
@@ -45,16 +45,6 @@ const loginOrigin = (environment: string): string => {
   if (environment === "production") return "https://login.salesforce.com";
   if (environment === "sandbox") return "https://test.salesforce.com";
   throw new Error("Salesforce environment must be production or sandbox");
-};
-
-// PKCE verifier derived from the signed OAuth state with the server's signing
-// key — same approach as `x.ts`, so no cross-request store is needed. node
-// builtins load lazily: this module rides the client-reachable app registry.
-const deriveCodeVerifier = async (state: string): Promise<string> => {
-  const { createHmac } = await import("node:crypto");
-  const key = OAUTH_STATE_SECRET || SECRET_ENCRYPTION_KEY;
-  if (!key) throw new Error("OAuth signing secret is required");
-  return createHmac("sha256", key).update(`pkce:${state}`).digest("base64url");
 };
 
 const nonEmpty = (value: unknown, field: string): string => {
@@ -107,8 +97,7 @@ export const salesforce: AppDefinition = {
       if (!appCredentials.clientId) {
         throw new Error("Salesforce OAuth client ID not configured");
       }
-      const { createHash } = await import("node:crypto");
-      const verifier = await deriveCodeVerifier(state);
+      const challenge = await pkceChallenge(await pkceVerifier(state));
 
       const url = new URL(
         `${loginOrigin(appCredentials.environment ?? "")}/services/oauth2/authorize`,
@@ -118,10 +107,7 @@ export const salesforce: AppDefinition = {
       url.searchParams.set("redirect_uri", redirectUri);
       url.searchParams.set("scope", scopes.join(" "));
       url.searchParams.set("state", state);
-      url.searchParams.set(
-        "code_challenge",
-        createHash("sha256").update(verifier).digest("base64url"),
-      );
+      url.searchParams.set("code_challenge", challenge);
       url.searchParams.set("code_challenge_method", "S256");
       return url.toString();
     },
@@ -151,7 +137,7 @@ export const salesforce: AppDefinition = {
           client_id: appCredentials.clientId,
           client_secret: appCredentials.clientSecret,
           redirect_uri: redirectUri,
-          code_verifier: await deriveCodeVerifier(callbackParams.state),
+          code_verifier: await pkceVerifier(callbackParams.state),
         }),
       });
 

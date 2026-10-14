@@ -3,6 +3,7 @@ import { db } from "@onecli/db";
 import type { ApiEnv } from "../types";
 import { auth } from "../middleware/auth";
 import { ServiceError } from "../services/errors";
+import { userIsOrgAdmin } from "../services/workspace-access-check";
 
 // The current organization, resolved from the membership-fenced auth context —
 // never from input, so cross-org reads are impossible by construction.
@@ -38,6 +39,17 @@ export const orgRoutes = () => {
       throw new ServiceError("NOT_FOUND", "Organization not found");
     }
     return c.json(org);
+  });
+
+  // GET /v1/org/membership: the caller's standing in the current org, for
+  // UI that only org admins can act on (sharing a connection with the org).
+  // Display only: every admin action re-checks on its own route. Without
+  // roles (unlicensed self-host) every member is an admin, as everywhere.
+  app.get("/membership", member, async (c) => {
+    const authCtx = c.get("auth");
+    return c.json({
+      isAdmin: await userIsOrgAdmin(authCtx.userId, authCtx.organizationId),
+    });
   });
 
   return app;

@@ -49,6 +49,7 @@ vi.mock("@/lib/api/policy-visibility", () => ({
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 const { QuestionDialog } = await import("./question-dialog");
+const { CRITERIA_TEMPLATE } = await import("./eval-copy");
 
 const question: EvalQuestion = {
   id: "q-1",
@@ -151,6 +152,33 @@ describe("QuestionDialog", () => {
 
     await user.type(expected, "x");
     expect(expected).toHaveAttribute("aria-invalid", "false");
+  });
+
+  it("adds a custom check with success criteria, starting from the example", async () => {
+    api.addQuestion.mockResolvedValue({ ...question, id: "q-3" });
+    const { onClose } = mount(null);
+    const user = userEvent.setup();
+
+    await user.type(screen.getByLabelText("Question"), "Why did margin move?");
+    await user.click(screen.getByRole("radio", { name: /Custom check/ }));
+    const criteria = screen.getByLabelText("Success criteria");
+    expect(criteria).toHaveValue("");
+    await user.click(
+      screen.getByRole("button", { name: "Start from the example" }),
+    );
+    expect(criteria).toHaveValue(CRITERIA_TEMPLATE);
+    expect(
+      screen.queryByRole("button", { name: "Start from the example" }),
+    ).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Add question" }));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(api.addQuestion).toHaveBeenCalledWith("ag-1", {
+      question: "Why did margin move?",
+      expected: CRITERIA_TEMPLATE,
+      kind: "custom",
+      expectedApps: [],
+    });
   });
 
   it("moves between check kinds with the arrow keys", async () => {

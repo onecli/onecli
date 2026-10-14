@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import {
   detectAnthropicAuthMode,
   isAnthropicAdminKey,
+  isAnthropicRefreshToken,
   isOpenaiAdminKey,
   looksLikeAnthropicKey,
   looksLikeOpenaiKey,
@@ -40,6 +41,16 @@ export const keyFormatWarning = (
         </>
       );
     }
+    if (isAnthropicRefreshToken(value)) {
+      return (
+        <>
+          This is a refresh token, which can{"\u2019"}t call Claude models.
+          Paste the token{" "}
+          <code className={prefixClassName}>claude setup-token</code> prints (
+          <code className={prefixClassName}>sk-ant-oat…</code>) instead.
+        </>
+      );
+    }
     if (detectAnthropicAuthMode(value) !== null) {
       return "This value looks incomplete. Make sure you copied all of it.";
     }
@@ -51,7 +62,7 @@ export const keyFormatWarning = (
       <>
         Subscription tokens start with{" "}
         <code className={prefixClassName}>sk-ant-oat</code>, API keys with{" "}
-        <code className={prefixClassName}>sk-ant-api</code>.
+        <code className={prefixClassName}>sk-ant-</code>.
       </>
     );
   }

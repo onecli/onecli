@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentEvent } from "@onecli/agent-protocol";
+import type { HarnessEvent } from "@onecli/agent-protocol";
 
 /**
  * The jcode adapter against a MOCKED SDK — the layer between the pure
@@ -74,6 +74,16 @@ const state: {
   softInterruptError: Error | null;
   setModelError: Error | null;
   setEffortError: Error | null;
+  /** The handshake capabilities the "daemon" advertises. Default: the
+   * live pickup signal is there (jcode ≥ v0.94.0); a test drops it to
+   * exercise the history reconcile an older daemon still needs. */
+  capabilities: string[];
+  /** What the daemon answers `background_tool` with (SEND NOW). */
+  backgroundToolResult: {
+    moved: boolean;
+    toolCallId?: string;
+    toolName?: string;
+  };
   /** Every launched bridge process (a real emitter + stderr stream). */
   bridges: (EventEmitter & { stderr: PassThrough })[];
 } = {
@@ -92,6 +102,8 @@ const state: {
   softInterruptError: null,
   setModelError: null,
   setEffortError: null,
+  capabilities: [SOFT_INTERRUPT_IDS_CAPABILITY],
+  backgroundToolResult: { moved: false },
   bridges: [],
 };
 
@@ -208,6 +220,23 @@ vi.mock("@1jehuang/jcode-sdk", () => {
         ? Promise.reject(state.softInterruptError)
         : Promise.resolve();
     }
+    softInterruptWithId(
+      sessionId: string,
+      content: string,
+      options?: { clientId?: string },
+    ) {
+      record("softInterruptWithId", sessionId, content, options);
+      return state.softInterruptError
+        ? Promise.reject(state.softInterruptError)
+        : Promise.resolve();
+    }
+    supports(capability: string) {
+      return state.capabilities.includes(capability);
+    }
+    backgroundToolResult(sessionId: string) {
+      record("backgroundToolResult", sessionId);
+      return Promise.resolve(state.backgroundToolResult);
+    }
     cancelSoftInterrupts(sessionId: string) {
       record("cancelSoftInterrupts", sessionId);
       return Promise.resolve();
@@ -287,8 +316,10 @@ vi.mock("@1jehuang/jcode-sdk", () => {
 
 import {
   ABORT_TERMINAL_GRACE_MS,
+  BACKGROUND_TOOL_RESULT_CAPABILITY,
   BUSY_RESEND_DELAYS_MS,
   POST_ACCEPT_IDLE_MS,
+  SOFT_INTERRUPT_IDS_CAPABILITY,
   TOOL_INPUT_MAX_CHARS,
   createJcodeHarness,
 } from "./jcode";
@@ -298,9 +329,9 @@ const ORIGINAL_POST_ACCEPT_IDLE_MS = POST_ACCEPT_IDLE_MS.value;
 const ORIGINAL_ABORT_GRACE_MS = ABORT_TERMINAL_GRACE_MS.value;
 
 const collect = async (
-  iterable: AsyncIterable<AgentEvent>,
-): Promise<AgentEvent[]> => {
-  const events: AgentEvent[] = [];
+  iterable: AsyncIterable<HarnessEvent>,
+): Promise<HarnessEvent[]> => {
+  const events: HarnessEvent[] = [];
   for await (const event of iterable) events.push(event);
   return events;
 };
@@ -345,6 +376,8 @@ beforeEach(() => {
   state.softInterruptError = null;
   state.setModelError = null;
   state.setEffortError = null;
+  state.capabilities = [SOFT_INTERRUPT_IDS_CAPABILITY];
+  state.backgroundToolResult = { moved: false };
   state.bridges = [];
   delete process.env.ONECLI_JCODE_BINARY;
   delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
@@ -649,7 +682,7 @@ describe("the daemon's own diagnostics (jcode-log.ts wiring)", () => {
 
 describe("applyPreferences honesty", () => {
   const noticesOf = async (session: {
-    runTurn: (input: { message: string }) => AsyncIterable<AgentEvent>;
+    runTurn: (input: { message: string }) => AsyncIterable<HarnessEvent>;
   }) => {
     const events = await collect(session.runTurn({ message: "hello" }));
     return events.filter((e) => e.type === "notice");
@@ -730,7 +763,7 @@ describe("the busy self-heal", () => {
     // The orphan streams into the subscription before our send settles.
     state.clients[0]?.push({ ev: "text_delta", text: "ORPHAN-OUTPUT" });
 
-    const events: AgentEvent[] = [];
+    const events: HarnessEvent[] = [];
     let next = await iterator.next();
     while (!next.done) {
       events.push(next.value);
@@ -802,7 +835,7 @@ describe("the busy self-heal", () => {
       message: "Reasoning effort is not supported",
     });
 
-    const events: AgentEvent[] = [];
+    const events: HarnessEvent[] = [];
     let next = await iterator.next();
     while (!next.done) {
       events.push(next.value);
@@ -829,173 +862,421 @@ describe("the jcode steer plumbing", () => {
     expect(firstCancel).toBeLessThan(send);
   });
 
-  it("steer maps to a NON-URGENT softInterrupt while the turn runs", async () => {
-    state.events = [{ ev: "text_delta", text: "working" }, { ev: "turn_done" }];
-    const { session } = await startSession();
-    const iterator = session
-      .runTurn({ message: "task" })
-      [Symbol.asyncIterator]();
-    await iterator.next(); // turn.started — the gate is open
-
-    await session.steer?.({ id: "f1", message: "fold this in" });
-
-    expect(callsOf("softInterrupt")).toEqual([
-      { method: "softInterrupt", args: ["s-1", "fold this in", false] },
-    ]);
-    // Drain to completion so the shared fake stays clean.
-    let next = await iterator.next();
-    while (!next.done) next = await iterator.next();
-  });
-
-  it("REFUSES a steer between turns — never queued for a later run", async () => {
-    const { session } = await startSession();
-    await expect(
-      session.steer?.({ id: "f1", message: "too early" }),
-    ).rejects.toThrow("no turn in flight");
-    expect(callsOf("softInterrupt")).toHaveLength(0);
-  });
-
-  it("propagates a coded harness refusal from softInterrupt", async () => {
-    state.events = [{ ev: "text_delta", text: "working" }, { ev: "turn_done" }];
-    state.softInterruptError = Object.assign(new Error("unknown_session"), {
-      code: "unknown_session",
+  describe("without `soft_interrupt_ids` (an older daemon): the history reconcile", () => {
+    beforeEach(() => {
+      state.capabilities = [];
     });
-    const { session } = await startSession();
-    const iterator = session
-      .runTurn({ message: "task" })
-      [Symbol.asyncIterator]();
-    await iterator.next();
 
-    await expect(
-      session.steer?.({ id: "f1", message: "wrong session" }),
-    ).rejects.toThrow("unknown_session");
+    it("steer maps to a NON-URGENT softInterrupt while the turn runs", async () => {
+      state.events = [
+        { ev: "text_delta", text: "working" },
+        { ev: "turn_done" },
+      ];
+      const { session } = await startSession();
+      const iterator = session
+        .runTurn({ message: "task" })
+        [Symbol.asyncIterator]();
+      await iterator.next(); // turn.started — the gate is open
 
-    const events: AgentEvent[] = [];
-    let next = await iterator.next();
-    while (!next.done) {
-      events.push(next.value);
-      next = await iterator.next();
-    }
-    // Never tracked as delivered → never confirmed joined.
-    expect(events.some((e) => e.type === "message.joined")).toBe(false);
+      await session.steer?.({ id: "f1", message: "fold this in" });
+
+      expect(callsOf("softInterrupt")).toEqual([
+        { method: "softInterrupt", args: ["s-1", "fold this in", false] },
+      ]);
+      // Drain to completion so the shared fake stays clean.
+      let next = await iterator.next();
+      while (!next.done) next = await iterator.next();
+    });
+
+    it("REFUSES a steer between turns — never queued for a later run", async () => {
+      const { session } = await startSession();
+      await expect(
+        session.steer?.({ id: "f1", message: "too early" }),
+      ).rejects.toThrow("no turn in flight");
+      expect(callsOf("softInterrupt")).toHaveLength(0);
+    });
+
+    it("propagates a coded harness refusal from softInterrupt", async () => {
+      state.events = [
+        { ev: "text_delta", text: "working" },
+        { ev: "turn_done" },
+      ];
+      state.softInterruptError = Object.assign(new Error("unknown_session"), {
+        code: "unknown_session",
+      });
+      const { session } = await startSession();
+      const iterator = session
+        .runTurn({ message: "task" })
+        [Symbol.asyncIterator]();
+      await iterator.next();
+
+      await expect(
+        session.steer?.({ id: "f1", message: "wrong session" }),
+      ).rejects.toThrow("unknown_session");
+
+      const events: HarnessEvent[] = [];
+      let next = await iterator.next();
+      while (!next.done) {
+        events.push(next.value);
+        next = await iterator.next();
+      }
+      // Never tracked as delivered → never confirmed joined.
+      expect(events.some((e) => e.type === "message.joined")).toBe(false);
+    });
+
+    it("reconciles at the terminal: cancel → history → message.joined BEFORE turn.done", async () => {
+      state.events = [
+        { ev: "text_delta", text: "working" },
+        { ev: "turn_done" },
+      ];
+      // History GROWS like the real daemon's: the prompt alone at turn start
+      // (when the baseline is captured), the injection appended later.
+      state.history = [{ role: "user", content: "task" }];
+      const { session } = await startSession();
+      const iterator = session
+        .runTurn({ message: "task" })
+        [Symbol.asyncIterator]();
+      await iterator.next();
+      await session.steer?.({ id: "f1", message: "fold this in" });
+      state.history = [
+        { role: "user", content: "task" },
+        { role: "assistant", content: "on it" },
+        { role: "user", content: "fold this in" },
+      ];
+
+      const events: HarnessEvent[] = [];
+      let next = await iterator.next();
+      while (!next.done) {
+        events.push(next.value);
+        next = await iterator.next();
+      }
+
+      const kinds = events.map((e) => e.type);
+      expect(kinds).toContain("message.joined");
+      expect(kinds.indexOf("message.joined")).toBeLessThan(
+        kinds.indexOf("turn.done"),
+      );
+      // Cancel precedes the RECONCILE history read (the first read is the
+      // turn-start baseline capture): after the cancel nothing more can
+      // inject, so the read is stable.
+      const order = state.calls.map((c) => c.method);
+      expect(order.lastIndexOf("cancelSoftInterrupts")).toBeLessThan(
+        order.lastIndexOf("getHistory"),
+      );
+      // Nothing on this path knows where the injection landed while the
+      // run streams, so no delta is ever tagged as a reply: the reply
+      // reaches the transcript only as the handover's `text`.
+      expect(
+        events.every((e) => e.type !== "text.delta" || e.replyTo === undefined),
+      ).toBe(true);
+    });
+
+    it("a steer whose text EQUALS the prompt still reconciles joined — the index anchor", async () => {
+      // The content-anchor trap: matching the prompt from the END would find
+      // the INJECTED copy and read everything out of the window. The baseline
+      // index makes the duplicate a normal candidate.
+      state.events = [
+        { ev: "text_delta", text: "working" },
+        { ev: "turn_done" },
+      ];
+      state.history = [{ role: "user", content: "again" }];
+      const { session } = await startSession();
+      const iterator = session
+        .runTurn({ message: "again" })
+        [Symbol.asyncIterator]();
+      await iterator.next();
+      await session.steer?.({ id: "f1", message: "again" });
+      state.history = [
+        { role: "user", content: "again" },
+        { role: "assistant", content: "working on it" },
+        { role: "user", content: "again" },
+      ];
+
+      const events: HarnessEvent[] = [];
+      let next = await iterator.next();
+      while (!next.done) {
+        events.push(next.value);
+        next = await iterator.next();
+      }
+
+      expect(
+        events.some(
+          (e) => e.type === "message.joined" && e.followUpId === "f1",
+        ),
+      ).toBe(true);
+    });
+
+    it("a steer matching only the turn's OWN prompt reads as missed — never joined", async () => {
+      // The false-positive the exact-window rule kills: "ok" appears inside
+      // the prompt (memory context + message travel there verbatim), and a
+      // matcher over the whole history would mark it joined — the message
+      // silently swallowed.
+      state.events = [
+        { ev: "text_delta", text: "working" },
+        { ev: "turn_done" },
+      ];
+      state.history = [
+        { role: "user", content: "please check everything is ok today" },
+        { role: "assistant", content: "done" },
+      ];
+      const { session } = await startSession();
+      const iterator = session
+        .runTurn({ message: "please check everything is ok today" })
+        [Symbol.asyncIterator]();
+      await iterator.next();
+      await session.steer?.({ id: "f1", message: "ok" });
+
+      const events: HarnessEvent[] = [];
+      let next = await iterator.next();
+      while (!next.done) {
+        events.push(next.value);
+        next = await iterator.next();
+      }
+
+      expect(events.some((e) => e.type === "message.joined")).toBe(false);
+    });
+
+    it("a history failure degrades every pending steer to missed", async () => {
+      state.events = [
+        { ev: "text_delta", text: "working" },
+        { ev: "turn_done" },
+      ];
+      state.historyError = new Error("bridge went away");
+      const { session } = await startSession();
+      const iterator = session
+        .runTurn({ message: "task" })
+        [Symbol.asyncIterator]();
+      await iterator.next();
+      await session.steer?.({ id: "f1", message: "fold this in" });
+
+      const events: HarnessEvent[] = [];
+      let next = await iterator.next();
+      while (!next.done) {
+        events.push(next.value);
+        next = await iterator.next();
+      }
+
+      // No joined events — and the terminal still arrived (the turn is not
+      // held hostage by the reconcile).
+      expect(events.some((e) => e.type === "message.joined")).toBe(false);
+      expect(events.at(-1)?.type).toBe("turn.done");
+    });
   });
 
-  it("reconciles at the terminal: cancel → history → message.joined BEFORE turn.done", async () => {
-    state.events = [{ ev: "text_delta", text: "working" }, { ev: "turn_done" }];
-    // History GROWS like the real daemon's: the prompt alone at turn start
-    // (when the baseline is captured), the injection appended later.
-    state.history = [{ role: "user", content: "task" }];
-    const { session } = await startSession();
-    const iterator = session
-      .runTurn({ message: "task" })
-      [Symbol.asyncIterator]();
-    await iterator.next();
-    await session.steer?.({ id: "f1", message: "fold this in" });
-    state.history = [
-      { role: "user", content: "task" },
-      { role: "assistant", content: "on it" },
-      { role: "user", content: "fold this in" },
-    ];
+  describe("with `soft_interrupt_ids` (jcode ≥ v0.94.0): the live pickup signal", () => {
+    /** Open a turn, steer once the gate is open, with `frames` as the run's
+     * own stream (delivered behind the daemon's ack, like the real wire), and
+     * return every event after the steer. The steer is an RPC the daemon
+     * answers on its request loop, so it precedes the run's frames. */
+    const steerThen = async (
+      frames: { ev: string; [key: string]: unknown }[],
+      steers: { id: string; message: string }[] = [
+        { id: "f1", message: "fold this in" },
+      ],
+    ) => {
+      state.events = frames;
+      const { session } = await startSession();
+      const iterator = session
+        .runTurn({ message: "task" })
+        [Symbol.asyncIterator]();
+      await iterator.next(); // turn.started: the gate is open
+      for (const steer of steers) await session.steer?.(steer);
+      const events: HarnessEvent[] = [];
+      let next = await iterator.next();
+      while (!next.done) {
+        events.push(next.value);
+        next = await iterator.next();
+      }
+      return events;
+    };
+    /** The steer outcome the stream reported, per follow-up in join order:
+     * the join, with the reply `message.replied` later attached to it. */
+    const joins = (events: HarnessEvent[]) => {
+      const out: { followUpId: string; reply?: string }[] = [];
+      for (const e of events) {
+        if (e.type === "message.joined") out.push({ followUpId: e.followUpId });
+        if (e.type === "message.replied") {
+          const entry = out.find((j) => j.followUpId === e.followUpId);
+          if (entry) entry.reply = e.reply;
+          else out.push({ followUpId: `UNJOINED:${e.followUpId}` });
+        }
+      }
+      return out;
+    };
 
-    const events: AgentEvent[] = [];
-    let next = await iterator.next();
-    while (!next.done) {
-      events.push(next.value);
-      next = await iterator.next();
-    }
+    it("steer rides softInterruptWithId, tagged with the follow-up's own id", async () => {
+      await steerThen([{ ev: "turn_done" }]);
+      expect(callsOf("softInterruptWithId")).toEqual([
+        {
+          method: "softInterruptWithId",
+          args: ["s-1", "fold this in", { clientId: "f1" }],
+        },
+      ]);
+      expect(callsOf("softInterrupt")).toHaveLength(0);
+    });
 
-    const kinds = events.map((e) => e.type);
-    expect(kinds).toContain("message.joined");
-    expect(kinds.indexOf("message.joined")).toBeLessThan(
-      kinds.indexOf("turn.done"),
-    );
-    // Cancel precedes the RECONCILE history read (the first read is the
-    // turn-start baseline capture): after the cancel nothing more can
-    // inject, so the read is stable.
-    const order = state.calls.map((c) => c.method);
-    expect(order.lastIndexOf("cancelSoftInterrupts")).toBeLessThan(
-      order.lastIndexOf("getHistory"),
-    );
-  });
+    it("the injection confirms the join LIVE, then the next framed message is the reply, before the work goes on", async () => {
+      // The point-D shape as the daemon streams it: the injection
+      // lands behind a tool, the agent answers in its next message, then
+      // calls the next tool. The join is yielded AT the injection, before
+      // the reply's first delta; the reply is yielded the moment that
+      // message closes, not at the terminal.
+      const events = await steerThen([
+        { ev: "text_delta", text: "Running the build.", message_id: "m1" },
+        { ev: "text_done", message_id: "m1" },
+        { ev: "tool_start", call_id: "c1", name: "bash" },
+        { ev: "tool_done", call_id: "c1", name: "bash", output: "built" },
+        { ev: "soft_interrupt_injected", client_ids: ["f1"], point: "D" },
+        { ev: "text_delta", text: "Sure, I'll ", message_id: "m2" },
+        { ev: "text_delta", text: "check the linter too.", message_id: "m2" },
+        { ev: "text_done", message_id: "m2" },
+        { ev: "tool_start", call_id: "c2", name: "bash" },
+        { ev: "tool_done", call_id: "c2", name: "bash", output: "linted" },
+        { ev: "text_delta", text: "Both passed.", message_id: "m3" },
+        { ev: "turn_done" },
+      ]);
 
-  it("a steer whose text EQUALS the prompt still reconciles joined — the index anchor", async () => {
-    // The content-anchor trap: matching the prompt from the END would find
-    // the INJECTED copy and read everything out of the window. The baseline
-    // index makes the duplicate a normal candidate.
-    state.events = [{ ev: "text_delta", text: "working" }, { ev: "turn_done" }];
-    state.history = [{ role: "user", content: "again" }];
-    const { session } = await startSession();
-    const iterator = session
-      .runTurn({ message: "again" })
-      [Symbol.asyncIterator]();
-    await iterator.next();
-    await session.steer?.({ id: "f1", message: "again" });
-    state.history = [
-      { role: "user", content: "again" },
-      { role: "assistant", content: "working on it" },
-      { role: "user", content: "again" },
-    ];
+      expect(joins(events)).toEqual([
+        { followUpId: "f1", reply: "Sure, I'll check the linter too." },
+      ]);
+      const kinds = events.map((e) => e.type);
+      const joinedAt = kinds.indexOf("message.joined");
+      const repliedAt = kinds.indexOf("message.replied");
+      const firstReplyDelta = events.findIndex(
+        (e) => e.type === "text.delta" && e.text === "Sure, I'll ",
+      );
+      const lastReplyDelta = events.findIndex(
+        (e) => e.type === "text.delta" && e.text === "check the linter too.",
+      );
+      // The join BEFORE the reply's first word (a reader sees the pickup,
+      // then the reply grow); the reply after its last word, before the
+      // second tool and long before the terminal.
+      expect(joinedAt).toBeGreaterThan(kinds.indexOf("tool.finished"));
+      expect(joinedAt).toBeLessThan(firstReplyDelta);
+      expect(repliedAt).toBeGreaterThan(lastReplyDelta);
+      expect(repliedAt).toBeLessThan(kinds.lastIndexOf("tool.started"));
+      expect(repliedAt).toBeLessThan(kinds.indexOf("turn.done"));
+      // No history read anywhere: the signal replaced it.
+      expect(callsOf("getHistory")).toHaveLength(0);
+      // THE REPLY STREAMS: every delta of the reply's message is
+      // tagged with the follow-up it answers, and nothing else is (the
+      // narration before the injection, the words after the second tool).
+      const deltas = events.flatMap((e) =>
+        e.type === "text.delta" ? [[e.text, e.replyTo] as const] : [],
+      );
+      expect(deltas).toEqual([
+        ["Running the build.", undefined],
+        ["Sure, I'll ", "f1"],
+        ["check the linter too.", "f1"],
+        ["Both passed.", undefined],
+      ]);
+    });
 
-    const events: AgentEvent[] = [];
-    let next = await iterator.next();
-    while (!next.done) {
-      events.push(next.value);
-      next = await iterator.next();
-    }
+    it("a tool call right after the injection means no separate reply", async () => {
+      const events = await steerThen([
+        { ev: "soft_interrupt_injected", client_ids: ["f1"], point: "D" },
+        { ev: "tool_start", call_id: "c1", name: "bash" },
+        { ev: "tool_done", call_id: "c1", name: "bash", output: "ok" },
+        { ev: "text_delta", text: "All done.", message_id: "m1" },
+        { ev: "turn_done" },
+      ]);
+      expect(joins(events)).toEqual([{ followUpId: "f1" }]);
+      expect(events.map((e) => e.type).indexOf("message.joined")).toBeLessThan(
+        events.map((e) => e.type).indexOf("tool.started"),
+      );
+    });
 
-    expect(
-      events.some((e) => e.type === "message.joined" && e.followUpId === "f1"),
-    ).toBe(true);
-  });
+    it("at point B the reply is the extension message and the terminal closes it", async () => {
+      const events = await steerThen([
+        {
+          ev: "text_delta",
+          text: "Done: the report is in report.md.",
+          message_id: "m1",
+        },
+        { ev: "text_done", message_id: "m1" },
+        { ev: "soft_interrupt_injected", client_ids: ["f1"], point: "B" },
+        {
+          ev: "text_delta",
+          text: "Yes, I can also email it.",
+          message_id: "m2",
+        },
+        { ev: "turn_done" },
+      ]);
+      expect(joins(events)).toEqual([
+        { followUpId: "f1", reply: "Yes, I can also email it." },
+      ]);
+      expect(events.at(-1)?.type).toBe("turn.done");
+    });
 
-  it("a steer matching only the turn's OWN prompt reads as missed — never joined", async () => {
-    // The false-positive the exact-window rule kills: "ok" appears inside
-    // the prompt (memory context + message travel there verbatim), and a
-    // matcher over the whole history would mark it joined — the message
-    // silently swallowed.
-    state.events = [{ ev: "text_delta", text: "working" }, { ev: "turn_done" }];
-    state.history = [
-      { role: "user", content: "please check everything is ok today" },
-      { role: "assistant", content: "done" },
-    ];
-    const { session } = await startSession();
-    const iterator = session
-      .runTurn({ message: "please check everything is ok today" })
-      [Symbol.asyncIterator]();
-    await iterator.next();
-    await session.steer?.({ id: "f1", message: "ok" });
+    it("steers injected together share one reply, on the LAST sent", async () => {
+      const events = await steerThen(
+        [
+          {
+            ev: "soft_interrupt_injected",
+            client_ids: ["f1", "f2"],
+            point: "D",
+          },
+          { ev: "text_delta", text: "Four and six.", message_id: "m1" },
+          { ev: "text_done", message_id: "m1" },
+          { ev: "turn_done" },
+        ],
+        [
+          { id: "f1", message: "what is 2 plus 2?" },
+          { id: "f2", message: "what is 3 plus 3?" },
+        ],
+      );
+      expect(joins(events)).toEqual([
+        { followUpId: "f1" },
+        { followUpId: "f2", reply: "Four and six." },
+      ]);
+    });
 
-    const events: AgentEvent[] = [];
-    let next = await iterator.next();
-    while (!next.done) {
-      events.push(next.value);
-      next = await iterator.next();
-    }
+    it("a steer the daemon never confirmed is missed: no join, no history read", async () => {
+      const events = await steerThen([
+        { ev: "text_delta", text: "working", message_id: "m1" },
+        { ev: "turn_done", pending_soft_interrupts: 1 },
+      ]);
+      expect(joins(events)).toEqual([]);
+      expect(events.at(-1)?.type).toBe("turn.done");
+      expect(callsOf("getHistory")).toHaveLength(0);
+    });
 
-    expect(events.some((e) => e.type === "message.joined")).toBe(false);
-  });
+    it("an injection naming an id this turn never sent is ignored", async () => {
+      const events = await steerThen([
+        { ev: "soft_interrupt_injected", client_ids: ["stale-id"], point: "D" },
+        { ev: "text_delta", text: "hm", message_id: "m1" },
+        { ev: "turn_done" },
+      ]);
+      expect(joins(events)).toEqual([]);
+    });
 
-  it("a history failure degrades every pending steer to missed", async () => {
-    state.events = [{ ev: "text_delta", text: "working" }, { ev: "turn_done" }];
-    state.historyError = new Error("bridge went away");
-    const { session } = await startSession();
-    const iterator = session
-      .runTurn({ message: "task" })
-      [Symbol.asyncIterator]();
-    await iterator.next();
-    await session.steer?.({ id: "f1", message: "fold this in" });
+    it("a correction of the reply's own message replaces the reply", async () => {
+      const events = await steerThen([
+        { ev: "soft_interrupt_injected", client_ids: ["f1"], point: "D" },
+        { ev: "text_delta", text: "Yes, I can also em", message_id: "m2" },
+        {
+          ev: "text_replace",
+          text: "Yes, I can also email it.",
+          message_id: "m2",
+        },
+        { ev: "text_done", message_id: "m2" },
+        { ev: "turn_done" },
+      ]);
+      expect(joins(events)).toEqual([
+        { followUpId: "f1", reply: "Yes, I can also email it." },
+      ]);
+    });
 
-    const events: AgentEvent[] = [];
-    let next = await iterator.next();
-    while (!next.done) {
-      events.push(next.value);
-      next = await iterator.next();
-    }
-
-    // No joined events — and the terminal still arrived (the turn is not
-    // held hostage by the reconcile).
-    expect(events.some((e) => e.type === "message.joined")).toBe(false);
-    expect(events.at(-1)?.type).toBe("turn.done");
+    it("the reasoning before the reply is not the reply", async () => {
+      const events = await steerThen([
+        { ev: "soft_interrupt_injected", client_ids: ["f1"], point: "D" },
+        { ev: "reasoning_delta", text: "they want the linter too" },
+        { ev: "text_delta", text: "On it.", message_id: "m2" },
+        { ev: "text_done", message_id: "m2" },
+        { ev: "turn_done" },
+      ]);
+      expect(joins(events)).toEqual([{ followUpId: "f1", reply: "On it." }]);
+    });
   });
 
   it("abort also drops the daemon's queued interrupts — Stop means silence", async () => {
@@ -1019,6 +1300,67 @@ describe("the jcode steer plumbing", () => {
   });
 });
 
+describe("SEND NOW: moving the running tool to the background", () => {
+  /** Open a turn and hold it mid-run (the gate open), ask to move. */
+  const moveMidRun = async () => {
+    state.events = [];
+    const { session } = await startSession();
+    const iterator = session
+      .runTurn({ message: "task" })
+      [Symbol.asyncIterator]();
+    await iterator.next(); // turn.started: the gate is open
+    const result = await session.backgroundRunningTool?.();
+    return { session, result };
+  };
+
+  it("asks a daemon that reports the move, scoped to this session, and says what moved", async () => {
+    state.capabilities = [
+      SOFT_INTERRUPT_IDS_CAPABILITY,
+      BACKGROUND_TOOL_RESULT_CAPABILITY,
+    ];
+    state.backgroundToolResult = {
+      moved: true,
+      toolCallId: "call-1",
+      toolName: "bash",
+    };
+    const { result } = await moveMidRun();
+    expect(callsOf("backgroundToolResult")).toEqual([
+      { method: "backgroundToolResult", args: ["s-1"] },
+    ]);
+    // The daemon's call id stays inside the adapter.
+    expect(result).toEqual({ moved: true, toolName: "bash" });
+  });
+
+  it("nothing running: moved false, never a name", async () => {
+    state.capabilities = [BACKGROUND_TOOL_RESULT_CAPABILITY];
+    state.backgroundToolResult = { moved: false, toolName: "stale" };
+    const { result } = await moveMidRun();
+    expect(result).toEqual({ moved: false });
+  });
+
+  it("an OLDER daemon (no background_tool_result) is never asked: it could move a tool and only say ok", async () => {
+    // MUTATION-PROOF for the gate: asking anyway would cut the person's
+    // tool short while reporting `moved: false`.
+    state.capabilities = [SOFT_INTERRUPT_IDS_CAPABILITY];
+    state.backgroundToolResult = { moved: true, toolName: "bash" };
+    const { result } = await moveMidRun();
+    expect(callsOf("backgroundToolResult")).toHaveLength(0);
+    expect(result).toEqual({ moved: false });
+  });
+
+  it("between turns there is nothing to move, and the daemon is not asked", async () => {
+    state.capabilities = [BACKGROUND_TOOL_RESULT_CAPABILITY];
+    state.backgroundToolResult = { moved: true, toolName: "bash" };
+    const { session } = await startSession();
+    expect(await session.backgroundRunningTool?.()).toEqual({ moved: false });
+    expect(callsOf("backgroundToolResult")).toHaveLength(0);
+  });
+
+  it("is declared, so the supervisor offers it", () => {
+    expect(createJcodeHarness().capabilities.backgroundTool).toBe(true);
+  });
+});
+
 describe("the frame fence", () => {
   beforeEach(() => {
     // Keep the heal cycle fast; afterEach restores the real backoff.
@@ -1028,9 +1370,9 @@ describe("the frame fence", () => {
   const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
 
   const drain = async (
-    iterator: AsyncIterator<AgentEvent>,
-  ): Promise<AgentEvent[]> => {
-    const events: AgentEvent[] = [];
+    iterator: AsyncIterator<HarnessEvent>,
+  ): Promise<HarnessEvent[]> => {
+    const events: HarnessEvent[] = [];
     let next = await iterator.next();
     while (!next.done) {
       events.push(next.value);
@@ -1176,6 +1518,9 @@ describe("the frame fence", () => {
   }, 15_000);
 
   it("the baseline read retries through SDK timeouts and the turn completes", async () => {
+    // The baseline is the HISTORY reconcile's floor: only a daemon without
+    // the live pickup signal needs it (the live path never reads history).
+    state.capabilities = [];
     const timeoutError = () =>
       Object.assign(new Error("no reply to get_history within 30000ms"), {
         code: "timeout",
@@ -1199,6 +1544,7 @@ describe("the frame fence", () => {
     // `disconnected`, an unknown session, a closing channel — retrying
     // cannot help; the floor stays null and reconcile takes the content
     // anchor. The fence is untouched: it never depended on this read.
+    state.capabilities = [];
     state.historyErrorQueue = [new Error("boom")];
     state.events = [{ ev: "text_delta", text: "ours" }, { ev: "turn_done" }];
     const { session } = await startSession();
@@ -1300,11 +1646,17 @@ describe("the frame fence", () => {
 });
 
 describe("issue #1124 — the fence outlives a slow get_history", () => {
+  // The baseline get_history is the HISTORY reconcile's; the live pickup
+  // path never issues it. These pin the fence against a daemon without the
+  // live signal, where the read still happens.
+  beforeEach(() => {
+    state.capabilities = [];
+  });
   const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
   const drain = async (
-    iterator: AsyncIterator<AgentEvent>,
-  ): Promise<AgentEvent[]> => {
-    const events: AgentEvent[] = [];
+    iterator: AsyncIterator<HarnessEvent>,
+  ): Promise<HarnessEvent[]> => {
+    const events: HarnessEvent[] = [];
     let next = await iterator.next();
     while (!next.done) {
       events.push(next.value);
@@ -1563,9 +1915,9 @@ describe("the external wake listener", () => {
 });
 
 describe("tool-call input capture", () => {
-  const finishedOf = (events: AgentEvent[]) =>
+  const finishedOf = (events: HarnessEvent[]) =>
     events.filter(
-      (e): e is Extract<AgentEvent, { type: "tool.finished" }> =>
+      (e): e is Extract<HarnessEvent, { type: "tool.finished" }> =>
         e.type === "tool.finished",
     );
 
@@ -1719,4 +2071,120 @@ describe("tool-call input capture", () => {
 
     expect(finished.map((e) => e.input)).toEqual(['{"cmd":"ls"}', undefined]);
   });
+});
+
+/**
+ * The bridge's MESSAGE FRAMING (the frame shapes verified live on the pinned
+ * runtime: an id on every text delta, `text_replace` retracting a rolled-back
+ * attempt). The adapter carries both into the harness vocabulary; what the
+ * answer makes of them is answer.test.ts's.
+ */
+describe("message framing", () => {
+  it("carries each delta's message id, and a retraction, into the harness vocabulary", async () => {
+    // The live shape of a mid-stream retry: the partial attempt is retracted
+    // by id, and the replay streams as a new message.
+    state.events = [
+      { ev: "text_delta", text: "PARTIAL ", message_id: "text-1" },
+      { ev: "text_replace", text: "", message_id: "text-1" },
+      { ev: "text_delta", text: "FINAL", message_id: "text-2" },
+      { ev: "text_done", message_id: "text-2" },
+      { ev: "turn_done" },
+    ];
+    const { session } = await startSession();
+    const events = await collect(session.runTurn({ message: "hi" }));
+
+    expect(
+      events.filter(
+        (e) => e.type === "text.delta" || e.type === "text.replace",
+      ),
+    ).toEqual([
+      { type: "text.delta", text: "PARTIAL ", messageId: "text-1" },
+      { type: "text.replace", messageId: "text-1", text: "" },
+      { type: "text.delta", text: "FINAL", messageId: "text-2" },
+    ]);
+    // `text_done` needs no event: a new id is the boundary.
+    expect(events.at(-1)?.type).toBe("turn.done");
+  });
+
+  it("an unframed bridge's deltas carry no id, and an id-less correction is dropped", async () => {
+    // A runtime without framing: every delta reads as unframed text, and a
+    // correction that cannot name its message has nothing it could replace.
+    state.events = [
+      { ev: "text_delta", text: "plain" },
+      { ev: "text_replace", text: "orphan correction" },
+      { ev: "turn_done" },
+    ];
+    const { session } = await startSession();
+    const events = await collect(session.runTurn({ message: "hi" }));
+
+    expect(
+      events.filter(
+        (e) => e.type === "text.delta" || e.type === "text.replace",
+      ),
+    ).toEqual([{ type: "text.delta", text: "plain" }]);
+  });
+
+  it("a foreign run's correction is quarantined with its other text, never yielded", async () => {
+    // Under a standing fence, another run's `text_replace` is that run's
+    // business: it must not retract or rewrite anything in OUR answer.
+    state.events = [];
+    state.acceptDelayMs = 40;
+    const { session } = await startSession();
+    const iterator = session
+      .runTurn({ message: "task" })
+      [Symbol.asyncIterator]();
+    await iterator.next(); // turn.started
+    const client = state.clients[0];
+    client?.push({ ev: "text_delta", text: "WAKE", message_id: "text-9" });
+    client?.push({ ev: "text_replace", text: "", message_id: "text-9" });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    client?.push({ ev: "text_delta", text: "ours", message_id: "text-10" });
+    client?.push({ ev: "turn_done" });
+
+    const events: HarnessEvent[] = [];
+    for (
+      let next = await iterator.next();
+      !next.done;
+      next = await iterator.next()
+    ) {
+      events.push(next.value);
+    }
+
+    expect(events.some((e) => e.type === "text.replace")).toBe(false);
+    expect(
+      events.filter((e) => e.type === "text.delta").map((e) => e.messageId),
+    ).toEqual(["text-10"]);
+    // Foreign text was excluded, so the reader is told.
+    expect(events.filter((e) => e.type === "notice")).toHaveLength(1);
+  }, 15_000);
+
+  it("a foreign correction carrying text is excluded text too: the reader is told", async () => {
+    // Its text would have rewritten what the reader saw, so dropping it is
+    // an exclusion like any other foreign text, never a silent one.
+    state.events = [];
+    state.acceptDelayMs = 40;
+    const { session } = await startSession();
+    const iterator = session
+      .runTurn({ message: "task" })
+      [Symbol.asyncIterator]();
+    await iterator.next(); // turn.started
+    state.clients[0]?.push({
+      ev: "text_replace",
+      text: "a wake run's corrected words",
+      message_id: "text-9",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    state.clients[0]?.push({ ev: "turn_done" });
+
+    const events: HarnessEvent[] = [];
+    for (
+      let next = await iterator.next();
+      !next.done;
+      next = await iterator.next()
+    ) {
+      events.push(next.value);
+    }
+
+    expect(events.filter((e) => e.type === "notice")).toHaveLength(1);
+  }, 15_000);
 });

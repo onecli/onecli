@@ -344,7 +344,11 @@ export interface ChannelProvider {
 
   /**
    * The events arm's completion door: exchange the OAuth code for the bot
-   * token using the stored client credentials.
+   * token using the stored client credentials. Throws a `ServiceError`
+   * without calling the provider when the stored credentials carry no OAuth
+   * client, and the provider's `ChannelProviderApiError` when it refuses the
+   * exchange (a code minted for another app, an expired code, a deleted
+   * app). The stateless door reads both as "not this app".
    */
   exchangeOAuthCode(input: {
     code: string;
@@ -483,13 +487,19 @@ export interface ChannelProvider {
    * approval card was read with (never re-resolved at execute). Throws the
    * provider's own API error on refusal — the caller routes a dead-credential
    * refusal to the presence flip.
+   *
+   * Answers the thread address a reply to this message will arrive on, in
+   * the same shape inbound events carry it (Slack: the DM's IM id, or
+   * `<channel>:<ts>` for the thread a channel post roots, which a reply
+   * reaches the agent in when it mentions the agent), so a later reply
+   * there can be tied back to this send.
    */
   sendMessage(input: {
     credentialsJson: string;
     to: { kind: "person" | "app" | "channel"; ref: string };
     text: string;
     mentions?: ReadonlyMap<string, string>;
-  }): Promise<void>;
+  }): Promise<{ externalThreadId: string }>;
 
   /**
    * The provider's member roster for `find_recipient`: everyone the presence

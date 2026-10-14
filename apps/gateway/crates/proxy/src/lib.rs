@@ -15,16 +15,24 @@
 //!   operator allowlist entry
 pub mod approval_enrich;
 pub mod body;
+#[cfg(test)]
+mod byoc_groups_pg_test;
 pub mod connect;
 pub mod egress;
 pub mod finalizers;
 pub mod forward;
+pub mod github_org_access;
 pub mod hints;
 pub mod hooks;
+mod log_redact;
+pub mod method_override;
 pub mod mitm;
 pub mod refresh;
 pub mod relay;
 pub mod response;
+#[cfg(test)]
+mod shared_github_source_pg_test;
+pub mod stale_token;
 pub mod transforms;
 pub mod tunnel;
 pub mod websocket;

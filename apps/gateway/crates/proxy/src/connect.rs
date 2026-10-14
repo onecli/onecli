@@ -17,6 +17,54 @@ use inject::{Injection, InjectionRule};
 /// How long to cache resolved connect responses before re-checking.
 const CACHE_TTL_SECS: u64 = 60;
 
+/// Every cached connect response of one workspace starts with this prefix.
+/// The responses carry credential ciphertext, so anything that replaces a
+/// credential drops the prefix (the server's cache flush, a refused token).
+#[must_use]
+pub fn connect_cache_prefix(organization_id: &str, workspace_id: &str) -> String {
+    format!("connect:{organization_id}:{workspace_id}:")
+}
+
+/// Every cached injection-rule entry of one workspace starts with this
+/// prefix; [`connection_injection_cache_prefix`] narrows it to a connection.
+#[must_use]
+pub fn injection_cache_prefix(organization_id: &str, workspace_id: &str) -> String {
+    format!("app_injection:{organization_id}:{workspace_id}:")
+}
+
+/// Every cached injection-rule entry of one connection (any host, any session
+/// policy) starts with this prefix. The trailing `:` keeps connection `c1`
+/// from matching `c10`.
+#[must_use]
+pub fn connection_injection_cache_prefix(
+    organization_id: &str,
+    workspace_id: &str,
+    connection_id: &str,
+) -> String {
+    format!(
+        "{}{connection_id}:",
+        injection_cache_prefix(organization_id, workspace_id)
+    )
+}
+
+/// The injection-rule cache key of `conn` on `hostname`.
+fn injection_cache_key(
+    organization_id: &str,
+    workspace_id: &str,
+    conn: &db::AppConnectionRow,
+    hostname: &str,
+) -> String {
+    let policy_suffix = conn
+        .session_policy
+        .as_ref()
+        .map(|sp| format!(":{sp}"))
+        .unwrap_or_default();
+    format!(
+        "{}{hostname}{policy_suffix}",
+        connection_injection_cache_prefix(organization_id, workspace_id, &conn.id)
+    )
+}
+
 /// Header name for per-request app connection disambiguation (request).
 pub const CONNECTION_ID_HEADER: &str = "x-onecli-connection-id";
 /// Header name for listing available connections (response).
@@ -615,6 +663,10 @@ pub trait PolicyEngineExt {
         workspace_id: &str,
         provider: &str,
     ) -> Option<db::AppConfigRow>;
+
+    /// The GitHub App signing key a shared (derived) connection borrows from
+    /// its still-connected source. `None` = no usable source: fail closed.
+    async fn source_github_app_key(&self, connection_id: &str) -> Option<String>;
 }
 
 #[async_trait::async_trait]
@@ -1263,15 +1315,7 @@ impl PolicyEngineExt for PolicyEngine {
         workspace_id: &str,
         cache: &dyn CacheStore,
     ) -> Result<AppConnectionResult, ConnectError> {
-        let policy_suffix = conn
-            .session_policy
-            .as_ref()
-            .map(|sp| format!(":{sp}"))
-            .unwrap_or_default();
-        let cache_key = format!(
-            "app_injection:{organization_id}:{workspace_id}:{}:{hostname}{policy_suffix}",
-            conn.id
-        );
+        let cache_key = injection_cache_key(organization_id, workspace_id, conn, hostname);
 
         if let Some(cached) = cache.get::<CachedAppInjection>(&cache_key).await {
             // A warm entry already holds the built rules (credential included),
@@ -1662,6 +1706,22 @@ impl PolicyEngineExt for PolicyEngine {
             warn!(provider = %provider, error = %e, "failed to parse access token credentials JSON");
             TokenFailure::Unavailable
         })?;
+        // A shared GitHub App connection (built on another connection's
+        // installation) stores no signing key: it borrows the source's, so the
+        // key lives in exactly one row and removing the source cuts it off.
+        // Only the key is taken; installation, repo pin and token stay its own.
+        let borrowed_key = creds.get("type").and_then(|v| v.as_str()) == Some("github_app")
+            && creds.get("private_key").is_none();
+        if borrowed_key {
+            let source_key = self.source_github_app_key(connection_id).await;
+            match source_key {
+                Some(key) => creds["private_key"] = serde_json::Value::String(key),
+                None => {
+                    debug!(connection_id = %connection_id, "shared GitHub App connection has no usable source; injecting nothing");
+                    return Err(TokenFailure::Unavailable);
+                }
+            }
+        }
 
         let mut token = creds
             .get("access_token")
@@ -1721,6 +1781,15 @@ impl PolicyEngineExt for PolicyEngine {
                             } else if let Some(stored) = conn.credentials.as_deref() {
                                 creds["access_token"] = serde_json::Value::String(new_token);
                                 creds["expires_at"] = serde_json::json!(new_expires_at);
+                                // A borrowed signing key (shared GitHub App
+                                // connection) must never be written into this
+                                // row: the key lives only in its source.
+                                let mut to_store = creds.clone();
+                                if borrowed_key {
+                                    if let Some(obj) = to_store.as_object_mut() {
+                                        obj.remove("private_key");
+                                    }
+                                }
                                 // No single-use token is spent here (these types
                                 // re-mint from a long-lived key), so there is no
                                 // lock. The write still yields to a newer stored row.
@@ -1730,7 +1799,7 @@ impl PolicyEngineExt for PolicyEngine {
                                     connection_id,
                                     provider,
                                     stored,
-                                    &creds,
+                                    &to_store,
                                 )
                                 .await;
                             }
@@ -1759,6 +1828,7 @@ impl PolicyEngineExt for PolicyEngine {
                             provider,
                             workspace_id,
                             config,
+                            rejected: None,
                         },
                     )
                     .await
@@ -1820,6 +1890,27 @@ impl PolicyEngineExt for PolicyEngine {
             .map(|t| (t, effective_expires_at))
             .ok_or(TokenFailure::Unavailable)
     }
+    async fn source_github_app_key(&self, connection_id: &str) -> Option<String> {
+        let encrypted = db::find_source_connection_credentials(&self.pool, connection_id)
+            .await
+            .map_err(|e| warn!(error = %e, "failed to query source connection"))
+            .ok()
+            .flatten()?;
+        let json = self
+            .crypto
+            .decrypt(&encrypted)
+            .await
+            .map_err(|e| warn!(error = ?e, "source connection decrypt failed"))
+            .ok()?;
+        let source: serde_json::Value = serde_json::from_str(&json).ok()?;
+        if source.get("type").and_then(|v| v.as_str()) != Some("github_app") {
+            return None;
+        }
+        source
+            .get("private_key")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    }
     /// Resolve BYOC client credentials for refreshing a connection.
     ///
     /// Prefers the config that *minted* the connection (the provenance link):
@@ -1841,7 +1932,10 @@ impl PolicyEngineExt for PolicyEngine {
         provider: &str,
         connection_id: &str,
     ) -> Option<(String, String)> {
-        let linked_row = db::find_app_config_by_connection(&self.pool, connection_id, provider)
+        // Most specific first: a legacy per-app row, then the vendor group row
+        // ("google") that serves every Google app.
+        let keys = apps::config_keys_for(provider);
+        let linked_row = db::find_app_config_by_connection(&self.pool, connection_id, &keys)
             .await
             .map_err(|e| warn!(error = %e, "failed to query linked BYOC app config"))
             .ok()
@@ -1857,7 +1951,7 @@ impl PolicyEngineExt for PolicyEngine {
             );
         }
 
-        let workspace_row = db::find_app_config(&self.pool, workspace_id, provider)
+        let workspace_row = db::find_app_config(&self.pool, workspace_id, &keys)
             .await
             .map_err(|e| warn!(error = %e, "failed to query BYOC app config"))
             .ok()
@@ -1912,11 +2006,15 @@ impl PolicyEngineExt for PolicyEngine {
             .map_err(|e| warn!(error = %e, "failed to resolve org for BYOC fallback"))
             .ok()
             .flatten()?;
-        db::find_app_config_by_org(&self.pool, &organization_id, provider)
-            .await
-            .map_err(|e| warn!(error = %e, "failed to query org BYOC app config"))
-            .ok()
-            .flatten()
+        db::find_app_config_by_org(
+            &self.pool,
+            &organization_id,
+            &apps::config_keys_for(provider),
+        )
+        .await
+        .map_err(|e| warn!(error = %e, "failed to query org BYOC app config"))
+        .ok()
+        .flatten()
     }
 }
 
@@ -1942,8 +2040,8 @@ pub async fn resolve(
     let agent = policy_engine.find_agent(agent_token).await?;
 
     let cache_key = format!(
-        "connect:{}:{}:{agent_token}:{hostname}",
-        agent.organization_id, agent.workspace_id
+        "{}{agent_token}:{hostname}",
+        connect_cache_prefix(&agent.organization_id, &agent.workspace_id)
     );
 
     if let Some(response) = cache.get::<ConnectResponse>(&cache_key).await {
@@ -1975,7 +2073,10 @@ pub async fn resolve_from_cache(
     policy_engine: &PolicyEngine,
     cache: &dyn CacheStore,
 ) -> Result<ConnectResponse, ConnectError> {
-    let cache_key = format!("connect:{organization_id}:{workspace_id}:{agent_token}:{hostname}");
+    let cache_key = format!(
+        "{}{agent_token}:{hostname}",
+        connect_cache_prefix(organization_id, workspace_id)
+    );
 
     if let Some(response) = cache.get::<ConnectResponse>(&cache_key).await {
         return Ok(response);
@@ -2059,15 +2160,7 @@ pub async fn seed_app_injection_cache(
     rewrite_host: Option<&str>,
     connection_label: Option<&str>,
 ) {
-    let policy_suffix = conn
-        .session_policy
-        .as_ref()
-        .map(|sp| format!(":{sp}"))
-        .unwrap_or_default();
-    let key = format!(
-        "app_injection:{organization_id}:{workspace_id}:{}:{hostname}{policy_suffix}",
-        conn.id
-    );
+    let key = injection_cache_key(organization_id, workspace_id, conn, hostname);
     let entry = CachedAppInjection {
         rules,
         rewrite_host: rewrite_host.map(str::to_string),
@@ -3627,6 +3720,34 @@ mod deferred_injection_tests {
         assert!(!granular_scoping_requested(Some(&serde_json::json!([
             { "type": "body_contains", "value": "x" }
         ]))));
+    }
+
+    /// A shared GitHub App connection stores no signing key and borrows its
+    /// source's. With no reachable source (removed, disconnected, or the read
+    /// fails) it must inject NOTHING: never its stored token, never a guess.
+    #[tokio::test]
+    async fn a_shared_github_connection_without_a_source_injects_nothing() {
+        let engine = PolicyEngine::test_stub();
+        let creds = serde_json::json!({
+            "type": "github_app",
+            "app_id": "1",
+            "installation_id": "2",
+            "access_token": "ghs_stored",
+            "expires_at": i64::MAX,
+            "repositories": ["org/a"],
+        })
+        .to_string();
+        let conn = db::AppConnectionRow {
+            id: "c-shared".into(),
+            provider: "github-app".into(),
+            scope: "workspace".into(),
+            credentials: None,
+            label: Some("gh".into()),
+            metadata: None,
+            session_policy: None,
+        };
+        let result = engine.resolve_access_token(&conn, &creds, "proj-1").await;
+        assert!(matches!(result, Err(TokenFailure::Unavailable)));
     }
 
     /// The point of the deferral: a resource-scoped connection yields no rules

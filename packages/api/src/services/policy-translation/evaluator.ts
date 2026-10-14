@@ -36,6 +36,23 @@ const identityMatches = (rule: NewRule, request: PolicyRequest): boolean =>
     }
   });
 
+/** Mirror of the gateway's `MethodFilter`: a whole-app connection target's
+ * stored `method`: empty/absent = any, `GET,HEAD` = only those,
+ * `!GET,HEAD` = every other. Case-insensitive. */
+export const methodAllows = (
+  raw: string | null | undefined,
+  method: string,
+): boolean => {
+  const trimmed = (raw ?? "").trim();
+  const except = trimmed.startsWith("!");
+  const listed = (except ? trimmed.slice(1) : trimmed)
+    .split(",")
+    .map((m) => m.trim().toUpperCase())
+    .filter((m) => m.length > 0);
+  if (listed.length === 0) return true;
+  return listed.includes(method.toUpperCase()) !== except;
+};
+
 const targetMatches = (
   target: NewTarget,
   rule: NewRule,
@@ -84,6 +101,7 @@ const targetMatches = (
         return false;
       }
       if (target.tools.length === 0) {
+        if (!methodAllows(target.method, request.method)) return false;
         return providerHostMatches(request.host, provider);
       }
       return appTargetMatches(request, provider, target.tools, rule.conditions);

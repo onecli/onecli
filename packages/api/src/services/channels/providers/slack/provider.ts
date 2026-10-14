@@ -20,6 +20,7 @@ import {
   conversationsOpen,
   decodeSlackTokens,
   deleteMessage,
+  groupThreadId,
   markdownToMrkdwn,
   postBlocksMessage,
   postMessage,
@@ -584,7 +585,16 @@ export const slackProvider: ChannelProvider = {
       text,
       mentions ? { mentions: new Map(mentions) } : undefined,
     );
-    await postMessage(botToken, { channel, text: rendered });
+    const posted = await postMessage(botToken, { channel, text: rendered });
+    // The address a reply arrives on (the inbound codec's own shapes): a DM
+    // answer comes back as the IM itself; a channel answer that mentions
+    // the agent comes back as the thread this post roots.
+    return {
+      externalThreadId:
+        to.kind === "channel"
+          ? groupThreadId(posted.channel, posted.ts)
+          : posted.channel,
+    };
   },
 
   async listMembers({ credentialsJson, tenantId, selfIdentityRef }) {

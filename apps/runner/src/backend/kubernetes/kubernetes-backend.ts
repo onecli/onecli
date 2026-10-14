@@ -49,6 +49,9 @@ export const LABEL_SANDBOX = "sh.onecli.sandbox-id";
 export const LABEL_RUNNER = "sh.onecli.runner-id";
 export const LABEL_INSTALLATION = "sh.onecli.installation";
 export const LABEL_SPAWN = "sh.onecli.spawn";
+/** "1" when the spawning runner handed out supervisor sessions; absent on
+ * spawns before the resumable channel or with the key off. */
+export const LABEL_RESUMABLE = "sh.onecli.resumable";
 /** The payload hash is a 64-char sha256 hex digest, one past the label
  * value cap, so it rides an annotation. */
 export const ANNOTATION_PAYLOAD = "sh.onecli.payload-hash";
@@ -441,6 +444,7 @@ export const createKubernetesBackend = (
         [LABEL_INSTALLATION]: options.installationId,
         [LABEL_SPAWN]: spawn,
         [LABEL_ROLE]: ROLE_SANDBOX,
+        ...(spec.resumable && { [LABEL_RESUMABLE]: "1" }),
       };
       const annotations = { [ANNOTATION_PAYLOAD]: spec.payloadHash };
 
@@ -711,6 +715,7 @@ export const createKubernetesBackend = (
           containerRef: name,
           running: pod?.phase === "Running",
           payloadHash: job.metadata?.annotations?.[ANNOTATION_PAYLOAD] ?? null,
+          resumable: job.metadata?.labels?.[LABEL_RESUMABLE] === "1",
           // A Job whose pod is gone (evicted, node lost) is terminal for the
           // boot-crash classifier: the runner's re-dispatch creates a fresh
           // spawn from the durable home.

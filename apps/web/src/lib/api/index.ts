@@ -36,6 +36,7 @@ import * as evals from "./evals";
 import * as skills from "./skills";
 import * as sshKeys from "./ssh-keys";
 import * as user from "./user";
+import * as githubAppShare from "./github-app-share";
 
 export {
   agents,
@@ -76,6 +77,7 @@ export {
   skills,
   sshKeys,
   user,
+  githubAppShare,
 };
 export type {
   Agent,
@@ -139,9 +141,11 @@ export type {
   TurnUsage,
   TurnEvent,
   TurnEventKind,
+  LiveOnlyTurnEventKind,
   TranscriptPage,
   TurnsPage,
   AbortTurnResult,
+  SendNowResult,
 } from "./types";
 export type { CreatePolicyRuleInput, UpdatePolicyRuleInput } from "./policy";
 export type {
@@ -162,6 +166,10 @@ export type {
   CreatePresenceResult,
   OrgChannelIntegration,
   OrgChannelsView,
+  OrgChannelAgentState,
+  OrgChannelAgent,
+  OrgChannelAgents,
+  OrgChannelWorkspace,
 } from "./channels";
 export type { AgentCron, CronInput, CronUpdate } from "./crons";
 export type { AgentWebhook, WebhookInput, WebhookUpdate } from "./webhooks";
@@ -206,5 +214,6 @@ export type {
   EvalQuestion,
   EvalRunDetail,
   EvalRunSummary,
+  EvalSchedule,
   EvalsView,
 } from "./evals";

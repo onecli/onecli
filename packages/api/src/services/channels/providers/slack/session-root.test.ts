@@ -21,11 +21,11 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
  */
 
 const attachTurnReceipt = vi.fn();
-const moveTurnReceipt = vi.fn();
+const attachFollowUpReceipt = vi.fn();
 
 vi.mock("../../turn-receipt-service", () => ({
   attachTurnReceipt: (...args: unknown[]) => attachTurnReceipt(...args),
-  moveTurnReceipt: (...args: unknown[]) => moveTurnReceipt(...args),
+  attachFollowUpReceipt: (...args: unknown[]) => attachFollowUpReceipt(...args),
 }));
 
 const ingestDirectMessage = vi.fn();
@@ -53,7 +53,7 @@ const TURN = {
 
 beforeEach(() => {
   attachTurnReceipt.mockClear();
-  moveTurnReceipt.mockClear();
+  attachFollowUpReceipt.mockClear();
   ingestDirectMessage.mockResolvedValue(TURN);
   ingestGroupMessage.mockResolvedValue(TURN);
 });
@@ -120,10 +120,12 @@ describe("the Slack session root", () => {
     expect(arg.messageTs).toBe("1717171799.999999");
   });
 
-  it("uses the SAME root when a follow-up moves the mark", async () => {
-    // The move's no-mark fallback calls attachTurnReceipt, so a divergence
-    // between these two call sites would give a follow-up a different
-    // session than the turn it belongs to.
+  it("a follow-up gets its OWN mark on its own message, never a session of its own", async () => {
+    // One mark per message: the follow-up's waiting
+    // mark sits on the message that arrived, addressed by its channel and
+    // ts alone. No session root and no card address ride along: the
+    // thread's loader, when there is one, already covers every message in
+    // it, and stays keyed on the running turn.
     ingestDirectMessage.mockResolvedValue({
       kind: "followUp",
       conversationId: "cv1",
@@ -137,9 +139,14 @@ describe("the Slack session root", () => {
       eventId: "e3",
     });
 
-    expect(moveTurnReceipt).toHaveBeenCalledTimes(1);
-    const arg = moveTurnReceipt.mock.calls[0]![0] as Record<string, unknown>;
-    expect(arg.threadTs).toBe("1717171717.123456");
+    expect(attachTurnReceipt).not.toHaveBeenCalled();
+    expect(attachFollowUpReceipt).toHaveBeenCalledTimes(1);
+    expect(attachFollowUpReceipt.mock.calls[0]![0]).toEqual({
+      presenceId: "p1",
+      followUpTurnId: "t2",
+      channel: "D100",
+      messageTs: "1717171717.123456",
+    });
   });
 
   it("keys a THREADED DM session by its thread root, and lights the loader", async () => {
@@ -181,33 +188,6 @@ describe("the Slack session root", () => {
     const arg = attachTurnReceipt.mock.calls[0]![0] as Record<string, unknown>;
     expect(arg.unthreaded).toBe(true);
     expect(arg.replyThreadTs).toBeNull();
-  });
-
-  it("hands the follow-up fallback the SAME addressing as an attach", async () => {
-    // `moveTurnReceipt` falls back to `attachTurnReceipt` when there is no
-    // mark to move (the turn was opened from the web). Without the card
-    // address riding along, a threaded DM follow-up would post its progress
-    // card at the top of the DM instead of in the thread being read.
-    //
-    // MUTATION-PROOF: drop `replyThreadTs`/`unthreaded` from the move call
-    // and this fails.
-    ingestDirectMessage.mockResolvedValue({
-      kind: "followUp",
-      conversationId: "cv1",
-      turn: { id: "t9", errorCode: null },
-    });
-
-    await dispatchSlackEvent({
-      presenceId: "p1",
-      identityRef: "BOT",
-      event: threadedDmEvent,
-      eventId: "e7",
-    });
-
-    const arg = moveTurnReceipt.mock.calls[0]![0] as Record<string, unknown>;
-    expect(arg.threadTs).toBe("1717171717.123456");
-    expect(arg.replyThreadTs).toBe("1717171717.123456");
-    expect(arg.unthreaded).toBe(false);
   });
 
   it("never receipts a turn the door refused", async () => {

@@ -12,6 +12,7 @@ import {
 import { cleanLabel } from "../../lib/format";
 import { logger } from "../../lib/logger";
 import { writeConversationNotice } from "../conversation-notice";
+import { previousRunStartedAt } from "../turn-service";
 import { authorizeChannelUser } from "./channel-ingestion-service";
 import { dmReachableOwners, cardRefsOf } from "./agent-reach-service";
 import { channelProvider } from "./registry";
@@ -69,8 +70,14 @@ export interface ApprovedAction {
   id: string;
   agentId: string;
   conversationId: string | null;
+  /** The turn that asked (the notice anchor), when there was one. Lets a
+   * handler attribute its follow-on records to the person who asked. */
+  originTurnId: string | null;
   action: string;
   payload: Prisma.JsonValue;
+  /** Who approved it. Lets a handler record follow-on grants in that
+   * person's name (send_message: opening the recipient's replies). */
+  decidedByUserId: string;
 }
 
 /**
@@ -252,7 +259,14 @@ const postActionApprovalCards = async (approvalId: string): Promise<void> => {
 };
 
 export type ActionDecisionResult =
-  | { kind: "decided"; status: ActionApprovalStatus }
+  | {
+      kind: "decided";
+      status: ActionApprovalStatus;
+      /** What was decided, and by whom: the clicked card settles to the
+       * same words every other posted card does. */
+      summary: string;
+      decidedByName: string;
+    }
   | { kind: "already_settled" }
   | { kind: "refused"; message: string };
 
@@ -364,8 +378,10 @@ export const decideActionApproval = async (input: {
         id: approval.id,
         agentId: approval.agentId,
         conversationId: approval.conversationId,
+        originTurnId: approval.originTurnId,
         action: approval.action,
         payload: approval.payload,
+        decidedByUserId: input.deciderUserId,
       };
       // The standing grant FIRST, best-effort: a failed upsert must not
       // block the send the owner just approved — the next send simply asks
@@ -400,7 +416,12 @@ export const decideActionApproval = async (input: {
     decider.name || decider.email,
     input.decision === "reject" ? reason : failure,
   );
-  return { kind: "decided", status: finalStatus };
+  return {
+    kind: "decided",
+    status: finalStatus,
+    summary: approval.summary,
+    decidedByName: decider.name || decider.email,
+  };
 };
 
 /**
@@ -570,8 +591,20 @@ export const listActionApprovals = async (input: {
 
 // ── Settlement: cards + the outcome notice ─────────────────────────────────
 
+/** The terminal statuses: every one has an outcome line. */
+const SETTLED_STATUSES = [
+  "executed",
+  "failed",
+  "rejected",
+  "expired",
+] as const satisfies readonly ActionApprovalStatus[];
+type SettledStatus = (typeof SETTLED_STATUSES)[number];
+
+const isSettledStatus = (status: string): status is SettledStatus =>
+  (SETTLED_STATUSES as readonly string[]).includes(status);
+
 const OUTCOME_LINES: Record<
-  Exclude<ActionApprovalStatus, "pending" | "approved">,
+  SettledStatus,
   (summary: string, detail: string | null) => string
 > = {
   executed: (summary) => `Approved and done: ${summary}.`,
@@ -584,6 +617,82 @@ const OUTCOME_LINES: Record<
   expired: (summary) =>
     `Expired unanswered: ${summary}. Nobody decided in time - ask again if it still matters.`,
 };
+
+/**
+ * The turn-start APPROVAL-OUTCOME note: every held action asked from THIS
+ * conversation that was decided (or expired) since the model last ran here,
+ * plus the asks still waiting. The `send_message`/`message_agent` tool
+ * results promise the decision "arrives as a notice"; the durable notice
+ * row is what the person sees in the transcript, and this note is the half
+ * the MODEL reads. Without it the agent kept answering "still waiting for
+ * approval" about a message that had already been delivered.
+ *
+ * The window is (the previous turn the model RAN started, now]. "Ran" is
+ * the harness's own `turn.started` row: a report turn the platform wrote
+ * (an automation delivery, a peer task's close) or a follow-up folded into
+ * another run never reached the model, so it must not move the window.
+ * `now` is dispatch time (this builder runs at dispatch), so a decision
+ * landing while this turn sat in the queue is still news for it. No stored
+ * "seen" flag: a decision is news for one run, and the next run's window
+ * starts after it.
+ *
+ * Delivery-only context (the same law as the mention note): composed from
+ * current truth at dispatch, never stored; the caller isolates failure.
+ */
+export const buildApprovalOutcomeNote = async (
+  conversationId: string,
+  turnCreatedAt: Date,
+): Promise<string | null> => {
+  // `startedAt` is written with the `turn.started` row (same transaction,
+  // the app clock that also stamps `updatedAt` below).
+  const since = await previousRunStartedAt(conversationId, turnCreatedAt);
+  if (!since) return null;
+  const now = new Date();
+
+  const [settled, waiting] = await Promise.all([
+    db.actionApproval.findMany({
+      where: {
+        conversationId,
+        status: { in: [...SETTLED_STATUSES] },
+        updatedAt: { gt: since, lte: now },
+      },
+      orderBy: { updatedAt: "desc" },
+      take: APPROVAL_NOTE_MAX_ROWS,
+      select: { status: true, summary: true, reason: true },
+    }),
+    // Only asks an owner can still decide: an expired row the sweep has
+    // not parked yet is not "waiting" (it reads as expired once parked).
+    db.actionApproval.findMany({
+      where: { conversationId, status: "pending", expiresAt: { gt: now } },
+      orderBy: { createdAt: "desc" },
+      take: APPROVAL_NOTE_MAX_ROWS,
+      select: { summary: true },
+    }),
+  ]);
+
+  // Newest rows win the cap; the note reads oldest first.
+  const lines = [
+    ...settled
+      .reverse()
+      .flatMap((a) =>
+        isSettledStatus(a.status)
+          ? [OUTCOME_LINES[a.status](a.summary, a.reason)]
+          : [],
+      ),
+    ...waiting
+      .reverse()
+      .map((a) => `Still waiting for the owner's decision: ${a.summary}.`),
+  ];
+  if (lines.length === 0) return null;
+  return [
+    "Approval updates for actions you asked for in this conversation (current truth; trust these over your earlier replies):",
+    ...lines.map((line) => `- ${line}`),
+  ].join("\n");
+};
+
+/** Bounds the note: a conversation that asked for dozens of sends still
+ * gets a context block, not a flood. */
+const APPROVAL_NOTE_MAX_ROWS = 10;
 
 /**
  * Settle every posted card and write the durable outcome notice on the

@@ -7,7 +7,7 @@ import type {
   Harness,
   SupervisorMessage,
   SupervisorTransport,
-  WorkItem,
+  SupervisorWorkItem,
 } from "@onecli/agent-protocol";
 import {
   createFakeHarness,
@@ -39,6 +39,7 @@ const config = (homeDir: string) => ({
   harness: "fake",
   runnerWsUrl: undefined,
   bootstrapToken: undefined,
+  sandboxId: undefined,
   outboundAttachments: false,
 });
 
@@ -47,7 +48,7 @@ const home = (prefix: string) => mkdtempSync(join(tmpdir(), prefix));
 /** A transport the test drives by hand: push work in, read messages out. */
 const createTestTransport = () => {
   const sent: SupervisorMessage[] = [];
-  const queue: WorkItem[] = [];
+  const queue: SupervisorWorkItem[] = [];
   let notify: (() => void) | undefined;
   let closes = 0;
   /**
@@ -62,7 +63,7 @@ const createTestTransport = () => {
     lost,
     /** How many times the supervisor released the channel. */
     closeCount: () => closes,
-    push(item: WorkItem) {
+    push(item: SupervisorWorkItem) {
       queue.push(item);
       notify?.();
       notify = undefined;
@@ -87,7 +88,7 @@ const createTestTransport = () => {
       await run;
     },
     transport: {
-      async *incoming(): AsyncIterable<WorkItem> {
+      async *incoming(): AsyncIterable<SupervisorWorkItem> {
         for (;;) {
           while (queue.length > 0) {
             const item = queue.shift();
@@ -117,7 +118,7 @@ const deliver = (
   turnId: string,
   conversationId: string,
   extra: { message?: string; resumeSessionRef?: string } = {},
-): WorkItem => ({
+): SupervisorWorkItem => ({
   kind: "turn.deliver",
   turnId,
   conversationId,

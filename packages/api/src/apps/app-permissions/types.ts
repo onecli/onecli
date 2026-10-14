@@ -54,7 +54,8 @@ export const allGroupTools = <T>(group: { tools: T[]; wildcard?: T }): T[] => [
   ...group.tools,
 ];
 
-const methodsOf = (tool: AppTool): string[] =>
+/** A tool's HTTP methods; empty = any method. */
+export const methodsOf = (tool: AppTool): string[] =>
   tool.methods ?? (tool.method ? [tool.method] : []);
 
 /**

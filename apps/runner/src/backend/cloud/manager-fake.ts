@@ -20,6 +20,7 @@ export interface FakeSnapshot {
   containerRef: string;
   running: boolean;
   payloadHash: string | null;
+  resumable: boolean;
   phase: string | null;
   waitingReason: string | null;
 }
@@ -144,6 +145,7 @@ export const startFakeManager = async (): Promise<FakeManager> => {
           sandboxId: string;
           runnerId: string;
           payloadHash: string;
+          resumable?: boolean;
         };
         const containerRef = `pod-uid-${(refCounter += 1)}`;
         sandboxes.set(containerRef, {
@@ -152,6 +154,7 @@ export const startFakeManager = async (): Promise<FakeManager> => {
           containerRef,
           running: fake.createRunning ?? true,
           payloadHash: spec.payloadHash,
+          resumable: spec.resumable === true,
           phase: fake.createRunning ? "Running" : "Pending",
           waitingReason: null,
         });
@@ -168,6 +171,7 @@ export const startFakeManager = async (): Promise<FakeManager> => {
               containerRef: snapshot.containerRef,
               running: snapshot.running,
               payloadHash: snapshot.payloadHash,
+              resumable: snapshot.resumable,
               phase: snapshot.phase,
               waitingReason: snapshot.waitingReason,
             })),

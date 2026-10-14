@@ -4,7 +4,15 @@ import { useState, useEffect, useRef, useMemo, type RefObject } from "react";
 import Image from "next/image";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { toast } from "sonner";
-import { ArrowLeft, Copy, Key, Settings2, Upload, X } from "lucide-react";
+import {
+  ArrowLeft,
+  CircleHelp,
+  Copy,
+  Key,
+  Settings2,
+  Upload,
+  X,
+} from "lucide-react";
 import { cn } from "@onecli/ui/lib/utils";
 import {
   Dialog,
@@ -54,11 +62,16 @@ import {
   isParamInjection,
   isPathRegexInjection,
   isPathTemplateInjection,
+  looksLikeAnthropicKey,
   looksLikeOpenaiKey,
   parseOpenaiAuthJson,
 } from "@onecli/api/validations/secret";
 
 type SecretType = "anthropic" | "openai" | "generic";
+
+/** The docs guide behind the Anthropic dialog's "Need help?" link. */
+const ANTHROPIC_SETUP_GUIDE_URL =
+  "https://onecli.sh/docs/integrations/anthropic";
 
 /**
  * Hand focus to an input once it exists — the value input when the name
@@ -876,18 +889,26 @@ export const SecretDialog = ({
                           onChange={(e) => {
                             const val = e.target.value;
                             setValue(val);
-                            if (type === "anthropic" && !name.trim()) {
-                              const detected = detectAnthropicAuthMode(
-                                val.trim(),
+                            if (name.trim()) return;
+                            const pasted = val.trim();
+                            // Name the key by its kind only once the value is
+                            // a complete credential: a half-typed `sk-ant-…`
+                            // would read as an API key before the `oat` lands.
+                            if (
+                              type === "anthropic" &&
+                              looksLikeAnthropicKey(pasted)
+                            ) {
+                              setName(
+                                detectAnthropicAuthMode(pasted) === "oauth"
+                                  ? "Claude Subscription"
+                                  : "Anthropic API Key",
                               );
-                              if (detected === "api-key")
-                                setName("Anthropic API Key");
-                              else if (detected === "oauth")
-                                setName("Claude Subscription");
                             }
-                            if (type === "openai" && !name.trim()) {
-                              if (looksLikeOpenaiKey(val.trim()))
-                                setName("OpenAI API Key");
+                            if (
+                              type === "openai" &&
+                              looksLikeOpenaiKey(pasted)
+                            ) {
+                              setName("OpenAI API Key");
                             }
                           }}
                         />
@@ -910,7 +931,7 @@ export const SecretDialog = ({
                         <p className="text-muted-foreground min-w-0 text-xs">
                           {type === "anthropic" ? (
                             <>
-                              Paste a subscription token from{" "}
+                              From{" "}
                               <CopyableCommand
                                 command="claude setup-token"
                                 variant="link"
@@ -1372,6 +1393,25 @@ export const SecretDialog = ({
             </div>
 
             <DialogFooter>
+              {type === "anthropic" && (
+                // The step-by-step guide for both credentials (installing
+                // Claude Code for `claude setup-token`, or a Console API key).
+                // Left-aligned so it never competes with the primary action.
+                <Button
+                  variant="link"
+                  asChild
+                  className="px-0 has-[>svg]:px-0 sm:mr-auto"
+                >
+                  <a
+                    href={ANTHROPIC_SETUP_GUIDE_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    <CircleHelp aria-hidden />
+                    Need help?
+                  </a>
+                </Button>
+              )}
               <Button variant="ghost" onClick={() => onOpenChange(false)}>
                 Cancel
               </Button>

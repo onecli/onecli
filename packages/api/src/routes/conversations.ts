@@ -13,6 +13,7 @@ import {
   createTurn,
   listTurns,
   readTranscript,
+  requestSendNow,
 } from "../services/turn-service";
 import { sendConversationMessage } from "../services/follow-up-service";
 import {
@@ -369,6 +370,18 @@ export const turnRoutes = () => {
     const workspaceId = requireWorkspaceId(auth);
     return c.json(
       await abortTurn(workspaceId, c.req.param("turnId"), auth.userId),
+    );
+  });
+
+  // POST /turns/:id/send-now: read this waiting mid-run follow-up now. A
+  // request the sandbox acts on, so 202: the outcome
+  // arrives on the conversation's stream as `message.sent_now`.
+  app.post("/:turnId/send-now", async (c) => {
+    const auth = c.get("auth");
+    const workspaceId = requireWorkspaceId(auth);
+    return c.json(
+      await requestSendNow(workspaceId, c.req.param("turnId"), auth.userId),
+      202,
     );
   });
 

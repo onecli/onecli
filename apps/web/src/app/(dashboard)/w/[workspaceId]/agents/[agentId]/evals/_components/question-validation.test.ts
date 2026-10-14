@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   EVAL_APPS_MAX,
+  EVAL_CRITERIA_MAX_LENGTH,
   EVAL_TEXT_MAX_LENGTH,
   NUMERIC_EXPECTED_MESSAGE,
 } from "@onecli/api/validations/evals";
@@ -80,5 +81,31 @@ describe("validateQuestion", () => {
       }),
     );
     expect(tooMany).toMatchObject({ ok: false, first: "expectedApps" });
+  });
+
+  it("gives custom success criteria more room than an expected answer", () => {
+    const long = "f".repeat(EVAL_TEXT_MAX_LENGTH + 1);
+    expect(validateQuestion(draft({ kind: "custom", expected: long }))).toEqual(
+      expect.objectContaining({ ok: true }),
+    );
+    expect(validateQuestion(draft({ kind: "text", expected: long }))).toEqual(
+      expect.objectContaining({
+        ok: false,
+        errors: { expected: expect.stringMatching(/4,000/) },
+      }),
+    );
+    expect(
+      validateQuestion(
+        draft({
+          kind: "custom",
+          expected: "f".repeat(EVAL_CRITERIA_MAX_LENGTH + 1),
+        }),
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        ok: false,
+        errors: { expected: expect.stringMatching(/10,000/) },
+      }),
+    );
   });
 });

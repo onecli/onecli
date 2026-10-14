@@ -46,6 +46,7 @@ vi.mock("../lib/env", async (importOriginal) => {
 const services = vi.hoisted(() => ({
   // channel-integration-service
   getIntegrationView: vi.fn(),
+  listOrgChannelAgents: vi.fn(),
   listUserLinks: vi.fn(),
   connectIntegration: vi.fn(),
   disconnectIntegration: vi.fn(),
@@ -61,6 +62,7 @@ const services = vi.hoisted(() => ({
   completePresence: vi.fn(),
   detachPresence: vi.fn(),
   completePresenceFromOAuth: vi.fn(),
+  completeAgentInstallFromCode: vi.fn(),
   // channel-adapter-service
   registerAdapter: vi.fn(),
   heartbeatAdapter: vi.fn(),
@@ -171,6 +173,7 @@ vi.mock("@onecli/db", () => {
 
 vi.mock("../services/channels/channel-integration-service", () => ({
   getIntegrationView: services.getIntegrationView,
+  listOrgChannelAgents: services.listOrgChannelAgents,
   listUserLinks: services.listUserLinks,
   connectIntegration: services.connectIntegration,
   disconnectIntegration: services.disconnectIntegration,
@@ -187,6 +190,7 @@ vi.mock("../services/channels/agent-channel-service", () => ({
   completePresence: services.completePresence,
   detachPresence: services.detachPresence,
   completePresenceFromOAuth: services.completePresenceFromOAuth,
+  completeAgentInstallFromCode: services.completeAgentInstallFromCode,
 }));
 
 vi.mock("../services/channels/channel-cleanup-service", () => ({
@@ -238,7 +242,8 @@ vi.mock("../services/attachment-service", async (importOriginal) => ({
 
 vi.mock("../services/channels/turn-receipt-service", () => ({
   attachTurnReceipt: vi.fn(),
-  moveTurnReceipt: vi.fn(),
+  attachFollowUpReceipt: vi.fn(),
+  markFollowUpRead: vi.fn(),
   clearTurnReceipts: services.clearTurnReceipts,
 }));
 
@@ -440,6 +445,32 @@ describe("GET /v1/org/channels where roles are ENFORCED (CAPS.rbac on)", () => {
     });
   });
 
+  it("admin-gates the one-click agent list: a member is refused before any read", async () => {
+    store.role = "member";
+    const refused = await appRbacOn.request("/v1/org/channels/slack/agents", {
+      headers: ORG_HEADERS,
+    });
+    expect(refused.status).toBe(403);
+    expect(services.listOrgChannelAgents).not.toHaveBeenCalled();
+
+    store.role = "admin";
+    const listed = {
+      posture: { transport: "events" },
+      workspaces: [{ id: "ws-1", name: "Sales", agents: [] }],
+    };
+    services.listOrgChannelAgents.mockResolvedValue(listed);
+    const ok = await appRbacOn.request("/v1/org/channels/slack/agents", {
+      headers: ORG_HEADERS,
+    });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual(listed);
+    // Scoped to the CALLER's org, never a client-chosen one.
+    expect(services.listOrgChannelAgents).toHaveBeenCalledWith({
+      organizationId: ORG_ID,
+      provider: "slack",
+    });
+  });
+
   it("admin-gates the write routes too", async () => {
     store.role = "member";
     const res = await appRbacOn.request("/v1/org/channels/slack/credentials", {
@@ -449,6 +480,81 @@ describe("GET /v1/org/channels where roles are ENFORCED (CAPS.rbac on)", () => {
     });
     expect(res.status).toBe(403);
     expect(services.connectIntegration).not.toHaveBeenCalled();
+  });
+
+  it("admin-gates the stateless agent install — a member never spends the code", async () => {
+    store.role = "member";
+    const res = await appRbacOn.request(
+      "/v1/org/channels/slack/agent-install",
+      {
+        method: "POST",
+        headers: { ...ORG_HEADERS, "content-type": "application/json" },
+        body: JSON.stringify({ code: "slack-code" }),
+      },
+    );
+    expect(res.status).toBe(403);
+    expect(services.completeAgentInstallFromCode).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /v1/org/channels/:provider/agent-install", () => {
+  it("finishes the matched agent in the CALLER's org, as the caller, and audits", async () => {
+    services.completeAgentInstallFromCode.mockResolvedValueOnce({
+      agentId: "agent-1",
+      workspaceId: "ws-1",
+      presenceId: "pres-1",
+    });
+    const res = await appRbacOff.request(
+      "/v1/org/channels/slack/agent-install",
+      {
+        method: "POST",
+        headers: { ...ORG_HEADERS, "content-type": "application/json" },
+        body: JSON.stringify({ code: "slack-code" }),
+      },
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      agent: { id: "agent-1", workspaceId: "ws-1" },
+      sharedAppConfigured: false,
+    });
+    expect(services.completeAgentInstallFromCode).toHaveBeenCalledWith({
+      organizationId: ORG_ID,
+      actorUserId: "user-1",
+      provider: "slack",
+      code: "slack-code",
+    });
+    expect(dbSpies.auditCreate).toHaveBeenCalled();
+  });
+
+  it("answers agent: null (no audit) when no waiting app claims the code", async () => {
+    services.completeAgentInstallFromCode.mockResolvedValueOnce(null);
+    const res = await appRbacOff.request(
+      "/v1/org/channels/slack/agent-install",
+      {
+        method: "POST",
+        headers: { ...ORG_HEADERS, "content-type": "application/json" },
+        body: JSON.stringify({ code: "slack-code" }),
+      },
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      agent: null,
+      sharedAppConfigured: false,
+    });
+    expect(dbSpies.auditCreate).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing code with 422", async () => {
+    const res = await appRbacOff.request(
+      "/v1/org/channels/slack/agent-install",
+      {
+        method: "POST",
+        headers: { ...ORG_HEADERS, "content-type": "application/json" },
+        body: "{}",
+      },
+    );
+    expect(res.status).toBe(422);
+    expect(services.completeAgentInstallFromCode).not.toHaveBeenCalled();
   });
 });
 
@@ -1890,6 +1996,46 @@ describe("POST /v1/channels/slack/interactivity", () => {
     expect(services.decideApprovalFromChannel).not.toHaveBeenCalled();
   });
 
+  it("an ACTION card click rewrites the card with WHAT was done and by whom", async () => {
+    services.decideActionApprovalFromChannel.mockResolvedValue({
+      kind: "decided",
+      status: "executed",
+      summary: 'send @Dana: "what time today?"',
+      decidedByName: "Morgan",
+    });
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("{}"));
+    try {
+      const responseUrl = "https://hooks.slack.com/actions/T1/B1/act";
+      const body = interactivityBody({
+        ...approvePayload,
+        actions: [{ action_id: "action_approve", value: "act-1" }],
+        response_url: responseUrl,
+      });
+      const res = await appRbacOff.request("/v1/channels/slack/interactivity", {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          ...slackSigned(body),
+        },
+        body,
+      });
+      expect(res.status).toBe(200);
+      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+      const sent = JSON.parse(
+        String((fetchSpy.mock.calls[0]?.[1] as RequestInit).body),
+      );
+      expect(sent).toMatchObject({ replace_original: true });
+      // Not the bare "Approved and done." of before: the owner can tell
+      // which request this was without scrolling up.
+      expect(sent.text).toContain("send @Dana");
+      expect(sent.text).toContain("Approved by Morgan");
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it("decides a signed Approve all as THAT clicker, and replaces the card", async () => {
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
@@ -1924,6 +2070,45 @@ describe("POST /v1/channels/slack/interactivity", () => {
       );
       expect(sent).toMatchObject({ replace_original: true });
       expect(sent.text).toContain("2 approved by Morgan");
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("a click on rows already decided elsewhere never reads '0 denied by'", async () => {
+    // MUTATION-TESTED: always lead with the clicker's count and a card
+    // decided on the web first read "⛔ 0 denied by Morgan · 5 already
+    // decided".
+    services.decideApprovalsFromChannel.mockResolvedValue({
+      kind: "decided",
+      decidedByName: "Morgan",
+      decided: [],
+      alreadySettled: ["ap-1", "ap-2"],
+      failed: [],
+    });
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("{}"));
+    try {
+      const body = interactivityBody({
+        ...approvePayload,
+        actions: [{ action_id: "channel_group_deny", value: "ap-1,ap-2" }],
+        response_url: "https://hooks.slack.com/actions/T1/B1/grp",
+      });
+      await appRbacOff.request("/v1/channels/slack/interactivity", {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          ...slackSigned(body),
+        },
+        body,
+      });
+      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+      const sent = JSON.parse(
+        String((fetchSpy.mock.calls[0]?.[1] as RequestInit).body),
+      );
+      expect(sent.text).toBe("☑️ All 2 were already decided");
+      expect(sent.text).not.toContain("0 denied");
     } finally {
       fetchSpy.mockRestore();
     }

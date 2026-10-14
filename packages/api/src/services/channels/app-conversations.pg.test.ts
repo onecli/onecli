@@ -763,7 +763,7 @@ describe.skipIf(!PROOF_URL)("app conversations (5a) — the app-turn cap", () =>
       decision: "approve",
       deciderUserId: OWNER,
     });
-    expect(decided).toEqual({ kind: "decided", status: "executed" });
+    expect(decided).toMatchObject({ kind: "decided", status: "executed" });
 
     // The replay: the parked 7th message is now a turn, nobody typed - and
     // it is the round's FIRST turn, so the streak reads 1 after it lands.
@@ -899,7 +899,7 @@ describe.skipIf(!PROOF_URL)("app conversations (5a) — the app-turn cap", () =>
       decision: "approve",
       deciderUserId: OWNER,
     });
-    expect(decided).toEqual({ kind: "decided", status: "failed" });
+    expect(decided).toMatchObject({ kind: "decided", status: "failed" });
     const row = await db.actionApproval.findUniqueOrThrow({
       where: { id: hold.id },
     });
@@ -943,7 +943,7 @@ describe.skipIf(!PROOF_URL)("app conversations (5a) — the app-turn cap", () =>
       decision: "approve",
       deciderUserId: OWNER,
     });
-    expect(decided).toEqual({ kind: "decided", status: "failed" });
+    expect(decided).toMatchObject({ kind: "decided", status: "failed" });
     const row = await db.actionApproval.findUniqueOrThrow({
       where: { id: hold.id },
     });

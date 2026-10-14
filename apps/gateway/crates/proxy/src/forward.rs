@@ -254,6 +254,11 @@ fn content_length_at_most(headers: &hyper::HeaderMap, max: usize) -> bool {
 /// multi-megabyte attachment.
 const APPROVAL_BODY_PEEK: usize = 16 * 1024;
 
+/// How much of a bulk change's body the approval card reads: enough for
+/// Salesforce's 200-record cap with long values (see
+/// [`summary::reads_whole_body`]). Bounded, held only for the approval.
+const BULK_BODY_PEEK: usize = 512 * 1024;
+
 /// Maximum response body to buffer when checking if a 400 is auth-related.
 /// Auth error messages are small JSON; no need to scan large bodies.
 const AUTH_CHECK_BODY_LIMIT: usize = 8192;
@@ -349,7 +354,7 @@ pub async fn materialize_injections<'a>(
                     connection_id = %pending.conn.id,
                     provider = %pending.conn.provider,
                     %method,
-                    %path,
+                    path = %super::log_redact::redact_for_log(path),
                     "connection needs reconnect; the allowed request was not forwarded"
                 );
                 return Err(Box::new(response::connection_needs_reconnect(
@@ -362,7 +367,7 @@ pub async fn materialize_injections<'a>(
                     connection_id = %pending.conn.id,
                     provider = %pending.conn.provider,
                     %method,
-                    %path,
+                    path = %super::log_redact::redact_for_log(path),
                     "could not resolve the connection's credential after the request was allowed"
                 );
                 return Err(Box::new(response::json(
@@ -409,7 +414,17 @@ pub async fn forward_request(
         .path_and_query()
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
-    let url = format!("{scheme}://{host}{path}");
+    // The URL as log lines show it: credential-looking query values masked
+    // (`log_redact`). Nothing below sends it: the work reads the raw `path`,
+    // and `upstream_url` (which also gains any injected query secret) is
+    // built from it and never logged.
+    let url = format!(
+        "{scheme}://{host}{}",
+        super::log_redact::redact_for_log(&path)
+    );
+    // Read before anything wraps the body: a request without one is the only
+    // kind a stale-token refusal may resend (see `stale_token`).
+    let has_body = !hyper::body::Body::is_end_stream(req.body());
 
     // Destination guard, IP-literal half: an IP host never reaches the DNS
     // resolver, so it is judged here — before approval, injection or anything
@@ -431,6 +446,16 @@ pub async fn forward_request(
         if let Err(refusal) = super::egress::check_host_via_proxy(host).await {
             return Ok(refuse_destination(&refusal.host));
         }
+    }
+
+    // Everything below judges the request line. A request asking the upstream
+    // to run another method (`?_HttpMethod=DELETE`, `X-HTTP-Method-Override`)
+    // could be judged as one method and run as another, so it is refused
+    // before any rule is consulted or any credential is minted.
+    if let Some(resp) =
+        super::method_override::refuse(proxy_ctx, host, &method, &path, req.headers())
+    {
+        return Ok(resp);
     }
 
     // An empty resource scope reaches nothing, so refuse before anything can
@@ -669,8 +694,8 @@ pub async fn forward_request(
             Err(resp) => return Ok(*resp),
         };
 
-    // Apply injection rules — upstream_path may gain query-param secrets;
-    // the original `path`/`url` stays clean for logging and approval metadata.
+    // Apply injection rules. `upstream_path` may gain query-param secrets, so
+    // it is never logged; log lines name the masked `url` instead.
     let mut upstream_path = path.clone();
     let injection_count =
         inject::apply_injections(&mut headers, &mut upstream_path, &injection_rules);
@@ -718,19 +743,30 @@ pub async fn forward_request(
             // Peek a bounded prefix of the body for the summary + preview, then
             // build the forwarding body. If condition buffering already captured
             // the body, reuse that buffer instead of peeking the stream again.
+            // A bulk change of the matched app (one request for a list of
+            // records) is read whole, up to its own cap, so the card can show
+            // every record it changes: a cut body is never summarized as one.
+            let matched_app =
+                apps::provider_for_host_and_path(common::util::strip_port(host), &path);
+            let peek_limit = match matched_app {
+                Some((app, _)) if summary::reads_whole_body(app, method.as_str(), &path) => {
+                    BULK_BODY_PEEK
+                }
+                _ => APPROVAL_BODY_PEEK,
+            };
             let (summary_bytes, fwd_body): (Cow<'_, [u8]>, reqwest::Body) = if let Some(ref buf) =
                 condition_buffer
             {
                 // Body already buffered for condition matching — borrow its prefix
                 // for the summary instead of copying it again.
-                let take = buf.bytes.len().min(APPROVAL_BODY_PEEK);
+                let take = buf.bytes.len().min(peek_limit);
                 (Cow::Borrowed(&buf.bytes[..take]), body)
             } else {
                 let mut body_stream = Box::pin(http_body_util::BodyDataStream::new(body));
                 let mut peeked: Vec<Bytes> = Vec::new();
                 let mut peeked_len: usize = 0;
 
-                while peeked_len < APPROVAL_BODY_PEEK {
+                while peeked_len < peek_limit {
                     match body_stream.next().await {
                         Some(Ok(data)) => {
                             peeked_len += data.len();
@@ -743,11 +779,11 @@ pub async fn forward_request(
                     }
                 }
 
-                let mut buf = Vec::with_capacity(peeked_len.min(APPROVAL_BODY_PEEK));
+                let mut buf = Vec::with_capacity(peeked_len.min(peek_limit));
                 for chunk in &peeked {
-                    let take = (APPROVAL_BODY_PEEK - buf.len()).min(chunk.len());
+                    let take = (peek_limit - buf.len()).min(chunk.len());
                     buf.extend_from_slice(&chunk[..take]);
-                    if buf.len() >= APPROVAL_BODY_PEEK {
+                    if buf.len() >= peek_limit {
                         break;
                     }
                 }
@@ -765,8 +801,6 @@ pub async fn forward_request(
             // gracefully: unknown provider → generic summary, no content-type →
             // best-effort sniffing. The summary/preview never embed raw base64 or
             // oversized JSON, so the approval card can't overflow a chat client.
-            let matched_app =
-                apps::provider_for_host_and_path(common::util::strip_port(host), &path);
             let (summary_provider, _) = matched_app.unwrap_or((host, host));
             let content_type = parts
                 .headers
@@ -1056,10 +1090,10 @@ pub async fn forward_request(
     };
 
     // ── Provider-specific request signing ─────────────────────────
-    let forward_body = match rules
+    let finalizer = rules
         .finalizer
-        .or_else(|| apps::finalizer_for_host(host.split(':').next().unwrap_or(host)))
-    {
+        .or_else(|| apps::finalizer_for_host(host.split(':').next().unwrap_or(host)));
+    let forward_body = match finalizer {
         Some(apps::RequestFinalizer::AwsSigV4) => {
             super::finalizers::aws_sigv4::finalize_request(
                 host,
@@ -1084,6 +1118,12 @@ pub async fn forward_request(
     };
 
     // ── Forward to upstream ──────────────────────────────────────────
+    // A provider that recovers from a refused token (see `stale_token`) may
+    // send this request a second time, so never a signed or transformed one,
+    // whose headers and bytes are bound to the first send.
+    let recoverable = super::stale_token::applies(rules, injection_count)
+        .filter(|_| finalizer.is_none() && rules.body_transform.is_none());
+
     let mut upstream = http_client.request(method.clone(), &upstream_url);
     for (name, value) in headers.iter() {
         upstream = upstream.header(name.clone(), value.clone());
@@ -1112,7 +1152,7 @@ pub async fn forward_request(
             if let Some(refusal) = super::egress::find_refusal(&e) {
                 return Ok(refuse_destination(&refusal.host));
             }
-            return Err(e).with_context(|| format!("forwarding to {url}"));
+            return Err(send_failure(e, &url));
         }
         // Deliberately NOT replayed. Once the request has gone upstream its
         // outcome is unknown, and re-sending could double a non-idempotent
@@ -1128,6 +1168,89 @@ pub async fn forward_request(
             );
             return Ok(response::upstream_timeout());
         }
+    };
+
+    // The provider refused the access token the gateway injected, though its
+    // stored expiry had not passed (Salesforce ends tokens with the org's
+    // session timeout). Replace it, and send a request without a body again
+    // with the new one. The refusal means the provider performed nothing, so
+    // the second send cannot double an operation.
+    let upstream_resp = match recoverable {
+        Some(target) if upstream_resp.status() == StatusCode::UNAUTHORIZED => {
+            let first_status = upstream_resp.status();
+            let first_version = upstream_resp.version();
+            let first_headers = upstream_resp.headers().clone();
+            let mut stream: UpstreamStream = Box::pin(upstream_resp.bytes_stream());
+            let head = super::body::read_head(&mut stream, super::stale_token::BODY_LIMIT)
+                .await
+                .context("reading the 401 body")?;
+
+            let refreshed = match (
+                super::stale_token::injected_bearer(&headers, &parts.headers),
+                proxy_ctx.organization_id.as_deref(),
+                proxy_ctx.workspace_id.as_deref(),
+            ) {
+                (Some(rejected), Some(organization_id), Some(workspace_id))
+                    if super::stale_token::is_stale(target.config, &first_headers, &head) =>
+                {
+                    super::stale_token::recover(
+                        engine,
+                        cache,
+                        target,
+                        rejected,
+                        organization_id,
+                        workspace_id,
+                    )
+                    .await
+                }
+                _ => None,
+            };
+
+            match refreshed.filter(|_| !has_body) {
+                Some(access_token) => {
+                    let value =
+                        hyper::header::HeaderValue::from_str(&format!("Bearer {access_token}"))
+                            .context("refreshed token is not a valid header value")?;
+                    headers.insert(hyper::header::AUTHORIZATION, value);
+                    let mut retry = http_client.request(method.clone(), &upstream_url);
+                    for (name, value) in headers.iter() {
+                        retry = retry.header(name.clone(), value.clone());
+                    }
+                    info!(method = %method, url = %url, "resending with the refreshed token");
+                    match tokio::time::timeout(upstream_header_timeout(), retry.send()).await {
+                        Ok(Ok(resp)) => resp,
+                        Ok(Err(e)) => {
+                            if let Some(refusal) = super::egress::find_refusal(&e) {
+                                return Ok(refuse_destination(&refusal.host));
+                            }
+                            return Err(send_failure(e, &url));
+                        }
+                        Err(_elapsed) => {
+                            warn!(
+                                method = %method,
+                                url = %url,
+                                timeout_secs = upstream_header_timeout().as_secs(),
+                                "upstream did not send response headers to the resend before the deadline",
+                            );
+                            return Ok(response::upstream_timeout());
+                        }
+                    }
+                }
+                // Forward the provider's 401 byte for byte: the head read
+                // above, then whatever was not read.
+                None => {
+                    let head = Bytes::from(head.bytes);
+                    let replayed =
+                        futures_util::stream::once(async move { Ok(head) }).chain(stream);
+                    let mut rebuilt = hyper::Response::new(reqwest::Body::wrap_stream(replayed));
+                    *rebuilt.status_mut() = first_status;
+                    *rebuilt.version_mut() = first_version;
+                    *rebuilt.headers_mut() = first_headers;
+                    reqwest::Response::from(rebuilt)
+                }
+            }
+        }
+        _ => upstream_resp,
     };
 
     let status = upstream_resp.status();
@@ -1401,6 +1524,73 @@ pub async fn forward_request(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("-");
 
+    // The row the request log records for a forwarded request: status and
+    // latency as the agent receives them, the injection facts, and the manual
+    // approval outcome. Called once: either for the GitHub guidance below or
+    // for the normal path, both answering for a request that was really sent.
+    let forwarded_meta = |status: u16| {
+        let mut meta = hooks::request_meta(
+            proxy_ctx,
+            host,
+            method.as_str(),
+            &path,
+            status,
+            start.elapsed().as_millis() as u32,
+        )?;
+        meta.injection_count = injection_count as u16;
+        meta.injected = injection_count > 0;
+        hooks::attribute_to_connection(&mut meta, rules, injection_count);
+        meta.connection_label = rules.connection_label.clone();
+        (meta.existing_log_id, meta.decision) = approval_decision().unzip();
+        meta.matched_rule = matched_rule;
+        Some(meta)
+    };
+
+    // GitHub organization access: an organization refused the GitHub OAuth
+    // connection's token (not approved / not SSO-authorized). See
+    // `github_org_access`: the refusal is answered with guidance instead of
+    // GitHub's body and recorded on the connection; a later success of the
+    // refused endpoint clears it. Every other response streams as before.
+    let upstream_stream: UpstreamStream = Box::pin(upstream_resp.bytes_stream());
+    let upstream_stream = if super::github_org_access::applies(
+        common::util::strip_port(host),
+        rules.winning_provider.as_deref(),
+        injection_count,
+    ) {
+        match github_org_access_check(
+            upstream_stream,
+            status,
+            &resp_headers,
+            &method,
+            &path,
+            rules,
+            engine,
+        )
+        .await?
+        {
+            GitHubOrgAccess::Forward(stream) => stream,
+            GitHubOrgAccess::Refused(refusal) => {
+                info!(
+                    method = %method,
+                    url = %url,
+                    org = %refusal.org,
+                    reason = refusal.reason.as_str(),
+                    "GitHub organization refused the connection; returning guidance"
+                );
+                let resp = response::github_org_access_required(
+                    &refusal,
+                    proxy_ctx.workspace_id.as_deref(),
+                );
+                if let Some(meta) = forwarded_meta(resp.status().as_u16()) {
+                    telemetry::on_request(meta.into_event(None));
+                }
+                return Ok(resp);
+            }
+        }
+    } else {
+        upstream_stream
+    };
+
     info!(
         method = %method,
         url = %url,
@@ -1412,23 +1602,9 @@ pub async fn forward_request(
 
     // Track all authenticated proxied requests and stream response body.
     // Hooks handle telemetry emission and optional response stream wrapping.
-    let body_stream: hooks::BodyStream = if let Some(mut meta) = hooks::request_meta(
-        proxy_ctx,
-        host,
-        method.as_str(),
-        &path,
-        status.as_u16(),
-        start.elapsed().as_millis() as u32,
-    ) {
-        meta.injection_count = injection_count as u16;
-        meta.injected = injection_count > 0;
-        hooks::attribute_to_connection(&mut meta, rules, injection_count);
-        meta.connection_label = rules.connection_label.clone();
-        (meta.existing_log_id, meta.decision) = approval_decision().unzip();
-        meta.matched_rule = matched_rule;
-        hooks::track_and_wrap(meta, rules, &resp_headers, upstream_resp.bytes_stream())
-    } else {
-        Box::pin(upstream_resp.bytes_stream().map_ok(Frame::data))
+    let body_stream: hooks::BodyStream = match forwarded_meta(status.as_u16()) {
+        Some(meta) => hooks::track_and_wrap(meta, rules, &resp_headers, upstream_stream),
+        None => Box::pin(upstream_stream.map_ok(Frame::data)),
     };
 
     let body = http_body_util::StreamBody::new(body_stream);
@@ -1442,6 +1618,109 @@ pub async fn forward_request(
     }
 
     Ok(response)
+}
+
+/// The upstream body as a stream, so a peeked head can be replayed in front of
+/// what was not read.
+type UpstreamStream = futures_util::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>;
+
+/// The outcome of [`github_org_access_check`].
+enum GitHubOrgAccess {
+    /// Not an organization refusal: forward this stream (the upstream body,
+    /// with any peeked head replayed in front of the unread rest).
+    Forward(UpstreamStream),
+    /// An organization refused the token: answer with guidance instead.
+    Refused(super::github_org_access::OrgRefusal),
+}
+
+/// Read GitHub's answer to a request the GitHub OAuth connection injected
+/// into, and keep the connection's `githubOrgAccess` record in step with it.
+/// Only a 403 is peeked, and only its first `BODY_LIMIT` bytes; anything
+/// beyond streams on untouched, so a 403 that is not a refusal reaches the
+/// agent byte for byte.
+async fn github_org_access_check(
+    mut stream: UpstreamStream,
+    status: StatusCode,
+    headers: &hyper::HeaderMap,
+    method: &hyper::Method,
+    path: &str,
+    rules: &ResolvedRules,
+    engine: &crate::connect::PolicyEngine,
+) -> Result<GitHubOrgAccess> {
+    use super::github_org_access::{classify, record_writes, BODY_LIMIT};
+
+    let mut refusal = None;
+    if status == StatusCode::FORBIDDEN {
+        let head = super::body::read_head(&mut stream, BODY_LIMIT)
+            .await
+            .context("reading GitHub 403 body")?;
+        refusal = classify(status, headers, &head.bytes);
+        if refusal.is_none() {
+            let head = Bytes::from(head.bytes);
+            stream = Box::pin(futures_util::stream::once(async move { Ok(head) }).chain(stream));
+        }
+    }
+
+    if let Some(connection_id) = rules.winning_connection_id.as_deref() {
+        for write in record_writes(
+            rules.github_org_access.as_ref(),
+            refusal.as_ref(),
+            status,
+            method,
+            path,
+        ) {
+            spawn_github_org_access_write(engine.pool.clone(), connection_id.to_string(), write);
+        }
+    }
+
+    Ok(match refusal {
+        Some(refusal) => GitHubOrgAccess::Refused(refusal),
+        None => GitHubOrgAccess::Forward(stream),
+    })
+}
+
+/// Apply one change to a connection's GitHub organization record, off the
+/// request path: the agent's answer never waits on the write, and a failed
+/// write only delays the dashboard until the next refusal or success. Held by
+/// the shutdown drain like the token-refresh write.
+fn spawn_github_org_access_write(
+    pool: sqlx::PgPool,
+    connection_id: String,
+    write: super::github_org_access::RecordWrite,
+) {
+    use super::github_org_access::RecordWrite;
+
+    let drain_guard = shutdown::task_guard();
+    tokio::spawn(async move {
+        let _drain_guard = drain_guard;
+        let (org, result) = match &write {
+            RecordWrite::Record { org, entry } => (
+                org,
+                db::record_github_org_access(&pool, &connection_id, org, entry).await,
+            ),
+            RecordWrite::Clear { org, expected } => (
+                org,
+                db::clear_github_org_access(&pool, &connection_id, org, expected).await,
+            ),
+        };
+        let recorded = matches!(write, RecordWrite::Record { .. });
+        match result {
+            Ok(changed) => tracing::debug!(
+                connection_id = %connection_id,
+                org = %org,
+                recorded,
+                changed,
+                "github org access state written"
+            ),
+            Err(e) => warn!(
+                connection_id = %connection_id,
+                org = %org,
+                recorded,
+                error = %e,
+                "github org access state write failed"
+            ),
+        }
+    });
 }
 
 /// Whether an uncredentialed upstream 404 means "wrong host" rather than "no
@@ -1515,6 +1794,14 @@ fn body_indicates_auth_error(body: &[u8]) -> bool {
         "not authenticated",
     ];
     AUTH_KEYWORDS.iter().any(|kw| lower.contains(kw))
+}
+
+/// The error for an upstream send that failed, as mitm.rs and the HTTP-proxy
+/// path log it (`error = ?e`). reqwest's own message carries the full upstream
+/// URL, injected query credentials included, so that is dropped and the
+/// masked `url` named instead.
+fn send_failure(e: reqwest::Error, url: &str) -> anyhow::Error {
+    anyhow::Error::new(e.without_url()).context(format!("forwarding to {url}"))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -2018,6 +2305,7 @@ mod tests {
             session_policy: None,
             winning_connection_id: None,
             winning_provider: None,
+            github_org_access: None,
             budget_bindings: Vec::new(),
             host_mismatch: None,
         }
@@ -2464,5 +2752,343 @@ mod tests {
             "the body genuinely outlived the 1s header bound (took {:?})",
             started.elapsed(),
         );
+    }
+
+    /// An upstream that answers 200 and hands back the request line it read,
+    /// so a test can see exactly what was forwarded.
+    fn request_line_upstream() -> (std::net::SocketAddr, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind upstream");
+        let addr = listener.local_addr().expect("local addr");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Some(Ok(mut stream)) = listener.incoming().next() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]);
+                let _ = tx.send(head.lines().next().unwrap_or_default().to_string());
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok"
+                );
+            }
+        });
+        (addr, rx)
+    }
+
+    /// Masking is for log lines only: the request that reaches the provider
+    /// keeps its real query credential, or it would be refused upstream.
+    #[tokio::test]
+    async fn the_forwarded_request_keeps_its_real_query_credential() {
+        pin_test_header_timeout();
+        let (upstream_addr, request_line) = request_line_upstream();
+        let gateway_addr = gateway_serving_one_request_with(upstream_addr, permissive_rules).await;
+
+        let response = reqwest::Client::new()
+            .get(format!(
+                "http://{gateway_addr}/upload?guid=a1&tempauth=v1.LIVE&access_token=LIVE2"
+            ))
+            .send()
+            .await
+            .expect("gateway responded");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            request_line
+                .recv_timeout(Duration::from_secs(5))
+                .expect("forwarded"),
+            "GET /upload?guid=a1&tempauth=v1.LIVE&access_token=LIVE2 HTTP/1.1"
+        );
+    }
+
+    /// A failed send is logged by mitm.rs as `error = ?e`. reqwest's own
+    /// message ends with the upstream URL, which carries any injected query
+    /// credential, so neither the raw query nor the URL may be in it.
+    #[tokio::test]
+    async fn a_failed_send_names_the_masked_url_only() {
+        // Nothing listens on a port we just released: the send fails.
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind")
+            .local_addr()
+            .expect("addr");
+        let raw = format!("http://{addr}/x?key=1&api_key=LIVE_SECRET");
+        let e = reqwest::Client::new()
+            .get(&raw)
+            .send()
+            .await
+            .expect_err("nothing listens");
+        assert!(format!("{e}").contains("LIVE_SECRET"), "precondition: {e}");
+
+        let err = send_failure(e, &crate::log_redact::redact_for_log(&raw));
+        for shown in [format!("{err:?}"), format!("{err:#}")] {
+            assert!(!shown.contains("LIVE_SECRET"), "leaked: {shown}");
+            assert!(shown.contains("api_key=***"), "{shown}");
+        }
+        assert!(
+            err.chain().any(|e| e.is::<reqwest::Error>()),
+            "mitm.rs still recognizes an upstream send failure"
+        );
+    }
+
+    // ── GitHub organization access ─────────────────────────────────────
+
+    /// A one-shot GitHub upstream answering every request with `status`,
+    /// `extra_headers` and `body` (raw bytes, so a test can send gzip).
+    fn github_upstream(
+        status: u16,
+        extra_headers: &'static str,
+        body: impl Into<Vec<u8>>,
+    ) -> std::net::SocketAddr {
+        use std::io::{Read, Write};
+
+        let body = body.into();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind github upstream");
+        let addr = listener.local_addr().expect("local addr");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n{extra_headers}content-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
+        });
+        addr
+    }
+
+    /// GitHub's OAuth-app-restriction refusal for `acme-labs`.
+    const RESTRICTED_BODY: &str = r#"{"message":"Although you appear to have the correct authorization credentials, the `Acme-Labs` organization has enabled OAuth App access restrictions, meaning that data access to third-parties is limited."}"#;
+
+    /// The GitHub OAuth connection injecting into `api.github.com`.
+    fn github_oauth_rules() -> ResolvedRules {
+        ResolvedRules {
+            injection_rules: vec![inject::InjectionRule {
+                path_pattern: "*".to_string(),
+                injections: vec![inject::Injection::SetHeader {
+                    name: "authorization".to_string(),
+                    value: "Bearer test-token".to_string(),
+                }],
+            }],
+            winning_connection_id: Some("conn_gh".into()),
+            winning_provider: Some("github".into()),
+            // Exactly what the refusals below record (each test's refused
+            // request), so the hot path skips the write and the stub pool
+            // (which never connects) is never touched. The writes themselves
+            // are pinned by `github_org_access::tests` and its Postgres suite.
+            github_org_access: Some(serde_json::json!({
+                "acme": { "reason": "sso_required", "write": false, "endpoint": "repos/acme/api/pulls" },
+                "acme-labs": { "reason": "approval_required", "write": false, "endpoint": "repos/acme-labs/api" }
+            })),
+            ..permissive_rules()
+        }
+    }
+
+    /// Serve one request addressed to `api.github.com` (plain http), with the
+    /// client resolving that name to `upstream`.
+    async fn github_gateway(
+        upstream: std::net::SocketAddr,
+        rules: fn() -> ResolvedRules,
+    ) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind gateway");
+        let gateway_addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept client");
+            let io = hyper_util::rt::TokioIo::new(stream);
+            let service = hyper::service::service_fn(move |req: Request<Incoming>| async move {
+                let cache = cache::in_memory();
+                let approvals = approval::in_memory();
+                let engine = crate::connect::PolicyEngine::test_stub();
+                let proxy_ctx = ProxyContext {
+                    workspace_id: Some("ws_1".into()),
+                    organization_id: None,
+                    agent_id: None,
+                    agent_name: None,
+                    agent_identifier: None,
+                    agent_token: "test-token".to_string(),
+                };
+                let host = format!("api.github.com:{}", upstream.port());
+                forward_request(
+                    req,
+                    &host,
+                    &host,
+                    "http",
+                    reqwest::Client::builder()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .resolve("api.github.com", upstream)
+                        .build()
+                        .expect("client"),
+                    &rules(),
+                    &*cache,
+                    &proxy_ctx,
+                    &approvals,
+                    &engine,
+                )
+                .await
+            });
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(io, service)
+                .await;
+        });
+        gateway_addr
+    }
+
+    #[tokio::test]
+    async fn github_sso_refusal_becomes_org_access_guidance() {
+        pin_test_header_timeout();
+        let upstream = github_upstream(
+            403,
+            "x-github-sso: required; url=https://github.com/orgs/acme/sso?authorization_request=AAZ\r\n",
+            r#"{"message":"Resource protected by organization SAML enforcement."}"#,
+        );
+        let gateway = github_gateway(upstream, github_oauth_rules).await;
+        let response = reqwest::Client::new()
+            .get(format!("http://{gateway}/repos/acme/api/pulls/1"))
+            .send()
+            .await
+            .expect("gateway responded");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-should-retry")
+                .map(|v| v.to_str().unwrap()),
+            Some("false")
+        );
+        let json: serde_json::Value = response.json().await.expect("json body");
+        assert_eq!(json["error"], "github_org_access_required");
+        assert_eq!(json["org"], "acme");
+        assert_eq!(json["reason"], "sso_required");
+        let url = json["connect_url"].as_str().expect("connect_url");
+        assert!(
+            url.ends_with("/w/ws_1/connections/apps/github?org_access=acme"),
+            "{url}"
+        );
+        // GitHub's own (per-call) SSO link never reaches the agent.
+        assert!(!json.to_string().contains("authorization_request"));
+    }
+
+    #[tokio::test]
+    async fn github_app_restriction_refusal_becomes_org_access_guidance() {
+        pin_test_header_timeout();
+        let upstream = github_upstream(403, "", RESTRICTED_BODY);
+        let gateway = github_gateway(upstream, github_oauth_rules).await;
+        let json: serde_json::Value = reqwest::Client::new()
+            .get(format!("http://{gateway}/repos/acme-labs/api"))
+            .send()
+            .await
+            .expect("gateway responded")
+            .json()
+            .await
+            .expect("json body");
+        assert_eq!(json["error"], "github_org_access_required");
+        assert_eq!(json["org"], "acme-labs", "lowercased");
+        assert_eq!(json["reason"], "approval_required");
+    }
+
+    /// The client accepted gzip (as curl --compressed, Node fetch, Python
+    /// requests and Go all do), so GitHub gzipped its refusal: it is still
+    /// read, and the agent gets the plain-JSON guidance.
+    #[tokio::test]
+    async fn gzipped_restriction_refusal_becomes_org_access_guidance() {
+        use std::io::Write;
+
+        pin_test_header_timeout();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(RESTRICTED_BODY.as_bytes()).expect("gzip");
+        let upstream = github_upstream(
+            403,
+            "content-encoding: gzip\r\n",
+            gz.finish().expect("gzip"),
+        );
+        let gateway = github_gateway(upstream, github_oauth_rules).await;
+        let response = reqwest::Client::new()
+            .get(format!("http://{gateway}/repos/acme-labs/api"))
+            .header("accept-encoding", "gzip")
+            .send()
+            .await
+            .expect("gateway responded");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            response.headers().get("content-encoding").is_none(),
+            "the guidance is the gateway's own body, never labelled gzip"
+        );
+        let json: serde_json::Value = response.json().await.expect("json body");
+        assert_eq!(json["error"], "github_org_access_required");
+        assert_eq!(json["org"], "acme-labs");
+    }
+
+    /// Any other GitHub 403 (a permission or rate limit refusal) is buffered
+    /// for classification and then forwarded byte-for-byte.
+    #[tokio::test]
+    async fn other_github_403_is_forwarded_verbatim() {
+        pin_test_header_timeout();
+        let body = r#"{"message":"Must have admin rights to Repository."}"#;
+        let upstream = github_upstream(403, "", body);
+        let gateway = github_gateway(upstream, github_oauth_rules).await;
+        let response = reqwest::Client::new()
+            .get(format!("http://{gateway}/repos/acme/api/hooks"))
+            .send()
+            .await
+            .expect("gateway responded");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(response.headers().get("x-should-retry").is_none());
+        assert_eq!(response.text().await.expect("body"), body);
+    }
+
+    /// A 403 larger than the classification window is read only up to the
+    /// window, then streamed on: the client still gets every byte.
+    #[tokio::test]
+    async fn large_github_403_is_forwarded_intact() {
+        pin_test_header_timeout();
+        static BIG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let body: &'static str = BIG.get_or_init(|| {
+            format!(
+                r#"{{"message":"Forbidden","padding":"{}"}}"#,
+                "x".repeat(3 * super::super::github_org_access::BODY_LIMIT)
+            )
+        });
+        let upstream = github_upstream(403, "", body.as_bytes());
+        let gateway = github_gateway(upstream, github_oauth_rules).await;
+        let response = reqwest::Client::new()
+            .get(format!("http://{gateway}/repos/acme/api"))
+            .send()
+            .await
+            .expect("gateway responded");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.text().await.expect("body"), body);
+    }
+
+    /// Without the GitHub OAuth connection injecting (a GitHub App, a secret),
+    /// the SSO 403 is GitHub's to answer.
+    #[tokio::test]
+    async fn github_app_connection_403_is_not_rewritten() {
+        pin_test_header_timeout();
+        fn github_app_rules() -> ResolvedRules {
+            ResolvedRules {
+                winning_provider: Some("github-app".into()),
+                ..github_oauth_rules()
+            }
+        }
+        let body = r#"{"message":"Resource protected by organization SAML enforcement."}"#;
+        let upstream = github_upstream(
+            403,
+            "x-github-sso: required; url=https://github.com/orgs/acme/sso?x=1\r\n",
+            body,
+        );
+        let gateway = github_gateway(upstream, github_app_rules).await;
+        let response = reqwest::Client::new()
+            .get(format!("http://{gateway}/repos/acme/api"))
+            .send()
+            .await
+            .expect("gateway responded");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.text().await.expect("body"), body);
     }
 }

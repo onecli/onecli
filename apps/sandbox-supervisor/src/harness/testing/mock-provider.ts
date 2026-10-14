@@ -47,7 +47,19 @@ export interface ScriptedToolCall {
   tag?: string;
 }
 
-export type ScriptedResponse = ScriptedText | ScriptedToolCall;
+/**
+ * A reply whose connection DROPS mid-stream after `partial`: the transient
+ * transport fault a runtime answers by rolling the partial attempt back and
+ * replaying the request. Only the first response should be scripted this
+ * way; the replay is a fresh request the script routes as it likes.
+ */
+export interface ScriptedCut {
+  kind: "cut";
+  partial: string;
+  tag?: string;
+}
+
+export type ScriptedResponse = ScriptedText | ScriptedToolCall | ScriptedCut;
 
 /**
  * Per-request director for scenario tests. Receives the LAST user message
@@ -81,6 +93,10 @@ export interface MockProvider {
     /** The request's system/developer message text, joined — the only
      * ground truth for "what instruction doc did the model see THIS turn". */
     systemText: string;
+    /** The request's LAST user message, as the model saw it: the ground
+     * truth for what a steered message looked like once injected (its
+     * delivery-only frame included). */
+    lastUser: string;
   }[];
   close: () => Promise<void>;
 }
@@ -196,6 +212,15 @@ const serveScripted = (
     connection: "keep-alive",
   });
   res.write(rawChunk({ role: "assistant" }, null));
+  if (scripted.kind === "cut") {
+    // Stream the partial, then drop the socket with no finish and no
+    // [DONE]: to the runtime, a transport fault mid-response. The pause
+    // lets the partial reach the consumer first, so it is a real partial
+    // attempt to roll back, not an empty one.
+    res.write(rawChunk({ content: scripted.partial }, null));
+    setTimeout(() => res.socket?.destroy(), 300);
+    return;
+  }
   const finish = (reason: string) => {
     res.write(rawChunk({}, reason, true));
     res.write("data: [DONE]\n\n");
@@ -262,8 +287,9 @@ export const startMockProvider = (options: {
         const swarmToolDescription = swarmToolDescriptionOf(body);
         const toolNames = toolNamesOf(body);
         const systemText = systemTextOf(body);
+        const lastUser = lastUserContent(body);
         const scripted = options.script?.({
-          lastUser: lastUserContent(body),
+          lastUser,
           index: served++,
         });
         if (scripted) {
@@ -273,6 +299,7 @@ export const startMockProvider = (options: {
             tag: scripted.tag,
             toolNames,
             systemText,
+            lastUser,
             ...(swarmToolDescription !== undefined && {
               swarmToolDescription,
             }),
@@ -280,12 +307,13 @@ export const startMockProvider = (options: {
           serveScripted(res, scripted);
           return;
         }
-        const long = lastUserContent(body).includes(LONG_RUN_MARKER);
+        const long = lastUser.includes(LONG_RUN_MARKER);
         requests.push({
           at: Date.now(),
           kind: long ? "long" : "quick",
           toolNames,
           systemText,
+          lastUser,
           ...(swarmToolDescription !== undefined && { swarmToolDescription }),
         });
         res.writeHead(200, {

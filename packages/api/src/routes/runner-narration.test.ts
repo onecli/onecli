@@ -21,23 +21,26 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
  */
 
 const narrateTurnActivity = vi.fn();
+const markFollowUpRead = vi.fn();
 vi.mock("../services/channels/turn-receipt-service", () => ({
   narrateTurnActivity: (...args: unknown[]) => narrateTurnActivity(...args),
+  markFollowUpRead: (...args: unknown[]) => markFollowUpRead(...args),
   clearTurnReceipts: vi.fn(),
   attachTurnReceipt: vi.fn(),
-  moveTurnReceipt: vi.fn(),
+  attachFollowUpReceipt: vi.fn(),
   sweepStaleSessionReceipts: vi.fn(),
 }));
 
 import type { AgentEvent } from "@onecli/agent-protocol";
 
-import { pushTurnNarration } from "./runner";
+import { markJoinedFollowUpsRead, pushTurnNarration } from "./runner";
 
 const push = (events: unknown[]) =>
   pushTurnNarration("turn-1", events as AgentEvent[]);
 
 beforeEach(() => {
   narrateTurnActivity.mockReset();
+  markFollowUpRead.mockReset();
 });
 
 describe("which event becomes the task row", () => {
@@ -117,5 +120,29 @@ describe("when the narration must stay silent", () => {
   it("says NOTHING for an empty batch", () => {
     push([]);
     expect(narrateTurnActivity).not.toHaveBeenCalled();
+  });
+});
+
+describe("which event flips a follow-up's mark to read", () => {
+  const mark = (events: unknown[]) =>
+    markJoinedFollowUpsRead(events as AgentEvent[]);
+
+  it("marks every follow-up the batch confirmed joined, in order", () => {
+    mark([
+      { type: "text.delta", text: "Sure." },
+      { type: "message.joined", followUpId: "f1" },
+      { type: "tool.started", callId: "c1", name: "bash" },
+      { type: "message.joined", followUpId: "f2" },
+    ]);
+    expect(markFollowUpRead.mock.calls).toEqual([["f1"], ["f2"]]);
+  });
+
+  it("marks nothing when no join rode the batch", () => {
+    mark([
+      { type: "text.delta", text: "hi" },
+      { type: "tool.started", callId: "c1", name: "bash" },
+      { type: "turn.done" },
+    ]);
+    expect(markFollowUpRead).not.toHaveBeenCalled();
   });
 });

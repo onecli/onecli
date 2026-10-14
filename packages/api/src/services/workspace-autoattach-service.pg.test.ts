@@ -199,7 +199,7 @@ beforeEach(async () => {
 describe.skipIf(!PROOF_URL)(
   "workspace auto-attach over real PostgreSQL",
   () => {
-    it("a new connection is on for every agent of the workspace, as full access", async () => {
+    it("a new connection is on for every agent of the workspace, as the default attach", async () => {
       await makeAgent(AGENT_1);
       await makeAgent(AGENT_2);
       await makeConnection();
@@ -211,8 +211,8 @@ describe.skipIf(!PROOF_URL)(
       );
 
       expect(agentsIn(written.connections)).toEqual([AGENT_1, AGENT_2].sort());
-      expect(await connectionsOf(AGENT_1)).toEqual([`${CONNECTION}:full`]);
-      expect(await connectionsOf(AGENT_2)).toEqual([`${CONNECTION}:full`]);
+      expect(await connectionsOf(AGENT_1)).toEqual([`${CONNECTION}:custom`]);
+      expect(await connectionsOf(AGENT_2)).toEqual([`${CONNECTION}:custom`]);
     });
 
     it("an agent in another workspace is never touched — planted control", async () => {
@@ -323,7 +323,7 @@ describe.skipIf(!PROOF_URL)(
         connections: [{ agentId: AGENT_1, connectionId: CONNECTION }],
         secrets: [{ agentId: AGENT_1, secretId: custom.id }],
       });
-      expect(await connectionsOf(AGENT_1)).toEqual([`${CONNECTION}:full`]);
+      expect(await connectionsOf(AGENT_1)).toEqual([`${CONNECTION}:custom`]);
       expect(await secretsOf(AGENT_1)).toEqual([custom.id]);
     });
 
@@ -394,7 +394,7 @@ describe.skipIf(!PROOF_URL)(
       // Only the agent with no stack was written.
       expect(agentsIn(written.connections)).toEqual([AGENT_2]);
       expect(await connectionsOf(AGENT_1)).toEqual([`${CONNECTION}:custom`]);
-      expect(await connectionsOf(AGENT_2)).toEqual([`${CONNECTION}:full`]);
+      expect(await connectionsOf(AGENT_2)).toEqual([`${CONNECTION}:custom`]);
     });
 
     it("ONE published generation however many (agent, resource) pairs", async () => {

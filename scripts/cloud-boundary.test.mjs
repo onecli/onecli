@@ -90,11 +90,16 @@ test(
  * whole synced tree for false positives when it was added.
  *
  * Plain Kubernetes vocabulary (kubelet, PVC, ServiceAccount, ResourceQuota,
- * EKS as a platform name, Kata as a RuntimeClass, an ALB/NLB fronting the
+ * EKS as a platform name, Kata as a RuntimeClass, an ALB fronting the
  * chart's Gateway) is NOT in this list: the synced Helm chart and the
  * runner's kubernetes backend describe a self-hoster's own cluster in those
  * words. What stays cloud-only is the cloud's own machinery (the sandbox
  * platform, its stacks, its AWS services).
+ *
+ * The NLB, its IP-target registration, "on dev" notes and the private
+ * tracker's issue numbers ARE listed: no synced file needs them (the chart
+ * fronts its Gateway with an ALB), so a hit is always a hosted deployment's
+ * own detail, its dev environment, or an issue the public mirror cannot open.
  */
 const CLOUD_IMPLEMENTATION_TERMS = [
   /\bmicro-?vms?\b/i,
@@ -124,6 +129,10 @@ const CLOUD_IMPLEMENTATION_TERMS = [
   /\bdeploy(-infra|-sandbox-platform|-analytics)?\.yml\b/,
   /\bdev live gate\b/i,
   /\bobserved on dev\b/i,
+  /\bnlb\b/i,
+  /\bip-target registration\b/i,
+  /\b(found|seen) (live )?on dev\b|\b(after boot|ran) on dev\b|\bdev ran on\b|\bon dev:/i,
+  /#1300\b/,
 ];
 
 /** Synced files whose prose may name these terms by design. */
@@ -303,12 +312,14 @@ test(
     // comment is found, the same term inside a string literal is not.
     const rows = await commentsOf(
       "x.ts",
-      'const a = "fargate";\n// boots under Fargate\nconst b = `sandbox-manager ${a}`;\n',
+      'const a = "fargate";\n// boots under Fargate\nconst b = `sandbox-manager ${a}`;\n' +
+        'const c = "behind the NLB";\n// Found live on dev: behind the NLB\n',
     );
     const flagged = rows.filter(({ text }) =>
       CLOUD_IMPLEMENTATION_TERMS.some((re) => re.test(text)),
     );
-    assert.equal(flagged.length, 1);
+    assert.equal(flagged.length, 2);
     assert.equal(flagged[0].line, 2);
+    assert.equal(flagged[1].line, 5);
   },
 );

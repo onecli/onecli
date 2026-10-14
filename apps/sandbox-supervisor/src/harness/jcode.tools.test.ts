@@ -61,6 +61,26 @@ describe("the managed config's update opt-out", () => {
   });
 });
 
+describe("the managed config's context cap", () => {
+  it("caps the compaction budget at 200k tokens", () => {
+    // MUTATION-PROOF: drop the section or the key and this fails. Without it
+    // a 1M-window model compacts at 80% of its window (~800k), so a long
+    // conversation re-sends that much on every request.
+    expect(managedConfigToml).toMatch(
+      /\[compaction\]\nmax_context_tokens = 200000\n/,
+    );
+  });
+
+  it("pins the one-hour Anthropic prompt cache under [provider]", () => {
+    // Upstream's default today; pinned so a default flip cannot quietly
+    // drop the cache to 5 minutes. MUTATION-PROOF: remove the key, or move
+    // it out of [provider], and this fails. Order within the section is free.
+    expect(managedConfigToml).toMatch(
+      /\[provider\]\n(?:[^[\n][^\n]*\n)*anthropic_cache_ttl_1h = true\n/,
+    );
+  });
+});
+
 describe("the managed config's sponsor opt-out", () => {
   it("opts out of integration discovery", () => {
     expect(managedConfigToml).toMatch(/\[sponsors\]\nenabled = false/);

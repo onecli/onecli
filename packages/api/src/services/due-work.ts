@@ -1,5 +1,8 @@
 import { db, Prisma } from "@onecli/db";
-import { runnerCapabilitiesSchema } from "@onecli/agent-protocol";
+import {
+  ceilingWarningSteerId,
+  runnerCapabilitiesSchema,
+} from "@onecli/agent-protocol";
 import {
   MAX_HELD_AWAKE_SANDBOXES,
   SANDBOX_IDLE_STOP_SECONDS,
@@ -13,9 +16,11 @@ import {
   AGENT_NEVER_STARTED_MESSAGE,
   AUTOMATION_SOURCES,
   FOLLOW_UP_EXPIRED_MESSAGE,
+  STEERED_FOLLOW_UP_CONTEXT,
   TURN_CEILING_WARNING_MESSAGE,
   TURN_STALLED_MESSAGE,
   TURN_TIME_LIMIT_MESSAGE,
+  isAutomationSource,
 } from "../validations/conversation";
 import { logger } from "../lib/logger";
 
@@ -199,6 +204,13 @@ export interface DueTurnMessage {
   conversationId: string;
   sandboxId: string;
   message: string;
+  /**
+   * Delivery-only frame the supervisor prepends at the harness boundary
+   * (`STEERED_FOLLOW_UP_CONTEXT`): set for a follow-up someone sent (a
+   * person, a peer agent), absent for an automation's and for the platform's
+   * own ceiling warning, whose messages carry their own header.
+   */
+  context?: string;
 }
 
 /** A RUNNING sandbox whose home projection is behind desired (step 9). */
@@ -210,12 +222,25 @@ export interface DueHomeSync {
   generation: number;
 }
 
+/** SEND NOW: a delivered follow-up the person asked the run
+ * to read now. */
+export interface DueTurnSendNow {
+  kind: "turn.send_now";
+  /** The waiting follow-up row's own id. */
+  turnId: string;
+  /** The running turn it was delivered into. */
+  targetTurnId: string;
+  conversationId: string;
+  sandboxId: string;
+}
+
 export type DueWork =
   | DueStart
   | DueStop
   | DueTurn
   | DueTurnAbort
   | DueTurnMessage
+  | DueTurnSendNow
   | DueHomeSync;
 
 interface ClaimedRow {
@@ -270,12 +295,22 @@ interface SteerRow {
   /** From a correlated subquery — typed honestly, filtered at the mapping. */
   sandbox_id: string | null;
   message: string;
+  /** Who wrote it: a sender's follow-up is framed, an automation's is not. */
+  source: string;
 }
 
 interface SyncRow {
   id: string;
   agent_id: string;
   home_desired_generation: number;
+}
+
+interface SendNowRow {
+  id: string;
+  conversation_id: string;
+  follow_up_of_turn_id: string;
+  /** From a correlated subquery, typed honestly, filtered at the mapping. */
+  sandbox_id: string | null;
 }
 
 /**
@@ -663,7 +698,8 @@ export const claimDueWork = async (
         (SELECT s.id FROM conversations c
            JOIN sandboxes s ON s.agent_id = c.agent_id
           WHERE c.id = f.conversation_id) AS sandbox_id,
-        f.message
+        f.message,
+        f.source
     `;
 
     // Home syncs (step 9), BEFORE turns on purpose: the composed items
@@ -783,6 +819,54 @@ export const claimDueWork = async (
         COALESCE(t.retried_at, t.promoted_at, t.created_at) AS waited_since
     `;
 
+    // SEND NOW: a waiting follow-up the person asked the run
+    // to read now. One-shot like the abort arm: the flag is cleared in the
+    // same statement that hands it over. Four predicates carry the design:
+    //
+    // - `steer_delivered_at IS NOT NULL` - the follow-up must already be IN
+    //   the run's queue, or there is nothing for moving the tool to let in.
+    //   A request made before delivery just waits here; the steer arm above
+    //   stamps delivery in this same transaction, so a follow-up claimed for
+    //   delivery in this poll is eligible here too, and the composition
+    //   below emits it AFTER its `turn.message` on the same ordered socket.
+    // - `f.status = 'joining'` - a row already read (`joined`), aborted or
+    //   promoted has nothing to wait for; its flag is simply never handed
+    //   over (and a promoted row's is inert: this arm is its only reader).
+    // - the target is RUNNING - a turn not started yet has no tool to move,
+    //   and a finished one is not reading anything.
+    // - the runner capability gate, for the same all-or-nothing parse
+    //   reason as the steer arm.
+    const sendNows = await tx.$queryRaw<SendNowRow[]>`
+      WITH claimed AS (
+        SELECT f.id
+        FROM turns f
+        JOIN turns target ON target.id = f.follow_up_of_turn_id
+        JOIN conversations c ON c.id = f.conversation_id
+        JOIN sandboxes s ON s.agent_id = c.agent_id
+        JOIN runners r ON r.id = s.runner_id
+        WHERE s.runner_id = ${runnerId}
+          AND s.status = 'running'
+          AND f.send_now_requested = true
+          AND f.status = 'joining'
+          AND f.steer_delivered_at IS NOT NULL
+          AND target.status = 'running'
+          AND (r.capabilities->>'sendNow')::boolean IS TRUE
+        ORDER BY f.created_at ASC
+        LIMIT ${TURN_LIMIT}
+        FOR UPDATE OF f SKIP LOCKED
+      )
+      UPDATE turns f SET send_now_requested = false, updated_at = now()
+      FROM claimed cl
+      WHERE f.id = cl.id
+      RETURNING
+        f.id,
+        f.conversation_id,
+        f.follow_up_of_turn_id,
+        (SELECT s.id FROM conversations c
+           JOIN sandboxes s ON s.agent_id = c.agent_id
+          WHERE c.id = f.conversation_id) AS sandbox_id
+    `;
+
     return [
       ...starts.map(
         (row): DueStart => ({
@@ -842,7 +926,10 @@ export const claimDueWork = async (
       ),
       // Steers LAST, after the turn arm: within one composed batch the
       // runner executes serially, so a same-poll deliver+steer pair reaches
-      // the supervisor in deliver-first order.
+      // the supervisor in deliver-first order. A sender's words (a person,
+      // a peer agent) get the "new message" frame; an automation's follow-up
+      // (a wake joining a running watch turn) already says what it is in
+      // its own header.
       ...steers.flatMap((row): DueTurnMessage[] =>
         row.sandbox_id
           ? [
@@ -853,6 +940,9 @@ export const claimDueWork = async (
                 conversationId: row.conversation_id,
                 sandboxId: row.sandbox_id,
                 message: row.message,
+                ...(!isAutomationSource(row.source) && {
+                  context: STEERED_FOLLOW_UP_CONTEXT,
+                }),
               },
             ]
           : [],
@@ -865,11 +955,26 @@ export const claimDueWork = async (
           ? [
               {
                 kind: "turn.message",
-                turnId: `ceiling-warning:${row.id}`,
+                turnId: ceilingWarningSteerId(row.id),
                 targetTurnId: row.id,
                 conversationId: row.conversation_id,
                 sandboxId: row.sandbox_id,
                 message: TURN_CEILING_WARNING_MESSAGE,
+              },
+            ]
+          : [],
+      ),
+      // Send nows LAST of all: a follow-up delivered in this very poll must
+      // reach the supervisor before the request to read it now does.
+      ...sendNows.flatMap((row): DueTurnSendNow[] =>
+        row.sandbox_id
+          ? [
+              {
+                kind: "turn.send_now",
+                turnId: row.id,
+                targetTurnId: row.follow_up_of_turn_id,
+                conversationId: row.conversation_id,
+                sandboxId: row.sandbox_id,
               },
             ]
           : [],
@@ -1212,6 +1317,122 @@ export const completeClaimedCron = async (
       disabledReason: "completed",
       lastFiredAt: new Date(),
     },
+  });
+  return count > 0;
+};
+
+// ── Eval schedules ───────────────────────────────────────────────────────────
+// The agent's eval schedule (eval-schedule-service.ts), claimed with the same
+// CTE + lease law as the crons above: claiming stamps `next_fire_at = lease`,
+// so concurrent pollers skip the row, and a poller that dies mid-fire only
+// delays that fire by the lease. Firing lives in eval-schedule-fire-service.
+
+/** Eval schedules fired per poll. A fire admits one run (a few writes) and
+ * the run itself proceeds in the background worker. */
+const EVAL_SCHEDULE_FIRE_LIMIT = 10;
+const EVAL_SCHEDULE_LEASE_SECONDS = 300;
+
+export interface DueEvalSchedule {
+  id: string;
+  agentId: string;
+  workspaceId: string;
+  organizationId: string;
+  schedule: string;
+  timezone: string;
+  createdByUserId: string | null;
+}
+
+interface DueEvalScheduleRow {
+  id: string;
+  agent_id: string;
+  workspace_id: string;
+  organization_id: string;
+  schedule: string;
+  timezone: string;
+  created_by_user_id: string | null;
+}
+
+export const claimDueEvalSchedules = async (): Promise<{
+  lease: Date;
+  schedules: DueEvalSchedule[];
+}> => {
+  const now = new Date();
+  const lease = new Date(Date.now() + EVAL_SCHEDULE_LEASE_SECONDS * 1000);
+  const rows = await db.$queryRaw<DueEvalScheduleRow[]>`
+    WITH claimed AS (
+      SELECT es.id
+      FROM agent_eval_schedules es
+      WHERE es.enabled = true
+        AND es.next_fire_at <= ${now}
+      ORDER BY es.next_fire_at ASC
+      LIMIT ${EVAL_SCHEDULE_FIRE_LIMIT}
+      FOR UPDATE OF es SKIP LOCKED
+    )
+    UPDATE agent_eval_schedules es
+    SET next_fire_at = ${lease}, updated_at = now()
+    FROM claimed cl, agents a, workspaces w
+    WHERE es.id = cl.id
+      AND a.id = es.agent_id
+      AND w.id = a.workspace_id
+    RETURNING
+      es.id,
+      es.agent_id,
+      a.workspace_id,
+      w.organization_id,
+      es.schedule,
+      es.timezone,
+      es.created_by_user_id
+  `;
+  return {
+    lease,
+    schedules: rows.map((row) => ({
+      id: row.id,
+      agentId: row.agent_id,
+      workspaceId: row.workspace_id,
+      organizationId: row.organization_id,
+      schedule: row.schedule,
+      timezone: row.timezone,
+      createdByUserId: row.created_by_user_id,
+    })),
+  };
+};
+
+/**
+ * Move a claimed eval schedule from its lease to the real next occurrence
+ * (or retire it when there is none), only if the lease is still ours. A
+ * human save mid-claim recomputed `next_fire_at`, and this fire is skipped.
+ */
+export const advanceClaimedEvalSchedule = async (
+  scheduleId: string,
+  expectedLease: Date,
+  nextFireAt: Date | null,
+): Promise<boolean> => {
+  const { count } = await db.agentEvalSchedule.updateMany({
+    where: { id: scheduleId, nextFireAt: expectedLease },
+    data: nextFireAt
+      ? { nextFireAt, lastFiredAt: new Date() }
+      : {
+          enabled: false,
+          disabledReason: "completed",
+          lastFiredAt: new Date(),
+        },
+  });
+  return count > 0;
+};
+
+/**
+ * Turn a claimed eval schedule off because its creator can no longer run it,
+ * only if the lease is still ours: a save mid-claim (often a colleague taking
+ * it over, which the paused message asks for) re-enabled it under a new
+ * creator, and that save wins.
+ */
+export const disableClaimedEvalSchedule = async (
+  scheduleId: string,
+  expectedLease: Date,
+): Promise<boolean> => {
+  const { count } = await db.agentEvalSchedule.updateMany({
+    where: { id: scheduleId, nextFireAt: expectedLease },
+    data: { enabled: false, disabledReason: "authorization" },
   });
   return count > 0;
 };

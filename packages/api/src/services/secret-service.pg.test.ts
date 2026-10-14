@@ -42,12 +42,16 @@ const reset = async () => {
   await db.organization.deleteMany({ where: { id: { startsWith: P } } });
 };
 
-/** An LLM key (or, with type "generic", a plain secret) in THE workspace. */
+/** An LLM key (or, with type "generic", a plain secret) in THE workspace.
+ * Dated well before any log row the tests write: key health ignores failures
+ * logged before the key's last write (they may be a predecessor's), so a key
+ * must predate the traffic it is judged by. */
 const secretRow = (
   id: string,
   type: string,
   hostPattern: string,
   scope: "workspace" | "organization" = "workspace",
+  updatedAt: Date = new Date(Date.now() - 30 * DAY),
 ) =>
   db.secret.create({
     data: {
@@ -59,6 +63,8 @@ const secretRow = (
       type,
       hostPattern,
       encryptedValue: "opaque",
+      createdAt: updatedAt,
+      updatedAt,
     },
   });
 
@@ -67,7 +73,7 @@ const logRow = (
   host: string,
   status: number,
   createdAt: Date,
-  opts: { workspaceId?: string; injectionCount?: number } = {},
+  opts: { workspaceId?: string; injectionCount?: number; path?: string } = {},
 ) =>
   db.requestLog.create({
     data: {
@@ -75,7 +81,7 @@ const logRow = (
       agentId: `${P}agent`,
       method: "POST",
       host,
-      path: "/v1/messages",
+      path: opts.path ?? "/v1/messages",
       provider: "custom",
       status,
       latencyMs: 12,
@@ -120,6 +126,49 @@ describe.skipIf(!PROOF_URL)(
 
       const rows = await listForWorkspace();
       expect(rows.get(`${P}s1`)?.lastError).toEqual({ status: 401, at });
+    });
+
+    it("a key added after the host's last failure starts clean", async () => {
+      // The 401 belongs to whatever key served this host before; this key's
+      // value was saved afterwards and has not failed.
+      await logRow("fresh.api.test", 401, new Date(Date.now() - 2 * HOUR));
+      await secretRow(
+        `${P}fresh`,
+        "anthropic",
+        "fresh.api.test",
+        "workspace",
+        new Date(Date.now() - 1 * HOUR),
+      );
+
+      const rows = await listForWorkspace();
+      expect(rows.get(`${P}fresh`)?.lastError).toBeNull();
+    });
+
+    it("ignores side endpoints a runtime polls with a good key", async () => {
+      // Claude Code polls /api/oauth/usage at boot; Anthropic answers 403 for
+      // working keys. A later usage 403 must not hide the last real call.
+      const ok = new Date(Date.now() - 2 * HOUR);
+      await secretRow(`${P}side`, "anthropic", "side.api.test");
+      await logRow("side.api.test", 200, ok);
+      await logRow("side.api.test", 403, new Date(Date.now() - 1 * HOUR), {
+        path: "/api/oauth/usage",
+      });
+
+      const rows = await listForWorkspace();
+      expect(rows.get(`${P}side`)?.lastError).toBeNull();
+    });
+
+    it("brands an OAuth-mode OpenAI key on its Codex inference path", async () => {
+      // Codex signed in with ChatGPT calls chatgpt.com/backend-api/codex/…,
+      // not /v1/…; a 401 there is the key's own failure and must still show.
+      const at = new Date(Date.now() - 1 * HOUR);
+      await secretRow(`${P}codex`, "openai", "codex.chat.test");
+      await logRow("codex.chat.test:443", 401, at, {
+        path: "/backend-api/codex/responses",
+      });
+
+      const rows = await listForWorkspace();
+      expect(rows.get(`${P}codex`)?.lastError).toEqual({ status: 401, at });
     });
 
     it.each([402, 403, 429])(

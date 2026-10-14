@@ -22,10 +22,21 @@ export const QuestionRow = ({
     <div className="min-w-0 flex-1 space-y-1.5">
       <p className="text-sm break-words">{question.question}</p>
       <div className="text-muted-foreground flex flex-wrap items-center gap-1.5 text-xs">
-        <span>Expected</span>
-        <code className="text-foreground font-mono break-all">
-          {question.expected}
-        </code>
+        {question.kind === "custom" ? (
+          <>
+            <span>Criteria</span>
+            <span className="text-foreground line-clamp-1 max-w-full min-w-0 break-all">
+              {question.expected}
+            </span>
+          </>
+        ) : (
+          <>
+            <span>Expected</span>
+            <code className="text-foreground font-mono break-all">
+              {question.expected}
+            </code>
+          </>
+        )}
         <Badge variant="outline" className="text-[11px]">
           {CHECK_LABEL[question.kind]}
         </Badge>

@@ -105,6 +105,7 @@ describe("resolveAppCredentials — workspace → org → env", () => {
         values: { clientId: "p-id", clientSecret: "p-secret" },
         source: "app_config",
         appConfigId: "proj-cfg",
+        configKey: "testapp",
       });
     });
 

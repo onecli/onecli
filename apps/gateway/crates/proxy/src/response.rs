@@ -548,6 +548,43 @@ pub fn connection_needs_reconnect_axum(
     ))
 }
 
+/// The dashboard link for a GitHub organization's access steps: the GitHub
+/// app page, naming the organization (`org_access=<org>`) so the account card
+/// can highlight it and the chat can render its own card.
+fn github_org_access_url(org: &str, workspace_id: Option<&str>) -> String {
+    scoped_url(
+        dashboard_url(),
+        &format!(
+            "/connections/apps/{}?org_access={}",
+            crate::github_org_access::GITHUB_OAUTH_PROVIDER,
+            utf8_percent_encode(org, NON_ALPHANUMERIC)
+        ),
+        workspace_id,
+    )
+}
+
+/// 403: a GitHub organization refused the connection's token (not approved,
+/// or not authorized for its SSO). Replaces GitHub's own body, whose SSO link
+/// changes on every call and reads as "retry with this link". Non-retryable:
+/// only the user and the organization's owners can change the outcome.
+pub fn github_org_access_required<S>(
+    refusal: &crate::github_org_access::OrgRefusal,
+    workspace_id: Option<&str>,
+) -> Response<ForwardBody<S>> {
+    let connect_url = github_org_access_url(&refusal.org, workspace_id);
+    with_no_retry(json_error(
+        StatusCode::FORBIDDEN,
+        serde_json::json!({
+            "error": crate::github_org_access::ERROR_CODE,
+            "message": crate::github_org_access::message(refusal, &connect_url),
+            "provider": crate::github_org_access::GITHUB_OAUTH_PROVIDER,
+            "org": refusal.org,
+            "reason": refusal.reason.as_str(),
+            "connect_url": connect_url,
+        }),
+    ))
+}
+
 /// 502 Bad Gateway — rule resolution failed mid-session.
 pub fn resolution_failed<S>() -> Response<ForwardBody<S>> {
     json_error(
@@ -673,6 +710,37 @@ pub fn gateway_restarting<S>(approval_id: &str) -> Response<ForwardBody<S>> {
     resp.headers_mut()
         .insert("retry-after", HeaderValue::from_static("1"));
     resp
+}
+
+/// 403 Forbidden: the request asks the upstream to run a different method
+/// than its request line (`crate::method_override`). Explains why and what to
+/// do instead, so an agent resends with the real method rather than retrying
+/// the same request or hunting for another spelling.
+pub fn method_override_refused<S>(
+    method: &str,
+    path: &str,
+    found: &super::method_override::Mismatch,
+) -> Response<ForwardBody<S>> {
+    let super::method_override::Mismatch { via, named } = found;
+    with_no_retry(json_error(
+        StatusCode::FORBIDDEN,
+        serde_json::json!({
+            "error": "method_override_refused",
+            "message": format!(
+                "OneCLI refused {method} {path}: {via} asks the service to run it as \
+                 \"{named}\" instead of {method}. Services differ on whether they honor \
+                 a method override, so OneCLI can't tell which one would run and never \
+                 forwards a request that could be judged as one method and run as \
+                 another. Send it again using the method you mean as the HTTP method \
+                 itself (for example a real DELETE or PATCH request) and without the \
+                 override. If your HTTP client can only send GET and POST, use one that \
+                 supports the method."
+            ),
+            "method": method,
+            "path": path,
+            "override": named,
+        }),
+    ))
 }
 
 /// 403 Forbidden — request blocked by a policy rule.

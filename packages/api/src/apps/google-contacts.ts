@@ -67,5 +67,6 @@ export const googleContacts: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
   },
 };

@@ -11,7 +11,6 @@ import {
 import { channelProvider } from "./registry";
 import type { ChannelProviderId } from "./types";
 import { logger } from "../../lib/logger";
-import { dashboardUrl } from "../../lib/dashboard-url";
 
 const log = logger.child({ component: "agent-reach" });
 
@@ -155,54 +154,33 @@ export const resolvePersonReach = (input: {
   resolveReach({ ...input, subjectKind: "external_user" });
 
 /**
- * The waiting line a channel hears while its grant is unsettled.
+ * The waiting line a channel or person hears while its grant is unsettled.
  *
  * Composed here (not in the ingestion door) because only this module knows
  * who the deciders are: it names the workspace owner so the room knows WHO
- * to nudge instead of hearing an ownerless "someone must approve", and
- * carries the ready dashboard link so that person can settle it without
- * hunting. Both parts degrade gracefully - an unnamed owner or an
- * unconfigured origin just drops that clause rather than failing the turn.
+ * to nudge instead of hearing an ownerless "someone must approve". One
+ * short sentence on purpose: the people reading it cannot act on it, and
+ * the owner already has the card (and the agent's Contacts page).
  */
-export const pendingReachMessage = async (input: {
-  agentId: string;
-  workspaceId: string;
-}): Promise<string> => {
-  const [owner, agent] = await Promise.all([
-    db.workspaceAccess.findFirst({
-      where: {
-        workspaceId: input.workspaceId,
-        role: "owner",
-        userId: { not: null },
-      },
-      // NAME ONLY, never the email. This sentence is posted into a channel
-      // that by definition may contain people outside the workspace (that
-      // is the whole question being asked), so the owner's email address
-      // must not ride along - an unnamed owner degrades to the generic
-      // phrase instead of escalating to a contact detail.
-      select: { user: { select: { name: true } } },
-      orderBy: { createdAt: "asc" },
-    }),
-    db.agent.findUnique({
-      where: { id: input.agentId },
-      select: { name: true },
-    }),
-  ]);
-  const ownerName = owner?.user?.name?.trim();
-  const who = ownerName
-    ? `${ownerName} (this workspace's owner)`
-    : "the workspace owner";
-  const link = dashboardUrl(`/agents/${input.agentId}/channels`, {
-    workspaceId: input.workspaceId,
+export const pendingReachMessage = async (
+  workspaceId: string,
+): Promise<string> => {
+  const owner = await db.workspaceAccess.findFirst({
+    where: {
+      workspaceId,
+      role: "owner",
+      userId: { not: null },
+    },
+    // NAME ONLY, never the email. This sentence is posted into a channel
+    // that by definition may contain people outside the workspace (that
+    // is the whole question being asked), so the owner's email address
+    // must not ride along - an unnamed owner degrades to the generic
+    // phrase instead of escalating to a contact detail.
+    select: { user: { select: { name: true } } },
+    orderBy: { createdAt: "asc" },
   });
-  const me = agent?.name?.trim() || "this agent";
-  return (
-    `I can't answer here yet - ${who} needs to approve me for this channel first.` +
-    ` I've sent them the request.\n` +
-    `They can decide here: ${link}` +
-    ` (choose whether ${me} answers everyone in this channel, only OneCLI` +
-    ` teammates, or no one).`
-  );
+  const ownerName = owner?.user?.name?.trim();
+  return `I can't reply here yet. I've asked ${ownerName || "the workspace owner"} to approve me.`;
 };
 
 /**
@@ -369,6 +347,37 @@ export const dmReachableOwners = async (
  * cadence. Never throws into the ingest path.
  */
 export const postReachCards = async (grantId: string): Promise<void> => {
+  // ONE poster per grant at a time. The ingest door and the retry sweep can
+  // both reach a freshly created grant within milliseconds; each read
+  // `cardRefs: []`, each posted, and only the later write survived - so one
+  // owner got two identical cards and a decision rewrote only one of them.
+  //
+  // A TRY lock, held by a transaction that does nothing else: a poster that
+  // finds the grant busy skips (whoever holds it posts what is owed, and
+  // the sweep re-checks on its next pass), so a stuck Slack call never
+  // stacks waiting transactions or pool connections behind it. The refs are
+  // written outside that transaction, after each post, so a crash mid-loop
+  // can never roll back a card that is already on someone's screen.
+  try {
+    await db.$transaction(
+      async (tx) => {
+        const [claim] = await tx.$queryRaw<
+          { locked: boolean }[]
+        >`SELECT pg_try_advisory_xact_lock(hashtextextended(${`reach-cards:${grantId}`}, 0)) AS locked`;
+        if (claim?.locked) await postOwedReachCards(grantId);
+      },
+      { timeout: REACH_CARD_POST_BUDGET_MS },
+    );
+  } catch (err) {
+    log.warn({ grantId, err: String(err) }, "reach card posting failed");
+  }
+};
+
+/** How long one grant's posting pass may hold its lock: a post or two per
+ * owner, each bounded by the provider's own call timeout. */
+const REACH_CARD_POST_BUDGET_MS = 60_000;
+
+const postOwedReachCards = async (grantId: string): Promise<void> => {
   const grant = await db.agentReachGrant.findUnique({
     where: { id: grantId },
     select: {

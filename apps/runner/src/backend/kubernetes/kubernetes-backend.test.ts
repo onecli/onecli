@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ANNOTATION_PAYLOAD,
+  LABEL_RESUMABLE,
   LABEL_INSTALLATION,
   LABEL_MANAGED,
   LABEL_ROLE,
@@ -132,6 +133,7 @@ const spec: SandboxSpec = {
   homeRef: "onecli-home-sbx-1",
   limits: { memoryMb: 2048, cpus: 2, pids: 512 },
   payloadHash: "a".repeat(64),
+  resumable: true,
 };
 
 /** The Job body the backend posted, or throws. */
@@ -346,10 +348,20 @@ describe("createSandbox: the pod spec is the tenant boundary", () => {
       [LABEL_RUNNER]: "r-1",
       [LABEL_INSTALLATION]: "inst-abc",
       [LABEL_ROLE]: "sandbox",
+      [LABEL_RESUMABLE]: "1",
     });
     // The 64-char hash would overflow a label value: it rides an annotation.
     expect(job.metadata.annotations[ANNOTATION_PAYLOAD]).toBe("a".repeat(64));
     expect(postedSecret(calls).metadata.labels[LABEL_SANDBOX]).toBe("sbx-1");
+  });
+
+  it("omits the resumable label for a keyless spawn, so a keyed successor grants it no grace", async () => {
+    const { backend, calls } = makeBackend();
+    await backend.prepare();
+    await backend.createSandbox({ ...spec, resumable: false });
+    expect(postedJob(calls).metadata.labels).not.toHaveProperty(
+      LABEL_RESUMABLE,
+    );
   });
 
   it("adopts the stable runner id after identify()", async () => {
@@ -648,7 +660,11 @@ describe("lifecycle", () => {
         {
           metadata: {
             name: "onecli-sandbox-sbx-1-abc",
-            labels: { [LABEL_SANDBOX]: "sbx-1", [LABEL_RUNNER]: "r-1" },
+            labels: {
+              [LABEL_SANDBOX]: "sbx-1",
+              [LABEL_RUNNER]: "r-1",
+              [LABEL_RESUMABLE]: "1",
+            },
             annotations: { [ANNOTATION_PAYLOAD]: "h1" },
           },
         },
@@ -686,6 +702,7 @@ describe("lifecycle", () => {
         containerRef: "onecli-sandbox-sbx-1-abc",
         running: true,
         payloadHash: "h1",
+        resumable: true,
         phase: "Running",
       },
       {
@@ -693,6 +710,8 @@ describe("lifecycle", () => {
         containerRef: "onecli-sandbox-sbx-2-def",
         running: false,
         payloadHash: null,
+        // No label: a Job spawned before the mark, or keyless.
+        resumable: false,
         phase: "Failed",
       },
     ]);

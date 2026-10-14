@@ -39,6 +39,9 @@ import { log } from "../../log";
 export const LABEL_SANDBOX = "sh.onecli.sandbox-id";
 export const LABEL_RUNNER = "sh.onecli.runner-id";
 export const LABEL_PAYLOAD = "sh.onecli.payload-hash";
+/** "1" when the spawning runner handed out supervisor sessions; absent on
+ * containers spawned before the resumable channel or with the key off. */
+export const LABEL_RESUMABLE = "sh.onecli.resumable";
 export const LABEL_MANAGED = "sh.onecli.managed";
 /** Which installation created it — a hash of the runner token, so the orphan
  * sweep never touches a DIFFERENT install's objects on a shared daemon. */
@@ -351,6 +354,7 @@ export const createDockerBackend = (
               [LABEL_SANDBOX]: spec.sandboxId,
               [LABEL_RUNNER]: owner,
               [LABEL_PAYLOAD]: spec.payloadHash,
+              ...(spec.resumable && { [LABEL_RESUMABLE]: "1" }),
               [LABEL_INSTALLATION]: options.installationId,
             },
             HostConfig: {
@@ -490,6 +494,7 @@ export const createDockerBackend = (
             containerRef: container.Id,
             running: container.State === "running",
             payloadHash: container.Labels?.[LABEL_PAYLOAD] ?? null,
+            resumable: container.Labels?.[LABEL_RESUMABLE] === "1",
           },
         ];
       });

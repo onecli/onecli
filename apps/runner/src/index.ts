@@ -15,6 +15,7 @@ import { createKubernetesBackend } from "./backend/kubernetes/kubernetes-backend
 import type { SandboxBackend } from "./backend/types";
 import { createRunner } from "./runner";
 import { createRunnerWsServer } from "./ws/server";
+import { parseSessionKeyring } from "./ws/session";
 import { createSupervisorMessageHandler } from "./supervisor-messages";
 import { createTurnEventCollector } from "./turn-events";
 import { log } from "./log";
@@ -208,8 +209,21 @@ const main = async (): Promise<void> => {
   // (and so any process.state frame) can exist.
   let containerRefOf: (sandboxId: string) => string | undefined = () =>
     undefined;
+  // The resumable channel's keyring. Parsed HERE (not in loadConfig) so the
+  // config stays a plain record; a malformed value throws at boot like any
+  // other config error, never silently disabling resumption.
+  const keyring = parseSessionKeyring(config.sessionKey ?? undefined);
+  log("info", "supervisor session resumption", {
+    enabled: keyring !== null,
+  });
   const wsServer = createRunnerWsServer({
     port: config.wsPort,
+    ...(keyring && {
+      sessions: {
+        keyring,
+        containerRefOf: (sandboxId) => containerRefOf(sandboxId),
+      },
+    }),
     onMessage: createSupervisorMessageHandler({
       report,
       collector,

@@ -5,10 +5,11 @@ import { detectAnthropicAuthMode } from "@onecli/api/validations/secret";
 
 /**
  * Names the KIND of Anthropic credential pasted, in the words the hint uses:
- * a Claude Console API key (`sk-ant-api…`, metered API billing) or a
- * subscription token (`sk-ant-oat…`, what `claude setup-token` prints, billed
- * to the Claude plan). Anything else (an Admin key, a foreign key) gets no
- * badge; the inline warning explains it instead.
+ * a subscription token (`sk-ant-oat…`, what `claude setup-token` prints,
+ * billed to the Claude plan) or a Claude Console API key (any other
+ * `sk-ant-…` key, e.g. `sk-ant-api…` or `sk-ant-usr…`, metered API billing).
+ * An Admin key, a refresh token, or a foreign key gets no badge; the inline
+ * warning explains it instead.
  */
 export const AnthropicKeyBadge = ({ value }: { value: string }) => {
   const detected = detectAnthropicAuthMode(value);

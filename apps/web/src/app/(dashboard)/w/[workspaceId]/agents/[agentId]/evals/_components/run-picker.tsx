@@ -42,6 +42,9 @@ export const RunPicker = ({
               {index === 0 && (
                 <span className="text-muted-foreground"> · latest</span>
               )}
+              {run.trigger === "scheduled" && (
+                <span className="text-muted-foreground"> · scheduled</span>
+              )}
               {run.status === "failed" && (
                 <span className="text-destructive"> · stopped</span>
               )}

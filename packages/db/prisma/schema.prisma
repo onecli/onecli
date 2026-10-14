@@ -282,6 +282,11 @@ model Workspace {
   slug               String?
   createdByUserId    String?  @map("created_by_user_id")
   createdByUserEmail String?  @map("created_by_user_email")
+  // The IANA zone the workspace's hosted agents run in (their sandbox `TZ`,
+  // so a browser, a cron-less `date`, and a file timestamp all agree with the
+  // people using them). Null means the platform default. Changing it reaches
+  // a live sandbox the way a model change does: by replacing the container.
+  timezone           String?
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
 
@@ -322,6 +327,11 @@ model User {
   nameComponents        Json?     @map("name_components")
   externalAuthId        String    @unique @map("external_auth_id")
   countryCode           String?   @map("country_code")
+  /// Federated identity provider this user has signed in with (e.g. "Google"),
+  /// recorded from the session at login; null for a native email sign-in or an
+  /// edition that has none. Read by the cloud platform trial credit, which
+  /// trusts a Google-federated owner whatever the address (ee/platform_llm.rs).
+  signInProvider        String?   @map("sign_in_provider")
   country               String?   @map("country")
   lastLoginAt           DateTime? @map("last_login_at")
   onboardingCompletedAt DateTime? @map("onboarding_completed_at")
@@ -362,6 +372,7 @@ model User {
   createdChannelIntegrations    ChannelIntegration[]          @relation("ChannelIntegrationCreator")
   createdChannelInstallations   ChannelInstallation[]         @relation("ChannelInstallationCreator")
   createdAgentChannels          AgentChannel[]                @relation("AgentChannelCreator")
+  originatedSentMessages        ChannelSentMessage[]          @relation("SentMessageOriginUser")
   memoryRevisionsAuthored       AgentMemoryRevision[]         @relation("MemoryRevisionAuthor")
   memoryRedactions              AgentMemoryRevision[]         @relation("MemoryRevisionRedactor")
   skillsCreated                 Skill[]                       @relation("SkillCreator")
@@ -369,6 +380,7 @@ model User {
   watchesCreated                ProcessWatch[]                @relation("WatchCreator")
   peerTasksCreated              PeerTask[]                    @relation("PeerTaskCreator")
   evalRunsCreated               AgentEvalRun[]                @relation("EvalRunCreator")
+  evalSchedulesCreated          AgentEvalSchedule[]           @relation("EvalScheduleCreator")
   sessions                      Session[]
   accounts                      Account[]
   sshKeys                       UserSshKey[]
@@ -465,6 +477,7 @@ model Agent {
   channels             AgentChannel[]
   crons                AgentCron[]
   evalQuestions        AgentEvalQuestion[]
+  evalSchedule         AgentEvalSchedule?
   evalRuns             AgentEvalRun[]
   webhooks             AgentWebhook[]
   memories             AgentMemory[]
@@ -803,6 +816,7 @@ model Conversation {
   mentionAnchors  MentionAnchor[]
   actionApprovals ActionApproval[]
   cronsHere       AgentCron[]              @relation("CronOrigin")
+  sentHere        ChannelSentMessage[]     @relation("SentMessageOrigin")
   webhooksHere    AgentWebhook[]           @relation("WebhookOrigin")
   processesHere   SandboxProcess[]         @relation("ProcessOrigin")
   watchesHere     ProcessWatch[]           @relation("WatchOrigin")
@@ -896,6 +910,20 @@ model Turn {
   // Single-purpose clock (house law: never `updatedAt` — re-dispatch stamps
   // that), and absent from `turnSelect` like its siblings.
   lastProgressAt   DateTime? @map("last_progress_at")
+  // Stamped when a channel mirror CLAIMED this follow-up's reply for
+  // posting (compare-and-set from NULL, before the post): the reply to a
+  // mid-run message is posted the moment the agent has written it, while
+  // the turn still runs, and the turn's completion pass must then not post
+  // it again. Only ever set on a joined follow-up with a reply of its own.
+  // Single-purpose clock (house law: never `updatedAt`), and absent from
+  // `turnSelect`: a reader of the conversation never needs it.
+  replyPostedAt    DateTime? @map("reply_posted_at")
+  // SEND NOW: the person asked the agent to read this
+  // waiting follow-up NOW, instead of after the tool its run is waiting on.
+  // A one-shot request like `abortRequested`: the runner's claim arm
+  // hands it over once the follow-up was delivered to the live run, and
+  // clears it in the same statement. Only ever set on a `joining` row.
+  sendNowRequested Boolean   @default(false) @map("send_now_requested")
 
   startedAt  DateTime? @map("started_at")
   finishedAt DateTime? @map("finished_at")
@@ -1425,6 +1453,7 @@ model AgentChannel {
   ingestedEvents    ChannelIngestedEvent[]
   toolApprovalCards ToolApprovalCard[]
   turnReceipts      ChannelTurnReceipt[]
+  sentMessages      ChannelSentMessage[]
 
   @@unique([agentId, provider])
   // Unique, not merely indexed: the inbound webhook arm resolves a presence by
@@ -1776,6 +1805,44 @@ model ChannelIngestedEvent {
   @@map("channel_ingested_events")
 }
 
+// What `send_message` delivered, and WHERE a reply to it will arrive: the
+// provider's own thread address (Slack: the DM id, or `<channel>:<ts>` of a
+// channel post), the same string inbound events carry as their thread. When
+// a turn starts in a conversation linked to that address, the agent is told
+// what it sent there and from which conversation, so a reply is read as the
+// answer it is and passed back (`buildSentContext`). Every delivery lands
+// here (approved, standing allow, the manager shortcut), independent of the
+// approval row, whose payload stays frozen at hold time.
+//
+// Rows older than the note's window are never read again: they are pruned
+// opportunistically on insert (the ingested-event idiom) and go with their
+// presence. The text itself already lives in the origin conversation's
+// tool-call events; this table only makes it findable from the reply side.
+model ChannelSentMessage {
+  id                   String   @id @default(uuid())
+  agentChannelId       String   @map("agent_channel_id")
+  externalThreadId     String   @map("external_thread_id")
+  // Display label captured at send time (the contact `displayName` rule),
+  // e.g. "Dana Kim" or "#proj-updates". Never matched on.
+  recipientLabel       String   @map("recipient_label")
+  text                 String
+  // Where the send was asked from. A turn starting there is not a reply to
+  // it, so the note skips it. SetNull: the record outlives a deleted chat.
+  originConversationId String?  @map("origin_conversation_id")
+  // The person whose turn led to the send, read back by display name only.
+  // Null when no signed-in person did (a guest, the agent's own initiative,
+  // an automation run). SetNull: a deleted user's name never lingers here.
+  originUserId         String?  @map("origin_user_id")
+  createdAt            DateTime @default(now()) @map("created_at")
+
+  agentChannel       AgentChannel  @relation(fields: [agentChannelId], references: [id], onDelete: Cascade)
+  originConversation Conversation? @relation("SentMessageOrigin", fields: [originConversationId], references: [id], onDelete: SetNull)
+  originUser         User?         @relation("SentMessageOriginUser", fields: [originUserId], references: [id], onDelete: SetNull)
+
+  @@index([agentChannelId, externalThreadId, createdAt])
+  @@map("channel_sent_messages")
+}
+
 // The posted card's delivery ledger for a GATEWAY TOOL approval — claim
 // dedupe (unique by approval id, so a restarted or twin adapter never
 // re-posts), the update handle (externalMessageRef, so any instance can
@@ -2119,30 +2186,38 @@ model OnboardingSurvey {
 // ── App connections ──────────────────────────────────────────────────────
 
 model AppConnection {
-  id                String             @id @default(uuid())
-  scope             String             @default("workspace") // "workspace" | "organization"
-  workspaceId       String?            @map("workspace_id")
-  organizationId    String?            @map("organization_id")
+  id                 String             @id @default(uuid())
+  scope              String             @default("workspace") // "workspace" | "organization"
+  workspaceId        String?            @map("workspace_id")
+  organizationId     String?            @map("organization_id")
   // The AppConfig whose credentials minted this connection (OAuth refresh
   // tokens are bound to that client). Null = platform/env credentials, a
   // connection method that needs no config, or minted before this link.
-  appConfigId       String?            @map("app_config_id")
-  provider          String // "github", "gmail", "google-calendar", "google-drive", etc.
-  label             String?            @map("label") // auto-populated from metadata (email/username)
-  status            String             @default("connected")
-  credentials       String?            @map("credentials") // encrypted JSON (access_token, refresh_token, etc.)
-  scopes            String[]           @default([])
-  metadata          Json? // non-secret info (username, org, email)
-  connectedAt       DateTime           @default(now()) @map("connected_at")
+  appConfigId        String?            @map("app_config_id")
+  // A connection built on another connection's grant instead of its own
+  // provider consent — today a workspace GitHub App connection reusing an
+  // installation already connected in the same org, narrowed to a repo subset.
+  // Removing the source removes every connection built on it.
+  sourceConnectionId String?            @map("source_connection_id")
+  provider           String // "github", "gmail", "google-calendar", "google-drive", etc.
+  label              String?            @map("label") // auto-populated from metadata (email/username)
+  status             String             @default("connected")
+  credentials        String?            @map("credentials") // encrypted JSON (access_token, refresh_token, etc.)
+  scopes             String[]           @default([])
+  metadata           Json? // non-secret info (username, org, email)
+  connectedAt        DateTime           @default(now()) @map("connected_at")
   // Set by the gateway when the provider refuses the OAuth refresh token
   // (`invalid_grant`): the account must be reconnected. Cleared by a reconnect.
-  reauthRequiredAt  DateTime?          @map("reauth_required_at")
-  updatedAt         DateTime           @updatedAt @map("updated_at")
-  workspace         Workspace?         @relation(fields: [workspaceId], references: [id])
-  organization      Organization?      @relation(fields: [organizationId], references: [id])
-  appConfig         AppConfig?         @relation(fields: [appConfigId], references: [id], onDelete: SetNull)
-  policyRuleTargets PolicyRuleTarget[]
+  reauthRequiredAt   DateTime?          @map("reauth_required_at")
+  updatedAt          DateTime           @updatedAt @map("updated_at")
+  workspace          Workspace?         @relation(fields: [workspaceId], references: [id])
+  organization       Organization?      @relation(fields: [organizationId], references: [id])
+  appConfig          AppConfig?         @relation(fields: [appConfigId], references: [id], onDelete: SetNull)
+  sourceConnection   AppConnection?     @relation("DerivedConnections", fields: [sourceConnectionId], references: [id], onDelete: Cascade)
+  derivedConnections AppConnection[]    @relation("DerivedConnections")
+  policyRuleTargets  PolicyRuleTarget[]
 
+  @@index([sourceConnectionId])
   @@index([workspaceId, provider])
   @@index([organizationId, provider])
   @@index([scope])
@@ -2537,7 +2612,7 @@ model AgentEvalQuestion {
   agentId      String   @map("agent_id")
   question     String
   expected     String
-  kind         String // numeric | text
+  kind         String // numeric | text | custom (EVAL_CHECK_KINDS)
   expectedApps String[] @default([]) @map("expected_apps")
   archived     Boolean  @default(false)
   createdAt    DateTime @default(now()) @map("created_at")
@@ -2558,6 +2633,8 @@ model AgentEvalRun {
   agentId         String    @map("agent_id")
   createdByUserId String?   @map("created_by_user_id")
   status          String    @default("queued") // queued | running | done | failed
+  // manual (a person pressed Run tests) | scheduled (the eval schedule fired)
+  trigger         String    @default("manual")
   // A partial fingerprint of the agent's configuration at run time
   // (instructions, model, effort, enabled skills, granted rule IDs).
   configVersion   String    @map("config_version")
@@ -2577,4 +2654,39 @@ model AgentEvalRun {
   @@index([agentId, createdAt])
   @@index([agentId, status])
   @@map("agent_eval_runs")
+}
+
+// An agent's eval schedule: run its test questions on a cron, so a change in
+// the agent's model, data or config shows up as a regression without anyone
+// pressing Run tests. At most one per agent. Claimed on the runner poll like
+// AgentCron (due-work.ts), with the same lease on `nextFireAt`.
+model AgentEvalSchedule {
+  id              String  @id @default(uuid())
+  agentId         String  @unique @map("agent_id")
+  // Cron expression (croner syntax), read in `timezone` (IANA). Validated by
+  // croner, the same library that computes occurrences; at most hourly.
+  schedule        String
+  timezone        String
+  enabled         Boolean @default(true)
+  // Why the platform turned it off: "authorization" (the creator lost access
+  // or is gone) | "completed" (no further occurrence).
+  disabledReason  String? @map("disabled_reason")
+  // Whose authority each run runs under (the run's createdBy). Re-checked at
+  // every fire. SetNull: a deleted creator disables the schedule at its next
+  // fire instead of letting it run on nobody's authority.
+  createdByUserId String? @map("created_by_user_id")
+
+  nextFireAt  DateTime  @map("next_fire_at")
+  lastFiredAt DateTime? @map("last_fired_at")
+  // started | skipped_busy | skipped_no_questions | failed
+  lastOutcome String?   @map("last_outcome")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  agent     Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  createdBy User? @relation("EvalScheduleCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([enabled, nextFireAt])
+  @@map("agent_eval_schedules")
 }

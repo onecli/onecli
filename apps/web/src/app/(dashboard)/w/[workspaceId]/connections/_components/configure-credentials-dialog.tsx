@@ -18,10 +18,12 @@ import { useSaveAppConfig } from "@/hooks/use-app-config";
 import type { OAuthConfigField } from "@onecli/api/apps/types";
 import { CloudUpsell } from "@/lib/components/cloud-upsell";
 import { AppIcon } from "@/lib/components/app-icon";
-import { SetupGuideLink } from "@/lib/components/setup-guide-link";
+import { credentialsScopeNote, groupOf } from "@onecli/api/apps/oauth/groups";
 import { RedirectUri } from "./redirect-uri";
 import { ConfigFieldOptions } from "./config-field-options";
 import { buildConfigPayload, resolveConfigValue } from "./config-field-values";
+import { CredentialsGuide } from "./credentials-guide";
+import { appConfigErrorMessage } from "./app-config-error";
 
 interface ConfigureCredentialsDialogProps {
   provider: string;
@@ -68,10 +70,16 @@ export const ConfigureCredentialsDialog = ({
       await saveMutation.mutateAsync(buildConfigPayload(fields, values));
       setValues({});
       onConfigured();
-    } catch {
-      toast.error("Failed to save credentials");
+    } catch (err) {
+      toast.error(appConfigErrorMessage(err, "Failed to save credentials"));
     }
   };
+
+  // Only a vendor-shared client needs the scope spelled out here: the dialog
+  // asks for one app's setup, but the client it saves serves the whole vendor.
+  const scopeNote = groupOf(provider)
+    ? credentialsScopeNote(provider, pageScope)
+    : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -89,7 +97,14 @@ export const ConfigureCredentialsDialog = ({
             </div>
           </div>
           {hint && <p className="pt-1 text-muted-foreground text-xs">{hint}</p>}
-          <SetupGuideLink appName={appName} url={setupGuideUrl} />
+          {scopeNote && (
+            <p className="text-muted-foreground text-xs">{scopeNote}</p>
+          )}
+          <CredentialsGuide
+            provider={provider}
+            appName={appName}
+            setupGuideUrl={setupGuideUrl}
+          />
         </DialogHeader>
 
         <div className="space-y-4 pt-2">

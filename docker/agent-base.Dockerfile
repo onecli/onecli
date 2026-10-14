@@ -116,6 +116,12 @@ FROM node:22.23.2-trixie-slim
 # burns turns on it).
 # xz-utils: `.tar.xz` is the release format of half the tools an agent will
 # fetch (Nix itself ships that way); slim has no xz.
+# tzdata-legacy: the zone names tzdata dropped in trixie (`Asia/Calcutta`,
+# `Europe/Kiev`, `US/Pacific`, 1.3 MB). The sandbox keeps time in whatever
+# zone the control plane hands it in TZ, and libc resolves that name as a
+# FILE: one it cannot find means UTC, silently. The control plane validates
+# against the runtime's own zone table, which still knows those spellings,
+# so without this package a valid setting could reach a clock it never set.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     tini git curl ripgrep ca-certificates openssl e2fsprogs util-linux \
@@ -125,7 +131,7 @@ RUN apt-get update \
     nano less \
     dbus-x11 chromium chromium-sandbox xvfb xdotool fonts-liberation fonts-noto-color-emoji ffmpeg libnss3-tools \
     gcc g++ make libc6-dev python3-dev \
-    procps jq zip unzip wget xz-utils \
+    procps jq zip unzip wget xz-utils tzdata-legacy \
   && rm -rf /var/lib/apt/lists/*
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
@@ -539,3 +545,8 @@ ENV PAGER=less
 # behaves for SSH humans and non-interactive reads alike (no hung pager in
 # a harness shell).
 ENV LESS=FRX
+# The one locale glibc ships without a `locales` package: UTF-8 everywhere
+# (file names, Python's default encoding, perl, git) with no "cannot set
+# locale" warning from every tool at startup. An image stacked on this one
+# may generate a richer locale and override it.
+ENV LANG=C.UTF-8

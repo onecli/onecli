@@ -12,11 +12,11 @@ import type { OutgoingMessage } from "@/hooks/use-conversations";
 import type { RenderedTurn } from "@/lib/chat/transcript";
 import { isFollowUpRow } from "@/lib/chat/turns";
 import { ApprovalTimelineSlot } from "./approval-timeline-slot";
-import {
-  useApprovalTimeline,
-  type ApprovalTimelineEntry,
-} from "./approval-timeline";
+import { useApprovalTimeline } from "./approval-timeline";
 import { useApprovalCards } from "./use-approval-cards";
+import { useActionApprovalCards } from "./use-action-approval-cards";
+import { InlineActionApproval } from "./inline-action-approval";
+import { slotAfterTurns } from "./slot-after-turns";
 import { EmptyThreadWelcome } from "./empty-thread-welcome";
 import { FollowingViewport } from "./following-viewport";
 import { LoadOlderSentinel } from "./load-older-sentinel";
@@ -27,10 +27,11 @@ import { UserBubble } from "./user-bubble";
  * The conversation as the reader sees it. Purely presentational: turns give
  * the order and the user side; the folded transcript gives the agent side.
  *
- * Mid-run follow-ups (`joining`/`joined` rows) render WITH their target turn
- * — between its user bubble and its agent block — so the answer that covers
- * them is the LAST thing in the exchange, not something their bubbles dangle
- * under looking unanswered. A follow-up whose target isn't in the list (a
+ * Mid-run follow-ups (`joining`/`joined` rows) render WITH their target turn,
+ * between its user bubble and its agent block, each followed by the agent's
+ * reply to it when it wrote one. So the answer that covers the rest is the
+ * LAST thing in the exchange, not something their bubbles dangle under
+ * looking unanswered. A follow-up whose target isn't in the list (a
  * pathological orphan) falls back to its own row so it is never invisible.
  */
 interface ChatThreadProps {
@@ -82,31 +83,22 @@ export const ChatThread = ({
   const grouped = new Set(
     [...followUpsByTarget.values()].flat().map((turn) => turn.id),
   );
+  // What the transcript holds under a follow-up's own id: the agent's
+  // reply to it, streaming while the run writes it and stored once it is
+  // handed over (the reply lives under the follow-up's row, like any
+  // turn's answer).
+  const followUpRendered = (followUpId: string) => folded.get(followUpId);
 
   // Approval cards ride the timeline like messages: each is slotted after
   // the last turn that PRECEDES its creation, so the card sits where it
   // fired and stays there as the conversation moves on — exactly the Slack
   // reading. Cards newer than every turn land at the end.
-  const approvals = useApprovalTimeline(useApprovalCards());
   const rows = turns.filter((turn) => !grouped.has(turn.id));
-  const cardsAfterTurn = new Map<string, ApprovalTimelineEntry[]>();
-  const cardsAtEnd: ApprovalTimelineEntry[] = [];
-  for (const card of approvals) {
-    let homeId: string | undefined;
-    for (const turn of rows) {
-      if (new Date(turn.createdAt).getTime() <= card.at) homeId = turn.id;
-      else break;
-    }
-    if (homeId === rows[rows.length - 1]?.id || homeId === undefined) {
-      // Newest slot (or an empty thread) — keep it after the final turn so
-      // it never renders above the exchange that raised it.
-      cardsAtEnd.push(card);
-    } else {
-      const group = cardsAfterTurn.get(homeId) ?? [];
-      group.push(card);
-      cardsAfterTurn.set(homeId, group);
-    }
-  }
+  const cards = slotAfterTurns(rows, useApprovalTimeline(useApprovalCards()));
+  const actions = slotAfterTurns(
+    rows,
+    useActionApprovalCards(agentId, conversationId),
+  );
 
   return (
     <MessageScrollerProvider autoScroll defaultScrollPosition="end">
@@ -153,12 +145,16 @@ export const ChatThread = ({
                   turn={turn}
                   rendered={folded.get(turn.id)}
                   followUps={followUpsByTarget.get(turn.id)}
+                  followUpRendered={followUpRendered}
                   modelsHref={modelsHref}
                   onConnectModelKey={onConnectModelKey}
                 />
                 <ApprovalTimelineSlot
-                  entries={cardsAfterTurn.get(turn.id) ?? []}
+                  entries={cards.afterTurn.get(turn.id) ?? []}
                 />
+                {actions.afterTurn.get(turn.id)?.map((card) => (
+                  <InlineActionApproval key={card.item.id} item={card.item} />
+                ))}
               </MessageScrollerItem>
             ))}
             {pending !== undefined && (
@@ -172,10 +168,13 @@ export const ChatThread = ({
             )}
             {/* Cards newer than every turn — including ones raised by a
                 background watch/cron with no turn running at all. */}
-            {cardsAtEnd.length > 0 && (
+            {(cards.atEnd.length > 0 || actions.atEnd.length > 0) && (
               <MessageScrollerItem messageId="approvals">
                 <div className="flex flex-col gap-3">
-                  <ApprovalTimelineSlot entries={cardsAtEnd} />
+                  <ApprovalTimelineSlot entries={cards.atEnd} />
+                  {actions.atEnd.map((card) => (
+                    <InlineActionApproval key={card.item.id} item={card.item} />
+                  ))}
                 </div>
               </MessageScrollerItem>
             )}

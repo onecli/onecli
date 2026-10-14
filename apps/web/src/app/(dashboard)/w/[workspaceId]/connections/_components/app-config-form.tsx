@@ -44,10 +44,16 @@ import {
   useToggleAppConfig,
 } from "@/hooks/use-app-config";
 import { CloudUpsell } from "@/lib/components/cloud-upsell";
-import { SetupGuideLink } from "@/lib/components/setup-guide-link";
+import {
+  credentialsScopeNote,
+  groupOf,
+  oauthClientGroupName,
+} from "@onecli/api/apps/oauth/groups";
 import { RedirectUri } from "./redirect-uri";
 import { ConfigFieldOptions } from "./config-field-options";
 import { buildConfigPayload, resolveConfigValue } from "./config-field-values";
+import { CredentialsGuide } from "./credentials-guide";
+import { appConfigErrorMessage } from "./app-config-error";
 
 export interface AppConfigFormHandle {
   /** Open the Custom credentials section, scroll it into view, and briefly highlight it. */
@@ -62,6 +68,8 @@ interface AppConfigFormProps {
   /** The app's OneCLI setup guide (`AppDefinition.setupGuideUrl`). */
   setupGuideUrl?: string;
   hasEnvDefaults: boolean;
+  /** Some account this config's client serves is connected in this scope:
+   *  this app's, or (for a vendor-shared client) any app of the vendor. */
   isConnected: boolean;
   pageScope?: PageScope;
   /** Imperative handle so the page header can open + scroll to this section. */
@@ -210,8 +218,8 @@ export const AppConfigForm = ({
     try {
       await saveMutation.mutateAsync(buildConfigPayload(fields, values));
       toast.success("Credentials saved");
-    } catch {
-      toast.error("Failed to save credentials");
+    } catch (err) {
+      toast.error(appConfigErrorMessage(err, "Failed to save credentials"));
     }
   };
 
@@ -231,7 +239,8 @@ export const AppConfigForm = ({
             ? "Custom credentials enabled"
             : "Custom credentials disabled",
         ),
-      onError: () => toast.error("Failed to update"),
+      onError: (err) =>
+        toast.error(appConfigErrorMessage(err, "Failed to update")),
     });
   };
 
@@ -248,8 +257,8 @@ export const AppConfigForm = ({
     try {
       await deleteMutation.mutateAsync();
       toast.success("Credentials removed");
-    } catch {
-      toast.error("Failed to remove credentials");
+    } catch (err) {
+      toast.error(appConfigErrorMessage(err, "Failed to remove credentials"));
     }
   };
 
@@ -262,6 +271,13 @@ export const AppConfigForm = ({
 
   const hasInput = fields.some((f) => !!values[f.name]);
   const saving = saveMutation.isPending;
+  const scopeNote = credentialsScopeNote(provider, pageScope);
+  // A vendor-shared client: changing or removing it affects every app of the
+  // vendor, so the dialogs name the vendor rather than the app on screen.
+  const group = groupOf(provider);
+  const vendorApps = group && `${oauthClientGroupName(group)} apps`;
+  const disconnectSubject = vendorApps ? `your ${vendorApps}` : appName;
+  const removalSubject = vendorApps ? `All ${vendorApps}` : appName;
 
   if (loading) {
     return (
@@ -298,6 +314,9 @@ export const AppConfigForm = ({
                   Use your own developer credentials
                 </p>
                 <p className="text-xs text-muted-foreground mt-0.5">
+                  {scopeNote}
+                </p>
+                <p className="text-xs text-muted-foreground mt-0.5">
                   {enabled
                     ? "Your custom credentials are active."
                     : hasCredentials
@@ -319,7 +338,11 @@ export const AppConfigForm = ({
 
             {/* Guide, then the URI to register, then the credentials it
                 produces. */}
-            <SetupGuideLink appName={appName} url={setupGuideUrl} />
+            <CredentialsGuide
+              provider={provider}
+              appName={appName}
+              setupGuideUrl={setupGuideUrl}
+            />
             <RedirectUri provider={provider} />
 
             {fields.map((field) => {
@@ -409,8 +432,8 @@ export const AppConfigForm = ({
                       </AlertDialogTitle>
                       <AlertDialogDescription>
                         {hasEnvDefaults
-                          ? `This will delete your credentials. ${appName} will fall back to platform defaults.`
-                          : `This will delete your credentials. ${appName} will no longer be available until reconfigured.`}
+                          ? `This will delete your credentials. ${removalSubject} will fall back to platform defaults.`
+                          : `This will delete your credentials. ${removalSubject} will no longer be available until reconfigured.`}
                         {dependentSentence ? ` ${dependentSentence}` : ""}
                       </AlertDialogDescription>
                     </AlertDialogHeader>
@@ -440,11 +463,15 @@ export const AppConfigForm = ({
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>This will disconnect {appName}</AlertDialogTitle>
+            <AlertDialogTitle>
+              This will disconnect {disconnectSubject}
+            </AlertDialogTitle>
             <AlertDialogDescription>
               {dependentSentence
                 ? `${dependentSentence} You'll need to reconnect afterward.`
-                : `Changing credentials will disconnect your current ${appName} connection. You'll need to reconnect afterward.`}
+                : group
+                  ? `Changing credentials will disconnect every ${oauthClientGroupName(group)} app connected here. You'll need to reconnect afterward.`
+                  : `Changing credentials will disconnect your current ${appName} connection. You'll need to reconnect afterward.`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

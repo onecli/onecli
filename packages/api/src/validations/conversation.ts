@@ -114,14 +114,24 @@ export type TurnSource =
   | typeof PEER_TASK_SOURCE;
 
 /**
+ * A turn or follow-up born from an automation rather than a person typing.
+ * The one predicate over `AUTOMATION_SOURCES`, shared by every surface that
+ * asks the question (the continuity bridge, the channel mirror, the steer
+ * arm's framing), so a new automation source is still ONE edit.
+ */
+export const isAutomationSource = (
+  source: string,
+): source is AutomationSource =>
+  (AUTOMATION_SOURCES as readonly string[]).includes(source);
+
+/**
  * Nobody typed this turn's message — the platform authored it (an automation
  * header, or the greeting instruction). The render surfaces branch on THIS,
  * not on `AUTOMATION_SOURCES`: the question they are asking is "does this get
  * a user bubble", which is about authorship, not about scheduling priority.
  */
 export const isPlatformAuthoredSource = (source: string): boolean =>
-  source === GREETING_SOURCE ||
-  (AUTOMATION_SOURCES as readonly string[]).includes(source);
+  source === GREETING_SOURCE || isAutomationSource(source);
 
 /** A turn's lifecycle. The first three are the ACTIVE set the partial unique
  * index fences — at most one of them per conversation. `joining`/`joined` are
@@ -268,6 +278,22 @@ export const TURN_STALLED_MESSAGE =
  * wording assumes nothing about WHAT is being supervised on purpose. */
 export const TURN_CEILING_WARNING_MESSAGE =
   "[system] This turn is approaching its time limit and will be ended soon. Stop starting new work and stop waiting on long-running things now. Reply with: what you completed, the current status of anything still running (background processes, CI, other agents — they keep running after this turn ends), what remains, and how to continue in the next message. Then end the turn.";
+
+/**
+ * The delivery-only frame a mid-run follow-up from a person (or a peer agent,
+ * whose text already names it as one) carries into the live run: the steer
+ * arm's `context`, prepended at the harness boundary like a turn's memory
+ * context, so the stored row keeps the sender's exact words. Without it the
+ * words land between tool results with nothing marking them as a new
+ * message, and the model folds them into the task instead of answering.
+ * Agent-facing: names what arrived and what to do, and leaves the HOW (short,
+ * direct, before any tool call) to the system prompt's rule. Sender-neutral
+ * on purpose, so it is never a lie about who wrote it. Automation follow-ups
+ * (a wake joining a running watch turn) and the ceiling warning carry their
+ * own header and never get this one.
+ */
+export const STEERED_FOLLOW_UP_CONTEXT =
+  "[A new message arrived while you were working. Reply to it directly in your next message, then continue the task.]";
 
 /** The host has no room right now; honest about the wait, silent about the
  * infrastructure. */

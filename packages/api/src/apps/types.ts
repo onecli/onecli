@@ -1,20 +1,82 @@
+import type { OAuthStatePayload } from "../lib/oauth-state";
+
+/**
+ * Vendor OAuth client groups: apps from one vendor that authenticate through
+ * the same OAuth client (one Google Cloud OAuth client serves Gmail, Drive,
+ * Calendar, …). Used as the AppConfig `provider` key for shared configs.
+ */
+export const OAUTH_CLIENT_GROUP_IDS = [
+  "google",
+  "atlassian",
+  "microsoft",
+] as const;
+export type OAuthClientGroupId = (typeof OAUTH_CLIENT_GROUP_IDS)[number];
+
 export interface OAuthBuildAuthUrlParams {
   appCredentials: Record<string, string>;
   redirectUri: string;
   scopes: string[];
   state: string;
+  /** The validated access level the user picked (see `OAuthAccessLevels`).
+   *  Always set for an app that declares `accessLevels`, never otherwise. */
+  accessLevel?: string;
 }
 
 export interface OAuthExchangeCodeParams {
   appCredentials: Record<string, string>;
   callbackParams: Record<string, string>;
   redirectUri: string;
+  /** The access level the authorize leg used, read back from the signed
+   *  OAuth state (never from the unauthenticated callback request). */
+  accessLevel?: string;
+  /** The callback's state, already verified by the route. Present on every
+   *  callback the routes complete; optional so direct exchanges (tests) can
+   *  omit it. */
+  state?: OAuthStatePayload;
+  /** The raw `oauth_state` cookie this browser carries for the callback path,
+   *  so a multi-leg flow can bind a later leg to the browser that ran the
+   *  earlier one. */
+  stateCookie?: string;
+}
+
+/** One access level a provider offers on its consent screen. */
+export interface OAuthAccessLevelOption {
+  /** Value passed to `buildAuthUrl` / `exchangeCode` (e.g. Attio's `token_level`). */
+  value: string;
+  /** User-facing label, in the provider's own terminology. */
+  label: string;
+  /** One-line explanation shown with the option in the connect window. */
+  description: string;
+}
+
+/**
+ * Providers that issue tokens at more than one level (e.g. Attio's workspace-
+ * vs user-level tokens) declare the choices here. The connect window shows a
+ * picker, the authorize route validates the choice against `options`, and the
+ * signed OAuth state carries it to the callback.
+ */
+export interface OAuthAccessLevels {
+  label: string;
+  options: OAuthAccessLevelOption[];
+  /** Must be one of `options[].value`; used when the request names none. */
+  defaultValue: string;
 }
 
 export interface OAuthExchangeResult {
   credentials: Record<string, unknown>;
   scopes: string[];
   metadata?: Record<string, unknown>;
+}
+
+/**
+ * What `continueCallback` returns when the provider needs one more round trip
+ * before anything can be stored (e.g. GitHub App ownership proof). The route
+ * stores nothing: it sets `state` as this browser's `oauth_state` cookie and
+ * redirects to `continueAt`, whose return lands on the same callback path.
+ */
+export interface OAuthContinuation {
+  continueAt: string;
+  state: string;
 }
 
 /** Human-friendly description of an OAuth permission/scope. */
@@ -63,6 +125,8 @@ export type ConnectionMethod =
        *  of a query parameter. The bridge page extracts the named param from the
        *  fragment and resubmits it as a query parameter for the server. */
       fragmentCallback?: { paramName: string };
+      /** Token levels the user may choose between at connect time. */
+      accessLevels?: OAuthAccessLevels;
       /** May be async: the registry graph is client-reachable, so a definition
        *  needing node builtins (PKCE/JWT crypto) must load them via a lazy
        *  `await import("node:crypto")` instead of a top-level import. */
@@ -72,6 +136,12 @@ export type ConnectionMethod =
       exchangeCode: (
         params: OAuthExchangeCodeParams,
       ) => Promise<OAuthExchangeResult>;
+      /** Optional step the callback runs before `exchangeCode`. A continuation
+       *  means "not yet": the browser goes on one more provider round trip
+       *  that returns to the same callback, and nothing is stored. */
+      continueCallback?: (
+        params: OAuthExchangeCodeParams,
+      ) => Promise<OAuthContinuation | null>;
     }
   | {
       type: "api_key";
@@ -88,6 +158,14 @@ export type ConnectionMethod =
         helpUrl?: string;
         /** Label for the help link; defaults to "Learn more". */
         helpLabel?: string;
+        /** Fixed choices rendered as a dropdown instead of a text input, so
+         *  the stored value is always one of these `value`s (e.g. a region).
+         *  The server-side `resolveMetadata` must still validate it: a client
+         *  can submit anything. */
+        options?: OAuthConfigFieldOption[];
+        /** Pre-selected choice for an `options` field; must be one of its
+         *  values. Submitted even if the user never opens the dropdown. */
+        defaultValue?: string;
       }[];
       /** Resolve metadata for the connection (e.g., org name, dashboard URL). */
       resolveMetadata?: (
@@ -221,5 +299,11 @@ export interface AppDefinition {
     envDefaults?: Record<string, string>;
     /** Short hint shown above the credential fields (e.g., "Use credentials from a GitHub OAuth App"). */
     hint?: string;
+    /**
+     * Vendor OAuth client group (e.g. "google"). Apps in one group share one
+     * OAuth client: a config saved for any member is stored under the group
+     * key and serves every member app (see `apps/oauth/groups.ts`).
+     */
+    group?: OAuthClientGroupId;
   };
 }

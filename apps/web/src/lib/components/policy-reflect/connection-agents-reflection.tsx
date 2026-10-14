@@ -19,24 +19,19 @@ import { withWorkspacePrefix } from "@/lib/navigation";
 import type { ConnectionAgentsReflectionProps } from "@/lib/components/policy-reflect";
 import { ConnectionAgentAccessRow } from "./connection-agent-access-row";
 
-// The connection "agent access" dialog — EDITABLE since step 4 of the attach
-// model: each agent row carries the attach toggle + a Manage deep-link into
-// the agent page's permissions sheet, while the effective framing stays
+// The post-connect "agent access" dialog: opened straight off a successful
+// connect, where it IS the setup step that used to be crammed into the 520px
+// OAuth popup. Each agent row carries the attach toggle + a Manage deep-link
+// into the agent page's permissions sheet, while the effective framing stays
 // (lead with what the agent can DO; credential detail is secondary). Writes
-// go through the step-2 grants API's connection orientation.
-//
-// Two ways in, same rows: from an account card, to audit or change an
-// established connection; and straight off a successful connect
-// (`justConnected`), where it IS the setup step that used to be crammed into
-// the 520px OAuth popup.
+// go through the grants API's connection orientation. An established
+// account's agents are edited in place on its card (`ConnectionAgentRows`).
 
 export const ConnectionAgentsReflection = ({
   connectionId,
-  connectionLabel,
   appName,
   open,
   onOpenChange,
-  justConnected = false,
 }: ConnectionAgentsReflectionProps) => {
   const pathname = usePathname();
   const effectiveQuery = useConnectionEffectiveAgents(connectionId, open);
@@ -55,43 +50,27 @@ export const ConnectionAgentsReflection = ({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="gap-0 p-0 sm:max-w-xl">
         <DialogHeader className="min-w-0 p-6 pb-4">
-          {justConnected ? (
-            <>
-              {/* Follows DialogHeader's own `text-center sm:text-left`, so the
-                  title doesn't sit left of a centred description on a phone. */}
-              <div className="flex min-w-0 items-center justify-center gap-2.5 sm:justify-start">
-                {/* The same mark the connect popup just showed, so the dialog
-                    reads as that flow continuing rather than as a new one. */}
-                <span
-                  className="bg-brand motion-safe:animate-in motion-safe:zoom-in-50 flex size-6 shrink-0 items-center justify-center rounded-full duration-300"
-                  aria-hidden="true"
-                >
-                  <Check className="size-3.5 text-white" strokeWidth={3} />
-                </span>
-                <DialogTitle className="break-words">
-                  {appName} connected
-                </DialogTitle>
-              </div>
-              <DialogDescription className="text-xs leading-relaxed">
-                Every agent in this workspace can use this connection now. Turn
-                off the ones that shouldn&apos;t. Changes apply immediately.
-              </DialogDescription>
-            </>
-          ) : (
-            <>
-              {/* `break-words` is load-bearing, not cosmetic: an account label
-                  is an email with no spaces, so without it the title's
-                  min-content width sizes the dialog's grid column and drags the
-                  whole panel past the viewport on a phone. */}
-              <DialogTitle className="break-words">
-                Agent access for {connectionLabel}
-              </DialogTitle>
-              <DialogDescription className="text-xs leading-relaxed">
-                Which agents may use this {appName} connection, and what each
-                one can do. Changes apply immediately.
-              </DialogDescription>
-            </>
-          )}
+          {/* Follows DialogHeader's own `text-center sm:text-left`, so the
+              title doesn't sit left of a centred description on a phone. */}
+          <div className="flex min-w-0 items-center justify-center gap-2.5 sm:justify-start">
+            {/* The same mark the connect popup just showed, so the dialog
+                reads as that flow continuing rather than as a new one. */}
+            <span
+              className="bg-brand motion-safe:animate-in motion-safe:zoom-in-50 flex size-6 shrink-0 items-center justify-center rounded-full duration-300"
+              aria-hidden="true"
+            >
+              <Check className="size-3.5 text-white" strokeWidth={3} />
+            </span>
+            {/* `break-words`: an app name never sizes the dialog's grid
+                column past the viewport on a phone. */}
+            <DialogTitle className="break-words">
+              {appName} connected
+            </DialogTitle>
+          </div>
+          <DialogDescription className="text-xs leading-relaxed">
+            Every agent in this workspace can use this connection now. Turn off
+            the ones that shouldn&apos;t. Changes apply immediately.
+          </DialogDescription>
         </DialogHeader>
 
         {/* `min-w-0` on the DIRECT children of DialogContent: they are grid
@@ -163,9 +142,7 @@ export const ConnectionAgentsReflection = ({
             workspace policy page is on its way out (step 6) — new UI must not
             advertise a dying surface. */}
         <DialogFooter className="border-border/50 border-t px-6 py-4">
-          <Button onClick={() => onOpenChange(false)}>
-            {justConnected ? "Done" : "Close"}
-          </Button>
+          <Button onClick={() => onOpenChange(false)}>Done</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

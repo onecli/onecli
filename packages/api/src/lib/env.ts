@@ -8,6 +8,7 @@
 
 import { capabilitiesFor, parseEdition } from "./edition";
 import { isEntitled } from "./entitlements";
+import { sandboxTimezoneSchema } from "../validations/timezone";
 import {
   firstConfigured,
   apiOrigin,
@@ -389,6 +390,25 @@ const optionalPositiveInt = (raw: string | undefined): number | null => {
 export const MAX_HELD_AWAKE_SANDBOXES = optionalPositiveInt(
   process.env.MAX_HELD_AWAKE_SANDBOXES,
 );
+
+/**
+ * The IANA zone a hosted agent's sandbox runs in when its workspace has not
+ * chosen one (the sandbox `TZ`). Unset = this server's own zone, which is
+ * what a self-host expects; a hosted deployment pins it so every sandbox
+ * agrees with the egress identity it browses from. Both pass the same
+ * sandbox-tier check as the workspace setting (a zone the container can
+ * resolve as a file), and `UTC` is the floor when neither does.
+ */
+export const SANDBOX_DEFAULT_TIMEZONE: string = (() => {
+  for (const candidate of [
+    process.env.SANDBOX_DEFAULT_TIMEZONE,
+    Intl.DateTimeFormat().resolvedOptions().timeZone,
+  ]) {
+    const parsed = sandboxTimezoneSchema.safeParse(candidate);
+    if (parsed.success) return parsed.data;
+  }
+  return "UTC";
+})();
 
 // ── Logging & Runtime ───────────────────────────────────────────────────
 

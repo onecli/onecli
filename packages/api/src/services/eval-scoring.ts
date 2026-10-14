@@ -6,9 +6,10 @@ import {
 } from "../validations/evals";
 
 /**
- * Eval SCORING: how one answer is judged. Deliberately simple and
- * explainable baselines, not semantic judging: a number check and a keyword
- * check, plus the required apps from the gateway evidence.
+ * Eval SCORING: how one answer is judged. Two simple, explainable
+ * baselines (a number check and a keyword check), plus the `custom` check,
+ * whose verdict comes from the AI judge (`eval-judge.ts`) and is passed in
+ * here, plus the required apps from the gateway evidence.
  */
 
 /** Number check: ANY number stated in the answer within 0.5% of the target. */
@@ -58,13 +59,18 @@ interface ScoringEvidence {
   /** Provider IDs and matched `host:` tokens the agent reached, or null when
    * app evidence was unavailable (ambiguous or partial). */
   appsUsed: string[] | null;
+  /** A custom check's verdict from the judge, or null when the judge could
+   * not run. Ignored by the other checks. */
+  judged?: boolean | null;
 }
 
 /**
  * Score one question from its evidence. An unfinished turn is an `error`,
  * never a pass on a partial answer. Required apps are checked only when the
  * evidence exists; a correct answer with unknown app evidence is
- * `inconclusive`, never a pass and never a "missing app".
+ * `inconclusive`, never a pass and never a "missing app". A custom check the
+ * judge could not decide is `inconclusive` too, unless a required app was
+ * missed, which fails it whatever the answer.
  */
 export const scoreEval = (
   check: { expected: string; kind: EvalCheckKind; expectedApps: string[] },
@@ -72,23 +78,24 @@ export const scoreEval = (
 ): { outcome: EvalOutcome; missingApps: string[] | null } => {
   if (evidence.error !== null || evidence.answer === null)
     return { outcome: "error", missingApps: null };
-  const answerOk =
+  // null: the answer could not be judged either way.
+  const answerOk: boolean | null =
     check.kind === "numeric"
       ? numericMatch(evidence.answer, check.expected)
-      : textMatch(evidence.answer, check.expected);
+      : check.kind === "text"
+        ? textMatch(evidence.answer, check.expected)
+        : (evidence.judged ?? null);
+  const verdict = (appsOk: boolean | null): EvalOutcome => {
+    if (answerOk === false || appsOk === false) return "mismatch";
+    return answerOk === null || appsOk === null ? "inconclusive" : "passed";
+  };
   if (check.expectedApps.length === 0)
-    return { outcome: answerOk ? "passed" : "mismatch", missingApps: null };
+    return { outcome: verdict(true), missingApps: null };
   if (evidence.appsUsed === null)
-    return {
-      outcome: answerOk ? "inconclusive" : "mismatch",
-      missingApps: null,
-    };
+    return { outcome: verdict(null), missingApps: null };
   const used = new Set(evidence.appsUsed.map((a) => a.toLowerCase()));
   const missingApps = check.expectedApps.filter(
     (app) => !used.has(app.toLowerCase()),
   );
-  return {
-    outcome: answerOk && missingApps.length === 0 ? "passed" : "mismatch",
-    missingApps,
-  };
+  return { outcome: verdict(missingApps.length === 0), missingApps };
 };

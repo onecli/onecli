@@ -1,10 +1,15 @@
 import type { Prisma } from "@onecli/db";
+import { getAppPermissionDefinition } from "../apps/app-permissions";
+import { methodsOf, type AppTool } from "../apps/app-permissions/types";
 import {
   catalogBlocksUnlisted,
   catalogToolIds,
 } from "../apps/app-permissions/validate";
 import type { PolicyRuleRow } from "./policy-service";
-import type { ConnectionGrantInput } from "../validations/grants";
+import type {
+  ConnectionGrantInput,
+  UnlistedChoice,
+} from "../validations/grants";
 
 /**
  * The PURE half of the step-2 grants compiler: desired-stack computation and
@@ -23,6 +28,11 @@ export interface CompiledRule {
   requireApproval: boolean;
   /** Tool narrowing for the connection target; empty = the whole app. */
   tools: string[];
+  /** A WHOLE-APP target's HTTP-method narrowing, stored as-is in the
+   * target's `method` column: `GET,HEAD` (only reads) or `!GET,HEAD`
+   * (everything but reads). Absent = any method, every row that predates
+   * it. */
+  method?: string;
   /**
    * Session-policy conditions, carried on EVERY allow-action row of a stack —
    * not just the first: the gateway's session-policy assembly is last-match-
@@ -35,6 +45,60 @@ export interface CompiledRule {
 
 export const sorted = (ids: string[]): string[] => [...ids].sort();
 
+/** A whole-app connection target's method narrowing, as stored in its
+ * `method` column (the gateway's `MethodFilter`): `GET,HEAD` = only reads,
+ * `!GET,HEAD` = everything but reads. */
+const READS_ONLY = "GET,HEAD";
+const ALL_BUT_READS = `!${READS_ONLY}`;
+
+/** The default for both catch-alls: needs approval, or never for a catalog
+ * that blocks unlisted requests (`unlisted: "block"`, AWS). */
+const defaultUnlisted = (provider: string): UnlistedChoice =>
+  catalogBlocksUnlisted(provider) ? "never" : "ask";
+
+/**
+ * What a new attach writes: every catalog tool allowed, requests outside the
+ * tool list needing approval (AWS included: Needs approval is a valid
+ * catch-all there, only Always allow is not). An app with no catalog has no
+ * tool list to split on, so it keeps full access.
+ */
+export const defaultConnectionGrant = (
+  provider: string,
+): ConnectionGrantInput => {
+  const tools = catalogToolIds(provider);
+  if (tools.length === 0) return { access: "full" };
+  return {
+    access: "custom",
+    allow: sorted(tools),
+    ask: [],
+    otherReads: "ask",
+    otherWrites: "ask",
+  };
+};
+
+/** How restrictive a catch-all choice is: Never > Needs approval > Allowed. */
+const strictness = (choice: UnlistedChoice): number =>
+  choice === "never" ? 2 : choice === "ask" ? 1 : 0;
+
+const unlistedRule = (
+  name: string,
+  choice: UnlistedChoice,
+  conditions: Prisma.JsonValue | null,
+  method?: string,
+): CompiledRule => {
+  const narrowed = method ? { method } : {};
+  return choice === "never"
+    ? { name, action: "block", requireApproval: false, tools: [], ...narrowed }
+    : {
+        name,
+        action: "allow",
+        requireApproval: choice === "ask",
+        tools: [],
+        conditions,
+        ...narrowed,
+      };
+};
+
 /** The §4.2 stack for one (agent, connection) grant. Order is load-bearing:
  * first-match walks allow → ask → blocked → everything-else.
  *
@@ -45,7 +109,8 @@ export const sorted = (ids: string[]): string[] => [...ids].sort();
  * would inject the credential on the surfaces a catalog leaves out on purpose
  * (Salesforce Composite/Bulk can mass-delete), quietly undoing a "Never" on
  * the matching tool. A catalog opting in with `unlisted: "block"` (AWS, whose
- * credential spans every service) keeps a terminal block instead.
+ * credential spans every service) defaults it to a block instead when the
+ * grant leaves the catch-alls unset.
  *
  * Allow-first is DELIBERATE, not an oversight, for overlapping catalog tools:
  * read tools overlap by design (google-calendar's `get_calendar` glob covers
@@ -110,16 +175,34 @@ export const compileConnectionStack = (
     });
   }
   const terminal = `${nameBase}: everything else`;
+  const fallback = defaultUnlisted(provider);
+  const otherReads = input.otherReads ?? fallback;
+  const otherWrites = input.otherWrites ?? fallback;
+  if (otherReads === otherWrites) {
+    // One terminal over everything unlisted: byte-identical to every stack
+    // written before the two rows existed, so those keep matching and the
+    // next unchanged save writes nothing.
+    stack.push(unlistedRule(terminal, otherWrites, conditions));
+    return stack;
+  }
+  // Two rows. The STRICTER choice comes first and is the one narrowed by
+  // method, the looser one is the plain whole-app row after it. A gateway
+  // that predates method narrowing reads the first row as whole-app, so
+  // mid-deploy it applies the stricter choice to everything unlisted: never
+  // looser than the user asked. Both sit after the blocked complement, so a
+  // tool set to Never stays blocked whatever the catch-alls say.
+  const reads = { name: `${nameBase}: all other reads`, choice: otherReads };
+  const writes = { name: `${nameBase}: all other writes`, choice: otherWrites };
   stack.push(
-    catalogBlocksUnlisted(provider)
-      ? { name: terminal, action: "block", requireApproval: false, tools: [] }
-      : {
-          name: terminal,
-          action: "allow",
-          requireApproval: true,
-          tools: [],
-          conditions,
-        },
+    ...(strictness(otherReads) > strictness(otherWrites)
+      ? [
+          unlistedRule(reads.name, reads.choice, conditions, READS_ONLY),
+          unlistedRule(writes.name, writes.choice, conditions),
+        ]
+      : [
+          unlistedRule(writes.name, writes.choice, conditions, ALL_BUT_READS),
+          unlistedRule(reads.name, reads.choice, conditions),
+        ]),
   );
   return stack;
 };
@@ -185,31 +268,138 @@ export const stackEquals = (
       row.requireApproval === want.requireApproval &&
       row.name === want.name &&
       conditionsEqual(row.conditions, want.conditions) &&
+      (row.targets[0]?.method ?? "") === (want.method ?? "") &&
       sorted(row.targets[0]?.appTools ?? []).join("\n") ===
         want.tools.join("\n")
     );
   });
 
-/** Fold one connection's stack rows back into the tri-state intent. */
+const unlistedChoiceOf = (row: PolicyRuleRow): UnlistedChoice =>
+  row.action === "block" ? "never" : row.requireApproval ? "ask" : "allow";
+
+const READ_METHODS = new Set(READS_ONLY.split(","));
+
+/**
+ * The choice a catalog tool reads back as when no row of its stack names it:
+ * a tool added to the catalog after the stack was written. The catch-alls are
+ * the user's choice for exactly those ("including tools added later"), so it
+ * takes theirs: Other reads for a GET/HEAD-only tool, Other writes for one
+ * with no read method, and the stricter of the two for a tool spanning both
+ * (or any method), so it never reads looser than its catch-all. A save then
+ * names it with that choice, where reading it as Never would have blocked it.
+ */
+const unlistedChoiceForTool = (
+  tool: AppTool,
+  otherReads: UnlistedChoice,
+  otherWrites: UnlistedChoice,
+): UnlistedChoice => {
+  const methods = methodsOf(tool).map((m) => m.toUpperCase());
+  if (methods.length > 0 && methods.every((m) => READ_METHODS.has(m))) {
+    return otherReads;
+  }
+  if (methods.length > 0 && methods.every((m) => !READ_METHODS.has(m))) {
+    return otherWrites;
+  }
+  return strictness(otherReads) >= strictness(otherWrites)
+    ? otherReads
+    : otherWrites;
+};
+
+/** Fold one connection's stack rows back into the tri-state intent, plus the
+ * two catch-all choices ("All other reads" / "All other writes"). A catalog
+ * tool the stack doesn't name reads as the catch-all choice it falls to
+ * (`unlistedChoiceForTool`), never as Never: the blocked row names every tool
+ * that is. */
 export const stackToGrant = (
   rows: PolicyRuleRow[],
-): { access: "full" | "custom"; allow: string[]; ask: string[] } => {
+  provider: string,
+): {
+  access: "full" | "custom";
+  allow: string[];
+  ask: string[];
+  otherReads: UnlistedChoice;
+  otherWrites: UnlistedChoice;
+} => {
   const isFull =
     rows.length === 1 &&
     rows[0]?.action === "allow" &&
     !rows[0].requireApproval &&
     (rows[0].targets[0]?.appTools ?? []).length === 0;
-  if (isFull) return { access: "full", allow: [], ask: [] };
-  // The approval terminal is an allow+approval row too, but it names no tools
-  // (it is the unlisted-requests row, not a tool the user picked), so it adds
-  // nothing to `ask`.
-  const allow = rows
-    .filter((r) => r.action === "allow" && !r.requireApproval)
-    .flatMap((r) => r.targets[0]?.appTools ?? []);
-  const ask = rows
-    .filter((r) => r.action === "allow" && r.requireApproval)
-    .flatMap((r) => r.targets[0]?.appTools ?? []);
-  return { access: "custom", allow: sorted(allow), ask: sorted(ask) };
+  if (isFull) {
+    return {
+      access: "full",
+      allow: [],
+      ask: [],
+      otherReads: "allow",
+      otherWrites: "allow",
+    };
+  }
+  // The catch-alls name no tools (they are the unlisted-requests rows, not
+  // tools the user picked), so they add nothing to `allow`/`ask`. With one
+  // catch-all (no method narrowing) it covers both families; with two, the
+  // narrowed one says which family it is and the plain one is the other.
+  const wholeApp = rows.filter(
+    (r) => (r.targets[0]?.appTools ?? []).length === 0,
+  );
+  const narrowed = wholeApp.find((r) => (r.targets[0]?.method ?? "") !== "");
+  const plain = wholeApp.find((r) => (r.targets[0]?.method ?? "") === "");
+  const plainChoice = plain ? unlistedChoiceOf(plain) : "ask";
+  const narrowedChoice = narrowed ? unlistedChoiceOf(narrowed) : plainChoice;
+  const readsNarrowed = narrowed?.targets[0]?.method === READS_ONLY;
+  const otherReads = readsNarrowed ? narrowedChoice : plainChoice;
+  const otherWrites = readsNarrowed ? plainChoice : narrowedChoice;
+  const named = new Set(rows.flatMap((r) => r.targets[0]?.appTools ?? []));
+  const addedLater = (getAppPermissionDefinition(provider)?.groups ?? [])
+    .flatMap((g) => g.tools)
+    .filter((tool) => !named.has(tool.id));
+  const addedAs = (choice: UnlistedChoice) =>
+    addedLater
+      .filter(
+        (tool) =>
+          unlistedChoiceForTool(tool, otherReads, otherWrites) === choice,
+      )
+      .map((tool) => tool.id);
+  const allow = [
+    ...rows
+      .filter((r) => r.action === "allow" && !r.requireApproval)
+      .flatMap((r) => r.targets[0]?.appTools ?? []),
+    ...addedAs("allow"),
+  ];
+  const ask = [
+    ...rows
+      .filter((r) => r.action === "allow" && r.requireApproval)
+      .flatMap((r) => r.targets[0]?.appTools ?? []),
+    ...addedAs("ask"),
+  ];
+  return {
+    access: "custom",
+    allow: sorted(allow),
+    ask: sorted(ask),
+    otherReads,
+    otherWrites,
+  };
+};
+
+/**
+ * A customized grant input with its ABSENT catch-all choices filled from the
+ * existing stack, when that stack is a customized one: a tools-only save (an
+ * older client, the SDK) must never quietly reset "All other reads" to its
+ * default. A first customization (no stack yet, or a full-access one) keeps
+ * them absent, so the compiler applies the provider default.
+ */
+export const withStoredUnlisted = (
+  input: ConnectionGrantInput,
+  existing: PolicyRuleRow[],
+  provider: string,
+): ConnectionGrantInput => {
+  if (input.access !== "custom" || existing.length === 0) return input;
+  const stored = stackToGrant(existing, provider);
+  if (stored.access !== "custom") return input;
+  return {
+    ...input,
+    otherReads: input.otherReads ?? stored.otherReads,
+    otherWrites: input.otherWrites ?? stored.otherWrites,
+  };
 };
 
 /**

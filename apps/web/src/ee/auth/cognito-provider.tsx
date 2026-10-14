@@ -27,6 +27,7 @@ import type {
 } from "@/lib/auth/types";
 import { configureAmplify } from "@/ee/auth/amplify-config";
 import { clearClientAuthState } from "@/ee/auth/logout-cleanup";
+import { SIGNUP_VERIFICATION_TOKEN_FIELD } from "@/ee/auth/signup-verification";
 import { AnalyticsProvider } from "@/ee/analytics";
 
 export const AuthProviderImpl = ({ children }: { children: ReactNode }) => {
@@ -187,7 +188,10 @@ export const AuthProviderImpl = ({ children }: { children: ReactNode }) => {
   // ── Email OTP ──
 
   const signUpWithEmail = useCallback(
-    async (email: string): Promise<EmailOtpStep> => {
+    async (
+      email: string,
+      verificationToken?: string,
+    ): Promise<EmailOtpStep> => {
       // Cognito SignUp API requires a password field even for EMAIL_OTP flows.
       // The user never sees or uses it — authentication is via OTP only.
       const password = crypto.randomUUID() + "!Aa1";
@@ -200,6 +204,14 @@ export const AuthProviderImpl = ({ children }: { children: ReactNode }) => {
             preferredChallenge: "EMAIL_OTP",
           },
           userAttributes: { email },
+          // ValidationData reaches only the PreSignUp trigger, which redeems
+          // the token; Cognito never stores it. The confirm step's
+          // auto sign-in replays the autoSignIn options above, never this.
+          ...(verificationToken && {
+            validationData: {
+              [SIGNUP_VERIFICATION_TOKEN_FIELD]: verificationToken,
+            },
+          }),
         },
       });
       if (output.nextStep.signUpStep === "CONFIRM_SIGN_UP") {

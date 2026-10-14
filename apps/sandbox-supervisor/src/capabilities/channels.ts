@@ -147,7 +147,8 @@ const liveSection = (live: AgentChannelPresenceWire[]): string => {
     "",
     "send_message reaches people and channels directly, outside the current conversation, on your own initiative or when asked. Use the recipient's exact name (a find_recipient result or the Mentionable list); #channel-name reaches a channel.",
     "",
-    '- "sent" = delivered. "held" = the workspace owner was asked first; the decision arrives as a notice at the start of a later turn, so never promise to follow up on your own.',
+    '- "sent" = delivered. "held" = the workspace owner was asked first; the decision arrives as a notice at the start of a later turn, so never promise to report the decision on your own. "not_sent" = an earlier message to that recipient is still waiting, so this one was dropped; send it again after the decision if it still matters.',
+    "- A reply from the person you messaged reaches you with what you sent them and where it was asked from; pass the answer on yourself with send_message. Never ask anyone to check back later for it.",
   );
   return lines.join("\n");
 };
@@ -238,7 +239,7 @@ export const channelsTools = (
   return [
     {
       name: "send_message",
-      description: `Send a message to a person (DM) or a channel in your ${platforms} workspace, outside this conversation. Delivery may need the workspace owner's one-time approval: the result says "sent" (delivered) or "held" (owner asked; the decision arrives as a notice in this conversation). Use the exact name from find_recipient or the Mentionable list; prefix # for a channel.`,
+      description: `Send a message to a person (DM) or a channel in your ${platforms} workspace, outside this conversation. Delivery may need the workspace owner's one-time approval: the result says "sent" (delivered), "held" (owner asked; the decision arrives as a notice in this conversation), or "not_sent" (an earlier message to them still waits; this one was dropped). Use the exact name from find_recipient or the Mentionable list; prefix # for a channel.`,
       inputSchema: {
         type: "object",
         properties: {

@@ -28,6 +28,7 @@ import {
 } from "../services/due-work";
 import { createLogClaimWait } from "../services/claim-wait-log";
 import { fireDueCrons } from "../services/cron-fire-service";
+import { fireDueEvalSchedules } from "../services/eval-schedule-fire-service";
 import { fireDueWatches } from "../services/watch-fire-service";
 import { promoteParkedFollowUps } from "../services/follow-up-service";
 import { applyProcessState } from "../services/sandbox-process-service";
@@ -60,7 +61,10 @@ import { buildTurnContext } from "../services/turn-context-service";
 import { MAX_TURN_CONTEXT_CHARS } from "@onecli/agent-protocol";
 import { activityForTool } from "@onecli/agent-protocol/activity";
 import type { AgentEvent } from "@onecli/agent-protocol";
-import { narrateTurnActivity } from "../services/channels/turn-receipt-service";
+import {
+  markFollowUpRead,
+  narrateTurnActivity,
+} from "../services/channels/turn-receipt-service";
 import { buildHomeSyncItem } from "../services/home-sync-service";
 import {
   executeAttachmentUpload,
@@ -103,6 +107,25 @@ export const pushTurnNarration = (
   }
   if (!activity) return;
   void narrateTurnActivity(turnId, activity);
+};
+
+/**
+ * Flip the "read" mark on every mid-run follow-up a batch confirmed the
+ * run picked up (`message.joined`, the live pickup signal): the person's
+ * waiting mark on their channel message becomes the read mark the moment
+ * the agent has the message, not when the answer posts. Coarse like the
+ * narration above (a handful per turn, never per token), and detached for
+ * the same reason: a mark decorates a message already accepted and must
+ * never delay an ack or fail a batch.
+ *
+ * Exported for its test, beside `pushTurnNarration`: which event moves a
+ * mark is the whole behavior.
+ */
+export const markJoinedFollowUpsRead = (events: AgentEvent[]): void => {
+  for (const event of events) {
+    if (event.type === "message.joined")
+      void markFollowUpRead(event.followUpId);
+  }
 };
 
 /** The turn-queue telemetry line — see services/claim-wait-log.ts. */
@@ -213,6 +236,12 @@ export const runnerRoutes = () => {
     // right precision for cron (§3.3).
     await fireDueCrons().catch((err: unknown) =>
       log.warn({ err }, "cron fire pass failed"),
+    );
+
+    // Eval schedules fire here too, the same way: a fire admits an ordinary
+    // eval run, whose worker then asks its questions as normal queued turns.
+    await fireDueEvalSchedules().catch((err: unknown) =>
+      log.warn({ err }, "eval schedule fire pass failed"),
     );
 
     // Background-process watches fire here too (step 10). Its internal sweeps
@@ -341,9 +370,10 @@ export const runnerRoutes = () => {
             continue;
           }
           if (due.kind === "turn.message") {
-            // Steers carry the raw follow-up text only — no dispatch-time
-            // context: the live turn's session already has the target's, and
-            // the message rides into it verbatim.
+            // Steers carry the follow-up text verbatim and, for a sender's
+            // message, the claim's own delivery-only frame. Never the
+            // dispatch-time memory context: the live turn's session already
+            // has the target's.
             items.push({
               kind: "turn.message",
               sandboxId: due.sandboxId,
@@ -351,6 +381,17 @@ export const runnerRoutes = () => {
               turnId: due.turnId,
               targetTurnId: due.targetTurnId,
               message: due.message,
+              ...(due.context && { context: due.context }),
+            });
+            continue;
+          }
+          if (due.kind === "turn.send_now") {
+            items.push({
+              kind: "turn.send_now",
+              sandboxId: due.sandboxId,
+              conversationId: due.conversationId,
+              turnId: due.turnId,
+              targetTurnId: due.targetTurnId,
             });
             continue;
           }
@@ -503,7 +544,10 @@ export const runnerRoutes = () => {
             // batch. Wired HERE rather than inside `applyTurnEvents` because
             // the transcript service has no channel dependency and should
             // not grow one — routes are where the two meet.
-            if (accepted) pushTurnNarration(event.turnId, event.events);
+            if (accepted) {
+              pushTurnNarration(event.turnId, event.events);
+              markJoinedFollowUpsRead(event.events);
+            }
             break;
           }
           case "turn.progress":

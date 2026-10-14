@@ -327,7 +327,7 @@ describe("a presence the workspace REMOVED on the Slack side", () => {
     expect(screen.queryByText("Connected")).toBeNull();
     expect(screen.queryByRole("link", { name: /Open in Slack/ })).toBeNull();
     // Not the half-finished-setup story either.
-    expect(screen.queryByText(/Setup was started but not finished/)).toBeNull();
+    expect(screen.queryByText(/Not finished yet/)).toBeNull();
   });
 
   it("Re-attach resumes the SAME app: the create fires on the row's stamped transport", async () => {

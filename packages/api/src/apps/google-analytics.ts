@@ -46,5 +46,6 @@ export const googleAnalytics: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
   },
 };

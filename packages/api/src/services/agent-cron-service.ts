@@ -2,6 +2,7 @@ import { Cron } from "croner";
 import { db } from "@onecli/db";
 import { ServiceError } from "./errors";
 import type { CronDisabledReason } from "../validations/crons";
+import { isValidTimezone } from "../validations/timezone";
 
 /**
  * Scheduled tasks on hosted agents (plans/hosted-agents-v2.md step 7).
@@ -71,9 +72,7 @@ export const CRON_FAILURE_DISABLE_THRESHOLD = 5;
 export const MAX_CRONS_PER_AGENT = 20;
 
 const assertValidTimezone = (timezone: string): void => {
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone: timezone });
-  } catch {
+  if (!isValidTimezone(timezone)) {
     throw new ServiceError(
       "UNPROCESSABLE",
       `Unknown timezone "${timezone}". Use an IANA zone name like "America/Los_Angeles"`,

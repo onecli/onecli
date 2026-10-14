@@ -862,10 +862,7 @@ const tryPersonLane = async (
   if (state === "pending") {
     return {
       kind: "refused",
-      message: await pendingReachMessage({
-        agentId: presence.agent.id,
-        workspaceId: presence.agent.workspaceId,
-      }),
+      message: await pendingReachMessage(presence.agent.workspaceId),
     };
   }
   // blocked / members_only (incl. legacy denied|revoked): a settled no. The
@@ -1175,10 +1172,7 @@ const checkChannelGate = async (
       kind: "closed",
       outcome: {
         kind: "refused",
-        message: await pendingReachMessage({
-          agentId: presence.agent.id,
-          workspaceId: presence.agent.workspaceId,
-        }),
+        message: await pendingReachMessage(presence.agent.workspaceId),
       },
     };
   }

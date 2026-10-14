@@ -4,6 +4,7 @@ import {
   adapterMentionReportRequestSchema,
   adapterMentionResolveRequestSchema,
   adapterRegisterRequestSchema,
+  adapterReplyClaimSchema,
   type AdapterConfigResponse,
   type AdapterGroupDecisionResponse,
   type AdapterIngestResponse,
@@ -16,6 +17,7 @@ import {
 import { ServiceError } from "../services/errors";
 import {
   advanceMirrorCursor,
+  claimFollowUpReply,
   claimToolApprovalCard,
   getAdapterConfig,
   getAdapterWork,
@@ -206,8 +208,24 @@ export const channelAdapterRoutes = () => {
       }));
     const response: AdapterWorkResponse = {
       finished: serialize(work.finished),
+      replies: work.replies,
     };
     return c.json(response);
+  });
+
+  // POST /channel-adapter/replies/claim: the mirror's claim on a mid-run
+  // follow-up's reply before it posts it: compare-and-set on the row, so
+  // an adapter twin and the turn's completion pass can never both post it.
+  app.post("/replies/claim", async (c) => {
+    const body = parsed(
+      adapterReplyClaimSchema.safeParse(await parseBody(c.req.raw)),
+      "Invalid reply claim body",
+    );
+    const claimed = await claimFollowUpReply(
+      c.get("channelAdapter").adapterId,
+      body.followUpId,
+    );
+    return c.json({ claimed });
   });
 
   // POST /channel-adapter/ingest — a raw provider event. Interpretation, the

@@ -29,8 +29,9 @@ import {
 // resolveAlias in EE builds.
 import { ResourceScopeFields } from "@/lib/policy-editor/resource-scope";
 import { PermissionGroup } from "./permission-group";
+import { OtherRequestsSection } from "./other-requests-section";
 import type { ToolChoice } from "./tri-state-control";
-import { grantIntentFromChoices } from "./grant-intent";
+import { grantIntentFromChoices, type OtherChoices } from "./grant-intent";
 
 interface ManagePermissionsDialogProps {
   agentId: string;
@@ -68,6 +69,48 @@ const deriveChoices = (
   return choices;
 };
 
+/** The two catch-all rows as STORED: only a custom grant has them. Full
+ * access (or no grant yet) stores none (see `displayedOther`). */
+const storedOther = (
+  grant: AgentGrantConnection | undefined,
+): OtherChoices | null =>
+  grant?.access === "custom"
+    ? { otherReads: grant.otherReads, otherWrites: grant.otherWrites }
+    : null;
+
+/** What the two rows show, and what a save writes, is what will actually
+ * happen: the user's pick on that row; else the stored custom value; else,
+ * with no stored value (full access), Allowed while every tool is Allowed
+ * (the save stays full access) and the provider's default the moment the
+ * grid is customized (Needs approval; Never for `unlisted: "block"`), exactly
+ * how unlisted requests behave today.
+ *
+ * A catalog that blocks unlisted requests allows them only under full access
+ * (the API refuses Always allow on a customized grant), so there a row reads
+ * Allowed only while every tool is Allowed too; otherwise it falls back to
+ * its stored choice, else Never. */
+const displayedOther = (
+  edits: Partial<OtherChoices>,
+  stored: OtherChoices | null,
+  allToolsAllow: boolean,
+  unlisted: "block" | undefined,
+): OtherChoices => {
+  const fallback: ToolChoice = allToolsAllow
+    ? "allow"
+    : unlisted === "block"
+      ? "never"
+      : "ask";
+  const shown = (key: keyof OtherChoices): ToolChoice => {
+    const choice = edits[key] ?? stored?.[key] ?? fallback;
+    if (unlisted !== "block" || choice !== "allow" || allToolsAllow) {
+      return choice;
+    }
+    const kept = stored?.[key];
+    return kept !== undefined && kept !== "allow" ? kept : "never";
+  };
+  return { otherReads: shown("otherReads"), otherWrites: shown("otherWrites") };
+};
+
 export const ManagePermissionsDialog = ({
   agentId,
   connection,
@@ -96,6 +139,8 @@ export const ManagePermissionsDialog = ({
 
   const [choices, setChoices] = useState<Record<string, ToolChoice>>({});
   const [initial, setInitial] = useState<Record<string, ToolChoice>>({});
+  const [otherEdits, setOtherEdits] = useState<Partial<OtherChoices>>({});
+  const [stored, setStored] = useState<OtherChoices | null>(null);
   const [resources, setResources] = useState<GrantResources | null>(null);
   const [initialResources, setInitialResources] =
     useState<GrantResources | null>(null);
@@ -108,6 +153,8 @@ export const ManagePermissionsDialog = ({
     const derived = deriveChoices(toolIds, grant);
     setChoices(derived);
     setInitial(derived);
+    setOtherEdits({});
+    setStored(storedOther(grant));
     const seededResources = grant?.resources ?? null;
     setResources(seededResources);
     setInitialResources(seededResources);
@@ -151,19 +198,39 @@ export const ManagePermissionsDialog = ({
   // all-Never state is a detach, not a save (the server 422s it too).
   const allNever =
     toolIds.length > 0 && toolIds.every((id) => choices[id] === "never");
-  const unchanged = toolIds.every((id) => choices[id] === initial[id]);
+  const allowAll = (c: Record<string, ToolChoice>) =>
+    toolIds.length > 0 && toolIds.every((id) => c[id] === "allow");
+  const other = displayedOther(
+    otherEdits,
+    stored,
+    allowAll(choices),
+    definition?.unlisted,
+  );
+  const initialOther = displayedOther(
+    {},
+    stored,
+    allowAll(initial),
+    definition?.unlisted,
+  );
+  const unchanged =
+    toolIds.every((id) => choices[id] === initial[id]) &&
+    other.otherReads === initialOther.otherReads &&
+    other.otherWrites === initialOther.otherWrites;
+  // What a save writes.
+  const intent = grantIntentFromChoices(toolIds, choices, other);
   // Key-stable compare is enough: both sides come from the same source (the
   // stored grant, or the picker's committed draft).
   const resourcesUnchanged =
     JSON.stringify(resources) === JSON.stringify(initialResources);
-  // Presentational only: whether the grant is full as STORED, used for the
-  // notice about requests outside the list. It must NOT gate what
-  // `handleSave` writes (see `grantIntentFromChoices`).
+  // Whether the grant is full as STORED: the notice about requests outside
+  // the list, and the one case `unchanged` can't see on its own (a custom
+  // grant whose grid already shows full access, which a save converts). It
+  // must NOT gate what `handleSave` writes (see `grantIntentFromChoices`).
   const wasFull = grant === undefined || grant.access === "full";
+  const accessUnchanged = (intent.access === "full") === wasFull;
 
   const handleSave = () => {
     if (connection === null) return;
-    const base = grantIntentFromChoices(toolIds, choices);
     save.mutate(
       {
         agentId,
@@ -172,7 +239,7 @@ export const ManagePermissionsDialog = ({
         // server's PRESERVE arm — tools-only saves never hit the resources
         // validator (a free-plan agent with a carried restriction must still
         // be able to edit tools), and unchanged saves stay idempotent.
-        input: resourcesUnchanged ? base : { ...base, resources },
+        input: resourcesUnchanged ? intent : { ...intent, resources },
       },
       { onSuccess: () => onClose() },
     );
@@ -221,11 +288,7 @@ export const ManagePermissionsDialog = ({
               {!readOnly && wasFull && (
                 <p className="text-muted-foreground text-xs">
                   This agent currently has full access. Saving a customization
-                  applies your choices to the tools listed here. Requests
-                  outside this list, including tools added later,{" "}
-                  {definition.unlisted === "block"
-                    ? "are blocked."
-                    : "need approval."}
+                  applies your choices below.
                 </p>
               )}
               {reflection.isError && (
@@ -261,6 +324,13 @@ export const ManagePermissionsDialog = ({
                   onGroupSelect={setGroup}
                 />
               ))}
+              <OtherRequestsSection
+                other={other}
+                unlisted={definition.unlisted}
+                allToolsAllowed={allowAll(choices)}
+                readOnly={readOnly || save.isPending}
+                onChange={setOtherEdits}
+              />
             </>
           )}
         </div>
@@ -279,7 +349,9 @@ export const ManagePermissionsDialog = ({
               onClick={handleSave}
               loading={save.isPending}
               disabled={
-                (unchanged && resourcesUnchanged) || allNever || save.isPending
+                (unchanged && resourcesUnchanged && accessUnchanged) ||
+                allNever ||
+                save.isPending
               }
             >
               {save.isPending ? "Saving…" : "Save"}

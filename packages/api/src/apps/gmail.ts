@@ -61,6 +61,7 @@ export const gmail: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
     envDefaults: googleEnvDefaults,
   },
 };

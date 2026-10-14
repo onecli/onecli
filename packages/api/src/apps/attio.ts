@@ -1,4 +1,104 @@
-import type { AppDefinition } from "./types";
+import type { AppDefinition, OAuthPermission } from "./types";
+import { pkceChallenge, pkceVerifier } from "./oauth/pkce";
+
+// Attio issues tokens at two levels (docs.attio.com/rest-api/guides/authentication):
+// `workspace` acts for the whole workspace and only a workspace admin can grant
+// it; `user` acts as one member, limited to their own Attio permissions, and any
+// member can grant it once an admin has installed the app. Omitting
+// `token_level` means workspace, so that stays the default and the flow every
+// existing connection was made with. User-level tokens require PKCE.
+
+// Attio's scopes are configured on the app at build.attio.com, not requested
+// per authorize, so this list mirrors what the app asks for. A token can hold
+// fewer (a user-level one gets only the user scopes the installing admin
+// approved): the exchange stores what `/v2/self` reports, and falls back to
+// this list only when that lookup fails.
+const permissions: OAuthPermission[] = [
+  {
+    scope: "record_permission:read-write",
+    name: "Records",
+    description: "Contacts, companies, and deals",
+    access: "write",
+  },
+  {
+    scope: "object_configuration:read-write",
+    name: "Object Configuration",
+    description: "Custom objects and attributes",
+    access: "write",
+  },
+  {
+    scope: "list_entry:read-write",
+    name: "List Entries",
+    description: "Entries in lists",
+    access: "write",
+  },
+  {
+    scope: "list_configuration:read-write",
+    name: "List Configuration",
+    description: "Lists and their columns",
+    access: "write",
+  },
+  {
+    scope: "note:read-write",
+    name: "Notes",
+    description: "Notes on records",
+    access: "write",
+  },
+  {
+    scope: "task:read-write",
+    name: "Tasks",
+    description: "Tasks and assignments",
+    access: "write",
+  },
+  {
+    scope: "comment:read-write",
+    name: "Comments",
+    description: "Threads and comments",
+    access: "write",
+  },
+  {
+    scope: "file:read-write",
+    name: "Files",
+    description: "Upload and view files",
+    access: "write",
+  },
+  {
+    scope: "webhook:read-write",
+    name: "Webhooks",
+    description: "Manage webhooks",
+    access: "write",
+  },
+  {
+    scope: "user_management:read",
+    name: "User Management",
+    description: "View workspace members",
+    access: "read",
+  },
+  {
+    scope: "meeting:read-write",
+    name: "Meetings",
+    description: "View and manage meetings",
+    access: "write",
+  },
+  {
+    scope: "call_recording:read",
+    name: "Call Recordings",
+    description: "Transcripts and speakers",
+    access: "read",
+  },
+];
+
+/** The `/v2/self` fields this definition reads. Every member but `active` is
+ *  optional (docs.attio.com/rest-api/endpoint-reference/meta/identify). */
+interface AttioSelf {
+  token_level?: string;
+  scope?: string;
+  workspace_id?: string;
+  workspace_name?: string;
+  workspace_slug?: string;
+  workspace_logo_url?: string;
+  authorized_by_workspace_member_id?: string;
+}
 
 export const attio: AppDefinition = {
   id: "attio",
@@ -11,101 +111,86 @@ export const attio: AppDefinition = {
   connectionMethod: {
     type: "oauth",
     defaultScopes: [],
-    permissions: [
-      {
-        scope: "record_permission:read-write",
-        name: "Records",
-        description: "Contacts, companies, and deals",
-        access: "write",
-      },
-      {
-        scope: "object_configuration:read-write",
-        name: "Object Configuration",
-        description: "Custom objects and attributes",
-        access: "write",
-      },
-      {
-        scope: "list_entry:read-write",
-        name: "List Entries",
-        description: "Entries in lists",
-        access: "write",
-      },
-      {
-        scope: "list_configuration:read-write",
-        name: "List Configuration",
-        description: "Lists and their columns",
-        access: "write",
-      },
-      {
-        scope: "note:read-write",
-        name: "Notes",
-        description: "Notes on records",
-        access: "write",
-      },
-      {
-        scope: "task:read-write",
-        name: "Tasks",
-        description: "Tasks and assignments",
-        access: "write",
-      },
-      {
-        scope: "comment:read-write",
-        name: "Comments",
-        description: "Threads and comments",
-        access: "write",
-      },
-      {
-        scope: "file:read-write",
-        name: "Files",
-        description: "Upload and view files",
-        access: "write",
-      },
-      {
-        scope: "webhook:read-write",
-        name: "Webhooks",
-        description: "Manage webhooks",
-        access: "write",
-      },
-      {
-        scope: "user_management:read",
-        name: "User Management",
-        description: "View workspace members",
-        access: "read",
-      },
-      {
-        scope: "meeting:read-write",
-        name: "Meetings",
-        description: "View and manage meetings",
-        access: "write",
-      },
-      {
-        scope: "call_recording:read",
-        name: "Call Recordings",
-        description: "Transcripts and speakers",
-        access: "read",
-      },
-    ],
-    buildAuthUrl: ({ appCredentials, redirectUri, state }) => {
+    permissions,
+    accessLevels: {
+      label: "Access level",
+      defaultValue: "workspace",
+      options: [
+        {
+          value: "workspace",
+          label: "Workspace access",
+          description: "Acts for the whole workspace. Needs an Attio admin.",
+        },
+        {
+          value: "user",
+          label: "Personal access",
+          description: "Acts as you, limited to your Attio permissions.",
+        },
+      ],
+    },
+    buildAuthUrl: async ({
+      appCredentials,
+      redirectUri,
+      state,
+      accessLevel,
+    }) => {
+      if (!appCredentials.clientId) {
+        throw new Error("Attio OAuth client ID not configured");
+      }
       const url = new URL("https://app.attio.com/authorize");
-      url.searchParams.set("client_id", appCredentials.clientId!);
+      url.searchParams.set("client_id", appCredentials.clientId);
       url.searchParams.set("redirect_uri", redirectUri);
       url.searchParams.set("response_type", "code");
       url.searchParams.set("state", state);
+      if (accessLevel === "user") {
+        url.searchParams.set("token_level", "user");
+        url.searchParams.set(
+          "code_challenge",
+          await pkceChallenge(await pkceVerifier(state)),
+        );
+        url.searchParams.set("code_challenge_method", "S256");
+      }
       return url.toString();
     },
-    exchangeCode: async ({ appCredentials, callbackParams, redirectUri }) => {
+    exchangeCode: async ({
+      appCredentials,
+      callbackParams,
+      redirectUri,
+      accessLevel,
+    }) => {
+      // Attio redirects back with `error` instead of a code when the user
+      // declines, or when the app has no user scopes for a personal token.
+      if (callbackParams.error) {
+        throw new Error(
+          `Attio authorization error: ${callbackParams.error} (${callbackParams.error_description ?? "no description"})`,
+        );
+      }
+      if (!callbackParams.code) {
+        throw new Error("Attio callback missing authorization code");
+      }
+      if (!appCredentials.clientId || !appCredentials.clientSecret) {
+        throw new Error("Attio OAuth credentials not configured");
+      }
+      const requestedLevel = accessLevel === "user" ? "user" : "workspace";
+      const body = new URLSearchParams({
+        grant_type: "authorization_code",
+        code: callbackParams.code,
+        redirect_uri: redirectUri,
+        client_id: appCredentials.clientId,
+        client_secret: appCredentials.clientSecret,
+      });
+      if (requestedLevel === "user") {
+        if (!callbackParams.state) {
+          throw new Error("Attio callback missing state parameter");
+        }
+        body.set("code_verifier", await pkceVerifier(callbackParams.state));
+      }
       const tokenRes = await fetch("https://app.attio.com/oauth/token", {
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
         },
-        body: new URLSearchParams({
-          grant_type: "authorization_code",
-          code: callbackParams.code!,
-          redirect_uri: redirectUri,
-          client_id: appCredentials.clientId!,
-          client_secret: appCredentials.clientSecret!,
-        }).toString(),
+        body: body.toString(),
       });
 
       if (!tokenRes.ok) {
@@ -147,19 +232,15 @@ export const attio: AppDefinition = {
         credentials.expires_at = expiresAt;
       }
 
-      let metadata: Record<string, unknown> | undefined;
+      let self: AttioSelf | null = null;
+      let metadata: Record<string, unknown> = {};
       const selfRes = await fetch("https://api.attio.com/v2/self", {
         headers: { Authorization: `Bearer ${tokenData.access_token}` },
       });
 
       if (selfRes.ok) {
-        const self = (await selfRes.json()) as {
-          workspace_id?: string;
-          workspace_name?: string;
-          workspace_slug?: string;
-          workspace_logo_url?: string;
-          authorized_by_workspace_member_id?: string;
-        };
+        self = (await selfRes.json()) as AttioSelf;
+        const authorizedBy = self.authorized_by_workspace_member_id;
 
         metadata = {
           workspaceName: self.workspace_name,
@@ -187,9 +268,7 @@ export const attio: AppDefinition = {
           };
 
           const member = membersData.data?.find(
-            (m) =>
-              m.id?.workspace_member_id ===
-              self.authorized_by_workspace_member_id,
+            (m) => m.id?.workspace_member_id === authorizedBy,
           );
 
           if (member) {
@@ -206,22 +285,27 @@ export const attio: AppDefinition = {
         }
       }
 
-      const scopes = [
-        "record_permission:read-write",
-        "object_configuration:read-write",
-        "list_entry:read-write",
-        "list_configuration:read-write",
-        "note:read-write",
-        "task:read-write",
-        "comment:read-write",
-        "file:read-write",
-        "webhook:read-write",
-        "user_management:read",
-        "meeting:read-write",
-        "call_recording:read",
-      ];
+      // What Attio actually granted, from `/v2/self`: the token's level, and
+      // its scopes (a user-level token holds only those the installing admin
+      // approved). What was requested stands in only when that lookup failed.
+      const grantedLevel =
+        self?.token_level === "user" || self?.token_level === "workspace"
+          ? self.token_level
+          : requestedLevel;
+      const grantedScopes =
+        typeof self?.scope === "string"
+          ? self.scope.split(/\s+/).filter(Boolean)
+          : [];
 
-      return { credentials, scopes, metadata };
+      return {
+        credentials,
+        scopes: grantedScopes.length
+          ? grantedScopes
+          : permissions.map((p) => p.scope),
+        // The `accessLevels` option this connection holds; the connection
+        // card shows its label so the two kinds can be told apart.
+        metadata: { ...metadata, accessLevel: grantedLevel },
+      };
     },
   },
   // Alternate to OAuth: bring your own Attio API key, scoped as narrowly as you

@@ -166,12 +166,17 @@ export const adapterWorkItemSchema = z.object({
    * mirror posts the web-sourced ones ahead of the answer so the provider
    * thread shows the same exchange the web does (an automation's, i.e. a
    * wake that joined a running wake, as its caption, never as a person's
-   * words); provider-sourced ones are already in the channel. Optional: an
+   * words); provider-sourced ones are already in the channel. Each one's
+   * own reply, when the agent wrote one, posts right after it. Optional: an
    * older control plane simply never sends it.
    */
   followUps: z
     .array(
       z.object({
+        /** The follow-up's own turn id: where its reply is stored in the
+         * transcript. Optional: an older control plane never sends it, and
+         * the mirror then posts no reply (the pre-field behavior). */
+        id: z.string().optional(),
         message: z.string(),
         source: z.string(),
         /** Display name of THIS follow-up's author — on a group thread it
@@ -179,6 +184,16 @@ export const adapterWorkItemSchema = z.object({
          * never sends it (consumers fall back to the turn's name). Null: the
          * control plane resolved and found nothing (deleted user). */
         userName: z.string().nullable().optional(),
+        /** Where THIS follow-up was asked, when finer than the link's own
+         * address: its reply is posted there (the turn's `sourceThreadId`
+         * rule, per message). Optional/nullable for version skew. */
+        sourceThreadId: z.string().nullable().optional(),
+        /** Whether this follow-up's reply was ALREADY posted, mid-run, by
+         * the reply feed (`replies`): the completion pass then posts the
+         * follow-up's words (when they came from elsewhere) but not the
+         * reply again. Optional: an older control plane never sends it,
+         * and never served a reply early either. */
+        replyPosted: z.boolean().optional(),
       }),
     )
     .optional(),
@@ -192,10 +207,59 @@ export const adapterWorkItemSchema = z.object({
 });
 export type AdapterWorkItem = z.infer<typeof adapterWorkItemSchema>;
 
+/**
+ * A reply the agent wrote to a mid-run follow-up of a turn STILL RUNNING,
+ * not yet posted to the provider. Everything the mirror needs to post it
+ * where the follow-up was asked, without a transcript read of its own: the
+ * reply text travels with the item, and so do the follow-up's own words and
+ * author, because a follow-up typed on ANOTHER surface (the web) is not in
+ * the channel yet and must post ahead of its reply, as one exchange.
+ */
+export const adapterReplyItemSchema = z.object({
+  linkId: z.string(),
+  presenceId: z.string(),
+  conversationId: z.string(),
+  /** The link's own address: the channel the reply posts in. */
+  externalThreadId: z.string(),
+  kind: z.enum(["direct", "group"]),
+  /** The running turn the follow-up joined. */
+  turnId: z.string(),
+  followUp: z.object({
+    id: z.string(),
+    /** The follow-up's words, as the completion pass would mirror them. */
+    message: z.string(),
+    source: z.string(),
+    /** The author's display name (null: unnamed), for the attribution line
+     * of a follow-up from another surface. */
+    userName: z.string().nullable(),
+    /** Where the follow-up was asked, when finer than the link's address. */
+    sourceThreadId: z.string().nullable(),
+  }),
+  /** The agent's reply, as stored under the follow-up. */
+  reply: z.string(),
+});
+export type AdapterReplyItem = z.infer<typeof adapterReplyItemSchema>;
+
 export const adapterWorkResponseSchema = z.object({
   finished: z.array(adapterWorkItemSchema),
+  /**
+   * Replies the agent has ALREADY written to mid-run follow-ups of turns
+   * still running, not yet posted to the provider: the mirror posts each
+   * one the moment it sees it (claim first, then post), so a person who
+   * asked while the agent worked reads the answer while the agent still
+   * works. Optional: an older control plane never sends it, and every
+   * reply then posts at the turn's close as before.
+   */
+  replies: z.array(adapterReplyItemSchema).optional(),
 });
 export type AdapterWorkResponse = z.infer<typeof adapterWorkResponseSchema>;
+
+/** The claim on a follow-up's reply, before it posts: exactly-once by a
+ * compare-and-set on the row (NULL to now). */
+export const adapterReplyClaimSchema = z.object({
+  followUpId: z.string(),
+});
+export type AdapterReplyClaim = z.infer<typeof adapterReplyClaimSchema>;
 
 // ── Ingest (raw provider event → door outcome) ──────────────────────────────
 
@@ -402,6 +466,11 @@ export const adapterUnsettledPromptsResponseSchema = z.object({
 
 export const adapterCursorResponseSchema = z.object({
   advanced: z.boolean(),
+});
+
+/** The answer to a reply claim: true on the winning compare-and-set. */
+export const adapterReplyClaimResponseSchema = z.object({
+  claimed: z.boolean(),
 });
 
 // ── Outbound mentions (the completion pass's name resolution) ───────────────

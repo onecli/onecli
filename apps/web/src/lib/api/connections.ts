@@ -1,4 +1,4 @@
-import { apiGet, apiPatch, apiDelete } from "./client";
+import { apiGet, apiPatch, apiDelete, apiPost } from "./client";
 import type { PageScope } from "./scope";
 import type { Connection } from "./types";
 
@@ -19,3 +19,10 @@ export const rename = (
 
 export const disconnect = (id: string, scope: PageScope = "workspace") =>
   apiDelete(`${connectionsPath(scope)}/${id}`);
+
+/** Move a workspace connection up to the organization (org admins only). */
+export const promote = (id: string) =>
+  apiPost<Pick<Connection, "id" | "provider" | "status" | "label">>(
+    `/v1/connections/${id}/promote`,
+    {},
+  );

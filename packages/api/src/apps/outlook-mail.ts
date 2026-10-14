@@ -50,6 +50,7 @@ export const outlookMail: AppDefinition = {
   },
   configurable: {
     fields: microsoftConfigFields,
+    group: "microsoft",
     envDefaults: microsoftEnvDefaults,
   },
 };

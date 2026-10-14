@@ -18,15 +18,18 @@ import { RUN_WINDOW_SLACK_MS } from "@onecli/api/validations/runs";
 import { PageHeader } from "@dashboard/page-header";
 import { useAgents } from "@/hooks/use-agents";
 import type { RunListItem } from "@/lib/api";
+import { isRunsView, type RunsView } from "@/lib/agents/runs/runs-view";
 import { RunsTab } from "./runs-tab";
 import { NetworkTab } from "./network-tab";
 
 const ALL_AGENTS = "all";
 
-/** The Activity URL: `?tab=runs`, `?agent=<id>`, `?from=…&to=…`. */
+/** The Activity URL: `?tab=runs`, `?agent=<id>`, `?view=<runs filter>`,
+ *  `?from=…&to=…`. */
 interface ActivityUrl {
   tab?: "runs";
   agent?: string;
+  view?: Exclude<RunsView, "all">;
   from?: string;
   to?: string;
 }
@@ -61,6 +64,10 @@ export const ActivityContent = () => {
   const { data: agents = [] } = useAgents();
 
   const tab = params.get("tab") === "runs" ? "runs" : "network";
+  // The Runs filter; an unknown value falls back to All.
+  const rawView = params.get("view");
+  const view = isRunsView(rawView) ? rawView : "all";
+  const viewParam = view === "all" ? undefined : view;
   // A hand-edited or stale URL must not reach the query: an invalid scope is
   // dropped whole.
   const parsed = activityScopeSchema.safeParse({
@@ -89,6 +96,7 @@ export const ActivityContent = () => {
     go({
       tab: tab === "runs" ? "runs" : undefined,
       agent: id === ALL_AGENTS ? undefined : id,
+      view: tab === "runs" ? viewParam : undefined,
     });
   // A new history entry: Back returns to the run list.
   const viewRunNetwork = (run: RunListItem) =>
@@ -123,7 +131,18 @@ export const ActivityContent = () => {
       </div>
 
       {tab === "runs" ? (
-        <RunsTab agentId={scope.agentId} onViewNetwork={viewRunNetwork} />
+        <RunsTab
+          agentId={scope.agentId}
+          view={view}
+          onViewChange={(next) =>
+            go({
+              tab: "runs",
+              agent: scope.agentId,
+              view: next === "all" ? undefined : next,
+            })
+          }
+          onViewNetwork={viewRunNetwork}
+        />
       ) : (
         <NetworkTab
           scope={scope}

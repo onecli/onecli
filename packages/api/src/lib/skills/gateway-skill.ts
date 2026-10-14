@@ -139,22 +139,74 @@ If an MCP server won't start due to missing credentials, create stubs
 secret values, with file permissions \`0600\`. See the guide at:
 https://onecli.sh/docs/guides/credential-stubs/general-app
 
+## Do What Was Asked, or Stop and Ask
+
+A reviewer approving your writes trusts that each one is the change the
+user asked for. Keep it that way, in every app:
+
+- If the change can't be done the way the user asked (the API has no such
+  endpoint, it refuses, a field can't be set), stop after the first
+  failure. Say plainly what failed and why, offer what you could do instead,
+  and wait for a yes. Never swap in a different change on your own, such as
+  renaming or moving a record when a merge failed.
+- Before a write the user didn't spell out, say in one line what will
+  change on which record ("I'll rename Jane D. to Jane Doe and move her to
+  Acme Corp"), so the approval card is never the first time they see it.
+- Don't guess endpoints. When you're not sure one exists, check the API's
+  docs or make a read first. Never send a write to a URL you made up: every
+  guess costs the reviewer an approval for nothing.
+
 ## Many Similar Writes
 
 Importing, creating or updating a list of records can mean one approval per
 request. Make that one card for the reviewer:
 
-- Tell the user the count up front ("I'll create 39 contacts; you'll get one
-  approval card").
-- Tag every request of the task with the same headers (the gateway strips
+- **Updating a list of Salesforce records: send ONE bulk update** of up to
+  200 records, \`PATCH /services/data/v62.0/composite/sobjects\` with
+  \`{"allOrNone": false, "records": [{"attributes": {"type": "Contact"},
+  "id": "<record id>", "<Field>": "<new value>"}, …]}\`. It is one request,
+  so ONE approval for the whole list, and the reviewer's card shows every
+  record with its current and new value and flags the ones that overwrite
+  an existing value. One record type and the same fields per call. For more
+  than 200, send one bulk update per 200 and say how many approvals to
+  expect ("450 contacts: 3 approvals"). Tell the user the count up front.
+  Tag each of those calls with \`X-OneCLI-Batch: <new id per call>\`,
+  \`X-OneCLI-Batch-Label: <what the task is> (2 of 3)\` and
+  \`X-OneCLI-Batch-Total: 1\`, so each card says which part it is and how
+  many follow. Send the next part only after this one is decided.
+  After it lands, read the response: each record has its own
+  \`success\`/\`errors\`; report the failures by name, and stop if they all
+  failed (for example a 401) instead of retrying.
+- **Creating or deleting a list of Salesforce records: the same, ONE
+  call** of up to 200. Create: \`POST /services/data/v62.0/composite/sobjects\`
+  with \`{"allOrNone": false, "records": [{"attributes": {"type":
+  "Contact"}, "LastName": "…", …}, …]}\` (no ids). Delete: \`DELETE
+  /services/data/v62.0/composite/sobjects?ids=<id>,<id>,…&allOrNone=false\`
+  (one record type per call). One approval; the card lists every record.
+- Anything else (other apps, or writes no bulk call covers): tell the user the count up
+  front ("I'll create 20 contacts; you'll get one approval card"). One
+  card holds up to 25 requests. For more, split the list into groups of 25
+  and say how many cards to expect ("105 contacts: 5 cards of up to 25").
+- Tag every request of one group with the same headers (the gateway strips
   them before forwarding):
   \`X-OneCLI-Batch: <id>\` (1-64 of letters, digits, \`-\`, \`_\`),
   \`X-OneCLI-Batch-Label: <what the task is>\` (up to 120 characters),
-  \`X-OneCLI-Batch-Total: <how many requests>\`.
-- Send the requests in parallel, at most 10 at a time. Don't send them one
-  after another waiting on each approval, and don't fold them into one bulk
-  call (Salesforce sObject Collections, composite): the reviewer then gets
-  a single card for every record at once and can't decide them one by one.
+  \`X-OneCLI-Batch-Total: <how many requests in this group>\`.
+  Each group of 25 is its own batch: a new id, the label ending in its
+  place ("Update mailing country (2 of 5)"), and the total counting only
+  that group, never the whole list. The card waits for the total it was
+  told, so a whole-list total makes it wait for requests you haven't sent.
+- Send one group's requests in parallel, all of it at once, so the
+  reviewer sees them on one card. Wait until that group is decided before
+  sending the next. Don't send them one after another waiting on each
+  approval.
+- Check that you sent every request of the group before you wait: the
+  number started must equal the group's size. A shell \`while read\`
+  loop over a file skips its last line when the file has no trailing
+  newline, so loop over an array, or write the file with one.
+- When they finish, read the records back and confirm each change landed.
+  Send any you missed with the same \`X-OneCLI-Batch\` headers as their
+  group, so they join its card, and tell the user it was your miss.
 - At the end, summarize what succeeded and what was denied. Never re-send a
   denied request unless the user asks.
 - When a write belongs to a record, say so in the same request, so the
@@ -171,6 +223,15 @@ Salesforce returns no link, only the record id: its record page is
 \`https://<host>/<id>\` on the org host the gateway gave you for that
 connection. Never guess a URL or copy an example hostname. If you can't
 get a real link, show the id instead.
+
+Talk about records the way the user sees them in the app: a field by the
+label on its screen ("SDR Owner"), taken from the app's own field
+metadata (for Salesforce, \`GET /services/data/vXX.X/sobjects/<Object>/describe\`
+lists each field's \`label\`), never its API name (\`SDR__c\`) or a
+guess; a person or record by name. When several records share a name
+(two users named Alex Kim), tell them apart by something the user
+recognizes (email, title, team, active or not) and ask which one if it
+matters, never by a bare id.
 
 ## When a Request Fails
 
@@ -204,6 +265,15 @@ First classify the gateway error code, not just its HTTP status:
   from the error so they can reconnect that account, then retry the same
   request once they confirm. Reconnecting keeps the account's agent access
   and rules.
+- \`github_org_access_required\` (403) means one GitHub organization (the
+  body's \`org\`) refused the connected account: it has not approved OneCLI
+  yet (\`reason=approval_required\`) or requires SSO sign-in
+  (\`reason=sso_required\`). Only the user, and for approval an owner of
+  that organization, can fix it. Do not retry, and never paste GitHub's own
+  SSO or authorization links. Tell the user which organization refused and
+  why, give them the \`connect_url\` (it walks them through the fix), and
+  retry once they confirm. Requests outside that organization are
+  unaffected.
 
 For other authentication or connection failures (401, 403, or a gateway
 error such as \`app_not_connected\`):

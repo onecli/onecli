@@ -16,6 +16,7 @@ import { AppIcon } from "@/lib/components/app-icon";
 import {
   SLACK_DISPLAY_NAME,
   SLACK_ICON_SRC,
+  slackAppRedirectUrl,
 } from "@/lib/agents/slack-presence";
 import type { AgentChannelPresence } from "@/lib/api";
 import { SlackDetachDialog } from "./slack-detach-dialog";
@@ -120,10 +121,10 @@ export const SlackPresenceCard = ({
         <CardFooter className="justify-between gap-2 border-t [.border-t]:pt-4">
           <Button variant="outline" size="sm" asChild>
             <a
-              // `team=` pins the redirect to the installed workspace — without it a
-              // multi-workspace user lands in their DEFAULT workspace, which may
-              // not be the one the agent lives in.
-              href={`https://slack.com/app_redirect?app=${encodeURIComponent(presence.externalId)}&team=${encodeURIComponent(presence.tenant.externalId)}`}
+              href={slackAppRedirectUrl(
+                presence.externalId,
+                presence.tenant.externalId,
+              )}
               target="_blank"
               rel="noreferrer"
             >

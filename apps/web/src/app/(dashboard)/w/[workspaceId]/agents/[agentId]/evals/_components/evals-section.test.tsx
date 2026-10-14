@@ -20,6 +20,8 @@ const state = vi.hoisted(() => ({
   dialog: vi.fn(),
   results: vi.fn(),
   toastError: vi.fn(),
+  saveSchedule: vi.fn(),
+  deleteSchedule: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-evals", () => ({
@@ -33,6 +35,14 @@ vi.mock("@/hooks/use-evals", () => ({
     isPending: state.startPending,
   }),
   useArchiveEvalQuestion: () => ({ mutate: state.archive, isPending: false }),
+  useSaveEvalSchedule: () => ({
+    mutate: state.saveSchedule,
+    isPending: false,
+  }),
+  useDeleteEvalSchedule: () => ({
+    mutate: state.deleteSchedule,
+    isPending: false,
+  }),
 }));
 vi.mock("@/lib/api/policy-visibility", () => ({
   useEffectiveCredentials: () => ({
@@ -81,6 +91,7 @@ const runSummary = (
 ): EvalRunSummary => ({
   id,
   status: "done",
+  trigger: "manual",
   configVersion: "cfg",
   total: 1,
   counts: { pending: 0, passed: 1, mismatch: 0, error: 0, inconclusive: 0 },
@@ -94,6 +105,7 @@ const runSummary = (
 const view = (patch: Partial<EvalsView> = {}): EvalsView => ({
   questions: [],
   runs: [],
+  schedule: null,
   maxQuestions: 50,
   ...patch,
 });
@@ -107,6 +119,8 @@ beforeEach(() => {
   state.archive.mockReset();
   state.dialog.mockReset();
   state.results.mockReset();
+  state.saveSchedule.mockReset();
+  state.deleteSchedule.mockReset();
   // Radix Select measures and captures the pointer; jsdom does neither.
   Element.prototype.scrollIntoView = vi.fn();
   Element.prototype.hasPointerCapture = vi.fn(() => false);
@@ -255,5 +269,71 @@ describe("EvalsSection", () => {
     );
     await user.click(screen.getByRole("button", { name: "Archive" }));
     expect(state.archive).toHaveBeenCalledWith("q-1", expect.anything());
+  });
+
+  const savedSchedule = (
+    patch: Partial<NonNullable<EvalsView["schedule"]>> = {},
+  ): NonNullable<EvalsView["schedule"]> => ({
+    schedule: "0 9 * * 1-5",
+    timezone: "Asia/Jerusalem",
+    enabled: true,
+    disabledReason: null,
+    nextFireAt: "2026-10-12T06:00:00Z",
+    lastFiredAt: null,
+    lastOutcome: null,
+    ...patch,
+  });
+
+  it("schedules the tests daily at 09:00 by default, in the browser's zone", async () => {
+    state.view = view({ questions: [question("q-1")] });
+    const user = userEvent.setup();
+    render(<EvalsSection />);
+
+    await user.click(screen.getByRole("button", { name: "Schedule" }));
+    expect(screen.getByLabelText("At")).toHaveValue("09:00");
+    await user.clear(screen.getByLabelText("At"));
+    await user.type(screen.getByLabelText("At"), "07:30");
+    await user.clear(screen.getByLabelText("Timezone"));
+    await user.type(screen.getByLabelText("Timezone"), "Asia/Jerusalem");
+    await user.click(screen.getByRole("button", { name: "Save schedule" }));
+
+    expect(state.saveSchedule).toHaveBeenCalledWith(
+      { schedule: "30 7 * * *", timezone: "Asia/Jerusalem", enabled: true },
+      expect.anything(),
+    );
+  });
+
+  it("shows the saved schedule, its next run and its last outcome, and edits it", async () => {
+    state.view = view({
+      questions: [question("q-1")],
+      schedule: savedSchedule({ lastOutcome: "skipped_busy" }),
+    });
+    const user = userEvent.setup();
+    render(<EvalsSection />);
+
+    expect(screen.getByText("Weekdays at 09:00")).toBeInTheDocument();
+    expect(screen.getByText(/Next run/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/skipped: a run was already going/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Schedule" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Edit schedule" }));
+    expect(screen.getByLabelText("At")).toHaveValue("09:00");
+    expect(screen.getByLabelText("Timezone")).toHaveValue("Asia/Jerusalem");
+    await user.click(screen.getByRole("button", { name: "Remove schedule" }));
+    expect(state.deleteSchedule).toHaveBeenCalled();
+  });
+
+  it("says why the platform paused a schedule", () => {
+    state.view = view({
+      schedule: savedSchedule({
+        enabled: false,
+        disabledReason: "authorization",
+      }),
+    });
+    render(<EvalsSection />);
+    expect(screen.getByText(/no longer has access/)).toBeInTheDocument();
+    expect(screen.queryByText(/Next run/)).toBeNull();
   });
 });

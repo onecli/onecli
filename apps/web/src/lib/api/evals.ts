@@ -4,6 +4,10 @@ import type {
   EvalQuestionInput,
   EvalResultView,
   EvalRunStatus,
+  EvalRunTrigger,
+  EvalScheduleDisabledReason,
+  EvalScheduleInput,
+  EvalScheduleOutcome,
 } from "@onecli/api/validations/evals";
 import { apiDelete, apiGet, apiPost, apiPut } from "./client";
 
@@ -25,6 +29,7 @@ export interface EvalQuestion {
 export interface EvalRunSummary {
   id: string;
   status: EvalRunStatus;
+  trigger: EvalRunTrigger;
   configVersion: string;
   total: number;
   counts: EvalOutcomeCounts;
@@ -39,9 +44,21 @@ export interface EvalRunDetail extends EvalRunSummary {
   previous: { id: string; configVersion: string } | null;
 }
 
+/** The agent's eval schedule (one per agent). */
+export interface EvalSchedule {
+  schedule: string;
+  timezone: string;
+  enabled: boolean;
+  disabledReason: EvalScheduleDisabledReason | null;
+  nextFireAt: string;
+  lastFiredAt: string | null;
+  lastOutcome: EvalScheduleOutcome | null;
+}
+
 export interface EvalsView {
   questions: EvalQuestion[];
   runs: EvalRunSummary[];
+  schedule: EvalSchedule | null;
   maxQuestions: number;
 }
 
@@ -70,3 +87,9 @@ export const startRun = (agentId: string) =>
 
 export const getRun = (agentId: string, runId: string) =>
   apiGet<EvalRunDetail>(base(agentId, `/runs/${encodeURIComponent(runId)}`));
+
+export const saveSchedule = (agentId: string, input: EvalScheduleInput) =>
+  apiPut<EvalSchedule>(base(agentId, "/schedule"), input);
+
+export const deleteSchedule = (agentId: string) =>
+  apiDelete(base(agentId, "/schedule"));

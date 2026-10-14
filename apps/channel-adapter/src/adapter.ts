@@ -1,12 +1,13 @@
 import type {
   AdapterIngestResponse,
   AdapterPresence,
+  AdapterReplyItem,
   AdapterWorkItem,
 } from "@onecli/agent-protocol";
 import type { AdapterConfig } from "./config";
 import type { ControlPlaneClient } from "./control-plane";
 import { createApprovalsManager } from "./approvals";
-import { mirrorFinishedTurn } from "./mirror";
+import { mirrorFinishedTurn, mirrorFollowUpReply } from "./mirror";
 import {
   channelAdapterProviderFor,
   type ChannelAdapterProvider,
@@ -56,6 +57,7 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
   const approvals = createApprovalsManager({
     controlPlane,
     gatewayUrl: config.gatewayUrl,
+    appUrl: config.appUrl,
     approvalsPollSeconds: config.approvalsPollSeconds,
     // Per-presence resolution through the registry: the approvals manager
     // stays channel-general and only ever sees the seam. Null for a
@@ -407,6 +409,28 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
     else cursors.delete(item.linkId); // lost the CAS — re-seed from config
   };
 
+  const handleReply = async (item: AdapterReplyItem): Promise<void> => {
+    const runtime = runtimes.get(item.presenceId);
+    if (!runtime?.credential) return;
+    const { agent } = runtime.presence;
+    await mirrorFollowUpReply({
+      controlPlane,
+      credential: runtime.credential,
+      provider: runtime.presence.provider,
+      posts: runtime.provider.posts,
+      removalEventFor: runtime.provider.removalEventFor,
+      threadAddress: runtime.provider.threadAddress,
+      iconUrl: runtime.presence.agent.imageUrl ?? null,
+      item,
+      // The same doors the completion pass hands a reply's connect cards.
+      ...(config.appUrl && {
+        modelsUrl: `${config.appUrl}/w/${encodeURIComponent(agent.workspaceId)}/agents/${encodeURIComponent(agent.id)}/models`,
+        chatUrl: `${config.appUrl}/w/${encodeURIComponent(agent.workspaceId)}/agents/${encodeURIComponent(agent.id)}/chat`,
+      }),
+      onLog: log,
+    });
+  };
+
   // ── Loops ───────────────────────────────────────────────────────────────
 
   // These parked timers are what keep the PROCESS alive between polls — the
@@ -438,6 +462,12 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
     while (!stopped) {
       try {
         const work = await controlPlane.getWork();
+        // Replies first: a reply to a mid-run message is read by someone
+        // waiting on it right now; a finished turn's answer has already
+        // waited the whole turn.
+        for (const item of work.replies ?? []) {
+          await handleReply(item);
+        }
         for (const item of work.finished) {
           await handleFinished(item);
         }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Loader2, Play } from "lucide-react";
+import { CalendarClock, Loader2, Play } from "lucide-react";
 import { toast } from "sonner";
 import { isActiveEvalRun } from "@onecli/api/validations/evals";
 import { Button } from "@onecli/ui/components/button";
@@ -17,6 +17,8 @@ import { QuestionDialog, type QuestionDialogState } from "./question-dialog";
 import { QuestionList } from "./question-list";
 import { RunPicker } from "./run-picker";
 import { RunResults } from "./run-results";
+import { ScheduleDialog } from "./schedule-dialog";
+import { ScheduleSummary } from "./schedule-summary";
 import { useAgentEvalApps } from "./use-agent-eval-apps";
 
 /**
@@ -37,6 +39,9 @@ export const EvalsSection = () => {
   });
   const [archiving, setArchiving] = useState<EvalQuestion | null>(null);
   const [inspecting, setInspecting] = useState<string | null>(null);
+  const [scheduleDialog, setScheduleDialog] = useState({ open: false, key: 0 });
+  const openSchedule = () =>
+    setScheduleDialog((s) => ({ open: true, key: s.key + 1 }));
   // Labels for stored apps; the agent's apps load once there are questions.
   const apps = useAgentEvalApps(
     agent.id,
@@ -60,7 +65,7 @@ export const EvalsSection = () => {
       </div>
     );
 
-  const { questions, runs, maxQuestions } = view.data;
+  const { questions, runs, schedule, maxQuestions } = view.data;
   const latest = runs[0];
   const runId =
     runs.find((run) => run.id === pickedRunId)?.id ?? latest?.id ?? null;
@@ -92,16 +97,28 @@ export const EvalsSection = () => {
             changed after you edit it.
           </p>
         </div>
-        <Button
-          size="sm"
-          disabled={questions.length === 0}
-          loading={busy}
-          onClick={runTests}
-        >
-          {!busy && <Play />}
-          {busy ? "Running tests…" : "Run tests"}
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          {!schedule && (
+            <Button size="sm" variant="outline" onClick={openSchedule}>
+              <CalendarClock />
+              Schedule
+            </Button>
+          )}
+          <Button
+            size="sm"
+            disabled={questions.length === 0}
+            loading={busy}
+            onClick={runTests}
+          >
+            {!busy && <Play />}
+            {busy ? "Running tests…" : "Run tests"}
+          </Button>
+        </div>
       </div>
+
+      {schedule && (
+        <ScheduleSummary schedule={schedule} onEdit={openSchedule} />
+      )}
 
       <section aria-labelledby="eval-results-heading" className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -158,6 +175,13 @@ export const EvalsSection = () => {
         agentId={agent.id}
         state={dialog}
         onClose={() => setDialog((current) => ({ ...current, open: false }))}
+      />
+      <ScheduleDialog
+        key={scheduleDialog.key}
+        agentId={agent.id}
+        open={scheduleDialog.open}
+        onOpenChange={(open) => setScheduleDialog((s) => ({ ...s, open }))}
+        current={schedule}
       />
       <ArchiveQuestionDialog
         agentId={agent.id}

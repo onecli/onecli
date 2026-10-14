@@ -40,6 +40,21 @@ import { MAX_ATTACHMENTS_PER_MESSAGE } from "./attachments";
  * `home.synced` ack.
  */
 
+/**
+ * The `turn.message` id of a steer the PLATFORM writes into a running turn
+ * (the approaching-ceiling warning), not a person: namespaced so it can
+ * never collide with a follow-up row's id (uuids have no colon), and so a
+ * reader can tell it apart. There is no row behind it, so there is nothing
+ * to store an answer under: the agent's reply to it stays the turn's own.
+ */
+export const ceilingWarningSteerId = (turnId: string): string =>
+  `ceiling-warning:${turnId}`;
+
+/** True for a steer id the platform minted (see `ceilingWarningSteerId`):
+ * one with no follow-up row behind it. */
+export const isPlatformSteerId = (steerId: string): boolean =>
+  steerId.startsWith("ceiling-warning:");
+
 /** What a runner can do, declared at registration — capacity and posture. */
 export const runnerCapabilitiesSchema = z.object({
   /** Concurrent-sandbox cap the runner enforces; placement respects it. */
@@ -59,6 +74,13 @@ export const runnerCapabilitiesSchema = z.object({
    * the queue-only degrade.
    */
   steerMessages: z.boolean().optional(),
+  /**
+   * This runner parses the `turn.send_now` work item. Same
+   * all-or-nothing reason as `steerMessages`: the claim arm is gated on it,
+   * so an older runner never receives the kind and a Send now request on
+   * its sandbox simply stays a request. Absent = false.
+   */
+  sendNow: z.boolean().optional(),
   /**
    * This runner pulls attachment bytes (`GET /v1/runner/attachments/:id`)
    * and streams them into the sandbox ahead of the turn. Dispatch composes
@@ -238,6 +260,30 @@ export const runnerWorkItemSchema = z
       targetTurnId: z.string().min(1),
       /** Bounded: user-authored text that crosses two hops. */
       message: z.string().max(100_000),
+      /** Delivery-only prompt context (the "a new message arrived" frame
+       * for a sender's follow-up); see the transport schema's field of the
+       * same name. The runner forwards it verbatim. */
+      context: z.string().max(MAX_TURN_CONTEXT_CHARS).optional(),
+    }),
+    /**
+     * SEND NOW: the person asked the agent to read a waiting
+     * follow-up NOW instead of after the tool it is running. The supervisor
+     * moves that tool to the background, so the harness reaches its next
+     * safe point and injects the queued message. Claimed only once the
+     * follow-up was delivered to this run, so it always follows its own
+     * `turn.message` on the same ordered channel. A runner with no live
+     * channel does nothing: the request was a wish about a live run, and
+     * there is none to act on. Only sent to runners that advertised
+     * `sendNow`.
+     */
+    z.object({
+      kind: z.literal("turn.send_now"),
+      sandboxId: z.string().min(1),
+      conversationId: z.string().min(1),
+      /** The follow-up row's own id: the one the person is waiting on. */
+      turnId: z.string().min(1),
+      /** The running turn it was delivered into. */
+      targetTurnId: z.string().min(1),
     }),
     /**
      * Push the home projection into a RUNNING sandbox (step 9). All parts

@@ -20,6 +20,8 @@ export interface PendingApproval {
   /** The readable card (`summary::ApprovalSummary` on the wire). */
   readonly summary?: {
     readonly action: string;
+    /** The familiar shape it produces (`email`, `event`); absent otherwise. */
+    readonly kind?: "email" | "event";
     readonly details: ReadonlyArray<{
       label: string;
       value: string;
@@ -31,6 +33,20 @@ export interface PendingApproval {
       lead: string;
       record: string;
       row: number;
+    };
+    /** A record table (Salesforce sObject Collections or Composite, or one
+     *  record). */
+    readonly bulk?: {
+      kind: "create" | "update" | "delete";
+      object: string;
+      objectLabel: string;
+      fields: ReadonlyArray<{ api: string; label: string }>;
+      rows: ReadonlyArray<{
+        id: string;
+        name?: string;
+        new: ReadonlyArray<string | null>;
+      }>;
+      hiddenFields?: ReadonlyArray<string>;
     };
   };
   /** The agent's batch tag (`X-OneCLI-Batch*`), when it sent one. */

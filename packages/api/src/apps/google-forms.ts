@@ -46,5 +46,6 @@ export const googleForms: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
   },
 };

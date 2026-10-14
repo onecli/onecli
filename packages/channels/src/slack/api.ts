@@ -324,6 +324,10 @@ export const postBlocksMessage = async (
     blocks: unknown[];
     threadTs?: string;
     iconUrl?: string;
+    /** No link previews under the message: an approval card links records
+     *  (a Salesforce contact), and the record's own Slack app would attach
+     *  a preview card of its own below ours. */
+    noUnfurl?: boolean;
   },
 ) => {
   const form = {
@@ -331,6 +335,11 @@ export const postBlocksMessage = async (
     text: input.text,
     blocks: JSON.stringify(input.blocks),
     ...(input.threadTs && { thread_ts: input.threadTs }),
+    ...(input.noUnfurl && {
+      unfurl_links: "false",
+      unfurl_media: "false",
+      unfurl_app_links: "false",
+    }),
   };
   if (input.iconUrl && !iconlessMemoized(botToken)) {
     try {
@@ -411,7 +420,18 @@ export const SLACK_TASK_TITLE_MAX = 256;
  */
 export const updateBlocksMessage = (
   botToken: string,
-  input: { channel: string; ts: string; text: string; blocks?: unknown[] },
+  input: {
+    channel: string;
+    ts: string;
+    text: string;
+    blocks?: unknown[];
+    /** The message's files, replacing the ones it has (`chat.update`'s
+     *  `file_ids`): uploaded privately first (`uploadFiles` without a
+     *  channel). `[]` detaches them (a settled bulk card drops its table;
+     *  Slack documents the parameter, not an empty list, so the settle
+     *  path relies on Slack's observed behavior). */
+    fileIds?: readonly string[];
+  },
 ) =>
   slackCall(
     "chat.update",
@@ -422,6 +442,7 @@ export const updateBlocksMessage = (
         ts: input.ts,
         text: input.text,
         ...(input.blocks && { blocks: JSON.stringify(input.blocks) }),
+        ...(input.fileIds && { file_ids: JSON.stringify(input.fileIds) }),
       },
     },
     okEnvelope,
@@ -586,7 +607,11 @@ export interface SlackUploadFile {
 export const uploadFiles = async (
   botToken: string,
   input: {
-    channel: string;
+    /** Where the files are shared as one message. Omitted: the files stay
+     *  private to the bot and nothing is posted (Slack's documented
+     *  behavior), ready to attach to an existing message by id
+     *  (`updateBlocksMessage`'s `fileIds`). */
+    channel?: string;
     threadTs?: string;
     initialComment?: string;
     files: readonly SlackUploadFile[];
@@ -645,7 +670,7 @@ export const uploadFiles = async (
       token: botToken,
       form: {
         files: JSON.stringify(minted),
-        channel_id: input.channel,
+        ...(input.channel && { channel_id: input.channel }),
         ...(input.threadTs && { thread_ts: input.threadTs }),
         ...(input.initialComment && { initial_comment: input.initialComment }),
       },
@@ -653,6 +678,128 @@ export const uploadFiles = async (
     completeUploadResponse,
   );
   return { fileIds: done.files.map((f) => f.id) };
+};
+
+const fileSharesResponse = z.object({
+  file: z
+    .object({
+      shares: z
+        .object({
+          public: z
+            .record(z.string(), z.array(z.object({ ts: z.string().min(1) })))
+            .optional(),
+          private: z
+            .record(z.string(), z.array(z.object({ ts: z.string().min(1) })))
+            .optional(),
+        })
+        .loose()
+        .optional(),
+    })
+    .loose(),
+});
+
+/** How long the share's message ts may take to appear on the file. */
+const SHARE_TS_TRIES = 15;
+const SHARE_TS_DELAY_MS = 300;
+
+/**
+ * The share POSTED its message, but Slack never said which one (no
+ * `files:read` to read it back, or the share never showed up on the file).
+ * The card is in the channel: the caller must NOT post it again.
+ */
+export class SharedMessageUnknownError extends Error {
+  constructor(readonly cause: unknown) {
+    super("Slack shared the file but its message could not be read back");
+    this.name = "SharedMessageUnknownError";
+  }
+}
+
+/**
+ * ONE message carrying Block Kit blocks AND one file: an approval card with
+ * its CSV, which Slack shows under the card, collapsed and scrollable.
+ *
+ * Only a file shared WITH its message shows on it. A file attached later
+ * (`chat.update` `file_ids`) is accepted and linked, but the message never
+ * lists it, so Slack shows nothing (measured live).
+ *
+ * Slack's upload never answers with the message ts, so it is read back from
+ * the file's shares. Failures split in two, and the split is what keeps a
+ * card from ever posting twice:
+ * - before the share completes (upload refused, bytes rejected): plain
+ *   `SlackApiError` / `Error`, nothing was posted, the caller posts the card
+ *   without the file;
+ * - after it completes: `SharedMessageUnknownError`, the card IS posted, the
+ *   caller must not post again.
+ */
+export const shareFileWithBlocks = async (
+  botToken: string,
+  input: {
+    channel: string;
+    threadTs?: string;
+    blocks: unknown[];
+    file: SlackUploadFile;
+  },
+): Promise<{ channel: string; ts: string }> => {
+  const bytes = input.file.bytes;
+  if (bytes.byteLength === 0 || bytes.byteLength > SLACK_MAX_UPLOAD_BYTES) {
+    throw new SlackApiError("files.getUploadURLExternal", "invalid_arguments");
+  }
+  const ticket = await slackCall(
+    "files.getUploadURLExternal",
+    {
+      token: botToken,
+      form: { filename: input.file.name, length: String(bytes.byteLength) },
+    },
+    uploadUrlResponse,
+  );
+  if (!isSlackUploadUrl(ticket.upload_url)) {
+    throw new Error("Slack minted an upload URL outside its own hosts");
+  }
+  // Same rules as `uploadFiles`: raw bytes, no bearer, no redirects.
+  const put = await fetch(ticket.upload_url, {
+    method: "POST",
+    headers: { "content-type": "application/octet-stream" },
+    body: new Blob([Uint8Array.from(bytes)]),
+    redirect: "manual",
+    signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
+  });
+  await put.body?.cancel().catch(() => {});
+  if (!put.ok) throw new Error(`Slack upload answered HTTP ${put.status}`);
+  await slackCall(
+    "files.completeUploadExternal",
+    {
+      token: botToken,
+      form: {
+        files: JSON.stringify([
+          { id: ticket.file_id, title: input.file.title ?? input.file.name },
+        ]),
+        channel_id: input.channel,
+        ...(input.threadTs && { thread_ts: input.threadTs }),
+        blocks: JSON.stringify(input.blocks),
+      },
+    },
+    completeUploadResponse,
+  );
+  // From here the card is in the channel: every failure is "posted, ts
+  // unknown", never a reason to post again.
+  try {
+    for (let i = 0; i < SHARE_TS_TRIES; i++) {
+      const info = await slackCall(
+        "files.info",
+        { token: botToken, form: { file: ticket.file_id }, retry5xx: true },
+        fileSharesResponse,
+      );
+      const shares = info.file.shares;
+      const ts =
+        shares?.public?.[input.channel]?.[0]?.ts ??
+        shares?.private?.[input.channel]?.[0]?.ts;
+      if (ts) return { channel: input.channel, ts };
+      await new Promise((r) => setTimeout(r, SHARE_TS_DELAY_MS));
+    }
+    throw new Error("the share never appeared on the file");
+  } catch (err) {
+    throw new SharedMessageUnknownError(err);
+  }
 };
 
 /**

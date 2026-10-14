@@ -46,5 +46,6 @@ export const googleClassroom: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
   },
 };

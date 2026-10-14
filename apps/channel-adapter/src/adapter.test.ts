@@ -491,6 +491,85 @@ describe("ingest outcomes answer on the provider side", () => {
 });
 
 describe("the completion pass posts once", () => {
+  it("posts a mid-run follow-up's reply the moment the feed serves it, claim first, ahead of finished turns", async () => {
+    // The turn is still running when its follow-up's reply appears on the
+    // feed: the adapter claims it and posts it right away, before any
+    // finished-turn work of the same poll, and never posts it again.
+    const order: string[] = [];
+    let served = false;
+    const { controlPlane } = feedControlPlane([presence()], {
+      getWork: async () => {
+        if (served) return { finished: [] };
+        served = true;
+        return {
+          finished: [
+            workItem({
+              status: "done",
+              finishedAt: "2026-08-06T10:00:05.000Z",
+            }),
+          ],
+          replies: [
+            {
+              linkId: "l1",
+              presenceId: "p1",
+              conversationId: "cv1",
+              externalThreadId: "D100",
+              kind: "direct" as const,
+              turnId: "t9",
+              followUp: {
+                id: "f1",
+                message: "also this",
+                source: "slack",
+                userName: null,
+                sourceThreadId: null,
+              },
+              reply: "On it.",
+            },
+          ],
+        };
+      },
+      readTranscript: async () => ({
+        events: [
+          {
+            seq: 1,
+            turnId: "t1",
+            type: "text",
+            payload: { text: "the whole answer" },
+          },
+        ],
+        nextSince: 1,
+        hasMore: false,
+      }),
+      claimReply: async (followUpId) => {
+        order.push(`claim:${followUpId}`);
+        return true;
+      },
+      advanceCursor: async () => {
+        order.push("cursor");
+        return true;
+      },
+    });
+    slack.onCall = (call) => order.push(`slack:${call.method}`);
+    await startAdapter(controlPlane);
+
+    await vi.waitFor(() =>
+      expect(slack.callsTo("chat.postMessage")).toHaveLength(2),
+    );
+    await settle();
+
+    // The socket dial is config-feed work, not the work loop's.
+    expect(order.filter((o) => o !== "slack:apps.connections.open")).toEqual([
+      "claim:f1",
+      "slack:chat.postMessage",
+      "cursor",
+      "slack:chat.postMessage",
+    ]);
+    expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
+      "On it.",
+      "the whole answer",
+    ]);
+  });
+
   it("posts a finished provider turn's answer exactly once and claims the cursor WITH the turn id", async () => {
     // Nothing posts while the turn is unfinished (there is no live
     // rendering); the finished item drives ONE post, and the CAS claim

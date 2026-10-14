@@ -30,6 +30,13 @@
 //! Step 4 runs as its own task: a request that is cancelled mid-refresh (the
 //! client hangs up) must not drop a refresh whose new token the provider has
 //! already issued but the database has not yet stored.
+//!
+//! A refresh is normally driven by the stored expiry. It can also be driven
+//! by the provider refusing an access token it was sent (`rejected`): some
+//! providers end a token before its advertised expiry (Salesforce, with the
+//! org's session timeout). Step 3 then treats the stored token as dead only
+//! while it is still that refused token, so a burst of refused requests
+//! spends the refresh token once, and every later one picks up the new token.
 
 use std::sync::Arc;
 
@@ -44,6 +51,10 @@ pub(crate) struct OAuthRefresh<'a> {
     pub provider: &'a str,
     pub workspace_id: &'a str,
     pub config: &'static apps::RefreshConfig,
+    /// The access token the provider just refused, when the refresh is driven
+    /// by that refusal rather than by the stored expiry. A stored token equal
+    /// to it is dead whatever its `expires_at` says.
+    pub rejected: Option<&'a str>,
 }
 
 /// What a refresh attempt produced, as far as the request is concerned.
@@ -77,9 +88,13 @@ pub(crate) fn now_secs() -> i64 {
 
 /// The stored access token, when it is present and not expired. A token with
 /// no `expires_at` is usable: the request path never refreshes one, and a
-/// reconnect may legitimately store such a token.
-fn usable_token(creds: &Value, now: i64) -> Option<(String, Option<i64>)> {
+/// reconnect may legitimately store such a token. A token the provider just
+/// refused (`rejected`) is never usable, whatever its expiry.
+fn usable_token(creds: &Value, now: i64, rejected: Option<&str>) -> Option<(String, Option<i64>)> {
     let token = creds.get("access_token")?.as_str()?;
+    if rejected == Some(token) {
+        return None;
+    }
     let expires_at = creds.get("expires_at").and_then(Value::as_i64);
     // Same boundary as the caller's expiry check (`exp < now` refreshes).
     let expired = expires_at.is_some_and(|exp| exp < now);
@@ -150,7 +165,7 @@ pub(crate) async fn refresh_oauth_token(
     };
 
     // Someone else holding this lock before us already refreshed: use theirs.
-    if let Some((access_token, expires_at)) = usable_token(&current, now_secs()) {
+    if let Some((access_token, expires_at)) = usable_token(&current, now_secs(), refresh.rejected) {
         debug!(connection_id = %refresh.connection_id, "token refresh: already refreshed elsewhere");
         return RefreshOutcome::Token {
             access_token,
@@ -351,6 +366,7 @@ mod tests {
                     provider: "gitlab",
                     workspace_id: "ws",
                     config: apps::refresh_config("gitlab").expect("gitlab refreshes"),
+                    rejected: None,
                 },
             ),
         )
@@ -364,21 +380,55 @@ mod tests {
     fn a_token_is_usable_only_before_it_expires() {
         let now = now_secs();
         assert_eq!(
-            usable_token(&json!({ "access_token": "t", "expires_at": now + 60 }), now),
+            usable_token(
+                &json!({ "access_token": "t", "expires_at": now + 60 }),
+                now,
+                None
+            ),
             Some(("t".to_string(), Some(now + 60)))
         );
         assert_eq!(
-            usable_token(&json!({ "access_token": "t", "expires_at": now - 1 }), now),
+            usable_token(
+                &json!({ "access_token": "t", "expires_at": now - 1 }),
+                now,
+                None
+            ),
             None
         );
-        assert_eq!(usable_token(&json!({ "expires_at": now + 60 }), now), None);
+        assert_eq!(
+            usable_token(&json!({ "expires_at": now + 60 }), now, None),
+            None
+        );
     }
 
     #[test]
     fn a_token_without_an_expiry_never_needs_a_refresh() {
         assert_eq!(
-            usable_token(&json!({ "access_token": "t" }), now_secs()),
+            usable_token(&json!({ "access_token": "t" }), now_secs(), None),
             Some(("t".to_string(), None))
+        );
+    }
+
+    /// The Salesforce incident: the stored token still had hours on its
+    /// `expires_at` when the provider refused it. Refused means dead.
+    #[test]
+    fn a_refused_token_is_never_usable_whatever_its_expiry() {
+        let now = now_secs();
+        let creds = json!({ "access_token": "dead", "expires_at": now + 3600 });
+        assert_eq!(usable_token(&creds, now, Some("dead")), None);
+        let no_expiry = json!({ "access_token": "dead" });
+        assert_eq!(usable_token(&no_expiry, now, Some("dead")), None);
+    }
+
+    /// Another request already replaced the refused token: the new one is
+    /// served, so a burst of refusals spends the refresh token once.
+    #[test]
+    fn a_token_that_replaced_the_refused_one_is_served() {
+        let now = now_secs();
+        let creds = json!({ "access_token": "fresh", "expires_at": now + 600 });
+        assert_eq!(
+            usable_token(&creds, now, Some("dead")),
+            Some(("fresh".to_string(), Some(now + 600)))
         );
     }
 }

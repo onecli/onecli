@@ -19,7 +19,6 @@ import {
   Card,
   CardContent,
   CardDescription,
-  CardFooter,
   CardHeader,
   CardTitle,
 } from "@onecli/ui/components/card";
@@ -226,10 +225,12 @@ export const SlackIntegrationCard = ({ choice }: SlackIntegrationCardProps) => {
                   </Badge>
                 )}
               </div>
-              <CardDescription className="mt-1">
+              <CardDescription className="mt-1.5">
                 {choice?.role === "alternative"
                   ? "For workspaces that can't install the OneCLI app. Each agent gets its own Slack app, created in one click."
-                  : "Each agent gets its own Slack app, created in one click."}
+                  : slack?.hasCredentials
+                    ? "Each agent joins Slack as its own private app, with its own name."
+                    : "Connect your Slack workspace once. Then add any agent to Slack in one click."}
               </CardDescription>
               {choice?.role === "alternative" && (
                 <button
@@ -272,16 +273,33 @@ export const SlackIntegrationCard = ({ choice }: SlackIntegrationCardProps) => {
                 </p>
               )}
               {slack.hasCredentials ? (
-                <p className="text-muted-foreground text-sm">
-                  <span className="text-foreground font-medium">
-                    {slack.name ?? slack.externalId}
-                  </span>{" "}
-                  is connected with{" "}
-                  {slack.presenceCount === 1
-                    ? "1 agent app"
-                    : `${slack.presenceCount} agent apps`}
-                  .
-                </p>
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-muted-foreground min-w-0 truncate text-sm">
+                    Connected to{" "}
+                    <span
+                      className={
+                        slack.name
+                          ? "text-foreground font-medium"
+                          : "text-foreground font-mono text-xs"
+                      }
+                      translate="no"
+                    >
+                      {/* The raw T… id only when there is no name: it is
+                          the one thing that tells two unnamed workspaces
+                          apart. */}
+                      {slack.name ?? slack.externalId}
+                    </span>
+                    .
+                  </p>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-muted-foreground hover:text-destructive shrink-0"
+                    onClick={() => setConfirmOpen(true)}
+                  >
+                    Disconnect
+                  </Button>
+                </div>
               ) : mintsViaShared ? (
                 // The shared install's user token does the minting; the
                 // config-token paste stays reachable as a small fallback.
@@ -347,21 +365,6 @@ export const SlackIntegrationCard = ({ choice }: SlackIntegrationCardProps) => {
             </p>
           )}
         </CardContent>
-        {!isPending && slack?.hasCredentials && (
-          <CardFooter className="justify-between border-t">
-            <p className="text-muted-foreground min-w-0 truncate font-mono text-xs">
-              {slack.externalId}
-            </p>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-destructive hover:text-destructive shrink-0"
-              onClick={() => setConfirmOpen(true)}
-            >
-              Disconnect
-            </Button>
-          </CardFooter>
-        )}
       </Card>
 
       <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>

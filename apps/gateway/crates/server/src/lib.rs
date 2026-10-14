@@ -512,11 +512,14 @@ pub(crate) async fn flush_workspace_cache(state: &GatewayState, workspace_id: &s
 
     state
         .cache
-        .del_by_prefix(&format!("app_injection:{org_id}:{workspace_id}:"))
+        .del_by_prefix(&proxy::connect::injection_cache_prefix(
+            &org_id,
+            workspace_id,
+        ))
         .await;
     state
         .cache
-        .del_by_prefix(&format!("connect:{org_id}:{workspace_id}:"))
+        .del_by_prefix(&proxy::connect::connect_cache_prefix(&org_id, workspace_id))
         .await;
 }
 
@@ -1299,6 +1302,10 @@ async fn handle_http_proxy(
         finalizer: resolved_finalizer,
         body_transform: resolved_body_transform,
         session_policy: resolved_session_policy,
+        github_org_access: proxy::github_org_access::record_for(
+            &resolved.app_connections,
+            resolved_connection_id.as_deref(),
+        ),
         winning_connection_id: resolved_connection_id,
         winning_provider: resolved_provider,
         budget_bindings: resolved.budget_bindings,

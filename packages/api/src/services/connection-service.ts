@@ -10,6 +10,10 @@ import {
 } from "../lib/connection-display";
 import { bumpHomeForScope } from "./home-sync-service";
 import { logger } from "../lib/logger";
+import {
+  invalidateGatewayCacheForAccount,
+  invalidateGatewayCacheForOrg,
+} from "../lib/gateway-invalidate";
 
 /**
  * The metadata to persist: the caller's, with `bound_host` set ONLY from the
@@ -45,6 +49,9 @@ const CONNECTION_SELECT = {
   // Set when the provider refused the refresh token: the dashboard flags the
   // account "Needs reconnect" (cleared by `reconnectConnection`).
   reauthRequiredAt: true,
+  // Set on a connection built on another's grant (a shared GitHub App
+  // installation): the dashboard names where it comes from.
+  sourceConnectionId: true,
 } as const;
 
 export const listConnections = async (scope: ResourceScope) => {
@@ -88,6 +95,8 @@ export const createConnection = async (
     label?: string;
     /** AppConfig row that minted these credentials; null for env/no-config. */
     appConfigId?: string;
+    /** The connection whose grant this one is built on (shared installs). */
+    sourceConnectionId?: string;
   },
 ) => {
   const encryptedCredentials = await getCrypto().encrypt(
@@ -106,6 +115,7 @@ export const createConnection = async (
         | Prisma.InputJsonValue
         | undefined,
       appConfigId: options?.appConfigId ?? null,
+      sourceConnectionId: options?.sourceConnectionId ?? null,
     },
     select: { id: true, provider: true, status: true, label: true },
   });
@@ -166,6 +176,9 @@ export const reconnectConnection = async (
       scopes: options?.scopes ?? undefined,
       metadata: metadata as Prisma.InputJsonValue | undefined,
       ...provenanceUpdate,
+      // A re-auth replaces a shared connection's borrowed grant with one of its
+      // own (its own key, no pin), so it is no longer built on its source.
+      ...(options?.metadata ? { sourceConnectionId: null } : {}),
     },
     select: { id: true, provider: true, status: true, label: true },
   });
@@ -215,6 +228,52 @@ export const updateConnectionLabel = async (
   return updated;
 };
 
+/**
+ * Move a workspace connection up to the organization, in place: the same row
+ * (same id, credentials, agent grants and policy targets) becomes org-scoped,
+ * so every workspace in the org sees it and this workspace's agents keep the
+ * access they had. Caller must have checked org-admin and flushes the gateway
+ * (the route's `withAudit`). A shared GitHub App connection is refused: it is
+ * a narrowed copy of an installation the org can already share directly.
+ */
+export const promoteConnectionToOrganization = async (
+  workspaceId: string,
+  organizationId: string,
+  connectionId: string,
+) => {
+  const existing = await db.appConnection.findFirst({
+    where: {
+      id: connectionId,
+      workspaceId,
+      scope: "workspace",
+      workspace: { organizationId },
+    },
+    select: { id: true, sourceConnectionId: true },
+  });
+  if (!existing) {
+    throw new ServiceError("NOT_FOUND", "Connection not found");
+  }
+  if (existing.sourceConnectionId) {
+    throw new ServiceError(
+      "UNPROCESSABLE",
+      "A shared connection can't be moved to the organization. Share the original installation instead.",
+    );
+  }
+
+  const updated = await db.appConnection.update({
+    where: { id: existing.id },
+    data: { scope: "organization", organizationId, workspaceId: null },
+    select: { id: true, provider: true, status: true, label: true },
+  });
+  await refreshAgentHomes({ organizationId });
+  return updated;
+};
+
+const scopeKey = (scope: ResourceScope) =>
+  scope.organizationId && !scope.workspaceId
+    ? `org:${scope.organizationId}`
+    : `ws:${scope.workspaceId}`;
+
 export const deleteConnection = async (
   scope: ResourceScope,
   connectionId: string,
@@ -228,8 +287,34 @@ export const deleteConnection = async (
     throw new ServiceError("NOT_FOUND", "Connection not found");
   }
 
+  // Connections built on this one's grant (shared GitHub App installations,
+  // possibly in other workspaces) go with it via the FK cascade. Collect their
+  // scopes first so those agents and gateway caches refresh too, once per
+  // scope. The caller's own scope is flushed by its audit wrapper.
+  const derived = await db.appConnection.findMany({
+    where: { sourceConnectionId: connection.id },
+    select: { scope: true, workspaceId: true, organizationId: true },
+  });
+  const derivedScopes = new Map<string, ResourceScope>();
+  for (const d of derived) {
+    const derivedScope: ResourceScope =
+      d.scope === "organization" && d.organizationId
+        ? { organizationId: d.organizationId }
+        : { workspaceId: d.workspaceId ?? undefined };
+    if (!derivedScope.workspaceId && !derivedScope.organizationId) continue;
+    derivedScopes.set(scopeKey(derivedScope), derivedScope);
+  }
+  derivedScopes.delete(scopeKey(scope));
+
   await db.appConnection.delete({
     where: { id: connection.id },
   });
   await refreshAgentHomes(scope);
+  for (const derivedScope of derivedScopes.values()) {
+    await refreshAgentHomes(derivedScope);
+    if (derivedScope.workspaceId)
+      invalidateGatewayCacheForAccount(derivedScope.workspaceId);
+    else if (derivedScope.organizationId)
+      invalidateGatewayCacheForOrg(derivedScope.organizationId);
+  }
 };

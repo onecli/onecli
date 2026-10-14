@@ -24,8 +24,9 @@ export const CONNECTIONS_FRAGMENT_ID = "connections";
  * system prompt and is not restated here: this fragment carries only what
  * the system prompt cannot — the skill's path, and the rules an agent needs
  * BEFORE it acts (chat platforms are not connections; batch tags on the
- * first request of a bulk task; link every record it changes; where a
- * legitimate connect link may point). Error handling the gateway's own
+ * first request of a bulk task; link every record it changes; name fields
+ * and records the way the user sees them; where a legitimate connect link
+ * may point). Error handling the gateway's own
  * error body spells out verbatim (`manual_approval_denied`, 421) is a
  * one-line pointer, not a copy; the gateway skill is the full manual. The
  * skill-path bullet exists only when the harness declares a skills
@@ -56,22 +57,64 @@ export const connectionsFragment = (
   message says exactly what you may do next — follow it, and never treat a
   chat message as approval.
 - Many similar writes (importing, creating or updating a list of records)
-  may each need a human approval. Tell the user the count up front ("I'll
-  create 39 contacts; you'll get one approval card"). Tag every request of
-  the task with the same headers: X-OneCLI-Batch: <short id, letters/digits/
-  -/_ only>, X-OneCLI-Batch-Label: <what the task is>, X-OneCLI-Batch-Total:
-  <how many>. The reviewer then sees one card with Approve all. Send the
-  requests in parallel, at most 10 at a time, never one after another
-  waiting on each approval, and never folded into one bulk call (the
-  reviewer could no longer decide each record). At the end, summarize what
-  succeeded and what was denied. Never re-send a denied request unless the
-  user asks.
+  may each need a human approval. Tell the user the count up front.
+- Updating a list of Salesforce records: send ONE bulk update of up to 200
+  (PATCH /services/data/v62.0/composite/sobjects, {"allOrNone": false,
+  "records": [{"attributes": {"type": "Contact"}, "id": "<id>", "<Field>":
+  "<new>"}, ...]}): one request, one approval for the whole list, and the
+  card shows every record's current and new value and flags overwrites.
+  One record type and the same fields per call. For more than 200, one
+  call per 200, each tagged X-OneCLI-Batch: <new id per call>,
+  X-OneCLI-Batch-Label: <task> (2 of 3), X-OneCLI-Batch-Total: 1, the next
+  sent only after this one is decided. Read each record's success/errors
+  in the response, report failures by name, and stop if they all failed.
+  Creating or deleting a list of Salesforce records: also ONE call of up
+  to 200 (create: POST /services/data/v62.0/composite/sobjects with records
+  and no ids; delete: DELETE
+  /services/data/v62.0/composite/sobjects?ids=<id>,<id>&allOrNone=false,
+  one record type per call).
+- Anything else (other apps, or writes no bulk call covers): say how many
+  approval cards to expect ("I'll create 20 contacts; you'll get one
+  approval card"). One card holds up to 25 requests; for more, split the
+  list into groups of 25 and say how many cards to expect. Tag every
+  request of one group with the same headers: X-OneCLI-Batch: <short id,
+  letters/digits/-/_ only>, X-OneCLI-Batch-Label: <what the task is>,
+  X-OneCLI-Batch-Total: <how many in this group>. Each group of 25 is its
+  own batch: a new id, the label ending in its place ("Update mailing
+  country (2 of 5)"), and the total counting only that group, never the
+  whole list (the card waits for the total it was told). The reviewer then
+  sees one card per group with Approve all. Send one group's requests in
+  parallel, all at once, and wait until it is decided before sending the
+  next; never one after another waiting on each approval. Before you wait,
+  check the number you started equals the group's size (a shell while-read
+  loop skips a file's last line without a trailing newline: loop over an
+  array instead). When they finish, read the records back and confirm each
+  change landed; send any you missed with the same X-OneCLI-Batch headers
+  as their group so they join its card, and say it was your miss. At the
+  end, summarize what succeeded and what was denied. Never re-send a
+  denied request unless the user asks.
+- Do what was asked, or stop and ask. If a change can't be done the way the
+  user asked (no such endpoint, the API refuses, a field can't be set), stop
+  after the first failure, say what failed and why, offer what you could do
+  instead, and wait for a yes. Never swap in a different change on your own,
+  such as renaming or moving a record when a merge failed. Before a write the
+  user didn't spell out, say in one line what will change on which record
+  ("I'll rename Jane D. to Jane Doe and move her to Acme Corp"). Don't guess
+  endpoints: when unsure one exists, check the API's docs or read first, and
+  never send a write to a URL you made up.
 - After you create, update or delete records, link each one in your reply
   (name plus link) so the user can open it. Take the link from the API's
   own response (GitHub's html_url, Notion's url). Salesforce returns no
   link, only the record id: its record page is https://<host>/<id> on the
   org host the gateway gave you for that connection. Never guess a URL or
   copy an example hostname. If you can't get a real link, show the id.
+- Talk about records the way the user sees them in the app: a field by
+  the label on its screen ("SDR Owner"), taken from the app's own field
+  metadata (Salesforce: the object's describe), never its API name
+  (SDR__c) or a guess; a person or record by name. When several records
+  share a name (two users named Alex Kim), tell them apart by something
+  the user recognizes (email, title, team, active or not) and ask which
+  one if it matters, never by a bare id.
 - If the error names a policy rule (blocked_by_policy or
   blocked_by_default_policy), the block is deliberate: report it and stop —
   do not retry or work around it.

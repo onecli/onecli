@@ -247,7 +247,7 @@ describe.skipIf(!PROOF_URL)(
         .connection.id;
       for (const agent of [alpha, beta]) {
         expect((await grantsOf(agent.id)).connections).toEqual([
-          `${connectionId}:full`,
+          `${connectionId}:custom`,
         ]);
         expect((await injectableFor(agent.id)).connections).toEqual([
           connectionId,
@@ -297,7 +297,7 @@ describe.skipIf(!PROOF_URL)(
       // ── 4. A new agent starts with the connection and the custom secret.
       const gamma = await createAgent(`${P}gamma`);
       const gammaGrants = await grantsOf(gamma.id);
-      expect(gammaGrants.connections).toEqual([`${connectionId}:full`]);
+      expect(gammaGrants.connections).toEqual([`${connectionId}:custom`]);
       expect(gammaGrants.secrets).toContain(custom.id);
       expect(gammaGrants.secrets).not.toContain(orgSecret.id);
       expect((await injectableFor(gamma.id)).connections).toEqual([
@@ -347,7 +347,7 @@ describe.skipIf(!PROOF_URL)(
       expect(everyone).toBe(0);
       expect(await injectableFor(gamma.id)).toEqual(gammaBefore);
       expect((await grantsOf(gamma.id)).connections).toEqual([
-        `${connectionId}:full`,
+        `${connectionId}:custom`,
       ]);
 
       // ── 7b. Planted control: the other workspace's agent saw nothing.

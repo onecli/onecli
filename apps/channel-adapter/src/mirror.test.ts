@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   MAX_OUTBOUND_ATTACHMENT_BYTES,
+  type AdapterReplyItem,
   type AdapterWorkItem,
   type AdapterWorkTurn,
 } from "@onecli/agent-protocol";
-import type { ControlPlaneClient } from "./control-plane";
-import { dropDanglingLeadIn, mirrorFinishedTurn } from "./mirror";
+import { ControlPlaneError, type ControlPlaneClient } from "./control-plane";
+import {
+  dropDanglingLeadIn,
+  mirrorFinishedTurn,
+  mirrorFollowUpReply,
+} from "./mirror";
 import { slackMirrorPosts } from "./slack/mirror-posts";
 import { slackAdapterProvider } from "./slack/adapter-provider";
 import {
@@ -476,6 +481,31 @@ describe("what gets posted", () => {
     expect(posted).toHaveLength(1);
     expect(posted[0]!.form.blocks).toBeUndefined();
     expect(posted[0]!.form.text).toContain("reconnect=gmail");
+  });
+
+  it("keeps app-page links that need a reconnect or an org's approval in the prose, never on an Attach card", async () => {
+    // MUTATION-PROOF: drop the non-attach guard in findConnectLinkMatches and
+    // this fails: both links would card as "Attach an account to this agent",
+    // a fix for neither the rejected login nor the GitHub org's refusal.
+    const reconnect =
+      "https://app.example.com/w/ws1/connections/apps/gmail?reconnect=conn-1";
+    const orgAccess =
+      "https://app.example.com/w/ws1/connections/apps/github?org_access=acme";
+    const controlPlane = createFakeControlPlane(
+      transcriptWith(`Reconnect Gmail: ${reconnect}\nAsk acme: ${orgAccess}`),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack" }),
+      chatUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.form.blocks).toBeUndefined();
+    expect(posted[0]!.form.text).toContain(reconnect);
+    expect(posted[0]!.form.text).toContain(orgAccess);
   });
 
   it("drops the lead-in that only introduced a lifted link — no dangling 'open this link:'", async () => {
@@ -1182,6 +1212,360 @@ describe("what gets posted", () => {
     ]);
   });
 
+  it("posts each follow-up's own reply right under it, before the turn's answer", async () => {
+    // The agent answered the mid-turn message, then kept working.
+    // The reply is stored under the follow-up's own id, and the thread
+    // shows it under the message it answers, the web's layout. A
+    // Slack-sourced follow-up is already in the thread, so only its reply
+    // posts. MUTATION-PROOF: skip the reply post and the person's question
+    // reads as ignored again.
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          {
+            seq: 1,
+            turnId: "f1",
+            type: "text",
+            payload: { text: "Using <Q3>." },
+          },
+          { seq: 2, turnId: "f2", type: "text", payload: { text: "Sure." } },
+          {
+            seq: 3,
+            turnId: "t1",
+            type: "text",
+            payload: { text: "Report sent." },
+          },
+        ],
+        nextSince: 4,
+        hasMore: false,
+      }),
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack" }),
+        followUps: [
+          { id: "f1", message: "use the Q3 numbers", source: "web" },
+          { id: "f2", message: "and email it", source: "slack" },
+        ],
+      },
+    });
+
+    expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
+      "_(from the web)_ use the Q3 numbers",
+      "Using &lt;Q3&gt;.",
+      "Sure.",
+      "Report sent.",
+    ]);
+  });
+
+  it("posts a reply in the thread its message was asked in", async () => {
+    // The turn's own thread rule, per message: a follow-up typed in a DM
+    // thread gets its answer in that thread, even when the turn's own
+    // message sits at the top of the DM.
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          { seq: 1, turnId: "f1", type: "text", payload: { text: "On it." } },
+          { seq: 2, turnId: "t1", type: "text", payload: { text: "Done." } },
+        ],
+        nextSince: 3,
+        hasMore: false,
+      }),
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack" }),
+        followUps: [
+          {
+            id: "f1",
+            message: "and this",
+            source: "slack",
+            sourceThreadId: "1699.555",
+          },
+        ],
+      },
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted.map((c) => [c.form.text, c.form.thread_ts])).toEqual([
+      ["On it.", "1699.555"],
+      ["Done.", undefined],
+    ]);
+  });
+
+  it("skips a follow-up the reply feed already posted mid-run, words and reply both", async () => {
+    // The early post claimed and posted the exchange while the turn ran (a
+    // web-sourced follow-up's words ahead of its reply); the close must
+    // post none of it again. MUTATION-PROOF: ignore `replyPosted` and
+    // "use the Q3 numbers" and "Using Q3." post again below.
+    const claims: string[] = [];
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          {
+            seq: 1,
+            turnId: "f1",
+            type: "text",
+            payload: { text: "Using Q3." },
+          },
+          { seq: 2, turnId: "f2", type: "text", payload: { text: "Sure." } },
+          { seq: 3, turnId: "t1", type: "text", payload: { text: "Done." } },
+        ],
+        nextSince: 4,
+        hasMore: false,
+      }),
+      claimReply: async (followUpId) => {
+        claims.push(followUpId);
+        return true;
+      },
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack" }),
+        followUps: [
+          {
+            id: "f1",
+            message: "use the Q3 numbers",
+            source: "web",
+            replyPosted: true,
+          },
+          { id: "f2", message: "and email it", source: "slack" },
+        ],
+      },
+    });
+
+    expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
+      "Sure.",
+      "Done.",
+    ]);
+    // Only the unposted reply was claimed; the posted one never reached the
+    // control plane again.
+    expect(claims).toEqual(["f2"]);
+  });
+
+  it("posts NO reply at the close when the claim is lost (a feed poll got there first)", async () => {
+    // The close and a reply feed poll can race on the same reply; the
+    // compare-and-set decides, and the loser posts nothing.
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          { seq: 1, turnId: "f1", type: "text", payload: { text: "On it." } },
+          { seq: 2, turnId: "t1", type: "text", payload: { text: "Done." } },
+        ],
+        nextSince: 3,
+        hasMore: false,
+      }),
+      claimReply: async () => false,
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack" }),
+        followUps: [{ id: "f1", message: "and this", source: "slack" }],
+      },
+    });
+
+    expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
+      "Done.",
+    ]);
+  });
+
+  it("an OLDER control plane without the claim route still gets its replies at the close", async () => {
+    // Version skew: no claim route means no reply feed either, so this pass
+    // is the only poster and must keep posting (a 404 is not a lost claim).
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          { seq: 1, turnId: "f1", type: "text", payload: { text: "On it." } },
+          { seq: 2, turnId: "t1", type: "text", payload: { text: "Done." } },
+        ],
+        nextSince: 3,
+        hasMore: false,
+      }),
+      claimReply: async () => {
+        throw new ControlPlaneError(404, "control plane answered 404");
+      },
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack" }),
+        followUps: [{ id: "f1", message: "and this", source: "slack" }],
+      },
+    });
+
+    expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
+      "On it.",
+      "Done.",
+    ]);
+  });
+  it("posts no reply for an older control plane's follow-up (no id)", async () => {
+    // Version skew: a control plane that predates per-follow-up ids sends
+    // none, so the mirror cannot know which text is whose and posts exactly
+    // what it did before.
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          { seq: 1, turnId: "f1", type: "text", payload: { text: "On it." } },
+          { seq: 2, turnId: "t1", type: "text", payload: { text: "Done." } },
+        ],
+        nextSince: 3,
+        hasMore: false,
+      }),
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack" }),
+        followUps: [{ message: "and this", source: "web" }],
+      },
+    });
+
+    expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
+      "_(from the web)_ and this",
+      "Done.",
+    ]);
+  });
+
+  it("answers a top-level DM message at the top level, even when its turn was asked in a thread", async () => {
+    // The address is the MESSAGE's, not the turn's: a follow-up typed at
+    // the top of the DM while a threaded question runs must not have its
+    // reply buried in that thread. MUTATION-PROOF: derive the reply's
+    // target from the turn's and the reply posts into thread 1699.123.
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          { seq: 1, turnId: "f1", type: "text", payload: { text: "On it." } },
+          { seq: 2, turnId: "t1", type: "text", payload: { text: "Done." } },
+        ],
+        nextSince: 3,
+        hasMore: false,
+      }),
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack", sourceThreadId: "1699.123" }),
+        followUps: [
+          {
+            id: "f1",
+            message: "and this",
+            source: "slack",
+            sourceThreadId: null,
+          },
+        ],
+      },
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted.map((c) => [c.form.text, c.form.thread_ts])).toEqual([
+      ["On it.", undefined],
+      ["Done.", "1699.123"],
+    ]);
+  });
+
+  it("posts a joined wake's reply as its caption's body, the web's layout", async () => {
+    // The agent said something back to the wake before working on: on the
+    // web that reply sits under the wake's header, so on Slack it is the
+    // caption's body. MUTATION-PROOF: keep the caption body-less and the
+    // reply never reaches the thread.
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          {
+            seq: 1,
+            turnId: "w1",
+            type: "text",
+            payload: { text: "CI went green." },
+          },
+          { seq: 2, turnId: "t1", type: "text", payload: { text: "Done." } },
+        ],
+        nextSince: 3,
+        hasMore: false,
+      }),
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack" }),
+        followUps: [
+          {
+            id: "w1",
+            message: '[Watch on process "ci" fired]\n\nRe-check CI.',
+            source: "watch",
+            userName: null,
+          },
+        ],
+      },
+    });
+
+    expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
+      ':stopwatch: Watch on process "ci" fired\nCI went green.',
+      "Done.",
+    ]);
+  });
+
+  it("posts a wake that joined a WAKE, and its reply, ahead of the report", async () => {
+    // A batch finishing seconds apart: the second wake joins the first's
+    // run. The web shows its header (and the reply to it) above the report;
+    // before this the mirror posted the report alone. MUTATION-PROOF: skip
+    // the follow-ups on an automated turn and the joined wake vanishes.
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          {
+            seq: 1,
+            turnId: "w2",
+            type: "text",
+            payload: { text: "The second job passed too." },
+          },
+          {
+            seq: 2,
+            turnId: "t1",
+            type: "text",
+            payload: { text: "Both jobs passed." },
+          },
+        ],
+        nextSince: 3,
+        hasMore: false,
+      }),
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({
+          source: "watch",
+          message: '[Watch on process "job-1" fired]\n\nReport.',
+        }),
+        followUps: [
+          {
+            id: "w2",
+            message: '[Watch on process "job-2" fired]\n\nReport.',
+            source: "watch",
+            userName: null,
+          },
+        ],
+      },
+    });
+
+    expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
+      ':stopwatch: Watch on process "job-2" fired\nThe second job passed too.',
+      ':stopwatch: Watch on process "job-1" fired\nBoth jobs passed.',
+    ]);
+  });
+
   it("answers a DM THREAD inside that thread", async () => {
     // THE BUG THIS FIXES (live): a reply typed in a DM thread was answered
     // at the bottom of the DM, outside the thread the person was reading.
@@ -1449,6 +1833,123 @@ describe("what gets posted", () => {
   });
 });
 
+describe("the early reply post (a reply posts while the turn runs)", () => {
+  const replyItem = (
+    overrides: Partial<AdapterReplyItem> = {},
+  ): AdapterReplyItem => ({
+    linkId: "l1",
+    presenceId: "p1",
+    conversationId: "cv1",
+    externalThreadId: "D100",
+    kind: "direct",
+    turnId: "t1",
+    followUp: {
+      id: "f1",
+      message: "and check the linter",
+      source: "slack",
+      userName: null,
+      sourceThreadId: "1699.555",
+    },
+    reply: "On it, <checking> now.",
+    ...overrides,
+  });
+  const post = (
+    controlPlane: ControlPlaneClient,
+    overrides: Partial<AdapterReplyItem> = {},
+  ) =>
+    mirrorFollowUpReply({
+      controlPlane,
+      credential: "xoxb-bot",
+      provider: "slack",
+      posts: slackMirrorPosts,
+      removalEventFor: slackAdapterProvider.removalEventFor,
+      threadAddress: slackAdapterProvider.threadAddress,
+      iconUrl: null,
+      item: replyItem(overrides),
+      onLog: () => {},
+    });
+
+  it("claims BEFORE posting, then posts the reply in the thread it was asked in, escaped", async () => {
+    const order: string[] = [];
+    const controlPlane = createFakeControlPlane({
+      claimReply: async (followUpId) => {
+        order.push(`claim:${followUpId}`);
+        return true;
+      },
+    });
+    slack.onCall = (call) => order.push(call.method);
+
+    await post(controlPlane);
+
+    // A Slack-sourced follow-up is already in the thread: only its reply
+    // posts.
+    expect(order).toEqual(["claim:f1", "chat.postMessage"]);
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted.map((c) => [c.form.text, c.form.thread_ts])).toEqual([
+      ["On it, &lt;checking&gt; now.", "1699.555"],
+    ]);
+  });
+
+  it("posts a web-sourced follow-up's attributed words AHEAD of its reply, as one exchange", async () => {
+    // The person typed on the web while the agent worked: the thread has
+    // not seen their words yet, so the mirror posts them first (attributed
+    // to their author, quoted not rendered), then the reply, both where the
+    // turn was asked. MUTATION-PROOF: post the reply alone and the thread
+    // shows an answer to a message it never saw.
+    const controlPlane = createFakeControlPlane();
+
+    await post(controlPlane, {
+      followUp: {
+        id: "f1",
+        message: "use the <Q3> numbers",
+        source: "web",
+        userName: "Jonathan",
+        sourceThreadId: null,
+      },
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted.map((c) => [c.form.text, c.form.thread_ts])).toEqual([
+      ["_(from the web · Jonathan)_ use the &lt;Q3&gt; numbers", undefined],
+      ["On it, &lt;checking&gt; now.", undefined],
+    ]);
+  });
+
+  it("posts NOTHING when the claim is lost", async () => {
+    const controlPlane = createFakeControlPlane({
+      claimReply: async () => false,
+    });
+
+    await post(controlPlane);
+
+    expect(slack.calls).toEqual([]);
+  });
+
+  it("a post refused with a DEAD-credential code is relayed as the provider's removal event", async () => {
+    // Same relay as the completion pass: the claim is spent either way (no
+    // retry into a double post), and the presence learns it is dead.
+    const ingested: unknown[] = [];
+    const controlPlane = createFakeControlPlane({
+      ingest: async (request) => {
+        ingested.push(request);
+        return { kind: "duplicate" as const };
+      },
+    });
+    slack.respond("chat.postMessage", () => ({
+      ok: false,
+      error: "account_inactive",
+    }));
+
+    await post(controlPlane);
+
+    expect(ingested).toHaveLength(1);
+    expect(ingested[0]).toMatchObject({
+      presenceId: "p1",
+      eventId: "dead-credential:f1",
+    });
+  });
+});
+
 describe("failure surfacing — never silent on a terminal outcome", () => {
   /** A transcript holding arbitrary events for t1. */
   const transcriptOf = (
@@ -1622,6 +2123,52 @@ describe("post failure after the cursor advanced", () => {
 });
 
 describe("outbound mentions — resolve, render, report", () => {
+  it("resolves mentions in a follow-up's reply in the SAME call as the answer's", async () => {
+    // A reply is model text like the answer: its @[Name] must ping too, and
+    // the mirror must not spend one resolve call per message.
+    const asked: string[][] = [];
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          {
+            seq: 1,
+            turnId: "f1",
+            type: "text",
+            payload: { text: "Asking @[Dan Abramov] now." },
+          },
+          { seq: 2, turnId: "t1", type: "text", payload: { text: "Done." } },
+        ],
+        nextSince: 3,
+        hasMore: false,
+      }),
+      resolveMentions: async (_presenceId, names) => {
+        asked.push(names);
+        return [
+          {
+            kind: "resolved",
+            name: "dan abramov",
+            externalUserId: "U0DAN1",
+            displayName: "Dan Abramov",
+          },
+        ];
+      },
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack" }),
+        followUps: [{ id: "f1", message: "loop in Dan", source: "slack" }],
+      },
+    });
+
+    expect(asked).toEqual([["dan abramov"]]);
+    expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
+      "Asking <@U0DAN1> now.",
+      "Done.",
+    ]);
+  });
+
   it("resolves @[Name] through the control plane and posts a real mention", async () => {
     let asked: { presenceId: string; names: string[] } | null = null;
     const controlPlane = createFakeControlPlane({
@@ -1743,6 +2290,49 @@ describe("outbound mentions — resolve, render, report", () => {
     // The token stays visible as literal text in the automation post.
     const posted = slack.callsTo("chat.postMessage");
     expect(JSON.stringify(posted[0]?.form)).toContain("@[Dan]");
+  });
+
+  it("a joined wake's reply never resolves mentions either (it posts as an automation body)", async () => {
+    // Same rule, one level down: the reply to a wake rides its caption,
+    // so it is automation text. MUTATION-PROOF: scan every reply and the
+    // wake's @[Dan] is sent to resolve.
+    const asked: string[][] = [];
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          {
+            seq: 1,
+            turnId: "w1",
+            type: "text",
+            payload: { text: "Pinging @[Dan] about CI." },
+          },
+          { seq: 2, turnId: "t1", type: "text", payload: { text: "Done." } },
+        ],
+        nextSince: 3,
+        hasMore: false,
+      }),
+      resolveMentions: async (_presenceId, names) => {
+        asked.push(names);
+        return [];
+      },
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack" }),
+        followUps: [
+          {
+            id: "w1",
+            message: '[Watch on process "ci" fired]\n\nRe-check CI.',
+            source: "watch",
+            userName: null,
+          },
+        ],
+      },
+    });
+
+    expect(asked).toEqual([]);
   });
 });
 

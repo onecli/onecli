@@ -16,6 +16,7 @@ const { useEvalRun } = await import("./use-evals");
 const run = (status: EvalRunDetail["status"]): EvalRunDetail => ({
   id: "run-1",
   status,
+  trigger: "manual",
   configVersion: "cfg",
   total: 1,
   counts: { pending: 0, passed: 1, mismatch: 0, error: 0, inconclusive: 0 },

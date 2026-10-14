@@ -1,10 +1,10 @@
 import { mkdtempSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import type {
-  AgentEvent,
+  HarnessEvent,
   SupervisorMessage,
   SupervisorTransport,
-  WorkItem,
+  SupervisorWorkItem,
 } from "@onecli/agent-protocol";
 
 /**
@@ -63,11 +63,11 @@ interface Stamped {
 
 const createTransport = () => {
   const sent: Stamped[] = [];
-  const queue: WorkItem[] = [];
+  const queue: SupervisorWorkItem[] = [];
   let notify: (() => void) | undefined;
   return {
     sent,
-    push(item: WorkItem) {
+    push(item: SupervisorWorkItem) {
       queue.push(item);
       notify?.();
       notify = undefined;
@@ -107,7 +107,7 @@ const createTransport = () => {
       throw new Error(`timed out waiting for ${label}`);
     },
     transport: {
-      async *incoming(): AsyncIterable<WorkItem> {
+      async *incoming(): AsyncIterable<SupervisorWorkItem> {
         for (;;) {
           while (queue.length > 0) {
             const item = queue.shift();
@@ -154,6 +154,7 @@ const supervisorConfig = (homeDir: string) => ({
   harness: "jcode",
   runnerWsUrl: undefined,
   bootstrapToken: undefined,
+  sandboxId: undefined,
   outboundAttachments: false,
 });
 
@@ -161,7 +162,12 @@ const deliver = (
   turnId: string,
   conversationId: string,
   message: string,
-): WorkItem => ({ kind: "turn.deliver", turnId, conversationId, message });
+): SupervisorWorkItem => ({
+  kind: "turn.deliver",
+  turnId,
+  conversationId,
+  message,
+});
 
 const withMock = async (
   longMs: number,
@@ -597,7 +603,7 @@ describe.skipIf(!LIVE)(
             let notices = 0;
             for (let i = 0; i < TURNS; i += 1) {
               const started = Date.now();
-              const events: AgentEvent[] = [];
+              const events: HarnessEvent[] = [];
               for await (const event of session.runTurn({
                 message: `slow-reply status please #${i}`,
               })) {
@@ -650,7 +656,7 @@ describe.skipIf(!LIVE)(
           const iterator = session
             .runTurn({ message: `${LONG_RUN_MARKER} hold the line` })
             [Symbol.asyncIterator]();
-          const events: AgentEvent[] = [];
+          const events: HarnessEvent[] = [];
           // Read until the run is live at the mock, on a side task.
           const drained = (async () => {
             let next = await iterator.next();

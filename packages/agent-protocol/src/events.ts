@@ -14,6 +14,13 @@ export const turnStartedEventSchema = z.object({
   type: z.literal("turn.started"),
 });
 
+/**
+ * A slice of the agent's prose as it is written. Attribution rides the
+ * envelope: a delta that answers a mid-run follow-up is sent under THAT
+ * follow-up's turn id, so a live reader sees the reply grow
+ * under the message it answers, exactly where the settled `text` row lands.
+ * Deltas are live-only (never persisted); the durable `text` follows them.
+ */
 export const textDeltaEventSchema = z.object({
   type: z.literal("text.delta"),
   text: z.string(),
@@ -198,16 +205,37 @@ export const readPeerTaskStamp = (
 
 /**
  * A steered follow-up message was CONSUMED by this turn — the adapter
- * confirmed the harness injected it into the live run. Emitted just before
- * the terminal event, one per confirmed follow-up. `followUpId` is the
- * opaque correlation id the steer carried in; the supervisor folds these
- * into `turn.result.followUps`, which is how the control plane settles the
- * follow-up row `joined`. A control-plane state transition, not transcript
- * content — the settled row is the record, so this is never persisted.
+ * confirmed the harness injected it into the live run. Emitted the moment the
+ * harness confirms it (mid-run, on a runtime with the live pickup signal) or
+ * just before the terminal event (a runtime that can only tell at the end),
+ * one per confirmed follow-up. `followUpId` is the opaque correlation id the
+ * steer carried in. The control plane settles the follow-up row `joined` as
+ * soon as the event arrives; the supervisor also folds these into
+ * `turn.result.followUps`, the backstop that settles any join the live stream
+ * never carried. A control-plane state transition, not transcript content:
+ * the settled row is the record, so this is never persisted.
  */
 export const messageJoinedEventSchema = z.object({
   type: z.literal("message.joined"),
   followUpId: z.string(),
+});
+
+/**
+ * SEND NOW's outcome, sent under the waiting FOLLOW-UP's own
+ * turn id: the person asked the agent to read that message now, and this is
+ * the honest answer. `moved` means the harness moved the tool the run was
+ * waiting on (`toolName`) to the background, so the run reaches its next
+ * safe point and reads the message within moments (its `message.joined`
+ * follows). `moved: false` means there was nothing to move (no tool was
+ * running, or the harness cannot say what it moved), and the message is
+ * read at the run's next safe point as before. Live-only, like
+ * `message.joined`: the row's own status is the durable record, and a
+ * reader who arrives later has nothing left to be told.
+ */
+export const messageSentNowEventSchema = z.object({
+  type: z.literal("message.sent_now"),
+  moved: z.boolean(),
+  toolName: z.string().optional(),
 });
 
 export const agentEventSchema = z.discriminatedUnion("type", [
@@ -220,6 +248,7 @@ export const agentEventSchema = z.discriminatedUnion("type", [
   approvalPendingEventSchema,
   noticeEventSchema,
   messageJoinedEventSchema,
+  messageSentNowEventSchema,
   turnDoneEventSchema,
   errorEventSchema,
 ]);
@@ -227,8 +256,9 @@ export const agentEventSchema = z.discriminatedUnion("type", [
 export type AgentEvent = z.infer<typeof agentEventSchema>;
 export type AgentEventType = AgentEvent["type"];
 
-/** The two events that legally terminate a turn's stream. */
-export const isTerminalEvent = (
-  event: AgentEvent,
-): event is Extract<AgentEvent, { type: "turn.done" | "error" }> =>
+/** The two events that legally terminate a turn's stream. Generic so it
+ * narrows the harness-side vocabulary (`HarnessEvent`) as well as this one. */
+export const isTerminalEvent = <E extends { type: string }>(
+  event: E,
+): event is Extract<E, { type: "turn.done" | "error" }> =>
   event.type === "turn.done" || event.type === "error";

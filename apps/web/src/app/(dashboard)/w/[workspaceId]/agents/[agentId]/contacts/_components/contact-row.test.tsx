@@ -6,10 +6,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentContact } from "@/lib/api";
 
 /**
- * One outbound contact (someone the agent messaged on its own). Acceptance
- * behaviors: the badge says the standing and, pressed, offers the three
- * words; choosing one mutates with THIS contact's id; the current word is
- * a no-op; Remove lives last in the … menu and is confirm-gated.
+ * One outbound-only contact (an app the agent messaged on its own).
+ * Acceptance behaviors: the badge says whether the agent may message it
+ * without asking and, pressed, asks that question in full and offers the
+ * three words; choosing one mutates with THIS contact's id; the current
+ * word is a no-op; Remove lives last in the … menu and is confirm-gated.
  */
 
 const mocks = vi.hoisted(() => ({
@@ -34,9 +35,9 @@ import { ContactRow } from "./contact-row";
 
 const contact = (policy: AgentContact["policy"]): AgentContact => ({
   id: "c-1",
-  kind: "person",
-  externalRef: "U1",
-  displayName: "Dana",
+  kind: "app",
+  externalRef: "B1",
+  displayName: "Jira",
   policy,
   updatedAt: "2026-09-16T00:00:00Z",
 });
@@ -44,9 +45,12 @@ const contact = (policy: AgentContact["policy"]): AgentContact => ({
 const renderRow = (c: AgentContact) =>
   render(
     <QueryClientProvider client={new QueryClient()}>
-      <ContactRow agentId="ag-1" contact={c} />
+      <ContactRow agentId="ag-1" agentName="Donna" contact={c} />
     </QueryClientProvider>,
   );
+
+const trigger = () =>
+  screen.getByRole("button", { name: /Can Donna message Jira on its own/ });
 
 beforeEach(() => {
   mocks.setPolicy.mockReset();
@@ -54,18 +58,15 @@ beforeEach(() => {
 });
 
 describe("ContactRow", () => {
-  it("the badge is the standing; pressed, it offers the three words and mutates with this contact's id", async () => {
+  it("the badge is the standing; pressed, it asks the question and mutates with this contact's id", async () => {
     renderRow(contact("ask"));
-    expect(screen.getByText("Asks first")).toBeDefined();
+    expect(screen.getByText("Asks you first")).toBeDefined();
+    await userEvent.click(trigger());
+    expect(screen.getByText(/on its own\?/)).toBeDefined();
+    expect(screen.getAllByRole("menuitem")).toHaveLength(3);
     await userEvent.click(
-      screen.getByRole("button", {
-        name: /Whether the agent may message Dana on its own/,
-      }),
+      screen.getByRole("menuitem", { name: /Without asking/ }),
     );
-    expect(screen.getByText("Always allow")).toBeDefined();
-    expect(screen.getByText("Ask me first")).toBeDefined();
-    expect(screen.getByText("Block")).toBeDefined();
-    await userEvent.click(screen.getByText("Always allow"));
     expect(mocks.setPolicy).toHaveBeenCalledTimes(1);
     expect(mocks.setPolicy.mock.calls[0]![0]).toEqual({
       contactId: "c-1",
@@ -75,19 +76,15 @@ describe("ContactRow", () => {
 
   it("choosing the current word is a no-op", async () => {
     renderRow(contact("blocked"));
-    await userEvent.click(
-      screen.getByRole("button", {
-        name: /Whether the agent may message Dana on its own/,
-      }),
-    );
-    await userEvent.click(screen.getByText("Block"));
+    await userEvent.click(trigger());
+    await userEvent.click(screen.getByRole("menuitem", { name: /^Block/ }));
     expect(mocks.setPolicy).not.toHaveBeenCalled();
   });
 
   it("Remove is the … menu's item and is confirm-gated: only the dialog's Remove fires", async () => {
     renderRow(contact("allow"));
     await userEvent.click(
-      screen.getByRole("button", { name: "More for Dana" }),
+      screen.getByRole("button", { name: "More for Jira" }),
     );
     await userEvent.click(screen.getByRole("menuitem", { name: /Remove/ }));
     expect(mocks.remove).not.toHaveBeenCalled();
@@ -99,7 +96,7 @@ describe("ContactRow", () => {
   it("cancel closes the dialog without firing", async () => {
     renderRow(contact("allow"));
     await userEvent.click(
-      screen.getByRole("button", { name: "More for Dana" }),
+      screen.getByRole("button", { name: "More for Jira" }),
     );
     await userEvent.click(screen.getByRole("menuitem", { name: /Remove/ }));
     await userEvent.click(screen.getByRole("button", { name: "Cancel" }));

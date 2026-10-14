@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { PageHeader } from "@dashboard/page-header";
 import { SlackCardsRow } from "./_components/slack-cards-row";
+import { SlackAgentsSection } from "./_components/slack-agents-section";
 import { ChannelUserLinksCard } from "./_components/channel-user-links-card";
 
 export const metadata: Metadata = {
@@ -15,10 +16,11 @@ export default function ChannelsSettingsPage() {
         title="Channels"
         description="Connect your chat workspaces so agents can join them."
       />
-      {/* The guided Slack setup surface — one default path (the OneCLI app)
-          with the token alternative a swap away; states route in the row.
+      {/* The Slack connection, then (once one-click is real) every agent a
+          click away from Slack, then the rare people-matching escape hatch.
           Full width, like every card on the admin pages. */}
       <SlackCardsRow />
+      <SlackAgentsSection />
       <ChannelUserLinksCard />
     </div>
   );

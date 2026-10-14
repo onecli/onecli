@@ -6,6 +6,7 @@ import { Button } from "@onecli/ui/components/button";
 import { useRunsList } from "@/hooks/use-runs";
 import type { RunListItem } from "@/lib/api";
 import { RunDetailSheet } from "@/lib/agents/runs";
+import { RUNS_VIEWS, type RunsView } from "@/lib/agents/runs/runs-view";
 import { SegmentedFilter, type SegmentOption } from "./segmented-filter";
 import { LiveToggle } from "./live-toggle";
 import { RunsTable } from "./runs-table";
@@ -22,24 +23,19 @@ import { RunsTable } from "./runs-table";
  *
  * SECURITY: questions and answers are untrusted text, rendered as text.
  */
-type RunsView =
-  | "all"
-  | "web"
-  | "slack"
-  | "cron"
-  | "webhook"
-  | "eval"
-  | "failed";
-
-const VIEWS: readonly SegmentOption<RunsView>[] = [
-  { value: "all", label: "All" },
-  { value: "web", label: "Web" },
-  { value: "slack", label: "Slack" },
-  { value: "cron", label: "Schedules" },
-  { value: "webhook", label: "Webhooks" },
-  { value: "eval", label: "Tests" },
-  { value: "failed", label: "Failed" },
-];
+const LABEL: Record<RunsView, string> = {
+  all: "All",
+  web: "Web",
+  slack: "Slack",
+  cron: "Schedules",
+  webhook: "Webhooks",
+  eval: "Tests",
+  failed: "Failed",
+};
+const VIEWS: readonly SegmentOption<RunsView>[] = RUNS_VIEWS.map((value) => ({
+  value,
+  label: LABEL[value],
+}));
 
 const EMPTY: Record<RunsView, string> = {
   all: "No runs yet.",
@@ -53,14 +49,18 @@ const EMPTY: Record<RunsView, string> = {
 
 export const RunsTab = ({
   agentId,
+  view,
+  onViewChange,
   onViewNetwork,
 }: {
   /** Narrow to one agent (from the URL). */
   agentId?: string;
+  /** The segmented filter, kept in the URL so a link can open a view. */
+  view: RunsView;
+  onViewChange: (view: RunsView) => void;
   /** Show Network narrowed to this run's agent and time window. */
   onViewNetwork: (run: RunListItem) => void;
 }) => {
-  const [view, setView] = useState<RunsView>("all");
   const [open, setOpen] = useState<RunListItem | null>(null);
   const list = useRunsList({
     ...(agentId && { agentId }),
@@ -78,7 +78,7 @@ export const RunsTab = ({
         <SegmentedFilter
           options={VIEWS}
           value={view}
-          onChange={setView}
+          onChange={onViewChange}
           label="Filter runs"
         />
         <LiveToggle

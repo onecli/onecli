@@ -22,7 +22,7 @@ import { redactSecrets } from "../logs/redact";
  */
 
 /** Matches `jcode-YYYY-MM-DD.log` only, never the memory/ telemetry dir. */
-export const JCODE_LOG_FILE = /^jcode-\d{4}-\d{2}-\d{2}\.log$/;
+const JCODE_LOG_FILE = /^jcode-\d{4}-\d{2}-\d{2}\.log$/;
 
 /** The entry header: `[2026-10-01 13:54:13.349] [ERROR] message…`. */
 const ENTRY_HEADER = /^\[(\d{4}-\d{2}-\d{2} [\d:.]+)\] \[([A-Z]+)\] ?(.*)$/;

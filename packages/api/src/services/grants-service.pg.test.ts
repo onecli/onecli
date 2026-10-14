@@ -226,6 +226,30 @@ const grantRows = (extra: Record<string, unknown> = {}) =>
   });
 
 describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
+  it("default attach: tools allowed, requests outside the tool list need approval", async () => {
+    await grants.setConnectionGrant(
+      SCOPE,
+      AGENT,
+      CONN_WORK,
+      { access: "default" },
+      null,
+    );
+    const listed = await decide({
+      path: "/gmail/v1/users/me/drafts",
+      method: "POST",
+      winner: CONN_WORK,
+    });
+    expect(listed.action).toBe("allow");
+    expect(listed.requireApproval).toBeFalsy();
+    expect(
+      await decide({
+        path: "/gmail/v1/users/me/history",
+        method: "GET",
+        winner: CONN_WORK,
+      }),
+    ).toMatchObject({ action: "allow", requireApproval: true });
+  });
+
   it("full attach: one whole-app allow rule that decides via the winner and injects", async () => {
     const result = await grants.setConnectionGrant(
       SCOPE,
@@ -362,6 +386,60 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
       _max: { generation: true },
     });
     expect(genAfter._max.generation).toBe(genBefore._max.generation);
+  });
+
+  it("all other reads / writes: the split publishes its method, decides, reads back, and survives a tools-only save", async () => {
+    const save = (extra: Record<string, unknown> = {}) =>
+      grants.setConnectionGrant(
+        SCOPE,
+        AGENT,
+        CONN_WORK,
+        { access: "custom", allow: ["create_draft"], ask: [], ...extra },
+        null,
+      );
+    await save({ otherReads: "allow", otherWrites: "ask" });
+
+    // The narrowed (stricter, writes) row carries its method on BOTH the
+    // draft and the published copy the gateway loads.
+    for (const status of ["draft", "published"]) {
+      const rows = await grantRows({ status });
+      const writes = rows.find((r) => r.name.endsWith(": all other writes"));
+      const reads = rows.find((r) => r.name.endsWith(": all other reads"));
+      expect(writes?.targets[0]?.method, status).toBe("!GET,HEAD");
+      expect(reads?.targets[0]?.method ?? null, status).toBeNull();
+    }
+
+    // An unlisted read passes the grant, an unlisted write is held.
+    const read = { path: "/gmail/v1/users/me/history", winner: CONN_WORK };
+    expect(await decide({ ...read, method: "GET" })).toEqual({
+      action: "allow",
+    });
+    expect(await decide({ ...read, method: "POST" })).toMatchObject({
+      action: "allow",
+      requireApproval: true,
+    });
+
+    const listed = async () =>
+      (await grants.getAgentGrants(SCOPE, AGENT)).connections.find(
+        (c) => c.connectionId === CONN_WORK,
+      );
+    expect(await listed()).toMatchObject({
+      otherReads: "allow",
+      otherWrites: "ask",
+    });
+
+    // A tools-only save (an older client, the SDK) keeps both choices, and
+    // the same save again writes nothing.
+    await save({ ask: ["get_message"] });
+    expect(await listed()).toMatchObject({
+      ask: ["get_message"],
+      otherReads: "allow",
+      otherWrites: "ask",
+    });
+    expect(await decide({ ...read, method: "GET" })).toEqual({
+      action: "allow",
+    });
+    expect((await save({ ask: ["get_message"] })).changed).toBe(false);
   });
 
   it("repairs hand-edit drift on the next write", async () => {

@@ -6,6 +6,7 @@ import { createConversation } from "./conversation-service";
 import { abortTurn, createTurn } from "./turn-service";
 import { getEvalRunEvidence } from "./agent-runs-service";
 import { scoreEval } from "./eval-scoring";
+import { judgeAnswer } from "./eval-judge";
 import { logger } from "../lib/logger";
 import { ACTIVE_TURN_STATUSES, EVAL_SOURCE } from "../validations/conversation";
 import { RUN_WINDOW_SLACK_MS } from "../validations/runs";
@@ -15,6 +16,7 @@ import {
   EVAL_QUESTIONS_MAX,
   EVAL_RUN_STATUSES,
   EVAL_RUNS_LISTED,
+  EVAL_RUN_TRIGGERS,
   NUMERIC_EXPECTED_MESSAGE,
   countEvalOutcomes,
   evalResultSchema,
@@ -25,6 +27,7 @@ import {
   type EvalResult,
   type EvalResultView,
   type EvalRunStatus,
+  type EvalRunTrigger,
 } from "../validations/evals";
 import { compareToPrevious } from "./eval-comparison";
 
@@ -32,8 +35,9 @@ import { compareToPrevious } from "./eval-comparison";
  * Agent EVALS: test questions with known answers, asked of the live agent
  * through the ordinary turn path (one fresh `eval` conversation per
  * question) so a run exercises exactly what a user gets. Each answer is
- * scored by a simple check plus the apps the agent reached, and every run
- * keeps a snapshot of its questions and results.
+ * scored by a simple check (or, for a custom check, by an AI judge applying
+ * the author's own success criteria) plus the apps the agent reached, and
+ * every run keeps a snapshot of its questions and results.
  *
  * The worker runs in the API process that accepted the run. If that process
  * dies (a deploy, a crash), the run stops making progress; the next run
@@ -51,7 +55,9 @@ const POLL_MS = 1_500;
 const EVIDENCE_SETTLE_MS = 2 * RUN_WINDOW_SLACK_MS + 500;
 /** An active run with no checkpoint for this long has lost its worker. A
  * live worker checkpoints at least once per question, and one question
- * takes at most QUESTION_TIMEOUT_MS + ABORT_SETTLE_MS + EVIDENCE_SETTLE_MS. */
+ * takes at most QUESTION_TIMEOUT_MS + ABORT_SETTLE_MS + EVIDENCE_SETTLE_MS
+ * (about 5.6 minutes), plus a custom check's judge (two attempts of at most
+ * a minute each, `eval-judge.ts`): under 8 minutes in all. */
 export const STALE_RUN_MS = 10 * 60_000;
 
 export interface EvalQuestion {
@@ -66,6 +72,8 @@ export interface EvalQuestion {
 export interface EvalRunSummary {
   id: string;
   status: EvalRunStatus;
+  /** Who started it: a person (`manual`) or the eval schedule. */
+  trigger: EvalRunTrigger;
   configVersion: string;
   total: number;
   counts: EvalOutcomeCounts;
@@ -85,7 +93,12 @@ export interface EvalRunDetail extends EvalRunSummary {
 
 const log = logger.child({ component: "agent-evals" });
 
-const requireHostedAgent = async (workspaceId: string, agentId: string) => {
+/** The eval fence every entry point shares (questions, runs, the schedule):
+ * the agent must be this workspace's, and hosted. */
+export const requireHostedAgent = async (
+  workspaceId: string,
+  agentId: string,
+) => {
   const agent = await db.agent.findFirst({
     where: { id: agentId, workspaceId },
     select: { kind: true },
@@ -248,6 +261,7 @@ export const archiveQuestion = async (
 const runSelect = {
   id: true,
   status: true,
+  trigger: true,
   configVersion: true,
   total: true,
   results: true,
@@ -260,19 +274,34 @@ type RunRow = Prisma.AgentEvalRunGetPayload<{ select: typeof runSelect }>;
 
 const storedResults = z.array(evalResultSchema);
 
-/** A stored run, parsed: rows are written only by this service, so a row
- * that does not parse is corruption and fails loudly. */
+/** Shown on a run whose stored results this version cannot read (written by
+ * an older format). */
+const UNREADABLE_RUN_ERROR =
+  "This run was recorded in an older format and its results cannot be shown.";
+
+/** A stored run, parsed. A row whose results do not parse (an older format)
+ * must not take the whole Evals screen down with it: it reads as a failed
+ * run with no results, and the detail stays in the server log. */
 const parseRun = (row: RunRow) => {
-  const results = storedResults.parse(row.results);
+  const parsed = storedResults.safeParse(row.results);
+  if (!parsed.success)
+    log.warn(
+      { runId: row.id, issues: parsed.error.issues.length },
+      "eval run results could not be read",
+    );
+  const results = parsed.success ? parsed.data : [];
   return {
     results,
     summary: {
       id: row.id,
-      status: z.enum(EVAL_RUN_STATUSES).parse(row.status),
+      status: parsed.success
+        ? z.enum(EVAL_RUN_STATUSES).parse(row.status)
+        : "failed",
+      trigger: z.enum(EVAL_RUN_TRIGGERS).catch("manual").parse(row.trigger),
       configVersion: row.configVersion,
       total: row.total,
-      counts: countEvalOutcomes(results, row.total),
-      error: row.error,
+      counts: countEvalOutcomes(results, parsed.success ? row.total : 0),
+      error: parsed.success ? row.error : UNREADABLE_RUN_ERROR,
       createdAt: row.createdAt,
       startedAt: row.startedAt,
       finishedAt: row.finishedAt,
@@ -363,13 +392,25 @@ const failStaleRuns = async (
   });
 };
 
+/** A run was asked of an agent with no active test questions. Still the
+ * same 422 to a person pressing Run tests; typed so the eval schedule can
+ * tell it apart from any other refusal, decided inside the admission lock. */
+export class NoEvalQuestionsError extends ServiceError {
+  constructor() {
+    super("UNPROCESSABLE", "Add a test question first");
+  }
+}
+
 /** Admit one run per agent: no active run and no active eval turn. The
- * worker starts after the admission commits. */
+ * worker starts after the admission commits. `scheduled` runs come from the
+ * eval schedule (`eval-schedule-fire-service.ts`), on its creator's
+ * authority. */
 export const startRun = async (
   workspaceId: string,
   organizationId: string,
   userId: string,
   agentId: string,
+  trigger: EvalRunTrigger = "manual",
 ): Promise<EvalRunSummary> => {
   await requireHostedAgent(workspaceId, agentId);
   const { run, questions } = await db.$transaction(async (tx) => {
@@ -383,12 +424,12 @@ export const startRun = async (
     const questions = (await activeQuestions(tx, workspaceId, agentId)).map(
       toQuestion,
     );
-    if (questions.length === 0)
-      throw new ServiceError("UNPROCESSABLE", "Add a test question first");
+    if (questions.length === 0) throw new NoEvalQuestionsError();
     const run = await tx.agentEvalRun.create({
       data: {
         agentId,
         createdByUserId: userId,
+        trigger,
         configVersion: await agentConfigVersion(tx, agentId),
         total: questions.length,
       },
@@ -472,6 +513,8 @@ const askQuestion = async (
     turnId: null,
     conversationId: null,
     error: null,
+    judgement: null,
+    judgeError: null,
   };
   const scoreAsError = (error: string): EvalResult => ({
     ...result,
@@ -528,11 +571,24 @@ const askQuestion = async (
       turn.id,
       q.expectedApps,
     );
+    // A custom check is decided by the judge, on the finished answer only:
+    // an unfinished turn is an `error` whatever the judge would say.
+    const judged =
+      q.kind === "custom" && failure === null && evidence.answer !== null
+        ? await judgeAnswer({
+            agent: { id: ctx.agentId, workspaceId: ctx.workspaceId },
+            organizationId: ctx.organizationId,
+            question: q.question,
+            criteria: q.expected,
+            answer: evidence.answer,
+          })
+        : null;
     const { outcome, missingApps } = scoreEval(q, {
       answer: evidence.answer,
       error: failure,
       appsUsed:
         evidence.appAttribution === "withheld" ? null : evidence.appsUsed,
+      judged: judged?.ok ? judged.judgement.passed : null,
     });
     return {
       ...result,
@@ -540,6 +596,8 @@ const askQuestion = async (
       answer: evidence.answer,
       missingApps,
       error: failure,
+      judgement: judged?.ok ? judged.judgement : null,
+      judgeError: judged && !judged.ok ? judged.error : null,
     };
   } catch (err) {
     if (err instanceof UnsettledTurnError) throw err;

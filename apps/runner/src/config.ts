@@ -55,6 +55,14 @@ export interface RunnerConfig {
   sandboxManagerUrl: string | null;
   sandboxManagerToken: string | null;
   /**
+   * The supervisor-session signing keyring (`RUNNER_SESSION_KEY`, raw:
+   * `kid.secret[,kid.secret…]` or a bare secret), parsed by the composition
+   * root. Null = resumption off: a runner restart severs every supervisor
+   * channel, as before the feature. Optional on purpose, so the key can
+   * deploy ahead of (or be rolled back after) the runner that uses it.
+   */
+  sessionKey: string | null;
+  /**
    * Ceiling on waiting for the backend to ACCEPT a park (never the archive
    * itself, which completes backend-side): bounds the predecessor
    * sandbox's termination grace plus slack.
@@ -199,6 +207,7 @@ export const loadConfig = (
 
   return {
     token,
+    sessionKey: env.RUNNER_SESSION_KEY?.trim() || null,
     controlPlaneUrl: env.RUNNER_CONTROL_PLANE_URL ?? "http://localhost:10256",
     name: env.RUNNER_NAME ?? "runner",
     backend,

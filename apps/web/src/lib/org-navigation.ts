@@ -16,7 +16,7 @@ export const useOrgPrefix = (): string => {
   return generateOrgPrefix(extractOrgId(pathname));
 };
 
-/** The current org's Global Connections root: the `basePath` every org-scope
+/** The current org's Shared Connections root: the `basePath` every org-scope
  *  connections component hands the shared workspace tabs. */
 export const useOrgConnectionsPath = (): string => {
   const orgId = extractOrgId(usePathname());

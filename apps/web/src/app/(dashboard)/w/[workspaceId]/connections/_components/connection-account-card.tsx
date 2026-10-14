@@ -14,7 +14,6 @@ import {
   Settings,
   Unplug,
   User,
-  Users,
 } from "lucide-react";
 import { Card } from "@onecli/ui/components/card";
 import { Badge } from "@onecli/ui/components/badge";
@@ -48,34 +47,34 @@ import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
 import {
   useDisconnectConnection,
+  usePromoteConnection,
   useRenameConnection,
 } from "@/hooks/use-connections";
+import { GITHUB_APP_PROVIDER } from "@/hooks/use-github-app-share";
+import { useOrgMembership } from "@/hooks/use-org";
 import type { PageScope } from "@/lib/api";
+import { connectionAccessLevelLabel } from "@onecli/api/apps/access-level";
 import {
   extractBoundHost,
   extractLabel,
 } from "@onecli/api/lib/connection-display";
-// The read-only agent-access reflection, which reads the v2 policy engine.
-// Shared since step 10 — every edition renders it.
-import { ConnectionAgentsReflection } from "@/lib/components/policy-reflect";
+import {
+  extractGitHubOrgAccess,
+  githubOrgAccessSummary,
+} from "@onecli/api/lib/github-org-access";
+import { GitHubOrgAccessNotice } from "./github-org-access-notice";
+import { ConnectionAgentRows } from "./connection-agent-rows";
+import type { AccountCardConnection } from "./account-card-connection";
 
 interface ConnectionAccountCardProps {
-  connection: {
-    id: string;
-    label: string | null;
-    status: string;
-    scopes: string[];
-    metadata: Record<string, unknown> | null;
-    connectedAt: string;
-    /** Set when the provider refused the saved login (see the gateway's
-     * `connection_needs_reconnect`). Reconnecting clears it. */
-    reauthRequiredAt?: string | null;
-  };
+  connection: AccountCardConnection;
   appName: string;
   onReconnect: (connectionId: string) => void;
   pageScope?: PageScope;
   /** The agent's reconnect link pointed here (`?reconnect=<id>`). */
   highlighted?: boolean;
+  /** The agent's `?org_access=<org>` link named this GitHub organization. */
+  highlightedOrg?: string | null;
 }
 
 export const ConnectionAccountCard = ({
@@ -84,16 +83,31 @@ export const ConnectionAccountCard = ({
   onReconnect,
   pageScope = "workspace",
   highlighted = false,
+  highlightedOrg = null,
 }: ConnectionAccountCardProps) => {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
-  const [agentDialogOpen, setAgentDialogOpen] = useState(false);
+  const [promoteOpen, setPromoteOpen] = useState(false);
   const disconnectMutation = useDisconnectConnection(pageScope);
   const renameMutation = useRenameConnection(pageScope);
-
-  // Agents are workspace-scoped, so agent access only applies on the workspace page.
-  const showAgentAccess = pageScope === "workspace";
+  const promoteMutation = usePromoteConnection();
+  // Agents are workspace-scoped, so agent access (and moving an account up to
+  // the org) only applies on the workspace page.
+  const isWorkspacePage = pageScope === "workspace";
+  // Org admins can move a workspace account up to Shared Connections. A
+  // shared GitHub connection is already a narrowed copy of an installation
+  // the org can share directly, so it is not offered there (the API refuses).
+  const { data: membership } = useOrgMembership(isWorkspacePage);
+  const canPromote =
+    isWorkspacePage &&
+    membership?.isAdmin === true &&
+    !connection.sourceConnectionId;
+  // Removing an original installation removes the shared connections built
+  // on it, in any workspace.
+  const isGitHubAppSource =
+    connection.provider === GITHUB_APP_PROVIDER &&
+    !connection.sourceConnectionId;
 
   const displayName =
     connection.label ??
@@ -102,9 +116,18 @@ export const ConnectionAccountCard = ({
 
   const avatarUrl = connection.metadata?.avatarUrl as string | undefined;
   const accountType = connection.metadata?.accountType as string | undefined;
+  // Which kind of token the account holds, for apps that offer more than one
+  // (Attio's workspace vs personal access).
+  const accessLevel = connectionAccessLevelLabel(
+    connection.provider,
+    connection.metadata,
+  );
   const tags = (connection.metadata?.tags as string[] | undefined) ?? [];
   const boundHost = extractBoundHost(connection.metadata);
   const needsReconnect = !!connection.reauthRequiredAt;
+  // GitHub organizations that refused this account (recorded by the gateway).
+  // Per-organization: the account stays connected for everything else.
+  const orgAccessIssues = extractGitHubOrgAccess(connection.metadata);
 
   const handleRename = () => {
     const trimmed = renameValue.trim();
@@ -176,9 +199,24 @@ export const ConnectionAccountCard = ({
               <p className="text-xs text-muted-foreground">
                 {needsReconnect ? (
                   <span className="text-destructive">Needs reconnect</span>
+                ) : orgAccessIssues.length > 0 ? (
+                  <span className="text-amber-700 dark:text-amber-400">
+                    Connected &middot;{" "}
+                    {githubOrgAccessSummary(orgAccessIssues.length)}
+                  </span>
                 ) : (
                   (accountType ?? "Connected")
                 )}{" "}
+                {accessLevel && (
+                  <span className="text-muted-foreground/60 whitespace-nowrap">
+                    &middot; {accessLevel}{" "}
+                  </span>
+                )}
+                {connection.sourceConnectionId && (
+                  <span className="text-muted-foreground/60">
+                    &middot; Shared{" "}
+                  </span>
+                )}
                 <span className="text-muted-foreground/60">
                   &middot;{" "}
                   {new Date(connection.connectedAt).toLocaleDateString(
@@ -240,12 +278,6 @@ export const ConnectionAccountCard = ({
                   <Pencil className="size-4" />
                   Rename
                 </DropdownMenuItem>
-                {showAgentAccess && (
-                  <DropdownMenuItem onClick={() => setAgentDialogOpen(true)}>
-                    <Users className="size-4" />
-                    Agent access
-                  </DropdownMenuItem>
-                )}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   onClick={() => setConfirmOpen(true)}
@@ -271,24 +303,19 @@ export const ConnectionAccountCard = ({
             account until you reconnect it. Agent access and rules are kept.
           </p>
         )}
-
-        {showAgentAccess && (
-          // A neutral opener: policy rules decide agent access, so a summary
-          // line can't state it without the reflection's own evaluation.
-          <button
-            type="button"
-            onClick={() => setAgentDialogOpen(true)}
-            aria-label="View agent access"
-            className="flex min-w-0 items-center gap-1.5 rounded-sm text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none"
-          >
-            <Users className="size-3.5 shrink-0" aria-hidden="true" />
-            <span className="truncate">Agent access</span>
-            <ChevronRight
-              className="size-3 shrink-0 opacity-60"
-              aria-hidden="true"
+        {!needsReconnect &&
+          orgAccessIssues.map((issue) => (
+            <GitHubOrgAccessNotice
+              key={issue.org}
+              issue={issue}
+              highlighted={issue.org === highlightedOrg?.toLowerCase()}
+              onReconnect={
+                connection.metadata?.manageUrl
+                  ? undefined
+                  : () => onReconnect(connection.id)
+              }
             />
-          </button>
-        )}
+          ))}
 
         {tags.length > 0 && (
           <div className="flex flex-wrap gap-1.5">
@@ -298,6 +325,20 @@ export const ConnectionAccountCard = ({
               </Badge>
             ))}
           </div>
+        )}
+        {isWorkspacePage && <ConnectionAgentRows connection={connection} />}
+        {canPromote && (
+          <button
+            type="button"
+            onClick={() => setPromoteOpen(true)}
+            className="text-muted-foreground hover:text-foreground hover:bg-muted/60 focus-visible:ring-ring -mx-4 -mb-3 mt-1 flex items-center justify-between gap-2 rounded-b-xl border-t px-4 py-2 text-left text-xs transition-colors focus-visible:ring-2 focus-visible:outline-none"
+          >
+            <span className="flex items-center gap-1.5">
+              <Building2 className="size-3.5" aria-hidden="true" />
+              Share with more workspaces
+            </span>
+            <ChevronRight className="size-3.5 opacity-60" aria-hidden="true" />
+          </button>
         )}
       </Card>
 
@@ -309,6 +350,13 @@ export const ConnectionAccountCard = ({
               This will revoke access and remove the stored credentials for this{" "}
               {appName} account. Agents using this connection will no longer be
               able to authenticate.
+              {isGitHubAppSource && (
+                <>
+                  {" "}
+                  Connections shared from this installation, in any workspace,
+                  are removed too.
+                </>
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -363,15 +411,44 @@ export const ConnectionAccountCard = ({
         </DialogContent>
       </Dialog>
 
-      {showAgentAccess && (
-        <ConnectionAgentsReflection
-          connectionId={connection.id}
-          connectionLabel={displayName}
-          appName={appName}
-          open={agentDialogOpen}
-          onOpenChange={setAgentDialogOpen}
-        />
-      )}
+      <AlertDialog open={promoteOpen} onOpenChange={setPromoteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Share {displayName} with the organization?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              It moves to Shared Connections and every workspace can use it.
+              Agents here keep their access and permissions. Only organization
+              admins can rename or disconnect it after this.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={promoteMutation.isPending}
+              onClick={(e) => {
+                e.preventDefault();
+                promoteMutation.mutate(connection.id, {
+                  onSuccess: () => {
+                    toast.success(`${displayName} is now shared`);
+                    setPromoteOpen(false);
+                  },
+                });
+              }}
+            >
+              {promoteMutation.isPending ? (
+                <>
+                  <Loader2 className="size-3.5 animate-spin" />
+                  Sharing...
+                </>
+              ) : (
+                "Share"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 };

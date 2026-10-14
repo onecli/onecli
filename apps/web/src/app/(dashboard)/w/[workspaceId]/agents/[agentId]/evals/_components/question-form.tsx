@@ -6,10 +6,15 @@ import { Button } from "@onecli/ui/components/button";
 import { DialogBody, DialogFooter } from "@onecli/ui/components/dialog";
 import { Input } from "@onecli/ui/components/input";
 import { Textarea } from "@onecli/ui/components/textarea";
-import { EVAL_TEXT_MAX_LENGTH } from "@onecli/api/validations/evals";
+import {
+  EVAL_CRITERIA_MAX_LENGTH,
+  EVAL_TEXT_MAX_LENGTH,
+  type EvalCheckKind,
+} from "@onecli/api/validations/evals";
 import type { useSaveEvalQuestion } from "@/hooks/use-evals";
 import type { EvalQuestion } from "@/lib/api";
 import { CheckKindPicker } from "./check-kind-picker";
+import { CRITERIA_TEMPLATE } from "./eval-copy";
 import { ExpectedAppsField } from "./expected-apps-field";
 import { fieldDescribedBy, FormField } from "./form-field";
 import {
@@ -26,6 +31,31 @@ const FIELD_ID: Record<QuestionField, string> = {
   expectedApps: "eval-apps",
 };
 const CHECK_LABEL_ID = "eval-check-label";
+
+/** The expected field, per check: what it holds and how it is read. */
+const EXPECTED_FIELD: Record<
+  EvalCheckKind,
+  { label: string; help: string; placeholder: string; max: number }
+> = {
+  numeric: {
+    label: "Expected number",
+    help: "One number, like 3200000 or $3.2M. Not a sentence or a date.",
+    placeholder: "e.g. 3200000",
+    max: EVAL_TEXT_MAX_LENGTH,
+  },
+  text: {
+    label: "Expected keywords",
+    help: "Distinctive words. Common words like “the” are ignored, and meaning or negation is not understood.",
+    placeholder: "e.g. Acme renewal",
+    max: EVAL_TEXT_MAX_LENGTH,
+  },
+  custom: {
+    label: "Success criteria",
+    help: "Plain words for the judge: the facts a good answer covers, and the pass rule (for example “at least 70% of the facts” or “any invented fact fails”). With no pass rule, every fact must be there. Wording may differ; the substance must match.",
+    placeholder: CRITERIA_TEMPLATE,
+    max: EVAL_CRITERIA_MAX_LENGTH,
+  },
+};
 
 const draftFrom = (question: EvalQuestion | null): QuestionDraft => ({
   question: question?.question ?? "",
@@ -80,6 +110,8 @@ export const QuestionForm = ({
   };
 
   const numeric = draft.kind === "numeric";
+  const custom = draft.kind === "custom";
+  const expectedField = EXPECTED_FIELD[draft.kind];
   const ExpectedControl = numeric ? Input : Textarea;
   const control = (field: QuestionField) => ({
     id: FIELD_ID[field],
@@ -130,24 +162,33 @@ export const QuestionForm = ({
 
           <FormField
             id={FIELD_ID.expected}
-            label={numeric ? "Expected number" : "Expected keywords"}
-            help={
-              numeric
-                ? "One number, like 3200000 or $3.2M. Not a sentence or a date."
-                : "Distinctive words. Common words like “the” are ignored, and meaning or negation is not understood."
-            }
+            label={expectedField.label}
+            help={expectedField.help}
             error={errors.expected}
           >
             <ExpectedControl
               {...control("expected")}
-              {...(!numeric && { rows: 2 })}
+              {...(!numeric && { rows: custom ? 8 : 2 })}
               value={draft.expected}
-              maxLength={EVAL_TEXT_MAX_LENGTH}
+              maxLength={expectedField.max}
               onChange={(event) =>
                 update({ expected: event.target.value }, "expected")
               }
-              placeholder={numeric ? "e.g. 3200000" : "e.g. Acme renewal"}
+              placeholder={expectedField.placeholder}
             />
+            {custom && draft.expected.trim() === "" && (
+              <Button
+                type="button"
+                size="xs"
+                variant="link"
+                className="h-auto px-0"
+                onClick={() =>
+                  update({ expected: CRITERIA_TEMPLATE }, "expected")
+                }
+              >
+                Start from the example
+              </Button>
+            )}
           </FormField>
 
           <FormField

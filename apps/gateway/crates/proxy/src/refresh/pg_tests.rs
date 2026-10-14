@@ -132,6 +132,8 @@ fn config(token_url: &'static str) -> &'static apps::RefreshConfig {
         client_secret_env: "ONECLI_REFRESH_TEST_UNSET_SECRET",
         body_format: apps::TokenBodyFormat::Form,
         client_auth: apps::ClientCredentialMethod::Body,
+        max_lifetime_secs: None,
+        stale_token_error_codes: &[],
     }))
 }
 
@@ -291,6 +293,7 @@ impl World {
             provider: "gitlab",
             workspace_id: &self.workspace_id,
             config,
+            rejected: None,
         }
     }
 }
@@ -810,4 +813,100 @@ async fn a_flagged_connection_resolves_to_needs_reconnect_without_caching() {
         world.workspace_id, world.connection_id
     );
     assert!(cache.get_raw(&key).await.is_none(), "nothing may be cached");
+}
+
+// ── Refused before expiry (the Salesforce incident) ───────────────────────
+
+/// Store an UNEXPIRED access token, as Salesforce left one: its stored expiry
+/// hours away, the provider already refusing it.
+async fn store_unexpired(world: &World, engine: &PolicyEngine, access_token: &str) {
+    world
+        .reconnect(
+            engine,
+            &json!({
+                "access_token": access_token,
+                "refresh_token": "rt-0",
+                "expires_at": super::now_secs() + 3600,
+                "scope": "api",
+            }),
+        )
+        .await;
+}
+
+/// A token the provider refused is replaced though its stored expiry is
+/// hours away, and the replacement is what is stored.
+#[tokio::test]
+async fn a_refused_unexpired_token_is_refreshed() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let a = instance(Duration::from_secs(20)).await;
+    let provider = Provider::with_live("rt-0");
+    let cfg = config(serve(Arc::clone(&provider)).await);
+    let world = World::seed(pool, &a).await;
+    store_unexpired(&world, &a, "at-dead").await;
+
+    let mut refresh = world.refresh(cfg);
+    refresh.rejected = Some("at-dead");
+    let outcome = refresh_oauth_token(&a, refresh).await;
+
+    assert_eq!(token(&outcome), Some("at-1"));
+    assert_eq!(provider.calls(), 1);
+    let stored = world.stored(&a).await.expect("row");
+    assert_eq!(stored["access_token"], "at-1");
+    assert_eq!(stored["refresh_token"], "rt-1");
+}
+
+/// A burst of requests refused with the same token, across two instances,
+/// spends the refresh token ONCE: the first replaces the token, every later
+/// one finds the stored token is no longer the refused one and serves it.
+#[tokio::test]
+async fn a_burst_of_refusals_spends_the_refresh_token_once() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let a = instance(Duration::from_secs(20)).await;
+    let b = instance(Duration::from_secs(20)).await;
+    let provider = Provider::with_live("rt-0");
+    *provider.delay.lock().expect("lock") = Duration::from_millis(300);
+    let cfg = config(serve(Arc::clone(&provider)).await);
+    let world = World::seed(pool, &a).await;
+    store_unexpired(&world, &a, "at-dead").await;
+
+    let mut racers = Vec::new();
+    for i in 0..8 {
+        let engine = if i % 2 == 0 { &a } else { &b };
+        let mut refresh = world.refresh(cfg);
+        refresh.rejected = Some("at-dead");
+        racers.push(refresh_oauth_token(engine, refresh));
+    }
+    let outcomes = futures_util::future::join_all(racers).await;
+
+    assert_eq!(provider.calls(), 1, "one spend for one refusal");
+    assert!(!provider.revoked(), "the grant must survive");
+    for outcome in &outcomes {
+        assert_eq!(token(outcome), Some("at-1"));
+    }
+}
+
+/// A refusal whose refresh token is refused too flags the connection, the
+/// same as an expiry-driven refresh: only the user reconnecting fixes it.
+#[tokio::test]
+async fn a_refusal_with_a_refused_refresh_token_flags_the_connection() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let a = instance(Duration::from_secs(20)).await;
+    // The provider's live token is not the stored one: `invalid_grant`.
+    let provider = Provider::with_live("rt-other");
+    let cfg = config(serve(Arc::clone(&provider)).await);
+    let world = World::seed(pool, &a).await;
+    store_unexpired(&world, &a, "at-dead").await;
+
+    let mut refresh = world.refresh(cfg);
+    refresh.rejected = Some("at-dead");
+    let outcome = refresh_oauth_token(&a, refresh).await;
+
+    assert_eq!(outcome, RefreshOutcome::NeedsReconnect);
+    assert!(world.flagged().await);
 }

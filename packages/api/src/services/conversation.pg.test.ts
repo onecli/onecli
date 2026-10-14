@@ -1398,6 +1398,60 @@ describe.skipIf(!PROOF_URL)("finishTurn and the cold-death revival", () => {
     expect(row?.retriedAt).toBeNull();
   });
 
+  it("the runner's channel-loss batch, stopped FIRST, survives a poll between its two reports: one revival, one fresh boot, zero strands", async () => {
+    // The runner reports a channel loss as [sandbox.status(stopped),
+    // turn.finished(agent_restarted)] in THAT order, and its own poll loop
+    // can run between the two. Stopped-first: the strand door revives the
+    // never-started turn and flips the box to `unprovisioned`, so a poll in
+    // between claims the box off its queued turn (a start, not a turn: the
+    // turn arm needs `running`). The turn report then finds a `queued` row
+    // and is inert. The other order is a hole the runner avoids by
+    // construction: the finish door revives without waking (the box still
+    // reads `running`), a poll in between hands the revived turn straight
+    // back to the dying box, and the `stopped` then finds the once-fence
+    // spent and strands it. Seen on CI before the reorder.
+    const { conversationId, sandboxId } = await seedTalkable("fin-order");
+    const turn = await turns.createTurn(
+      WORKSPACE,
+      conversationId,
+      "cold",
+      WEB_A,
+    );
+    await dueWork.claimDueWork(RUNNER_A, 5);
+
+    await sandboxes.applyRunnerEvent(RUNNER_A, {
+      kind: "sandbox.status",
+      sandboxId,
+      status: "stopped",
+    });
+    let row = await db.turn.findUnique({ where: { id: turn.id } });
+    expect(row?.status).toBe("queued");
+    expect(row?.retriedAt).not.toBeNull();
+    expect(
+      (await db.sandbox.findUnique({ where: { id: sandboxId } }))?.status,
+    ).toBe("unprovisioned");
+
+    // The poll in between: the box is claimed for a fresh boot, the turn
+    // stays queued for it (never handed to the dead incarnation).
+    const work = await dueWork.claimDueWork(RUNNER_A, 5);
+    expect(work.map((item) => item.kind)).toEqual(["start"]);
+    row = await db.turn.findUnique({ where: { id: turn.id } });
+    expect(row?.status).toBe("queued");
+
+    await turns.finishTurn({
+      reporter: reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turnId: turn.id,
+      status: "failed",
+      error: "The agent was restarting. Send the message again.",
+      errorCode: "agent_restarted",
+    });
+
+    row = await db.turn.findUnique({ where: { id: turn.id } });
+    expect(row?.status).toBe("queued");
+    expect(row?.error).toBeNull();
+  });
+
   it("a LATE failed report cannot kill a just-revived queued turn", async () => {
     // The stopped-first order: the supervisor sends `unhealthy` BEFORE the
     // dying turn's own turn.result, so the strand law revives first and the

@@ -227,7 +227,8 @@ export const createApiApp = (
   // outbound surface, authenticated by the `rnr_` family alone; `/runners` is
   // the read-only human view, on the normal user auth.
   // The conversation plane (step 4): conversations own their turns and
-  // transcript; `/turns` exists only for the abort verb, kept shallow.
+  // transcript; `/turns` exists only for the per-turn verbs (abort, send-now),
+  // kept shallow.
   app.route("/conversations", conversationRoutes());
   app.route("/turns", turnRoutes());
   app.route("/runner", runnerRoutes());

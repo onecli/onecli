@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { toast } from "sonner";
 import { Ban, CircleCheck, CircleMinus, Hand, Settings2 } from "lucide-react";
 import { AgentIcon } from "@/lib/agents/agent-icon";
 import { Button } from "@onecli/ui/components/button";
@@ -16,6 +17,7 @@ import {
   useSetConnectionGrantForAgent,
 } from "@/hooks/use-grants";
 import { agentSectionPath } from "@/lib/navigation";
+import { agentConnectionState } from "./agent-connection-state";
 
 // One agent row of the connection "Agent access" dialog — the step-4 editable
 // version, mirroring the agent page's row-state machine: workspace-granted
@@ -105,10 +107,7 @@ export const ConnectionAgentAccessRow = ({
 
   // Injected by an ORG rule (not a workspace grant): locked on — not detachable
   // at workspace level.
-  const orgGranted =
-    !workspaceGranted &&
-    agent.credential.status === "viaRule" &&
-    agent.credential.provenance.some((p) => p.scope === "organization");
+  const { orgGranted, on } = agentConnectionState(agent, workspaceGranted);
 
   const detail = attachDetail(orgGranted);
 
@@ -179,18 +178,21 @@ export const ConnectionAgentAccessRow = ({
         </Button>
         <Switch
           size="sm"
-          checked={workspaceGranted || orgGranted}
+          checked={on}
           disabled={busy || orgGranted}
-          aria-label={`${workspaceGranted || orgGranted ? "Detach" : "Attach"} ${agent.name}`}
+          aria-label={`${on ? "Detach" : "Attach"} ${agent.name}`}
           onCheckedChange={(next) => {
             if (next) {
               attach.mutate({
                 connectionId,
                 agentId: agent.agentId,
-                input: { access: "full" },
+                input: { access: "default" },
               });
             } else {
-              detach.mutate({ connectionId, agentId: agent.agentId });
+              detach.mutate(
+                { connectionId, agentId: agent.agentId },
+                { onSuccess: () => toast.success("Access removed") },
+              );
             }
           }}
         />

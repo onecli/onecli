@@ -144,6 +144,28 @@ const LAST_ERROR_WINDOW_DAYS = 7;
  * key's. */
 const KEY_PROBLEM_STATUSES = new Set([401, 402, 403, 429]);
 
+/** The calls whose status speaks for the KEY: inference and the model list.
+ * Agent runtimes also poll side endpoints with the same key (Claude Code
+ * calls Anthropic's `/api/oauth/usage` at every boot), and providers refuse
+ * those with 403/429 for perfectly good keys, so they must never brand one.
+ * Path prefixes, so query strings and sub-paths (`/v1/messages/count_tokens`)
+ * still count. `/backend-api/codex/` is the inference path of an OAuth-mode
+ * OpenAI key (Codex signed in with ChatGPT, stored under `chatgpt.com`). */
+const KEY_HEALTH_PATH_PREFIXES = [
+  "/v1/messages",
+  "/v1/models",
+  "/v1/chat/completions",
+  "/v1/responses",
+  "/v1/completions",
+  "/v1/embeddings",
+  "/backend-api/codex/",
+] as const;
+const keyHealthPathWhere = {
+  OR: KEY_HEALTH_PATH_PREFIXES.map((prefix) => ({
+    path: { startsWith: prefix },
+  })),
+};
+
 export const listSecrets = async (scope: ResourceScope) => {
   const secrets = await db.secret.findMany({
     where: scopeWhere(scope),
@@ -159,6 +181,7 @@ export const listSecrets = async (scope: ResourceScope) => {
       metadata: true,
       scope: true,
       createdAt: true,
+      updatedAt: true,
     },
     orderBy: { createdAt: "desc" },
   });
@@ -215,14 +238,15 @@ export const listSecrets = async (scope: ResourceScope) => {
           ],
         };
         // Health is decoration on the list — a failed probe degrades to "no
-        // badge" for its host, never to a failed GET /v1/secrets.
+        // badge" for its host, never to a failed GET /v1/secrets. Only calls
+        // whose answer is about the key count (see KEY_HEALTH_PATH_PREFIXES).
         const latest = await db.requestLog
           .findFirst({
             where: {
               workspaceId,
               injectionCount: { gt: 0 },
               createdAt: { gte: healthWindowStart },
-              ...hostWhere,
+              AND: [hostWhere, keyHealthPathWhere],
             },
             orderBy: { createdAt: "desc" },
             select: { status: true, createdAt: true },
@@ -238,16 +262,24 @@ export const listSecrets = async (scope: ResourceScope) => {
     );
   }
 
-  return secrets.map((s) => ({
-    ...s,
-    typeLabel: SECRET_TYPE_LABELS[s.type] ?? s.type,
+  return secrets.map((s) => {
     // LLM keys only, per the published contract — a generic secret that
     // happens to share an LLM host must not inherit that traffic's badge.
-    lastError:
+    const hostError =
       s.type !== "generic"
         ? (lastErrorByHost.get(s.hostPattern) ?? null)
-        : null,
-  }));
+        : null;
+    // Health is per HOST, so a failure logged before the key's last write
+    // (creation, a new value, or any other edit) may belong to whatever key
+    // served the host before: a fresh or rotated key starts clean instead of
+    // inheriting its predecessor's "Key rejected". A real failure of THIS key
+    // re-brands it on its next call.
+    return {
+      ...s,
+      typeLabel: SECRET_TYPE_LABELS[s.type] ?? s.type,
+      lastError: hostError && hostError.at >= s.updatedAt ? hostError : null,
+    };
+  });
 };
 
 /**

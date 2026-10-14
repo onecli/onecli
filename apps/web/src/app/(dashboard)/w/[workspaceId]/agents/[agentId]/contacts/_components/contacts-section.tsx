@@ -1,8 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
 import { Bot, Hash, Users, UsersRound } from "lucide-react";
-import { Badge } from "@onecli/ui/components/badge";
 import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import type { AgentChannelPresence } from "@/lib/api";
@@ -13,34 +11,34 @@ import {
 } from "@/hooks/use-channels";
 import { isPresenceConnected } from "@/lib/agents/channel-providers";
 import { useAgentPageAgent } from "../../_components/agent-page-frame";
+import { ContactGroup } from "./contact-group";
 import { ContactRow } from "./contact-row";
-import { ContactRowFrame } from "./contact-row-frame";
+import { DirectionHeader } from "./direction-header";
+import { mergeChannels, mergePeople } from "./merge-contacts";
 import { PeerRow } from "./peer-row";
-import { PersonReachRow } from "./person-reach-row";
-import { SpaceReachRow } from "./space-reach-row";
+import { directionHeadings, TwoWayRow } from "./two-way-row";
 
 /**
- * The agent's Contacts section (PR 5b): WHO it talks with, by kind, each
- * row carrying its standing. Four groups answer four different questions:
+ * The agent's Contacts section: WHO it talks with, by kind.
  *
- * - People: who may talk to the agent one-on-one. Workspace members always
- *   can (no control - that is what membership is); a person who wrote from
- *   a channel provider with no OneCLI account has a reach row (moved here
- *   from the provider card), and a person the agent messaged on its own has
- *   a contact row.
- * - Channels: the rooms the agent is in and who it answers there (the space
- *   reach rows, moved here), plus channels it messaged on its own.
- * - Agents: the other agents it may message, with this side's policy and
- *   the pair conversation once they have talked.
- * - Apps: the provider-side apps it messaged on its own.
+ * Every person and channel is ONE row with BOTH directions side by side,
+ * under labeled columns: do they get answers when they write to the agent
+ * (inbound), and may the agent write to them on its own (outbound)? The
+ * server keeps those as two records (a reach row on the presence, a
+ * contact in the outbound address book); shown apart, the same human
+ * appeared twice with two unlabeled badges. They merge on the provider id.
  *
- * Every row is the same shape (`ContactRowFrame`): who, their standing,
- * one `…`. Approvals are NOT here: pending asks live in the bell, the one
- * inbox, and a row that is waiting says so and points there.
+ * - People: anyone outside the workspace who wrote to the agent, and anyone
+ *   it messaged (members included). Workspace members always get answers
+ *   (membership is the permission), so that is a sentence, not a row with
+ *   a fake setting.
+ * - Channels: the rooms the agent is in, or posted to.
+ * - Agents: the other agents it may message (both sides must allow).
+ * - Apps: provider-side apps it messaged (outbound only).
  *
- * Rows come from the existing queries (channels view, contacts, peers):
- * the section composes, it does not own data. Loading renders a skeleton,
- * never an empty group (the availability rule).
+ * Approvals are NOT here: pending asks live in the bell, the one inbox,
+ * and a cell that is waiting says so. Loading renders a skeleton, never an
+ * empty group.
  */
 export const ContactsSection = () => {
   const agent = useAgentPageAgent();
@@ -82,70 +80,55 @@ export const ContactsSection = () => {
   const live: AgentChannelPresence[] =
     channels.data.presences.filter(isPresenceConnected);
   const rows = contacts.data.contacts;
-  const personContacts = rows.filter((c) => c.kind === "person");
-  const channelContacts = rows.filter((c) => c.kind === "channel");
+  const people = mergePeople(live, rows);
+  const rooms = mergeChannels(live, rows);
   const appContacts = rows.filter((c) => c.kind === "app");
+  const personHeadings = directionHeadings("person", agent.name);
+  const channelHeadings = directionHeadings("channel", agent.name);
 
   return (
     <div className="space-y-8">
-      <Group
+      <ContactGroup
         icon={Users}
         title="People"
-        description="Who can message the agent directly."
-        rows={[
-          // Membership is the permission: nothing to change, nothing to
-          // remove, so the frame renders no menu and keeps the column.
-          <ContactRowFrame
-            key="members"
-            label="Workspace members"
-            status={
-              <Badge
-                variant="secondary"
-                className="border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-              >
-                Allowed
-              </Badge>
-            }
-          />,
-          ...live.flatMap((presence) =>
-            (presence.people ?? []).map((person) => (
-              <PersonReachRow
-                key={`${presence.provider}:${person.externalRef}`}
-                agentId={agent.id}
-                provider={presence.provider}
-                person={person}
-              />
-            )),
-          ),
-          ...personContacts.map((contact) => (
-            <ContactRow key={contact.id} agentId={agent.id} contact={contact} />
-          )),
-        ]}
+        description={
+          <>
+            Members of this workspace can always message{" "}
+            <span translate="no">{agent.name}</span>. Here: who else may message
+            it, and whom it may message.
+          </>
+        }
+        empty="No one yet."
+        header={<DirectionHeader {...personHeadings} />}
+        rows={people.map((entry) => (
+          <TwoWayRow
+            key={entry.key}
+            kind="person"
+            agentId={agent.id}
+            agentName={agent.name}
+            entry={entry}
+          />
+        ))}
       />
 
-      <Group
+      <ContactGroup
         icon={Hash}
         title="Channels"
-        description="Where the agent is, and who it answers there."
+        description="Where the agent is, who it answers there, and where it may post on its own."
         empty="Mention the agent in a channel to add it here."
-        rows={[
-          ...live.flatMap((presence) =>
-            (presence.spaces ?? []).map((space) => (
-              <SpaceReachRow
-                key={`${presence.provider}:${space.externalRef}`}
-                agentId={agent.id}
-                provider={presence.provider}
-                space={space}
-              />
-            )),
-          ),
-          ...channelContacts.map((contact) => (
-            <ContactRow key={contact.id} agentId={agent.id} contact={contact} />
-          )),
-        ]}
+        header={<DirectionHeader {...channelHeadings} />}
+        rows={rooms.map((entry) => (
+          <TwoWayRow
+            key={entry.key}
+            kind="channel"
+            agentId={agent.id}
+            agentName={agent.name}
+            entry={entry}
+          />
+        ))}
       />
 
-      <Group
+      <ContactGroup
         icon={UsersRound}
         title="Agents"
         description="Other agents this one can message. Both sides must allow."
@@ -160,49 +143,20 @@ export const ContactsSection = () => {
         ))}
       />
 
-      <Group
+      <ContactGroup
         icon={Bot}
         title="Apps"
         description="Apps the agent has messaged."
         empty="None yet."
         rows={appContacts.map((contact) => (
-          <ContactRow key={contact.id} agentId={agent.id} contact={contact} />
+          <ContactRow
+            key={contact.id}
+            agentId={agent.id}
+            agentName={agent.name}
+            contact={contact}
+          />
         ))}
       />
     </div>
   );
 };
-
-/** One kind's group: heading, one-line description, the rows or the empty
- *  line. `rows` is an explicit array so "empty" is a count, not a guess. */
-const Group = ({
-  icon: Icon,
-  title,
-  description,
-  empty,
-  rows,
-}: {
-  icon: typeof Users;
-  title: string;
-  description: string;
-  /** Shown when the group has no rows. */
-  empty?: string;
-  rows: ReactNode[];
-}) => (
-  <section className="space-y-2">
-    <div className="flex items-center gap-2">
-      <Icon className="text-muted-foreground size-4" aria-hidden />
-      <h2 className="text-sm font-medium">{title}</h2>
-    </div>
-    <p className="text-muted-foreground text-xs text-pretty">{description}</p>
-    {rows.length === 0 ? (
-      empty !== undefined && (
-        <p className="text-muted-foreground rounded-md border border-dashed px-3 py-3 text-sm">
-          {empty}
-        </p>
-      )
-    ) : (
-      <div className="divide-y rounded-md border px-3">{rows}</div>
-    )}
-  </section>
-);

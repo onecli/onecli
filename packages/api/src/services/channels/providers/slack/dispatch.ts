@@ -8,7 +8,10 @@ import {
   type GroupInviteOutcome,
 } from "../../channel-ingestion-service";
 import { markPresenceRemoved } from "../../agent-channel-service";
-import { attachTurnReceipt, moveTurnReceipt } from "../../turn-receipt-service";
+import {
+  attachFollowUpReceipt,
+  attachTurnReceipt,
+} from "../../turn-receipt-service";
 import { interpretSlackEvent, type SlackDoorCall } from "./interpret";
 
 /**
@@ -133,13 +136,14 @@ export const dispatchSlackEvent = async (input: {
 };
 
 /**
- * The "seen" mark, detached: an ACCEPTED turn (created cleanly — a door
+ * The "seen" mark, detached: an ACCEPTED turn (created cleanly, a door
  * failure's error IS its answer, posted by the completion pass) gets an
  * AI-chosen reaction on the triggering message. An accepted mid-run
- * FOLLOW-UP moves the conversation's existing mark to its message instead —
- * the reaction visibly travels to the newest thing the agent has taken on.
- * Fire-and-forget by design: nothing here may delay the ack or change the
- * outcome, and the receipt ledger is what makes the later clear restart-safe.
+ * FOLLOW-UP gets a waiting mark of its own on its message (one mark per
+ * message, never moved: the mark flips to "read" when the run picks the
+ * message up, and comes off with the answer). Fire-and-forget by design:
+ * nothing here may delay the ack or change the outcome, and the receipt
+ * ledger is what makes the later clear restart-safe.
  */
 const receiptForAcceptedTurn = (
   presenceId: string,
@@ -147,24 +151,11 @@ const receiptForAcceptedTurn = (
   outcome: IngestOutcome,
 ): void => {
   if (outcome.kind === "followUp") {
-    void moveTurnReceipt({
+    void attachFollowUpReceipt({
       presenceId,
       followUpTurnId: outcome.turn.id,
-      conversationId: outcome.conversationId,
       channel: call.replyChannel,
       messageTs: call.messageTs,
-      // Same session-root rule as the attach below: an UNTHREADED DM's root
-      // is the message that started the exchange. Kept identical on purpose
-      // — the move's no-mark fallback calls `attachTurnReceipt`, so a
-      // divergence here would give a follow-up a different session than its
-      // own turn.
-      threadTs: call.replyThreadTs ?? call.messageTs,
-      // The card's home and the loader decision, identical to the attach
-      // below — the fallback inside `moveTurnReceipt` calls it, so these
-      // must not diverge.
-      replyThreadTs: call.replyThreadTs,
-      unthreaded: call.replyThreadTs === null,
-      text: call.text,
     });
     return;
   }

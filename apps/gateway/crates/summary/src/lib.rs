@@ -33,16 +33,20 @@ mod record_links;
 mod records;
 mod redact;
 
+pub mod bulk;
 mod generic;
 mod gmail;
 mod google_calendar;
+mod google_drive;
+mod google_sheets;
 mod outlook_calendar;
 mod outlook_mail;
 mod salesforce;
+mod zoom;
 
-use records::{RecordRef, Target};
-pub use records::{RecordResolver, Subject};
-pub use redact::mask_secrets;
+pub use records::{ContextField, CurrentRecord, RecordResolver, Subject};
+use records::{Named, RecordRef, Target};
+pub use redact::{is_sensitive_key, mask_secrets};
 
 // ── Limits ───────────────────────────────────────────────────────────────
 
@@ -57,7 +61,7 @@ pub const MAX_SNIPPET_LEN: usize = 1800;
 /// Max number of attachment filenames to enumerate.
 pub const MAX_ATTACHMENTS: usize = 5;
 /// Most body fields shown as rows before the rest collapse to "+N more".
-const MAX_FIELD_ROWS: usize = 12;
+pub(crate) const MAX_FIELD_ROWS: usize = 12;
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -93,6 +97,11 @@ pub struct ApprovalSummary {
     /// action names no record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<Subject>,
+    /// A request that changes many records at once (one approval for the
+    /// whole list): every record, its new values and, once the gateway has
+    /// read them, its current ones. Omitted for single-record requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bulk: Option<bulk::BulkChange>,
 }
 
 /// The familiar shape a request produces. The details keep their usual labels
@@ -124,6 +133,7 @@ impl ApprovalSummary {
             refs: Vec::new(),
             target: None,
             subject: None,
+            bulk: None,
         }
     }
 
@@ -156,15 +166,30 @@ impl ApprovalSummary {
     /// Push a row naming a record by id, registered so the gateway can link
     /// it and show the record's name instead of the id.
     pub(crate) fn push_record(&mut self, label: impl Into<String>, object: &str, id: &str) {
+        let shown = format!("{} · {id}", humanize_key(object));
+        self.push_named(label, object, id, shown, Named::WithId);
+    }
+
+    /// Push a record row that reads `shown` until the gateway names the
+    /// record, then as `named` says.
+    pub(crate) fn push_named(
+        &mut self,
+        label: impl Into<String>,
+        object: &str,
+        id: &str,
+        shown: impl Into<String>,
+        named: Named,
+    ) {
         self.refs.push(RecordRef {
             detail_index: self.details.len(),
             object: object.to_string(),
             id: id.to_string(),
             name: None,
+            named,
         });
         self.details.push(ApprovalDetail {
             label: label.into(),
-            value: format!("{} · {id}", humanize_key(object)),
+            value: clamp(&shown.into(), MAX_VALUE_LEN),
             url: None,
         });
     }
@@ -237,6 +262,14 @@ impl SummaryRequest<'_> {
     pub fn base_path(&self) -> &str {
         self.path.split('?').next().unwrap_or(self.path)
     }
+
+    /// The first value of query parameter `key`, decoded. `None` when absent.
+    pub fn query_param(&self, key: &str) -> Option<String> {
+        let (_, query) = self.path.split_once('?')?;
+        form_urlencoded::parse(query.as_bytes())
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.into_owned())
+    }
 }
 
 /// A per-app summarizer. Implement on a zero-sized struct and register it in
@@ -251,6 +284,9 @@ static GOOGLE_CALENDAR: google_calendar::GoogleCalendar = google_calendar::Googl
 static OUTLOOK_MAIL: outlook_mail::OutlookMail = outlook_mail::OutlookMail;
 static OUTLOOK_CALENDAR: outlook_calendar::OutlookCalendar = outlook_calendar::OutlookCalendar;
 static SALESFORCE: salesforce::Salesforce = salesforce::Salesforce;
+static ZOOM: zoom::Zoom = zoom::Zoom;
+static GOOGLE_SHEETS: google_sheets::GoogleSheets = google_sheets::GoogleSheets;
+static GOOGLE_DRIVE: google_drive::GoogleDrive = google_drive::GoogleDrive;
 
 /// Resolve the summarizer for a OneCLI provider id. `None` for providers
 /// without a dedicated summarizer — the caller falls back to the generic
@@ -262,6 +298,9 @@ fn summarizer(provider: &str) -> Option<&'static dyn RequestSummarizer> {
         "outlook-mail" => Some(&OUTLOOK_MAIL),
         "outlook-calendar" => Some(&OUTLOOK_CALENDAR),
         "salesforce" => Some(&SALESFORCE),
+        "zoom" => Some(&ZOOM),
+        "google-sheets" => Some(&GOOGLE_SHEETS),
+        "google-drive" => Some(&GOOGLE_DRIVE),
         _ => None,
     }
 }
@@ -272,8 +311,20 @@ fn summarizer(provider: &str) -> Option<&'static dyn RequestSummarizer> {
 pub fn record_resolver(provider: &str) -> Option<&'static dyn RecordResolver> {
     match provider {
         "salesforce" => Some(&SALESFORCE),
+        "google-sheets" => Some(&GOOGLE_SHEETS),
+        "google-drive" => Some(&GOOGLE_DRIVE),
         _ => None,
     }
+}
+
+/// Whether this request's card lists a whole list of records from its body
+/// (a Salesforce sObject Collections write or Composite call), so the
+/// gateway reads the body whole, up to its bulk cap, instead of its usual
+/// short peek: a card must never summarize a cut list as the whole one.
+/// Only for the app the request matched, never a guess from the path alone.
+#[must_use]
+pub fn reads_whole_body(provider: &str, method: &str, path: &str) -> bool {
+    provider == "salesforce" && salesforce::is_bulk_write(method, path)
 }
 
 /// Build a human-readable summary for a held request.
@@ -376,6 +427,26 @@ fn humanize_key(key: &str) -> String {
 /// The last non-empty path segment, e.g. the id in `/messages/{id}`.
 pub fn last_segment(path: &str) -> Option<&str> {
     path.rsplit('/').find(|s| !s.is_empty())
+}
+
+/// A path segment as written before percent-encoding (`Sheet%201` →
+/// `Sheet 1`). A segment that doesn't decode to UTF-8 is kept as sent.
+fn decode_segment(s: &str) -> String {
+    percent_encoding::percent_decode_str(s)
+        .decode_utf8()
+        .map_or_else(|_| s.to_string(), std::borrow::Cow::into_owned)
+}
+
+/// Agent-written text shown as a one-line label or cell: control characters
+/// (a newline could forge a row in [`ApprovalSummary::render_text`]) and
+/// whitespace runs read as one space, and the result is clamped to `max`.
+fn one_line(s: &str, max: usize) -> String {
+    let flat = s
+        .split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    clamp(&flat, max)
 }
 
 /// The non-empty path segment immediately before `suffix`, e.g. the id in

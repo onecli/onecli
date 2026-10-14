@@ -21,12 +21,22 @@
 export interface PlatformLlmProvider {
   /**
    * Whether the platform trial credit applies to an org/workspace whose
-   * UNFILTERED secret pool is `pool` — an existing-but-restricted LLM key
-   * counts as present, so a restriction is never bypassed with free credit.
+   * UNFILTERED secret pool is `pool` and whose credit subject (the org's
+   * founding owner) is `owner` — an existing-but-restricted LLM key counts as
+   * present, so a restriction is never bypassed with free credit. `owner` is
+   * null when the org has no active owner.
    */
   trialCreditApplies: (
     pool: ReadonlyArray<{ type: string; hostPattern: string }>,
+    owner: TrialCreditOwner | null,
   ) => boolean;
+}
+
+/** What the trial-credit rule knows about the org's founding owner. */
+export interface TrialCreditOwner {
+  email: string;
+  /** `users.sign_in_provider`: "Google" once they signed in with Google. */
+  signInProvider: string | null;
 }
 
 /**

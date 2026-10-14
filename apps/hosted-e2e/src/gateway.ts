@@ -8,6 +8,7 @@ import {
   type LogScanner,
   type ServiceChild,
 } from "./child.js";
+import { UPSTREAM_HOST } from "./upstream.js";
 
 /**
  * A per-test gateway, ONPREM edition — the posture this suite exists to
@@ -66,12 +67,15 @@ export const startGateway = async (
         DATABASE_URL: opts.databaseUrl,
         SECRET_ENCRYPTION_KEY: secretEncryptionKey(),
         ...redisEnv,
-        // The stub upstream's self-signed cert lives on 127.0.0.1 — narrower
+        // The stub upstream's self-signed cert is for its name — narrower
         // than the global danger flag, same as gateway-e2e.
-        GATEWAY_SKIP_VERIFY_HOSTS: "127.0.0.1",
-        // The stub upstream is on loopback, which the destination guard
-        // refuses unless allowed — same exact-IP entry as gateway-e2e.
-        GATEWAY_ALLOW_PRIVATE_DESTINATIONS: "127.0.0.1",
+        GATEWAY_SKIP_VERIFY_HOSTS: UPSTREAM_HOST,
+        // The stub's name resolves to loopback, which the destination guard
+        // refuses unless allowed. Named, not by IP (gateway-e2e's entry):
+        // a sandbox addresses the stub by name because its own loopback is
+        // exempt from the proxy, and the guard judges the name it was asked
+        // for. Every other private address stays refused.
+        GATEWAY_ALLOW_PRIVATE_DESTINATIONS: UPSTREAM_HOST,
         APP_URL: "http://127.0.0.1:10254",
         LOG_FORMAT: "json",
         RUST_LOG: process.env.HOSTED_E2E_RUST_LOG ?? "info",

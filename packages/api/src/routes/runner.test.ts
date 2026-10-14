@@ -37,6 +37,7 @@ const services = vi.hoisted(() => ({
   runnerUpdate: vi.fn(),
   buildTurnContext: vi.fn(),
   fireDueCrons: vi.fn(),
+  fireDueEvalSchedules: vi.fn(),
   fireDueWatches: vi.fn(),
   promoteParkedFollowUps: vi.fn(),
   expireWedgedFollowUps: vi.fn(),
@@ -128,6 +129,10 @@ vi.mock("../services/cron-fire-service", () => ({
   fireDueCrons: services.fireDueCrons,
 }));
 
+vi.mock("../services/eval-schedule-fire-service", () => ({
+  fireDueEvalSchedules: services.fireDueEvalSchedules,
+}));
+
 // The poll's ssh-session sweep + the instance route's availability posture
 // — mocked so the route graph loads without the
 // ssh service; the sweep is non-fatal like every sweep.
@@ -175,6 +180,7 @@ beforeEach(() => {
   services.reclaimStaleTurns.mockResolvedValue([]);
   services.failStalledTurns.mockResolvedValue([]);
   services.fireDueCrons.mockResolvedValue(0);
+  services.fireDueEvalSchedules.mockResolvedValue(0);
   services.fireDueWatches.mockResolvedValue(0);
   services.promoteParkedFollowUps.mockResolvedValue(0);
   services.expireWedgedFollowUps.mockResolvedValue(0);
@@ -466,6 +472,95 @@ describe("POST /v1/runner/work", () => {
     const body = (await res.json()) as { items: Record<string, unknown>[] };
     expect(body.items[0]).not.toHaveProperty("context");
     expect(body.items[0]?.resumeSessionRef).toBe("sess-1");
+  });
+
+  it("a steer crosses the poll with the claim's own frame, and without one when the claim had none", async () => {
+    // The claim decides the frame (a person's follow-up gets it, an
+    // automation's does not); this hop forwards exactly that, and never
+    // folds the dispatch-time memory context into a steer. A rebuild here
+    // that dropped the key would silently unframe every mid-turn message
+    // while each unit test stayed green.
+    const claimed = {
+      kind: "turn.message",
+      turnId: "f-1",
+      targetTurnId: "t-1",
+      conversationId: "conv-1",
+      sandboxId: "sb-1",
+      message: "also check the linter",
+    } as const;
+    services.claimDueWork.mockResolvedValueOnce([
+      { ...claimed, context: "[new message]" },
+      { ...claimed, turnId: "f-2" },
+    ]);
+    services.buildTurnContext.mockResolvedValue("[Your memory — …]");
+
+    const res = await app.request("/v1/runner/work", {
+      method: "POST",
+      headers: RUNNER_AUTH,
+      body: JSON.stringify({}),
+    });
+
+    expect(await res.json()).toEqual({
+      items: [
+        {
+          kind: "turn.message",
+          sandboxId: "sb-1",
+          conversationId: "conv-1",
+          turnId: "f-1",
+          targetTurnId: "t-1",
+          message: "also check the linter",
+          context: "[new message]",
+        },
+        {
+          kind: "turn.message",
+          sandboxId: "sb-1",
+          conversationId: "conv-1",
+          turnId: "f-2",
+          targetTurnId: "t-1",
+          message: "also check the linter",
+        },
+      ],
+    });
+    expect(services.buildTurnContext).not.toHaveBeenCalled();
+  });
+
+  it("a SEND NOW crosses the poll as the claim composed it, after its delivery", async () => {
+    services.claimDueWork.mockResolvedValueOnce([
+      {
+        kind: "turn.message",
+        turnId: "f-1",
+        targetTurnId: "t-1",
+        conversationId: "conv-1",
+        sandboxId: "sb-1",
+        message: "stop and check prod",
+      },
+      {
+        kind: "turn.send_now",
+        turnId: "f-1",
+        targetTurnId: "t-1",
+        conversationId: "conv-1",
+        sandboxId: "sb-1",
+      },
+    ]);
+
+    const res = await app.request("/v1/runner/work", {
+      method: "POST",
+      headers: RUNNER_AUTH,
+      body: JSON.stringify({}),
+    });
+
+    const body = (await res.json()) as { items: Record<string, unknown>[] };
+    expect(body.items.map((item) => item.kind)).toEqual([
+      "turn.message",
+      "turn.send_now",
+    ]);
+    expect(body.items[1]).toEqual({
+      kind: "turn.send_now",
+      sandboxId: "sb-1",
+      conversationId: "conv-1",
+      turnId: "f-1",
+      targetTurnId: "t-1",
+    });
   });
 
   it("a throwing context builder never blocks the turn — memory flavors, never gates", async () => {

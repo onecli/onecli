@@ -29,7 +29,7 @@ import {
   cancelTaskArgsSchema,
   scheduleTaskArgsSchema,
 } from "../validations/crons";
-import { AUTOMATION_SOURCES } from "../validations/conversation";
+import { isAutomationSource } from "../validations/conversation";
 import {
   memoryGetArgsSchema,
   memoryListArgsSchema,
@@ -76,6 +76,13 @@ import {
 import { logger } from "../lib/logger";
 
 const log = logger.child({ component: "platform-tools" });
+
+/** send_message's promise about replies: a reply to this message reaches
+ * the agent with what it sent and where it was asked from
+ * (`buildSentContext`), so the agent passes the answer on itself instead of
+ * telling anyone to check back later. */
+const REPLY_COMES_BACK =
+  "If they reply, you'll be told what you sent them and where it was asked from; pass the answer on then. Don't ask anyone to check back later.";
 
 /**
  * The control-plane end of the platform-tool channel (step 7, §3.7).
@@ -151,10 +158,7 @@ export const resolveVerifiedContext = async (
   // degrades to no anchor, exactly like a forged one. PROVENANCE consumers
   // (memory revisions) keep the automation conversation — recording that a
   // save came from a cron turn is honest, and nothing is delivered there.
-  if (
-    purpose === "origin" &&
-    (AUTOMATION_SOURCES as readonly string[]).includes(conversation.source)
-  ) {
+  if (purpose === "origin" && isAutomationSource(conversation.source)) {
     log.warn(
       { agentId, conversationId: claim.conversationId },
       "context claimed an automation conversation; ignoring it",
@@ -1052,13 +1056,19 @@ export const executePlatformTool = async (
               ? {
                   status: "sent",
                   to: outcome.to,
-                  note: "Delivered.",
+                  note: `Delivered. ${REPLY_COMES_BACK}`,
                 }
-              : {
-                  status: "held",
-                  to: outcome.to,
-                  note: "The workspace owner was asked first. Their decision arrives as a notice in this conversation.",
-                },
+              : outcome.kind === "busy"
+                ? {
+                    status: "not_sent",
+                    to: outcome.to,
+                    note: `Not sent. An earlier message to ${outcome.to} is still waiting for the owner's approval, and only one can wait at a time. This message was dropped, not queued. Once the decision arrives as a notice here, send it again if it still matters.`,
+                  }
+                : {
+                    status: "held",
+                    to: outcome.to,
+                    note: `Waiting for the workspace owner's approval; the decision arrives as a notice in this conversation. ${REPLY_COMES_BACK} If you mention it, one short line (e.g. "Sent for approval, I'll pass on the answer."); don't explain the approval process.`,
+                  },
         };
       }
 

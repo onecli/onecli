@@ -615,25 +615,29 @@ pub struct AppConfigRow {
     pub credentials: Option<String>,
 }
 
-/// Find an enabled BYOC app config for a workspace + provider.
+/// Find an enabled BYOC app config for a workspace, trying `keys` in order
+/// (most specific first: the app id, then its vendor group, e.g.
+/// `["gmail", "google"]`). The first key with an enabled row wins.
 pub async fn find_app_config(
     pool: &PgPool,
     workspace_id: &str,
-    provider: &str,
+    keys: &[&str],
 ) -> Result<Option<AppConfigRow>> {
     sqlx::query_as::<_, AppConfigRow>(
         r#"SELECT settings, credentials FROM app_configs
-           WHERE workspace_id = $1 AND provider = $2 AND enabled = true
+           WHERE workspace_id = $1 AND provider = ANY($2) AND enabled = true
+           ORDER BY array_position($2, provider)
            LIMIT 1"#,
     )
     .bind(workspace_id)
-    .bind(provider)
+    .bind(keys)
     .fetch_optional(pool)
     .await
     .context("querying app_config by workspace_id + provider")
 }
 
-/// Find an enabled org-level BYOC app config for an organization + provider.
+/// Find an enabled org-level BYOC app config for an organization, trying
+/// `keys` in order like [`find_app_config`].
 ///
 /// Org-level app configs are writable only through the EE org surface
 /// (`POST /v1/org/apps/:provider/config`); OSS has no way to create them, so
@@ -641,16 +645,17 @@ pub async fn find_app_config(
 pub async fn find_app_config_by_org(
     pool: &PgPool,
     organization_id: &str,
-    provider: &str,
+    keys: &[&str],
 ) -> Result<Option<AppConfigRow>> {
     sqlx::query_as::<_, AppConfigRow>(
         r#"SELECT settings, credentials FROM app_configs
-           WHERE organization_id = $1 AND provider = $2
+           WHERE organization_id = $1 AND provider = ANY($2)
              AND scope = 'organization' AND enabled = true
+           ORDER BY array_position($2, provider)
            LIMIT 1"#,
     )
     .bind(organization_id)
-    .bind(provider)
+    .bind(keys)
     .fetch_optional(pool)
     .await
     .context("querying app_config by organization_id + provider")
@@ -664,30 +669,61 @@ pub async fn find_app_config_by_org(
 /// (workspace → org) would now select a different row. Returns `None` when the
 /// link is null (env-minted, a no-config method, or pre-dating the link), or the
 /// config has since been disabled/removed, or (defence-in-depth) points at a
-/// different provider. The `provider` guard keeps a mislinked FK from ever
-/// handing one provider's client secret to another provider's token endpoint;
-/// every writer links same-provider by construction, so it only ever excludes
-/// corrupt data. Shared across editions: workspace-tier links exist in OSS; org
+/// config key outside `keys` (the connection's provider and its vendor group).
+/// The guard keeps a mislinked FK from ever handing one vendor's client secret
+/// to another vendor's token endpoint; a Gmail connection may use the `google`
+/// group row, never an `atlassian` one. It only ever excludes corrupt data.
+/// Shared across editions: workspace-tier links exist in OSS; org
 /// rows simply never exist there.
 pub async fn find_app_config_by_connection(
     pool: &PgPool,
     connection_id: &str,
-    provider: &str,
+    keys: &[&str],
 ) -> Result<Option<AppConfigRow>> {
     sqlx::query_as::<_, AppConfigRow>(
         r#"SELECT ac.settings, ac.credentials FROM app_configs ac
            JOIN app_connections c ON c.app_config_id = ac.id
-           WHERE c.id = $1 AND ac.provider = $2 AND ac.enabled = true
+           WHERE c.id = $1 AND ac.provider = ANY($2) AND ac.enabled = true
            LIMIT 1"#,
     )
     .bind(connection_id)
-    .bind(provider)
+    .bind(keys)
     .fetch_optional(pool)
     .await
     .context("querying app_config by connection provenance link")
 }
 
 // ── App connection queries ─────────────────────────────────────────────
+
+/// The encrypted credentials of the connection a derived connection is built
+/// on (`app_connections.source_connection_id`), while that source is still
+/// connected and belongs to the derived connection's own organization. A
+/// shared GitHub App connection stores no signing key of its own: it borrows
+/// the source's at mint time, so removing or disconnecting the source cuts
+/// every connection built on it. `None` = no usable source.
+///
+/// Each side's organization is its own `organization_id` (an org-scoped row)
+/// or its workspace's: a link that crosses organizations, however it arose,
+/// never lends a key.
+pub async fn find_source_connection_credentials(
+    pool: &PgPool,
+    connection_id: &str,
+) -> Result<Option<String>> {
+    sqlx::query_scalar::<_, String>(
+        r#"SELECT s.credentials FROM app_connections c
+           JOIN app_connections s ON s.id = c.source_connection_id
+           LEFT JOIN workspaces cw ON cw.id = c.workspace_id
+           LEFT JOIN workspaces sw ON sw.id = s.workspace_id
+           WHERE c.id = $1 AND s.status = 'connected' AND s.credentials IS NOT NULL
+             AND s.provider = c.provider AND s.source_connection_id IS NULL
+             AND COALESCE(c.organization_id, cw.organization_id)
+               = COALESCE(s.organization_id, sw.organization_id)"#,
+    )
+    .bind(connection_id)
+    .fetch_optional(pool)
+    .await
+    .context("querying source connection credentials")
+}
 
 /// An app connection row from the `app_connections` table.
 #[derive(Debug, Clone, PartialEq, FromRow, serde::Serialize, serde::Deserialize)]
@@ -854,6 +890,81 @@ where
     .execute(executor)
     .await
     .context("marking app_connection reauth required")?;
+    Ok(done.rows_affected() == 1)
+}
+
+/// Record that the GitHub organization `org` refused this connection's token,
+/// as `entry` (the gateway's `github_org_access::OrgAccessEntry`), under
+/// `metadata.githubOrgAccess.<org>`, keeping every other metadata key. A
+/// refusal identical to the stored one rewrites nothing. Only a connected
+/// connection is touched. `true` = a row was written.
+pub async fn record_github_org_access<'e, E>(
+    executor: E,
+    connection_id: &str,
+    org: &str,
+    entry: &serde_json::Value,
+) -> Result<bool>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let done = sqlx::query(
+        r#"UPDATE app_connections
+           SET metadata = jsonb_set(
+                 CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END,
+                 '{githubOrgAccess}',
+                 CASE WHEN jsonb_typeof(metadata -> 'githubOrgAccess') = 'object'
+                      THEN metadata -> 'githubOrgAccess' ELSE '{}'::jsonb END
+                 || jsonb_build_object($2::text, $3::jsonb)
+               ),
+               updated_at = now()
+           WHERE id = $1 AND status = 'connected'
+             AND (metadata -> 'githubOrgAccess' -> $2::text) IS DISTINCT FROM $3::jsonb
+             -- Bounded: an already-recorded org may change, but no more than
+             -- 50 organizations are ever tracked per connection.
+             AND (
+               metadata -> 'githubOrgAccess' ? $2::text
+               OR jsonb_typeof(metadata -> 'githubOrgAccess') IS DISTINCT FROM 'object'
+               OR (SELECT count(*) FROM jsonb_object_keys(metadata -> 'githubOrgAccess')) < 50
+             )"#,
+    )
+    .bind(connection_id)
+    .bind(org)
+    .bind(entry)
+    .execute(executor)
+    .await
+    .context("recording github org access")?;
+    Ok(done.rows_affected() == 1)
+}
+
+/// Clear the refusal recorded for `org` once a request proved it stale, but
+/// only while the stored entry is still `expected`, the one the proof was
+/// checked against: a newer refusal recorded meanwhile stays. `false` when
+/// nothing (or something else) is recorded for `org`.
+pub async fn clear_github_org_access<'e, E>(
+    executor: E,
+    connection_id: &str,
+    org: &str,
+    expected: &serde_json::Value,
+) -> Result<bool>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let done = sqlx::query(
+        r#"UPDATE app_connections
+           SET metadata = CASE
+                 WHEN (metadata -> 'githubOrgAccess') - $2::text = '{}'::jsonb
+                   THEN metadata - 'githubOrgAccess'
+                 ELSE metadata #- ARRAY['githubOrgAccess', $2::text]
+               END,
+               updated_at = now()
+           WHERE id = $1 AND metadata -> 'githubOrgAccess' -> $2::text = $3::jsonb"#,
+    )
+    .bind(connection_id)
+    .bind(org)
+    .bind(expected)
+    .execute(executor)
+    .await
+    .context("clearing github org access")?;
     Ok(done.rows_affected() == 1)
 }
 

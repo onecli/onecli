@@ -680,153 +680,65 @@ export const clearTurnReceipts = async (turnId: string): Promise<void> => {
 };
 
 /**
- * MOVE the conversation's seen-mark to the newest message (the mid-run
- * follow-up that just arrived): remove the reaction from wherever it sits —
- * the target turn's message or an earlier follow-up's — and attach the SAME
- * emoji to the new one. Reusing the previous reaction is deliberate: no
- * second chooser inference per follow-up, and the mark visibly travels
- * instead of mutating. A SESSION mark doesn't travel at all — the thread's
- * loader already covers every message in it, and the row stays on the turn
- * that is RUNNING, which is both where the clear looks (it walks the turn
- * and its joined follow-ups) and where the narration card is keyed. Detached
- * and best-effort like every receipt write; two rapid follow-ups' moves can
- * interleave into a transient double-mark until the answer-post clear
- * converges them — bounded, cosmetic, accepted.
+ * THE FOLLOW-UP'S OWN MARK: a mid-run message sent
+ * while the agent works gets a reaction of its own the moment it is
+ * accepted, and keeps it. One mark per message, never moved:
+ *
+ *   `hourglass_flowing_sand`   accepted, waiting for the agent to reach it
+ *   `eyes`                     the agent has it (`markFollowUpRead`)
+ *   (removed)                  the answer posted (`clearTurnReceipts`)
+ *
+ * No chooser call: the waiting mark is a fixed glyph with a fixed meaning,
+ * and spending the customer's key on a pick per follow-up bought nothing a
+ * reader could tell apart. A thread under a SESSION mark (the provider's
+ * native loader, keyed on the running turn) gets no per-message mark: the
+ * loader already covers every message in the thread, and its row stays on
+ * the running turn where the narration card and the clear look.
+ *
+ * Detached and best-effort like every receipt write. The row is keyed by the
+ * follow-up's own turn id, which is what the family clear walks (the turn
+ * and its `joined` follow-ups), so the mark comes off with the answer.
  */
-export const moveTurnReceipt = async (input: {
+export const FOLLOW_UP_WAITING_REACTION = "hourglass_flowing_sand";
+export const FOLLOW_UP_READ_REACTION = "eyes";
+
+export const attachFollowUpReceipt = async (input: {
   presenceId: string;
-  /** The follow-up row: the reaction mark's new owner, and the excluded id
-   * when resolving where the current mark sits. A SESSION mark does not
-   * change owner — see the session arm below. */
+  /** The follow-up row the mark belongs to. */
   followUpTurnId: string;
-  /** The conversation whose seen-mark is moving. */
-  conversationId: string;
   channel: string;
   messageTs: string;
-  /** The session root — threaded through so a no-mark fallback attach can
-   * still choose the session kind. Null only when the caller has none. */
-  threadTs?: string | null;
-  /** Where a narration card belongs, for the no-mark fallback below — the
-   * same field `attachTurnReceipt` takes. Carried rather than re-derived so
-   * a follow-up that falls through to an attach lands its card in the same
-   * thread its own turn would have. */
-  replyThreadTs?: string | null;
-  /** Whether there is no thread to hang a loader on, for that same fallback.
-   * Omitted keeps `attachTurnReceipt`'s own default. */
-  unthreaded?: boolean;
-  /** The inbound text — chooser input only when no mark exists to move. */
-  text: string;
 }): Promise<void> => {
   try {
-    // Resolve where the mark currently sits. `ChannelTurnReceipt` has no
-    // conversation column (and no Turn FK) on purpose, so the family is
-    // resolved through the conversation's own recent turns — which also
-    // survives promotion chains, where the mark can sit on a follow-up of a
-    // follow-up rather than on this one's direct target. Bounded recency:
-    // marks live for one exchange and are pruned at 24h regardless.
-    const candidateIds = (
-      await db.turn.findMany({
-        where: {
-          conversationId: input.conversationId,
-          id: { not: input.followUpTurnId },
-        },
-        orderBy: { createdAt: "desc" },
-        take: 30,
-        select: { id: true },
-      })
-    ).map((row) => row.id);
-
-    const current = await db.channelTurnReceipt.findFirst({
-      where: { turnId: { in: candidateIds } },
-      orderBy: { createdAt: "desc" },
-      select: {
-        id: true,
-        turnId: true,
-        channel: true,
-        messageTs: true,
-        kind: true,
-        reaction: true,
-        workStatusSet: true,
-        agentChannel: {
-          select: { id: true, provider: true, credentials: true },
-        },
-      },
+    const presence = await db.agentChannel.findUnique({
+      where: { id: input.presenceId },
+      select: { id: true, provider: true, credentials: true },
     });
+    if (!presence) return;
 
-    if (!current) {
-      // Nothing to move (a web-opened turn never had a mark): fall back to
-      // the ordinary attach, chooser and all — with the SAME addressing its
-      // own turn would have had, so a threaded follow-up's card opens in its
-      // thread rather than at the top of the conversation.
-      await attachTurnReceipt({
-        presenceId: input.presenceId,
-        turnId: input.followUpTurnId,
-        channel: input.channel,
-        messageTs: input.messageTs,
-        threadTs: input.threadTs,
-        replyThreadTs: input.replyThreadTs,
-        ...(input.unthreaded !== undefined && { unthreaded: input.unthreaded }),
-        text: input.text,
-      });
-      return;
-    }
+    // The target is the RUNNING turn, which is where a session mark sits
+    // (it never moves off the run): one lookup says whether the thread's
+    // loader already covers this message.
+    const followUp = await db.turn.findUnique({
+      where: { id: input.followUpTurnId },
+      select: { followUpOfTurnId: true },
+    });
+    if (!followUp?.followUpOfTurnId) return;
+    const loader = await db.channelTurnReceipt.findFirst({
+      where: { turnId: followUp.followUpOfTurnId, kind: "session" },
+      select: { id: true },
+    });
+    if (loader) return;
 
-    if (current.kind === "session") {
-      // The row STAYS on the turn it was attached to. Nothing moves
-      // provider-side (the thread's loader already covers the follow-up's
-      // message), and nothing moves ledger-side either.
-      //
-      // It used to be re-keyed to the follow-up, on the reasoning that the
-      // clear "fires off the newest turn's id". That reasoning was wrong in
-      // one direction and load-bearing in the other:
-      //
-      // - The clear fires off the FINISHED turn's id — the mirror passes
-      //   `item.turn.id` (routes/channel-adapter.ts), and `clearTurnReceipts`
-      //   then walks that turn AND its `joined` follow-ups. A row left here is
-      //   found either way, so the re-key bought nothing.
-      // - The narration card is keyed by turn id, and the supervisor reports
-      //   tool activity under the turn it is RUNNING: a steer never moves
-      //   `runtime.activeTurnId` (apps/sandbox-supervisor). Re-keying moved
-      //   the receipt out from under `narrateTurnActivity`, whose lookup then
-      //   missed and returned silently — so a mid-run follow-up showed a
-      //   frozen card, or in a top-level DM no card at all, for the rest of
-      //   the turn (live 2026-09-02).
-      //
-      // Keeping the row where the narration looks for it is what fixes that,
-      // and it is also the simpler invariant: a session receipt belongs to
-      // the run, not to the last message that joined it.
-      //
-      // The self-clear still runs, against the row's OWN turn: the same
-      // attach-vs-clear race applies here (a clear that fired between the
-      // lookup above and now would have found nothing to do), and the
-      // follow-up's arrival is exactly when the parent may have just
-      // finished.
-      await selfClearIfTurnFinished(current.turnId);
-      return;
-    }
-    if (!current.reaction) return; // malformed row — nothing to move
-    const reaction = current.reaction;
-
-    const credentialsJson = current.agentChannel.credentials
-      ? await getCrypto().decrypt(current.agentChannel.credentials)
-      : null;
-    const provider = channelProvider(
-      current.agentChannel.provider as ChannelProviderId,
-    );
-
-    // New mark FIRST, old mark off second: a crash in between leaves two
-    // marks (converged by the answer-post clear) rather than none — a
-    // vanished ack reads as a drop, which is the exact perception this
-    // feature kills.
     try {
       await db.channelTurnReceipt.create({
         data: {
           turnId: input.followUpTurnId,
-          agentChannelId: current.agentChannel.id,
+          agentChannelId: presence.id,
           channel: input.channel,
           messageTs: input.messageTs,
           kind: "reaction",
-          reaction,
+          reaction: FOLLOW_UP_WAITING_REACTION,
         },
         select: { id: true },
       });
@@ -835,31 +747,114 @@ export const moveTurnReceipt = async (input: {
         err instanceof Prisma.PrismaClientKnownRequestError &&
         err.code === "P2002"
       ) {
-        return; // a twin already moved for this follow-up — its mark stands
+        return; // a twin already marked this follow-up: its mark stands
       }
       throw err;
     }
+    pruneOldReceipts(presence.id);
+
+    const credentialsJson = presence.credentials
+      ? await getCrypto().decrypt(presence.credentials)
+      : null;
+    const provider = channelProvider(presence.provider as ChannelProviderId);
     await provider.addReceiptReaction({
       credentialsJson,
       channel: input.channel,
       messageTs: input.messageTs,
-      reaction,
+      reaction: FOLLOW_UP_WAITING_REACTION,
     });
-
-    await provider.removeReceiptReaction({
-      credentialsJson,
-      channel: current.channel,
-      messageTs: current.messageTs,
-      reaction,
-    });
-    await db.channelTurnReceipt.delete({ where: { id: current.id } });
-    // Same race window as attach: the answer may have posted (and its clear
-    // no-oped) while the marks were being shuffled.
+    // The same race as the turn's own attach: the answer may have posted
+    // (and its clear no-oped) while the mark was landing.
     await selfClearIfTurnFinished(input.followUpTurnId);
   } catch (err) {
+    void noteOutboundFailure(input.presenceId, err);
     log.warn(
       { err: String(err), followUpTurnId: input.followUpTurnId },
-      "receipt move skipped",
+      "follow-up receipt add skipped",
+    );
+  }
+};
+
+/**
+ * The agent has the message (the live pickup signal, `message.joined`):
+ * swap the follow-up's waiting mark for the read mark. New mark on first,
+ * old mark off second, so a crash between the two leaves both (converged by
+ * the answer-post clear) rather than none. Idempotent: a row already read,
+ * or one that never had the waiting mark (a session thread, a web-sourced
+ * follow-up with no receipt), changes nothing.
+ */
+export const markFollowUpRead = async (
+  followUpTurnId: string,
+): Promise<void> => {
+  try {
+    const receipt = await db.channelTurnReceipt.findFirst({
+      where: {
+        turnId: followUpTurnId,
+        kind: "reaction",
+        reaction: FOLLOW_UP_WAITING_REACTION,
+      },
+      select: {
+        id: true,
+        channel: true,
+        messageTs: true,
+        agentChannel: {
+          select: { id: true, provider: true, credentials: true },
+        },
+      },
+    });
+    if (!receipt) return;
+
+    const credentialsJson = receipt.agentChannel.credentials
+      ? await getCrypto().decrypt(receipt.agentChannel.credentials)
+      : null;
+    const provider = channelProvider(
+      receipt.agentChannel.provider as ChannelProviderId,
+    );
+    await provider.addReceiptReaction({
+      credentialsJson,
+      channel: receipt.channel,
+      messageTs: receipt.messageTs,
+      reaction: FOLLOW_UP_READ_REACTION,
+    });
+    // The ledger flips BEFORE the old mark comes off: a clear racing in
+    // between then removes the read mark (what the row says), and the
+    // waiting mark is taken off right here, so nothing is left behind.
+    // Conditional on the row still holding the waiting mark: a clear that
+    // won in between (the answer posted as the join landed) already took
+    // the waiting mark off and deleted the row, and the read mark just
+    // added would outlive the exchange. A row flipped by a twin stands.
+    const flipped = await db.channelTurnReceipt.updateMany({
+      where: { id: receipt.id, reaction: FOLLOW_UP_WAITING_REACTION },
+      data: { reaction: FOLLOW_UP_READ_REACTION },
+    });
+    if (flipped.count === 0) {
+      const row = await db.channelTurnReceipt.findUnique({
+        where: { id: receipt.id },
+        select: { id: true },
+      });
+      if (row) return; // a twin flipped it: its read mark stands
+      log.info(
+        { followUpTurnId },
+        "answer cleared the mark as it flipped; taking the read mark off",
+      );
+      await provider.removeReceiptReaction({
+        credentialsJson,
+        channel: receipt.channel,
+        messageTs: receipt.messageTs,
+        reaction: FOLLOW_UP_READ_REACTION,
+      });
+      return;
+    }
+    await provider.removeReceiptReaction({
+      credentialsJson,
+      channel: receipt.channel,
+      messageTs: receipt.messageTs,
+      reaction: FOLLOW_UP_WAITING_REACTION,
+    });
+  } catch (err) {
+    log.warn(
+      { err: String(err), followUpTurnId },
+      "follow-up read mark skipped",
     );
   }
 };

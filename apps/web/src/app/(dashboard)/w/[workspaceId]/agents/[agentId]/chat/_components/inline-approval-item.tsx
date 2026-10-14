@@ -78,7 +78,15 @@ export const InlineApprovalItem = ({
   return (
     <Message align="start">
       <MessageContent>
-        <div className="bg-muted/50 w-fit max-w-[80%] overflow-hidden rounded-xl border">
+        <div
+          className={cn(
+            "bg-muted/50 overflow-hidden rounded-xl border",
+            // A record change is a table: it takes the chat column's full
+            // width (phone and desktop) so its columns read without
+            // scrolling; other cards stay sized to their content.
+            approval.summary?.bulk ? "w-full" : "w-fit max-w-[80%]",
+          )}
+        >
           {/* Header: what the agent wants to do, and how long the offer lasts. */}
           <div className="flex items-center gap-2.5 px-4 pt-3 pb-2">
             <ApprovalAppIcon appId={approval.app} />
@@ -112,10 +120,12 @@ export const InlineApprovalItem = ({
           {/* The parsed request (To / Subject / Body for an email), minus
               the record the title already names. The endpoint lives in
               Details; a card with no rows left keeps it, since then it is the
-              only hint of what the request does. */}
-          {details.length > 0 ? (
+              only hint of what the request does. A bulk change is its table,
+              rows or not (a bulk create or delete carries none). */}
+          {details.length > 0 || approval.summary?.bulk ? (
             <ApprovalPreview
               kind={approval.summary?.kind}
+              bulk={approval.summary?.bulk}
               details={details}
               className="px-4 pb-3"
             />

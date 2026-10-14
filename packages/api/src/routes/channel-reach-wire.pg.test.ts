@@ -357,10 +357,9 @@ describe.skipIf(!PROOF_URL)(
       expect(pendingRes.status).toBe(200);
       await waitForSlackCall("chat.postMessage", 2);
       const softLine = slackCallsFor("chat.postMessage").at(-1);
-      expect(softLine?.form.get("text")).toContain("needs to approve me");
-      expect(softLine?.form.get("text")).toContain(
-        `/agents/${agent.id}/channels`,
-      );
+      expect(softLine?.form.get("text")).toContain("to approve me");
+      // No dashboard link: the room can't act on it, the owner has a card.
+      expect(softLine?.form.get("text")).not.toContain("http");
       expect(
         await db.turn.count({
           where: { conversation: { agentId: agent.id } },
@@ -382,7 +381,7 @@ describe.skipIf(!PROOF_URL)(
       await waitForSlackCall("chat.postMessage", 3);
       expect(
         slackCallsFor("chat.postMessage").at(-1)?.form.get("text"),
-      ).toContain("needs to approve me");
+      ).toContain("to approve me");
       expect(
         await db.turn.count({
           where: { conversation: { agentId: agent.id } },

@@ -5,18 +5,23 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { guideHref } from "@/lib/components/setup-guide-link";
+import { ApiError } from "@/lib/api/client";
+import { toast } from "sonner";
 import type { OAuthConfigField } from "@onecli/api/apps/types";
+import { googleConfigFields } from "@onecli/api/apps/oauth/google";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
 
 // The unit is the dialog's own form logic: how an `options` field renders,
 // what reaches the save payload, and when the guide link shows. The real
-// `useSaveAppConfig` → `appConfig.save` chain runs; only the HTTP client is
-// stubbed, so the assertion is on the exact body the API would receive.
+// `useSaveAppConfig` → `appConfig.save` chain runs; only the HTTP calls are
+// stubbed (the real `ApiError` stays), so the assertion is on the exact body
+// the API would receive and on how a refusal reads.
 const mocks = vi.hoisted(() => ({
   apiPost: vi.fn<(path: string, body: unknown) => Promise<unknown>>(),
 }));
 
-vi.mock("@/lib/api/client", () => ({
+vi.mock("@/lib/api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api/client")>()),
   apiGet: vi.fn(),
   apiPost: mocks.apiPost,
   apiPatch: vi.fn(),
@@ -168,5 +173,90 @@ describe("ConfigureCredentialsDialog", () => {
     renderDialog({ fields: TEXT_FIELDS });
     expect(screen.queryByRole("link", { name: /setup guide/ })).toBeNull();
     expect(screen.queryByRole("group")).toBeNull();
+  });
+});
+
+// A grouped app's credentials become its vendor's shared client, so the
+// dialog sets that client up, not just the one app.
+describe("ConfigureCredentialsDialog: vendor-shared OAuth client", () => {
+  afterEach(() => {
+    mocks.apiPost.mockReset();
+    vi.mocked(toast.error).mockClear();
+  });
+
+  const renderGoogle = (pageScope: "workspace" | "organization") =>
+    renderDialog({
+      provider: "google-drive",
+      appName: "Google Drive",
+      fields: googleConfigFields,
+      setupGuideUrl: "https://onecli.sh/docs/integrations/google-drive",
+      pageScope,
+    });
+
+  it("says the client covers every Google app, and where", () => {
+    renderGoogle("workspace");
+    expect(
+      screen.getByText(
+        /^One Google client for all Google apps \(.+\) in this workspace \(overrides your organization's client\)\.$/,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("says an org save covers every workspace", () => {
+    renderGoogle("organization");
+    expect(
+      screen.getByText(
+        /^One Google client for all Google apps \(.+\) in every workspace in your organization\.$/,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("links the Google guide (not the app's own) and the enable-APIs flow", () => {
+    renderGoogle("workspace");
+    const guides = screen.getAllByRole("link", { name: /setup guide/ });
+    expect(guides).toHaveLength(1);
+    expect(guides[0]).toHaveAccessibleName(/Follow the Google setup guide/);
+    expect(guides[0]).toHaveAttribute(
+      "href",
+      guideHref("https://onecli.sh/docs/integrations/google"),
+    );
+    expect(
+      screen.getByRole("link", {
+        name: "Enable the Google APIs in your Cloud project",
+      }),
+    ).toHaveAttribute(
+      "href",
+      expect.stringContaining("flows/enableapi?apiid=gmail.googleapis.com,"),
+    );
+  });
+
+  it("shows the vendor's one redirect URI", () => {
+    renderGoogle("workspace");
+    expect(
+      screen.getByText(/\/v1\/apps\/oauth\/google\/callback$/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/One URI covers every Google app\./)).toBeTruthy();
+  });
+
+  it("explains a member's 403 instead of a generic failure", async () => {
+    mocks.apiPost.mockRejectedValue(
+      new ApiError("Insufficient permissions", 403),
+    );
+    const { onConfigured } = renderGoogle("workspace");
+    await userEvent.type(
+      screen.getByLabelText(/Client ID/),
+      "123.apps.googleusercontent.com",
+    );
+    await userEvent.type(screen.getByLabelText(/Client Secret/), "GOCSPX-x");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Save & Connect" }),
+    );
+
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(
+        "Only organization admins can change OAuth credentials. Ask an admin to set this up.",
+      ),
+    );
+    expect(onConfigured).not.toHaveBeenCalled();
   });
 });

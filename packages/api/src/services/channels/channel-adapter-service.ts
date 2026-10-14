@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "../errors";
+import { AUTOMATION_SOURCES } from "../../validations/conversation";
 import { decryptCached } from "./channel-decrypt-cache";
 import {
   CHANNEL_ADAPTER_TOKEN,
@@ -606,10 +607,22 @@ export interface AdapterWorkItem {
     }[];
   };
   /** Mid-run follow-ups this turn consumed, oldest first — the mirror posts
-   * the web-sourced ones so both surfaces show the same exchange. Each
+   * the web-sourced ones so both surfaces show the same exchange, and each
+   * one's own reply (stored under its `id`) right after it, in the thread it
+   * was asked in (`sourceThreadId`, the turn's rule per message). Each
    * carries its OWN author's display name: on a group thread the follow-up
    * author can differ from the turn's asker. */
-  followUps: { message: string; source: string; userName: string | null }[];
+  followUps: {
+    id: string;
+    message: string;
+    source: string;
+    userName: string | null;
+    sourceThreadId: string | null;
+    /** Whether the reply feed already posted this follow-up's reply mid-run
+     * (`replyPostedAt` stamped): the completion pass posts the words, not
+     * the reply again. */
+    replyPosted: boolean;
+  }[];
   /** The link's stored mirror cursor when this item was served — the CAS-seed
    * floor for an instance that acquired the link mid-history (its etag no
    * longer folds cursors, so the config feed can't be its seed source). */
@@ -620,7 +633,37 @@ export interface AdapterWork {
   /** Finished turns past each link's mirror cursor — the completion pass
    * posts each exactly once (CAS-gated) and advances the cursor. */
   finished: AdapterWorkItem[];
+  /** Replies already written to mid-run follow-ups of turns STILL RUNNING,
+   * not yet claimed for posting: the mirror posts each the moment it sees
+   * it (claim first, then post), without waiting for the turn to close. */
+  replies: AdapterReplyItem[];
 }
+
+/** A mid-run follow-up's reply, ready to post while its turn still runs. */
+export interface AdapterReplyItem {
+  linkId: string;
+  presenceId: string;
+  conversationId: string;
+  /** The link's own address: the channel the reply posts in. */
+  externalThreadId: string;
+  kind: "direct" | "group";
+  /** The running turn the follow-up joined. */
+  turnId: string;
+  /** The follow-up itself: its words and author travel too, because one
+   * typed on another surface (the web) is not in the channel yet and must
+   * post ahead of its reply, as one exchange. */
+  followUp: {
+    id: string;
+    message: string;
+    source: string;
+    userName: string | null;
+    sourceThreadId: string | null;
+  };
+  reply: string;
+}
+
+/** Bound on one poll's reply feed: a catch-up never floods a provider. */
+const MAX_REPLIES_PER_POLL = 50;
 
 const workTurnSelect = {
   id: true,
@@ -660,7 +703,7 @@ export const getAdapterWork = async (
       agentChannel: { select: { id: true, provider: true } },
     },
   });
-  if (links.length === 0) return { finished: [] };
+  if (links.length === 0) return { finished: [], replies: [] };
 
   const byConversation = new Map(links.map((l) => [l.conversationId, l]));
 
@@ -720,9 +763,17 @@ export const getAdapterWork = async (
             message: true,
             source: true,
             userId: true,
+            sourceThreadId: true,
+            replyPostedAt: true,
           },
           orderBy: { createdAt: "asc" },
         });
+
+  // The replies the agent already wrote to mid-run follow-ups of turns
+  // STILL RUNNING: read here, before the batched lookups, so their authors
+  // and attachment lines resolve in the same two queries as the finished
+  // turns'.
+  const liveReplies = await pendingReplies(byConversation);
 
   // Who spoke, by name — one batched lookup for the cross-surface
   // attribution lines ("(from the web — Jonathan)"). Follow-up authors are
@@ -730,7 +781,7 @@ export const getAdapterWork = async (
   // and the mirror must not put one member's words under another's name.
   const userIds = [
     ...new Set(
-      [...finishedTurns, ...joinedFollowUps]
+      [...finishedTurns, ...joinedFollowUps, ...liveReplies]
         .map((t) => t.userId)
         .filter((id): id is string => !!id),
     ),
@@ -759,6 +810,7 @@ export const getAdapterWork = async (
   const mirroredTurnIds = [
     ...finishedTurns.map((turn) => turn.id),
     ...joinedFollowUps.map((row) => row.id),
+    ...liveReplies.map((row) => row.id),
   ];
   const attachmentRows =
     mirroredTurnIds.length === 0
@@ -821,17 +873,17 @@ export const getAdapterWork = async (
     return message.length > 0 ? `${message}\n${line}` : line;
   };
 
-  const followUpsByTarget = new Map<
-    string,
-    { message: string; source: string; userName: string | null }[]
-  >();
+  const followUpsByTarget = new Map<string, AdapterWorkItem["followUps"]>();
   for (const row of joinedFollowUps) {
     if (!row.followUpOfTurnId) continue;
     const list = followUpsByTarget.get(row.followUpOfTurnId) ?? [];
     list.push({
+      id: row.id,
       message: withAttachmentLine(row.id, row.message),
       source: row.source,
       userName: row.userId ? (userNameById.get(row.userId) ?? null) : null,
+      sourceThreadId: row.sourceThreadId,
+      replyPosted: row.replyPostedAt !== null,
     });
     followUpsByTarget.set(row.followUpOfTurnId, list);
   }
@@ -868,7 +920,147 @@ export const getAdapterWork = async (
     .map(toItem)
     .filter((item): item is AdapterWorkItem => item !== null);
 
-  return { finished };
+  const replies = liveReplies.flatMap((row): AdapterReplyItem[] => {
+    const link = byConversation.get(row.conversationId);
+    if (!link) return [];
+    return [
+      {
+        linkId: link.id,
+        presenceId: link.agentChannel.id,
+        conversationId: row.conversationId,
+        externalThreadId: link.externalThreadId,
+        kind: link.kind === "direct" ? "direct" : "group",
+        turnId: row.followUpOfTurnId,
+        followUp: {
+          id: row.id,
+          message: withAttachmentLine(row.id, row.message),
+          source: row.source,
+          userName: row.userId ? (userNameById.get(row.userId) ?? null) : null,
+          sourceThreadId: row.sourceThreadId,
+        },
+        reply: row.reply,
+      },
+    ];
+  });
+
+  return { finished, replies };
+};
+
+/** A joined follow-up of a RUNNING turn with the reply the agent stored
+ * under it, not yet claimed for posting. */
+interface PendingReply {
+  id: string;
+  conversationId: string;
+  message: string;
+  source: string;
+  userId: string | null;
+  sourceThreadId: string | null;
+  followUpOfTurnId: string;
+  reply: string;
+}
+
+/**
+ * The reply feed: replies the agent already wrote to mid-run follow-ups of
+ * turns STILL RUNNING in the caller's linked conversations, not yet claimed
+ * for posting. One indexed query over the joined follow-ups, one over their
+ * targets' status, one over the reply rows (the `text` stored under each
+ * follow-up); a follow-up whose reply the agent folded into its closing
+ * words (no `text` of its own) never appears here. Automation follow-ups (a
+ * wake that joined a run) are excluded: their reply is the caption body of
+ * an automation post, which stays the completion pass's.
+ */
+const pendingReplies = async (
+  byConversation: ReadonlyMap<string, unknown>,
+): Promise<PendingReply[]> => {
+  const candidates = await db.turn.findMany({
+    where: {
+      status: "joined",
+      replyPostedAt: null,
+      source: { notIn: [...AUTOMATION_SOURCES] },
+      conversationId: { in: [...byConversation.keys()] },
+      followUpOfTurnId: { not: null },
+    },
+    select: {
+      id: true,
+      conversationId: true,
+      message: true,
+      source: true,
+      userId: true,
+      sourceThreadId: true,
+      followUpOfTurnId: true,
+    },
+    orderBy: { createdAt: "asc" },
+    take: MAX_REPLIES_PER_POLL,
+  });
+  if (candidates.length === 0) return [];
+
+  // Only follow-ups of a turn that is still running: once the turn closes,
+  // the completion pass owns every reply it did not get to.
+  const runningTargets = new Set(
+    (
+      await db.turn.findMany({
+        where: {
+          id: {
+            in: candidates.flatMap((row) =>
+              row.followUpOfTurnId ? [row.followUpOfTurnId] : [],
+            ),
+          },
+          status: "running",
+        },
+        select: { id: true },
+      })
+    ).map((row) => row.id),
+  );
+  const live = candidates.filter(
+    (row): row is typeof row & { followUpOfTurnId: string } =>
+      row.followUpOfTurnId !== null && runningTargets.has(row.followUpOfTurnId),
+  );
+  if (live.length === 0) return [];
+
+  // The reply rows: the durable `text` stored under each follow-up's id.
+  // Last one wins, matching the transcript's own fold.
+  const replyRows = await db.turnEvent.findMany({
+    where: { turnId: { in: live.map((row) => row.id) }, type: "text" },
+    select: { turnId: true, payload: true },
+    orderBy: { seq: "asc" },
+  });
+  const replyByFollowUp = new Map<string, string>();
+  for (const row of replyRows) {
+    const payload = row.payload as { text?: unknown };
+    if (typeof payload.text === "string" && payload.text.length > 0) {
+      replyByFollowUp.set(row.turnId, payload.text);
+    }
+  }
+
+  return live.flatMap((row) => {
+    const reply = replyByFollowUp.get(row.id);
+    return reply === undefined ? [] : [{ ...row, reply }];
+  });
+};
+
+/**
+ * Claim a follow-up's reply for posting: exactly-once by compare-and-set
+ * (`replyPostedAt` NULL to now). The loser of a race (an adapter twin, the
+ * completion pass against the reply feed) writes nothing and posts nothing.
+ * Fenced to the caller's own links: a follow-up this adapter does not serve
+ * is not its to claim.
+ */
+export const claimFollowUpReply = async (
+  adapterId: string,
+  followUpId: string,
+): Promise<boolean> => {
+  const updated = await db.turn.updateMany({
+    where: {
+      id: followUpId,
+      status: "joined",
+      replyPostedAt: null,
+      conversation: {
+        threadLink: { agentChannel: { ownerAdapterId: adapterId } },
+      },
+    },
+    data: { replyPostedAt: new Date() },
+  });
+  return updated.count === 1;
 };
 
 /**

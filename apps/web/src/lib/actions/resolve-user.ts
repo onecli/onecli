@@ -19,6 +19,7 @@ import {
   IDENTITY_CONFLICT_ERROR,
   resolveIdentityConflict,
 } from "@onecli/api/lib/identity-conflict";
+import { recordableSignInProvider } from "@onecli/api/lib/sign-in-provider";
 import { ensureSsoJitMembership } from "@onecli/api/ee/sso/jit-service";
 import { enforceSsoSession } from "@onecli/api/ee/sso/sso-enforcement";
 
@@ -73,6 +74,7 @@ const resolveAuthenticatedUser = async () => {
       }
     }
 
+    const signInProvider = recordableSignInProvider(session);
     const dbUser = await db.user.upsert({
       where: { email: session.email },
       create: {
@@ -80,10 +82,12 @@ const resolveAuthenticatedUser = async () => {
         email: session.email,
         name: session.name,
         lastLoginAt: new Date(),
+        ...(signInProvider && { signInProvider }),
       },
       update: {
         externalAuthId: session.id,
         lastLoginAt: new Date(),
+        ...(signInProvider && { signInProvider }),
       },
       select: { id: true, email: true, name: true },
     });

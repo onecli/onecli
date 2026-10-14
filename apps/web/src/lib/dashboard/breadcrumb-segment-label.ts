@@ -17,7 +17,7 @@ const titleCase = (segment: string): string =>
 
 /**
  * The header breadcrumb's label for a URL segment below a section. Inside a
- * connections section (the workspace's or the org's Global Connections) a
+ * connections section (the workspace's or the org's Shared Connections) a
  * segment is either a tab or an app/vault id, and both have a real name: the
  * tab's own word, or the app's display name ("GitHub", never "Github").
  * Anything else falls back to title-casing the slug.

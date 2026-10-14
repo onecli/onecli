@@ -145,7 +145,7 @@ export const ConnectionGrantRow = ({
               attach.mutate({
                 agentId,
                 connectionId: connection.id,
-                input: { access: "full" },
+                input: { access: "default" },
               });
             } else {
               detach.mutate({ agentId, connectionId: connection.id });

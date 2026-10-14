@@ -1993,6 +1993,406 @@
       ]
     }
   },
+  "coralogix": {
+    "delete_alert": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/alerts/alerts/v3/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_dashboard": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/dashboards/dashboards/v1/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "filter_cases": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/cases/cases/v1"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "filter_incidents": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/incidents/incidents/v1"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_alert_events": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/alerts/events/v3",
+        "/mgmt/openapi/*/alerts/events/v3/*/",
+        "/mgmt/openapi/*/alerts/events/v3/all/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_alerts": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/alerts/alerts/v3",
+        "/mgmt/openapi/*/alerts/alerts/v3/*/",
+        "/mgmt/openapi/*/alerts/alerts/v3/all/*",
+        "/mgmt/openapi/*/alerts/alerts/v3/version-ids/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_cases": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/cases/cases/v1/*/",
+        "/mgmt/openapi/*/cases/cases/v1/*/events",
+        "/mgmt/openapi/*/cases/events/v1/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_dashboards": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/dashboards/dashboards/v1/catalog/list",
+        "/mgmt/openapi/*/dashboards/dashboards/v1/*/",
+        "/mgmt/openapi/*/dashboards/folders/v1"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_incidents": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/incidents/incidents/v1",
+        "/mgmt/openapi/*/incidents/incidents/v1/*/",
+        "/mgmt/openapi/*/incidents/incidents/v1/*/events",
+        "/mgmt/openapi/*/incidents/events/v1",
+        "/mgmt/openapi/*/incidents/events/v1/*/",
+        "/mgmt/openapi/*/incidents/events/v1/all/count"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_slos": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/slo/slos/v1",
+        "/mgmt/openapi/*/slo/slos/v1/*/",
+        "/mgmt/openapi/*/slo/slos/v1/*/status"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_views": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/data-exploration/views/v1/views",
+        "/mgmt/openapi/*/data-exploration/views/v1/views/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "manage_alerts": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/alerts/alerts/v3",
+        "/mgmt/openapi/*/alerts/alerts/v3/all/*"
+      ],
+      "methods": [
+        "POST",
+        "PUT"
+      ]
+    },
+    "manage_dashboards": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/dashboards/dashboards/v1",
+        "/mgmt/openapi/*/dashboards/dashboards/v1/*/default",
+        "/mgmt/openapi/*/dashboards/dashboards/v1/*/folder"
+      ],
+      "methods": [
+        "POST",
+        "PUT"
+      ]
+    },
+    "query_logs": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/api/v1/dataprime/query"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "query_metrics": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/metrics/api/v1/*"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ]
+    },
+    "update_cases": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/cases/cases/v1/*/comments",
+        "/mgmt/openapi/*/cases/cases/v1/*/",
+        "/mgmt/openapi/*/cases/acknowledged/v1",
+        "/mgmt/openapi/*/cases/acknowledged/v1/*/",
+        "/mgmt/openapi/*/cases/assigned/v1",
+        "/mgmt/openapi/*/cases/assigned/v1/*/",
+        "/mgmt/openapi/*/cases/resolved/v1",
+        "/mgmt/openapi/*/cases/resolved/v1/*/",
+        "/mgmt/openapi/*/cases/closed/v1",
+        "/mgmt/openapi/*/cases/closed/v1/*/",
+        "/mgmt/openapi/*/cases/events/v1/*/comments"
+      ],
+      "methods": [
+        "POST",
+        "PUT",
+        "DELETE"
+      ]
+    },
+    "update_incidents": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/incidents/incidents/v1/all/*",
+        "/mgmt/openapi/*/incidents/events/v1/*/acknowledge",
+        "/mgmt/openapi/*/incidents/events/v1/*/resolve"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "whoami": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/aaa/identity/v1/whoami"
+      ],
+      "methods": [
+        "GET"
+      ]
+    }
+  },
   "datadog": {
     "apm_services": {
       "hosts": [
@@ -6331,6 +6731,233 @@
       ]
     }
   },
+  "onyx": {
+    "chat": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/chat/send-chat-message",
+        "/api/chat/create-chat-session"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "connector_indexing_status": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/manage/admin/connector/indexing-status"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_agent": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/persona"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_chat_session": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/chat/delete-chat-session/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_ingested_document": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/onyx-api/ingestion/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_me": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/me",
+        "/api/me/permissions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "ingest_documents": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/onyx-api/ingestion"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_agents": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/persona",
+        "/api/persona/*/",
+        "/api/agents"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_chat_sessions": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/chat/get-user-chat-sessions",
+        "/api/chat/get-chat-session/*/",
+        "/api/chat/search"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_connectors": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/manage/admin/connector",
+        "/api/manage/admin/connector/status",
+        "/api/manage/admin/connector/failed-indexing-status"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_document_sets": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/manage/document-set",
+        "/api/manage/document-set-public"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_ingested_documents": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/onyx-api/ingestion",
+        "/api/onyx-api/connector-docs/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_projects": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/user/projects",
+        "/api/user/projects/*/",
+        "/api/user/projects/*/details"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "manage_connectors": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/manage/admin/connector",
+        "/api/manage/admin/connector/run-once"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "mcp_access": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/mcp",
+        "/mcp/*"
+      ],
+      "methods": []
+    },
+    "search": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/search",
+        "/api/search/send-search-message",
+        "/api/search/search-flow-classification"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_history": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/search/search-history"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_agent": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/persona/*/"
+      ],
+      "methods": [
+        "PATCH",
+        "DELETE"
+      ]
+    },
+    "update_connector": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/manage/admin/connector/*/"
+      ],
+      "methods": [
+        "PATCH",
+        "DELETE"
+      ]
+    }
+  },
   "outlook-calendar": {
     "create_event": {
       "hosts": [
@@ -6543,6 +7170,397 @@
       ],
       "methods": [
         "PATCH"
+      ]
+    }
+  },
+  "pagerduty": {
+    "add_incident_note": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/notes"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "add_responders": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/responder_requests"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_change_event": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/change_events"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_incident": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_incident": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_abilities": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/abilities",
+        "/abilities/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_business_services": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/business_services",
+        "/business_services/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_change_events": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/change_events",
+        "/change_events/*/",
+        "/services/*/change_events"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_escalation_policies": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/escalation_policies",
+        "/escalation_policies/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_incident_alerts": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/alerts",
+        "/incidents/*/alerts/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_incident_log_entries": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/log_entries",
+        "/log_entries",
+        "/log_entries/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_incident_notes": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/notes"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_incident_related": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/related_incidents",
+        "/incidents/*/past_incidents",
+        "/incidents/*/outlier_incident"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_incidents": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_maintenance_windows": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/maintenance_windows",
+        "/maintenance_windows/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_oncalls": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/oncalls"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_priorities": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/priorities"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_schedules": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/schedules",
+        "/schedules/*/",
+        "/schedules/*/users",
+        "/schedules/*/overrides"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_services": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/services",
+        "/services/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_teams": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/teams",
+        "/teams/*/",
+        "/teams/*/members"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_users": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/users",
+        "/users/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "manage_alerts": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/alerts",
+        "/incidents/*/alerts/*/"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "manage_maintenance_windows": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/maintenance_windows",
+        "/maintenance_windows/*/"
+      ],
+      "methods": [
+        "POST",
+        "PUT",
+        "DELETE"
+      ]
+    },
+    "manage_schedule_overrides": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/schedules/*/overrides",
+        "/schedules/*/overrides/*/"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "manage_services": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/services",
+        "/services/*/"
+      ],
+      "methods": [
+        "POST",
+        "PUT",
+        "DELETE"
+      ]
+    },
+    "merge_incidents": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/merge"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "read_analytics": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/analytics/*"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ]
+    },
+    "send_status_update": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/status_updates"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "snooze_incident": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/snooze"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_incident": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/",
+        "/incidents"
+      ],
+      "methods": [
+        "PUT"
       ]
     }
   },
@@ -8555,7 +9573,9 @@
         "*.my.salesforce.com"
       ],
       "paths": [
-        "/services/data/v*/sobjects/*/*"
+        "/services/data/v*/sobjects/*/*",
+        "/services/data/v*/composite/sobjects",
+        "/services/data/v*/composite/sobjects/"
       ],
       "methods": [
         "DELETE"
@@ -8681,7 +9701,9 @@
         "*.my.salesforce.com"
       ],
       "paths": [
-        "/services/data/v*/sobjects/*/*"
+        "/services/data/v*/sobjects/*/*",
+        "/services/data/v*/composite/sobjects",
+        "/services/data/v*/composite/sobjects/"
       ],
       "methods": [
         "PATCH"
@@ -10049,6 +11071,478 @@
       ],
       "paths": [
         "/v1/projects/*/locations/*/endpoints/*:predict"
+      ],
+      "methods": [
+        "POST"
+      ]
+    }
+  },
+  "webflow": {
+    "create_collection": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/collections"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_collection_field": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/collections/*/fields"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_items": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/collections/*/items/insert",
+        "/v2/collections/*/items",
+        "/v2/collections/*/items/bulk",
+        "/v2/collections/*/items/live"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_asset": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/assets/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_collection": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/collections/*/",
+        "/v2/collections/*/fields/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_form_submission": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/form_submissions/*/",
+        "/v2/form_submissions/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_items": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/collections/*/items",
+        "/v2/collections/*/items/live",
+        "/v2/collections/*/items/*/",
+        "/v2/collections/*/items/*/live"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_site_config": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/robots_txt",
+        "/v2/sites/*/well_known"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_asset": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/assets/*/",
+        "/v2/asset_folders/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_authorized_user": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/token/authorized_by",
+        "/v2/token/introspect"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_collection": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/collections/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_component": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/components/*/dom",
+        "/v2/sites/*/components/*/properties"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_form": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/forms/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_form_submission": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/form_submissions/*/",
+        "/v2/form_submissions/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_item": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/collections/*/items/*/",
+        "/v2/collections/*/items/*/live"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_page": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/pages/*/",
+        "/v2/pages/*/dom"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_robots_txt": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/robots_txt"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_site": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/",
+        "/v2/sites/*/custom_domains"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_site_activity": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/activity_logs"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_assets": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/assets",
+        "/v2/sites/*/asset_folders"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_collections": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/collections"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_comments": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/comments",
+        "/v2/sites/*/comments/*/",
+        "/v2/sites/*/comments/*/replies"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_components": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/components"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_form_submissions": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/form_submissions",
+        "/v2/sites/*/forms/*/submissions",
+        "/v2/forms/*/submissions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_forms": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/forms"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_items": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/collections/*/items",
+        "/v2/collections/*/items/live"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_pages": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/pages"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_sites": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "publish_items": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/collections/*/items/publish"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "publish_site": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/publish"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "set_well_known_file": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/well_known"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "update_asset": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/assets/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_collection": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/collections/*/",
+        "/v2/collections/*/fields/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_component": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/components/*/dom",
+        "/v2/sites/*/components/*/properties"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_form_submission": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/form_submissions/*/",
+        "/v2/form_submissions/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_items": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/collections/*/items",
+        "/v2/collections/*/items/live",
+        "/v2/collections/*/items/*/",
+        "/v2/collections/*/items/*/live"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_page_content": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/pages/*/dom"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_page_settings": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/pages/*/"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "update_robots_txt": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/robots_txt"
+      ],
+      "methods": [
+        "PUT",
+        "PATCH"
+      ]
+    },
+    "upload_asset": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/assets",
+        "/v2/sites/*/asset_folders"
       ],
       "methods": [
         "POST"

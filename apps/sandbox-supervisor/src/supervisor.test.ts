@@ -58,6 +58,7 @@ describe("supervisor loop end-to-end (fake harness, stdio transport)", () => {
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        sandboxId: undefined,
         outboundAttachments: false,
       },
       createFakeHarness(),
@@ -140,6 +141,7 @@ describe("supervisor loop end-to-end (fake harness, stdio transport)", () => {
           harness: "fake",
           runnerWsUrl: undefined,
           bootstrapToken: undefined,
+          sandboxId: undefined,
           outboundAttachments: false,
         },
         createFakeHarness(),
@@ -235,6 +237,7 @@ describe("supervisor loop end-to-end (fake harness, stdio transport)", () => {
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        sandboxId: undefined,
         outboundAttachments: false,
       },
       fake,
@@ -448,6 +451,7 @@ describe("supervisor loop end-to-end (fake harness, stdio transport)", () => {
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        sandboxId: undefined,
         outboundAttachments: false,
       },
       fake,
@@ -554,6 +558,7 @@ describe("supervisor loop end-to-end (fake harness, stdio transport)", () => {
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        sandboxId: undefined,
         outboundAttachments: false,
       },
       fake,
@@ -657,6 +662,7 @@ describe("supervisor loop end-to-end (fake harness, stdio transport)", () => {
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        sandboxId: undefined,
         outboundAttachments: false,
       },
       // The fake's default script echoes the prompt it was handed, so the
@@ -723,6 +729,7 @@ describe("home sync in the loop", () => {
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        sandboxId: undefined,
         outboundAttachments: false,
       },
       createFakeHarness(),
@@ -807,6 +814,7 @@ describe("home sync in the loop", () => {
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        sandboxId: undefined,
         outboundAttachments: false,
       },
       // A slow fake turn gives the abort something real to stop.
@@ -894,6 +902,7 @@ describe("home sync in the loop", () => {
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        sandboxId: undefined,
         outboundAttachments: false,
       },
       wrapped,
@@ -1005,6 +1014,7 @@ describe("home sync in the loop", () => {
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        sandboxId: undefined,
         outboundAttachments: false,
       },
       wrapped,
@@ -1078,6 +1088,7 @@ describe("home sync in the loop", () => {
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        sandboxId: undefined,
         outboundAttachments: false,
       },
       createFakeHarness(),
@@ -1142,6 +1153,7 @@ describe("home sync in the loop", () => {
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        sandboxId: undefined,
         outboundAttachments: false,
       },
       createFakeHarness(),
@@ -1224,6 +1236,7 @@ describe("the harvester is wired into the sync apply", () => {
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        sandboxId: undefined,
         outboundAttachments: false,
       },
       createFakeHarness(),
@@ -1294,6 +1307,7 @@ describe("the answer is the agent's last message, not its whole turn", () => {
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        sandboxId: undefined,
         outboundAttachments: false,
       },
       createFakeHarness({ script }),
@@ -1396,6 +1410,56 @@ describe("the answer is the agent's last message, not its whole turn", () => {
 
     expect(answerOf(messages)).toBeNull();
   });
+
+  /**
+   * FRAMED harnesses name each message. These run the supervisor end to end
+   * (the unit rules live in answer.test.ts): the stored answer honors the
+   * framing, and the framing itself never leaves the supervisor.
+   */
+  it("keeps framed messages with no tool between them as paragraphs, not glued", async () => {
+    // The steer shape: a closing answer, then the reply to a message
+    // the user sent mid-turn, written back to back.
+    const messages = await runWithScript(() => [
+      { type: "tool.started", callId: "c1", name: "bash" },
+      { type: "tool.finished", callId: "c1", name: "bash", output: "ok" },
+      {
+        type: "text.delta",
+        text: "Done: the report is in report.md.",
+        messageId: "m1",
+      },
+      {
+        type: "text.delta",
+        text: "Yes, I can also email it.",
+        messageId: "m2",
+      },
+      { type: "turn.done", usage: { inputTokens: 1, outputTokens: 1 } },
+    ]);
+
+    expect(answerOf(messages)).toBe(
+      "Done: the report is in report.md.\n\nYes, I can also email it.",
+    );
+  });
+
+  it("stores the replayed answer alone when the harness retracted a failed attempt", async () => {
+    const messages = await runWithScript(() => [
+      { type: "text.delta", text: "PARTIAL attempt text ", messageId: "m1" },
+      { type: "text.replace", messageId: "m1", text: "" },
+      { type: "text.delta", text: "THE-FINAL-ANSWER", messageId: "m2" },
+      { type: "turn.done", usage: { inputTokens: 1, outputTokens: 1 } },
+    ]);
+
+    expect(answerOf(messages)).toBe("THE-FINAL-ANSWER");
+    // Framing stops at the supervisor: the live tail still saw the deltas,
+    // in the wire vocabulary, and no correction or message id went out.
+    const events = messages.flatMap((m) =>
+      m.kind === "event" ? [m.event] : [],
+    );
+    expect(events.map((e) => e.type)).not.toContain("text.replace");
+    expect(events.filter((e) => e.type === "text.delta")).toEqual([
+      { type: "text.delta", text: "PARTIAL attempt text " },
+      { type: "text.delta", text: "THE-FINAL-ANSWER" },
+    ]);
+  });
 });
 
 /**
@@ -1428,6 +1492,7 @@ describe("a first turn waits for the harness to take the tool list", () => {
         harness: "fake",
         runnerWsUrl: undefined,
         bootstrapToken: undefined,
+        sandboxId: undefined,
         outboundAttachments: false,
       },
       // Declares the bridge, so the supervisor must hold the first turn.
