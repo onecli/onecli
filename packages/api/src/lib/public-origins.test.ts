@@ -340,6 +340,50 @@ describe("buildTrustedOrigins", () => {
       "http://127.0.0.1:10254",
     ]);
   });
+
+  // Browsers send `Origin` with a lowercase host, no default port and a
+  // compressed IPv6 literal. The set is matched exactly, so it has to use that
+  // spelling whatever the operator typed.
+  it("spells configured origins the way a browser sends them", () => {
+    const { origins } = buildTrustedOrigins(
+      resolvePublicOrigins({ externalUrl: "HTTPS://OneCLI.Acme.com:443" }),
+      "http://Extra.Acme.com:80,http://[0:0:0:0:0:0:0:1]:10254",
+    );
+    expect(origins).toEqual([
+      "https://onecli.acme.com",
+      "http://extra.acme.com",
+      "http://[::1]:10254",
+    ]);
+  });
+
+  it("does the same for a legacy APP_URL alias and a split-host api", () => {
+    const { origins } = buildTrustedOrigins(
+      resolvePublicOrigins({
+        appUrl: "https://App.Acme.com:443",
+        apiUrl: "https://API.acme.com",
+      }),
+    );
+    expect(origins).toEqual(["https://app.acme.com", "https://api.acme.com"]);
+  });
+
+  it("finds the loopback twin of an uppercase localhost", () => {
+    const { origins } = buildTrustedOrigins(
+      resolvePublicOrigins({ externalUrl: "http://LOCALHOST:10254" }),
+    );
+    expect(origins).toEqual([
+      "http://localhost:10254",
+      "http://127.0.0.1:10254",
+    ]);
+  });
+
+  // `new URL("data:…").origin` is the opaque "null" that sandboxed and file://
+  // pages send, so a value that isn't an origin must stay as written.
+  it("never turns a non-origin value into the opaque origin", () => {
+    const { origins } = buildTrustedOrigins(
+      resolvePublicOrigins({ appUrl: "data:text/html,hi" }),
+    );
+    expect(origins).not.toContain("null");
+  });
 });
 
 describe("formatOriginsBanner", () => {
@@ -562,6 +606,22 @@ describe("trustedBrowserOrigin", () => {
     expect(trustedBrowserOrigin("HTTPS://onecli.acme.com")).toBe(
       "https://onecli.acme.com",
     );
+  });
+
+  it("matches a configured origin however its host and port are spelled", () => {
+    clearAll();
+    process.env.ONECLI_EXTERNAL_URL = "HTTPS://OneCLI.Acme.com:443";
+    process.env.ONECLI_TRUSTED_ORIGINS = "HTTP://Extra.Acme.com:80";
+    expect(trustedBrowserOrigin("https://onecli.acme.com")).toBe(
+      "https://onecli.acme.com",
+    );
+    expect(trustedBrowserOrigin("http://extra.acme.com")).toBe(
+      "http://extra.acme.com",
+    );
+    expect(
+      trustedBrowserOrigin("https://onecli.acme.com:8443"),
+    ).toBeUndefined();
+    expect(trustedBrowserOrigin("http://onecli.acme.com")).toBeUndefined();
   });
 
   // Env is read per call, never frozen at module load: the api-server builds
