@@ -18,7 +18,16 @@ import { proofDatabaseUrl } from "../testing/pg-proof";
  *  - a fire is a real `scheduled` eval run on the creator's authority;
  *  - no questions / a run already going are recorded skips, not failures;
  *  - a schedule whose creator is gone disables itself, never runs;
+ *  - a creator who lost workspace access disables it too (RBAC);
  *  - another workspace reads NOT_FOUND (negative control).
+ *
+ * The creator's authority goes through the production check in BOTH CI
+ * lanes: the suite boots the way the server does (`ensureEditionDefaults`)
+ * and forces `CAPS.rbac` on, so the licensed admin-or-binding resolution
+ * answers. The creator is a plain member granted the workspace through a
+ * WorkspaceAccess binding, the real shape of "may this person run tests
+ * here". Without that, the onprem lane would pass by the flat team's
+ * always-yes, and the cloud lane would fail on an unwired checker.
  */
 
 // Keep the real DB admission path, but never dispatch a live sandbox turn.
@@ -57,6 +66,16 @@ beforeAll(async () => {
   if (!url) return;
   process.env.DATABASE_URL = url;
   ({ db } = await import("@onecli/db"));
+  // Boot like the server, then enforce roles for real (see the header).
+  const { ensureEditionDefaults } = await import("../edition-defaults");
+  ensureEditionDefaults();
+  const { eeWorkspaceAccessChecker } =
+    await import("../ee/services/authorization-service");
+  const { initWorkspaceAccessChecker } =
+    await import("../providers/access-checker");
+  initWorkspaceAccessChecker(eeWorkspaceAccessChecker);
+  const env = await import("../lib/env");
+  Object.defineProperty(env.CAPS, "rbac", { value: true, configurable: true });
   schedules = await import("./eval-schedule-service");
   dueWork = await import("./due-work");
   fire = await import("./eval-schedule-fire-service");
@@ -84,6 +103,8 @@ beforeAll(async () => {
       organizationId: orgId,
     })),
   });
+  // The creator's access to the agent's workspace: a member's only grant.
+  await db.workspaceAccess.create({ data: { workspaceId, userId } });
   await db.agent.create({
     data: {
       id: agentId,
@@ -317,6 +338,22 @@ describe.skipIf(!url)("eval schedules on PostgreSQL", () => {
         },
         update: { status: "active" },
       });
+    }
+  });
+
+  it("disables itself, starting nothing, when its creator lost access to the workspace", async () => {
+    await addQuestion();
+    await schedules.saveEvalSchedule(workspaceId, agentId, userId, daily);
+    await db.workspaceAccess.deleteMany({ where: { workspaceId, userId } });
+    try {
+      await makeDue();
+      await fire.fireDueEvalSchedules();
+      expect(
+        await db.agentEvalSchedule.findUniqueOrThrow({ where: { agentId } }),
+      ).toMatchObject({ enabled: false, disabledReason: "authorization" });
+      expect(await db.agentEvalRun.count({ where: { agentId } })).toBe(0);
+    } finally {
+      await db.workspaceAccess.create({ data: { workspaceId, userId } });
     }
   });
 

@@ -6,10 +6,14 @@ import { describe, expect, it } from "vitest";
 import { getApps } from "../apps/registry";
 import {
   AMBIENT_HAZARD_VARS,
+  HERMETIC_BASELINE_KEY,
   HERMETIC_CA_PEM_SENTINEL,
   HERMETIC_MARKER_VAR,
   PRESERVED_AMBIENT_VARS,
+  applyHermeticEnv,
   normalizeTestEnv,
+  workerBaselineHolder,
+  type HermeticBaselineHolder,
 } from "./hermetic-env";
 
 describe("normalizeTestEnv", () => {
@@ -155,7 +159,88 @@ describe("normalizeTestEnv", () => {
   });
 });
 
+describe("applyHermeticEnv: one worker, many files", () => {
+  it("the first file normalizes and records the worker baseline", () => {
+    const holder: HermeticBaselineHolder = {};
+    const env: NodeJS.ProcessEnv = {
+      EDITION: "cloud",
+      DATABASE_URL: "postgresql://ambient",
+      PATH: "/usr/bin",
+      VITEST_WORKER_ID: "1",
+    };
+    applyHermeticEnv(env, holder);
+    expect(env.NEXT_PUBLIC_EDITION).toBe("cloud");
+    expect(env.DATABASE_URL).toBeUndefined();
+    expect(holder[HERMETIC_BASELINE_KEY]).toMatchObject({
+      NEXT_PUBLIC_EDITION: "cloud",
+      PATH: "/usr/bin",
+      NODE_ENV: "test",
+    });
+    // The runner's own bookkeeping is vitest's, never part of our baseline.
+    expect(holder[HERMETIC_BASELINE_KEY]).not.toHaveProperty(
+      "VITEST_WORKER_ID",
+    );
+  });
+
+  it("a later file starts from the baseline, not from the previous file's pins", () => {
+    // The incident: the onprem lane (edition unset), one file pins cloud
+    // and never undoes it, and the NEXT file loaded as cloud.
+    const holder: HermeticBaselineHolder = {};
+    const env: NodeJS.ProcessEnv = { PATH: "/usr/bin" };
+    applyHermeticEnv(env, holder);
+
+    env.NEXT_PUBLIC_EDITION = "cloud";
+    env.EDITION = "cloud";
+    env.DATABASE_URL = "postgresql://previous-file";
+    env.TURN_CEILING_SECONDS = "1800";
+    env.PATH = "/changed";
+    delete env.NODE_ENV;
+
+    applyHermeticEnv(env, holder);
+    expect(env.NEXT_PUBLIC_EDITION).toBeUndefined();
+    expect(env.EDITION).toBeUndefined();
+    expect(env.DATABASE_URL).toBeUndefined();
+    expect(env.TURN_CEILING_SECONDS).toBeUndefined();
+    expect(env.PATH).toBe("/usr/bin");
+    expect(env.NODE_ENV).toBe("test");
+    expect(env).toEqual({ ...holder[HERMETIC_BASELINE_KEY] });
+  });
+
+  it("the cloud lane's carrier survives every reset, even after an onprem pin", () => {
+    const holder: HermeticBaselineHolder = {};
+    const env: NodeJS.ProcessEnv = { NEXT_PUBLIC_EDITION: "cloud" };
+    applyHermeticEnv(env, holder);
+    env.NEXT_PUBLIC_EDITION = "onprem";
+    env.EDITION = "onprem";
+    applyHermeticEnv(env, holder);
+    expect(env.NEXT_PUBLIC_EDITION).toBe("cloud");
+    expect(env.EDITION).toBeUndefined();
+  });
+
+  it("leaves the runner's per-worker vars to vitest", () => {
+    const holder: HermeticBaselineHolder = {};
+    const env: NodeJS.ProcessEnv = { VITEST: "true", TEST: "true" };
+    applyHermeticEnv(env, holder);
+    env.VITEST_POOL_ID = "2";
+    applyHermeticEnv(env, holder);
+    expect(env).toMatchObject({
+      VITEST: "true",
+      TEST: "true",
+      VITEST_POOL_ID: "2",
+    });
+  });
+});
+
 describe("setup wiring", () => {
+  it("recorded this worker's baseline on globalThis", () => {
+    // The reset only works if the setup keeps the baseline where the next
+    // file's setup can find it: the worker's globalThis.
+    const baseline = workerBaselineHolder()[HERMETIC_BASELINE_KEY];
+    expect(baseline).toBeDefined();
+    expect(baseline?.[HERMETIC_MARKER_VAR]).toBe("1");
+    expect(baseline?.GATEWAY_CA_PEM_FILE).toBe(HERMETIC_CA_PEM_SENTINEL);
+  });
+
   it("ran the hermetic setup before this file loaded", () => {
     // Fails on every machine if vitest.config.ts stops mounting the setup
     // file — the marker only exists when normalizeTestEnv ran in this worker.

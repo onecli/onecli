@@ -579,10 +579,10 @@ beforeAll(async () => {
   process.env.DATABASE_URL = PROOF_URL;
   // Pin the edition BEFORE any dynamic import below loads `lib/env`: this
   // suite's assertions are onprem semantics (factory AES crypto, flat-team
-  // access — no roleResolver). Vitest isolates the module graph per file but
-  // `process.env` LEAKS across files in a reused worker, so without this pin
-  // the suite inherits whatever edition the previous file left behind —
-  // green or red by scheduling (CI's ambient NEXT_PUBLIC_EDITION is cloud).
+  // access — no roleResolver). Every file starts from the lane's edition
+  // (the hermetic setup resets env per file), and CI's cloud lane carries
+  // NEXT_PUBLIC_EDITION=cloud, so the pin is what makes this suite onprem in
+  // both lanes.
   process.env.EDITION = "onprem";
   process.env.NEXT_PUBLIC_EDITION = "onprem";
   process.env.SECRET_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");

@@ -35,10 +35,20 @@
  * `POLICY_PROOF_DATABASE_URL` — `testing/pg-proof.ts`'s opt-in/loud-fail
  * contract; `LOG_LEVEL`, `HOME`, `PATH`.
  *
- * Scope caveat: with default per-file isolation each worker runs the setup
- * fresh. Under `--no-isolate`/`singleFork` the setup runs once per worker,
- * so suites that mutate env without restoring can still leak forward —
- * identical to the pre-existing behavior, not a regression.
+ * One worker, many files: the setup runs before EVERY test file, but a
+ * worker that runs several files (the pg project's `singleFork`, where all
+ * of them share one process) also shares `process.env` between them, and
+ * vitest restores none of it. Suites pin their edition by writing
+ * `process.env` and never undo it, so without a reset the NEXT file loaded
+ * under the PREVIOUS file's pin: a suite could pass only because whatever
+ * ran before it happened to pin the edition it needed, and fail the day the
+ * file order changed. `applyHermeticEnv` closes that: the first file in a
+ * worker records the normalized env as the worker's baseline, and every
+ * later file starts from exactly that baseline (5. below).
+ *
+ *  5. Restore the worker baseline before each later file: drop vars a
+ *     previous file added, put back ones it changed or deleted. The
+ *     runner's own bookkeeping (`VITEST*`, `TEST`) is left to vitest.
  *
  * This module must stay dependency-free: importing anything from `src/`
  * here would freeze `lib/env.ts` before the normalization runs.
@@ -270,6 +280,54 @@ export const PRESERVED_AMBIENT_VARS: readonly string[] = [
   "LOG_LEVEL",
   "HOME",
 ];
+
+/**
+ * Where the worker baseline lives between files: on `globalThis`, because
+ * the setup module itself is re-evaluated per file (isolated module
+ * registries) while the worker process, and its `process.env`, carry over.
+ */
+export const HERMETIC_BASELINE_KEY = "__onecliHermeticBaseline";
+
+/** The holder `applyHermeticEnv` keeps the baseline on (`globalThis`). */
+export type HermeticBaselineHolder = {
+  [HERMETIC_BASELINE_KEY]?: Readonly<Record<string, string>>;
+};
+
+/** The worker's holder: `globalThis`, typed the way `@onecli/db`'s Prisma
+ * singleton and `providers/edition-state.ts` type theirs. */
+export const workerBaselineHolder = (): HermeticBaselineHolder =>
+  globalThis as unknown as HermeticBaselineHolder;
+
+/** Vars vitest itself owns and sets per worker; never restored by us. */
+const isRunnerOwned = (name: string): boolean =>
+  name === "TEST" || name.startsWith("VITEST");
+
+/**
+ * The per-file entry point (`hermetic-env.setup.ts`): normalize the first
+ * file's env and record it as the worker baseline, then reset every later
+ * file in the same worker to that baseline (see module doc, step 5).
+ */
+export const applyHermeticEnv = (
+  env: NodeJS.ProcessEnv,
+  holder: HermeticBaselineHolder,
+): void => {
+  const baseline = holder[HERMETIC_BASELINE_KEY];
+  if (baseline === undefined) {
+    normalizeTestEnv(env);
+    const snapshot: Record<string, string> = {};
+    for (const [name, value] of Object.entries(env)) {
+      if (value !== undefined && !isRunnerOwned(name)) snapshot[name] = value;
+    }
+    holder[HERMETIC_BASELINE_KEY] = snapshot;
+    return;
+  }
+  for (const name of Object.keys(env)) {
+    if (!isRunnerOwned(name) && !Object.hasOwn(baseline, name)) {
+      delete env[name];
+    }
+  }
+  for (const [name, value] of Object.entries(baseline)) env[name] = value;
+};
 
 /** Normalize `env` in place to the clean-CI test baseline (see module doc). */
 export const normalizeTestEnv = (env: NodeJS.ProcessEnv): void => {

@@ -1,9 +1,10 @@
 /**
- * Vitest setup entry (wired in `vitest.config.ts`): runs in each worker
- * before the test file's module graph evaluates, so the normalization lands
- * before `lib/env.ts` freezes its module-load reads and before any
- * `vi.hoisted` edition pin runs. See `hermetic-env.ts` for the full rationale.
+ * Vitest setup entry (wired in `vitest.config.ts`): runs before EVERY test
+ * file's module graph evaluates, so the normalization (and, for a later file
+ * in the same worker, the reset to the worker baseline) lands before
+ * `lib/env.ts` freezes its module-load reads and before any `vi.hoisted`
+ * edition pin runs. See `hermetic-env.ts` for the full rationale.
  */
-import { normalizeTestEnv } from "./hermetic-env";
+import { applyHermeticEnv, workerBaselineHolder } from "./hermetic-env";
 
-normalizeTestEnv(process.env);
+applyHermeticEnv(process.env, workerBaselineHolder());

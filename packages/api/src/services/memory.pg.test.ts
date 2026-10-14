@@ -48,8 +48,9 @@ const AUTHOR = {
 beforeAll(async () => {
   if (!PROOF_URL) return;
   process.env.DATABASE_URL = PROOF_URL;
-  // Pinned per-suite: process.env leaks across worker files, and CI's ambient
-  // NEXT_PUBLIC_EDITION is cloud.
+  // Pinned per-suite: each file starts from the lane's edition (the hermetic
+  // setup resets env per file), and CI's cloud lane carries
+  // NEXT_PUBLIC_EDITION=cloud.
   process.env.EDITION = "onprem";
   process.env.NEXT_PUBLIC_EDITION = "onprem";
 
