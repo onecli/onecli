@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.14.0](https://github.com/onecli/onecli/compare/v2.13.0...v2.14.0) (2026-10-14)
+
+
+### Features
+
+* missing OAuth permission warnings, Drive "Shared with me", Slack on Kubernetes ([#615](https://github.com/onecli/onecli/issues/615)) ([6a31200](https://github.com/onecli/onecli/commit/6a31200839dcf107303c829892333fd54a0ff8df))
+
 ## [2.13.0](https://github.com/onecli/onecli/compare/v2.12.0...v2.13.0) (2026-10-14)
 
 
