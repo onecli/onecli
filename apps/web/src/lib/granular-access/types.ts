@@ -1,4 +1,5 @@
 import type { ComponentType } from "react";
+import type { MissingPermission } from "@onecli/api/apps/missing-permissions";
 
 export interface PolicyDialogContentProps {
   /** The app connection being scoped — needed by providers that browse
@@ -14,6 +15,12 @@ export interface PolicyDialogContentProps {
    * picker may only select within it, so resources outside show disabled.
    * Null = no boundary, everything the connection offers is selectable. */
   orgBoundary?: Record<string, unknown> | null;
+  /** Requested permissions the connection wasn't granted. A picker whose
+   * listing needs one of them shows why instead of a generic load error. */
+  missingPermissions?: MissingPermission[];
+  /** Re-run the provider consent for this connection (absent when the
+   * caller can't reconnect it here, e.g. an organization connection). */
+  onReconnect?: () => void;
 }
 
 export interface GranularAccessConfig {

@@ -1081,6 +1081,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_shared_with_me_folder_heads_its_own_chain() {
+        // "Shared with me": the folder lives in its owner's Drive, so this
+        // account can't see above it (its parent lookup fails). The dashboard
+        // stores it as a one-ID chain, and the walk is satisfied as soon as
+        // the folder is NAMED by a child, never needing its own parents.
+        let shared = FakeDrive(HashMap::from([
+            ("Inbox", vec!["OwnersHidden"]),
+            ("Batch", vec!["Inbox"]),
+            ("doc", vec!["Batch"]),
+            ("ROOT", vec![]),
+            ("mine", vec!["ROOT"]),
+        ]));
+        let a = vec!["Inbox".to_string()];
+        assert!(in_scope(&shared, "doc", &a).await);
+        assert!(in_scope(&shared, "Inbox", &a).await);
+        assert!(
+            !in_scope(&shared, "mine", &a).await,
+            "the account's own files stay out"
+        );
+    }
+
+    #[tokio::test]
     async fn the_whole_chain_must_hold_live() {
         // Entry Clients/Acme, but Acme has since been moved under Finance: the
         // live walk no longer finds Clients, so the (org) boundary still holds.

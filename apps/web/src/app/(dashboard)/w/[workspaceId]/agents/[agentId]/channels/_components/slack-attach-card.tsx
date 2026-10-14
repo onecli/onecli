@@ -50,11 +50,12 @@ interface SlackAttachCardProps {
   /** The bot's handle, for the removed copy ("@donna"), where known. */
   identityName?: string | null;
   /**
-   * The removed app's own id (`A0…`). The manual floor uses it to re-attach
-   * THAT app: no "create a new app" step, no App ID field to retype. Null
-   * when nothing is removed.
+   * The resumable app's own id (`A0…`): a detached or half-finished setup,
+   * or an app removed on the Slack side. The manual floor uses it to
+   * re-attach THAT app: no "create a new app" step, no App ID field to
+   * retype. Null when there is nothing to resume.
    */
-  removedAppId?: string | null;
+  resumeAppId?: string | null;
 }
 
 /**
@@ -75,7 +76,7 @@ export const SlackAttachCard = ({
   resuming,
   removed = false,
   identityName = null,
-  removedAppId = null,
+  resumeAppId = null,
 }: SlackAttachCardProps) => {
   const attach = useAttachChannel(agentId, "slack");
   const detach = useDetachChannel(agentId, "slack");
@@ -104,6 +105,11 @@ export const SlackAttachCard = ({
   // servers get nothing: the old attach route reads no body (the choice would
   // be silently ignored) and the old strict complete schema rejects the key.
   const requestedTransport = posture.available ? transport : undefined;
+  // No org credential splits two ways (the render below): the events posture
+  // points at the org setup, the socket posture falls to the manual paste
+  // floor. Named once so the resume hint and the arm shown never disagree.
+  const needsOrgSetup = !hasOrgCredentials && transport === "events";
+  const onPasteFloor = !hasOrgCredentials && !needsOrgSetup;
 
   const pickTransport = (next: ChannelTransport) => {
     setPicked(next);
@@ -212,10 +218,12 @@ export const SlackAttachCard = ({
         {resuming && !removed && (
           <div className="flex flex-wrap items-center justify-between gap-2">
             {/* Slack never tells us a request is waiting on an admin, so the
-                hint names that case instead of claiming to know. */}
+                guided hint names that case instead of claiming to know. The
+                floor has no Resume button: its form below IS the resume. */}
             <p className="text-muted-foreground text-sm">
-              Not finished yet. If your Slack admin has to approve the app,
-              click Resume setup once they do.
+              {onPasteFloor
+                ? "Not connected. Paste the app's tokens below to reconnect it, or start over to use a different app."
+                : "Not finished yet. If your Slack admin has to approve the app, click Resume setup once they do."}
             </p>
             {/* The escape hatch: without it a half-finished setup pins the
                 agent to its stamped transport forever (posture changes and
@@ -241,7 +249,7 @@ export const SlackAttachCard = ({
             socket posture keeps the floor — its manual steps are physically
             unavoidable (Slack has no API for app-level tokens), and the org
             token alone cannot finish a socket install. */}
-        {!hasOrgCredentials && transport === "events" ? (
+        {needsOrgSetup ? (
           <div className="flex flex-col items-center gap-1.5 rounded-xl border border-dashed px-6 py-10 text-center">
             <span className="bg-card mb-2 flex size-12 items-center justify-center rounded-2xl border shadow-sm">
               <AppIcon
@@ -272,7 +280,7 @@ export const SlackAttachCard = ({
               </p>
             )}
           </div>
-        ) : !hasOrgCredentials ? (
+        ) : onPasteFloor ? (
           // Reachable only on the SOCKET posture — the events posture routed
           // to the org-setup pointer above. The floor keeps its events arm
           // for generality; unused from here by design.
@@ -280,7 +288,7 @@ export const SlackAttachCard = ({
             agentId={agentId}
             transport={transport}
             requestedTransport={requestedTransport}
-            reattachAppId={removed ? removedAppId : null}
+            reattachAppId={resuming ? resumeAppId : null}
           />
         ) : attach.data?.transport === "socket" ? (
           <SlackGuidedSocketSteps

@@ -174,6 +174,33 @@ describe("ConnectFlow ready screen", () => {
     );
   });
 
+  // The callback's partial-grant landing: the popup stays open to say what
+  // wasn't granted, and "Try again" re-authenticates the same connection.
+  it("keeps a partial grant open and retries on the same connection", async () => {
+    render(
+      <ConnectFlow
+        app={baseApp}
+        hasDefaults
+        status="success"
+        connectionId="conn-1"
+        workspaceId="ws-2"
+        missingPermissions={[
+          { scope: "boards:write", name: "Boards", description: "Edit" },
+        ]}
+      />,
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("“Boards”");
+    await advance(5000);
+    expect(fakeLocation.href).toBe("http://localhost/");
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Try again" }).click();
+    });
+    const params = new URL(fakeLocation.href).searchParams;
+    expect(params.get("connectionId")).toBe("conn-1");
+    expect(params.get("_workspace")).toBe("ws-2");
+  });
+
   it("links the setup guide on the ready screen", () => {
     render(
       <ConnectFlow

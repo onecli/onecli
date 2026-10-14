@@ -945,6 +945,17 @@ const completePresenceUnlocked = async (
       "The App ID is required. Copy it from the app's Basic Information page.",
     );
   }
+  // A resumable row is bound to ITS app: the pasted tokens are verified with
+  // the provider, never matched against an id, so completing it with another
+  // app's tokens would store them under this row's id and route that app's
+  // traffic through the wrong record. Refuse before any provider call.
+  const requestedAppId = input.appId?.trim();
+  if (existing && requestedAppId && requestedAppId !== existing.externalId) {
+    throw new ServiceError(
+      "CONFLICT",
+      `This agent is already set up for ${channelProvider(provider).displayName} app ${existing.externalId}. To connect a different app, use Start over first.`,
+    );
+  }
 
   const existingJson = existing?.credentials
     ? await getCrypto().decrypt(existing.credentials)

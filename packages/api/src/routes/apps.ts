@@ -85,6 +85,7 @@ import {
   removeBlocklistRule,
 } from "../services/app-blocklist-service";
 import { logger } from "../lib/logger";
+import { setPartialGrantParams } from "../apps/missing-permissions";
 import { attachNewConnectionToAllAgents } from "../services/workspace-autoattach-service";
 import { registerGitHubAppShareRoutes } from "./github-app-share";
 
@@ -183,6 +184,7 @@ export const appRoutes = () => {
           label: conn.label,
           status: conn.status,
           scopes: conn.scopes,
+          missingPermissions: conn.missingPermissions,
           connectedAt: conn.connectedAt,
         })),
         credentialStubs: a.credentialStubs ?? [],
@@ -703,9 +705,11 @@ export const appRoutes = () => {
       // popup can offer the post-connect attach step. Reconnects deliberately
       // don't — the existing connection keeps whatever grants it has.
       let createdId: string | null = null;
+      // The connection this consent landed on, created or re-authenticated.
+      let connectionId: string;
 
       if (reconnectId) {
-        await reconnectConnection(
+        const updated = await reconnectConnection(
           { workspaceId: state.workspaceId },
           reconnectId,
           credentials,
@@ -715,6 +719,7 @@ export const appRoutes = () => {
             appConfigId: resolved.appConfigId,
           },
         );
+        connectionId = updated.id;
       } else {
         await getConnectionHooks().beforeCreate(stateOrgId);
         const fresh = await createConnection(
@@ -728,6 +733,7 @@ export const appRoutes = () => {
           },
         );
         createdId = fresh.id;
+        connectionId = fresh.id;
         // New workspace connection: on for every agent right away; the
         // post-connect dialog is where the user turns agents off.
         // (The callback is unauthenticated: the actor comes from the signed
@@ -760,6 +766,12 @@ export const appRoutes = () => {
         successParams.set("connected", createdId);
         successParams.set("workspaceId", state.workspaceId);
       }
+      // Permissions the user unticked on the consent screen: the popup warns
+      // and offers to try again on this same connection.
+      setPartialGrantParams(successParams, provider, scopes, {
+        connectionId,
+        scope: { workspaceId: state.workspaceId },
+      });
 
       deleteCookie(c, OAUTH_STATE_COOKIE, { path: redirectPath });
 

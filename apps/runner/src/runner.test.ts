@@ -625,6 +625,190 @@ describe("a sandbox that is running but unreachable", () => {
 });
 
 /**
+ * THE ZOMBIE BACKSTOP. A running container with no channel whose row the
+ * control plane has already parked (`stopped`/`failed`/`unprovisioned`): the
+ * report above is a no-op against that row (the status guard only applies
+ * `stopped` over running/stopping), so reporting it every pass does nothing
+ * forever. That is the shape a supervisor that gave up but never exited
+ * leaves behind. The runner is the only party that sees the container, so
+ * it stops it, through the ordinary stop path.
+ */
+describe("a running container the control plane no longer expects to run", () => {
+  /** A started sandbox whose channel is gone, as reconcile will find it. */
+  const zombie = async (status: string | undefined): Promise<string> => {
+    queued.push(startItem("sb-1"));
+    await drive();
+    expectedSandboxIds = ["sb-1"];
+    expectedStatuses = status === undefined ? undefined : { "sb-1": status };
+    posted.length = 0;
+    return backend.sandboxes.get("sb-1")!.containerRef;
+  };
+
+  it.each(["stopped", "failed"])(
+    "is STOPPED (home parked, nothing reported) when its row reads `%s`",
+    async (status) => {
+      // MUTATION-PROOF: drop the backstop and the container stays running
+      // (and the old per-pass report comes back).
+      const ref = await zombie(status);
+      const stopSpy = vi.spyOn(backend, "stopSandbox");
+
+      await runner.reconcile();
+      await runner.settle();
+
+      expect(stopSpy).toHaveBeenCalledWith(ref, "sb-1");
+      expect(backend.sandboxes.get("sb-1")?.running).toBe(false);
+      expect(backend.parks).toContain("fake-home-sb-1");
+      // The row is already where this stop leaves it; a report would only
+      // be absorbed by the control plane's status guard.
+      expect(posted).toEqual([]);
+    },
+  );
+
+  it("is stopped ONCE: a pass that finds it still listed does not stop it again", async () => {
+    // The stop is ref-bound and idempotent, but a container that lingers in
+    // the listing (a slow substrate) must not draw a stop every pass.
+    // MUTATION-PROOF: drop the per-ref dedupe and the spy sees two calls.
+    const ref = await zombie("stopped");
+    const stopSpy = vi.spyOn(backend, "stopSandbox");
+    // The substrate keeps listing it as running after the stop returns.
+    stopSpy.mockImplementation(async () => {});
+
+    await runner.reconcile();
+    await runner.settle();
+    await runner.reconcile();
+    await runner.settle();
+
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+    expect(stopSpy).toHaveBeenCalledWith(ref, "sb-1");
+  });
+
+  it("is tried AGAIN on the next pass when the stop itself failed", async () => {
+    // A transient backend error must not leave the stray running for good.
+    // MUTATION-PROOF: keep the ref deduped after a failed stop and the second
+    // pass does nothing.
+    await zombie("stopped");
+    const stopSpy = vi.spyOn(backend, "stopSandbox");
+    backend.failNext("stop");
+
+    await runner.reconcile();
+    await runner.settle();
+    expect(backend.sandboxes.get("sb-1")?.running).toBe(true);
+
+    await runner.reconcile();
+    await runner.settle();
+    expect(stopSpy).toHaveBeenCalledTimes(2);
+    expect(backend.sandboxes.get("sb-1")?.running).toBe(false);
+  });
+
+  it("is only REPORTED, never stopped, while its row reads `running` (the report is what moves the row)", async () => {
+    // MUTATION-PROOF: let `running` into the parked set and this stops a
+    // container the control plane still believes is serving.
+    await zombie("running");
+    const stopSpy = vi.spyOn(backend, "stopSandbox");
+
+    await runner.reconcile();
+    await runner.settle();
+
+    expect(stopSpy).not.toHaveBeenCalled();
+    expect(posted).toEqual([
+      { kind: "sandbox.status", sandboxId: "sb-1", status: "stopped" },
+    ]);
+  });
+
+  it.each(["starting", "stopping", "unprovisioned"])(
+    "is left alone while its row reads `%s` (a claim in flight, or a start that is due, owns it)",
+    async (status) => {
+      await zombie(status);
+      const stopSpy = vi.spyOn(backend, "stopSandbox");
+
+      await runner.reconcile();
+      await runner.settle();
+
+      expect(stopSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it("is only reported against an OLD control plane that sends no statuses", async () => {
+    // MUTATION-PROOF: treat a missing status as parked and this stops it.
+    await zombie(undefined);
+    const stopSpy = vi.spyOn(backend, "stopSandbox");
+
+    await runner.reconcile();
+    await runner.settle();
+
+    expect(stopSpy).not.toHaveBeenCalled();
+    expect(posted).toEqual([
+      { kind: "sandbox.status", sandboxId: "sb-1", status: "stopped" },
+    ]);
+  });
+
+  it("is left alone while a start for it is QUEUED (the start recreates it anyway)", async () => {
+    // The realistic race: a message arrived, the start is claimed and
+    // queued behind an executing stop, and reconcile still reads the old
+    // status. MUTATION-PROOF: drop the start fence and a second stop lands.
+    await zombie("stopped");
+    const stopSpy = vi.spyOn(backend, "stopSandbox");
+    const release = backend.holdNext("stop");
+    queued.push({ kind: "sandbox.stop", sandboxId: "sb-1" });
+    await runner.tick(0);
+    await vi.waitFor(() => expect(stopSpy).toHaveBeenCalledTimes(1));
+    queued.push(startItem("sb-1"));
+    await runner.tick(0);
+
+    await runner.reconcile();
+
+    release();
+    await runner.settle();
+    // The held stop, then the start's own recreate (stop + remove + create):
+    // two calls. A reconcile-issued stop would be a third.
+    expect(stopSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("is left alone while a start for it is EXECUTING (the old container is still listed mid-recreate)", async () => {
+    // The start has begun (its queue slot is drained) and is recreating;
+    // a substrate can still list the old container running with no channel
+    // while the row reads the old status. MUTATION-PROOF: drop the
+    // executing-start fence and reconcile stops the container being replaced.
+    const oldRef = await zombie("stopped");
+    const old = backend.sandboxes.get("sb-1")!;
+    const release = backend.holdNext("create");
+    queued.push(startItem("sb-1"));
+    await runner.tick(0);
+    // The recreate removed the old record and is held inside create; put the
+    // old container back, still running, as a lagging substrate would list it.
+    await vi.waitFor(() => expect(backend.sandboxes.has("sb-1")).toBe(false));
+    backend.sandboxes.set("sb-1", { ...old, running: true });
+    const stopSpy = vi.spyOn(backend, "stopSandbox");
+
+    await runner.reconcile();
+
+    release();
+    await runner.settle();
+    expect(stopSpy).not.toHaveBeenCalledWith(oldRef, "sb-1");
+  });
+
+  it("is left alone while a deliberate stop for it is QUEUED (that stop ends this very container)", async () => {
+    // One stop executing (its slot drained, held), a second queued behind
+    // it, and reconcile still finds the container running with a parked row.
+    // MUTATION-PROOF: drop the queued-stop fence and reconcile adds a third.
+    await zombie("stopped");
+    const stopSpy = vi.spyOn(backend, "stopSandbox");
+    const release = backend.holdNext("stop");
+    queued.push({ kind: "sandbox.stop", sandboxId: "sb-1" });
+    await runner.tick(0);
+    await vi.waitFor(() => expect(stopSpy).toHaveBeenCalledTimes(1));
+    queued.push({ kind: "sandbox.stop", sandboxId: "sb-1" });
+    await runner.tick(0);
+
+    await runner.reconcile();
+
+    release();
+    await runner.settle();
+    expect(stopSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
  * The resumable channel (runner restart survival). A supervisor that holds a
  * session reconnects by itself; the runner's job is to NOT treat the gap as a
  * death for as long as the supervisor is still inside its retry budget

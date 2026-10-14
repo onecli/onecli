@@ -117,9 +117,10 @@ export type ConnectionMethod =
   | {
       type: "oauth";
       defaultScopes?: string[];
-      /** Human-friendly permission descriptions. No runtime reader since the
-       *  app-page permissions panel was removed — kept as source data for the
-       *  docs permission tables (the sync-app-docs skill reads it). */
+      /** Human-friendly permission descriptions. Names what a connection's
+       *  grant lacks (`missing-permissions.ts`: only requested scopes are ever
+       *  flagged) and feeds the docs permission tables (the sync-app-docs skill
+       *  reads it). */
       permissions?: OAuthPermission[];
       /** Providers that return the token in a URL fragment (#token=...) instead
        *  of a query parameter. The bridge page extracts the named param from the

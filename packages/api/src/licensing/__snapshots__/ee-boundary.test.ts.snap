@@ -554,6 +554,7 @@ exports[`enterprise-license boundary > the licensed symbol set changes only by d
     "scope",
   ],
   "apps/gateway/crates/ee/ee/src/granular_access/google_drive.rs": [
+    "a_shared_with_me_folder_heads_its_own_chain",
     "add_parents",
     "alias_spellings_and_repeats_are_read_like_google",
     "allowed",
@@ -1335,6 +1336,7 @@ exports[`enterprise-license boundary > the licensed symbol set changes only by d
   ],
   "packages/api/src/ee/granular-access/shape/google-drive.ts": [
     "DRIVE_ID",
+    "DRIVE_READ_SCOPE",
     "MAX_NAME_LOOKUPS",
     "validateGoogleDrivePolicy",
   ],

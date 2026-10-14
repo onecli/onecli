@@ -1,6 +1,8 @@
 import { ServiceError } from "../../services/errors";
+import { lacksScope } from "../../apps/missing-permissions";
 import {
   DRIVE_ID,
+  DRIVE_READ_SCOPE,
   MAX_NAME_LOOKUPS,
 } from "../granular-access/shape/google-drive";
 import {
@@ -19,8 +21,9 @@ const MAX_ITEMS = 2000;
 export interface GoogleDriveFolder {
   id: string;
   name: string;
-  /** `sharedDrive` = a shared drive's root (only listed at the top level). */
-  kind: "folder" | "sharedDrive";
+  /** `sharedDrive` = a shared drive's root; `shared` = a folder someone else
+   * shared with this account ("Shared with me"). Both only at the top level. */
+  kind: "folder" | "sharedDrive" | "shared";
   /** Direct children, for the picker's "3 folders · 12 files" hint. `null`
    * when the count couldn't be taken (it never fails the listing). With
    * `countCapped`, only the first page was counted: both are LOWER bounds. */
@@ -75,6 +78,15 @@ const driveToken = async (
     connectionId,
     "google-drive",
   );
+  // Without `drive.readonly` Drive only shows files OneCLI itself created, so
+  // a folder listing is refused (403) or silently empty. Say why, so the
+  // picker can offer the reconnect that fixes it instead of a generic error.
+  if (lacksScope("google-drive", conn.scopes, DRIVE_READ_SCOPE)) {
+    throw new ServiceError(
+      "FORBIDDEN",
+      "This Google Drive connection wasn't granted “Read files”. Reconnect it and allow that permission to browse folders.",
+    );
+  }
   const token = await validAccessToken(
     conn,
     creds,
@@ -161,15 +173,17 @@ const fetchPaged = async <T extends { nextPageToken?: string }>(
 
 /**
  * Lists the subfolders of `parentId` for a Google Drive connection the caller
- * may see (see `loadOAuthConnection`). With no `parentId`, lists the top level: My Drive's
- * root folders followed by the shared drives the account can see.
+ * may see (see `loadOAuthConnection`). With no `parentId`, lists the top level:
+ * My Drive's root folders, then the folders shared with the account ("Shared
+ * with me"), then the shared drives it can see.
  *
  * The picker turns the browsed trail into the policy's folder-ID chain; the
  * gateway re-verifies that chain against Drive's live parent links on every
  * agent request, so nothing here is trusted for enforcement.
  *
  * @throws ServiceError NOT_FOUND if the connection isn't found in the org,
- *   BAD_REQUEST for an invalid parent ID or when no usable token exists.
+ *   BAD_REQUEST for an invalid parent ID or when no usable token exists,
+ *   FORBIDDEN when the connection wasn't granted Drive read access.
  */
 export const listGoogleDriveFolders = async (
   scope: ConnectionAccessScope,
@@ -210,6 +224,40 @@ export const listGoogleDriveFolders = async (
   );
 
   if (parentId === undefined) {
+    // "Shared with me": folders other people shared with this account. They
+    // live in the owner's Drive, so they are neither under `root` nor a shared
+    // drive, yet are often exactly what the account exists for (an ingestion
+    // account reading a teammate's folder). A shared folder heads its own
+    // chain: the gateway's live walk finds it among the target's ancestors
+    // without ever needing to see above it.
+    const listed = new Set(folders.map((f) => f.id));
+    await fetchPaged<FilesListResult>(
+      token,
+      (pageToken) => {
+        const params = new URLSearchParams({
+          q: `sharedWithMe = true and mimeType = '${FOLDER_MIME}' and trashed = false`,
+          fields: "nextPageToken,files(id,name)",
+          orderBy: "name_natural",
+          pageSize: "1000",
+          // A folder shared from a shared drive is only returned with both.
+          supportsAllDrives: "true",
+          includeItemsFromAllDrives: "true",
+          corpora: "user",
+        });
+        if (pageToken) params.set("pageToken", pageToken);
+        return `/files?${params}`;
+      },
+      (page) => {
+        for (const f of page.files ?? []) {
+          if (f.id && DRIVE_ID.test(f.id) && !listed.has(f.id)) {
+            listed.add(f.id);
+            folders.push({ id: f.id, name: f.name ?? f.id, kind: "shared" });
+          }
+        }
+        return page.files?.length ?? 0;
+      },
+    );
+
     await fetchPaged<DrivesListResult>(
       token,
       (pageToken) => {
@@ -252,7 +300,8 @@ export const listGoogleDriveFolders = async (
  * the account can't see at all maps to `null` rather than failing the lookup.
  *
  * @throws ServiceError NOT_FOUND if the connection isn't found in the org,
- *   BAD_REQUEST for invalid/too many IDs or when no usable token exists.
+ *   BAD_REQUEST for invalid/too many IDs or when no usable token exists,
+ *   FORBIDDEN when the connection wasn't granted Drive read access.
  */
 export const resolveGoogleDriveFolderNames = async (
   scope: ConnectionAccessScope,

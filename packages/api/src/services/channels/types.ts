@@ -408,6 +408,20 @@ export interface ChannelProvider {
   >;
 
   /**
+   * Did the USER create this app by hand on the provider's side (the paste
+   * floor), so the platform never held what tearing it down takes? Read from
+   * the presence's own stored credentials, and true only on positive
+   * evidence: an empty, unreadable, or partial blob proves nothing, so it
+   * answers false and the confirmed-uninstall gate runs as usual.
+   *
+   * The cleanup worker releases such an app's job instead of retaining it.
+   * There is nothing remote for the platform to undo, and a retained job
+   * would reserve the app id against re-attaching the very app the user
+   * owns. A provider whose apps are all platform-created omits it.
+   */
+  isUserCreatedApp?(input: { credentialsJson: string | null }): boolean;
+
+  /**
    * The provider REMOVED a presence (the workspace uninstalled the agent's
    * app or revoked its bot token) and the platform just marked it
    * `disabled` — drop any per-app state that would keep admitting the dead

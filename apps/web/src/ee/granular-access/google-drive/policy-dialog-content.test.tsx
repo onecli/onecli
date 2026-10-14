@@ -20,6 +20,7 @@ const listings: Record<string, Record<string, unknown>[]> = {
   "": [
     { id: "F1", name: "Clients", kind: "folder", ...counts(1, 3) },
     { id: "SD", name: "Team Drive", kind: "sharedDrive", ...counts(0, 0) },
+    { id: "SH", name: "Inbox", kind: "shared", ...counts(1, 0) },
     {
       id: "F4",
       name: "Archive",
@@ -34,10 +35,13 @@ const listings: Record<string, Record<string, unknown>[]> = {
   // Counted only up to the first page: no subfolders seen there, but more
   // children exist, so it must stay expandable.
   F4: [{ id: "F5", name: "Deep", kind: "folder", ...counts(0, 0) }],
+  SH: [{ id: "SH2", name: "Batch 1", kind: "folder", ...counts(0, 3) }],
 };
 const fetched: string[] = [];
 /** Whether the names lookup (saved chains → names) has resolved. */
 let namesKnown = true;
+/** Saved folder IDs the dialog asked the names lookup for (enabled only). */
+const namesLookedUp: string[] = [];
 
 vi.mock("./use-google-drive-folders", () => ({
   useGoogleDriveFolders: (_c: string, parentId: string, enabled: boolean) => {
@@ -48,9 +52,15 @@ vi.mock("./use-google-drive-folders", () => ({
       isError: false,
     };
   },
-  useGoogleDriveFolderNames: () => ({
-    data: namesKnown ? { F1: "Clients", F2: "Acme", F3: "Contracts" } : {},
-  }),
+  useGoogleDriveFolderNames: (_c: string, ids: string[], enabled = true) => {
+    if (enabled && ids.length > 0) namesLookedUp.push(...ids);
+    return {
+      data:
+        enabled && namesKnown
+          ? { F1: "Clients", F2: "Acme", F3: "Contracts" }
+          : {},
+    };
+  },
 }));
 vi.mock("@/lib/user-plan", () => ({
   getCurrentPlan: async () => "team",
@@ -98,6 +108,7 @@ describe("GoogleDrivePolicyDialogContent", () => {
     onPolicyChange.mockReset();
     queryClient.clear();
     fetched.length = 0;
+    namesLookedUp.length = 0;
     namesKnown = true;
   });
 
@@ -222,5 +233,85 @@ describe("GoogleDrivePolicyDialogContent", () => {
     expect(screen.getByText("1000+ items")).toBeInTheDocument();
     await expand(user, "Archive");
     expect(screen.getByText("Deep")).toBeInTheDocument();
+  });
+
+  it("warns and offers a reconnect instead of listing when 'Read files' wasn't granted", async () => {
+    const user = userEvent.setup();
+    const onReconnect = vi.fn();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <GoogleDrivePolicyDialogContent
+          connectionId="c1"
+          metadata={{}}
+          policy={{ driveFolders: ["F1/F2"] }}
+          onPolicyChange={onPolicyChange}
+          onSave={() => {}}
+          onCancel={() => {}}
+          missingPermissions={[
+            {
+              scope: "https://www.googleapis.com/auth/drive.readonly",
+              name: "Read files",
+              description: "View and download all your Drive files",
+            },
+          ]}
+          onReconnect={onReconnect}
+        />
+      </QueryClientProvider>,
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("Missing permissions");
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "can't list the folders in this Drive",
+    );
+    // Neither doomed request goes out: the listing nor the saved-names lookup
+    // (the server refuses both without Drive read access).
+    expect(fetched).toEqual([]);
+    expect(namesLookedUp).toEqual([]);
+    await user.click(
+      screen.getByRole("button", { name: /Reconnect to grant/ }),
+    );
+    expect(onReconnect).toHaveBeenCalledOnce();
+  });
+
+  it("ignores missing permissions the listing doesn't need", () => {
+    render(
+      <QueryClientProvider client={queryClient}>
+        <GoogleDrivePolicyDialogContent
+          connectionId="c1"
+          metadata={{}}
+          policy={{ driveFolders: [] }}
+          onPolicyChange={onPolicyChange}
+          onSave={() => {}}
+          onCancel={() => {}}
+          missingPermissions={[
+            {
+              scope: "https://www.googleapis.com/auth/drive.file",
+              name: "Manage app files",
+              description: "Create and edit files opened or created by OneCLI",
+            },
+          ]}
+        />
+      </QueryClientProvider>,
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(fetched).toEqual([""]);
+  });
+
+  it("groups the top level: Shared drives, then Shared with me, then My Drive", () => {
+    setup({ driveFolders: [] });
+    const headings = screen
+      .getAllByRole("heading", { level: 3 })
+      .map((h) => h.textContent);
+    expect(headings).toEqual(["Shared drives", "Shared with me", "My Drive"]);
+  });
+
+  it("drills into a Shared-with-me folder and selects it as its own chain head", async () => {
+    const user = userEvent.setup();
+    setup({ driveFolders: [] });
+    await expand(user, "Inbox");
+    expect(screen.getByText("Batch 1")).toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: "Batch 1" }));
+    expect(onPolicyChange).toHaveBeenLastCalledWith({
+      driveFolders: ["SH/SH2"],
+    });
   });
 });

@@ -1,6 +1,6 @@
 import { expect } from "vitest";
 import { scenario } from "../src/scenario.js";
-import { containerNameFor, dockerKill } from "../src/docker.js";
+import { containerNameFor, dockerKill, isRunning } from "../src/docker.js";
 import {
   seedAnthropicGrant,
   seedHostedAgent,
@@ -164,6 +164,74 @@ scenario(
     revived.pump();
 
     const after = await runTurn(stack.v1, conversation.id, "after the restart");
+    expect(after.status).toBe("done");
+
+    await revived.stop();
+    await revived.reap();
+  },
+);
+
+scenario(
+  "a box nothing will wake is STOPPED by the runner, not reported forever (the zombie backstop)",
+  async (cx) => {
+    // The shape a supervisor that gave up but never exited leaves behind:
+    // its container runs on with no channel. The runner's report moves the
+    // row to `stopped` once; every later report is a no-op against that row,
+    // and nothing recreates a box no message arrives for. Same shape here,
+    // on real Docker: a runner restart strands a channelless container, the
+    // first reconcile parks its row, and NO message follows. The next pass
+    // must stop the container itself.
+    const stack = await cx.startStack();
+    if (stack.runner === null) throw new Error("runner expected");
+    await seedTenant(cx.prisma, cx.ids);
+    await seedHostedAgent(cx.prisma, cx.ids, {
+      runnerId: stack.runner.runnerId,
+    });
+    await seedAnthropicGrant(cx.prisma, cx.ids);
+    stack.runner.pump();
+    const conversation = await stack.v1.json<{ id: string }>(
+      await stack.v1.put(`/v1/agents/${cx.ids.agent}/conversations/direct`),
+    );
+    expect((await runTurn(stack.v1, conversation.id, "before")).status).toBe(
+      "done",
+    );
+    await stack.runner.stop();
+    const container = containerNameFor(cx.ids.sandbox);
+
+    const revived = await startTestRunner({
+      controlPlaneUrl: stack.api.origin,
+      ids: cx.ids,
+      config: cx.config,
+    });
+    // start()'s own reconcile: running, channelless, row `running` → the
+    // ordinary report, which parks the row. The container is still up.
+    await waitFor(
+      () => cx.prisma.sandbox.findUnique({ where: { id: cx.ids.sandbox } }),
+      (row) => row?.status === "stopped",
+      "the report to park the row",
+    );
+    expect(await isRunning(container)).toBe(true);
+
+    // The next pass finds the same container, row parked: it stops it.
+    await revived.reconcile();
+    await waitFor(
+      () => isRunning(container),
+      (running) => !running,
+      "the runner to stop the stray container",
+    );
+    // No second report: the row was already where the stop leaves it.
+    expect(
+      revived.posted.filter(
+        (e) =>
+          e.kind === "sandbox.status" &&
+          e.sandboxId === cx.ids.sandbox &&
+          e.status === "stopped",
+      ),
+    ).toHaveLength(1);
+
+    // And the agent is fine: the next message wakes it as usual.
+    revived.pump();
+    const after = await runTurn(stack.v1, conversation.id, "after");
     expect(after.status).toBe("done");
 
     await revived.stop();

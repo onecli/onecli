@@ -235,7 +235,7 @@ describe("no org credential", () => {
     ).not.toBeInTheDocument();
     expect(screen.queryByLabelText("App ID")).not.toBeInTheDocument();
     expect(
-      screen.getByText("Reinstall the app and paste its fresh tokens"),
+      screen.getByText("Paste the app's tokens to reconnect it"),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: /Open the app on api.slack.com/ }),
@@ -247,6 +247,43 @@ describe("no org credential", () => {
 
     expect(mocks.complete).toHaveBeenCalledWith(
       { botToken: "xoxb-fresh", appId: "A123", appToken: "xapp-fresh" },
+      expect.anything(),
+    );
+  });
+
+  it("a DETACHED app on the SOCKET floor reconnects THAT app too, with Start over to use a different one", async () => {
+    // The reported loop: after a detach the floor read "1. Create a Slack app
+    // from this manifest" with an App ID field, as if no app existed, and a
+    // different App ID typed there was silently bound to the old app.
+    const user = userEvent.setup();
+    state.view = view({
+      orgIntegrations: [],
+      posture: { transport: "socket" },
+      presences: [
+        activePresence({ status: "pending_setup", transport: "socket" }),
+      ],
+    });
+    renderSection();
+
+    expect(
+      screen.queryByText("Create a Slack app from this manifest"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("App ID")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Paste the app's tokens to reconnect it"),
+    ).toBeInTheDocument();
+    // The floor has no Resume button, so the hint must not name one.
+    expect(screen.queryByText(/click Resume setup/)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Start over" }),
+    ).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("Bot token"), "xoxb-same");
+    await user.type(screen.getByLabelText("App-level token"), "xapp-same");
+    await user.click(screen.getByRole("button", { name: "Re-attach" }));
+
+    expect(mocks.complete).toHaveBeenCalledWith(
+      { botToken: "xoxb-same", appId: "A123", appToken: "xapp-same" },
       expect.anything(),
     );
   });

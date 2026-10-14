@@ -9,6 +9,7 @@ import { DialogFooter } from "@onecli/ui/components/dialog";
 import { cn } from "@onecli/ui/lib/utils";
 import type { PolicyDialogContentProps } from "@/lib/granular-access/types";
 import { coveredBy } from "@onecli/api/lib/resource-axis";
+import { DRIVE_READ_SCOPE } from "@onecli/api/ee/granular-access/shape/google-drive";
 import { UpgradeToTeamButton } from "@/ee/billing/_components/upgrade-to-team-button";
 import { useHasTeamFeatures } from "../use-has-team-features";
 import {
@@ -16,14 +17,24 @@ import {
   useGoogleDriveFolders,
 } from "./use-google-drive-folders";
 import { FolderRow, type FolderCrumb } from "./folder-row";
+import { MissingPermissionsNotice } from "@/lib/components/missing-permissions-notice";
+
+/** Top-level groups, in display order: team spaces first, then what others
+ * shared with the account, then the account's own My Drive. */
+const SECTIONS = [
+  { kind: "sharedDrive", label: "Shared drives" },
+  { kind: "shared", label: "Shared with me" },
+  { kind: "folder", label: "My Drive" },
+] as const;
 
 /**
- * Google Drive folder picker: an expandable tree of My Drive and shared
- * drives, each row showing its direct subfolder and file counts. Drive
- * addresses folders by opaque ID, so a selection is stored as the CHAIN of IDs
- * from the top down to it (`<sharedDriveOrTopFolder>/<…>/<folder>`) — the
- * gateway checks the whole chain against Drive's live parent links on every
- * agent request.
+ * Google Drive folder picker: an expandable tree of shared drives, folders
+ * shared with the account, and My Drive, each row showing its direct
+ * subfolder and file counts. Drive addresses folders by opaque ID, so a
+ * selection is stored as the CHAIN of IDs from the top down to it
+ * (`<sharedDriveOrTopFolder>/<…>/<folder>`; a Shared-with-me folder heads its
+ * own chain) — the gateway checks the whole chain against Drive's live parent
+ * links on every agent request.
  */
 export const GoogleDrivePolicyDialogContent = ({
   connectionId,
@@ -32,7 +43,15 @@ export const GoogleDrivePolicyDialogContent = ({
   onPolicyChange,
   onSave,
   onCancel,
+  missingPermissions = [],
+  onReconnect,
 }: PolicyDialogContentProps) => {
+  // Without "Read files" Drive shows only files OneCLI created, so the tree
+  // can't be browsed: say so up front (and skip the doomed request).
+  const missingRead = missingPermissions.filter(
+    (p) => p.scope === DRIVE_READ_SCOPE,
+  );
+  const canBrowse = missingRead.length === 0;
   // Selecting a folder the organization doesn't allow would compose to a
   // narrower scope than asked for — the server refuses it, so don't offer it.
   // `coveredBy` is the shared containment law (null boundary = unbounded).
@@ -55,7 +74,7 @@ export const GoogleDrivePolicyDialogContent = ({
     data: folders = [],
     isPending,
     isError,
-  } = useGoogleDriveFolders(connectionId, "", !isAllFolders);
+  } = useGoogleDriveFolders(connectionId, "", !isAllFolders && canBrowse);
 
   // Saved chains hold IDs only; label them with live names. Keyed on the
   // joined chains so a re-render with the same selection doesn't refetch.
@@ -67,6 +86,7 @@ export const GoogleDrivePolicyDialogContent = ({
   const { data: names = {} } = useGoogleDriveFolderNames(
     connectionId,
     savedIds,
+    canBrowse,
   );
   // Names of the folders checked in this session, so a fresh selection is
   // labelled immediately (before the names lookup refetches). Recorded in the
@@ -137,7 +157,17 @@ export const GoogleDrivePolicyDialogContent = ({
           })}
         </div>
 
-        {!isAllFolders && (
+        {!isAllFolders && !canBrowse && (
+          <MissingPermissionsNotice
+            className="mt-3"
+            permissions={missingRead}
+            consequence="list the folders in this Drive"
+            hint="Reconnect and tick “See and download all your Google Drive files” on Google's consent screen."
+            onReconnect={onReconnect}
+          />
+        )}
+
+        {!isAllFolders && canBrowse && (
           <div className="mt-3 space-y-2">
             <div className="relative">
               <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2" />
@@ -169,19 +199,30 @@ export const GoogleDrivePolicyDialogContent = ({
                     : "No folders in this Drive"}
                 </p>
               ) : (
-                filteredFolders.map((folder) => (
-                  <FolderRow
-                    key={folder.id}
-                    connectionId={connectionId}
-                    folder={folder}
-                    trail={[]}
-                    depth={0}
-                    selectedChains={selectedChains}
-                    selectedSet={selectedSet}
-                    withinOrgBoundary={withinOrgBoundary}
-                    toggleChain={toggleChain}
-                  />
-                ))
+                SECTIONS.map(({ kind, label }) => {
+                  const items = filteredFolders.filter((f) => f.kind === kind);
+                  if (items.length === 0) return null;
+                  return (
+                    <section key={kind} aria-label={label}>
+                      <h3 className="text-muted-foreground px-2 pt-2 pb-1 text-[11px] font-medium tracking-wide uppercase">
+                        {label}
+                      </h3>
+                      {items.map((folder) => (
+                        <FolderRow
+                          key={folder.id}
+                          connectionId={connectionId}
+                          folder={folder}
+                          trail={[]}
+                          depth={0}
+                          selectedChains={selectedChains}
+                          selectedSet={selectedSet}
+                          withinOrgBoundary={withinOrgBoundary}
+                          toggleChain={toggleChain}
+                        />
+                      ))}
+                    </section>
+                  );
+                })
               )}
             </div>
 

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { monday } from "./monday";
 
 const method = monday.connectionMethod;
@@ -47,5 +47,42 @@ describe("monday connect note", () => {
     expect(monday.connectNote?.link?.url).toBe(
       "https://onecli.sh/docs/integrations/monday#if-you’re-not-a-monday-com-admin",
     );
+  });
+});
+
+describe("monday token exchange", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const grantedScopes = async (scope: string) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) =>
+        String(input) === "https://auth.monday.com/oauth2/token"
+          ? Response.json({ access_token: "tok-1", scope })
+          : new Response("nope", { status: 500 }),
+      ),
+    );
+    const result = await method.exchangeCode({
+      appCredentials: { clientId: "client-1", clientSecret: "secret-1" },
+      callbackParams: { code: "code-1" },
+      redirectUri: "https://api.example.com/v1/apps/monday/callback",
+    });
+    return result.scopes;
+  };
+
+  // monday documents the granted `scope` as comma-separated, while its own
+  // example response uses spaces: each scope must land as its own entry.
+  it("splits a comma-separated grant", async () => {
+    expect(await grantedScopes("me:read,boards:read")).toEqual([
+      "me:read",
+      "boards:read",
+    ]);
+  });
+
+  it("splits a space-separated grant", async () => {
+    expect(await grantedScopes("me:read boards:read")).toEqual([
+      "me:read",
+      "boards:read",
+    ]);
   });
 });

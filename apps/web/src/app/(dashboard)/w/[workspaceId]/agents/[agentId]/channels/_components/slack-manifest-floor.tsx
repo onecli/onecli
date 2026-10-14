@@ -20,10 +20,11 @@ interface SlackManifestFloorProps {
    * (undefined on older servers, whose strict schemas reject unknown keys). */
   requestedTransport?: ChannelTransport;
   /**
-   * Re-attaching an app the platform already knows (it was removed on the
-   * provider's side): the app exists, so there is nothing to create and the
-   * App ID is on file. The floor then asks only for fresh tokens and resumes
-   * the same presence. Null = first-time setup, the full two steps.
+   * Re-attaching an app the platform already knows (a detached setup, or an
+   * app removed on the provider's side): the app exists, so there is nothing
+   * to create and the App ID is on file. The floor then asks only for its
+   * tokens and resumes the same presence. Null = first-time setup, the full
+   * two steps.
    */
   reattachAppId?: string | null;
 }
@@ -130,15 +131,15 @@ export const SlackManifestFloor = ({
   );
 
   if (reattaching) {
-    // The app exists (the platform holds its id); only its tokens are dead
-    // or unknown. One step: reinstall at Slack if it was uninstalled, then
-    // paste the fresh tokens. No manifest, no App ID to retype.
+    // The app exists (the platform holds its id); only its tokens are needed.
+    // One step: reinstall at Slack if it was uninstalled, then paste them.
+    // No manifest, no App ID to retype.
     return (
       <ol>
         <InstallStep
           number={1}
-          title="Reinstall the app and paste its fresh tokens"
-          description={`Open the app (${reattachAppId}) on api.slack.com, reinstall it to your workspace if it was uninstalled, then copy the new values below. The same app comes back; nothing else changes.`}
+          title="Paste the app's tokens to reconnect it"
+          description={`Open the app (${reattachAppId}) on api.slack.com. If it was uninstalled, reinstall it to your workspace first. Then copy its values below. The same app comes back; nothing else changes.`}
           last
         >
           <div className="space-y-3">

@@ -1,25 +1,27 @@
 # OneCLI Helm chart
 
 OneCLI on Kubernetes: the dashboard, the API, the credential-injecting
-gateway, and the hosted-agents runner. Each agent sandbox runs as its own
-Job + PVC in a fenced namespace, with no Docker daemon anywhere.
+gateway, the hosted-agents runner, and (opt-in) the Slack channel adapter.
+Each agent sandbox runs as its own Job + PVC in a fenced namespace, with no
+Docker daemon anywhere.
 
-It is the Kubernetes counterpart of the [Docker Compose stack](../docs/self-hosting.md)
+It is the Kubernetes counterpart of the [Docker Compose stack](../../docs/self-hosting.md)
 and runs the same images with the same configuration. Amazon EKS is the
 reference platform; any conformant Kubernetes 1.30+ with a
 NetworkPolicy-enforcing CNI works.
 
 ## What you get
 
-| Component    | Kind              | Notes                                                                 |
-| ------------ | ----------------- | --------------------------------------------------------------------- |
-| `web`        | Deployment        | The dashboard (Next.js), port 10254                                   |
-| `api`        | Deployment        | The one `/v1` server, port 10256. One replica (in-process event bus)  |
-| `gateway`    | Deployment        | MITM proxy, port 10255. CA from a Secret, read-only root, no volume   |
-| `runner`     | Deployment        | Starts/parks/reaps sandboxes via the Kubernetes API                   |
-| `migrations` | Job               | `prisma migrate deploy`, one per install/upgrade; the api waits on it |
-| `postgresql` | StatefulSet       | **Evaluation only.** Bring your own for production                    |
-| sandboxes    | Namespace + fence | PSA `restricted`, default-deny NetworkPolicy, quota, LimitRange       |
+| Component         | Kind              | Notes                                                                    |
+| ----------------- | ----------------- | ------------------------------------------------------------------------ |
+| `web`             | Deployment        | The dashboard (Next.js), port 10254                                      |
+| `api`             | Deployment        | The one `/v1` server, port 10256. One replica (in-process event bus)     |
+| `gateway`         | Deployment        | MITM proxy, port 10255. CA from a Secret, read-only root, no volume      |
+| `runner`          | Deployment        | Starts/parks/reaps sandboxes via the Kubernetes API                      |
+| `channel-adapter` | Deployment        | Opt-in (`channelAdapter.enabled`). Slack connections, answers, approvals |
+| `migrations`      | Job               | `prisma migrate deploy`, one per install/upgrade; the api waits on it    |
+| `postgresql`      | StatefulSet       | **Evaluation only.** Bring your own for production                       |
+| sandboxes         | Namespace + fence | PSA `restricted`, default-deny NetworkPolicy, quota, LimitRange          |
 
 Every pod runs non-root with all capabilities dropped and the default seccomp
 profile, which is what Pod Security Admission `restricted` requires. The
@@ -30,26 +32,40 @@ namespace plus a `get` on three Services.
 
 ### 1. Secrets
 
-Create the four application secrets in the release namespace. They are
-yours to keep: `SECRET_ENCRYPTION_KEY` encrypts every credential OneCLI
-stores, and losing it orphans them all.
+Create the application secrets in the release namespace. They are yours to
+keep: `SECRET_ENCRYPTION_KEY` encrypts every credential OneCLI stores, and
+losing it orphans them all.
 
 ```sh
+hex() { head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 kubectl create namespace onecli
 kubectl -n onecli create secret generic onecli-secrets \
   --from-literal=BETTER_AUTH_SECRET="$(head -c 32 /dev/urandom | base64)" \
   --from-literal=SECRET_ENCRYPTION_KEY="$(head -c 32 /dev/urandom | base64)" \
   --from-literal=GATEWAY_INTERNAL_SECRET="$(head -c 32 /dev/urandom | base64)" \
-  --from-literal=RUNNER_TOKEN="rnr_$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  --from-literal=RUNNER_TOKEN="rnr_$(hex)" \
+  --from-literal=RUNNER_SESSION_KEY="k1.$(hex)" \
+  --from-literal=CHANNEL_ADAPTER_TOKEN="cha_$(hex)"
 ```
 
-Any secret manager that materialises a Kubernetes Secret with those four keys
-(External Secrets Operator, Sealed Secrets, Vault) works the same way: name
-it in `secrets.existingSecret`.
+`RUNNER_SESSION_KEY` lets a runner restart (an upgrade, a node drain) keep
+every in-flight agent turn; without it the runner still works, but a
+restart ends running turns. `CHANNEL_ADAPTER_TOKEN` is read only when Slack
+is on ([Slack](#6-slack)); minting it now makes that a one-flag change.
 
-For a throwaway evaluation, `secrets.generate.enabled=true` runs a one-time
-Job that mints them into `<release>-secrets` instead. It never overwrites an
-existing Secret.
+Any secret manager that materialises a Kubernetes Secret with those keys
+(External Secrets Operator, Sealed Secrets, Vault) works the same way: name
+it in `secrets.existingSecret`. A Secret made from an older version of this
+README lacks the last two keys; add them without touching the others:
+
+```sh
+kubectl -n onecli patch secret onecli-secrets --type merge -p \
+  "{\"stringData\":{\"RUNNER_SESSION_KEY\":\"k1.$(hex)\",\"CHANNEL_ADAPTER_TOKEN\":\"cha_$(hex)\"}}"
+```
+
+For a throwaway evaluation, `secrets.generate.enabled=true` runs a Job that
+mints them into `<release>-secrets` instead. It never changes an existing
+value; on upgrades it only adds keys a newer chart introduced.
 
 ### 2. Database
 
@@ -151,6 +167,49 @@ agents share a kernel with their neighbours.
 Agents reach the internet only through the gateway. To let them reach
 internal services (a self-hosted Jira, a private package registry), list
 those in `gateway.allowPrivateDestinations`.
+
+### 6. Slack
+
+Agents answer in Slack through the channel adapter, a small daemon that
+holds the Slack connections and posts every answer and approval card. It is
+off by default; turn it on with:
+
+```sh
+helm upgrade onecli oci://ghcr.io/onecli/charts/onecli --namespace onecli \
+  --reset-then-reuse-values --set channelAdapter.enabled=true
+```
+
+It reads `CHANNEL_ADAPTER_TOKEN` from the application Secret, and the api
+reads the same key to admit it. With `secrets.generate.enabled` the Job
+mints the key; with your own Secret, the upgrade refuses with the exact
+`kubectl patch` when the key is missing. Then
+`kubectl -n onecli logs deploy/onecli-channel-adapter` shows `registered`,
+and the dashboard's Channels pages stop reporting channels offline.
+
+Argo CD and Flux render with `helm template`, which cannot see your Secret,
+so there the check cannot run: add the key before turning the adapter on.
+If you add it afterwards, the adapter starts once the key exists but the
+api, which read the Secret when it started, still refuses it (the adapter
+logs a 401 and restarts); `kubectl -n onecli rollout restart deploy/onecli-api`
+fixes it.
+
+The adapter needs no Service, port, database or ServiceAccount token. It
+dials the api and gateway Services in-cluster and Slack directly over
+outbound 443 (allow `slack.com` and its subdomains if your egress is
+filtered: Socket Mode and file uploads use them). Its traffic is platform
+traffic, so it never goes through the gateway, and the sandbox fence does
+not admit it.
+
+Both Slack transports need it. With an `https://` `externalUrl` new agents
+default to Events mode: Slack posts to `/v1/channels/slack/events`, which
+the chart's route already sends to the api, and the adapter posts the
+replies. Setting up an agent's Slack app is in
+[docs/channels-slack.md](../../docs/channels-slack.md).
+
+The optional shared Slack app (team onboarding from Slack) reads four
+credentials from a Secret you name in `slackSharedApp.existingSecret`
+(`SLACK_SHARED_CLIENT_ID`, `SLACK_SHARED_CLIENT_SECRET`,
+`SLACK_SHARED_SIGNING_SECRET`, `SLACK_SHARED_APP_ID`). Most installs skip it.
 
 ## Amazon EKS
 
@@ -267,8 +326,16 @@ kubectl -n onecli create secret generic onecli-gateway-ca \
 ## Upgrades
 
 ```sh
-helm upgrade onecli oci://ghcr.io/onecli/charts/onecli --namespace onecli --reuse-values
+helm upgrade onecli oci://ghcr.io/onecli/charts/onecli --namespace onecli \
+  --reset-then-reuse-values
 ```
+
+`--reset-then-reuse-values` (Helm 3.14+) keeps your settings and picks up
+the new chart's defaults for anything you never set. Prefer it to
+`--reuse-values`, which replays the previous release's values in place of
+the new defaults, so a value a newer chart introduced arrives empty. Even
+better, keep your values in a file and pass `-f values.yaml` on every
+upgrade.
 
 Each upgrade creates a new migrations Job; the api's init container waits
 for the schema to be current. Running agents keep their old image until
@@ -293,7 +360,7 @@ most installs touch:
 | Value                              | Default            | What it does                                        |
 | ---------------------------------- | ------------------ | --------------------------------------------------- |
 | `externalUrl`                      | (required)         | The URL people open OneCLI at                       |
-| `secrets.existingSecret`           | `""`               | Your Secret with the four application secrets       |
+| `secrets.existingSecret`           | `""`               | Your Secret with the application secrets            |
 | `secrets.generate.enabled`         | `false`            | Mint them with a Job instead (evaluation)           |
 | `database.enabled`                 | `true`             | Bundled PostgreSQL (evaluation only)                |
 | `database.external.existingSecret` | `""`               | Your Secret with `DATABASE_URL` (production)        |
@@ -306,6 +373,8 @@ most installs touch:
 | `sandboxes.memoryMb` / `cpus`      | `2048` / `2`       | Per-sandbox ceiling                                 |
 | `sandboxes.nodeSelector`           | `{}`               | Dedicated sandbox nodes                             |
 | `gateway.allowPrivateDestinations` | `""`               | Internal hosts agents may reach through the gateway |
+| `channelAdapter.enabled`           | `false`            | Slack: agents answer in Slack                       |
+| `slackSharedApp.existingSecret`    | `""`               | Your own shared Slack app (team onboarding)         |
 | `enterpriseEnabled`                | `false`            | The Enterprise feature set (requires a license)     |
 
 ## Enterprise features
@@ -318,7 +387,7 @@ compose stack's `ENTERPRISE_ENABLED`. With a
 
 ```sh
 helm upgrade onecli oci://ghcr.io/onecli/charts/onecli --namespace onecli \
-  --reuse-values --set enterpriseEnabled=true
+  --reset-then-reuse-values --set enterpriseEnabled=true
 ```
 
 The api, dashboard and gateway read the flag at startup, so the upgrade
@@ -328,6 +397,10 @@ restarts them; running agents are unaffected.
 
 - Scale the api. Self-hosted installs run one api replica (its event bus is
   in-process), and the chart refuses `api.replicas > 1`.
+- Scale the gateway without shared state. Pending approvals and the config
+  cache live in each gateway's memory, so the chart refuses
+  `gateway.replicas > 1` unless `enterpriseEnabled` is on and `REDIS_HOST`
+  (the licensed multi-instance stores) is set in `gateway.extraEnv`.
 - Expose the raw proxy. The gateway's CONNECT proxy on :10255 stays
   in-cluster, which is where hosted agents reach it. For agents on other
   machines, `gateway.service.type=LoadBalancer` exposes it; a VPN is the

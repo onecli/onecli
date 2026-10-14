@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { join } from "node:path";
 import {
   afterAll,
   beforeAll,
@@ -10393,3 +10395,345 @@ describe.skipIf(!PROOF_URL)("durable channel cleanup outbox", () => {
     ).toMatchObject({ state: "pending" });
   });
 });
+
+describe.skipIf(!PROOF_URL)(
+  "user-created apps (the paste floor) are never reserved",
+  () => {
+    /** The reported shape: socket posture, no org automation token, so the
+     * user created the app at api.slack.com and pasted only its tokens. The
+     * platform never held its client pair, so `apps.uninstall` cannot run. */
+    const pasteUserApp = (agentId: string, appId: string, botToken: string) =>
+      agentChannels.completePresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        { botToken, appToken: "xapp-user", appId },
+        ADMIN,
+      );
+    const cleanupFor = (externalId: string) =>
+      db.channelCleanup.findUnique({
+        where: { provider_externalId: { provider: "slack", externalId } },
+      });
+
+    it("detach keeps the app, and the SAME app re-attaches with no Slack teardown", async () => {
+      const agentId = await seedAgent("user-app-reattach");
+      scriptAuthTest();
+      const first = await pasteUserApp(agentId, "A-USER-1", "xoxb-first");
+
+      await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+        deleteRemote: false,
+      });
+
+      // Released, not blocked: nothing reserves the app id.
+      expect(await cleanupFor("A-USER-1")).toBeNull();
+      // The user's own app was never touched remotely.
+      expect(slackCallsFor("apps.uninstall")).toHaveLength(0);
+      expect(slackCallsFor("apps.manifest.update")).toHaveLength(0);
+      // The service key went with the attachment.
+      expect(
+        await db.apiKey.findUnique({ where: { id: first.apiKeyId! } }),
+      ).toBeNull();
+
+      const again = await pasteUserApp(agentId, "A-USER-1", "xoxb-fresh");
+      expect(again).toMatchObject({
+        id: first.id,
+        externalId: "A-USER-1",
+        status: "active",
+      });
+      const row = await db.agentChannel.findUniqueOrThrow({
+        where: { id: first.id },
+      });
+      expect(
+        JSON.parse(await getCrypto().decrypt(row.credentials!)),
+      ).toMatchObject({ botToken: "xoxb-fresh" });
+    });
+
+    it("Start over (remote delete) releases the app too: no rename, no uninstall, no record delete", async () => {
+      await seedIntegration({
+        credentials: await integrationCredentials(12 * 3600),
+      });
+      const agentId = await seedAgent("user-app-start-over");
+      scriptAuthTest();
+      await pasteUserApp(agentId, "A-USER-2", "xoxb-first");
+
+      await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+        deleteRemote: true,
+      });
+
+      expect(await cleanupFor("A-USER-2")).toBeNull();
+      // Even with an org token on file, the user's app is theirs: the
+      // tombstone rename and the record delete never run against it.
+      expect(slackCallsFor("apps.manifest.export")).toHaveLength(0);
+      expect(slackCallsFor("apps.manifest.update")).toHaveLength(0);
+      expect(slackCallsFor("apps.uninstall")).toHaveLength(0);
+      expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
+
+      // A fresh paste of the same app attaches as a new presence.
+      const again = await pasteUserApp(agentId, "A-USER-2", "xoxb-again");
+      expect(again).toMatchObject({ externalId: "A-USER-2", status: "active" });
+    });
+
+    it("a platform-created app missing its bot token is STILL retained (the gate holds)", async () => {
+      // The control: only positive evidence of a user-created app releases a
+      // job. A pending guided app holds the client pair and no bot token,
+      // which proves nothing about whether it was ever installed.
+      const integration = await seedIntegration({
+        credentials: await integrationCredentials(12 * 3600),
+      });
+      const agentId = await seedAgent("guided-no-bot");
+      const presence = await seedPresence(agentId, integration.id, {
+        status: "pending_setup",
+        externalId: "A-GUIDED-NOBOT",
+        credentials: await getCrypto().encrypt(
+          JSON.stringify({ clientId: "id", clientSecret: "secret" }),
+        ),
+      });
+      const cleanup = await import("./channel-cleanup-service");
+      const ids = await db.$transaction(async (tx) => {
+        const ids = await cleanup.enqueueChannelCleanup(
+          tx,
+          { id: presence.id },
+          false,
+        );
+        await tx.agentChannel.delete({ where: { id: presence.id } });
+        return ids;
+      });
+
+      await cleanup.processChannelCleanups({ ids });
+
+      expect(await cleanupFor("A-GUIDED-NOBOT")).toMatchObject({
+        state: "blocked",
+        reason: "missing_uninstall_credentials",
+      });
+    });
+
+    it("a release never erases a snapshot that changed after it was claimed", async () => {
+      // The ciphertext fence: a job re-snapshotted with a platform-created
+      // app's credentials while the worker held the claim is not the one the
+      // worker judged, and must survive for the normal gate.
+      const agentId = await seedAgent("user-app-fence");
+      scriptAuthTest();
+      const presence = await pasteUserApp(agentId, "A-USER-FENCE", "xoxb-u");
+      const cleanup = await import("./channel-cleanup-service");
+      const ids = await db.$transaction(async (tx) => {
+        const ids = await cleanup.enqueueChannelCleanup(
+          tx,
+          { id: presence.id },
+          false,
+        );
+        await tx.agentChannel.delete({ where: { id: presence.id } });
+        return ids;
+      });
+      const managed = await getCrypto().encrypt(
+        JSON.stringify({
+          botToken: "xoxb-m",
+          clientId: "managed",
+          clientSecret: "managed-secret",
+        }),
+      );
+      // Swap the snapshot the instant the worker decrypts the old one.
+      const crypto = getCrypto();
+      const realDecrypt = crypto.decrypt.bind(crypto);
+      const decrypt = vi
+        .spyOn(crypto, "decrypt")
+        .mockImplementationOnce(async (ciphertext: string) => {
+          const plain = await realDecrypt(ciphertext);
+          await db.channelCleanup.update({
+            where: { id: ids[0] },
+            data: { credentials: managed },
+          });
+          return plain;
+        });
+      try {
+        await cleanup.processChannelCleanups({ ids });
+      } finally {
+        decrypt.mockRestore();
+      }
+
+      expect(await cleanupFor("A-USER-FENCE")).toMatchObject({
+        credentials: managed,
+      });
+    });
+
+    it("refuses a DIFFERENT App ID on a detached presence, before any Slack call", async () => {
+      // Before this guard the pasted id was ignored and the new app's tokens
+      // were stored under the shell's id, routing that app through the wrong
+      // record with no warning.
+      const agentId = await seedAgent("user-app-other-id");
+      scriptAuthTest();
+      const first = await pasteUserApp(agentId, "A-USER-OLD", "xoxb-old");
+      await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+        deleteRemote: false,
+      });
+      const authTests = slackCallsFor("auth.test").length;
+
+      await expect(
+        pasteUserApp(agentId, "A-USER-NEW", "xoxb-new"),
+      ).rejects.toMatchObject({
+        code: "CONFLICT",
+        message: expect.stringContaining("A-USER-OLD"),
+      });
+      expect(slackCallsFor("auth.test")).toHaveLength(authTests);
+      expect(
+        await db.agentChannel.findUniqueOrThrow({ where: { id: first.id } }),
+      ).toMatchObject({ externalId: "A-USER-OLD", status: "pending_setup" });
+
+      // Start over clears the shell; the other app then attaches cleanly.
+      await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+        deleteRemote: true,
+      });
+      const other = await pasteUserApp(agentId, "A-USER-NEW", "xoxb-new");
+      expect(other).toMatchObject({
+        externalId: "A-USER-NEW",
+        status: "active",
+      });
+    });
+
+    describe("the requeue migration for jobs a previous build left blocked", () => {
+      const MIGRATION = join(
+        __dirname,
+        "../../../../db/prisma/migrations/20261014142243_requeue_user_created_slack_app_cleanups/migration.sql",
+      );
+      /** Re-applied by hand over seeded rows, in a session whose clock is NOT
+       * UTC: the columns hold UTC wall time, so a bare `now()` would push the
+       * requeued job hours into the future and leave it undue. */
+      const applyMigration = () =>
+        db.$transaction(async (tx) => {
+          await tx.$queryRaw`SELECT set_config('TimeZone', 'Asia/Tokyo', true)`;
+          return tx.$executeRawUnsafe(
+            readFileSync(MIGRATION, "utf8")
+              .split("\n")
+              .filter((line) => !line.trim().startsWith("--"))
+              .join("\n"),
+          );
+        });
+
+      /** The exact state the old worker left: the job enqueued with the
+       * presence's credentials, then blocked on its first attempt. */
+      const seedStuckJob = async (
+        suffix: string,
+        credentialsJson: string,
+        options: { expired?: boolean } = {},
+      ) => {
+        const integration = await db.channelIntegration.upsert({
+          where: {
+            organizationId_provider: { organizationId: ORG, provider: "slack" },
+          },
+          create: {
+            organizationId: ORG,
+            provider: "slack",
+            externalId: "T111",
+            name: "Acme",
+            createdByUserId: ADMIN,
+          },
+          update: {},
+          select: { id: true },
+        });
+        const agentId = await seedAgent(`stuck-${suffix}`);
+        const presence = await seedPresence(agentId, integration.id, {
+          externalId: `A-STUCK-${suffix}`,
+          credentials: await getCrypto().encrypt(credentialsJson),
+        });
+        const cleanup = await import("./channel-cleanup-service");
+        const [id] = await db.$transaction(async (tx) => {
+          const ids = await cleanup.enqueueChannelCleanup(
+            tx,
+            { id: presence.id },
+            false,
+          );
+          await tx.agentChannel.update({
+            where: { id: presence.id },
+            data: { status: "pending_setup", apiKeyId: null },
+          });
+          return ids;
+        });
+        await db.channelCleanup.update({
+          where: { id },
+          data: {
+            state: "blocked",
+            reason: "missing_uninstall_credentials",
+            attempts: 1,
+            ...(options.expired && { expiresAt: new Date(Date.now() - 1000) }),
+          },
+        });
+        return { agentId, presence, id: id! };
+      };
+
+      it("frees a stuck user-created app on the next pass, and only that one", async () => {
+        scriptAuthTest();
+        const user = await seedStuckJob(
+          "user",
+          JSON.stringify({ botToken: "xoxb-user", appToken: "xapp-user" }),
+        );
+        const guided = await seedStuckJob(
+          "guided",
+          JSON.stringify({ clientId: "id", clientSecret: "secret" }),
+        );
+        const expired = await seedStuckJob(
+          "expired",
+          JSON.stringify({ botToken: "xoxb-old", appToken: "xapp-old" }),
+          { expired: true },
+        );
+        // The reported symptom, before the migration.
+        await expect(
+          pasteUserApp(user.agentId, user.presence.externalId, "xoxb-again"),
+        ).rejects.toThrow("reserved for remote cleanup");
+
+        expect(await applyMigration()).toBe(2);
+        const requeued = await db.channelCleanup.findUniqueOrThrow({
+          where: { id: user.id },
+        });
+        expect(requeued).toMatchObject({
+          state: "pending",
+          reason: null,
+          claimToken: null,
+        });
+        expect(requeued.nextAttemptAt.getTime()).toBeLessThanOrEqual(
+          Date.now(),
+        );
+        // Past retention: left exactly as it was.
+        expect(
+          await db.channelCleanup.findUniqueOrThrow({
+            where: { id: expired.id },
+          }),
+        ).toMatchObject({
+          state: "blocked",
+          reason: "missing_uninstall_credentials",
+        });
+
+        const cleanup = await import("./channel-cleanup-service");
+        await cleanup.processChannelCleanups({ ids: [user.id, guided.id] });
+
+        expect(
+          await db.channelCleanup.findUnique({ where: { id: user.id } }),
+        ).toBeNull();
+        // The platform-created app keeps its gate: re-blocked, same reason.
+        expect(
+          await db.channelCleanup.findUniqueOrThrow({
+            where: { id: guided.id },
+          }),
+        ).toMatchObject({
+          state: "blocked",
+          reason: "missing_uninstall_credentials",
+        });
+        expect(slackCallsFor("apps.uninstall")).toHaveLength(0);
+
+        // The user's own app re-attaches. A re-run hands back only the
+        // platform-created job, which the worker re-blocks exactly as before.
+        await expect(
+          pasteUserApp(user.agentId, user.presence.externalId, "xoxb-again"),
+        ).resolves.toMatchObject({ status: "active" });
+        expect(await applyMigration()).toBe(1);
+        await cleanup.processChannelCleanups({ ids: [guided.id] });
+        expect(
+          await db.channelCleanup.findUniqueOrThrow({
+            where: { id: guided.id },
+          }),
+        ).toMatchObject({
+          state: "blocked",
+          reason: "missing_uninstall_credentials",
+        });
+      });
+    });
+  },
+);

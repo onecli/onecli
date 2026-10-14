@@ -12,7 +12,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@onecli/ui/components/dialog";
-import type { Connection } from "@/lib/api";
 import { useAgentGrants } from "@/hooks/use-grants";
 import { useConnections } from "@/hooks/use-connections";
 import { useAppPermissionDefinitions } from "@/hooks/use-app-permissions";
@@ -75,9 +74,11 @@ export const AttachConnectionDialog = ({
 
   // The per-row Manage door: the agent page's permissions side drawer,
   // targeted at ONE connection. Same read-only law as every Manage surface.
-  const [manageConnection, setManageConnection] = useState<Connection | null>(
-    null,
-  );
+  // The id, not a snapshot: the dialog reads the live row, so a reconnect
+  // from inside it (which refetches the list) shows the refreshed grant.
+  const [manageId, setManageId] = useState<string | null>(null);
+  const manageConnection =
+    connectionsQuery.data?.find((c) => c.id === manageId) ?? null;
   const {
     grant: manageGrant,
     readOnly: manageReadOnly,
@@ -235,7 +236,7 @@ export const AttachConnectionDialog = ({
                       credential?.kind === "connection" && credential.orgBlocked
                     }
                     hasCatalog={hasCatalog}
-                    onManage={() => setManageConnection(connection)}
+                    onManage={() => setManageId(connection.id)}
                   />
                 );
               })}
@@ -282,7 +283,7 @@ export const AttachConnectionDialog = ({
         grant={manageGrant}
         readOnly={manageReadOnly}
         readOnlyReason={manageReadOnlyReason}
-        onClose={() => setManageConnection(null)}
+        onClose={() => setManageId(null)}
       />
     </>
   );

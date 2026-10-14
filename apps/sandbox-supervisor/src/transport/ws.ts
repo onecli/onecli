@@ -30,8 +30,8 @@ import { log } from "../log";
  * there dialling a socket nobody answers for the life of the container,
  * holding its memory and its home volume, invisible to a reconcile that
  * only recognises objects labelled by the CURRENT runner. Giving up ends the
- * process, which stops the container, which is the state an operator can
- * actually see and clean up.
+ * run, and the entrypoint then ends the process explicitly (index.ts), which
+ * stops the container: the state an operator can actually see and clean up.
  */
 export const DEFAULT_MAX_ATTEMPTS = SESSION_RESUME_BUDGET.maxAttempts;
 
@@ -43,8 +43,10 @@ export const DEFAULT_MAX_ATTEMPTS = SESSION_RESUME_BUDGET.maxAttempts;
 export const MAX_OUTBOUND_MESSAGES = 2_000;
 
 /**
- * Longest `close()` waits for the socket to acknowledge. Bounded because the
- * alternative to a half-open socket noticing is a container that never exits.
+ * Longest `close()` waits for the socket to acknowledge, so a half-open socket
+ * cannot stall the teardown behind it. It does NOT have to finish closing for
+ * the container to end: the entrypoint exits explicitly once the run is over
+ * (index.ts), whatever this socket is still doing.
  */
 export const CLOSE_TIMEOUT_MS = 2_000;
 

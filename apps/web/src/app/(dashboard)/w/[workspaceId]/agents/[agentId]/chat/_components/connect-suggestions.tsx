@@ -122,9 +122,10 @@ export const ConnectorSuggestionsCard = ({
       .filter((c) => c.provenance.some((p) => p.scope === "organization"))
       .map((c) => c.id),
   );
-  const [manageConnection, setManageConnection] = useState<Connection | null>(
-    null,
-  );
+  // The id, not a snapshot: the dialog reads the live row, so a reconnect
+  // from inside it (which refetches the list) shows the refreshed grant.
+  const [manageId, setManageId] = useState<string | null>(null);
+  const manageConnection = connections.find((c) => c.id === manageId) ?? null;
   /** Provider whose Attach dialog is open (all of that app's connections,
    * each with an attach toggle for this agent). The provider survives the
    * close (open flips false) so Radix can play the exit animation instead
@@ -446,7 +447,7 @@ export const ConnectorSuggestionsCard = ({
                       size="xs"
                       aria-label={`Manage ${app.name} access`}
                       disabled={!grantsReady}
-                      onClick={() => setManageConnection(connection)}
+                      onClick={() => setManageId(connection.id)}
                     >
                       <Settings2 className="size-3.5" aria-hidden />
                       Manage
@@ -540,7 +541,7 @@ export const ConnectorSuggestionsCard = ({
           grant={manageGrant}
           readOnly={manageReadOnly}
           readOnlyReason={manageReadOnlyReason}
-          onClose={() => setManageConnection(null)}
+          onClose={() => setManageId(null)}
         />
       )}
 

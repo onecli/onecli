@@ -35,6 +35,8 @@ export interface OAuthConnection {
   workspaceId: string | null;
   organizationId: string | null;
   appConfigId: string | null;
+  /** The scopes the provider granted (feature gates check what's missing). */
+  scopes: string[];
 }
 
 /**
@@ -83,6 +85,7 @@ export const loadOAuthConnection = async (
       workspaceId: true,
       organizationId: true,
       appConfigId: true,
+      scopes: true,
     },
   });
   if (!conn?.credentials) {

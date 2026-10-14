@@ -11,6 +11,7 @@ import {
 } from "./oauth/groups";
 import { accessLevelFromState, resolveAccessLevel } from "./access-level";
 import { extractLabel } from "../lib/connection-display";
+import { setPartialGrantParams } from "./missing-permissions";
 import {
   createConnection,
   reconnectConnection,
@@ -276,19 +277,19 @@ export const tryHandleOrgCallback = async (
       }
     }
 
-    if (reconnectId) {
-      await reconnectConnection({ organizationId }, reconnectId, credentials, {
-        scopes,
-        metadata,
-        appConfigId: resolved.appConfigId,
-      });
-    } else {
-      await createConnection({ organizationId }, provider, credentials, {
-        scopes,
-        metadata,
-        appConfigId: resolved.appConfigId,
-      });
-    }
+    // The connection this consent landed on, created or re-authenticated.
+    const connection = reconnectId
+      ? await reconnectConnection(
+          { organizationId },
+          reconnectId,
+          credentials,
+          { scopes, metadata, appConfigId: resolved.appConfigId },
+        )
+      : await createConnection({ organizationId }, provider, credentials, {
+          scopes,
+          metadata,
+          appConfigId: resolved.appConfigId,
+        });
 
     if (app.blocklist?.length) {
       await initBlocklistDefaults({ organizationId }, provider, app.blocklist);
@@ -298,8 +299,15 @@ export const tryHandleOrgCallback = async (
     // just the workspace the dance started from.
     invalidateGatewayCacheForOrg(organizationId);
 
+    const successParams = new URLSearchParams({ status: "success" });
+    // Same partial-grant warning as the workspace callback: the popup offers
+    // to re-authenticate this org connection.
+    setPartialGrantParams(successParams, provider, scopes, {
+      connectionId: connection.id,
+      scope: { orgId: organizationId },
+    });
     return Response.redirect(
-      `${appOrigin}/app-connect/${provider}?status=success`,
+      `${appOrigin}/app-connect/${provider}?${successParams}`,
     );
   } catch (err) {
     logger.error({ err, provider }, "Org OAuth callback failed");

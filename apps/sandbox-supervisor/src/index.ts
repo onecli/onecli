@@ -155,6 +155,14 @@ const main = async (): Promise<void> => {
     closeDesktop();
   }
   log("info", "supervisor exited cleanly");
+  // END THE PROCESS, explicitly. This process is the sandbox's whole
+  // lifetime (the container runs as long as it does), and a finished run has
+  // already torn down everything it owns (runSupervisor's `finally`). Left to
+  // the event loop, ONE handle nothing here owns keeps it alive: a runner
+  // socket whose close never completed has kept a sandbox, and everything it
+  // holds, running indefinitely after its run ended. The signal path above
+  // already exits this way; the crash path below does too.
+  process.exit(0);
 };
 
 main().catch((error: unknown) => {

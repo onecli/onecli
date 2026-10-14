@@ -56,6 +56,7 @@ spec:
       {{- end }}
     spec:
       automountServiceAccountToken: false
+      enableServiceLinks: false
       {{- include "onecli.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- include "onecli.podSecurityContext" (dict "uid" .Values.gateway.runAsUser "gid" .Values.gateway.runAsGroup) | nindent 8 }}

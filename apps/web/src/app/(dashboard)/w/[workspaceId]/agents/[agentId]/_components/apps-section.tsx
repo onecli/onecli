@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import type { Connection } from "@/lib/api";
 import { useConnections } from "@/hooks/use-connections";
 import { useManageConnectionState } from "@/hooks/use-manage-connection-state";
 import { AppsTab } from "./apps-tab";
@@ -23,9 +22,10 @@ export const AppsSection = ({
 }) => {
   const searchParams = useSearchParams();
   const { data: connections = [] } = useConnections("workspace");
-  const [manageConnection, setManageConnection] = useState<Connection | null>(
-    null,
-  );
+  // The id, not a snapshot: the dialog reads the live row, so a reconnect
+  // from inside it (which refetches the list) shows the refreshed grant.
+  const [manageId, setManageId] = useState<string | null>(null);
+  const manageConnection = connections.find((c) => c.id === manageId) ?? null;
   const {
     grant: manageGrant,
     readOnly: manageReadOnly,
@@ -55,7 +55,7 @@ export const AppsSection = ({
     const target = connections.find((c) => c.id === connectionParam);
     if (!target) return;
     consumedDeepLink.current = connectionParam;
-    setManageConnection(target);
+    setManageId(target.id);
     // CONSUME the link: strip its params (shallow — no server round-trip).
     // The guard ref resets whenever a tab flip remounts this section, so
     // stripping is the real consumption — under a still-parameterized URL
@@ -75,7 +75,7 @@ export const AppsSection = ({
     <>
       <AppsTab
         agentId={agentId}
-        onManage={setManageConnection}
+        onManage={(connection) => setManageId(connection.id)}
         onAddConnection={onAddConnection}
       />
       <ManagePermissionsDialog
@@ -84,7 +84,7 @@ export const AppsSection = ({
         grant={manageGrant}
         readOnly={manageReadOnly}
         readOnlyReason={manageReadOnlyReason}
-        onClose={() => setManageConnection(null)}
+        onClose={() => setManageId(null)}
       />
     </>
   );

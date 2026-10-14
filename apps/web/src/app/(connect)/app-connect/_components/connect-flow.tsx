@@ -13,6 +13,7 @@ import { ConnectLayout } from "./connect-layout";
 import { ConnectSuccess } from "./connect-success";
 import { CredentialsFlow } from "./credentials-flow";
 import { OrDivider } from "./or-divider";
+import type { MissingPermission } from "@onecli/api/apps/missing-permissions";
 
 type FlowState = "ready" | "redirecting" | "success" | "error";
 
@@ -72,6 +73,10 @@ interface ConnectFlowProps {
   preContent?: ReactNode;
   workspaceId?: string;
   orgId?: string;
+  /** Requested permissions the provider didn't grant (the user unticked them
+   * on the consent screen). The success screen warns and offers a retry,
+   * which re-authenticates `connectionId` (so it can't create a second). */
+  missingPermissions?: MissingPermission[];
 }
 
 export const ConnectFlow = ({
@@ -85,6 +90,7 @@ export const ConnectFlow = ({
   preContent,
   workspaceId: explicitWorkspaceId,
   orgId,
+  missingPermissions = [],
 }: ConnectFlowProps) => {
   const [state, setState] = useState<FlowState>(
     status === "success" ? "success" : status === "error" ? "error" : "ready",
@@ -175,6 +181,11 @@ export const ConnectFlow = ({
           provider={app.id}
           agentName={agentName}
           connectedId={connectedId ?? createdConnectionId}
+          missingPermissions={missingPermissions}
+          onRetry={() => {
+            redirectedRef.current = false;
+            void doRedirect();
+          }}
         />
       </ConnectLayout>
     );

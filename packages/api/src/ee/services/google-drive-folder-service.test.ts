@@ -42,6 +42,7 @@ describe("google-drive-folder-service", () => {
     pages?: Record<string, string>;
     children?: Record<string, { mimeType: string }[] | "error">;
     drives?: { id: string; name: string }[];
+    sharedWithMe?: { id: string; name: string }[];
   }) =>
     fetchMock.mockImplementation(async (raw: string) => {
       const url = new URL(raw);
@@ -49,6 +50,9 @@ describe("google-drive-folder-service", () => {
         return json(200, { drives: opts.drives ?? [] });
       }
       const q = url.searchParams.get("q") ?? "";
+      if (q.startsWith("sharedWithMe = true")) {
+        return json(200, { files: opts.sharedWithMe ?? [] });
+      }
       const parent = /^'([^']+)' in parents/.exec(q)?.[1] ?? "";
       if (q.includes("mimeType = 'application/vnd.google-apps.folder'")) {
         const pageToken = url.searchParams.get("pageToken");
@@ -112,6 +116,31 @@ describe("google-drive-folder-service", () => {
     });
   });
 
+  it("lists Shared-with-me folders at the top level, once each", async () => {
+    fakeDrive({
+      folders: { root: [{ id: "f1", name: "Clients" }] },
+      sharedWithMe: [
+        { id: "s1", name: "Team Inbox" },
+        // Also in My Drive (e.g. added as a shortcut target): listed once.
+        { id: "f1", name: "Clients" },
+      ],
+      drives: [{ id: "0SD", name: "Team" }],
+    });
+    const out = await listGoogleDriveFolders(SCOPE, "c1", undefined);
+    expect(out.map((f) => [f.id, f.kind])).toEqual([
+      ["f1", "folder"],
+      ["s1", "shared"],
+      ["0SD", "sharedDrive"],
+    ]);
+    // Drive returns no shared-drive items without both flags, so a folder
+    // shared from a shared drive would otherwise never be listed.
+    const sharedQuery = fetchMock.mock.calls
+      .map(([raw]) => new URL(String(raw)).searchParams)
+      .find((p) => p.get("q")?.startsWith("sharedWithMe = true"));
+    expect(sharedQuery?.get("supportsAllDrives")).toBe("true");
+    expect(sharedQuery?.get("includeItemsFromAllDrives")).toBe("true");
+  });
+
   it("lists a subfolder's children, following pagination, without drives", async () => {
     fakeDrive({
       folders: {
@@ -149,6 +178,23 @@ describe("google-drive-folder-service", () => {
     });
     const out = await listGoogleDriveFolders(SCOPE, "c1", undefined);
     expect(out.map((f) => f.id)).toEqual(["ok"]);
+  });
+
+  it("refuses with a reconnect hint when 'Read files' wasn't granted", async () => {
+    loadOAuthConnection.mockResolvedValue({
+      conn: {
+        id: "c1",
+        scopes: ["openid", "https://www.googleapis.com/auth/drive.file"],
+      },
+      creds: {},
+    });
+    await expect(
+      listGoogleDriveFolders(SCOPE, "c1", undefined),
+    ).rejects.toMatchObject({
+      code: "FORBIDDEN",
+      message: expect.stringContaining("Read files"),
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("fails when no token can be obtained", async () => {

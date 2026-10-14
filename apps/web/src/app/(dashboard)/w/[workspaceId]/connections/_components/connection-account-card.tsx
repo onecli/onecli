@@ -63,6 +63,7 @@ import {
   githubOrgAccessSummary,
 } from "@onecli/api/lib/github-org-access";
 import { GitHubOrgAccessNotice } from "./github-org-access-notice";
+import { MissingPermissionsNotice } from "@/lib/components/missing-permissions-notice";
 import { ConnectionAgentRows } from "./connection-agent-rows";
 import type { AccountCardConnection } from "./account-card-connection";
 
@@ -125,6 +126,9 @@ export const ConnectionAccountCard = ({
   const tags = (connection.metadata?.tags as string[] | undefined) ?? [];
   const boundHost = extractBoundHost(connection.metadata);
   const needsReconnect = !!connection.reauthRequiredAt;
+  const missing = connection.missingPermissions ?? [];
+  // A refused login outranks it: nothing works until that reconnect anyway.
+  const missingPermissions = !needsReconnect && missing.length > 0;
   // GitHub organizations that refused this account (recorded by the gateway).
   // Per-organization: the account stays connected for everything else.
   const orgAccessIssues = extractGitHubOrgAccess(connection.metadata);
@@ -157,6 +161,7 @@ export const ConnectionAccountCard = ({
         className={cn(
           "gap-2 px-4 py-3",
           needsReconnect && "border-destructive/50",
+          missingPermissions && "border-amber-500/40",
           highlighted && "ring-2 ring-ring",
         )}
       >
@@ -199,6 +204,10 @@ export const ConnectionAccountCard = ({
               <p className="text-xs text-muted-foreground">
                 {needsReconnect ? (
                   <span className="text-destructive">Needs reconnect</span>
+                ) : missingPermissions ? (
+                  <span className="text-amber-700 dark:text-amber-400">
+                    Connected &middot; Missing permissions
+                  </span>
                 ) : orgAccessIssues.length > 0 ? (
                   <span className="text-amber-700 dark:text-amber-400">
                     Connected &middot;{" "}
@@ -302,6 +311,12 @@ export const ConnectionAccountCard = ({
             {appName} rejected the saved login, so agents can&apos;t use this
             account until you reconnect it. Agent access and rules are kept.
           </p>
+        )}
+        {missingPermissions && (
+          <MissingPermissionsNotice
+            permissions={missing}
+            onReconnect={() => onReconnect(connection.id)}
+          />
         )}
         {!needsReconnect &&
           orgAccessIssues.map((issue) => (

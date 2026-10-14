@@ -279,7 +279,11 @@ jobs:
               - 'apps/web/src/proxy.ts'
               - 'apps/runner/src/config.ts'
               - 'apps/runner/src/backend/kubernetes/**'
+              - 'apps/channel-adapter/src/config.ts'
               - 'apps/api-server/src/app.ts'
+              - 'docker/docker-compose.yml'
+              - 'scripts/lib/secrets.mjs'
+              - 'scripts/helm-chart.test.mjs'
               - '.github/workflows/publish.yml'
               - '.github/workflows/ci.yml'
 

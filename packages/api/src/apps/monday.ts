@@ -20,6 +20,10 @@ export const monday: AppDefinition = {
   },
   connectionMethod: {
     type: "oauth",
+    // No `scope` is sent on authorize, so monday grants the full list ticked
+    // on the app in its Developer Center (OAuth & Permissions). Keep this list
+    // identical to that page, or every connection reads as "Missing
+    // permissions" for the scopes only listed here.
     defaultScopes: [
       "me:read",
       "account:read",
@@ -204,7 +208,9 @@ export const monday: AppDefinition = {
         token_type: tokenData.token_type ?? "Bearer",
       };
 
-      const scopes = tokenData.scope?.split(/\s+/).filter(Boolean) ?? [];
+      // monday documents the granted `scope` as comma-separated (its own
+      // example shows spaces), so accept either.
+      const scopes = tokenData.scope?.split(/[\s,]+/).filter(Boolean) ?? [];
 
       const metadata: Record<string, unknown> = {};
       try {

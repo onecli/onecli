@@ -72,7 +72,8 @@ begun in its own dashboard fails review.
 per-agent apps need none of this. To run your own anyway: create the app
 once from `GET /v1/org/channels/slack/shared-manifest` (requires a public
 HTTPS `API_URL`; the shared app is events-mode only), then set the four env
-vars in the install `.env` and restart the api:
+vars in the install `.env` and restart the api (on Kubernetes, put them in
+a Secret and name it in `slackSharedApp.existingSecret`):
 
 ```bash
 SLACK_SHARED_CLIENT_ID=...      # Basic Information → App Credentials
@@ -108,6 +109,20 @@ docker compose up -d
 
 No ports, no database, no docker socket. Its traffic goes directly to Slack —
 deliberately not through the gateway (platform traffic, not agent traffic).
+
+**On Kubernetes (the Helm chart):** turn on `channelAdapter.enabled`. The
+adapter reads `CHANNEL_ADAPTER_TOKEN` from the chart's application Secret
+(`secrets.generate` mints it; with your own Secret, the upgrade refuses
+with the `kubectl patch` that adds it):
+
+```bash
+helm upgrade onecli oci://ghcr.io/onecli/charts/onecli --namespace onecli \
+  --reset-then-reuse-values --set channelAdapter.enabled=true
+```
+
+The chart's README has the details
+([Slack](../charts/onecli/README.md#6-slack)), including the shared app's
+`slackSharedApp.existingSecret`.
 
 The adapter uses `APP_URL` for the "Connect a model key" button in its Slack
 posts; the compose default points at the install's own address, so set

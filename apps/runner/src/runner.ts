@@ -614,21 +614,7 @@ export const createRunner = ({
     }
 
     try {
-      await backend.stopSandbox(ref, item.sandboxId);
-      // The container is gone — its process rows are now stale by definition
-      // (the control plane's lost sweep will terminalize them).
-      sandboxContainers.delete(item.sandboxId);
-      inheritedAt.delete(item.sandboxId);
-      // A deliberate stop ends the boot-crash attempt window with it — and
-      // releases the sandbox's admitted-capacity slot: a stopped container
-      // stays listed (not running) forever on some substrates, so the
-      // in-check prune alone would hold its slot and refuse admissible
-      // starts with capacity to spare.
-      startCompletedAt.delete(item.sandboxId);
-      admittedNew.delete(item.sandboxId);
-      // Addressed by name: a park of a home that was never born is the
-      // backend's no-op, so this needs no lookup first.
-      await backend.parkHome(backend.homeRefFor(item.sandboxId));
+      await stopContainer(item.sandboxId, ref);
       return [
         {
           kind: "sandbox.status",
@@ -650,6 +636,27 @@ export const createRunner = ({
         },
       ];
     }
+  };
+
+  /** Stop ONE container by ref and park its home: a deliberate stop's body,
+   * shared with reconcile's stray-container backstop. Throws what the
+   * backend throws; each caller decides what a failure means. */
+  const stopContainer = async (sandboxId: string, ref: string) => {
+    await backend.stopSandbox(ref, sandboxId);
+    // The container is gone — its process rows are now stale by definition
+    // (the control plane's lost sweep will terminalize them).
+    sandboxContainers.delete(sandboxId);
+    inheritedAt.delete(sandboxId);
+    // A deliberate stop ends the boot-crash attempt window with it — and
+    // releases the sandbox's admitted-capacity slot: a stopped container
+    // stays listed (not running) forever on some substrates, so the
+    // in-check prune alone would hold its slot and refuse admissible
+    // starts with capacity to spare.
+    startCompletedAt.delete(sandboxId);
+    admittedNew.delete(sandboxId);
+    // Addressed by name: a park of a home that was never born is the
+    // backend's no-op, so this needs no lookup first.
+    await backend.parkHome(backend.homeRefFor(sandboxId));
   };
 
   /**
@@ -1081,6 +1088,14 @@ export const createRunner = ({
   const reportedDead = new Set<string>();
 
   /**
+   * Stray containers (running, channelless, their row already parked) this
+   * process has stopped, keyed by containerRef — one stop per container; a
+   * failed stop drops its ref so the next pass retries. Bounded like
+   * `reportedDead`: by the containers this process ever observes.
+   */
+  const strayStopped = new Set<string>();
+
+  /**
    * Sandboxes the control plane believed `running` that had NO backend
    * snapshot on the PREVIOUS reconcile pass — the vanished-pod arm's memory.
    * Absence must be observed on two consecutive passes before it is
@@ -1346,6 +1361,61 @@ export const createRunner = ({
           // reconnecting, not gone: the runner just restarted under it.
           !reconnecting(snapshot.sandboxId);
         if (snapshot.running && channelless) {
+          const believed = assigned.statuses?.[snapshot.sandboxId];
+          /**
+           * A STRAY: running, no channel, and the control plane already
+           * parked its row (`stopped`/`failed`). The report below is a no-op
+           * against that row (`stopped` applies only over running/stopping),
+           * so reporting it every pass would leave the container, and
+           * everything it holds, running until some message recreates it —
+           * the shape a supervisor that gave up but never exited leaves
+           * behind. Only this process can see the container, so it stops
+           * it, through the deliberate stop's own body.
+           *
+           * Fences: a status this pass actually read (an old control plane
+           * sends none: report only, as before); never `running` (the report
+           * IS what moves that row), never a claim in flight (`starting`,
+           * `stopping`) and never `unprovisioned` (a start is due and
+           * recreates the container itself); never with a start of our own
+           * queued or executing, nor a stop of our own queued (it stops this
+           * very container); one stop per container ref.
+           */
+          if (
+            (believed === "stopped" || believed === "failed") &&
+            !queuedStarts.has(snapshot.sandboxId) &&
+            !executingStartHash.has(snapshot.sandboxId) &&
+            !queuedStops.has(snapshot.sandboxId) &&
+            !strayStopped.has(snapshot.containerRef)
+          ) {
+            const { sandboxId, containerRef } = snapshot;
+            strayStopped.add(containerRef);
+            log(
+              "warn",
+              "stopping a running container whose sandbox is parked",
+              {
+                sandboxId,
+              },
+            );
+            // On the sandbox's chain, so it serializes with any start the
+            // control plane hands over meanwhile. No report: the row is
+            // already where this stop leaves it.
+            chains.enqueue(sandboxId, async () => {
+              try {
+                await stopContainer(sandboxId, containerRef);
+              } catch (error) {
+                strayStopped.delete(containerRef);
+                log(
+                  "warn",
+                  "stopping a stray container failed; retrying next pass",
+                  {
+                    sandboxId,
+                    error: String(error),
+                  },
+                );
+              }
+            });
+            continue;
+          }
           log("warn", "sandbox is running but has no control channel", {
             sandboxId: snapshot.sandboxId,
           });

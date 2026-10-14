@@ -49,6 +49,7 @@ spec:
       {{- end }}
     spec:
       automountServiceAccountToken: false
+      enableServiceLinks: false
       {{- include "onecli.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- include "onecli.podSecurityContext" (dict "uid" 1000 "gid" 1000) | nindent 8 }}
@@ -109,6 +110,27 @@ spec:
                 secretKeyRef:
                   name: {{ include "onecli.secretsName" . }}
                   key: RUNNER_TOKEN
+            {{- end }}
+            {{- if include "onecli.channelAdapter.enabled" . }}
+            # The adapter's registration anchor: the same key the adapter
+            # presents. Set only with the adapter on, so channels stay dark
+            # (nothing can register) otherwise.
+            {{- include "onecli.optionalSecretEnv" (dict "root" . "name" "CHANNEL_ADAPTER_TOKEN") | nindent 12 }}
+            {{- end }}
+            {{- with include "onecli.slackSharedApp.secret" . }}
+            {{- $slackSecret := . }}
+            # The shared Slack app (team onboarding from Slack). Optional
+            # refs: a partial set leaves the arm off, the api's own rule.
+            {{- range list "SLACK_SHARED_CLIENT_ID" "SLACK_SHARED_CLIENT_SECRET" "SLACK_SHARED_SIGNING_SECRET" "SLACK_SHARED_APP_ID" }}
+            - name: {{ . }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $slackSecret }}
+                  key: {{ . }}
+                  optional: true
+            {{- end }}
+            - name: SLACK_SHARED_APP_MANAGER_APPROVED
+              value: {{ $.Values.slackSharedApp.appManagerApproved | default false | ternary "true" "" | quote }}
             {{- end }}
             # The gateway's CA certificate, served to install flows and to
             # hosted agents (the api never sees the key).

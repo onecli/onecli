@@ -46,12 +46,15 @@ EKS is the reference platform; any Kubernetes 1.30+ with a
 NetworkPolicy-enforcing CNI works.
 
 ```sh
+hex() { head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 kubectl create namespace onecli
 kubectl -n onecli create secret generic onecli-secrets \
   --from-literal=BETTER_AUTH_SECRET="$(head -c 32 /dev/urandom | base64)" \
   --from-literal=SECRET_ENCRYPTION_KEY="$(head -c 32 /dev/urandom | base64)" \
   --from-literal=GATEWAY_INTERNAL_SECRET="$(head -c 32 /dev/urandom | base64)" \
-  --from-literal=RUNNER_TOKEN="rnr_$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  --from-literal=RUNNER_TOKEN="rnr_$(hex)" \
+  --from-literal=RUNNER_SESSION_KEY="k1.$(hex)" \
+  --from-literal=CHANNEL_ADAPTER_TOKEN="cha_$(hex)"
 helm install onecli oci://ghcr.io/onecli/charts/onecli --namespace onecli \
   --set externalUrl=https://onecli.example.com \
   --set secrets.existingSecret=onecli-secrets \
@@ -60,11 +63,12 @@ helm install onecli oci://ghcr.io/onecli/charts/onecli --namespace onecli \
 
 That is an evaluation install on the chart's bundled PostgreSQL. For
 production, bring your own database (`database.enabled=false` and
-`database.external.existingSecret`). The chart's
+`database.external.existingSecret`). Slack is opt-in: add
+`--set channelAdapter.enabled=true` so agents answer in Slack. The chart's
 [README](../charts/onecli/README.md) covers secrets, the database, routing
-(Gateway API or Ingress), hosted agents and the fence, EKS prerequisites,
-upgrades, and Enterprise features. Every parameter, with its default and a
-description, is in [`values.yaml`](../charts/onecli/values.yaml).
+(Gateway API or Ingress), hosted agents and the fence, Slack, EKS
+prerequisites, upgrades, and Enterprise features. Every parameter, with its
+default and a description, is in [`values.yaml`](../charts/onecli/values.yaml).
 
 ## Upgrading
 

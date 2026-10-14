@@ -9,6 +9,10 @@ const MAX_CHAIN_DEPTH = 100;
 /** IDs one folder-names request resolves (each costs up to two Drive calls).
  * A saved policy can name far more, so the picker asks in batches of this. */
 export const MAX_NAME_LOOKUPS = 200;
+/** The scope browsing folders needs: without it Drive shows a connection only
+ * the files it created, so the picker can't list (or name) anything. */
+export const DRIVE_READ_SCOPE =
+  "https://www.googleapis.com/auth/drive.readonly";
 
 /**
  * Validates a Google Drive session policy. Folders are browsed live (no

@@ -15,9 +15,9 @@ export const googleDriveFolderRoutes = () => {
   app.use("*", requireEnterprise("granular_access"));
 
   // GET /folders?connectionId=...&parentId=<folderId>  → subfolders of the
-  // folder (no parentId = My Drive's top level plus shared drives). The
-  // dashboard browses Drive live, like Dropbox. Service throws map to HTTP via
-  // the app-level error handler.
+  // folder (no parentId = My Drive's top level, Shared with me, and the shared
+  // drives). The dashboard browses Drive live, like Dropbox. Service throws
+  // map to HTTP via the app-level error handler.
   app.get("/folders", read, async (c) => {
     const { organizationId, workspaceId } = c.get("auth");
     const parentId = c.req.query("parentId") || undefined;

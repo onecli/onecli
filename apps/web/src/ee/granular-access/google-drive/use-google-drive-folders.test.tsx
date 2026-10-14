@@ -41,4 +41,16 @@ describe("useGoogleDriveFolderNames", () => {
     expect(Object.keys(result.current.data ?? {})).toHaveLength(ids.length);
     expect(result.current.data?.id400).toBe("name-id400");
   });
+
+  it("asks nothing when disabled (a connection the server would refuse)", async () => {
+    folderNames.mockClear();
+    const { result } = renderHook(
+      () => useGoogleDriveFolderNames("c1", ["id0", "id1"], false),
+      { wrapper },
+    );
+    // A disabled query never leaves `pending` and never runs its queryFn.
+    await waitFor(() => expect(result.current.fetchStatus).toBe("idle"));
+    expect(result.current.isPending).toBe(true);
+    expect(folderNames).not.toHaveBeenCalled();
+  });
 });

@@ -419,6 +419,26 @@ export const slackProvider: ChannelProvider = {
     }
   },
 
+  isUserCreatedApp({ credentialsJson }) {
+    // `apps.manifest.create` returns the client pair for every app the
+    // platform creates (the guided arm and the shared-app mint), and every
+    // later write merges into that blob. A bot token with NEITHER half is the
+    // paste floor's shape: the user made the app at api.slack.com and pasted
+    // only its tokens. Half a pair is a shape no path writes, so it proves
+    // nothing either way.
+    if (!credentialsJson) return false;
+    try {
+      const creds = parseSlackPresenceCredentials(credentialsJson);
+      return (
+        creds.botToken !== undefined &&
+        creds.clientId === undefined &&
+        creds.clientSecret === undefined
+      );
+    } catch {
+      return false;
+    }
+  },
+
   async renameRemotePresence({ accessToken, externalId }) {
     // Before the uninstall: an uninstalled app answers `app_not_found` here.
     // Cosmetic best effort: Slack copies the name onto the bot user

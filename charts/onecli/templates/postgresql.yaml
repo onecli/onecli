@@ -42,6 +42,7 @@ spec:
         {{- include "onecli.selectorLabels" (dict "root" . "component" "postgresql") | nindent 8 }}
     spec:
       automountServiceAccountToken: false
+      enableServiceLinks: false
       securityContext:
         {{- include "onecli.podSecurityContext" (dict "uid" 70 "gid" 70) | nindent 8 }}
         fsGroup: 70

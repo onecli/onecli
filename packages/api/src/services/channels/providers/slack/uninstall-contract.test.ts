@@ -121,6 +121,35 @@ describe("observable Slack uninstall", () => {
   });
 });
 
+describe("user-created app detection", () => {
+  it.each([
+    ['{"botToken":"xoxb-1","appToken":"xapp-1"}', "socket paste floor"],
+    ['{"botToken":"xoxb-1","signingSecret":"s"}', "events paste floor"],
+  ])("recognizes %s (%s) as user-created", async (credentialsJson) => {
+    const { slackProvider } = await import("./provider");
+    expect(slackProvider.isUserCreatedApp!({ credentialsJson })).toBe(true);
+  });
+
+  it.each<[credentialsJson: string | null, shape: string]>([
+    [null, "no credentials"],
+    ["bad json", "unreadable"],
+    ['{"unknown":"field"}', "a shape this build does not know"],
+    ["{}", "empty"],
+    ['{"appToken":"xapp-1"}', "no bot token"],
+    [credentialsJson, "platform-created, installed"],
+    ['{"clientId":"id","clientSecret":"secret"}', "platform-created, pending"],
+    ['{"botToken":"xoxb-1","clientSecret":"secret"}', "half a client pair"],
+    ['{"botToken":"xoxb-1","clientId":"id"}', "the other half"],
+  ])("never claims %s (%s)", async (json) => {
+    // A wrong `true` releases a job the platform could still act on, so
+    // anything short of positive evidence keeps the confirmed-uninstall gate.
+    const { slackProvider } = await import("./provider");
+    expect(slackProvider.isUserCreatedApp!({ credentialsJson: json })).toBe(
+      false,
+    );
+  });
+});
+
 describe("idempotent Slack app-record deletion", () => {
   it("treats an already-deleted app as done (a replayed manifest phase)", async () => {
     const { slackProvider } = await import("./provider");

@@ -13,6 +13,14 @@
 //     never matches; verified in the spike)
 //   - every image the chart pulls is one publish.yml builds
 //   - the chart ships no Docker socket, hostPath, or privileged anything
+//   - every env compose hands a service the chart also runs is wired by the
+//     chart or on a commented allowlist of intentional differences (the
+//     drift that left Kubernetes without CHANNEL_ADAPTER_TOKEN and
+//     RUNNER_SESSION_KEY)
+//   - the adapter's env is env its config reads, and the api admits it with
+//     the same Secret key
+//   - every application-Secret key a template reads is one the generator
+//     mints, in the same shape scripts/lib/secrets.mjs mints for compose
 //
 // Renders with the helm binary when one is on PATH (CI, most dev machines);
 // the source-level pins run regardless.
@@ -245,11 +253,11 @@ test("no Docker socket, hostPath, privileged mode, or host namespaces anywhere i
   }
 });
 
-test("every pod drops all capabilities, runs non-root with the default seccomp profile, and only the runner and generator Jobs mount a ServiceAccount token", () => {
+test("every pod drops all capabilities, runs non-root with the default seccomp profile, opts out of service links, and only the runner and generator Jobs mount a ServiceAccount token", () => {
   const podFiles = Object.entries(templates).filter(([, b]) =>
     /kind: (Deployment|StatefulSet|Job)\n/.test(b),
   );
-  assert.ok(podFiles.length >= 7);
+  assert.ok(podFiles.length >= 8);
   for (const [file, body] of podFiles) {
     assert.match(
       body,
@@ -260,6 +268,15 @@ test("every pod drops all capabilities, runs non-root with the default seccomp p
       body,
       /onecli\.containerSecurityContext/,
       `${file}: container securityContext`,
+    );
+    // Service links inject `<SERVICE>_PORT=tcp://...` for every Service in
+    // the namespace; with the release named `onecli` that is
+    // ONECLI_API_PORT / ONECLI_GATEWAY_PORT, names the public-origins
+    // resolver reads. Nothing here relies on them.
+    assert.match(
+      body,
+      /enableServiceLinks: false/,
+      `${file}: enableServiceLinks: false`,
     );
     const mountsToken = /automountServiceAccountToken: true/.test(body);
     const allowed = [
@@ -303,6 +320,241 @@ test("the values the templates read are the values values.yaml declares", () => 
       );
     }
   }
+});
+
+// ── pins against compose, the adapter, and the secret generator ───────────
+
+/** `environment:` keys per compose service (top-level services only). */
+const composeEnv = () => {
+  const compose = read("docker/docker-compose.yml");
+  const services = {};
+  let current = null;
+  let inEnv = false;
+  for (const line of compose.split("\n")) {
+    const service = line.match(/^ {2}([a-z][a-z-]*):\s*$/);
+    if (service) {
+      current = service[1];
+      services[current] = new Set();
+      inEnv = false;
+    } else if (/^\S/.test(line)) current = null;
+    else if (!current) continue;
+    else if (/^ {4}environment:/.test(line)) inEnv = true;
+    else if (/^ {4}[a-z_]+:/.test(line)) inEnv = false;
+    else if (inEnv) {
+      const env = line.match(/^ {6}([A-Z][A-Z0-9_]*):/);
+      if (env) services[current].add(env[1]);
+    }
+  }
+  return services;
+};
+
+/** Env names a chart template sets, shared helpers resolved. */
+const chartEnv = (file) => {
+  const body = templates[file];
+  const names = new Set(
+    [...body.matchAll(/- name: ([A-Z][A-Z0-9_]*)\n/g)].map((m) => m[1]),
+  );
+  for (const m of body.matchAll(
+    /"onecli\.optionalSecretEnv" \(dict "root" \. "name" "([A-Z_]+)"\)/g,
+  ))
+    names.add(m[1]);
+  if (body.includes('"onecli.publicUrlEnv"')) {
+    names.add("ONECLI_EXTERNAL_URL");
+    names.add("ONECLI_TRUSTED_ORIGINS");
+  }
+  if (body.includes('"onecli.flagsEnv"')) names.add("ENTERPRISE_ENABLED");
+  const shared = body.match(/range list ((?:"[A-Z_]+" ?)+)/);
+  if (shared)
+    for (const m of shared[1].matchAll(/"([A-Z_]+)"/g)) names.add(m[1]);
+  return names;
+};
+
+// Compose env the chart deliberately does not set, each with its reason.
+// Adding a line here is a review decision: the default is to wire it.
+const SINGLE_ORIGIN =
+  "the chart serves one origin (externalUrl); split-host overrides go through extraEnv";
+const PORTS_MODE =
+  "ports-mode publish facts; the chart is proxy mode (https externalUrl) only";
+const LEGACY_SEED = "the deprecated ONECLI_BIND_HOST seed, compose-only";
+const INTENTIONAL_GAPS = {
+  api: {
+    APP_URL: SINGLE_ORIGIN,
+    API_URL: SINGLE_ORIGIN,
+    GATEWAY_API_URL: SINGLE_ORIGIN,
+    BETTER_AUTH_COOKIE_DOMAIN: SINGLE_ORIGIN,
+    ONECLI_BIND_HOST: LEGACY_SEED,
+    ONECLI_APP_PORT: PORTS_MODE,
+    ONECLI_API_PORT: PORTS_MODE,
+    ONECLI_GATEWAY_PORT: PORTS_MODE,
+    SSH_PORT: "the SSH front door is not part of the chart yet",
+  },
+  web: {
+    APP_URL: SINGLE_ORIGIN,
+    API_URL: SINGLE_ORIGIN,
+    GATEWAY_API_URL: SINGLE_ORIGIN,
+    BETTER_AUTH_COOKIE_DOMAIN: SINGLE_ORIGIN,
+    ONECLI_BIND_HOST: LEGACY_SEED,
+    ONECLI_APP_PORT: PORTS_MODE,
+    ONECLI_API_PORT: PORTS_MODE,
+    ONECLI_GATEWAY_PORT: PORTS_MODE,
+  },
+  gateway: {
+    APP_URL: SINGLE_ORIGIN,
+    ONECLI_BIND_HOST: LEGACY_SEED,
+    ONECLI_APP_PORT: PORTS_MODE,
+  },
+  runner: {
+    RUNNER_SANDBOX_NETWORK:
+      "a Docker network; the kubernetes backend fences by NetworkPolicy",
+  },
+  "channel-adapter": {
+    APP_URL: SINGLE_ORIGIN,
+    ONECLI_BIND_HOST: LEGACY_SEED,
+    ONECLI_APP_PORT: PORTS_MODE,
+  },
+};
+const CHART_FILE = {
+  api: "api.yaml",
+  web: "web.yaml",
+  gateway: "gateway.yaml",
+  runner: "runner.yaml",
+  migrations: "job-migrations.yaml",
+  "channel-adapter": "channel-adapter.yaml",
+};
+
+test("every env compose hands a service is wired by the chart or a documented intentional gap", () => {
+  const compose = composeEnv();
+  for (const [service, file] of Object.entries(CHART_FILE)) {
+    assert.ok(compose[service]?.size, `compose lost the ${service} service`);
+    const wired = chartEnv(file);
+    const gaps = INTENTIONAL_GAPS[service] ?? {};
+    for (const name of compose[service]) {
+      assert.ok(
+        wired.has(name) || name in gaps,
+        `compose gives ${service} ${name} but charts/onecli/templates/${file} never sets it. ` +
+          "Wire it (the Kubernetes self-host runs the same env contract), or add it to INTENTIONAL_GAPS with the reason.",
+      );
+    }
+    // A stale allowlist entry hides the next real gap: every entry must
+    // still be compose env the chart leaves unset.
+    for (const name of Object.keys(gaps)) {
+      assert.ok(
+        compose[service].has(name) && !wired.has(name),
+        `INTENTIONAL_GAPS.${service}.${name} is stale: drop it`,
+      );
+    }
+  }
+});
+
+test("the adapter's env is env its config reads, and the api admits it with the same Secret key", () => {
+  const config = read("apps/channel-adapter/src/config.ts");
+  const set = chartEnv("channel-adapter.yaml");
+  assert.ok(set.has("CHANNEL_ADAPTER_TOKEN") && set.has("CONTROL_PLANE_URL"));
+  for (const name of set) {
+    assert.ok(
+      config.includes(`env.${name}`),
+      `${name} is set by charts/onecli/templates/channel-adapter.yaml but apps/channel-adapter/src/config.ts never reads it`,
+    );
+  }
+  // A stable name keeps the adapter's row (and presence leases) across a
+  // restart; the hostname fallback would orphan them on every rollout.
+  assert.match(
+    templates["channel-adapter.yaml"],
+    /CHANNEL_ADAPTER_NAME\n\s+value: \{\{ \$name \| quote \}\}/,
+  );
+  assert.match(
+    templates["channel-adapter.yaml"],
+    /CONTROL_PLANE_URL\n\s+value: \{\{ include "onecli\.apiUrl" \. \| quote \}\}/,
+  );
+  // Both sides read CHANNEL_ADAPTER_TOKEN from the application Secret: the
+  // api through the shared helper (which names onecli.secretsName), the
+  // adapter directly.
+  assert.match(
+    templates["channel-adapter.yaml"],
+    /name: \{\{ include "onecli\.secretsName" \. \}\}\n\s+key: CHANNEL_ADAPTER_TOKEN/,
+  );
+  assert.match(
+    templates["api.yaml"],
+    /"onecli\.optionalSecretEnv" \(dict "root" \. "name" "CHANNEL_ADAPTER_TOKEN"\)/,
+  );
+  assert.match(
+    templates["_helpers.tpl"],
+    /define "onecli\.optionalSecretEnv"[\s\S]*?name: \{\{ include "onecli\.secretsName" \.root \}\}/,
+  );
+});
+
+test("every application-Secret key a template reads is minted by the generator, in compose's shape", () => {
+  const tool = templates["configmap-secret-tool.yaml"];
+  const specs = tool.match(/const APP_SECRET_SPECS = \{([\s\S]*?)\n\s*\};/);
+  assert.ok(specs, "configmap-secret-tool.yaml lost APP_SECRET_SPECS");
+  const minted = Object.fromEntries(
+    [...specs[1].matchAll(/^\s*([A-Z_]+): (.+?),?$/gm)].map((m) => [
+      m[1],
+      m[2],
+    ]),
+  );
+
+  // Keys read from the application Secret, directly or through the helper.
+  const consumed = new Set();
+  for (const body of Object.values(templates)) {
+    for (const m of body.matchAll(
+      /name: \{\{ include "onecli\.secretsName" \. \}\}\n\s+key: ([A-Z_]+)/g,
+    ))
+      consumed.add(m[1]);
+    for (const m of body.matchAll(
+      /"onecli\.optionalSecretEnv" \(dict "root" \. "name" "([A-Z_]+)"\)/g,
+    ))
+      consumed.add(m[1]);
+  }
+  assert.ok(
+    consumed.size >= 6,
+    `expected the application keys, got ${[...consumed]}`,
+  );
+  for (const key of consumed) {
+    assert.ok(
+      key in minted,
+      `templates read ${key} but the generator never mints it`,
+    );
+  }
+
+  // Same prefixes the setup wizard / install.sh mint for compose, so a
+  // value moved between the two stacks is accepted by both.
+  const specsMjs = read("scripts/lib/secrets.mjs");
+  for (const [key, prefix] of [
+    ["RUNNER_TOKEN", "rnr_"],
+    ["RUNNER_SESSION_KEY", "k1."],
+    ["CHANNEL_ADAPTER_TOKEN", "cha_"],
+  ]) {
+    assert.ok(
+      minted[key].includes(`\`${prefix}`),
+      `${key} is minted without ${prefix}`,
+    );
+    const spec = specsMjs.slice(specsMjs.indexOf(`key: "${key}"`));
+    const generate = spec.match(/generate: \(\) => `([^$`]*)\$/);
+    assert.equal(
+      generate?.[1],
+      prefix,
+      `scripts/lib/secrets.mjs mints ${key} with a different prefix`,
+    );
+  }
+});
+
+test("the generator Job may patch only its own Secret", () => {
+  const job = templates["job-secrets.yaml"];
+  const role = job.slice(
+    job.indexOf("kind: Role\n"),
+    job.indexOf("kind: RoleBinding"),
+  );
+  assert.match(
+    role,
+    /resources: \["secrets"\]\n\s+verbs: \["create"\]/,
+    "create cannot be name-scoped (the name is in the body)",
+  );
+  assert.match(
+    role,
+    /resourceNames: \[\{\{ \$name \| quote \}\}\]\n\s+verbs: \["get", "patch"\]/,
+  );
+  assert.doesNotMatch(role, /"(update|delete|list|watch)"/);
 });
 
 // ── rendered output, when helm is available ───────────────────────────────
@@ -411,5 +663,195 @@ test(
       ],
       "pick one",
     );
+    refuses(
+      ["--set", "secrets.existingSecret=s", "--set", "gateway.replicas=2"],
+      "gateway.replicas > 1 needs shared state",
+    );
+    // Licensed multi-instance: the shared stores make a second replica safe.
+    render([
+      "--set",
+      "secrets.existingSecret=s",
+      "--set",
+      "gateway.replicas=2",
+      "--set",
+      "enterpriseEnabled=true",
+      "--set",
+      "gateway.extraEnv[0].name=REDIS_HOST",
+      "--set",
+      "gateway.extraEnv[0].value=redis.internal",
+    ]);
+  },
+);
+
+/** One rendered document by kind and name. */
+const doc = (out, kind, name) =>
+  out
+    .split(/^---$/m)
+    .find(
+      (d) => d.includes(`kind: ${kind}\n`) && d.includes(`name: ${name}\n`),
+    );
+
+test(
+  "rendered: the channel adapter is off by default, and the api then admits no adapter",
+  { skip: !helm && "helm not on PATH" },
+  () => {
+    const out = render(["--set", "secrets.existingSecret=s"]);
+    assert.equal(doc(out, "Deployment", "onecli-channel-adapter"), undefined);
+    assert.doesNotMatch(
+      doc(out, "Deployment", "onecli-api"),
+      /CHANNEL_ADAPTER_TOKEN/,
+    );
+  },
+);
+
+test(
+  "rendered: channelAdapter.enabled wires the adapter and the api to one Secret key",
+  { skip: !helm && "helm not on PATH" },
+  () => {
+    const out = render([
+      "--set",
+      "secrets.existingSecret=s",
+      "--set",
+      "channelAdapter.enabled=true",
+    ]);
+    const adapter = doc(out, "Deployment", "onecli-channel-adapter");
+    assert.ok(adapter, "no channel-adapter Deployment");
+    assert.match(adapter, /replicas: 1\n\s+strategy:\n\s+type: Recreate/);
+    assert.match(adapter, /name: s\n\s+key: CHANNEL_ADAPTER_TOKEN\n/);
+    assert.match(adapter, /value: "http:\/\/onecli-api:10256"/);
+    assert.match(adapter, /value: "http:\/\/onecli-gateway:10255"/);
+    assert.match(adapter, /value: "onecli-channel-adapter"/);
+    assert.match(adapter, /readOnlyRootFilesystem: true/);
+    assert.match(adapter, /automountServiceAccountToken: false/);
+    assert.equal(doc(out, "Service", "onecli-channel-adapter"), undefined);
+    // BYO Secret: the api's ref is optional, so a Secret missing the key
+    // can never keep the api from starting.
+    assert.match(
+      doc(out, "Deployment", "onecli-api"),
+      /name: s\n\s+key: CHANNEL_ADAPTER_TOKEN\n\s+optional: true/,
+    );
+  },
+);
+
+test(
+  "rendered: refs to newer keys are optional with your own Secret, required with the generated one",
+  { skip: !helm && "helm not on PATH" },
+  () => {
+    const byo = render([
+      "--set",
+      "secrets.existingSecret=s",
+      "--set",
+      "channelAdapter.enabled=true",
+    ]);
+    assert.match(
+      doc(byo, "Deployment", "onecli-runner"),
+      /key: RUNNER_SESSION_KEY\n\s+optional: true/,
+    );
+    const generated = render([
+      "--set",
+      "secrets.generate.enabled=true",
+      "--set",
+      "channelAdapter.enabled=true",
+    ]);
+    for (const [deploy, key] of [
+      ["onecli-runner", "RUNNER_SESSION_KEY"],
+      ["onecli-api", "CHANNEL_ADAPTER_TOKEN"],
+    ]) {
+      const body = doc(generated, "Deployment", deploy);
+      assert.match(
+        body,
+        new RegExp(`name: onecli-secrets\\n\\s+key: ${key}\\n`),
+      );
+      assert.doesNotMatch(body, new RegExp(`key: ${key}\\n\\s+optional`));
+    }
+  },
+);
+
+test(
+  "rendered: the shared Slack app reads its own Secret, every key optional",
+  { skip: !helm && "helm not on PATH" },
+  () => {
+    const api = doc(
+      render([
+        "--set",
+        "secrets.existingSecret=s",
+        "--set",
+        "slackSharedApp.existingSecret=slack",
+        "--set",
+        "slackSharedApp.appManagerApproved=true",
+      ]),
+      "Deployment",
+      "onecli-api",
+    );
+    for (const key of [
+      "SLACK_SHARED_CLIENT_ID",
+      "SLACK_SHARED_CLIENT_SECRET",
+      "SLACK_SHARED_SIGNING_SECRET",
+      "SLACK_SHARED_APP_ID",
+    ]) {
+      assert.match(
+        api,
+        new RegExp(`name: slack\\n\\s+key: ${key}\\n\\s+optional: true`),
+      );
+    }
+    assert.match(api, /SLACK_SHARED_APP_MANAGER_APPROVED\n\s+value: "true"/);
+  },
+);
+
+test(
+  "rendered: values carried over from an older release (--reuse-values) render with Slack off, and say how to fix Slack on",
+  { skip: !helm && "helm not on PATH" },
+  () => {
+    // `--set key=null` deletes the key: exactly the values an older
+    // release hands `--reuse-values`, which never had these blocks.
+    const stale = [
+      "--set",
+      "secrets.existingSecret=s",
+      "--set",
+      "channelAdapter=null",
+      "--set",
+      "slackSharedApp=null",
+    ];
+    assert.doesNotMatch(render(stale), /channel-adapter/);
+    assert.throws(
+      () =>
+        execFileSync(
+          helm,
+          [
+            "template",
+            "onecli",
+            CHART,
+            "--set",
+            "externalUrl=https://onecli.example.test",
+            "--set",
+            "secrets.existingSecret=s",
+            "-f",
+            "-",
+          ],
+          {
+            encoding: "utf8",
+            stdio: ["pipe", "pipe", "pipe"],
+            input: "channelAdapter: { enabled: true, resources: null }\n",
+          },
+        ),
+      (error) => String(error.stderr).includes("--reset-then-reuse-values"),
+    );
+  },
+);
+
+test(
+  "rendered: the generator mints the newer keys and may patch only its own Secret",
+  { skip: !helm && "helm not on PATH" },
+  () => {
+    const out = render(["--set", "secrets.generate.enabled=true"]);
+    const role = doc(out, "Role", "onecli-secrets-generate");
+    assert.match(
+      role,
+      /resourceNames: \["onecli-secrets"\]\n\s+verbs: \["get", "patch"\]/,
+    );
+    const tool = doc(out, "ConfigMap", "onecli-secret-tool");
+    for (const key of ["RUNNER_SESSION_KEY", "CHANNEL_ADAPTER_TOKEN"]) {
+      assert.match(tool, new RegExp(`${key}: \\(\\) =>`));
+    }
   },
 );

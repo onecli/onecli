@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import { getApp } from "@onecli/api/apps/registry";
+import { describeScopes } from "@onecli/api/apps/missing-permissions";
 import { checkAppConfigExists } from "@/lib/actions/app-config";
 import { ConnectFlow } from "../_components/connect-flow";
 
@@ -15,6 +16,11 @@ interface Props {
     agent_name?: string;
     workspaceId?: string;
     orgId?: string;
+    /** Space-joined scopes the user didn't grant (the OAuth callback's
+     * success redirect, beside the `connectionId` a retry re-authenticates).
+     * Resolved to the app's own permission names, so only scopes the app
+     * requests and describes are ever shown. */
+    missing?: string;
   }>;
 }
 
@@ -28,10 +34,16 @@ export default async function ConnectPage({ params, searchParams }: Props) {
     agent_name,
     workspaceId,
     orgId,
+    missing,
   } = await searchParams;
 
   const app = getApp(provider);
   if (!app) notFound();
+
+  const missingScopes = new Set((missing ?? "").split(" "));
+  const missingPermissions = describeScopes(provider, (scope) =>
+    missingScopes.has(scope),
+  );
 
   // Check if platform defaults are available (server-only env var check)
   let hasEnvDefaults = false;
@@ -91,6 +103,7 @@ export default async function ConnectPage({ params, searchParams }: Props) {
       agentName={agent_name}
       workspaceId={workspaceId}
       orgId={orgId}
+      missingPermissions={missingPermissions}
     />
   );
 }

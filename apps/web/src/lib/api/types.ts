@@ -1,5 +1,6 @@
 import type { ChannelPresenceStatus } from "./channels";
 import type { UnlistedChoice } from "@onecli/api/validations/grants";
+import type { MissingPermission } from "@onecli/api/apps/missing-permissions";
 
 export type AgentKind = "byo" | "hosted";
 
@@ -90,7 +91,9 @@ export interface DropboxFolder {
 export interface GoogleDriveFolder {
   id: string;
   name: string;
-  kind: "folder" | "sharedDrive";
+  /** `shared` = a folder someone else shared with the account ("Shared with
+   * me"), listed at the top level. */
+  kind: "folder" | "sharedDrive" | "shared";
   /** Direct children; null when the count couldn't be taken. */
   subfolderCount: number | null;
   fileCount: number | null;
@@ -144,6 +147,9 @@ export interface Connection {
   connectedAt: string;
   /** Set when the provider refused the saved login: reconnect to clear it. */
   reauthRequiredAt?: string | null;
+  /** Requested permissions the user didn't grant on the consent screen.
+   * Reconnecting and allowing them clears it. */
+  missingPermissions?: MissingPermission[];
   /** Built on another connection's grant (a shared GitHub App installation). */
   sourceConnectionId?: string | null;
 }

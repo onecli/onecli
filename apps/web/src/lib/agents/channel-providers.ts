@@ -48,11 +48,12 @@ export interface AttachCardProps {
   removed: boolean;
   identityName: string | null;
   /**
-   * The removed presence's provider-side app id, so a re-attach face can
-   * point at THAT app instead of walking the first-time setup again. Null
-   * unless `removed`.
+   * The provider-side app id of the presence a re-attach would resume (a
+   * detached or half-finished setup, or an app removed on the provider's
+   * side), so the attach face can point at THAT app instead of walking the
+   * first-time setup again. Null unless `resuming`.
    */
-  removedAppId: string | null;
+  resumeAppId: string | null;
 }
 
 export interface ChannelProviderUi extends ChannelProviderDisplay {

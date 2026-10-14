@@ -36,6 +36,16 @@ NetworkPolicy, and the runner refuses to start an agent until it sees the
 fence in place. Check with:
   kubectl -n {{ .Values.sandboxes.namespace.name }} get networkpolicy
 {{- end }}
+{{- if include "onecli.channelAdapter.enabled" . }}
+
+Slack: the channel adapter registers with the api on boot. Check with:
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "onecli.component" (dict "root" . "component" "channel-adapter") }}
+It dials Slack directly (outbound 443); allow that if your egress is filtered.
+{{- else }}
+
+Slack is off. To let agents answer in Slack, set channelAdapter.enabled=true
+(see the README's Slack section).
+{{- end }}
 {{- if and (not .Values.ingress.enabled) (not .Values.httpRoute.enabled) }}
 
 Neither ingress nor httpRoute is enabled: nothing routes {{ .Values.externalUrl }}

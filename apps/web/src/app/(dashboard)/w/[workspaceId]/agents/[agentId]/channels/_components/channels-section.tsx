@@ -169,9 +169,9 @@ export const ChannelsSection = () => {
             }
             removed={presence?.status === "disabled"}
             identityName={presence?.identityName ?? null}
-            removedAppId={
-              presence?.status === "disabled" ? presence.externalId : null
-            }
+            // Only an unconnected presence reaches this branch, so any
+            // presence here is one a re-attach resumes.
+            resumeAppId={presence?.externalId ?? null}
           />
         );
       })}

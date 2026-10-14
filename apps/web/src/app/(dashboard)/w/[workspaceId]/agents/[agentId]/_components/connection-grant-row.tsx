@@ -62,6 +62,7 @@ export const ConnectionGrantRow = ({
       tools.every((t) => t.orgCeiling === "block"));
 
   const app = getApp(connection.provider);
+  const missingCount = connection.missingPermissions?.length ?? 0;
   const busy = attach.isPending || detach.isPending;
   // An org-blocked connection can still be DETACHED — that only removes intent,
   // and freezing it would strand the grant until the org unblocks. What it
@@ -105,6 +106,14 @@ export const ConnectionGrantRow = ({
             {caption && (
               <span className="text-muted-foreground/80 shrink-0">
                 {caption}
+              </span>
+            )}
+            {missingCount > 0 && (
+              <span
+                className="shrink-0 text-amber-700 dark:text-amber-400"
+                title={`Not granted: ${(connection.missingPermissions ?? []).map((p) => p.name).join(", ")}`}
+              >
+                Missing permissions
               </span>
             )}
           </div>

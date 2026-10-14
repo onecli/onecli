@@ -9,6 +9,7 @@ import {
   extractLabel,
 } from "../lib/connection-display";
 import { bumpHomeForScope } from "./home-sync-service";
+import { missingPermissions } from "../apps/missing-permissions";
 import { logger } from "../lib/logger";
 import {
   invalidateGatewayCacheForAccount,
@@ -54,23 +55,43 @@ const CONNECTION_SELECT = {
   sourceConnectionId: true,
 } as const;
 
+/**
+ * A listed connection plus the requested permissions its grant lacks (the
+ * user unticked them on the consent screen). Derived on read from the stored
+ * `scopes`, so it covers every existing row and clears itself on a reconnect
+ * that grants them. Names and descriptions only: never a credential.
+ */
+const withMissingPermissions = <
+  T extends { provider: string; scopes: string[] },
+>(
+  connection: T,
+) => ({
+  ...connection,
+  missingPermissions: missingPermissions(
+    connection.provider,
+    connection.scopes,
+  ),
+});
+
 export const listConnections = async (scope: ResourceScope) => {
-  return db.appConnection.findMany({
+  const rows = await db.appConnection.findMany({
     where: scopeWhere(scope),
     select: CONNECTION_SELECT,
     orderBy: { connectedAt: "desc" },
   });
+  return rows.map(withMissingPermissions);
 };
 
 export const listConnectionsByProvider = async (
   scope: ResourceScope,
   provider: string,
 ) => {
-  return db.appConnection.findMany({
+  const rows = await db.appConnection.findMany({
     where: { ...scopeWhere(scope), provider },
     select: CONNECTION_SELECT,
     orderBy: { connectedAt: "desc" },
   });
+  return rows.map(withMissingPermissions);
 };
 
 /**

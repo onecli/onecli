@@ -53,6 +53,8 @@ const store = vi.hoisted(() => ({
     stateCookie?: string;
   } | null,
   throwOnExchange: false,
+  // The scopes the fixture provider reports as granted (null = none reported).
+  grantedScopes: null as string[] | null,
   // When set, the fixture asks for one more provider round trip.
   continueAt: null as string | null,
   connections: [] as {
@@ -196,7 +198,15 @@ vi.mock("./registry", () => ({
             description: "OAuth test app",
             connectionMethod: {
               type: "oauth",
-              defaultScopes: ["read"],
+              defaultScopes: ["read", "write"],
+              permissions: [
+                {
+                  scope: "write",
+                  name: "Write",
+                  description: "Change things",
+                  access: "write",
+                },
+              ],
               buildAuthUrl: ({
                 state,
                 redirectUri,
@@ -236,7 +246,12 @@ vi.mock("./registry", () => ({
                   state,
                   stateCookie,
                 };
-                return { credentials: { access_token: "xchg-1" } };
+                return {
+                  credentials: { access_token: "xchg-1" },
+                  ...(store.grantedScopes
+                    ? { scopes: store.grantedScopes }
+                    : {}),
+                };
               },
               accessLevels: {
                 label: "Access level",
@@ -302,6 +317,7 @@ beforeEach(() => {
   store.authUrlArgs = null;
   store.exchangeArgs = null;
   store.throwOnExchange = false;
+  store.grantedScopes = null;
   store.continueAt = null;
   caps.rbac = false;
 });
@@ -566,6 +582,24 @@ describe("tryHandleOrgCallback (shared-callback interceptor)", () => {
 
     expect(res?.status).toBe(302);
     expect(store.exchangeArgs?.accessLevel).toBe("user");
+  });
+
+  it("a partial grant tells the popup what's missing and how to retry this org connection", async () => {
+    store.grantedScopes = ["read"];
+    const res = await tryHandleOrgCallback(
+      callbackRequest(orgState()),
+      "oauthapp",
+    );
+
+    const location = new URL(res?.headers.get("location") ?? "");
+    expect(Object.fromEntries(location.searchParams)).toEqual({
+      status: "success",
+      missing: "write",
+      // The retry re-authenticates the org connection just created, in the
+      // org: never a workspace, and never a second connection.
+      connectionId: store.connections[0]?.id,
+      orgId: "org-1",
+    });
   });
 
   it("a continuation redirects with the next leg's state cookie and stores nothing", async () => {

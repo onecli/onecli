@@ -1,7 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronRight, Folder, HardDrive, Loader2 } from "lucide-react";
+import {
+  ChevronRight,
+  Folder,
+  FolderSymlink,
+  HardDrive,
+  Loader2,
+} from "lucide-react";
 import { Checkbox } from "@onecli/ui/components/checkbox";
 import { cn } from "@onecli/ui/lib/utils";
 import { coveredBy } from "@onecli/api/lib/resource-axis";
@@ -89,7 +95,12 @@ export const FolderRow = ({
   // Only the CHECK direction is barred: a folder selected before the
   // organization narrowed its boundary must stay removable.
   const lockedOut = covered || (outside && !directlySelected);
-  const Icon = folder.kind === "sharedDrive" ? HardDrive : Folder;
+  const Icon =
+    folder.kind === "sharedDrive"
+      ? HardDrive
+      : folder.kind === "shared"
+        ? FolderSymlink
+        : Folder;
   const summary = childSummary(folder);
   const toggleOpen = () => hasChildren && setOpen((o) => !o);
 
@@ -134,15 +145,13 @@ export const FolderRow = ({
           aria-expanded={hasChildren ? open : undefined}
           className="flex min-w-0 flex-1 items-center gap-2 text-left"
         >
-          <Icon className="text-muted-foreground size-3.5 shrink-0" />
+          <Icon
+            className="text-muted-foreground size-3.5 shrink-0"
+            aria-hidden
+          />
           <span className={cn("truncate text-xs", lockedOut && "opacity-50")}>
             {folder.name}
           </span>
-          {folder.kind === "sharedDrive" && (
-            <span className="text-muted-foreground shrink-0 text-[11px]">
-              Shared drive
-            </span>
-          )}
           {covered && (
             <span className="text-muted-foreground shrink-0 text-[11px]">
               via parent

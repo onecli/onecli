@@ -102,3 +102,10 @@ export const dockerLogs = async (container: string): Promise<string> => {
   const { stdout, stderr } = await exec("docker", ["logs", container]);
   return `${stdout}${stderr}`;
 };
+
+/** Whether the container exists AND is running (a missing one is not). */
+export const isRunning = async (container: string): Promise<boolean> =>
+  exec("docker", ["inspect", "--format", "{{.State.Running}}", container]).then(
+    ({ stdout }) => stdout.trim() === "true",
+    () => false,
+  );

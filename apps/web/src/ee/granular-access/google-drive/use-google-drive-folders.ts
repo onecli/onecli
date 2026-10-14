@@ -27,6 +27,9 @@ export const useGoogleDriveFolders = (
 export const useGoogleDriveFolderNames = (
   connectionId: string,
   ids: string[],
+  /** Off when the lookup can't succeed (e.g. the connection lacks Drive read
+   * access, so the server refuses it): saved chains keep their raw IDs. */
+  enabled = true,
 ) => {
   const key = [...new Set(ids)].sort().join(",");
   return useQuery({
@@ -42,7 +45,7 @@ export const useGoogleDriveFolderNames = (
       );
       return Object.fromEntries(results.flatMap((r) => Object.entries(r)));
     },
-    enabled: connectionId.length > 0 && key.length > 0,
+    enabled: enabled && connectionId.length > 0 && key.length > 0,
     staleTime: 5 * 60_000,
   });
 };

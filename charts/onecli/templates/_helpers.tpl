@@ -78,13 +78,48 @@ annotations:
 
 {{/* ── Secrets ─────────────────────────────────────────────────────────── */}}
 
-{{/* The Secret holding the application secrets (auth, encryption, internal, runner). */}}
+{{/* The Secret holding the application secrets (auth, encryption, internal, runner, channel adapter). */}}
 {{- define "onecli.secretsName" -}}
 {{- if .Values.secrets.existingSecret -}}
 {{- .Values.secrets.existingSecret -}}
 {{- else -}}
 {{- include "onecli.component" (dict "root" . "component" "secrets") -}}
 {{- end -}}
+{{- end -}}
+
+{{/*
+An env entry reading one key of the application Secret; expects {root, name}
+with `name` both the env var and the key. For keys newer than the first
+README: with the operator's own Secret the ref is `optional`, so a Secret
+made before the key existed still starts the pod (the feature stays off)
+instead of a CreateContainerConfigError on a Recreate Deployment. With the
+generated Secret it stays required: on an upgrade the pod waits (the kubelet
+retries) until the generator Job adds the key, rather than starting without
+it and missing it until its next restart.
+*/}}
+{{- define "onecli.optionalSecretEnv" -}}
+- name: {{ .name }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "onecli.secretsName" .root }}
+      key: {{ .name }}
+      {{- if .root.Values.secrets.existingSecret }}
+      optional: true
+      {{- end }}
+{{- end -}}
+
+{{/*
+Feature switches read nil-safely. `helm upgrade --reuse-values` replaces the
+chart's defaults with the previous release's values, so a key this chart
+introduced is simply ABSENT there and `.Values.channelAdapter.enabled` would
+fail the render with a nil pointer. Absent means off.
+*/}}
+{{- define "onecli.channelAdapter.enabled" -}}
+{{- if (.Values.channelAdapter | default dict).enabled -}}true{{- end -}}
+{{- end -}}
+
+{{- define "onecli.slackSharedApp.secret" -}}
+{{- (.Values.slackSharedApp | default dict).existingSecret | default "" -}}
 {{- end -}}
 
 {{- define "onecli.gatewayCaSecretName" -}}
@@ -143,6 +178,61 @@ chart's from `database.external.url`. Exactly one source must be configured.
 {{- end -}}
 {{- if ne (int .Values.api.replicas) 1 -}}
 {{- fail "api.replicas must be 1 on a self-hosted install: the api's event bus is in-process" -}}
+{{- end -}}
+{{- include "onecli.validateGatewayReplicas" . -}}
+{{- include "onecli.validateChannelAdapter" . -}}
+{{- include "onecli.validateExistingSecretKeys" . -}}
+{{- end -}}
+
+{{/*
+More than one gateway needs shared state: pending approvals and the config
+cache live in each gateway's memory unless REDIS_HOST selects the shared
+stores, which are licensed multi-instance operation (the gateway refuses
+REDIS_HOST without the Enterprise flag). A second in-memory replica would
+silently drop approval decisions and cache flushes, so refuse it here.
+*/}}
+{{- define "onecli.validateGatewayReplicas" -}}
+{{- if gt (int .Values.gateway.replicas) 1 -}}
+{{- $redis := false -}}
+{{- range .Values.gateway.extraEnv -}}
+{{- if and (eq .name "REDIS_HOST") (or .value .valueFrom) -}}{{- $redis = true -}}{{- end -}}
+{{- end -}}
+{{- if not (and .Values.enterpriseEnabled $redis) -}}
+{{- fail "gateway.replicas > 1 needs shared state: pending approvals and the config cache live in each gateway's memory, so a second replica would drop approval decisions and cache flushes. Keep gateway.replicas=1, or (with a OneCLI Enterprise license) set enterpriseEnabled=true and REDIS_HOST in gateway.extraEnv" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+`channelAdapter.enabled=true` with values carried over by `--reuse-values`
+from a release older than the key: the toggle is present but the rest of the
+block is not. Say how to fix it instead of rendering a pod with no resources.
+*/}}
+{{- define "onecli.validateChannelAdapter" -}}
+{{- if include "onecli.channelAdapter.enabled" . -}}
+{{- if not (hasKey .Values.channelAdapter "resources") -}}
+{{- fail "channelAdapter.enabled is set but the rest of channelAdapter.* is missing: the values were carried over from an older release with --reuse-values, which drops new chart defaults. Upgrade with --reset-then-reuse-values instead" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The key an enabled feature needs from the operator's own application
+Secret. Checked only on positive evidence: `lookup` sees the Secret during
+`helm install`/`upgrade` and returns nothing under `helm template` (Argo CD,
+Flux, CI), where the check stays silent rather than guess. A Secret made
+from an older README lacks the keys newer features read; the message hands
+over the exact patch. The generated Secret is never checked: the generator
+Job adds missing keys itself.
+*/}}
+{{- define "onecli.validateExistingSecretKeys" -}}
+{{- if and .Values.secrets.existingSecret (include "onecli.channelAdapter.enabled" .) -}}
+{{- $secret := lookup "v1" "Secret" .Release.Namespace .Values.secrets.existingSecret -}}
+{{- if and $secret (not (get ($secret.data | default dict) "CHANNEL_ADAPTER_TOKEN")) -}}
+{{- fail (printf `secrets.existingSecret %q has no CHANNEL_ADAPTER_TOKEN, which channelAdapter.enabled needs (the api and the adapter read the same value). Add it without touching the other keys, then re-run the upgrade:
+  TOKEN="cha_$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  kubectl -n %s patch secret %s --type merge -p "{\"stringData\":{\"CHANNEL_ADAPTER_TOKEN\":\"$TOKEN\"}}"` .Values.secrets.existingSecret .Release.Namespace .Values.secrets.existingSecret) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 

@@ -56,6 +56,7 @@ spec:
     spec:
       serviceAccountName: {{ $name }}
       automountServiceAccountToken: true
+      enableServiceLinks: false
       {{- include "onecli.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- include "onecli.podSecurityContext" (dict "uid" 1000 "gid" 1000) | nindent 8 }}
@@ -74,6 +75,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "onecli.secretsName" . }}
                   key: RUNNER_TOKEN
+            # Signs supervisor sessions so a runner restart (an upgrade, a
+            # drain, an eviction) keeps every in-flight turn. Absent from a
+            # Secret made before the key existed: the runner then boots with
+            # resumption off and logs so.
+            {{- include "onecli.optionalSecretEnv" (dict "root" . "name" "RUNNER_SESSION_KEY") | nindent 12 }}
             - name: RUNNER_CONTROL_PLANE_URL
               value: {{ include "onecli.apiUrl" . | quote }}
             - name: RUNNER_BACKEND

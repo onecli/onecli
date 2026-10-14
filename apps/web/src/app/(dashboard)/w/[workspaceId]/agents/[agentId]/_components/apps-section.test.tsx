@@ -25,6 +25,9 @@ vi.mock("./manage-permissions-dialog", () => ({
     connection ? (
       <div data-testid="manage-sheet">
         {connection.id}
+        <span data-testid="sheet-missing">
+          {connection.missingPermissions?.length ?? 0}
+        </span>
         <button data-testid="close-sheet" onClick={onClose}>
           close
         </button>
@@ -98,6 +101,41 @@ const renderSection = (connections: Connection[]) => {
     queryClient,
   };
 };
+
+describe("AppsSection manage sheet", () => {
+  afterEach(() => {
+    search = new URLSearchParams();
+    vi.mocked(connectionsApi.list).mockReset();
+  });
+
+  // A reconnect from inside the sheet (the Drive picker's "Reconnect to
+  // grant") refetches the connection list. The open sheet must show the
+  // refreshed row, not the one it opened with, or its warning never clears.
+  it("follows the live connection row while open", async () => {
+    const readFiles = {
+      scope: "https://www.googleapis.com/auth/drive.readonly",
+      name: "Read files",
+      description: "View and download all your Drive files",
+    };
+    search = new URLSearchParams("connection=conn-1&manage=1");
+    const { queryClient } = renderSection([
+      { ...conn("conn-1"), missingPermissions: [readFiles] },
+    ]);
+    expect(await screen.findByTestId("sheet-missing")).toHaveTextContent("1");
+
+    vi.mocked(connectionsApi.list).mockResolvedValue([
+      { ...conn("conn-1"), missingPermissions: [] },
+    ]);
+    await act(async () => {
+      await queryClient.invalidateQueries({
+        queryKey: queryKeys.connections.all(),
+      });
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("sheet-missing")).toHaveTextContent("0"),
+    );
+  });
+});
 
 describe("AppsSection ?connection=&manage=1 deep link", () => {
   afterEach(() => {
