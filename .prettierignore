@@ -24,3 +24,8 @@ AGENTS.md
 
 # Helm templates are Go templates, not YAML; prettier would mangle the actions.
 charts/**/templates/
+
+# Agent tooling state (oh-my-claudecode / oh-my-opencode scratch dirs, gitignored
+# at the root) — not repo content; the format gate must not fail on it.
+.omc/
+.omo/
