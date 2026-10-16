@@ -100,11 +100,13 @@ const NUL = String.fromCharCode(0);
  */
 const clean = (value: string): string => {
   const withoutNul = value.includes(NUL) ? value.split(NUL).join("") : value;
-  return withoutNul.length <= MAX_EVENT_TEXT_CHARS
-    ? withoutNul
-    : `${withoutNul.slice(0, MAX_EVENT_TEXT_CHARS)}\n… [truncated ${
-        withoutNul.length - MAX_EVENT_TEXT_CHARS
-      } characters]`;
+  if (withoutNul.length <= MAX_EVENT_TEXT_CHARS) return withoutNul;
+  // Never cut between a surrogate pair: the lone half serializes as "\ud83d",
+  // which jsonb refuses just like a NUL.
+  const kept = withoutNul
+    .slice(0, MAX_EVENT_TEXT_CHARS)
+    .replace(/[\uD800-\uDBFF]$/, "");
+  return `${kept}\n… [truncated ${withoutNul.length - kept.length} characters]`;
 };
 
 /**
