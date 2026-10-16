@@ -83,6 +83,7 @@ import { pagerdutyPermissions } from "./pagerduty";
 import { coralogixPermissions } from "./coralogix";
 import { onyxPermissions } from "./onyx";
 import { webflowPermissions } from "./webflow";
+import { serplyPermissions } from "./serply";
 
 const permissionRegistry = new Map<string, AppPermissionDefinition>();
 
@@ -168,3 +169,4 @@ register(pagerdutyPermissions);
 register(coralogixPermissions);
 register(onyxPermissions);
 register(webflowPermissions);
+register(serplyPermissions);

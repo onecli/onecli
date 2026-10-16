@@ -71,6 +71,7 @@ import { pagerduty } from "./pagerduty";
 import { coralogix } from "./coralogix";
 import { onyx } from "./onyx";
 import { webflow } from "./webflow";
+import { serply } from "./serply";
 
 const staticApps: AppDefinition[] = [
   salesforce,
@@ -142,6 +143,7 @@ const staticApps: AppDefinition[] = [
   coralogix,
   onyx,
   webflow,
+  serply,
 ];
 
 export const getApps = (): AppDefinition[] => [...staticApps];
