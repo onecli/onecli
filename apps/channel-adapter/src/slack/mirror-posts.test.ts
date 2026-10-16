@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { automationCaption } from "./mirror-posts";
+import { automationCaption, sectionChunks } from "./mirror-posts";
 
 /**
  * The automation caption. Its whole job is to LABEL a report, never to be
@@ -105,5 +105,23 @@ describe("the automation caption", () => {
   it("is empty for an empty header, so nothing invents a label", () => {
     expect(automationCaption("")).toBe("");
     expect(automationCaption("\n\nbody only")).toBe("");
+  });
+});
+
+describe("the section splitter", () => {
+  it("never cuts an emoji in half on a hard cut", () => {
+    // No newline to cut at, and the emoji straddles the section limit.
+    const text = `${"a".repeat(2899)}😀${"b".repeat(300)}`;
+    const sections = sectionChunks(text);
+
+    expect(sections.join("")).toBe(text);
+    for (const section of sections) {
+      expect(section.length).toBeLessThanOrEqual(2900);
+      expect(
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
+          section,
+        ),
+      ).toBe(false);
+    }
   });
 });

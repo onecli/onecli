@@ -105,7 +105,7 @@ export const automationCaption = (title: string): string => {
   return `${clipped}…`;
 };
 
-const sectionChunks = (text: string): string[] => {
+export const sectionChunks = (text: string): string[] => {
   const chunks: string[] = [];
   let rest = text;
   while (rest.length > SECTION_TEXT_LIMIT) {
@@ -123,6 +123,9 @@ const sectionChunks = (text: string): string[] => {
       const close = rest.indexOf(">", open);
       if (close === -1 || close >= cut) cut = open;
     }
+    // Never cut between a surrogate pair: each half would render as a
+    // replacement character (same rule as the caption clip).
+    if (/[\uD800-\uDBFF]/.test(rest.charAt(cut - 1))) cut -= 1;
     chunks.push(rest.slice(0, cut));
     rest = rest.slice(cut).replace(/^\n/, "");
   }
