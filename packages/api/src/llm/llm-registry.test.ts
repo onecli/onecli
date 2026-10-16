@@ -86,6 +86,18 @@ describe("the provider definitions", () => {
     expect(isLlmProviderId("openrouter")).toBe(true);
   });
 
+  it("opencode-go offers ONLY its OpenAI /chat/completions models", () => {
+    const provider = LLM_PROVIDERS["opencode-go"];
+    expect(provider.isSelectable("deepseek-v4.1-flash")).toBe(true);
+    expect(provider.isSelectable("glm-5.3")).toBe(true);
+    // `/responses`- and `/messages`-only models are unsupported by the harness
+    // today, so they must not be offered.
+    expect(provider.isSelectable("gpt-6-luna")).toBe(false);
+    expect(provider.isSelectable("grok-4.7")).toBe(false);
+    expect(provider.isSelectable("claude-haiku-5-5")).toBe(false);
+    expect(provider.isSelectable("qwen3.8-max")).toBe(false);
+  });
+
   it("registers `local` as the keyless, user-URL OpenAI-compatible provider", () => {
     const provider = LLM_PROVIDERS.local;
     expect(provider.id).toBe("local");
