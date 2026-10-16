@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { anthropic } from "./anthropic";
 import { openai } from "./openai";
+import { local } from "./local";
 import { LLM_PROVIDERS, isLlmProviderId } from "./registry";
 import { getModelCatalog, resetModelCatalogCache } from "./catalog-cache";
 import { resolveAgentModel } from "./resolve";
@@ -25,9 +26,19 @@ describe("the provider definitions", () => {
     expect(isLlmProviderId("generic")).toBe(false);
   });
 
-  it("hardcodes each catalog URL — never derived from a stored host", () => {
-    for (const provider of Object.values(LLM_PROVIDERS))
+  it("hardcodes each hosted catalog URL — never derived from a stored host", () => {
+    for (const provider of Object.values(LLM_PROVIDERS)) {
+      // `local` is the ONE deliberate exception (the SSRF note in types.ts):
+      // its catalog URL comes from the user's own base URL, not a constant.
+      if (provider.catalogUrlFor) {
+        expect(provider.catalogUrl).toBeUndefined();
+        expect(provider.catalogUrlFor("http://192.168.1.50:11434/v1")).toBe(
+          "http://192.168.1.50:11434/v1/models",
+        );
+        continue;
+      }
       expect(provider.catalogUrl).toMatch(/^https:\/\//);
+    }
   });
 
   it("lists with every API key", () => {
@@ -51,6 +62,83 @@ describe("the provider definitions", () => {
       "x-api-key": "sk-ant-api-x",
       "anthropic-version": "2023-06-01",
     });
+  });
+
+  it("registers the OpenAI-compatible pay-your-own-upstream providers", () => {
+    for (const [id, label, order, catalogUrl] of [
+      ["opencode-go", "OpenCode Go", 2, "https://opencode.ai/zen/go/v1/models"],
+      ["openrouter", "OpenRouter", 3, "https://openrouter.ai/api/v1/models"],
+    ] as const) {
+      const provider = LLM_PROVIDERS[id];
+      expect(provider.id).toBe(id);
+      expect(provider.label).toBe(label);
+      expect(provider.order).toBe(order);
+      expect(provider.catalogUrl).toBe(catalogUrl);
+      expect(provider.canList("api-key")).toBe(true);
+      expect(provider.canList("oauth")).toBe(false);
+      expect(provider.catalogHeaders("sk-x", "api-key")).toEqual({
+        authorization: "Bearer sk-x",
+      });
+      expect(provider.fallback.length).toBeGreaterThan(0);
+      expect(provider.isSelectable(provider.defaultModel)).toBe(true);
+    }
+    expect(isLlmProviderId("opencode-go")).toBe(true);
+    expect(isLlmProviderId("openrouter")).toBe(true);
+  });
+
+  it("registers `local` as the keyless, user-URL OpenAI-compatible provider", () => {
+    const provider = LLM_PROVIDERS.local;
+    expect(provider.id).toBe("local");
+    expect(provider.label).toBe("Local (OpenAI-compatible)");
+    expect(provider.order).toBe(4);
+    expect(provider.canList("api-key")).toBe(true);
+    expect(provider.canList("oauth")).toBe(false);
+    expect(provider.canListWithoutKey).toBe(true);
+    expect(provider.fallback.length).toBeGreaterThan(0);
+    expect(provider.isSelectable(provider.defaultModel)).toBe(true);
+    expect(isLlmProviderId("local")).toBe(true);
+    // Trailing slashes are trimmed so the catalogue URL never double-slashes.
+    expect(provider.catalogUrlFor?.("http://192.168.1.50:11434/v1/")).toBe(
+      "http://192.168.1.50:11434/v1/models",
+    );
+    // A keyless server sends NO auth header; a key is a plain bearer.
+    expect(provider.catalogHeaders("", "api-key")).toEqual({});
+    expect(provider.catalogHeaders("sk-x", "api-key")).toEqual({
+      authorization: "Bearer sk-x",
+    });
+  });
+});
+
+describe("parsing an OpenAI-compatible catalog", () => {
+  it("keeps only well-formed id rows for both providers", () => {
+    for (const id of ["opencode-go", "openrouter"] as const) {
+      expect(
+        LLM_PROVIDERS[id].parseCatalog({
+          data: [{ id: "model-a" }, { id: "" }, { nope: 1 }, null, "x"],
+        }),
+      ).toEqual([{ id: "model-a" }]);
+    }
+  });
+
+  it("drops OpenRouter's non-chat modalities but keeps the vendor models", () => {
+    const openrouter = LLM_PROVIDERS.openrouter;
+    for (const id of [
+      "openai/text-embedding-3-large",
+      "openai/whisper-1",
+      "openai/dall-e-3",
+      "openai/gpt-4o-audio-preview",
+      "openai/omni-moderation-latest",
+      "openai/gpt-3.5-turbo-instruct",
+      "stabilityai/stable-diffusion-xl",
+    ])
+      expect(openrouter.isSelectable(id)).toBe(false);
+    for (const id of [
+      "anthropic/claude-sonnet-4",
+      "openai/gpt-5.4",
+      "google/gemini-3-pro",
+      "deepseek/deepseek-v4",
+    ])
+      expect(openrouter.isSelectable(id)).toBe(true);
   });
 });
 
@@ -451,6 +539,43 @@ describe("the catalog cache", () => {
     );
     expect(result.degraded).toBe(true);
     expect(result.models.map((m) => m.id)).toEqual([...provider.fallback]);
+  });
+
+  it("fetches a `local` server's catalog from its OWN base URL, even keyless", async () => {
+    const spy = vi.fn().mockResolvedValue(ok());
+    vi.stubGlobal("fetch", spy);
+
+    const result = await getModelCatalog(
+      local,
+      "sec-local",
+      async () => null,
+      "api-key",
+      "http://192.168.1.50:11434/v1",
+    );
+
+    expect(spy).toHaveBeenCalledWith(
+      "http://192.168.1.50:11434/v1/models",
+      expect.objectContaining({ headers: {} }),
+    );
+    expect(result.degraded).toBe(false);
+    expect(result.models.every((m) => m.source === "live")).toBe(true);
+  });
+
+  it("degrades a `local` catalog to the pinned list when no base URL is known", async () => {
+    const spy = vi.fn().mockResolvedValue(ok());
+    vi.stubGlobal("fetch", spy);
+
+    const result = await getModelCatalog(
+      local,
+      "sec-local",
+      async () => null,
+      "api-key",
+      null,
+    );
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(result.degraded).toBe(true);
+    expect(result.models.map((m) => m.id)).toEqual([...local.fallback]);
   });
 });
 

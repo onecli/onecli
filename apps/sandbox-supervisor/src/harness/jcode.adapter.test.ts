@@ -382,6 +382,17 @@ beforeEach(() => {
   delete process.env.ONECLI_JCODE_BINARY;
   delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
   delete process.env.ANTHROPIC_API_KEY;
+  // The native-provider grant vars a test may set (see the pin describe):
+  // cleared by name through a computed key so the runtime-provided names need
+  // not be declared in the repo's root turbo.json.
+  for (const name of [
+    "OPENCODE_GO_API_KEY",
+    "OPENROUTER_API_KEY",
+    "LOCAL_LLM_BASE_URL",
+    "LOCAL_LLM_API_KEY",
+  ]) {
+    delete process.env[name];
+  }
 });
 
 afterEach(() => {
@@ -517,6 +528,100 @@ describe("the connection model", () => {
 
       expect(state.launches).toHaveLength(1);
       expect(existsSync(planted)).toBe(false);
+    });
+  });
+
+  describe("the native provider pin", () => {
+    /**
+     * Launch with the given grant env and return the env the adapter handed
+     * `launchInstance` plus the managed config.toml it wrote. This is the
+     * write-path proof for `resolveNativeProvider`: the pure resolver is
+     * covered in jcode.pin.test.ts, and only this boundary shows the value
+     * actually reaching both levers (config declaration + env fence).
+     */
+    const launchWith = async (grant: Record<string, string>) => {
+      Object.assign(process.env, grant);
+      const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+      await createJcodeHarness().startSession({ homeDir });
+      const options = state.launches[0]?.options as {
+        env?: Record<string, string>;
+        jcodeHome?: string;
+      };
+      const configPath = join(
+        options.jcodeHome ?? join(homeDir, ".jcode-home"),
+        "config.toml",
+      );
+      return {
+        env: options.env ?? {},
+        config: readFileSync(configPath, "utf8"),
+      };
+    };
+
+    it("OPENCODE_GO_API_KEY pins both the env fence and the managed config", async () => {
+      const { env, config } = await launchWith({
+        OPENCODE_GO_API_KEY: "placeholder",
+      });
+      // The fence: env beats config on every reload, surviving jcode's own
+      // config round-trip and an agent editing its config.toml.
+      expect(env.JCODE_PROVIDER).toBe("opencode-go");
+      expect(config).toContain('default_provider = "opencode-go"');
+      // No Anthropic grant, so the Anthropic route is not pinned.
+      expect(env.JCODE_RUNTIME_PROVIDER).toBeUndefined();
+    });
+
+    it("OPENROUTER_API_KEY pins both the env fence and the managed config", async () => {
+      const { env, config } = await launchWith({
+        OPENROUTER_API_KEY: "placeholder",
+      });
+      expect(env.JCODE_PROVIDER).toBe("openrouter");
+      expect(config).toContain('default_provider = "openrouter"');
+    });
+
+    it("an Anthropic grant wins — no native pin, config stays provider-neutral", async () => {
+      const { env, config } = await launchWith({
+        ANTHROPIC_API_KEY: "placeholder",
+        OPENCODE_GO_API_KEY: "placeholder",
+      });
+      expect(env.JCODE_PROVIDER).toBeUndefined();
+      expect(env.JCODE_RUNTIME_PROVIDER).toBe("claude-api");
+      expect(config).not.toContain("default_provider");
+    });
+
+    it("LOCAL_LLM_BASE_URL pins the local endpoint: env fence + config with the profile and key env", async () => {
+      const { env, config } = await launchWith({
+        LOCAL_LLM_BASE_URL: "http://192.168.1.50:11434/v1",
+        LOCAL_LLM_API_KEY: "placeholder",
+      });
+      // The env fence names the profile; the config declares it with the
+      // base URL interpolated and the key sourced from the sandbox env.
+      expect(env.JCODE_PROVIDER).toBe("local");
+      expect(env.JCODE_RUNTIME_PROVIDER).toBeUndefined();
+      expect(config).toContain('[provider]\ndefault_provider = "local"');
+      expect(config).toContain("[providers.local]");
+      expect(config).toContain('base_url = "http://192.168.1.50:11434/v1"');
+      expect(config).toContain('api_key_env = "LOCAL_LLM_API_KEY"');
+      expect(config).toContain("requires_api_key = true");
+      // Never the secret itself — only the name of the env var holding it.
+      expect(config).not.toContain("placeholder");
+    });
+
+    it("a keyless local endpoint pins auth=none with no api_key_env", async () => {
+      const { env, config } = await launchWith({
+        LOCAL_LLM_BASE_URL: "http://192.168.1.50:11434/v1",
+      });
+      expect(env.JCODE_PROVIDER).toBe("local");
+      expect(config).toContain('auth = "none"');
+      expect(config).toContain("requires_api_key = false");
+      expect(config).not.toContain("api_key_env");
+    });
+
+    it("a local endpoint never leaks into a non-local boot — the base config is untouched", async () => {
+      const { config } = await launchWith({
+        OPENROUTER_API_KEY: "placeholder",
+      });
+      expect(config).toContain('default_provider = "openrouter"');
+      expect(config).not.toContain("[providers.");
+      expect(config).not.toContain("LOCAL_LLM");
     });
   });
 

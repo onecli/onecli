@@ -92,6 +92,33 @@ export const SecretsContent = ({
       });
       setCreateOpen(true);
       router.replace(window.location.pathname, { scroll: false });
+    } else if (createType === "opencode-go" && typeFilter === "llm") {
+      paramHandled.current = true;
+      setPrefill({
+        type: "opencode-go",
+        hostPattern: "opencode.ai",
+        name: "OpenCode Go Token",
+      });
+      setCreateOpen(true);
+      router.replace(window.location.pathname, { scroll: false });
+    } else if (createType === "openrouter" && typeFilter === "llm") {
+      paramHandled.current = true;
+      setPrefill({
+        type: "openrouter",
+        hostPattern: "openrouter.ai",
+        name: "OpenRouter Token",
+      });
+      setCreateOpen(true);
+      router.replace(window.location.pathname, { scroll: false });
+    } else if (createType === "local" && typeFilter === "llm") {
+      paramHandled.current = true;
+      setPrefill({
+        type: "local",
+        hostPattern: "",
+        name: "Local LLM",
+      });
+      setCreateOpen(true);
+      router.replace(window.location.pathname, { scroll: false });
     } else if (createType === "codex" && typeFilter === "llm") {
       paramHandled.current = true;
       setPrefill({
@@ -196,7 +223,9 @@ export const SecretsContent = ({
         prefill={prefill}
         defaultType={typeFilter === "generic" ? "generic" : undefined}
         allowedTypes={
-          typeFilter === "llm" ? ["anthropic", "openai"] : undefined
+          typeFilter === "llm"
+            ? ["anthropic", "openai", "opencode-go", "openrouter", "local"]
+            : undefined
         }
         secretActions={secretActions}
       />

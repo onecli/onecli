@@ -266,19 +266,69 @@ const opDisplaySchema = z
   .object({ vault: z.string(), item: z.string(), field: z.string() })
   .optional();
 
+// A `local` provider's base URL: a user-run OpenAI-compatible server on the
+// user's own network. This is the ONE intentional SSRF exception (§3.10) — the
+// destination is the user's to choose, never merged into a hosted provider's
+// catalog URL. Restricted to http(s), the only schemes `fetch` and the gateway
+// speak; the trailing slash is trimmed so `<baseUrl>/models` never double-slashes.
+export const localBaseUrlSchema = z
+  .string()
+  .trim()
+  .url()
+  .refine((v) => /^https?:\/\//i.test(v), {
+    message: "Base URL must start with http:// or https://",
+  });
+
+export interface LocalSecretMetadata {
+  baseUrl: string;
+}
+
+/** The `local` secret's stored shape (`secret.metadata`): just its base URL. */
+export const parseLocalMetadata = (
+  metadata: unknown,
+): LocalSecretMetadata | null => {
+  if (
+    metadata &&
+    typeof metadata === "object" &&
+    "baseUrl" in metadata &&
+    typeof (metadata as { baseUrl: unknown }).baseUrl === "string" &&
+    (metadata as { baseUrl: string }).baseUrl !== ""
+  ) {
+    return metadata as LocalSecretMetadata;
+  }
+  return null;
+};
+
 export const createSecretSchema = z
   .object({
     name: z.string().trim().min(1).max(255),
-    type: z.enum(["anthropic", "openai", "generic"]),
+    type: z.enum([
+      "anthropic",
+      "openai",
+      "opencode-go",
+      "openrouter",
+      "local",
+      "generic",
+    ]),
     valueSource: z.enum(valueSources).optional(),
     value: z.string().max(10000).optional(),
     opRef: opRefSchema.optional(),
     opDisplay: opDisplaySchema,
     hostPattern: hostPatternSchema,
     pathPattern: z.string().max(1000).optional(),
+    // `local` only: the user's own server. Required for that type, ignored for
+    // every other (see the superRefine).
+    baseUrl: localBaseUrlSchema.optional(),
     injectionConfig: injectionConfigSchema,
   })
   .superRefine((data, ctx) => {
+    if (data.type === "local" && !data.baseUrl) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["baseUrl"],
+        message: "Base URL is required for local providers",
+      });
+    }
     if (data.valueSource === "onepassword") {
       if (!data.opRef) {
         ctx.addIssue({
@@ -287,7 +337,12 @@ export const createSecretSchema = z
           message: "Select a 1Password field",
         });
       }
-    } else if (!data.value || data.value.length < 1) {
+      // A `local` server may run keyless, so its value is optional; every other
+      // type still needs one (or a 1Password reference).
+    } else if (
+      data.type !== "local" &&
+      (!data.value || data.value.length < 1)
+    ) {
       ctx.addIssue({
         code: "custom",
         path: ["value"],
@@ -307,6 +362,9 @@ export const updateSecretSchema = z
     opDisplay: opDisplaySchema,
     hostPattern: hostPatternSchema.optional(),
     pathPattern: z.string().max(1000).nullable().optional(),
+    // `local` only, and only meaningful there; the service keeps the existing
+    // value when it is omitted.
+    baseUrl: localBaseUrlSchema.optional(),
     injectionConfig: injectionConfigSchema,
   })
   .refine((data) => Object.keys(data).length > 0, {
@@ -320,16 +378,9 @@ export const updateSecretSchema = z
         message: "Select a 1Password field",
       });
     }
-    if (
-      data.valueSource === "inline" &&
-      (!data.value || data.value.length < 1)
-    ) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["value"],
-        message: "Secret value is required",
-      });
-    }
+    // An inline value is required for a secret that already has a type, but this
+    // schema cannot see `type`; the service enforces it per-type and permits an
+    // EMPTY value for `local` (a keyless server).
   });
 
 export type UpdateSecretInput = z.infer<typeof updateSecretSchema>;

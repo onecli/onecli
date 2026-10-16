@@ -10,6 +10,17 @@ import {
 
 const prefixClassName = "text-[11px]";
 
+/** Every typed LLM key whose value we can comment on. `generic` is excluded —
+ *  its value is an opaque secret with no provider format to check. `local` is
+ *  included but always neutral: an OpenAI-compatible server's key is optional
+ *  and has no published shape, so there is no prefix to check or invent. */
+export type FormattableKeyType =
+  | "anthropic"
+  | "openai"
+  | "opencode-go"
+  | "openrouter"
+  | "local";
+
 /**
  * The amber line under an LLM key input: why the pasted value doesn't look
  * like a credential this provider's API accepts, or `null` when it does (or
@@ -17,11 +28,15 @@ const prefixClassName = "text-[11px]";
  * Format hints only; they never block saving.
  */
 export const keyFormatWarning = (
-  type: "anthropic" | "openai",
+  type: FormattableKeyType,
   raw: string,
 ): ReactNode => {
   const value = raw.trim();
   if (!value) return null;
+
+  // A local OpenAI-compatible server hands out opaque or absent keys: nothing
+  // to check, and never fabricate a prefix.
+  if (type === "local") return null;
 
   // No provider credential contains whitespace. `claude setup-token` prints a
   // long token that terminals wrap; a single-line input drops the line break
@@ -67,6 +82,32 @@ export const keyFormatWarning = (
     );
   }
 
+  if (type === "openai") {
+    return openaiFormatWarning(value);
+  }
+
+  // OpenCode Go hands out opaque subscription keys with no published prefix,
+  // so there is no shape to check — never invent one. Whitespace above is the
+  // only thing worth flagging.
+  if (type === "opencode-go") return null;
+
+  // OpenRouter keys conventionally start with `sk-or-`.
+  if (value.startsWith("sk-or-")) return null;
+  if (looksLikeAnthropicKey(value)) {
+    return "This looks like an Anthropic key, not an OpenRouter one.";
+  }
+  if (looksLikeOpenaiKey(value)) {
+    return "This looks like an OpenAI key, not an OpenRouter one.";
+  }
+  return (
+    <>
+      OpenRouter keys usually start with{" "}
+      <code className={prefixClassName}>sk-or-</code>.
+    </>
+  );
+};
+
+const openaiFormatWarning = (value: string): ReactNode => {
   if (looksLikeOpenaiKey(value)) return null;
   if (value.startsWith("sk-ant-")) {
     return "This looks like an Anthropic key, not an OpenAI key.";

@@ -3,6 +3,7 @@ import { agentProxyAddress } from "../lib/public-origins";
 import { loadCaCertificate } from "../lib/gateway-ca";
 import {
   parseAnthropicMetadata,
+  parseLocalMetadata,
   parseOpenaiMetadata,
 } from "../validations/secret";
 import { buildCodexOAuthStub } from "../lib/codex-stubs";
@@ -244,6 +245,46 @@ export const buildContainerConfig = async ({
     }
   }
 
+  // Pay-your-own-upstream OpenAI-compatible providers. A granted key becomes the
+  // placeholder in the harness's own credential variable; the gateway splices
+  // the real value at the wire. At most one of each, and they coexist with the
+  // Anthropic/OpenAI arms because a harness chooses its provider by which
+  // variable is set.
+  const opencodeGoSecret = await findInjectableSecretOfType(
+    injectableSecrets,
+    "opencode-go",
+    { id: true },
+  );
+  const openrouterSecret = await findInjectableSecretOfType(
+    injectableSecrets,
+    "openrouter",
+    { id: true },
+  );
+
+  const compatEnv: Record<string, string> = {};
+  if (opencodeGoSecret) compatEnv.OPENCODE_GO_API_KEY = "placeholder";
+  if (openrouterSecret) compatEnv.OPENROUTER_API_KEY = "placeholder";
+
+  // A user-run OpenAI-compatible server (`local`). The supervisor configures
+  // jcode from LOCAL_LLM_BASE_URL; the API key is emitted ONLY when the secret
+  // actually holds one — a keyless server gets the base URL and no key, so the
+  // gateway injects nothing and nothing shadows the server's own behaviour.
+  const localSecret = await findInjectableSecretOfType(
+    injectableSecrets,
+    "local",
+    { metadata: true, encryptedValue: true, valueSource: true },
+  );
+  const localMeta = parseLocalMetadata(localSecret?.metadata);
+
+  const localEnv: Record<string, string> = {};
+  if (localSecret && localMeta) {
+    localEnv.LOCAL_LLM_BASE_URL = localMeta.baseUrl;
+    const hasApiKey =
+      localSecret.valueSource === "onepassword" ||
+      localSecret.encryptedValue !== null;
+    if (hasApiKey) localEnv.LOCAL_LLM_API_KEY = "placeholder";
+  }
+
   const warnings: string[] = [];
   if (!anthropicSecret && !platformCredit) {
     warnings.push(
@@ -303,6 +344,8 @@ export const buildContainerConfig = async ({
         TZ: timezone,
         ...authEnv,
         ...openaiEnv,
+        ...compatEnv,
+        ...localEnv,
       },
       caCertificate,
       caCertificateContainerPath: CA_CONTAINER_PATH,

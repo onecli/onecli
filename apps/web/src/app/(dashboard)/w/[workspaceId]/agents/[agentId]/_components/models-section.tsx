@@ -83,7 +83,13 @@ export const ModelsSection = ({ agentId }: { agentId: string }) => {
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         onSaved={onSaved}
-        allowedTypes={["anthropic", "openai"]}
+        allowedTypes={[
+          "anthropic",
+          "openai",
+          "opencode-go",
+          "openrouter",
+          "local",
+        ]}
         secretActions={secretActions}
       />
       {/* Edit door: replace the stored value (write-only) or rename. Keyed so

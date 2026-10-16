@@ -48,6 +48,9 @@ const configured = (): boolean =>
 const isLlmSecret = (secret: { type: string; hostPattern: string }): boolean =>
   secret.type === "anthropic" ||
   secret.type === "openai" ||
+  secret.type === "opencode-go" ||
+  secret.type === "openrouter" ||
+  secret.type === "local" ||
   LLM_HOST_FRAGMENTS.some((fragment) => secret.hostPattern.includes(fragment));
 
 /**

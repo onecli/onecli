@@ -13,7 +13,13 @@ export default async function SecretsRedirectPage({
   const prefix = workspaceId ? `/w/${workspaceId}` : "";
   const base = `${prefix}/connections`;
 
-  if (sp.create === "anthropic" || sp.create === "openai") {
+  if (
+    sp.create === "anthropic" ||
+    sp.create === "openai" ||
+    sp.create === "opencode-go" ||
+    sp.create === "openrouter" ||
+    sp.create === "local"
+  ) {
     redirect(`${base}/llms?create=${sp.create}`);
   }
 

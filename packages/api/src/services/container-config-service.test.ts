@@ -267,6 +267,10 @@ describe("which provider's variables the container gets", () => {
     expect(result.config.env).not.toHaveProperty("ANTHROPIC_API_KEY");
     expect(result.config.env).not.toHaveProperty("CLAUDE_CODE_OAUTH_TOKEN");
     expect(result.config.env).not.toHaveProperty("OPENAI_API_KEY");
+    expect(result.config.env).not.toHaveProperty("OPENCODE_GO_API_KEY");
+    expect(result.config.env).not.toHaveProperty("OPENROUTER_API_KEY");
+    expect(result.config.env).not.toHaveProperty("LOCAL_LLM_BASE_URL");
+    expect(result.config.env).not.toHaveProperty("LOCAL_LLM_API_KEY");
     expect(result.llmCredential).toBeNull();
   });
 
@@ -302,6 +306,110 @@ describe("which provider's variables the container gets", () => {
     if (!result.ok) throw new Error("expected a config");
 
     expect(result.llmCredential?.provider).toBe("anthropic");
+  });
+
+  it("sets OPENCODE_GO_API_KEY when an OpenCode Go key is granted", async () => {
+    granted([{ type: "opencode-go" }]);
+    mocks.secretFindFirst.mockImplementation(
+      async ({ where }: { where: { AND: Array<{ type?: string }> } }) => {
+        const type = where.AND.find((clause) => clause.type)?.type;
+        return type === "opencode-go" ? { id: "sec-og" } : null;
+      },
+    );
+    const result = await build();
+    if (!result.ok) throw new Error("expected a config");
+
+    expect(result.config.env.OPENCODE_GO_API_KEY).toBe("placeholder");
+    expect(result.config.env).not.toHaveProperty("OPENROUTER_API_KEY");
+    expect(result.llmCredential?.provider).toBe("opencode-go");
+  });
+
+  it("sets OPENROUTER_API_KEY when an OpenRouter key is granted", async () => {
+    granted([{ type: "openrouter" }]);
+    mocks.secretFindFirst.mockImplementation(
+      async ({ where }: { where: { AND: Array<{ type?: string }> } }) => {
+        const type = where.AND.find((clause) => clause.type)?.type;
+        return type === "openrouter" ? { id: "sec-or" } : null;
+      },
+    );
+    const result = await build();
+    if (!result.ok) throw new Error("expected a config");
+
+    expect(result.config.env.OPENROUTER_API_KEY).toBe("placeholder");
+    expect(result.config.env).not.toHaveProperty("OPENCODE_GO_API_KEY");
+    expect(result.llmCredential?.provider).toBe("openrouter");
+  });
+
+  it("advertises both compatible keys when both are granted", async () => {
+    granted([{ type: "opencode-go" }, { type: "openrouter" }]);
+    mocks.secretFindFirst.mockImplementation(
+      async ({ where }: { where: { AND: Array<{ type?: string }> } }) => {
+        const type = where.AND.find((clause) => clause.type)?.type;
+        return type === "opencode-go" || type === "openrouter"
+          ? { id: `sec-${type}` }
+          : null;
+      },
+    );
+    const result = await build();
+    if (!result.ok) throw new Error("expected a config");
+
+    expect(result.config.env.OPENCODE_GO_API_KEY).toBe("placeholder");
+    expect(result.config.env.OPENROUTER_API_KEY).toBe("placeholder");
+  });
+
+  it("emits a granted `local` server's base URL, with no key when keyless", async () => {
+    granted([
+      { type: "local", metadata: { baseUrl: "http://192.168.1.50:11434/v1" } },
+    ]);
+    mocks.secretFindFirst.mockImplementation(
+      async ({ where }: { where: { AND: Array<{ type?: string }> } }) => {
+        const type = where.AND.find((clause) => clause.type)?.type;
+        return type === "local"
+          ? {
+              metadata: { baseUrl: "http://192.168.1.50:11434/v1" },
+              encryptedValue: null,
+              valueSource: "inline",
+            }
+          : null;
+      },
+    );
+
+    const result = await build();
+    if (!result.ok) throw new Error("expected a config");
+
+    expect(result.config.env.LOCAL_LLM_BASE_URL).toBe(
+      "http://192.168.1.50:11434/v1",
+    );
+    // Keyless: the supervisor configures jcode to call the server with no auth.
+    expect(result.config.env).not.toHaveProperty("LOCAL_LLM_API_KEY");
+    expect(result.llmCredential?.provider).toBe("local");
+  });
+
+  it("adds the placeholder key for a `local` server that has one", async () => {
+    granted([
+      { type: "local", metadata: { baseUrl: "http://10.0.0.9:1234/v1" } },
+    ]);
+    mocks.secretFindFirst.mockImplementation(
+      async ({ where }: { where: { AND: Array<{ type?: string }> } }) => {
+        const type = where.AND.find((clause) => clause.type)?.type;
+        return type === "local"
+          ? {
+              metadata: { baseUrl: "http://10.0.0.9:1234/v1" },
+              encryptedValue: "enc",
+              valueSource: "inline",
+            }
+          : null;
+      },
+    );
+
+    const result = await build();
+    if (!result.ok) throw new Error("expected a config");
+
+    expect(result.config.env.LOCAL_LLM_BASE_URL).toBe(
+      "http://10.0.0.9:1234/v1",
+    );
+    // Still only a placeholder — the real value is spliced by the gateway.
+    expect(result.config.env.LOCAL_LLM_API_KEY).toBe("placeholder");
   });
 });
 

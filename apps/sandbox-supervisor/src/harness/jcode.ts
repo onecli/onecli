@@ -133,6 +133,14 @@ import { createJcodeWakeFeed } from "./jcode-wake";
  *   launch from the grant (see resolveAnthropicCredential). Unpinned, the
  *   runtime picks OAuth-vs-key itself, and a resumed session can re-pick it
  *   for the whole process.
+ * - `JCODE_PROVIDER` / `[provider] default_provider`: the NATIVE provider pin
+ *   (local / opencode-go / openrouter), set only when the grant names one and
+ *   no Anthropic grant is present (see resolveNativeProvider). jcode auto-detects
+ *   OpenRouter from its key env but NOT OpenCode Go, so the pin is explicit;
+ *   `JCODE_PROVIDER` (reload-fingerprinted, env beats config) is the fence.
+ *   `local` is a name-only pin plus a managed `[providers.local]` profile (a
+ *   user-supplied OpenAI-compatible endpoint from `LOCAL_LLM_BASE_URL`, with
+ *   `LOCAL_LLM_API_KEY` optional) — see managedConfigTomlWithProvider.
  */
 
 const JCODE_HOME_DIRNAME = ".jcode-home";
@@ -174,6 +182,85 @@ export const resolveAnthropicCredential = (
   if (env.ANTHROPIC_API_KEY) return { route: "claude-api", oauthStub: false };
   if (env.CLAUDE_CODE_OAUTH_TOKEN) return { route: "claude", oauthStub: true };
   return { route: undefined, oauthStub: false };
+};
+
+/**
+ * The jcode providers this adapter can PIN natively, beside the Anthropic
+ * routes above. Both ship first-class in the runtime — id, base URL, and the
+ * API-key env var are all compiled in (re-read from the bundled binary):
+ *
+ * - `opencode-go` — `OpenCode Go`, `OPENCODE_GO_API_KEY`, base
+ *   `https://opencode.ai/zen/go/v1`, env file `opencode-go.env`.
+ * - `openrouter`  — `OpenRouter`, `OPENROUTER_API_KEY`, base
+ *   `https://openrouter.ai/api/v1`, env file `openrouter.env`.
+ * - `local`       — a user-supplied OpenAI-compatible endpoint,
+ *   `LOCAL_LLM_BASE_URL` (the base, e.g. `http://192.168.1.50:11434/v1`) plus
+ *   an OPTIONAL `LOCAL_LLM_API_KEY` (present only when a key exists; a local
+ *   server with no auth is normal). Unlike the two above, `local` is not a
+ *   compiled-in provider: jcode only knows it through a named
+ *   `[providers.local]` profile the managed config must declare (base URL and
+ *   key-env included), so `local` is the one id whose config pin is more than a
+ *   bare `default_provider` line — see `managedConfigTomlWithProvider`.
+ *
+ * The API emits `<PROVIDER>_API_KEY=placeholder` into the sandbox process env
+ * exactly when that provider is granted, and the gateway splices the real key
+ * at the wire — this file never sees one. jcode env-auto-detects OpenRouter
+ * ("Using OpenRouter as the initial provider") but has NO auto-detect string
+ * for OpenCode Go, so a bare `OPENCODE_GO_API_KEY` leaves the runtime on its
+ * own default (observed live: `getRuntimeInfo().provider` stayed "OpenRouter").
+ * The pin is ours to make: `resolveNativeProvider` names the provider, the
+ * managed config declares it, and the reload-fingerprinted `JCODE_PROVIDER`
+ * env fence enforces it (see managedConfigTomlWithProvider / launchDaemon).
+ */
+export type JcodeNativeProviderId = "opencode-go" | "openrouter" | "local";
+
+/**
+ * The `local` provider's non-compiled-in half: the endpoint the managed
+ * `[providers.local]` profile must point at, and whether the sandbox env
+ * granted a key. Both come straight off the sandbox env (see
+ * resolveLocalProvider), and `hasApiKey` decides the profile's auth shape —
+ * an `api_key_env` read at runtime when a key exists, `auth = "none"` when it
+ * does not.
+ */
+export interface JcodeLocalProvider {
+  baseUrl: string;
+  hasApiKey: boolean;
+}
+
+/**
+ * The local endpoint's env, or undefined when none is configured. Gated on
+ * `LOCAL_LLM_BASE_URL` alone (empty counts as unset, matching
+ * `resolveAnthropicCredential`): `LOCAL_LLM_API_KEY` is OPTIONAL and only
+ * selects the auth shape, because a local server frequently needs no key.
+ */
+export const resolveLocalProvider = (
+  env: NodeJS.ProcessEnv,
+): JcodeLocalProvider | undefined => {
+  const baseUrl = env.LOCAL_LLM_BASE_URL;
+  if (!baseUrl) return undefined;
+  return { baseUrl, hasApiKey: Boolean(env.LOCAL_LLM_API_KEY) };
+};
+
+/**
+ * Which native provider (if any) the agent's env grants.
+ *
+ * An Anthropic grant always wins and stays untouched: a hosted agent is handed
+ * one provider, but if the env somehow holds both an Anthropic credential and
+ * a native key, the Anthropic path remains authoritative rather than the
+ * launch half-pinning two providers. The local endpoint is checked first —
+ * its presence is explicit operator intent for THIS agent's own model server,
+ * so it outranks the shared hosted keys. OpenCode Go is then checked before
+ * OpenRouter so the choice is deterministic if both keys are ever present.
+ * Empty values count as unset, matching `resolveAnthropicCredential`.
+ */
+export const resolveNativeProvider = (
+  env: NodeJS.ProcessEnv,
+): JcodeNativeProviderId | undefined => {
+  if (resolveAnthropicCredential(env).route) return undefined;
+  if (env.LOCAL_LLM_BASE_URL) return "local";
+  if (env.OPENCODE_GO_API_KEY) return "opencode-go";
+  if (env.OPENROUTER_API_KEY) return "openrouter";
+  return undefined;
 };
 
 /**
@@ -360,6 +447,83 @@ trusted_external_sources = ["claude_code_native_credentials"]
 [sponsors]
 enabled = false
 `;
+
+/**
+ * A TOML basic-string literal for an interpolated value (currently only the
+ * local base URL). The env is operator-set, but escaping keeps a stray quote
+ * or backslash from corrupting the whole config file at boot.
+ */
+const tomlString = (value: string): string =>
+  `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+
+/**
+ * The `[providers.local]` block the managed config gains when the agent's env
+ * names a local OpenAI-compatible endpoint. The shape is the bundled jcode's
+ * OWN `provider add` output (captured from the pinned binary):
+ *
+ *   [providers.local]
+ *   type = "openai-compatible"
+ *   base_url = "<LOCAL_LLM_BASE_URL>"
+ *   auth = "bearer" | "none"
+ *   api_key_env = "LOCAL_LLM_API_KEY"   # key present only
+ *   requires_api_key = true | false
+ *
+ * `api_key_env` names the sandbox env var — the VALUE is read by jcode from the
+ * inherited environment at request time (the SDK spawns the daemon with
+ * `{ ...process.env, ...options.env }`), never hardcoded here. With no key the
+ * profile declares `auth = "none"` / `requires_api_key = false` and omits
+ * `api_key_env` entirely (jcode's `--no-api-key` shape), so an unauthenticated
+ * local server still binds. `models`/`default_model` are deliberately NOT
+ * written: the model is chosen per session through `setModel`, and the binary
+ * accepts any model id for a profile without a catalog (verified against the
+ * pinned runtime: `provider current` resolves an uncatalogued `local:<model>`).
+ */
+const localProviderBlock = (local: JcodeLocalProvider): string => {
+  const lines = [
+    "[providers.local]",
+    'type = "openai-compatible"',
+    `base_url = ${tomlString(local.baseUrl)}`,
+    `auth = ${tomlString(local.hasApiKey ? "bearer" : "none")}`,
+  ];
+  if (local.hasApiKey) lines.push('api_key_env = "LOCAL_LLM_API_KEY"');
+  lines.push(`requires_api_key = ${local.hasApiKey ? "true" : "false"}`);
+  return `${lines.join("\n")}\n`;
+};
+
+/**
+ * The managed config with the agent's native-provider pin folded into
+ * `[provider]`. `managedConfigToml` stays the canonical static base (nothing
+ * is pinned without a grant, and the trap tests keep matching it byte-for-byte);
+ * this only ADDS the pin when `resolveNativeProvider` named a provider.
+ *
+ * Two levers, one choice — the same shape as the mcp_tools fence: this config
+ * line is the DECLARATION (verified live: `getRuntimeInfo().provider` reads
+ * "OpenCode Go" off `default_provider = "opencode-go"`, and the pinned binary
+ * resolves `default_provider = "local"` to the named profile), and the
+ * launch's `JCODE_PROVIDER` env var is the ENFORCEMENT. Env beats config.toml
+ * on every reload (fingerprinted upstream, the file header's standing law), so
+ * the pin survives jcode's own config round-trip saves and an agent editing
+ * its own config.toml mid-session — it is not an agent-writable switch.
+ *
+ * `local` is the one pin that needs a second lever of its own: because it is
+ * not compiled into the runtime, the `default_provider = "local"` line is only
+ * meaningful beside the `[providers.local]` profile that defines the endpoint,
+ * so `local` additionally appends `localProviderBlock(local)`. The base URL
+ * stays OUT of the config when no local endpoint is configured — the no-grant
+ * output is byte-identical to `managedConfigToml`.
+ */
+export const managedConfigTomlWithProvider = (
+  defaultProvider?: JcodeNativeProviderId,
+  local?: JcodeLocalProvider,
+): string => {
+  if (defaultProvider === undefined) return managedConfigToml;
+  const declared = managedConfigToml.replace(
+    "[provider]\n",
+    `[provider]\ndefault_provider = "${defaultProvider}"\n`,
+  );
+  if (defaultProvider !== "local" || local === undefined) return declared;
+  return `${declared}\n${localProviderBlock(local)}`;
+};
 
 /**
  * The platform-tool cliff fence. Since v0.79.1 the harness defaults
@@ -831,7 +995,10 @@ const applyPreferences = async (
   const notices: string[] = [];
 
   if (options.model) {
-    const target = toJcodeModel(options.model);
+    const target = toJcodeModel(
+      options.model,
+      resolveNativeProvider(process.env),
+    );
     try {
       await jcode.setModel(sessionId, target);
     } catch (error) {
@@ -900,11 +1067,32 @@ const usageFromEvent = (
  * we offer; it exists so the day one diverges is a one-line edit here rather
  * than vendor knowledge leaking upward. An id with no entry is passed through,
  * and a pass-through jcode rejects degrades (below) rather than failing.
+ *
+ * `provider` is the pinned NATIVE provider (opencode-go / openrouter / local),
+ * and its one job is to qualify the id jcode's way — `<provider>:<model>`.
+ * Verified live: with the launch pinned to OpenCode Go, `setModel(id, "glm-5")`
+ * flips the ACTIVE provider back to OpenRouter (a bare id resolves through the
+ * auto/default route), while `setModel(id, "opencode-go:glm-5")` stays on
+ * OpenCode Go. The same law governs `local`: verified against the pinned
+ * binary, a bare `setModel(id, "llama3")` with nothing pinned resolves to
+ * OpenRouter, while `local:llama3` resolves the provider back to `local` —
+ * which for a named profile means the `<profile>:<model>` route the mock
+ * provider suite has always used (`mockai:mock-model`). An absent `provider`
+ * (Anthropic, or nothing pinned) leaves the id bare, so the Anthropic path is
+ * byte-for-byte unchanged; an id already provider-qualified is never
+ * double-prefixed.
  */
 const JCODE_MODEL_ALIASES: Record<string, string> = {};
 
-const toJcodeModel = (model: string): string =>
-  JCODE_MODEL_ALIASES[model] ?? model;
+/** Exported for the pin test (the `local:<model>` prefix contract). */
+export const toJcodeModel = (
+  model: string,
+  provider?: JcodeNativeProviderId,
+): string => {
+  const aliased = JCODE_MODEL_ALIASES[model] ?? model;
+  if (provider === undefined) return aliased;
+  return aliased.includes(":") ? aliased : `${provider}:${aliased}`;
+};
 
 /**
  * OUR effort scale → jcode's. jcode accepts
@@ -2225,7 +2413,22 @@ export const createJcodeHarness = (): Harness => {
     // its messages, #1194; an image in a format the provider refuses) is
     // repaired here, while no daemon holds the store.
     healJcodeTranscripts(jcodeHome);
-    writeManagedFile(join(jcodeHome, "config.toml"), managedConfigToml, 0o600);
+    // The native provider the agent's grant names
+    // (local / opencode-go / openrouter), or undefined when Anthropic owns the
+    // launch. See resolveNativeProvider. The local endpoint is the one id that
+    // is not compiled into the runtime: its config pin additionally needs the
+    // `[providers.local]` profile, so its env half is resolved here too (gated
+    // identically on LOCAL_LLM_BASE_URL, and only when local won the pin).
+    const nativeProvider = resolveNativeProvider(process.env);
+    const localProvider =
+      nativeProvider === "local"
+        ? resolveLocalProvider(process.env)
+        : undefined;
+    writeManagedFile(
+      join(jcodeHome, "config.toml"),
+      managedConfigTomlWithProvider(nativeProvider, localProvider),
+      0o600,
+    );
     preparePromptFiles(homeDir, jcodeHome);
     prepareMcpConfig(homeDir, jcodeHome, platformToolsSocketPath());
     // Before the launch, so the daemon's own startup lines are forwarded
@@ -2327,6 +2530,13 @@ export const createJcodeHarness = (): Harness => {
         // model would get a launch env and a session model that disagree.
         // `setModel` in `applyPreferences` is the single door.
         ...(anthropic.oauthStub ? { JCODE_PROVIDER: "claude" } : {}),
+        // The native-provider pin's ENFORCEMENT half (declared in
+        // managedConfigTomlWithProvider): env overrides win on every config
+        // reload, so this survives jcode's own config round-trip saves and an
+        // agent editing its own config.toml. Mutually exclusive with the
+        // Anthropic oauthStub above by construction — resolveNativeProvider
+        // yields nothing while an Anthropic route is set.
+        ...(nativeProvider ? { JCODE_PROVIDER: nativeProvider } : {}),
         // The credential-route pin (see resolveAnthropicCredential). Read by
         // every Anthropic runtime the daemon constructs, so a session
         // resumed from either route lands on the route the grant names.

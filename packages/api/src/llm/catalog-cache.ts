@@ -70,17 +70,38 @@ const pinned = (provider: LlmProvider): ModelOption[] =>
     source: "pinned" as const,
   }));
 
+/**
+ * The URL a provider's catalogue is fetched from. Every hosted provider fixes
+ * it (`catalogUrl`); `local` derives it from the user's own base URL
+ * (`catalogUrlFor`) — the ONE deliberate SSRF exception documented in `types`.
+ * Returns null when a dynamic provider has no base URL yet, which degrades to
+ * the pinned list rather than fetching from nowhere.
+ */
+const resolveCatalogUrl = (
+  provider: LlmProvider,
+  baseUrl?: string | null,
+): string | null => {
+  if (provider.catalogUrlFor) {
+    const trimmed = baseUrl?.trim();
+    return trimmed ? provider.catalogUrlFor(trimmed) : null;
+  }
+  return provider.catalogUrl ?? null;
+};
+
 const fetchCatalog = async (
   provider: LlmProvider,
+  url: string,
   headers: Record<string, string>,
 ): Promise<ModelOption[]> => {
-  const res = await fetch(provider.catalogUrl, {
+  const res = await fetch(url, {
     headers,
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    // The URL is a constant, so a redirect can only ever move us OFF the host
-    // we meant to talk to — and undici does not strip a custom auth header
-    // like Anthropic's `x-api-key` the way it strips `Authorization`. Refusing
-    // outright is free here and removes the question entirely.
+    // The URL is a constant for every hosted provider — and for `local` it is
+    // the user's own base URL, chosen by them (§3.10). Either way a redirect
+    // can only ever move us OFF the host we meant to talk to, and undici does
+    // not strip a custom auth header like Anthropic's `x-api-key` the way it
+    // strips `Authorization`. Refusing outright is free here and removes the
+    // question entirely.
     redirect: "error",
   });
   // The provider's error body can carry account details; never let it travel.
@@ -100,6 +121,7 @@ const fetchCatalog = async (
 const refresh = (
   provider: LlmProvider,
   key: CacheKey,
+  url: string,
   headers: Record<string, string>,
 ): Promise<void> => {
   const existing = inflight.get(key);
@@ -107,7 +129,7 @@ const refresh = (
   const flight: Flight = { promise: Promise.resolve() };
   flight.promise = (async () => {
     try {
-      const models = await fetchCatalog(provider, headers);
+      const models = await fetchCatalog(provider, url, headers);
       cache.set(key, { models, fetchedAt: Date.now() });
     } catch {
       // Keep serving what we have, and pace the next attempt.
@@ -161,8 +183,17 @@ export const getModelCatalog = async (
   secretId: string,
   credential: () => Promise<string | null>,
   authMode: LlmAuthMode,
+  /** `local` only: the user's own base URL the catalogue is fetched from. */
+  baseUrl?: string | null,
 ): Promise<ModelCatalog> => {
-  const key = `${provider.id}:${secretId}`;
+  const url = resolveCatalogUrl(provider, baseUrl);
+  // A dynamic provider with no base URL has nowhere to fetch from; the pinned
+  // list is the honest, never-empty answer.
+  if (!url) return { models: pinned(provider), degraded: true };
+
+  // The URL is part of the key so a `local` server whose base URL changed is
+  // not answered from the previous endpoint's cached catalogue.
+  const key = `${provider.id}:${secretId}:${url}`;
   const entry = cache.get(key);
   if (entry && Date.now() - entry.fetchedAt < TTL_MS)
     return { models: entry.models, degraded: false };
@@ -182,17 +213,19 @@ export const getModelCatalog = async (
     return serveWhatWeHave();
 
   const value = await credential();
-  if (value === null) return serveWhatWeHave();
-  const headers = provider.catalogHeaders(value, authMode);
+  // A hosted provider with no key cannot list. `local` is the exception: a
+  // keyless server still serves `/models`, so fetch with no auth header.
+  if (value === null && !provider.canListWithoutKey) return serveWhatWeHave();
+  const headers = provider.catalogHeaders(value ?? "", authMode);
 
   if (entry) {
     // Stale-while-revalidate: answer now from what we hold, refresh behind it,
     // so this endpoint's latency never tracks the provider's.
-    void refresh(provider, key, headers);
+    void refresh(provider, key, url, headers);
     return { models: entry.models, degraded: true };
   }
 
-  await refresh(provider, key, headers);
+  await refresh(provider, key, url, headers);
   const filled = cache.get(key);
   if (!filled) return { models: pinned(provider), degraded: true };
   // Freshness, not mere existence: a FAILED cold refresh also leaves an entry

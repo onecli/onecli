@@ -177,7 +177,7 @@ describe("ModelsSection", () => {
   it("constrains the create door to LLM key types — the Models page mints no generic secrets", () => {
     renderSection();
     expect(screen.getByTestId("allowed-types")).toHaveTextContent(
-      "anthropic,openai",
+      "anthropic,openai,opencode-go,openrouter,local",
     );
   });
 

@@ -9,7 +9,10 @@ import {
   CircleHelp,
   Copy,
   Key,
+  Route,
+  Server,
   Settings2,
+  Terminal,
   Upload,
   X,
 } from "lucide-react";
@@ -67,7 +70,13 @@ import {
   parseOpenaiAuthJson,
 } from "@onecli/api/validations/secret";
 
-type SecretType = "anthropic" | "openai" | "generic";
+type SecretType =
+  | "anthropic"
+  | "openai"
+  | "opencode-go"
+  | "openrouter"
+  | "local"
+  | "generic";
 
 /** The docs guide behind the Anthropic dialog's "Need help?" link. */
 const ANTHROPIC_SETUP_GUIDE_URL =
@@ -136,6 +145,33 @@ const SECRET_TYPE_OPTIONS: SecretTypeOption[] = [
     nameDefault: "OpenAI Token",
   },
   {
+    value: "opencode-go",
+    label: "OpenCode Go",
+    description:
+      "Inject an OpenCode Go subscription key into requests to opencode.ai",
+    icon: <Terminal className="size-5" />,
+    hostDefault: "opencode.ai",
+    nameDefault: "OpenCode Go Token",
+  },
+  {
+    value: "openrouter",
+    label: "OpenRouter",
+    description: "Inject an OpenRouter API key into requests to openrouter.ai",
+    icon: <Route className="size-5" />,
+    hostDefault: "openrouter.ai",
+    nameDefault: "OpenRouter Token",
+  },
+  {
+    value: "local",
+    label: "Local (OpenAI-compatible)",
+    description:
+      "Point at a local OpenAI-compatible server like Ollama or LM Studio",
+    icon: <Server className="size-5" />,
+    // The host is derived from the Base URL, never asked for separately.
+    hostDefault: "",
+    nameDefault: "Local LLM",
+  },
+  {
     value: "generic",
     label: "Generic Secret",
     description:
@@ -145,6 +181,33 @@ const SECRET_TYPE_OPTIONS: SecretTypeOption[] = [
     nameDefault: "",
   },
 ];
+
+/**
+ * Quick-select endpoints for the `local` type. Each preset with a port/path
+ * fills the Base URL from the default localhost host; `custom` leaves the
+ * free-text input to the user. A future runtime is a one-line addition here.
+ */
+const LOCAL_PRESETS = [
+  { id: "ollama", label: "Ollama", port: 11434, path: "/v1" },
+  { id: "lmstudio", label: "LM Studio", port: 1234, path: "/v1" },
+  { id: "custom", label: "Custom" },
+] as const;
+
+type LocalPreset = (typeof LOCAL_PRESETS)[number];
+type LocalPresetId = LocalPreset["id"];
+
+/** The default Base URL a preset fills — null for the free-text `custom`. */
+const presetUrl = (preset: LocalPreset): string | null =>
+  "port" in preset ? `http://localhost:${preset.port}${preset.path}` : null;
+
+/** The host the API stores as hostPattern, taken from the Base URL. */
+const deriveHost = (baseUrl: string): string => {
+  try {
+    return new URL(baseUrl.trim()).host;
+  } catch {
+    return "";
+  }
+};
 
 const PATH_PREVIEW_MASK = "••••••";
 const PATH_PREVIEW_FILLER = "<token>";
@@ -249,6 +312,7 @@ export const SecretDialog = ({
   const queryClient = useQueryClient();
   const valueInputRef = useRef<HTMLInputElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
+  const baseUrlInputRef = useRef<HTMLInputElement>(null);
   const [step, setStep] = useState<"type" | "form">("type");
   const [saving, setSaving] = useState(false);
 
@@ -259,6 +323,8 @@ export const SecretDialog = ({
   const [nameTouched, setNameTouched] = useState(false);
   const [value, setValue] = useState("");
   const [hostPattern, setHostPattern] = useState("api.anthropic.com");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [localPreset, setLocalPreset] = useState<LocalPresetId>("custom");
   const [pathPattern, setPathPattern] = useState("");
   const [injectionTarget, setInjectionTarget] = useState<
     "header" | "param" | "path"
@@ -307,6 +373,25 @@ export const SecretDialog = ({
     return null;
   })();
 
+  // The `local` type is validated by its Base URL instead of a host pattern:
+  // the host is derived from the URL, so emptiness is caught below and this
+  // only reports a malformed value. http/https only, matching the server.
+  const baseUrlError = (() => {
+    if (type !== "local") return null;
+    const v = baseUrl.trim();
+    if (!v) return null;
+    try {
+      const url = new URL(v);
+      if (url.protocol !== "http:" && url.protocol !== "https:")
+        return "Base URL must start with http:// or https://";
+      if (!url.hostname) return "Base URL must include a host";
+      return null;
+    } catch {
+      return "Enter a valid URL, e.g. http://localhost:11434/v1";
+    }
+  })();
+  const hasBaseUrl = baseUrl.trim().length > 0 && baseUrlError === null;
+
   // When opening, populate from secret (edit), prefill (create with defaults), or reset (create)
   useEffect(() => {
     if (open) {
@@ -321,6 +406,8 @@ export const SecretDialog = ({
       setPathTemplate("");
       setPathRegex("");
       setPathReplacement("");
+      setBaseUrl("");
+      setLocalPreset("custom");
       if (secret) {
         const config = secret.injectionConfig as InjectionConfig | null;
         setStep("form");
@@ -337,6 +424,10 @@ export const SecretDialog = ({
         setValue("");
         setHostPattern(secret.hostPattern);
         setPathPattern(secret.pathPattern ?? "");
+        if (secret.type === "local") {
+          const stored = secret.metadata?.baseUrl;
+          if (typeof stored === "string") setBaseUrl(stored);
+        }
         if (isParamInjection(config)) {
           setInjectionTarget("param");
           setParamName(config.paramName);
@@ -387,7 +478,8 @@ export const SecretDialog = ({
         setValueFormat(prefill.valueFormat ?? "Bearer {value}");
         setParamName(prefill.paramName ?? "");
         setParamFormat(prefill.paramFormat ?? "");
-        focusInputSoon(valueInputRef);
+        if (prefill.type === "local") focusInputSoon(baseUrlInputRef);
+        else focusInputSoon(valueInputRef);
       } else if (defaultType) {
         const option = SECRET_TYPE_OPTIONS.find((o) => o.value === defaultType);
         setStep("form");
@@ -405,7 +497,8 @@ export const SecretDialog = ({
         // On a REOPEN the input mounts with the PREVIOUS session's name still
         // in state (this effect resets it a beat later), so its mount-time
         // autoFocus can compute false — the explicit focus covers that.
-        if (option?.nameDefault) focusInputSoon(valueInputRef);
+        if (defaultType === "local") focusInputSoon(baseUrlInputRef);
+        else if (option?.nameDefault) focusInputSoon(valueInputRef);
         else focusInputSoon(nameInputRef);
       } else {
         setStep("type");
@@ -429,7 +522,13 @@ export const SecretDialog = ({
     setHostPattern(option?.hostDefault ?? "");
     setName(option?.nameDefault ?? "");
     setStep("form");
-    if (option?.nameDefault) focusInputSoon(valueInputRef);
+    if (selected === "local") {
+      setBaseUrl("");
+      setLocalPreset("custom");
+      focusInputSoon(baseUrlInputRef);
+    } else if (option?.nameDefault) {
+      focusInputSoon(valueInputRef);
+    }
   };
 
   const hasPathTarget =
@@ -457,9 +556,10 @@ export const SecretDialog = ({
   const isValid = isEdit
     ? hostPattern.trim() && !hostPatternError && hasInjectionTarget
     : isNameValid &&
-      (fromOnePassword || !!value.trim()) &&
-      hostPattern.trim() &&
-      !hostPatternError &&
+      (fromOnePassword || type === "local" || !!value.trim()) &&
+      (type === "local"
+        ? hasBaseUrl
+        : hostPattern.trim() && !hostPatternError) &&
       hasInjectionTarget;
 
   const handleSave = async () => {
@@ -496,33 +596,37 @@ export const SecretDialog = ({
             : value.trim()
               ? { valueSource: "inline" as const, value: value.trim() }
               : {}),
+          ...(type === "local" && baseUrl.trim()
+            ? { baseUrl: baseUrl.trim() }
+            : {}),
           hostPattern,
           pathPattern: pathPattern || null,
           injectionConfig: buildInjectionConfig() ?? undefined,
         });
         toast.success("Secret updated");
       } else {
-        await createSecret(
-          opSelection
+        const effectiveHostPattern =
+          type === "local" ? deriveHost(baseUrl) : hostPattern;
+        const createInput = {
+          name,
+          type,
+          ...(opSelection
             ? {
-                name,
-                type,
-                valueSource: "onepassword",
+                valueSource: "onepassword" as const,
                 opRef: opSelection.opRef,
                 opDisplay: opSelection.opDisplay,
-                hostPattern,
-                pathPattern: pathPattern || undefined,
-                injectionConfig: buildInjectionConfig() ?? null,
               }
-            : {
-                name,
-                type,
-                value,
-                hostPattern,
-                pathPattern: pathPattern || undefined,
-                injectionConfig: buildInjectionConfig() ?? null,
-              },
-        );
+            : type === "local"
+              ? value.trim()
+                ? { value: value.trim() }
+                : {}
+              : { value }),
+          ...(type === "local" ? { baseUrl: baseUrl.trim() } : {}),
+          hostPattern: effectiveHostPattern,
+          pathPattern: pathPattern || undefined,
+          injectionConfig: buildInjectionConfig() ?? null,
+        };
+        await createSecret(createInput);
         toast.success("Secret created");
       }
       queryClient.invalidateQueries({ queryKey: queryKeys.secrets.all() });
@@ -610,7 +714,13 @@ export const SecretDialog = ({
                     ? "Your token or key is encrypted and injected into requests to api.anthropic.com."
                     : type === "openai"
                       ? `Inject credentials into requests to ${openaiMode === "codex" ? "chatgpt.com" : "api.openai.com"}.`
-                      : "Configure a custom secret to inject as a header, URL parameter, or URL path into matching requests."}
+                      : type === "opencode-go"
+                        ? "Your subscription key is encrypted and injected into requests to opencode.ai."
+                        : type === "openrouter"
+                          ? "Your API key is encrypted and injected into requests to openrouter.ai."
+                          : type === "local"
+                            ? "Point the gateway at an OpenAI-compatible server. The key is optional; the host is taken from the Base URL."
+                            : "Configure a custom secret to inject as a header, URL parameter, or URL path into matching requests."}
               </DialogDescription>
               {type === "generic" && !isEdit && !prefill && (
                 <div className="flex items-center gap-2 pt-1">
@@ -787,7 +897,13 @@ export const SecretDialog = ({
                         ? "e.g. Codex Personal"
                         : type === "openai"
                           ? "e.g. OpenAI Production Key"
-                          : "e.g. GitHub Token"
+                          : type === "opencode-go"
+                            ? "e.g. OpenCode Go Subscription"
+                            : type === "openrouter"
+                              ? "e.g. OpenRouter API Key"
+                              : type === "local"
+                                ? "e.g. Local Ollama"
+                                : "e.g. GitHub Token"
                   }
                   value={name}
                   onChange={(e) => setName(e.target.value)}
@@ -803,6 +919,63 @@ export const SecretDialog = ({
                 )}
               </div>
 
+              {type === "local" && (
+                <div className="space-y-2">
+                  <Label htmlFor="secret-base-url">Base URL</Label>
+                  <Input
+                    ref={baseUrlInputRef}
+                    id="secret-base-url"
+                    className="font-mono"
+                    placeholder="http://localhost:11434/v1"
+                    value={baseUrl}
+                    onChange={(e) => {
+                      const next = e.target.value;
+                      setBaseUrl(next);
+                      const match = LOCAL_PRESETS.find(
+                        (preset) => presetUrl(preset) === next,
+                      );
+                      setLocalPreset(match?.id ?? "custom");
+                    }}
+                  />
+                  <div
+                    className="flex w-full items-center gap-1 rounded-lg border p-1"
+                    role="radiogroup"
+                    aria-label="Base URL preset"
+                  >
+                    {LOCAL_PRESETS.map((preset) => (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        role="radio"
+                        aria-checked={localPreset === preset.id}
+                        className={cn(
+                          "flex-1 rounded-md px-3 py-1 text-sm font-medium transition-colors",
+                          localPreset === preset.id
+                            ? "bg-brand/10 text-brand"
+                            : "text-muted-foreground hover:bg-brand/5 hover:text-brand/80",
+                        )}
+                        onClick={() => {
+                          setLocalPreset(preset.id);
+                          const url = presetUrl(preset);
+                          if (url !== null) setBaseUrl(url);
+                          baseUrlInputRef.current?.focus();
+                        }}
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                  {baseUrlError ? (
+                    <p className="text-destructive text-xs">{baseUrlError}</p>
+                  ) : (
+                    <p className="text-muted-foreground text-xs">
+                      The OpenAI-compatible endpoint. The host is taken from
+                      this URL, so there is no separate host field.
+                    </p>
+                  )}
+                </div>
+              )}
+
               <div className="space-y-2">
                 <Label htmlFor="secret-value">
                   {isOAuthMode ? (
@@ -814,9 +987,16 @@ export const SecretDialog = ({
                     </>
                   ) : isEdit ? (
                     "New value"
+                  ) : type === "local" ? (
+                    "API key"
                   ) : (
                     "Secret value"
                   )}{" "}
+                  {type === "local" && !isEdit && (
+                    <span className="text-muted-foreground font-normal">
+                      (optional)
+                    </span>
+                  )}
                   {isEdit && !isOAuthMode && !fromOnePassword && (
                     <span className="text-muted-foreground font-normal">
                       (leave empty to keep current)
@@ -883,7 +1063,13 @@ export const SecretDialog = ({
                               ? "sk-ant-oat01-… or sk-ant-api03-…"
                               : type === "openai"
                                 ? "sk-proj-…"
-                                : "Enter secret value"
+                                : type === "opencode-go"
+                                  ? "Paste your OpenCode Go key"
+                                  : type === "openrouter"
+                                    ? "sk-or-…"
+                                    : type === "local"
+                                      ? "Optional — only if your server requires one"
+                                      : "Enter secret value"
                           }
                           value={value}
                           onChange={(e) => {
@@ -909,6 +1095,13 @@ export const SecretDialog = ({
                               looksLikeOpenaiKey(pasted)
                             ) {
                               setName("OpenAI API Key");
+                            }
+                            if (
+                              type === "openrouter" &&
+                              !name.trim() &&
+                              val.trim().startsWith("sk-or-")
+                            ) {
+                              setName("OpenRouter API Key");
                             }
                           }}
                         />
@@ -959,6 +1152,23 @@ export const SecretDialog = ({
                                 upload auth.json
                               </button>
                             </>
+                          ) : type === "opencode-go" ? (
+                            "Paste the subscription key from your OpenCode Go account. Encrypted at rest."
+                          ) : type === "openrouter" ? (
+                            <>
+                              Paste your API key from{" "}
+                              <a
+                                href="https://openrouter.ai/settings/keys"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className={inlineLinkClassName}
+                              >
+                                openrouter.ai
+                              </a>
+                              .
+                            </>
+                          ) : type === "local" ? (
+                            "Sent as a Bearer token to the Base URL's host. Leave empty for a keyless server like Ollama or LM Studio."
                           ) : (
                             "Encrypted at rest. You won\u2019t be able to view this value again."
                           )}
@@ -1022,28 +1232,29 @@ export const SecretDialog = ({
                   </AccordionTrigger>
                   <AccordionContent className="pb-0">
                     <div className="space-y-4">
-                      {(type !== "generic" || !!prefill) && (
-                        <div className="space-y-2">
-                          <Label htmlFor="secret-host">Host pattern</Label>
-                          <Input
-                            id="secret-host"
-                            placeholder="e.g. api.example.com or *.example.com"
-                            value={hostPattern}
-                            onChange={(e) => setHostPattern(e.target.value)}
-                          />
-                          {hostPatternError ? (
-                            <p className="text-xs text-red-500">
-                              {hostPatternError}
-                            </p>
-                          ) : (
-                            <p className="text-muted-foreground text-xs">
-                              The host this secret applies to. Use{" "}
-                              <code className="text-xs">*.example.com</code> for
-                              wildcard subdomains.
-                            </p>
-                          )}
-                        </div>
-                      )}
+                      {type !== "local" &&
+                        (type !== "generic" || !!prefill) && (
+                          <div className="space-y-2">
+                            <Label htmlFor="secret-host">Host pattern</Label>
+                            <Input
+                              id="secret-host"
+                              placeholder="e.g. api.example.com or *.example.com"
+                              value={hostPattern}
+                              onChange={(e) => setHostPattern(e.target.value)}
+                            />
+                            {hostPatternError ? (
+                              <p className="text-xs text-red-500">
+                                {hostPatternError}
+                              </p>
+                            ) : (
+                              <p className="text-muted-foreground text-xs">
+                                The host this secret applies to. Use{" "}
+                                <code className="text-xs">*.example.com</code>{" "}
+                                for wildcard subdomains.
+                              </p>
+                            )}
+                          </div>
+                        )}
 
                       {injectionTarget !== "path" && (
                         <div className="space-y-2">

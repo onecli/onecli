@@ -48,6 +48,38 @@ describe("KeyHealthBadge", () => {
     );
   });
 
+  it("names OpenRouter and links auth failures to its keys page", async () => {
+    render(
+      <KeyHealthBadge type="openrouter" lastError={{ status: 401, at: AT }} />,
+    );
+
+    await userEvent.click(screen.getByRole("button"));
+    expect(
+      screen.getByRole("link", { name: /Manage OpenRouter keys/ }),
+    ).toHaveAttribute("href", "https://openrouter.ai/settings/keys");
+  });
+
+  it("routes OpenRouter limit failures to its credits page", async () => {
+    render(
+      <KeyHealthBadge type="openrouter" lastError={{ status: 429, at: AT }} />,
+    );
+
+    await userEvent.click(screen.getByRole("button"));
+    expect(
+      screen.getByRole("link", { name: /OpenRouter credits & limits/ }),
+    ).toHaveAttribute("href", "https://openrouter.ai/settings/credits");
+  });
+
+  it("shows no link for OpenCode Go: it has no self-serve console to point at", async () => {
+    render(
+      <KeyHealthBadge type="opencode-go" lastError={{ status: 401, at: AT }} />,
+    );
+
+    await userEvent.click(screen.getByRole("button"));
+    expect(screen.getByText(/HTTP 401/)).toBeInTheDocument();
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+  });
+
   it("shows no link for a provider it cannot name", async () => {
     render(
       <KeyHealthBadge type="mystery" lastError={{ status: 401, at: AT }} />,

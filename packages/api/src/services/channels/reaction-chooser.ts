@@ -175,6 +175,18 @@ export const chooseReaction = async (input: {
     );
     if (!value) return FALLBACK_REACTION;
 
+    // Only Anthropic and OpenAI have a chooser path. The OpenAI-compatible
+    // pay-your-own-upstream providers (opencode-go / openrouter) must never
+    // have their key sent to api.openai.com — that would be a cross-vendor
+    // credential disclosure — so they take the fallback, not a wrong-vendor
+    // call that also could never succeed.
+    if (
+      credential.provider !== "anthropic" &&
+      credential.provider !== "openai"
+    ) {
+      return FALLBACK_REACTION;
+    }
+
     const answer =
       credential.provider === "anthropic"
         ? await askAnthropic(credential, value, input.text)

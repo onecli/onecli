@@ -5,8 +5,10 @@ import {
   JCODE_SWARM_ENV,
   JCODE_WEBSEARCH_ENV,
   managedConfigToml,
+  managedConfigTomlWithProvider,
   SWARM_LIGHT_PROMPT,
   SWARM_WORKER_CAP,
+  toJcodeModel,
   WEBSEARCH_NATIVE_MAX_USES,
 } from "./jcode";
 
@@ -92,6 +94,134 @@ describe("the managed config's sponsor opt-out", () => {
     // machine-written); a bare enabled=false is respected. MUTATION-PROOF:
     // add `endpoint = "..."` to the section and this fails.
     expect(managedConfigToml).not.toMatch(/endpoint/);
+  });
+});
+
+describe("the managed config's native-provider pin", () => {
+  it("the static base pins no provider — the pin is added only on a grant", () => {
+    // MUTATION-PROOF: the canonical config must stay provider-neutral, so a
+    // launch with no native grant writes exactly these bytes and the
+    // trap-assertions above keep matching. Baking default_provider into the
+    // base would silently pin every agent, Anthropic grants included.
+    expect(managedConfigToml).not.toMatch(/default_provider/);
+    expect(managedConfigTomlWithProvider(undefined)).toBe(managedConfigToml);
+  });
+
+  it.each(["opencode-go", "openrouter"] as const)(
+    "adds [provider] default_provider = %s when the grant names it",
+    (provider) => {
+      // The DECLARATION half of the pin (the launch's JCODE_PROVIDER env is
+      // the reload-fingerprinted fence). Verified live: default_provider =
+      // "opencode-go" makes getRuntimeInfo() report provider "OpenCode Go".
+      const pinned = managedConfigTomlWithProvider(provider);
+      expect(pinned).toMatch(
+        new RegExp(`\\[provider\\]\\ndefault_provider = "${provider}"`),
+      );
+      // The insert must not clobber the section's existing key.
+      expect(pinned).toMatch(/stream_idle_timeout_secs = 300/);
+    },
+  );
+
+  it("keeps every load-bearing section intact under the pin", () => {
+    // The pin is an ADDITION: the sponsor trap, the tool-surface fence, the
+    // update opt-out, and the swarm switch must all survive it.
+    const pinned = managedConfigTomlWithProvider("opencode-go");
+    expect(pinned).toMatch(/\[tools\]\nmcp_tools = "eager"/);
+    expect(pinned).toMatch(/check_updates = false/);
+    expect(pinned).toMatch(/swarm = true/);
+    expect(pinned).toMatch(/\[sponsors\]\nenabled = false/);
+    expect(pinned).not.toMatch(/endpoint/);
+  });
+});
+
+describe("the managed config's local-endpoint pin", () => {
+  const baseUrl = "http://192.168.1.50:11434/v1";
+
+  it("adds no provider block when no local endpoint is configured — the base stays byte-identical", () => {
+    // With LOCAL_LLM_BASE_URL unset, resolveNativeProvider returns undefined and
+    // the launch writes the canonical static template untouched. The "local"
+    // id with no config is an unreachable state (resolveNativeProvider gates on
+    // the base URL), but even then it must not fabricate a profile: it adds no
+    // base URL and no [providers.*] block.
+    expect(managedConfigTomlWithProvider(undefined)).toBe(managedConfigToml);
+    expect(managedConfigTomlWithProvider("local")).not.toMatch(/\[providers\./);
+    expect(managedConfigTomlWithProvider("opencode-go")).not.toMatch(
+      /\[providers\./,
+    );
+  });
+
+  it("declares default_provider=local plus the [providers.local] profile WITH api_key_env when a key exists", () => {
+    // The exact shape the bundled jcode's `provider add` writes for an
+    // OpenAI-compatible profile with an env-sourced key (captured from the
+    // pinned binary). The key VALUE is never here — only the env var NAME,
+    // which jcode reads from the inherited sandbox env at request time.
+    const config = managedConfigTomlWithProvider("local", {
+      baseUrl,
+      hasApiKey: true,
+    });
+    expect(config).toContain('[provider]\ndefault_provider = "local"');
+    expect(config).toContain(`[providers.local]
+type = "openai-compatible"
+base_url = "${baseUrl}"
+auth = "bearer"
+api_key_env = "LOCAL_LLM_API_KEY"
+requires_api_key = true`);
+    // The load-bearing sections survive the appended profile.
+    expect(config).toContain("[sponsors]\nenabled = false");
+    expect(config).toMatch(/check_updates = false/);
+    // No literal secret: the profile names the env var, it does not carry a key.
+    expect(config).not.toMatch(/sk-|placeholder/);
+  });
+
+  it("omits api_key_env and pins auth=none when no key exists", () => {
+    // jcode's own no-key shape (its `--no-api-key` / `--auth none`): a
+    // keyless localhost server must bind without one.
+    const config = managedConfigTomlWithProvider("local", {
+      baseUrl,
+      hasApiKey: false,
+    });
+    expect(config).toContain(`[providers.local]
+type = "openai-compatible"
+base_url = "${baseUrl}"
+auth = "none"
+requires_api_key = false`);
+    expect(config).not.toContain("api_key_env");
+  });
+
+  it("escapes a base URL containing quotes so the TOML cannot be corrupted", () => {
+    const config = managedConfigTomlWithProvider("local", {
+      baseUrl: 'http://host/v1"x',
+      hasApiKey: false,
+    });
+    expect(config).toContain('base_url = "http://host/v1\\"x"');
+  });
+});
+
+describe("the native-provider model prefix", () => {
+  it("prefixes a bare model when pinned to local", () => {
+    // The frozen contract: the control plane's model must route to the local
+    // profile, so it leaves as `local:<model>`. Verified against the pinned
+    // binary: a bare id resolves through the auto route (OpenRouter), while
+    // `local:<model>` resolves the provider back to `local`.
+    expect(toJcodeModel("llama3", "local")).toBe("local:llama3");
+    expect(toJcodeModel("qwen2.5-coder", "local")).toBe("local:qwen2.5-coder");
+  });
+
+  it("never double-prefixes an already-qualified id", () => {
+    // The guard the mock-provider suite relies on: `mockai:mock-model` must
+    // not become `local:mockai:mock-model`.
+    expect(toJcodeModel("local:llama3", "local")).toBe("local:llama3");
+    expect(toJcodeModel("opencode-go:glm-5", "local")).toBe(
+      "opencode-go:glm-5",
+    );
+  });
+
+  it("leaves the id bare when nothing is pinned, and keeps the other provider prefixes", () => {
+    expect(toJcodeModel("claude-sonnet-4-6")).toBe("claude-sonnet-4-6");
+    expect(toJcodeModel("glm-5", "opencode-go")).toBe("opencode-go:glm-5");
+    expect(toJcodeModel("anthropic/claude-3", "openrouter")).toBe(
+      "openrouter:anthropic/claude-3",
+    );
   });
 });
 

@@ -1,9 +1,13 @@
 //! Secret-to-injection mapping and OpenAI OAuth token refresh.
 //!
 //! Converts decrypted secret values into injection instructions based on the
-//! secret type (anthropic, openai, generic). OpenAI supports both API keys
-//! (plain string) and OAuth credentials (JSON with tokens). Also handles
-//! OpenAI OAuth token refresh and credential persistence.
+//! secret type (anthropic, openai, opencode-go, openrouter, local, generic).
+//! OpenAI supports both API keys (plain string) and OAuth credentials (JSON with
+//! tokens). Also handles OpenAI OAuth token refresh and credential persistence.
+//! `opencode-go` and `openrouter` are OpenAI-compatible pay-your-own-upstream
+//! keys: a plain bearer token, injected on the secret's own stored host. `local`
+//! is a user-run OpenAI-compatible server on the LAN, reached at the secret's
+//! own stored host, with an OPTIONAL bearer credential.
 
 use tracing::{debug, warn};
 
@@ -86,6 +90,35 @@ pub fn build_injections(
                     });
                 }
                 injections
+            } else {
+                vec![Injection::SetHeader {
+                    name: "authorization".to_string(),
+                    value: format!("Bearer {decrypted_value}"),
+                }]
+            }
+        }
+
+        // Pay-your-own-upstream OpenAI-compatible providers: the stored key is
+        // a plain bearer token and injection follows the secret's own stored
+        // `host_pattern` (the gateway has no host knowledge for these types).
+        "opencode-go" | "openrouter" => {
+            vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: format!("Bearer {decrypted_value}"),
+            }]
+        }
+
+        // A user-run OpenAI-compatible server on the LAN (Ollama, vLLM,
+        // llama.cpp, …), reached at an arbitrary http(s) URL the API stores as
+        // the secret's `host_pattern` (host-only — the gateway port-strips the
+        // request host). Its credential is OPTIONAL: a NON-EMPTY value injects
+        // the same `Authorization: Bearer` the OpenAI-compatible pair uses, an
+        // EMPTY one injects NOTHING — the server demands no auth and no header
+        // must be fabricated. No host knowledge lives in the gateway for this
+        // type, exactly like the pair above.
+        "local" => {
+            if decrypted_value.is_empty() {
+                vec![]
             } else {
                 vec![Injection::SetHeader {
                     name: "authorization".to_string(),
@@ -265,9 +298,20 @@ pub fn secret_injects_on_host(
 /// type alone). The one list every "is this an LLM key" check reads, so the
 /// platform trial-credit eligibility (`ee::platform_llm`) and the per-provider
 /// collapse below can never disagree about which types count.
+///
+/// `local` belongs here even though the gateway does not know its host: a
+/// user-run OpenAI-compatible server is the user's OWN LLM credential, so it
+/// collapses per-provider like the pair above and disqualifies the platform
+/// trial credit exactly as an `opencode-go` / `openrouter` key already does —
+/// the trial is for orgs with no LLM key of their own, and the collapse only
+/// ever sees secrets already filtered to ONE host, so two `local` servers on
+/// two different hosts are never collapsed against each other.
 #[must_use]
 pub fn is_llm_provider_type(secret_type: &str) -> bool {
-    matches!(secret_type, "anthropic" | "openai")
+    matches!(
+        secret_type,
+        "anthropic" | "openai" | "opencode-go" | "openrouter" | "local"
+    )
 }
 
 /// The secrets that may actually be INJECTED: at most one per LLM provider
@@ -677,6 +721,93 @@ mod tests {
         );
     }
 
+    // ── build_injections: opencode-go / openrouter ─────────────────────
+
+    // Both are OpenAI-compatible pay-your-own-upstream keys: identical Bearer
+    // `authorization` shape to the openai api-key arm, with no host knowledge
+    // in the gateway (the stored `host_pattern` carries the host).
+    #[test]
+    fn build_injections_opencode_go() {
+        let injections = build_injections("opencode-go", "sk-x", None, None);
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer sk-x".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn build_injections_openrouter() {
+        let injections = build_injections("openrouter", "sk-or-v1-test", None, None);
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer sk-or-v1-test".to_string(),
+            }
+        );
+    }
+
+    // ── build_injections: local (optional credential) ──────────────────
+
+    // A user-run OpenAI-compatible server that requires a key: same Bearer
+    // `authorization` shape as the openai-compatible pair, injected on the
+    // secret's own stored host (the gateway knows no host for `local`).
+    #[test]
+    fn build_injections_local_with_key() {
+        let injections = build_injections("local", "sk-x", None, None);
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer sk-x".to_string(),
+            }
+        );
+    }
+
+    // A local server that demands no auth: an EMPTY credential injects
+    // NOTHING — no fabricated header, and the empty-key case still yields a
+    // rule, so the `injections_applied` count stays 0 for it.
+    #[test]
+    fn build_injections_local_without_key_injects_nothing() {
+        let injections = build_injections("local", "", None, None);
+        assert!(injections.is_empty());
+    }
+
+    #[test]
+    fn is_llm_provider_type_covers_the_openai_compatible_pair() {
+        for type_ in ["opencode-go", "openrouter", "local"] {
+            assert!(is_llm_provider_type(type_), "type {type_}");
+        }
+        assert!(is_llm_provider_type("anthropic"));
+        assert!(is_llm_provider_type("openai"));
+        assert!(!is_llm_provider_type("generic"));
+        assert!(!is_llm_provider_type("unknown"));
+    }
+
+    // The collapse is what makes "workspace beats organization" real for these
+    // providers too — same regression class as the Anthropic pair above.
+    #[test]
+    fn openai_compatible_providers_collapse_workspace_over_org() {
+        for type_ in ["opencode-go", "openrouter", "local"] {
+            let secrets = vec![
+                secret_row("org-key", type_, "organization"),
+                secret_row("ws-key", type_, "workspace"),
+            ];
+            let kept = one_credential_per_llm_provider(&secrets);
+            assert_eq!(kept.len(), 1, "one credential per provider ({type_})");
+            assert_eq!(
+                kept[0].id, "ws-key",
+                "workspace beats organization ({type_})"
+            );
+        }
+    }
+
     // ── build_injections: openai oauth ──────────────────────────────────
 
     #[test]
@@ -957,6 +1088,17 @@ mod tests {
         assert_eq!(
             secret_host_patterns("generic", "internal.example.com", None),
             vec!["internal.example.com".to_string()]
+        );
+        // The pinned "no extra hosts" contract for the OpenAI-compatible pair:
+        // the API stores their own host at creation, and only the openai OAuth
+        // arm above may expand (the #490 expansion class).
+        assert_eq!(
+            secret_host_patterns("opencode-go", "opencode.ai", None),
+            vec!["opencode.ai".to_string()]
+        );
+        assert_eq!(
+            secret_host_patterns("openrouter", "openrouter.ai", None),
+            vec!["openrouter.ai".to_string()]
         );
     }
 

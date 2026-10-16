@@ -61,6 +61,7 @@ const EVIDENCE_SCAN_MAX = 5_000;
 const LLM_PROVIDER_LABELS: ReadonlySet<string> = new Set([
   "anthropic",
   "openai",
+  "opencode-go",
   "deepseek",
   "groq",
   "openrouter",

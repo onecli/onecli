@@ -43,6 +43,8 @@ const {
   JCODE_DISABLED_TOOLS_VALUE,
   resolveAnthropicCredential,
   resolveJcodeBinary,
+  resolveLocalProvider,
+  resolveNativeProvider,
 } = await import("./jcode");
 
 let home: string;
@@ -144,8 +146,139 @@ describe("resolveAnthropicCredential", () => {
       env: { ANTHROPIC_API_KEY: "", CLAUDE_CODE_OAUTH_TOKEN: "placeholder" },
       expected: { route: "claude", oauthStub: true },
     },
+    {
+      name: "native provider keys are ignored by the Anthropic resolver",
+      env: {
+        OPENCODE_GO_API_KEY: "placeholder",
+        OPENROUTER_API_KEY: "placeholder",
+      },
+      expected: { route: undefined, oauthStub: false },
+    },
   ])("$name", ({ env, expected }) => {
     expect(resolveAnthropicCredential(env)).toEqual(expected);
+  });
+});
+
+describe("resolveNativeProvider", () => {
+  // The native provider pin: opencode-go needs an explicit pin because jcode
+  // has NO env auto-detect for it (verified live: with only
+  // OPENCODE_GO_API_KEY set, getRuntimeInfo().provider stayed "OpenRouter");
+  // openrouter has one, but the pin makes both deterministic. Anthropic always
+  // wins so resolveAnthropicCredential's behavior is never shadowed.
+  it.each([
+    {
+      name: "OPENCODE_GO_API_KEY pins OpenCode Go",
+      env: { OPENCODE_GO_API_KEY: "placeholder" },
+      expected: "opencode-go",
+    },
+    {
+      name: "OPENROUTER_API_KEY pins OpenRouter",
+      env: { OPENROUTER_API_KEY: "placeholder" },
+      expected: "openrouter",
+    },
+    {
+      name: "both keys: OpenCode Go wins deterministically",
+      env: {
+        OPENCODE_GO_API_KEY: "placeholder",
+        OPENROUTER_API_KEY: "placeholder",
+      },
+      expected: "opencode-go",
+    },
+    {
+      name: "an Anthropic API-key grant wins over a native key",
+      env: {
+        ANTHROPIC_API_KEY: "placeholder",
+        OPENCODE_GO_API_KEY: "placeholder",
+      },
+      expected: undefined,
+    },
+    {
+      name: "an Anthropic OAuth grant wins over a native key",
+      env: {
+        CLAUDE_CODE_OAUTH_TOKEN: "placeholder",
+        OPENROUTER_API_KEY: "placeholder",
+      },
+      expected: undefined,
+    },
+    {
+      name: "no native grant pins nothing",
+      env: { OPENAI_API_KEY: "placeholder" },
+      expected: undefined,
+    },
+    {
+      name: "empty values count as unset",
+      env: { OPENCODE_GO_API_KEY: "", OPENROUTER_API_KEY: "" },
+      expected: undefined,
+    },
+    // The local endpoint (a user-supplied OpenAI-compatible server). It is
+    // gated on LOCAL_LLM_BASE_URL alone — the key is optional, because a
+    // localhost model server frequently needs no auth.
+    {
+      name: "LOCAL_LLM_BASE_URL pins the local endpoint",
+      env: { LOCAL_LLM_BASE_URL: "http://192.168.1.50:11434/v1" },
+      expected: "local",
+    },
+    {
+      name: "the local endpoint outranks a hosted native key (explicit operator intent for this agent)",
+      env: {
+        LOCAL_LLM_BASE_URL: "http://192.168.1.50:11434/v1",
+        LOCAL_LLM_API_KEY: "placeholder",
+        OPENCODE_GO_API_KEY: "placeholder",
+        OPENROUTER_API_KEY: "placeholder",
+      },
+      expected: "local",
+    },
+    {
+      name: "an Anthropic grant still wins over the local endpoint",
+      env: {
+        ANTHROPIC_API_KEY: "placeholder",
+        LOCAL_LLM_BASE_URL: "http://192.168.1.50:11434/v1",
+      },
+      expected: undefined,
+    },
+    {
+      name: "a key without a base URL pins nothing — the endpoint is what identifies local",
+      env: { LOCAL_LLM_API_KEY: "placeholder" },
+      expected: undefined,
+    },
+    {
+      name: "an empty LOCAL_LLM_BASE_URL counts as unset",
+      env: { LOCAL_LLM_BASE_URL: "" },
+      expected: undefined,
+    },
+  ])("$name", ({ env, expected }) => {
+    expect(resolveNativeProvider(env)).toBe(expected);
+  });
+});
+
+describe("resolveLocalProvider", () => {
+  // The provider-agnostic half of the local pin: WHAT the `[providers.local]`
+  // profile points at, and whether the profile reads a key env (bearer) or
+  // declares no auth at all. Gated on the base URL exactly like
+  // resolveNativeProvider picks "local", so the two can never disagree.
+  it("carries the base URL and reports a key when the env has one", () => {
+    expect(
+      resolveLocalProvider({
+        LOCAL_LLM_BASE_URL: "http://192.168.1.50:11434/v1",
+        LOCAL_LLM_API_KEY: "placeholder",
+      }),
+    ).toEqual({ baseUrl: "http://192.168.1.50:11434/v1", hasApiKey: true });
+  });
+
+  it("reports no key when only the base URL is set (a keyless local server)", () => {
+    expect(
+      resolveLocalProvider({
+        LOCAL_LLM_BASE_URL: "http://192.168.1.50:11434/v1",
+      }),
+    ).toEqual({ baseUrl: "http://192.168.1.50:11434/v1", hasApiKey: false });
+  });
+
+  it("is undefined with no base URL — even if a stray key is set", () => {
+    expect(resolveLocalProvider({})).toBeUndefined();
+    expect(
+      resolveLocalProvider({ LOCAL_LLM_API_KEY: "placeholder" }),
+    ).toBeUndefined();
+    expect(resolveLocalProvider({ LOCAL_LLM_BASE_URL: "" })).toBeUndefined();
   });
 });
 

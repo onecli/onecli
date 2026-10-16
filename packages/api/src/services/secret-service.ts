@@ -15,6 +15,7 @@ import {
   isPathRegexInjection,
   isPathSafeValue,
   isPathTemplateInjection,
+  parseLocalMetadata,
   parseOpenaiAuthJson,
   parseOpenaiOAuthJson,
   type CreateSecretInput,
@@ -40,8 +41,25 @@ const normalizeOpenaiValue = (
 const SECRET_TYPE_LABELS: Record<string, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
+  "opencode-go": "OpenCode Go",
+  openrouter: "OpenRouter",
+  local: "Local (OpenAI-compatible)",
   generic: "Generic Secret",
 };
+
+/** A `local` provider's host pattern: its base URL's hostname, always derived,
+ *  never taken from the client (the SSRF note in `llm/types.ts`). */
+const hostnameOf = (baseUrl: string): string => {
+  try {
+    return new URL(baseUrl).hostname;
+  } catch {
+    throw new ServiceError("BAD_REQUEST", "Base URL must be a valid URL");
+  }
+};
+
+/** The `local` secret's metadata: just its base URL. */
+const localMetadata = (baseUrl: string): Prisma.InputJsonValue =>
+  ({ baseUrl }) as Prisma.InputJsonValue;
 
 const buildPreview = (plaintext: string): string => {
   if (plaintext.length <= 8) return "•".repeat(plaintext.length);
@@ -103,6 +121,7 @@ const assertPathValueSafe = (
 const buildMetadata = (
   type: string,
   value: string,
+  baseUrl?: string,
 ): Prisma.InputJsonValue | typeof Prisma.JsonNull => {
   if (type === "anthropic") {
     return {
@@ -117,16 +136,20 @@ const buildMetadata = (
       ...(parsed ? { accountId: parsed.tokens.account_id ?? null } : {}),
     } as Prisma.InputJsonValue;
   }
+  // `local` carries its base URL instead of an auth mode.
+  if (type === "local" && baseUrl) return localMetadata(baseUrl);
   return Prisma.JsonNull;
 };
 
 const buildOnePasswordMetadata = (
   type: string,
   opDisplay: CreateSecretInput["opDisplay"],
+  baseUrl?: string,
 ): Prisma.InputJsonValue | typeof Prisma.JsonNull => {
   const meta: Record<string, unknown> = {};
   // LLM keys resolved from 1Password are always API-key mode (no value to inspect, no OAuth).
   if (type === "anthropic" || type === "openai") meta.authMode = "api-key";
+  if (type === "local" && baseUrl) meta.baseUrl = baseUrl;
   if (opDisplay) meta.opDisplay = opDisplay;
   return Object.keys(meta).length > 0
     ? (meta as Prisma.InputJsonValue)
@@ -353,7 +376,21 @@ export const createSecret = async (
     assertPathValueSafe(config, input.valueSource, input.value);
   }
 
-  const pathPattern = input.pathPattern?.trim() || null;
+  // `local`: the base URL is the source of truth. The host pattern is DERIVED
+  // from it (never trusted from input — a client-supplied host would be a
+  // credential-exfiltration primitive), and the path is unconstrained.
+  const baseUrl = input.baseUrl?.trim();
+  if (input.type === "local") {
+    if (!baseUrl)
+      throw new ServiceError(
+        "BAD_REQUEST",
+        "Base URL is required for local providers",
+      );
+    hostPattern = hostnameOf(baseUrl);
+  }
+
+  const pathPattern =
+    input.type === "local" ? null : input.pathPattern?.trim() || null;
   const injectionConfig =
     input.type === "generic"
       ? buildInjectionConfig(input.injectionConfig)
@@ -381,6 +418,8 @@ export const createSecret = async (
     // LLM keys from 1Password are treated as plain API keys on their fixed host.
     if (input.type === "anthropic") hostPattern = "api.anthropic.com";
     if (input.type === "openai") hostPattern = "api.openai.com";
+    if (input.type === "opencode-go") hostPattern = "opencode.ai";
+    if (input.type === "openrouter") hostPattern = "openrouter.ai";
 
     const opSecret = await db.secret.create({
       data: {
@@ -392,7 +431,11 @@ export const createSecret = async (
         hostPattern,
         pathPattern,
         injectionConfig,
-        metadata: buildOnePasswordMetadata(input.type, input.opDisplay),
+        metadata: buildOnePasswordMetadata(
+          input.type,
+          input.opDisplay,
+          baseUrl,
+        ),
         ...scopeCreate(scope),
       },
       select: {
@@ -415,7 +458,11 @@ export const createSecret = async (
 
   // ── Inline value (encrypted at rest) ──
   let value = (input.value ?? "").trim();
-  if (!value) throw new ServiceError("BAD_REQUEST", "Secret value is required");
+  // A `local` server may run keyless: an empty value is stored as no value at
+  // all (encryptedValue null), so the gateway injects nothing and the catalog
+  // is still listed without auth.
+  if (!value && input.type !== "local")
+    throw new ServiceError("BAD_REQUEST", "Secret value is required");
 
   if (input.type === "openai") {
     const normalized = normalizeOpenaiValue(value);
@@ -423,16 +470,23 @@ export const createSecret = async (
     hostPattern = normalized.hostPattern;
   }
 
+  // Pay-your-own-upstream OpenAI-compatible keys inject on their own fixed
+  // host; the gateway has no host knowledge for these types, so the stored
+  // hostPattern is what routes the credential. Forced here, never trusted
+  // from input (the SSRF note in `llm/types.ts`).
+  if (input.type === "opencode-go") hostPattern = "opencode.ai";
+  if (input.type === "openrouter") hostPattern = "openrouter.ai";
+
   const secret = await db.secret.create({
     data: {
       name,
       type: input.type,
       valueSource: "inline",
-      encryptedValue: await getCrypto().encrypt(value),
+      encryptedValue: value ? await getCrypto().encrypt(value) : null,
       hostPattern,
       pathPattern,
       injectionConfig,
-      metadata: buildMetadata(input.type, value),
+      metadata: buildMetadata(input.type, value, baseUrl),
       ...scopeCreate(scope),
     },
     select: {
@@ -449,7 +503,7 @@ export const createSecret = async (
 
   return {
     ...secret,
-    preview: buildPreview(value),
+    ...(value ? { preview: buildPreview(value) } : {}),
     attachedAgents: await attachNewSecret(scope, secret, userId),
   };
 };
@@ -472,7 +526,7 @@ export const updateSecret = async (
 ) => {
   const secret = await db.secret.findFirst({
     where: scopeOwnership(scope, secretId),
-    select: { id: true, type: true },
+    select: { id: true, type: true, metadata: true },
   });
 
   if (!secret) throw new ServiceError("NOT_FOUND", "Secret not found");
@@ -483,6 +537,24 @@ export const updateSecret = async (
     const name = input.name.trim();
     if (!name) throw new ServiceError("BAD_REQUEST", "Name is required");
     data.name = name;
+  }
+
+  // `local`: the base URL (new, or the existing one when only the value
+  // changes) determines both the stored host pattern and the metadata. Handled
+  // once, up front, so the value arm and a baseUrl-only update agree.
+  if (secret.type === "local") {
+    const baseUrl = input.baseUrl?.trim();
+    if (input.baseUrl !== undefined && !baseUrl)
+      throw new ServiceError("BAD_REQUEST", "Base URL is required");
+    const resolved = baseUrl ?? parseLocalMetadata(secret.metadata)?.baseUrl;
+    if (!resolved)
+      throw new ServiceError(
+        "BAD_REQUEST",
+        "Base URL is required for local providers",
+      );
+    data.hostPattern = hostnameOf(resolved);
+    data.pathPattern = null;
+    data.metadata = localMetadata(resolved);
   }
 
   if (input.valueSource === "onepassword") {
@@ -502,10 +574,16 @@ export const updateSecret = async (
     data.opRef = input.opRef;
     if (secret.type === "anthropic") data.hostPattern = "api.anthropic.com";
     if (secret.type === "openai") data.hostPattern = "api.openai.com";
-    data.metadata = buildOnePasswordMetadata(secret.type, input.opDisplay);
+    if (secret.type === "opencode-go") data.hostPattern = "opencode.ai";
+    if (secret.type === "openrouter") data.hostPattern = "openrouter.ai";
+    // `local`'s metadata (its base URL) was set above and must survive.
+    if (secret.type !== "local")
+      data.metadata = buildOnePasswordMetadata(secret.type, input.opDisplay);
   } else if (input.value !== undefined) {
     let value = input.value.trim();
-    if (!value)
+    // `local` may clear its key to empty (a keyless server); every other type
+    // still needs a value.
+    if (!value && secret.type !== "local")
       throw new ServiceError("BAD_REQUEST", "Secret value is required");
 
     if (secret.type === "openai") {
@@ -513,9 +591,13 @@ export const updateSecret = async (
       value = normalized.value;
       data.hostPattern = normalized.hostPattern;
     }
+    if (secret.type === "opencode-go") data.hostPattern = "opencode.ai";
+    if (secret.type === "openrouter") data.hostPattern = "openrouter.ai";
 
     data.valueSource = "inline";
-    data.encryptedValue = await getCrypto().encrypt(value);
+    // An empty `local` value is stored as NO value, so the gateway injects
+    // nothing; the base-URL metadata set above still stands.
+    data.encryptedValue = value ? await getCrypto().encrypt(value) : null;
     data.opRef = null;
 
     if (secret.type === "anthropic" || secret.type === "openai") {
@@ -523,14 +605,20 @@ export const updateSecret = async (
     }
   }
 
-  if (input.hostPattern !== undefined) {
+  // A typed LLM key injects only on its provider's fixed host, so a PATCH must
+  // never re-point it — the gateway injects on whatever host is stored, and a
+  // client-supplied host here would be a key-exfiltration primitive. The create
+  // path already refuses input for these; this is the update half, and it runs
+  // AFTER the per-type forcing above so `input.hostPattern` can never win.
+  if (input.hostPattern !== undefined && !isLlmProviderId(secret.type)) {
     const hostPattern = input.hostPattern.trim();
     if (!hostPattern)
       throw new ServiceError("BAD_REQUEST", "Host pattern is required");
     data.hostPattern = hostPattern;
   }
 
-  if (input.pathPattern !== undefined) {
+  // `local`'s path pattern is always null (its base URL carries the path).
+  if (input.pathPattern !== undefined && secret.type !== "local") {
     data.pathPattern = input.pathPattern?.trim() || null;
   }
 

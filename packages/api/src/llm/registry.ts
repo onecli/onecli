@@ -1,6 +1,9 @@
 import type { LlmProvider, LlmProviderId } from "./types";
 import { anthropic } from "./anthropic";
 import { openai } from "./openai";
+import { opencodeGo } from "./opencode-go";
+import { openrouter } from "./openrouter";
+import { local } from "./local";
 
 // SERVER-ONLY (see `./types`): this registry reaches outbound fetch logic and
 // decrypted credentials. Client code gets its data from the models endpoint.
@@ -14,6 +17,9 @@ import { openai } from "./openai";
 export const LLM_PROVIDERS: Record<LlmProviderId, LlmProvider> = {
   anthropic,
   openai,
+  "opencode-go": opencodeGo,
+  openrouter,
+  local,
 };
 
 /** The secret types this registry can serve — derived, never hand-listed. */

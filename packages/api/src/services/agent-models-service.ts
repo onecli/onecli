@@ -97,6 +97,8 @@ export const getAgentModels = async (
           )
         : null,
     credential.authMode,
+    // `local` only: the user's own base URL the catalogue is fetched from.
+    credential.baseUrl,
   );
   const selected = resolveAgentModel(agent, credential.provider);
 

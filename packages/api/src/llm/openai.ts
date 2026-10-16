@@ -1,7 +1,15 @@
 import type { LlmProvider } from "./types";
 
-/** `GET /v1/models` returns `{ data: [{ id, object: "model" }] }` — ids only. */
-const parseCatalog = (body: unknown): Array<{ id: string; label?: string }> => {
+/**
+ * `GET /v1/models` returns `{ data: [{ id, object: "model" }] }` — ids only.
+ *
+ * Exported because it is the catalogue shape of every OpenAI-compatible
+ * provider, not just OpenAI: `opencode-go` and `openrouter` serve the same
+ * body, so they reuse this rather than re-implementing the parse.
+ */
+export const parseOpenaiCatalog = (
+  body: unknown,
+): Array<{ id: string; label?: string }> => {
   if (typeof body !== "object" || body === null) return [];
   const data = (body as { data?: unknown }).data;
   if (!Array.isArray(data)) return [];
@@ -68,7 +76,7 @@ export const openai: LlmProvider = {
   // duplicate a security-critical path for a dropdown.
   canList: (authMode) => authMode === "api-key",
   catalogHeaders: (credential) => ({ authorization: `Bearer ${credential}` }),
-  parseCatalog,
+  parseCatalog: parseOpenaiCatalog,
   isSelectable: (id) => {
     const lower = id.toLowerCase();
     if (NOT_CHAT.some((fragment) => lower.includes(fragment))) return false;

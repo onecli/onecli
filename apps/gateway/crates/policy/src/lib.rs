@@ -196,6 +196,7 @@ pub fn is_llm_host(host: &str) -> bool {
         || h.contains("deepseek.com")
         || h.contains("groq.com")
         || h.contains("openrouter.ai")
+        || h.contains("opencode.ai")
         || h.contains("moonshot.cn")
         || h.contains("generativelanguage.googleapis.com")
 }

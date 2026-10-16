@@ -17,7 +17,12 @@ import type { AgentEffort } from "@onecli/agent-protocol";
  * key names its own provider with no mapping table in between — which is what
  * makes "the key decides the model" a lookup rather than a negotiation.
  */
-export type LlmProviderId = "anthropic" | "openai";
+export type LlmProviderId =
+  | "anthropic"
+  | "openai"
+  | "opencode-go"
+  | "openrouter"
+  | "local";
 
 /**
  * How a stored LLM credential authenticates, from `Secret.metadata.authMode`:
@@ -76,8 +81,31 @@ export interface LlmProvider {
    * user-editable (`secret-service.ts` writes it unconditionally) — building an
    * outbound URL from it would turn "connect a key" into an SSRF primitive
    * against our own network.
+   *
+   * EXACTLY ONE of `catalogUrl` / `catalogUrlFor` is set. Every hosted provider
+   * fixes its origin here; `local` alone uses `catalogUrlFor` below.
    */
-  catalogUrl: string;
+  catalogUrl?: string;
+  /**
+   * THE ONE INTENTIONAL SSRF EXCEPTION (§3.10). Unlike `catalogUrl` above, this
+   * derives the catalog URL from the USER-SUPPLIED base URL stored in
+   * `secret.metadata.baseUrl` — a user-run OpenAI-compatible server on their own
+   * LAN, so the destination is the user's to choose rather than ours to fix.
+   *
+   * It must NEVER be defined for a hosted provider: those keep their hardcoded
+   * `catalogUrl` precisely so a stored host can never redirect their credential.
+   * Only `local` sets it, and the catalog cache resolves it through the same
+   * secret the credential came from — never from a client-supplied host.
+   */
+  catalogUrlFor?: (baseUrl: string) => string;
+  /**
+   * Whether the catalogue can be listed with NO credential at all. `local`
+   * alone sets this: an Ollama or LM Studio server may run keyless and its
+   * `/models` is public, so the live catalogue is still fetched (with no auth
+   * header) instead of degrading straight to the pinned list. Every hosted
+   * provider omits this and lists only once a key is present.
+   */
+  canListWithoutKey?: boolean;
   /**
    * Can a credential of this auth mode list at all? Asked BEFORE the
    * credential is obtained, because obtaining it costs a KMS decrypt and the

@@ -290,7 +290,13 @@ export const NewHostedAgentDialog = ({
           setPendingChatAgentId(null);
           if (agentId) router.push(agentChatPath(workspaceId, agentId));
         }}
-        allowedTypes={["anthropic", "openai"]}
+        allowedTypes={[
+          "anthropic",
+          "openai",
+          "opencode-go",
+          "openrouter",
+          "local",
+        ]}
         onSaved={() =>
           toast.success("LLM key added and attached to your agent")
         }

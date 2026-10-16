@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
+import type { CreateSecretInput } from "@onecli/api/validations/secret";
 import { SecretDialog } from "./secret-dialog";
 
 // The unit here is the dialog's own guidance surface: the provider hints
@@ -13,6 +14,7 @@ import { SecretDialog } from "./secret-dialog";
 // hook is the house clipboard seam, and toasts are observed, not rendered.
 const mocks = vi.hoisted(() => ({
   copy: vi.fn<(text: string) => Promise<boolean>>(),
+  create: vi.fn<(input: CreateSecretInput) => Promise<{ id: string }>>(),
 }));
 
 vi.mock("@/lib/actions/secrets", () => ({ updateSecret: vi.fn() }));
@@ -56,6 +58,7 @@ const renderDialog = (props: Partial<Parameters<typeof SecretDialog>[0]>) => {
 describe("SecretDialog provider guidance", () => {
   afterEach(() => {
     mocks.copy.mockReset();
+    mocks.create.mockReset();
     vi.mocked(toast.success).mockClear();
     vi.mocked(toast.error).mockClear();
   });
@@ -303,5 +306,92 @@ describe("SecretDialog provider guidance", () => {
       screen.getByRole("button", { name: "Copy codex login --device-auth" }),
     );
     expect(mocks.copy).toHaveBeenCalledWith("codex login --device-auth");
+  });
+
+  it("offers OpenCode Go and OpenRouter alongside the existing LLM providers", () => {
+    renderDialog({});
+    expect(screen.getByText("OpenCode Go")).toBeInTheDocument();
+    expect(screen.getByText("OpenRouter")).toBeInTheDocument();
+  });
+
+  it("keeps the OpenCode Go hint neutral with no fabricated key prefix", async () => {
+    renderDialog({ defaultType: "opencode-go" });
+    expect(
+      screen.getByPlaceholderText("Paste your OpenCode Go key"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      /Paste the subscription key from your OpenCode Go account/,
+    );
+
+    await userEvent.paste("opaque-subscription-token");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      /Paste the subscription key from your OpenCode Go account/,
+    );
+    expect(screen.getByRole("status")).not.toHaveTextContent(/start with/);
+  });
+
+  it("hints OpenRouter's sk-or- convention and links its keys page", async () => {
+    renderDialog({ defaultType: "openrouter" });
+    expect(screen.getByPlaceholderText("sk-or-…")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "openrouter.ai" })).toHaveAttribute(
+      "href",
+      "https://openrouter.ai/settings/keys",
+    );
+
+    await userEvent.click(screen.getByPlaceholderText("sk-or-…"));
+    await userEvent.paste("not-a-real-key");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      /OpenRouter keys usually start with/,
+    );
+  });
+
+  it("offers the Local (OpenAI-compatible) key type", () => {
+    renderDialog({});
+    expect(screen.getByText("Local (OpenAI-compatible)")).toBeInTheDocument();
+  });
+
+  it("prefills the Base URL from the Ollama and LM Studio presets, staying editable", async () => {
+    renderDialog({ defaultType: "local" });
+    const baseUrl = screen.getByLabelText("Base URL");
+
+    await userEvent.click(screen.getByRole("radio", { name: "Ollama" }));
+    expect(baseUrl).toHaveValue("http://localhost:11434/v1");
+
+    await userEvent.click(screen.getByRole("radio", { name: "LM Studio" }));
+    expect(baseUrl).toHaveValue("http://localhost:1234/v1");
+
+    await userEvent.clear(baseUrl);
+    await userEvent.type(baseUrl, "http://192.168.1.50:11434/v1");
+    expect(baseUrl).toHaveValue("http://192.168.1.50:11434/v1");
+  });
+
+  it("creates a local key with baseUrl and no value when the API key is left empty", async () => {
+    mocks.create.mockResolvedValue({ id: "sec-local" });
+    renderDialog({
+      defaultType: "local",
+      secretActions: { createSecret: mocks.create },
+    });
+
+    await userEvent.click(screen.getByRole("radio", { name: "Ollama" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add Secret" }));
+
+    await waitFor(() => expect(mocks.create).toHaveBeenCalledTimes(1));
+    const payload = mocks.create.mock.calls[0]?.[0];
+    expect(payload).toMatchObject({
+      type: "local",
+      baseUrl: "http://localhost:11434/v1",
+      hostPattern: "localhost:11434",
+    });
+    expect(payload).not.toHaveProperty("value");
+  });
+
+  it("rejects a non-http Base URL and keeps the key optional", async () => {
+    renderDialog({ defaultType: "local" });
+    await userEvent.type(screen.getByLabelText("Base URL"), "ftp://nope");
+
+    expect(
+      screen.getByText(/Base URL must start with http:\/\/ or https:\/\//),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add Secret" })).toBeDisabled();
   });
 });

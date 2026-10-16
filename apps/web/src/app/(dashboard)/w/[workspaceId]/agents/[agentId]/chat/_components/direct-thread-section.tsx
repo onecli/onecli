@@ -255,7 +255,13 @@ export const DirectThreadSection = () => {
         open={keyDialogOpen}
         onOpenChange={setKeyDialogOpen}
         onSaved={onKeySaved}
-        allowedTypes={["anthropic", "openai"]}
+        allowedTypes={[
+          "anthropic",
+          "openai",
+          "opencode-go",
+          "openrouter",
+          "local",
+        ]}
         secretActions={keySecretActions}
       />
 

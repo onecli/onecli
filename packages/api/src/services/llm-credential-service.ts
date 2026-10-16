@@ -10,6 +10,7 @@ import {
 } from "../validations/conversation";
 import {
   parseAnthropicMetadata,
+  parseLocalMetadata,
   parseOpenaiMetadata,
 } from "../validations/secret";
 import {
@@ -45,12 +46,27 @@ export interface ResolvedLlmCredential {
   scope: string;
   /** 1Password-sourced secrets have no stored value the control plane can read. */
   hasReadableValue: boolean;
+  /**
+   * `local` only: the user-supplied base URL the catalogue is fetched from
+   * (the ONE deliberate SSRF exception — `llm/types.ts`). Null for every other
+   * provider.
+   */
+  baseUrl: string | null;
 }
 
 const authModeOf = (
   provider: LlmProviderId,
   metadata: unknown,
 ): LlmAuthMode => {
+  // The OpenAI-compatible pay-your-own-upstream providers carry no auth-mode
+  // metadata: their credential is always a plain bearer API key (or, for
+  // `local`, no key at all).
+  if (
+    provider === "opencode-go" ||
+    provider === "openrouter" ||
+    provider === "local"
+  )
+    return "api-key";
   const parsed =
     provider === "anthropic"
       ? parseAnthropicMetadata(metadata)
@@ -144,6 +160,7 @@ const platformTrialCredential = async (
     authMode: "api-key",
     scope: "platform",
     hasReadableValue: false,
+    baseUrl: null,
   };
 };
 
@@ -179,6 +196,10 @@ export const resolveAgentLlmCredential = async (
     scope: winner.scope,
     hasReadableValue:
       winner.valueSource !== "onepassword" && winner.encryptedValue !== null,
+    baseUrl:
+      winner.type === "local"
+        ? (parseLocalMetadata(winner.metadata)?.baseUrl ?? null)
+        : null,
   };
 };
 

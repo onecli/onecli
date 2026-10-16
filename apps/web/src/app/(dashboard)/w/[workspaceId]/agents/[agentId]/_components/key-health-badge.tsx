@@ -50,6 +50,19 @@ const providerFixLink = (
           label: "OpenAI billing & limits",
         };
   }
+  // OpenCode Go is a subscription with no self-serve key/billing console we can
+  // point at, so it stays unlinked like any other provider we can't name.
+  if (type === "openrouter") {
+    return auth
+      ? {
+          href: "https://openrouter.ai/settings/keys",
+          label: "Manage OpenRouter keys",
+        }
+      : {
+          href: "https://openrouter.ai/settings/credits",
+          label: "OpenRouter credits & limits",
+        };
+  }
   return undefined;
 };
 
