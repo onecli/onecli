@@ -266,6 +266,17 @@ describe("markdownToMrkdwn", () => {
     );
   });
 
+  it("leaves a fence indented under a list item untouched", () => {
+    expect(
+      markdownToMrkdwn(
+        "1. Add:\n   ```yaml\n   - name: **x**\n     run: a — b\n   ```\n2. **Go**",
+      ),
+    ).toBe("1. Add:\n```\n- name: **x**\n  run: a — b\n```\n2. *Go*");
+    expect(markdownToMrkdwn("- Run:\n  ```\n  * 2\n  ```")).toBe(
+      "• Run:\n```\n* 2\n```",
+    );
+  });
+
   it("leaves a trailing lone fence line as prose", () => {
     expect(markdownToMrkdwn("done\n```")).toBe("done\n```");
   });

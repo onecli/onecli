@@ -169,7 +169,8 @@ export const markdownToMrkdwn = (
   };
 
   // Fenced blocks: the one-line shorthand first, then a single line-walk
-  // pairs multi-line fences per GFM — a closer is a run of the SAME
+  // pairs multi-line fences per GFM — an opener or closer may be indented
+  // (a fence inside a list item), a closer is a run of the SAME
   // character at least as long as the opener with only trailing whitespace;
   // an unclosed opener runs to the end of the message; a lone trailing
   // fence line stays prose. The rebuild normalizes every fence to plain
@@ -182,16 +183,18 @@ export const markdownToMrkdwn = (
     const out: string[] = [];
     for (let i = 0; i < lines.length; i += 1) {
       const line = lines[i] ?? "";
-      const marker = line[0] === "`" || line[0] === "~" ? line[0] : "";
+      const indent = /^[ \t]*/.exec(line)?.[0].length ?? 0;
+      const fence = line.slice(indent);
+      const marker = fence[0] === "`" || fence[0] === "~" ? fence[0] : "";
       let run = 0;
-      while (run < line.length && line[run] === marker) run += 1;
+      while (run < fence.length && fence[run] === marker) run += 1;
       if (marker === "" || run < 3 || i === lines.length - 1) {
         out.push(line);
         continue;
       }
       let close = -1;
       for (let j = i + 1; j < lines.length; j += 1) {
-        const cand = lines[j] ?? "";
+        const cand = (lines[j] ?? "").replace(/^[ \t]*/, "");
         let n = 0;
         while (n < cand.length && cand[n] === marker) n += 1;
         if (n >= run && /^[ \t]*$/.test(cand.slice(n))) {
@@ -199,8 +202,13 @@ export const markdownToMrkdwn = (
           break;
         }
       }
+      // A fence indented under a list item: its body carries the same
+      // indent, which is list layout, not code.
       const body = lines
         .slice(i + 1, close === -1 ? lines.length : close)
+        .map((l) =>
+          l.slice(Math.min(indent, /^[ \t]*/.exec(l)?.[0].length ?? 0)),
+        )
         .join("\n");
       out.push(lift(body ? `\`\`\`\n${body}\n\`\`\`` : "```\n```"));
       i = close === -1 ? lines.length : close;
