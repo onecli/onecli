@@ -68,18 +68,24 @@ describe("ToolGroup", () => {
     const user = userEvent.setup();
     render(
       <ToolGroup
-        tools={[bash("one"), bash("ls: denied\n\nExit code: 2")]}
+        tools={[
+          bash("one"),
+          { ...bash("ls: denied"), exitCode: 2 },
+          { ...tool("bg", "Error: Task not found"), isError: true },
+        ]}
         turnEnded
         startedAt="2026-09-29T12:00:00Z"
       />,
     );
-    const header = screen.getByRole("button", { name: /Ran 2 commands/ });
+    const header = screen.getByRole("button", { name: /Ran 3 steps/ });
     expect(header).toHaveAttribute("aria-expanded", "false");
     await user.click(header);
     expect(header).toHaveAttribute("aria-expanded", "true");
     expect(screen.getAllByText("Ran a command")).toHaveLength(2);
-    // Red lives only on the failed step inside, never on the header.
+    // Red lives only on the step whose tool failed, never on the header; a
+    // command's non-zero exit is a muted status on its own row.
     expect(screen.getAllByText("Failed")).toHaveLength(1);
+    expect(screen.getByText("exit 2")).toBeInTheDocument();
     expect(header.className).not.toMatch(/red/);
   });
 

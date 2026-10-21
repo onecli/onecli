@@ -93,6 +93,7 @@ const runSummary = (
   status: "done",
   trigger: "manual",
   configVersion: "cfg",
+  model: null,
   total: 1,
   counts: { pending: 0, passed: 1, mismatch: 0, error: 0, inconclusive: 0 },
   error: null,
@@ -247,6 +248,23 @@ describe("EvalsSection", () => {
     expect(screen.getByText("Results of run-1")).toBeInTheDocument();
   });
 
+  it("names the model each run answered with, when it was recorded", async () => {
+    state.view = view({
+      questions: [question("q-1")],
+      runs: [
+        runSummary("run-2", { model: "claude-opus-4-7" }),
+        runSummary("run-1"),
+      ],
+    });
+    const user = userEvent.setup();
+    render(<EvalsSection />);
+
+    await user.click(screen.getByRole("combobox", { name: "Test run" }));
+    const [latest, older] = screen.getAllByRole("option");
+    expect(latest).toHaveTextContent("claude-opus-4-7");
+    expect(older).not.toHaveTextContent("claude");
+  });
+
   it("archives a question only after confirmation", async () => {
     state.view = view({ questions: [question("q-1")] });
     const user = userEvent.setup();
@@ -268,7 +286,7 @@ describe("EvalsSection", () => {
       }),
     );
     await user.click(screen.getByRole("button", { name: "Archive" }));
-    expect(state.archive).toHaveBeenCalledWith("q-1", expect.anything());
+    expect(state.archive).toHaveBeenCalledWith("q-1");
   });
 
   const savedSchedule = (

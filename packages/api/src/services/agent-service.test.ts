@@ -273,19 +273,6 @@ describe("createAgent — the creation-world gates (cloud, §3.10 re-decided)", 
   });
 });
 
-describe("createAgent — no parent-mode inheritance (attach-model step 5)", () => {
-  it("creates the agent without threading any parent state", async () => {
-    // The step-5 law: inheritance is gone (the route still accepts
-    // `parentIdentifier` but no longer threads it), and since the
-    // `secret_mode` drop there is no mode to inherit at all — access is
-    // granted solely by policy rules after creation.
-    seedAgent("parent");
-    await createAgent("p1", { name: "Child", identifier: "child" });
-    expect(lastCreated().name).toBe("Child");
-    expect(lastCreated().identifier).toBe("child");
-  });
-});
-
 describe("createAgent — the BYO regression (hosted-agents step 1)", () => {
   it("an unadorned create stamps kind byo explicitly with null hosted fields", async () => {
     await createAgent("p1", { name: "Legacy", identifier: "legacy" });

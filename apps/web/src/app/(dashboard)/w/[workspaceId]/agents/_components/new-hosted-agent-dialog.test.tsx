@@ -1,15 +1,22 @@
 // @vitest-environment jsdom
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * The create dialog's promise: ONE required question. The brief is opt-in
- * (it used to sit open and read as required), and creating lands in the chat
- * rather than a second dialog step.
+ * (it used to sit open and read as required). Creating lands in the chat,
+ * through the steps that have something to do: an LLM key when there is
+ * none, then choosing connections when the workspace has any (a new agent
+ * starts with none).
  */
 
-const state = vi.hoisted(() => ({ availability: "ready" as string }));
+const state = vi.hoisted(() => ({
+  availability: "ready" as string,
+  counts: { apps: 0, secrets: 0 },
+  renderedCounts: undefined as { apps: number; secrets: number } | undefined,
+}));
 const mocks = vi.hoisted(() => ({
   push: vi.fn(),
   mutate: vi.fn(),
@@ -32,24 +39,59 @@ vi.mock("@/hooks/use-hosted-availability", () => ({
   useHostedAvailability: () => state.availability,
   useHomeDurabilityMessage: () => null,
 }));
-// The key dialog is a whole flow of its own; only its presence matters here.
+// The rendered counts may lag; the chooser decision asks the live answer.
+vi.mock("@/hooks/use-counts", () => ({
+  useCounts: () => ({ data: state.renderedCounts ?? state.counts }),
+  useHasConnectionsToChoose: () => async () =>
+    state.counts.apps + state.counts.secrets > 0,
+}));
+// The key dialog and the chooser are flows of their own; only their presence
+// and how they close matter here.
 vi.mock(
   "@/app/(dashboard)/w/[workspaceId]/connections/_components/secret-dialog",
   () => ({
-    SecretDialog: ({ open }: { open: boolean }) =>
-      open ? <div>secret-dialog</div> : null,
+    SecretDialog: ({
+      open,
+      onOpenChange,
+    }: {
+      open: boolean;
+      onOpenChange: (open: boolean) => void;
+    }) =>
+      open ? (
+        <button onClick={() => onOpenChange(false)}>secret-dialog</button>
+      ) : null,
   }),
 );
+vi.mock("./choose-connections-dialog", () => ({
+  ChooseConnectionsDialog: ({
+    agent,
+    onClose,
+  }: {
+    agent: { name: string } | null;
+    onClose: () => void;
+  }) =>
+    agent ? <button onClick={onClose}>choose for {agent.name}</button> : null,
+}));
 
 const { NewHostedAgentDialog } = await import("./new-hosted-agent-dialog");
 
 const open = () => render(<NewHostedAgentDialog open onOpenChange={vi.fn()} />);
+
+/** The page's real wiring: closing the create dialog actually closes it, so
+ * the steps after it are not trapped behind a modal that stays up. */
+const ControlledDialog = () => {
+  const [isOpen, setIsOpen] = useState(true);
+  return <NewHostedAgentDialog open={isOpen} onOpenChange={setIsOpen} />;
+};
+const openControlled = () => render(<ControlledDialog />);
 
 const nameField = () =>
   screen.getByPlaceholderText("e.g. Support Triage") as HTMLInputElement;
 
 beforeEach(() => {
   state.availability = "ready";
+  state.counts = { apps: 0, secrets: 0 };
+  state.renderedCounts = undefined;
   mocks.push.mockClear();
   mocks.mutate.mockClear();
 });
@@ -153,7 +195,7 @@ describe("the hosted create dialog", () => {
     );
   });
 
-  it("lands in the chat instead of a success step", async () => {
+  it("lands in the chat instead of a success step when there is nothing to choose", async () => {
     const user = userEvent.setup();
     open();
     await user.clear(nameField());
@@ -161,8 +203,28 @@ describe("the hosted create dialog", () => {
     await user.click(screen.getByRole("button", { name: "Create agent" }));
 
     const onSuccess = mocks.mutate.mock.calls[0]![1].onSuccess;
-    onSuccess({ id: "ag-1", name: "Donna", llmKeys: ["sec-1"] });
-    expect(mocks.push).toHaveBeenCalledWith("/w/w1/agents/ag-1/chat");
+    act(() => onSuccess({ id: "ag-1", name: "Donna", llmKeys: ["sec-1"] }));
+    await waitFor(() =>
+      expect(mocks.push).toHaveBeenCalledWith("/w/w1/agents/ag-1/chat"),
+    );
+  });
+
+  it("still offers the chooser when the create answers before the counts first loaded", async () => {
+    // The render saw no counts yet (zero); the workspace does have some.
+    state.renderedCounts = { apps: 0, secrets: 0 };
+    state.counts = { apps: 1, secrets: 0 };
+    const user = userEvent.setup();
+    openControlled();
+    await user.clear(nameField());
+    await user.type(nameField(), "Donna");
+    await user.click(screen.getByRole("button", { name: "Create agent" }));
+
+    const onSuccess = mocks.mutate.mock.calls[0]![1].onSuccess;
+    act(() => onSuccess({ id: "ag-1", name: "Donna", llmKeys: ["sec-1"] }));
+    expect(
+      await screen.findByRole("button", { name: "choose for Donna" }),
+    ).toBeInTheDocument();
+    expect(mocks.push).not.toHaveBeenCalled();
   });
 
   it("asks for an LLM key instead of landing in a room the agent cannot answer in", async () => {
@@ -176,6 +238,42 @@ describe("the hosted create dialog", () => {
     act(() => onSuccess({ id: "ag-1", name: "Donna", llmKeys: [] }));
     expect(mocks.push).not.toHaveBeenCalled();
     expect(screen.getByText("secret-dialog")).toBeVisible();
+  });
+
+  it("offers choosing connections when the workspace has some, then the chat", async () => {
+    state.counts = { apps: 1, secrets: 0 };
+    const user = userEvent.setup();
+    openControlled();
+    await user.clear(nameField());
+    await user.type(nameField(), "Donna");
+    await user.click(screen.getByRole("button", { name: "Create agent" }));
+
+    const onSuccess = mocks.mutate.mock.calls[0]![1].onSuccess;
+    act(() => onSuccess({ id: "ag-1", name: "Donna", llmKeys: ["sec-1"] }));
+    const chooser = await screen.findByRole("button", {
+      name: "choose for Donna",
+    });
+    expect(mocks.push).not.toHaveBeenCalled();
+
+    await user.click(chooser);
+    expect(mocks.push).toHaveBeenCalledWith("/w/w1/agents/ag-1/chat");
+  });
+
+  it("chains the key, then choosing connections, then the chat", async () => {
+    state.counts = { apps: 0, secrets: 2 };
+    const user = userEvent.setup();
+    openControlled();
+    await user.clear(nameField());
+    await user.type(nameField(), "Donna");
+    await user.click(screen.getByRole("button", { name: "Create agent" }));
+
+    const onSuccess = mocks.mutate.mock.calls[0]![1].onSuccess;
+    act(() => onSuccess({ id: "ag-1", name: "Donna", llmKeys: [] }));
+    await user.click(screen.getByRole("button", { name: "secret-dialog" }));
+    expect(mocks.push).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "choose for Donna" }));
+    expect(mocks.push).toHaveBeenCalledWith("/w/w1/agents/ag-1/chat");
   });
 
   it("won't submit once the suggested name is cleared away", async () => {

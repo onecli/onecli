@@ -80,9 +80,8 @@ const AUTH = {
 
 const SKILL = {
   id: "sk-1",
-  scope: "workspace",
-  agentId: null,
-  workspaceId: "p1",
+  scope: "agent",
+  agentId: "ag-1",
   organizationId: null,
   name: "release-checklist",
   description: "How we ship",
@@ -106,13 +105,13 @@ beforeEach(() => {
 });
 
 describe("the workspace door", () => {
-  it("lists every tier reaching the workspace", async () => {
+  it("lists the skills reaching the workspace", async () => {
     const response = await app.request("/v1/skills", { headers: AUTH });
     expect(response.status).toBe(200);
     expect(services.listSkillsForWorkspace).toHaveBeenCalledWith("p1", "org-1");
   });
 
-  it("create threads the creator and 201s; agentId selects the agent tier", async () => {
+  it("create threads the creator and 201s for the named agent", async () => {
     const response = await app.request("/v1/skills", {
       method: "POST",
       headers: AUTH,
@@ -131,15 +130,39 @@ describe("the workspace door", () => {
     );
   });
 
-  it("refuses the reserved gateway name, a bad kebab, and an over-budget body", async () => {
+  it("refuses a missing agentId (no workspace tier), the reserved gateway name, a bad kebab, and an over-budget body", async () => {
+    const missingAgent = await app.request("/v1/skills", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({
+        name: "no-agent",
+        description: "d",
+        content: "x",
+      }),
+    });
+    expect(missingAgent.status).toBe(422);
+    // The words name the field, not just a type mismatch.
+    const refusal = (await missingAgent.json()) as {
+      error: { message: string };
+    };
+    expect(refusal.error.message).toBe(
+      "agentId is required: the agent the skill belongs to",
+    );
+
     for (const body of [
-      { name: "onecli-gateway", description: "d", content: "x" },
-      { name: "Bad Name", description: "d", content: "x" },
+      {
+        name: "onecli-gateway",
+        description: "d",
+        content: "x",
+        agentId: "ag-1",
+      },
+      { name: "Bad Name", description: "d", content: "x", agentId: "ag-1" },
       {
         name: "big",
         description: "d",
         content: "x".repeat(24_000),
         files: [{ path: "extra.md", content: "y".repeat(10_000) }],
+        agentId: "ag-1",
       },
     ]) {
       const response = await app.request("/v1/skills", {

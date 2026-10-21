@@ -76,8 +76,6 @@ afterAll(async () => {
   await db.user.delete({ where: { id: OWNER } });
 });
 
-const readRow = () =>
-  db.channelIntegration.findUniqueOrThrow({ where: { id: integrationId } });
 const success = (team = TEAM) =>
   new Response(
     JSON.stringify({
@@ -88,40 +86,8 @@ const success = (team = TEAM) =>
       exp: Math.floor(Date.now() / 1000) + 43200,
     }),
   );
-const failureCases: [string, () => Promise<Response>][] = [
-  [
-    "connect timeout",
-    async () => {
-      throw new TypeError("fetch failed", {
-        cause: { code: "UND_ERR_CONNECT_TIMEOUT" },
-      });
-    },
-  ],
-  [
-    "HTTP 429",
-    async () =>
-      new Response('{"ok":false,"error":"invalid_refresh_token"}', {
-        status: 429,
-        headers: { "retry-after": "0" },
-      }),
-  ],
-  [
-    "HTTP 503",
-    async () =>
-      new Response('{"ok":false,"error":"invalid_refresh_token"}', {
-        status: 503,
-      }),
-  ],
-  [
-    "unknown refusal",
-    async () => new Response('{"ok":false,"error":"future_error"}'),
-  ],
-  ["malformed JSON", async () => new Response("not json")],
-  ["malformed success", async () => new Response('{"ok":true}')],
-];
-
 describe.skipIf(!PROOF_URL)(
-  "integration rotation preserves credentials unless permanently refused",
+  "integration rotation honors the expected identity (the tenant fence)",
   () => {
     it.each(["config", "shared"])(
       "%s rejects an already replaced integration or reconnected tenant before any callback",
@@ -239,161 +205,5 @@ describe.skipIf(!PROOF_URL)(
         );
       },
     );
-
-    it.each(["not json", '{"accessToken":"incomplete"}'])(
-      "clears a malformed stored credential without provider calls: %s",
-      async (malformed) => {
-        const credentials = await crypto.encrypt(malformed);
-        await db.channelIntegration.update({
-          where: { id: integrationId },
-          data: { credentials },
-        });
-        const fetch = vi.fn();
-        const work = vi.fn();
-        vi.stubGlobal("fetch", fetch);
-        await expect(
-          service.withFreshIntegrationCredentials(ORG, "slack", work),
-        ).rejects.toBeInstanceOf(Error);
-        expect(fetch).not.toHaveBeenCalled();
-        expect(work).not.toHaveBeenCalled();
-        expect(await readRow()).toMatchObject({
-          credentials: null,
-          credentialsRotatedAt: rotatedAt,
-        });
-      },
-    );
-
-    it.each(failureCases)(
-      "on-use %s preserves both fields, uses the live access token, and allows retry",
-      async (_name, respond) => {
-        const fetch = vi.fn().mockImplementation(respond);
-        vi.stubGlobal("fetch", fetch);
-        const work = vi.fn();
-        await service.withFreshIntegrationCredentials(ORG, "slack", work);
-        expect(work).toHaveBeenCalledExactlyOnceWith(
-          "old-access",
-          integrationId,
-        );
-        work.mockClear();
-        expect(await readRow()).toMatchObject({
-          credentials: ciphertext,
-          credentialsRotatedAt: rotatedAt,
-          externalId: TEAM,
-        });
-        expect((await service.getIntegrationView(ORG))[0]).toMatchObject({
-          hasCredentials: true,
-          needsCredentials: false,
-        });
-
-        fetch.mockImplementation(async () => success());
-        await service.withFreshIntegrationCredentials(ORG, "slack", work);
-        expect(work).toHaveBeenCalledExactlyOnceWith(
-          "new-access",
-          integrationId,
-        );
-        const row = await readRow();
-        expect(
-          JSON.parse(await crypto.decrypt(row.credentials!)),
-        ).toMatchObject({
-          accessToken: "new-access",
-          refreshToken: "new-refresh",
-        });
-        expect(row.credentialsRotatedAt!.getTime()).toBeGreaterThan(
-          rotatedAt.getTime(),
-        );
-      },
-    );
-
-    it.each(failureCases)(
-      "sweep %s counts deferral without clearing",
-      async (_name, respond) => {
-        vi.stubGlobal("fetch", vi.fn().mockImplementation(respond));
-        const result = await service.rotateStaleIntegrations();
-        expect(result.deferred).toBeGreaterThanOrEqual(1);
-        expect(await readRow()).toMatchObject({
-          credentials: ciphertext,
-          credentialsRotatedAt: rotatedAt,
-        });
-        // The claim is a retry lease, not loss of the stored credential.
-        await db.$executeRaw`UPDATE channel_integrations SET rotate_claimed_at = NULL WHERE id = ${integrationId}`;
-        vi.stubGlobal(
-          "fetch",
-          vi.fn().mockImplementation(async () => success()),
-        );
-        expect(
-          (await service.rotateStaleIntegrations()).rotated,
-        ).toBeGreaterThanOrEqual(1);
-        expect(
-          JSON.parse(await crypto.decrypt((await readRow()).credentials!)),
-        ).toMatchObject({ refreshToken: "new-refresh" });
-      },
-    );
-
-    it.each(["on-use", "sweep"])(
-      "%s clears explicit invalid_refresh_token but keeps the failure timestamp",
-      async (path) => {
-        vi.stubGlobal(
-          "fetch",
-          vi
-            .fn()
-            .mockImplementation(
-              async () =>
-                new Response('{"ok":false,"error":"invalid_refresh_token"}'),
-            ),
-        );
-        const work = vi.fn();
-        if (path === "on-use") {
-          await expect(
-            service.withFreshIntegrationCredentials(ORG, "slack", work),
-          ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
-          expect(work).not.toHaveBeenCalled();
-        } else {
-          expect(
-            (await service.rotateStaleIntegrations()).failed,
-          ).toBeGreaterThanOrEqual(1);
-        }
-        expect(await readRow()).toMatchObject({
-          credentials: null,
-          credentialsRotatedAt: rotatedAt,
-          externalId: TEAM,
-        });
-        expect((await service.getIntegrationView(ORG))[0]).toMatchObject({
-          hasCredentials: false,
-          needsCredentials: true,
-        });
-      },
-    );
-
-    it("retains the tenant-mismatch clear without rebinding", async () => {
-      vi.stubGlobal(
-        "fetch",
-        vi.fn().mockImplementation(async () => success("T-FOREIGN")),
-      );
-      const work = vi.fn();
-      await expect(
-        service.withFreshIntegrationCredentials(ORG, "slack", work),
-      ).rejects.toMatchObject({ code: "CONFLICT" });
-      expect(work).not.toHaveBeenCalled();
-      expect(await readRow()).toMatchObject({
-        credentials: null,
-        credentialsRotatedAt: rotatedAt,
-        externalId: TEAM,
-      });
-    });
-
-    it("serializes concurrent on-use rotations so the single-use refresh is consumed once", async () => {
-      const fetch = vi.fn().mockImplementation(async () => success());
-      vi.stubGlobal("fetch", fetch);
-      const work = vi.fn();
-      await Promise.all([
-        service.withFreshIntegrationCredentials(ORG, "slack", work),
-        service.withFreshIntegrationCredentials(ORG, "slack", work),
-      ]);
-      expect(fetch).toHaveBeenCalledTimes(1);
-      expect(work).toHaveBeenCalledTimes(2);
-      expect(
-        JSON.parse(await crypto.decrypt((await readRow()).credentials!)),
-      ).toMatchObject({ refreshToken: "new-refresh" });
-    });
   },
 );

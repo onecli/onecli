@@ -233,11 +233,16 @@ class FakeSession implements HarnessSession {
    * real runtime's next message after an injection, tagged as that steer's
    * reply (so it streams under the follow-up, as the real adapter's does),
    * and finally as the finished reply. Deterministic and observable: the
-   * reply echoes the steered text.
+   * reply echoes the steered text, then the media type and size of each
+   * image that rode with it, the proof a test can read that the picture
+   * reached the model and not only its words.
    */
   private *injectSteers(): Generator<HarnessEvent> {
     for (const steer of this.pendingSteers.splice(0)) {
-      const reply = `[steered: ${steer.message}]`;
+      const images = (steer.images ?? []).map(
+        (image) => ` [image ${image.mediaType} ${image.dataBase64.length}]`,
+      );
+      const reply = `[steered: ${steer.message}${images.join("")}]`;
       // The real order: the join the moment the message is in, the reply
       // streaming under it, then the finished reply.
       yield { type: "message.joined", followUpId: steer.id };

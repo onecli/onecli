@@ -30,6 +30,7 @@ export {
 } from "./errors";
 
 export { APPROVAL_GROUP_ID_RE, APPROVAL_GROUP_MAX_IDS } from "./approval-group";
+export { FOLLOW_UP_ACTIONS, type FollowUpAction } from "./follow-up-actions";
 export { readCappedBinaryBody } from "./http";
 export {
   MAX_MENTION_TOKENS,

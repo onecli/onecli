@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
-import { AttachParamDialog } from "./_components/attach-param-dialog";
+import { AttachParamDialog } from "../_components/attach-param-dialog";
 import { DirectThreadSection } from "./_components/direct-thread-section";
 
 export const metadata: Metadata = {

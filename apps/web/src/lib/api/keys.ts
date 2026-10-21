@@ -132,6 +132,11 @@ export const queryKeys = {
       [...queryKeys.grants.all(), "agent", agentId] as const,
     connection: (connectionId: string) =>
       [...queryKeys.grants.all(), "connection", connectionId] as const,
+    /** Every secret's agent view (`secret(id)` below): agent CRUD
+     * changes their rows. */
+    secrets: () => [...queryKeys.grants.all(), "secret"] as const,
+    secret: (secretId: string) =>
+      [...queryKeys.grants.secrets(), secretId] as const,
   },
   connections: {
     all: () => ["connections", ...scope()] as const,
@@ -145,11 +150,15 @@ export const queryKeys = {
         "github-installations",
         pageScope,
       ] as const,
-    githubInstallationRepos: (sourceConnectionId: string) =>
+    githubConnectionRepos: (
+      connectionId: string,
+      pageScope: PageScope = "workspace",
+    ) =>
       [
         ...queryKeys.connections.all(),
-        "github-installation-repos",
-        sourceConnectionId,
+        "github-connection-repos",
+        pageScope,
+        connectionId,
       ] as const,
   },
   workspaceAccess: {
@@ -236,6 +245,8 @@ export const queryKeys = {
     list: () => [...queryKeys.approvals.all(), "list"] as const,
     channel: (workspaceId: string) =>
       [...queryKeys.approvals.all(), "channel", workspaceId] as const,
+    outcomes: (agentId: string, ids: readonly string[]) =>
+      [...queryKeys.approvals.all(), "outcomes", agentId, ...ids] as const,
   },
   crons: {
     all: () => ["crons", ...scope()] as const,
@@ -247,6 +258,16 @@ export const queryKeys = {
     agent: (agentId: string) =>
       [...queryKeys.webhooks.all(), "agent", agentId] as const,
   },
+  ports: {
+    all: () => ["ports", ...scope()] as const,
+    agent: (agentId: string) =>
+      [...queryKeys.ports.all(), "agent", agentId] as const,
+  },
+  desktop: {
+    all: () => ["desktop", ...scope()] as const,
+    agent: (agentId: string) =>
+      [...queryKeys.desktop.all(), "agent", agentId] as const,
+  },
   skills: {
     all: () => ["skills", ...scope()] as const,
     list: () => [...queryKeys.skills.all(), "list"] as const,
@@ -255,6 +276,16 @@ export const queryKeys = {
     org: () => [...queryKeys.skills.all(), "org"] as const,
     orgDetail: (skillId: string) =>
       [...queryKeys.skills.all(), "org", "detail", skillId] as const,
+    library: () => [...queryKeys.skills.all(), "library"] as const,
+    orgRepo: () => [...queryKeys.skills.all(), "library", "repo"] as const,
+    githubAccounts: () =>
+      [...queryKeys.skills.all(), "library", "github-accounts"] as const,
+    accessRepos: (access: string) =>
+      [...queryKeys.skills.all(), "library", "access-repos", access] as const,
+    agentLibrary: (agentId: string) =>
+      [...queryKeys.skills.all(), "library", "agent", agentId] as const,
+    agentAvailable: (agentId: string) =>
+      [...queryKeys.skills.all(), "library", "available", agentId] as const,
   },
   memories: {
     all: () => ["memories", ...scope()] as const,
@@ -279,6 +310,12 @@ export const queryKeys = {
       [...queryKeys.runs.all(), "list", filter] as const,
     detail: (agentId: string, turnId: string) =>
       [...queryKeys.runs.all(), "detail", agentId, turnId] as const,
+  },
+  usage: {
+    all: () => ["usage", ...scope()] as const,
+    agent: (agentId: string, window: object) =>
+      [...queryKeys.usage.all(), "agent", agentId, window] as const,
+    org: (window: object) => [...queryKeys.usage.all(), "org", window] as const,
   },
   evals: {
     all: () => ["evals", ...scope()] as const,
@@ -310,6 +347,12 @@ export const queryKeys = {
     // The agent's peers (PR 5b): other agents and both sides' standing.
     peers: (agentId: string) =>
       [...queryKeys.channels.all(), "peers", agentId] as const,
+    // "Connect your Slack" read grants (licensed).
+    slackRead: (agentId: string) =>
+      [...queryKeys.channels.all(), "slack-read", agentId] as const,
+    // The workspace finder: which agents can read the caller's Slack.
+    slackReadAgents: () =>
+      [...queryKeys.channels.all(), "slack-read-agents"] as const,
   },
   appBlocklist: {
     all: () => ["appBlocklist", ...scope()] as const,

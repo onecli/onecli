@@ -35,7 +35,10 @@ interface Outcome {
 }
 
 /** Boot the supervisor, end its input at once, and see whether it exits. */
-const runToEnd = async (preload?: string): Promise<Outcome> => {
+const runToEnd = async (
+  preload?: string,
+  env: Record<string, string> = {},
+): Promise<Outcome> => {
   const home = mkdtempSync(join(tmpdir(), "ocl-exit-"));
   cleanups.push(() => rmSync(home, { recursive: true, force: true }));
   const args = ["--import", "tsx"];
@@ -52,6 +55,9 @@ const runToEnd = async (preload?: string): Promise<Outcome> => {
       // The stdio transport: no runner to dial, whatever the parent has set.
       RUNNER_WS_URL: "",
       HTTPS_PROXY: "",
+      RUNNER_PORT_STREAMS: "",
+      RUNNER_HOSTED_DESKTOP: "",
+      ...env,
     },
     stdio: ["pipe", "ignore", "pipe"],
   });
@@ -101,3 +107,29 @@ describe(
     });
   },
 );
+
+// The hosted platform's agent desktop is licensed code the entrypoint loads
+// only when the hosted runner turns it on (and carries port streams): a
+// self-hosted sandbox never loads it.
+describe("the hosted desktop", { timeout: EXIT_BUDGET_MS + 5_000 }, () => {
+  it("stays off without the hosted runner's switch", async () => {
+    const outcome = await runToEnd(undefined, { RUNNER_PORT_STREAMS: "1" });
+    expect(outcome.code).toBe(0);
+    expect(outcome.stderr).not.toContain("hosted desktop on");
+  });
+
+  it("stays off when the screen cannot be carried (no port streams)", async () => {
+    const outcome = await runToEnd(undefined, { RUNNER_HOSTED_DESKTOP: "1" });
+    expect(outcome.code).toBe(0);
+    expect(outcome.stderr).not.toContain("hosted desktop on");
+  });
+
+  it("is loaded on the hosted runner's switch", async () => {
+    const outcome = await runToEnd(undefined, {
+      RUNNER_HOSTED_DESKTOP: "1",
+      RUNNER_PORT_STREAMS: "1",
+    });
+    expect(outcome.code).toBe(0);
+    expect(outcome.stderr).toContain("hosted desktop on");
+  });
+});

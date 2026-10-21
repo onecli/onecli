@@ -321,6 +321,31 @@ describe("the turn-ending contract", () => {
   });
 });
 
+describe("the batching rule", () => {
+  // Why the rule exists is documented on PLATFORM_SYSTEM_PROMPT. These pins
+  // keep every leg of it: why steps cost, what to batch, and the one reason
+  // to go sequential. MUTATION-PROOF: drop any leg and this fails.
+  it("asks for independent tool calls in one response, sequential only on a dependency", () => {
+    const flat = PLATFORM_SYSTEM_PROMPT.replace(/\s+/g, " ");
+    expect(flat).toContain("Every step costs a full model round trip");
+    expect(flat).toContain(
+      "make all of those tool calls in the same response.",
+    );
+    expect(flat).toContain("Combine related shell commands into one script");
+    expect(flat).toContain(
+      "Go one call at a time only when a call needs an earlier call's result",
+    );
+  });
+
+  it("never promises the calls run at the same time", () => {
+    // The saving is the round trip, not tool time: the harness runs one
+    // response's calls one after another (only its batch tool runs calls
+    // concurrently). MUTATION-PROOF: promise concurrency and this fails.
+    const flat = PLATFORM_SYSTEM_PROMPT.replace(/\s+/g, " ");
+    expect(flat).not.toMatch(/run (together|concurrently|in parallel)/i);
+  });
+});
+
 // The response-style contract (user decision, 2026-08-30): live agents were
 // answering with multi-screen process narration nobody could read in chat.
 // The weak "be concise" line demonstrably did not land, so the directive now

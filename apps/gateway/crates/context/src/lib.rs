@@ -37,6 +37,24 @@ pub struct ProxyContext {
     pub agent_token: String,
 }
 
+/// The agent a connect link names: its id, so the dashboard can switch the
+/// new account on for it, and its name, to say who asked. Named fields, never
+/// an `(id, name)` pair two `&str`s could silently swap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectingAgent<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+}
+
+impl ProxyContext {
+    /// The session's agent as a connect link names it: both id and name, or
+    /// none, so a link carrying only one is never minted.
+    pub fn connecting_agent(&self) -> Option<ConnectingAgent<'_>> {
+        let (id, name) = self.agent_id.as_deref().zip(self.agent_name.as_deref())?;
+        Some(ConnectingAgent { id, name })
+    }
+}
+
 /// Shared state for the gateway, passed to all request handlers.
 #[derive(Clone)]
 pub struct GatewayState {

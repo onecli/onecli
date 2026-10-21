@@ -18,10 +18,11 @@ import {
 } from "../services/audit-service";
 
 /**
- * The workspace door of the skills surface (step 9): /v1/skills. Lists every
- * tier that REACHES this workspace (org rows read-only here — they are managed
- * on /v1/org/skills); creates workspace- or agent-tier rows. Own mount,
- * deliberately not composed onto /agents: two of three tiers have no agent.
+ * The workspace door of the skills surface (step 9): /v1/skills. Lists the
+ * skills that REACH this workspace — its agents' own rows plus the org's
+ * (org rows read-only here; they are managed on /v1/org/skills) — and
+ * creates agent-tier rows only (`agentId` required). Own mount, not composed
+ * onto /agents: the list spans the workspace's agents plus the org tier.
  *
  * `recordAuditEvent`, never `withAudit`: the gateway reads no skill table
  * (the cron/memory rule).
@@ -38,7 +39,7 @@ export const userSkillRoutes = () => {
   app.use("*", authMiddleware);
 
   // GET /skills — the section's payload: metadata only, bodies per detail
-  // fetch (50 × 32k would be a heavy list).
+  // fetch (a full list of 32k-char bodies would be a heavy payload).
   app.get("/", async (c) => {
     const a = c.get("auth");
     const workspaceId = requireWorkspaceId(a);
@@ -47,7 +48,7 @@ export const userSkillRoutes = () => {
     });
   });
 
-  // POST /skills — workspace tier, or agent tier when agentId is present.
+  // POST /skills — always an agent's own skill (agentId required).
   app.post("/", async (c) => {
     const a = c.get("auth");
     const workspaceId = requireWorkspaceId(a);
@@ -73,7 +74,7 @@ export const userSkillRoutes = () => {
         skillId: skill.id,
         name: skill.name,
         scope: skill.scope,
-        ...(skill.agentId && { agentId: skill.agentId }),
+        agentId: body.data.agentId,
       },
     });
     return c.json(skill, 201);

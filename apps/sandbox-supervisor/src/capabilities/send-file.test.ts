@@ -375,4 +375,14 @@ describe("send_file: the fragment", () => {
     expect(flat).toMatch(/read it before telling/);
     expect(sendFileFragment.body).not.toMatch(/jcode/i);
   });
+
+  it("sends a chart as an image file and never points at something unsent", () => {
+    // Observed live: an agent told a person "the card is right above your
+    // message" when nothing had been sent. Visuals ride send_file.
+    const flat = sendFileFragment.body.replace(/\s+/g, " ");
+    expect(flat).toContain("render it to an image (PNG) and send the file");
+    expect(flat).toContain(
+      "Never tell the person to look at a card, panel or picture you have not sent",
+    );
+  });
 });

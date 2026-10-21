@@ -92,30 +92,30 @@ describe("salesforce approval card (wire-level)", () => {
       );
       const row = await waitForApproval(gw, cx.ids.apiKey);
 
-      // The title names the record the change lands in, by id (no read).
-      expect(row.summary?.action).toBe(
-        "Create Contact in Account 001QO000010eH0cYAF",
-      );
-      // The title split, so a card can render the record as the link and
-      // drop the row it came from; no link over http.
-      expect(row.summary?.subject).toEqual({
-        verb: "Create Contact",
-        lead: "Create Contact in ",
-        record: "Account 001QO000010eH0cYAF",
-        row: 4,
+      // Structure only: the exact title and rows are pinned through the same
+      // `summarize_request` entry point by the `summary::salesforce` unit
+      // tests. What only the wire shows: the Salesforce summarizer ran for
+      // this connection on the approval path, in the camelCase poll-row shape
+      // the web and SDK read, with the title split so a card can render the
+      // record as the link and drop the row it came from.
+      const summary = row.summary;
+      const subject = summary?.subject;
+      const details = summary?.details ?? [];
+      expect(details.length).toBeGreaterThan(0);
+      expect(subject).toMatchObject({
+        verb: expect.any(String),
+        lead: expect.any(String),
+        record: expect.any(String),
+        row: expect.any(Number),
       });
-      expect(row.summary?.details).toEqual([
-        { label: "First name", value: "Jordan K" },
-        { label: "Last name", value: "Rivera" },
-        { label: "Email", value: "jordan.rivera@initech.example" },
-        { label: "Title", value: "Operations Lead" },
-        { label: "Account", value: "Account · 001QO000010eH0cYAF" },
-        { label: "Lead source", value: "Partner" },
-      ]);
+      // The record the change lands in, by id (no read over http).
+      expect(details[subject?.row ?? -1]?.value).toContain(
+        "001QO000010eH0cYAF",
+      );
       // Gateway-internal record state never reaches the wire.
       expect(row.summary).not.toHaveProperty("refs");
       expect(row.summary).not.toHaveProperty("target");
-      expect(row.bodyPreview).toContain("Create Contact");
+      expect(row.bodyPreview).toBeTruthy();
       expect(JSON.stringify(row)).not.toContain("e2e-sf-token");
 
       await decideApproval(gw, cx.ids.apiKey, row.id, "deny");

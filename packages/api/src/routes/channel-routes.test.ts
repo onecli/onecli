@@ -55,6 +55,7 @@ const services = vi.hoisted(() => ({
   withFreshIntegrationCredentials: vi.fn(),
   rotateStaleIntegrations: vi.fn(),
   processChannelCleanups: vi.fn(),
+  syncPresenceEvents: vi.fn(),
   // agent-channel-service
   getAgentChannels: vi.fn(),
   getSetupMaterial: vi.fn(),
@@ -81,11 +82,15 @@ const services = vi.hoisted(() => ({
   // channel-approval-service + slack dispatch
   decideApprovalFromChannel: vi.fn(),
   decideApprovalsFromChannel: vi.fn(),
+  // agent-reach-service (the reach card click door)
+  decideReachFromChannel: vi.fn(),
   // action-approval-service (the 4b click door)
   decideActionApprovalFromChannel: vi.fn(),
   dispatchSlackEvent: vi.fn(),
   // turn-receipt-service
   clearTurnReceipts: vi.fn(),
+  // presence-icons-service (the card's "Sync image")
+  syncPresenceIcon: vi.fn(),
 }));
 
 const dbSpies = vi.hoisted(() => ({
@@ -197,6 +202,14 @@ vi.mock("../services/channels/channel-cleanup-service", () => ({
   processChannelCleanups: services.processChannelCleanups,
 }));
 
+vi.mock("../services/channels/presence-events-service", () => ({
+  syncPresenceEvents: services.syncPresenceEvents,
+}));
+
+vi.mock("../services/channels/presence-icons-service", () => ({
+  syncPresenceIcon: services.syncPresenceIcon,
+}));
+
 vi.mock("../services/channels/channel-adapter-service", () => ({
   registerAdapter: services.registerAdapter,
   heartbeatAdapter: services.heartbeatAdapter,
@@ -215,6 +228,13 @@ vi.mock("../services/channels/channel-adapter-service", () => ({
 vi.mock("../services/channels/channel-approval-service", () => ({
   decideApprovalFromChannel: services.decideApprovalFromChannel,
   decideApprovalsFromChannel: services.decideApprovalsFromChannel,
+}));
+
+vi.mock("../services/channels/agent-reach-service", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("../services/channels/agent-reach-service")
+  >()),
+  decideReachFromChannel: services.decideReachFromChannel,
 }));
 
 vi.mock(
@@ -503,6 +523,7 @@ describe("POST /v1/org/channels/:provider/agent-install", () => {
       agentId: "agent-1",
       workspaceId: "ws-1",
       presenceId: "pres-1",
+      awaitingTransportCredential: false,
     });
     const res = await appRbacOff.request(
       "/v1/org/channels/slack/agent-install",
@@ -514,7 +535,11 @@ describe("POST /v1/org/channels/:provider/agent-install", () => {
     );
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
-      agent: { id: "agent-1", workspaceId: "ws-1" },
+      agent: {
+        id: "agent-1",
+        workspaceId: "ws-1",
+        awaitingTransportCredential: false,
+      },
       sharedAppConfigured: false,
     });
     expect(services.completeAgentInstallFromCode).toHaveBeenCalledWith({
@@ -524,6 +549,34 @@ describe("POST /v1/org/channels/:provider/agent-install", () => {
       code: "slack-code",
     });
     expect(dbSpies.auditCreate).toHaveBeenCalled();
+  });
+
+  it("a matched SOCKET app says its app-level token is still owed, and the audit does not call it completed", async () => {
+    services.completeAgentInstallFromCode.mockResolvedValueOnce({
+      agentId: "agent-1",
+      workspaceId: "ws-1",
+      presenceId: "pres-1",
+      awaitingTransportCredential: true,
+    });
+    const res = await appRbacOff.request(
+      "/v1/org/channels/slack/agent-install",
+      {
+        method: "POST",
+        headers: { ...ORG_HEADERS, "content-type": "application/json" },
+        body: JSON.stringify({ code: "slack-code" }),
+      },
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      agent: { id: "agent-1", awaitingTransportCredential: true },
+    });
+    expect(dbSpies.auditCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          metadata: expect.objectContaining({ completed: false }),
+        }),
+      }),
+    );
   });
 
   it("answers agent: null (no audit) when no waiting app claims the code", async () => {
@@ -1172,11 +1225,12 @@ describe("the adapter wire (authenticated by a registered cha_ token)", () => {
     expect(services.clearTurnReceipts).not.toHaveBeenCalled();
   });
 
-  it("runs the rotation sweep, kicks the detached cleanup pass, and relays only the rotation counts", async () => {
+  it("runs the rotation sweep, kicks the detached cleanup pass and event sync, and relays only the rotation counts", async () => {
     // Staleness is decided SERVER-side; the route is just the adapter's
     // trigger, answering the sweep's counts verbatim. The durable cleanup
-    // pass rides the same trigger but must not hold the answer: the adapter
-    // aborts at 15s and a cleanup pass can spend minutes on provider calls.
+    // pass and the presence event sync ride the same trigger but must not
+    // hold the answer: the adapter aborts at 15s and either can spend
+    // minutes on provider calls.
     services.rotateStaleIntegrations.mockResolvedValue({
       rotated: 2,
       failed: 1,
@@ -1187,6 +1241,12 @@ describe("the adapter wire (authenticated by a registered cha_ token)", () => {
         releaseCleanup = resolve;
       }),
     );
+    let releaseSync!: () => void;
+    services.syncPresenceEvents.mockReturnValue(
+      new Promise((resolve) => {
+        releaseSync = () => resolve({ synced: 0, deferred: 0 });
+      }),
+    );
     const res = await appRbacOff.request(
       "/v1/channel-adapter/rotate-integrations",
       { method: "POST", headers: CHA_AUTH },
@@ -1195,15 +1255,18 @@ describe("the adapter wire (authenticated by a registered cha_ token)", () => {
     expect(await res.json()).toEqual({ rotated: 2, failed: 1 });
     expect(services.rotateStaleIntegrations).toHaveBeenCalledTimes(1);
     expect(services.processChannelCleanups).toHaveBeenCalledTimes(1);
+    expect(services.syncPresenceEvents).toHaveBeenCalledTimes(1);
     releaseCleanup();
+    releaseSync();
   });
 
-  it("a failing cleanup pass never fails the rotation answer", async () => {
+  it("a failing cleanup pass or event sync never fails the rotation answer", async () => {
     services.rotateStaleIntegrations.mockResolvedValue({
       rotated: 0,
       failed: 0,
     });
     services.processChannelCleanups.mockRejectedValue(new Error("db down"));
+    services.syncPresenceEvents.mockRejectedValue(new Error("db down"));
     const res = await appRbacOff.request(
       "/v1/channel-adapter/rotate-integrations",
       { method: "POST", headers: CHA_AUTH },
@@ -1509,6 +1572,53 @@ describe("/v1/agents/:agentId/channels", () => {
     expect(services.createPresence).not.toHaveBeenCalled();
   });
 
+  it("syncs the app icon for the caller's workspace, auditing only a copy", async () => {
+    services.syncPresenceIcon.mockResolvedValueOnce({ changed: true });
+    const res = await appRbacOff.request(
+      "/v1/agents/ag-1/channels/slack/icon/sync",
+      { method: "POST", headers: WORKSPACE_HEADERS },
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ changed: true });
+    expect(services.syncPresenceIcon).toHaveBeenCalledWith({
+      workspaceId: "p1",
+      agentId: "ag-1",
+      provider: "slack",
+    });
+    // Ids only: never the icon URL or bytes.
+    expect(dbSpies.auditCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          userId: "user-1",
+          metadata: {
+            agentId: "ag-1",
+            field: "image",
+            via: "channel_icon_sync",
+            provider: "slack",
+          },
+        }),
+      }),
+    );
+
+    dbSpies.auditCreate.mockClear();
+    services.syncPresenceIcon.mockResolvedValueOnce({ changed: false });
+    const unchanged = await appRbacOff.request(
+      "/v1/agents/ag-1/channels/slack/icon/sync",
+      { method: "POST", headers: WORKSPACE_HEADERS },
+    );
+    expect(await unchanged.json()).toEqual({ changed: false });
+    expect(dbSpies.auditCreate).not.toHaveBeenCalled();
+  });
+
+  it("404s an icon sync for an unknown provider before any service call", async () => {
+    const res = await appRbacOff.request(
+      "/v1/agents/ag-1/channels/teams/icon/sync",
+      { method: "POST", headers: WORKSPACE_HEADERS },
+    );
+    expect(res.status).toBe(404);
+    expect(services.syncPresenceIcon).not.toHaveBeenCalled();
+  });
+
   it("surfaces a Slack API refusal as a 422 carrying Slack's code, not a blank 500", async () => {
     // A Slack `ok:false` (an expired token, managed_app_limit_reached, …) is a
     // bad-input outcome the user can act on. The error-handler maps SlackApiError
@@ -1532,11 +1642,40 @@ describe("/v1/agents/:agentId/channels", () => {
       {
         method: "POST",
         headers: { ...WORKSPACE_HEADERS, "content-type": "application/json" },
-        body: JSON.stringify({ appToken: "xapp-only" }),
+        // Unknown keys are refused (the schema is strict).
+        body: JSON.stringify({ appToken: "xapp-x", userToken: "xoxp-x" }),
       },
     );
     expect(res.status).toBe(422);
     expect(services.completePresence).not.toHaveBeenCalled();
+  });
+
+  it("passes an app-token-only body through: the socket arm after its OAuth install", async () => {
+    // The route only shapes the body; whether a stored bot token exists to
+    // pair it with is the provider's call (refused there when absent).
+    services.completePresence.mockResolvedValue({
+      id: "pr-1",
+      provider: "slack",
+      externalId: "A100",
+      status: "active",
+      transport: "socket",
+    });
+    const res = await appRbacOff.request(
+      "/v1/agents/ag-1/channels/slack/complete",
+      {
+        method: "POST",
+        headers: { ...WORKSPACE_HEADERS, "content-type": "application/json" },
+        body: JSON.stringify({ appToken: "xapp-only" }),
+      },
+    );
+    expect(res.status).toBe(200);
+    expect(services.completePresence).toHaveBeenCalledWith(
+      expect.anything(),
+      "ag-1",
+      "slack",
+      { appToken: "xapp-only" },
+      expect.anything(),
+    );
   });
 
   it("detaches with 204, honouring deleteRemote", async () => {
@@ -1996,6 +2135,54 @@ describe("POST /v1/channels/slack/interactivity", () => {
     expect(services.decideApprovalFromChannel).not.toHaveBeenCalled();
   });
 
+  it("a retry-refused reach click privately replies without replacing the actionable card", async () => {
+    const message =
+      "This request changed while being checked. Please try again.";
+    services.decideReachFromChannel.mockResolvedValue({
+      kind: "refused",
+      message,
+    });
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("{}"));
+    try {
+      const responseUrl = "https://hooks.slack.com/actions/T1/B1/reach-retry";
+      const body = interactivityBody({
+        ...approvePayload,
+        actions: [{ action_id: "reach_approve", value: "reach-1" }],
+        response_url: responseUrl,
+      });
+      const res = await appRbacOff.request("/v1/channels/slack/interactivity", {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          ...slackSigned(body),
+        },
+        body,
+      });
+      expect(res.status).toBe(200);
+      expect(services.decideReachFromChannel).toHaveBeenCalledExactlyOnceWith({
+        presenceId: "pr-1",
+        grantId: "reach-1",
+        decision: "approved",
+        clickerExternalUserId: "U-clicker",
+      });
+      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+      expect(fetchSpy.mock.calls[0]?.[0]).toBe(responseUrl);
+      expect(fetchSpy.mock.calls[0]?.[1]).toMatchObject({
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          replace_original: false,
+          response_type: "ephemeral",
+          text: message,
+        }),
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it("an ACTION card click rewrites the card with WHAT was done and by whom", async () => {
     services.decideActionApprovalFromChannel.mockResolvedValue({
       kind: "decided",
@@ -2284,7 +2471,8 @@ describe("POST /v1/channels/slack/interactivity", () => {
 describe("GET /v1/channels/slack/oauth/callback", () => {
   it("a valid state lands the install and redirects home to the agent's channels", async () => {
     services.completePresenceFromOAuth.mockResolvedValue({
-      presence: { id: "pr-1" },
+      presenceId: "pr-1",
+      awaitingTransportCredential: false,
       agentId: "ag-1",
       workspaceId: "p1",
     });
@@ -2304,6 +2492,46 @@ describe("GET /v1/channels/slack/oauth/callback", () => {
       code: "slack-code",
       redirectUri: "https://api.example.test/v1/channels/slack/oauth/callback",
     });
+  });
+
+  it("a SOCKET install still waiting on its app token lands with ?installed, not ?connected", async () => {
+    services.completePresenceFromOAuth.mockResolvedValue({
+      presenceId: "pr-1",
+      awaitingTransportCredential: true,
+      agentId: "ag-1",
+      workspaceId: "p1",
+    });
+
+    const res = await appRbacOff.request(
+      "/v1/channels/slack/oauth/callback?state=signed-state&code=slack-code",
+    );
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(
+      "https://app.example.test/w/p1/agents/ag-1/channels?installed=slack",
+    );
+  });
+
+  it("with no dashboard origin configured, a waiting SOCKET install says one step is left", async () => {
+    services.completePresenceFromOAuth.mockResolvedValue({
+      presenceId: "pr-1",
+      awaitingTransportCredential: true,
+      agentId: "ag-1",
+      workspaceId: "p1",
+    });
+    const appUrl = process.env.APP_URL;
+    delete process.env.APP_URL;
+    try {
+      const res = await appRbacOff.request(
+        "/v1/channels/slack/oauth/callback?state=signed-state&code=slack-code",
+      );
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain(
+        "Installed! One step left: return to the dashboard and paste the app-level token.",
+      );
+    } finally {
+      process.env.APP_URL = appUrl;
+    }
   });
 
   it("a BAD state answers 400 html, not a redirect", async () => {

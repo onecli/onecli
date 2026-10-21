@@ -28,6 +28,12 @@ const FREE_ORG_CREDENTIAL_FILES = [
   "packages/api/src/routes/org-connections.ts",
   "packages/api/src/routes/org-apps.ts",
   "packages/api/src/routes/org-secrets.ts",
+  // Connection-native repository grants are free, unlike per-agent policies.
+  "packages/api/src/routes/github-app-share.ts",
+  "packages/api/src/services/github-app-share-service.ts",
+  "apps/web/src/hooks/use-github-app-share.ts",
+  "apps/web/src/app/(dashboard)/w/[workspaceId]/connections/_components/edit-repositories-dialog.tsx",
+  "apps/web/src/app/(dashboard)/w/[workspaceId]/connections/_components/repo-scope-picker.tsx",
   // Org OAuth + credential-resolution cores (also the shared interceptor
   // implementations boot-injected into the oauthOrg/orgAppConfig slots)
   "packages/api/src/apps/oauth-org.ts",

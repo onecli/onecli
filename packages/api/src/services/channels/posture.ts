@@ -29,6 +29,17 @@ export const publicApiUrl = (): string | null => {
   }
 };
 
+/**
+ * A provider's OAuth redirect on this deployment: the ONE URL a manifest
+ * registers and every consent flow sends and exchanges with, so the three
+ * can never disagree (Slack refuses a `redirect_uri` that differs between
+ * the authorize and access steps). Null without a public HTTPS origin.
+ */
+export const oauthCallbackUrl = (provider: string): string | null => {
+  const api = publicApiUrl();
+  return api ? `${api}/v1/channels/${provider}/oauth/callback` : null;
+};
+
 /** The transports a NEW presence may be stamped with, events first. */
 export const availableTransports = (): ChannelTransport[] => [
   ...(publicApiUrl() !== null ? (["events"] as const) : []),

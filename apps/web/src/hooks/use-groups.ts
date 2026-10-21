@@ -40,8 +40,9 @@ export const useCreateGroup = () => {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (name: string) => groups.create(name),
-    onSuccess: (group) => {
-      qc.invalidateQueries({ queryKey: queryKeys.groups.all() });
+    onSuccess: async (group) => {
+      // Awaited: the dialog closes onto a list that already shows the group.
+      await qc.invalidateQueries({ queryKey: queryKeys.groups.all() });
       toast.success(`Group "${group.name}" created`);
     },
     // Surface the server reason (duplicate name, plan gate).
@@ -54,8 +55,8 @@ export const useRenameGroup = () => {
   return useMutation({
     mutationFn: ({ groupId, name }: { groupId: string; name: string }) =>
       groups.rename(groupId, name),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.groups.all() });
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: queryKeys.groups.all() });
       toast.success("Group renamed");
     },
     onError: (err) => toast.error(err.message),

@@ -2,32 +2,33 @@
 
 import { useState } from "react";
 import { Loader2, Plus, Sparkles } from "lucide-react";
-import { toast } from "sonner";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import {
   useOrgSkills,
+  useSetSkillEnabled,
   useSkills,
-  useUpdateOrgSkill,
-  useUpdateSkill,
 } from "@/hooks/use-skills";
+import { useAgentLibrarySkills } from "@/hooks/use-skill-library";
 import type { SkillSummary } from "@/lib/api";
 import { SkillRow } from "./skill-row";
 import { SkillDialog } from "./skill-dialog";
+import type { SkillSourceKind } from "./skill-source-chip";
+import { AddFromLibraryButton } from "./add-from-library-button";
+import { AgentLibrarySection } from "./agent-library-section";
+import { OrgLibrarySection } from "./org-library-section";
 
 /**
  * The Skills section, parameterized by door.
  *
  * - `agent` — the agent page's section (§3.18 as amended): skills are a
  *   property of an AGENT, so this is where they are written. It lists this
- *   agent's own rows plus everything it INHERITS (workspace and organization
- *   tiers), because what the agent carries is the merged set and hiding the
- *   inherited half would make its behavior unexplainable.
+ *   agent's own rows plus the organization rows it INHERITS, because what the
+ *   agent carries is the merged set and hiding the inherited half would make
+ *   its behavior unexplainable.
  * - `organization` — the org door: org rows only.
  *
- * Org rows are read-only away from the org page (they are managed there);
- * workspace-tier rows stay editable from any agent that inherits them, with a
- * label saying whom else they reach, so an edit is never a surprise.
+ * Org rows are read-only away from the org page (they are managed there).
  */
 export type SkillsSectionProps =
   /** The org door: org rows only. */
@@ -36,7 +37,8 @@ export type SkillsSectionProps =
    *  missing one would silently filter every agent row out. */
   | { tier: "agent"; agentId: string };
 
-export const SkillsSection = ({ tier, agentId }: SkillsSectionProps) => {
+export const SkillsSection = (props: SkillsSectionProps) => {
+  const { tier, agentId } = props;
   const isOrg = tier === "organization";
   // Each read is mounted only on the door that shows it: /v1/skills sends no
   // workspace header from an /org/ URL (a 401 on cloud, someone else's default
@@ -44,8 +46,10 @@ export const SkillsSection = ({ tier, agentId }: SkillsSectionProps) => {
   const workspaceView = useSkills(!isOrg);
   const orgView = useOrgSkills(isOrg);
   const view = isOrg ? orgView : workspaceView;
-  const update = useUpdateSkill();
-  const orgUpdate = useUpdateOrgSkill();
+  const setEnabled = useSetSkillEnabled(isOrg);
+  // Library skills count as skills this agent has: no "No skills yet" over
+  // a list of them.
+  const library = useAgentLibrarySkills(agentId ?? "", !isOrg);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<SkillSummary | null>(null);
 
@@ -80,39 +84,36 @@ export const SkillsSection = ({ tier, agentId }: SkillsSectionProps) => {
     );
   }
 
-  // The agent door shows what THIS agent carries: its own rows plus the
-  // tiers above it. Another agent's rows are none of its business.
+  // The agent door shows what THIS agent carries: its own rows plus the org
+  // tier above it. Another agent's rows are none of its business.
   const rows = isOrg
     ? view.data.skills
     : view.data.skills.filter(
         (skill) => skill.scope !== "agent" || skill.agentId === agentId,
       );
+  const hasLibrary = (library.data?.skills.length ?? 0) > 0;
+  // "No skills yet" only once the library read has answered with none: not
+  // while it loads (a flash), and not when it failed (the library section
+  // says so, and may be hiding skills this agent has). The org door has no
+  // library list of its own here.
+  const noSkills =
+    rows.length === 0 && (isOrg || (library.isSuccess && !hasLibrary));
 
-  const scopeLabel = (skill: SkillSummary): string => {
-    if (skill.scope === "organization") return "Organization";
-    // Only the agent door can see an agent row (the org list holds org rows
-    // alone), and its own rows need no "who": say what they are.
-    if (skill.scope === "agent") return "This agent";
-    return "Workspace";
-  };
+  // Only the agent door can see an agent row (the org list holds org rows
+  // alone), and its own rows need no "who": say what they are.
+  const scopeKind = (skill: SkillSummary): SkillSourceKind =>
+    skill.scope === "organization" ? "organization" : "agent";
 
-  const toggle = (skill: SkillSummary, next: boolean) => {
-    const handlers = {
-      onSuccess: () =>
-        toast.success(
-          next ? `"${skill.name}" resumed` : `"${skill.name}" paused`,
-        ),
-      onError: (error: Error) => toast.error(String(error.message)),
-    };
-    const payload = { skillId: skill.id, patch: { enabled: next } };
-    if (isOrg) orgUpdate.mutate(payload, handlers);
-    else update.mutate(payload, handlers);
-  };
+  // Instant: the switch IS the status, so its move is the confirmation; a
+  // failure puts it back and says why.
+  const toggle = (skill: SkillSummary, next: boolean) =>
+    setEnabled.mutate({ skillId: skill.id, enabled: next });
 
   return (
     <div className="space-y-4">
-      <div className="flex justify-end">
-        {rows.length > 0 && (
+      <div className="flex justify-end gap-2">
+        {!isOrg && agentId && <AddFromLibraryButton agentId={agentId} />}
+        {!noSkills && (
           <Button size="sm" onClick={openCreate}>
             <Plus className="size-4" />
             New skill
@@ -120,7 +121,7 @@ export const SkillsSection = ({ tier, agentId }: SkillsSectionProps) => {
         )}
       </div>
 
-      {rows.length === 0 ? (
+      {noSkills ? (
         <Card className="flex flex-col items-center gap-3 p-8 text-center">
           <div className="bg-muted flex size-10 items-center justify-center rounded-full">
             <Sparkles className="text-muted-foreground size-5" />
@@ -137,7 +138,7 @@ export const SkillsSection = ({ tier, agentId }: SkillsSectionProps) => {
             New skill
           </Button>
         </Card>
-      ) : (
+      ) : rows.length > 0 ? (
         <div className="divide-y rounded-md border">
           {rows.map((skill) => {
             // Org rows away from the org page are managed at org level — no
@@ -147,19 +148,21 @@ export const SkillsSection = ({ tier, agentId }: SkillsSectionProps) => {
               <SkillRow
                 key={skill.id}
                 skill={skill}
-                scopeLabel={scopeLabel(skill)}
+                kind={scopeKind(skill)}
                 onEdit={readOnly ? undefined : () => openEdit(skill)}
                 onToggle={readOnly ? undefined : (next) => toggle(skill, next)}
-                toggling={update.isPending || orgUpdate.isPending}
               />
             );
           })}
         </div>
-      )}
+      ) : null}
+
+      {!isOrg && agentId && <AgentLibrarySection agentId={agentId} />}
+      {isOrg && <OrgLibrarySection />}
 
       <SkillDialog
-        tier={tier}
-        agentId={agentId}
+        // Spread whole: destructuring loses the tier/agentId pairing.
+        {...props}
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         editing={editing}

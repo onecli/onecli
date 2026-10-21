@@ -1,6 +1,10 @@
 import type { Prisma } from "@onecli/db";
 import { describe, expect, it } from "vitest";
-import { getAppPermissionDefinitions } from "../apps/app-permissions";
+import {
+  getAppPermissionDefinition,
+  getAppPermissionDefinitions,
+} from "../apps/app-permissions";
+import { getApps } from "../apps/registry";
 import { catalogToolIds } from "../apps/app-permissions/validate";
 import {
   compileConnectionStack,
@@ -359,28 +363,46 @@ describe("stackToGrant: round-trips the catch-all choices", () => {
 });
 
 describe("defaultConnectionGrant", () => {
-  it("allows every catalog tool and holds unlisted requests for approval", () => {
+  const toolsOf = (provider: string, category: "read" | "write") =>
+    (getAppPermissionDefinition(provider)?.groups ?? [])
+      .filter((g) => g.category === category)
+      .flatMap((g) => g.tools.map((t) => t.id))
+      .sort();
+
+  it("allows reads, holds every write/delete tool and unlisted requests for approval", () => {
     const stack = compileConnectionStack(
       "G",
       "github",
       defaultConnectionGrant("github"),
     );
+    expect(toolsOf("github", "write").length).toBeGreaterThan(0);
     expect(stack.map((r) => [r.action, r.requireApproval, r.tools])).toEqual([
-      ["allow", false, [...catalogToolIds("github")].sort()],
+      ["allow", false, toolsOf("github", "read")],
+      ["allow", true, toolsOf("github", "write")],
       ["allow", true, []],
     ]);
   });
 
-  it("AWS gets the same shape: Needs approval is valid there, only Always allow is not", () => {
+  it("AWS gets the same shape: reads allowed, writes need approval", () => {
     const stack = compileConnectionStack(
       "G",
       "aws-role",
       defaultConnectionGrant("aws-role"),
     );
     expect(stack.map((r) => [r.action, r.requireApproval, r.tools])).toEqual([
-      ["allow", false, [...catalogToolIds("aws-role")].sort()],
+      ["allow", false, toolsOf("aws-role", "read")],
+      ["allow", true, toolsOf("aws-role", "write")],
       ["allow", true, []],
     ]);
+  });
+
+  it("no catalog tool is ever 'Always allow' for writes by default, in any app", () => {
+    for (const app of getApps()) {
+      const grant = defaultConnectionGrant(app.id);
+      if (grant.access !== "custom") continue;
+      const writes = toolsOf(app.id, "write");
+      expect(grant.allow.filter((t) => writes.includes(t))).toEqual([]);
+    }
   });
 
   it("keeps full access for an app with no catalog", () => {

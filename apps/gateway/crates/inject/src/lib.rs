@@ -7,6 +7,7 @@
 //! - Path pattern matching for injection rules
 
 pub mod default_interceptions;
+pub mod secret_choice;
 pub mod secret_inject;
 
 use std::borrow::Cow;
@@ -76,6 +77,11 @@ pub enum Injection {
 pub struct InjectionRule {
     pub path_pattern: String,
     pub injections: Vec<Injection>,
+    /// The custom (generic) secret this rule came from, if any. Drives
+    /// per-request disambiguation (`secret_choice`). Optional on the wire so
+    /// rules cached by an older gateway still deserialize (rolling deploy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<secret_choice::SecretRef>,
 }
 
 // ── Agent token extraction ──────────────────────────────────────────────
@@ -651,6 +657,7 @@ pub fn vault_credential_to_rules(hostname: &str, cred: &VaultCredential) -> Vec<
     vec![InjectionRule {
         path_pattern: "*".to_string(),
         injections,
+        secret: None,
     }]
 }
 
@@ -1199,6 +1206,7 @@ mod tests {
         InjectionRule {
             path_pattern: path_pattern.to_string(),
             injections,
+            secret: None,
         }
     }
 

@@ -70,6 +70,8 @@ const rendered = (overrides: Partial<RenderedTurn> = {}): RenderedTurn => ({
   lead: "",
   liveText: "",
   notices: [],
+  supersededApprovalIds: [],
+  desktopRequests: new Map(),
   peerMessages: [],
   peerMessagesOpeningTask: new Set<number>(),
   tools: [],
@@ -78,6 +80,72 @@ const rendered = (overrides: Partial<RenderedTurn> = {}): RenderedTurn => ({
 });
 
 describe("TurnBlock", () => {
+  it("renders the agent's open desktop ask with an Open computer button, and a settled one as a plain line", async () => {
+    const onOpenComputer = vi.fn();
+    const { rerender } = render(
+      <TurnBlock
+        turn={turn()}
+        rendered={rendered({
+          notices: [
+            "Needs you on the desktop: sign in",
+            "Alex took over the desktop and is done.",
+          ],
+          desktopRequests: new Map([
+            [0, { id: "req-1", outcome: "pending" }],
+            [1, { id: "req-1", outcome: "done" }],
+          ]),
+        })}
+        onOpenComputer={onOpenComputer}
+        computerHref={(id) => `/computer?takeover=${id}`}
+      />,
+    );
+    const open = screen.getByRole("button", { name: "Open computer" });
+    await userEvent.click(open);
+    expect(onOpenComputer).toHaveBeenCalledTimes(1);
+    expect(onOpenComputer).toHaveBeenCalledWith("req-1");
+    expect(screen.queryByRole("link", { name: "Open computer" })).toBeNull();
+    expect(
+      screen.getAllByRole("button", { name: "Open computer" }),
+    ).toHaveLength(1);
+    // Where there is no screen to open: plain text.
+    rerender(
+      <TurnBlock
+        turn={turn()}
+        rendered={rendered({
+          notices: ["Needs you on the desktop: sign in"],
+          desktopRequests: new Map([[0, { id: "req-1", outcome: "pending" }]]),
+        })}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Open computer" })).toBeNull();
+    expect(
+      screen.getByText("Needs you on the desktop: sign in"),
+    ).toBeInTheDocument();
+  });
+
+  it("deep-links a pending desktop ask when no in-place callback is available", () => {
+    render(
+      <TurnBlock
+        turn={turn()}
+        rendered={rendered({
+          notices: ["Needs you: sign in", "Desktop request finished"],
+          desktopRequests: new Map([
+            [0, { id: "req-1", outcome: "pending" }],
+            [1, { id: "req-2", outcome: "done" }],
+          ]),
+        })}
+        computerHref={(id) => `/computer?takeover=${id}`}
+      />,
+    );
+    expect(screen.getAllByRole("link", { name: "Open computer" })).toHaveLength(
+      1,
+    );
+    expect(screen.getByRole("link", { name: "Open computer" })).toHaveAttribute(
+      "href",
+      "/computer?takeover=req-1",
+    );
+  });
+
   it("renders the user message and the agent's markdown answer", () => {
     render(
       <TurnBlock
@@ -296,16 +364,6 @@ describe("TurnBlock", () => {
           rendered: inTool,
           followUps: [waiting({ status: "joined" })],
         },
-        // A message with files runs as its own turn, and so does the one
-        // sent after it (order is kept).
-        {
-          turn: turn({ status: "running" }),
-          rendered: inTool,
-          followUps: [
-            waiting({ attachments: [file] }),
-            waiting({ id: "f2", message: "and this" }),
-          ],
-        },
       ];
       for (const scenario of cases) {
         const { unmount } = withQuery(
@@ -320,19 +378,19 @@ describe("TurnBlock", () => {
       }
     });
 
-    it("only the messages AHEAD of one with files get it", () => {
+    it("a message with files, and one sent after it, get it like any other: both join the live run", () => {
       withQuery(
         <TurnBlock
           turn={turn({ status: "running" })}
           rendered={inTool}
           followUps={[
-            waiting(),
-            waiting({ id: "f2", message: "with a file", attachments: [file] }),
+            waiting({ attachments: [file] }),
+            waiting({ id: "f2", message: "and this" }),
           ]}
         />,
       );
       expect(screen.getAllByRole("button", { name: "Send now" })).toHaveLength(
-        1,
+        2,
       );
     });
 
@@ -619,7 +677,7 @@ describe("TurnBlock", () => {
       <TurnBlock
         turn={turn()}
         rendered={rendered({
-          tools: [{ ...tool, output: "bash: denied\nExit code: 2" }],
+          tools: [{ ...tool, output: "bash: denied", isError: true }],
         })}
       />,
     );
@@ -628,7 +686,7 @@ describe("TurnBlock", () => {
     expect(screen.getByText("Request")).toBeInTheDocument();
     expect(screen.getByText("Output")).toBeInTheDocument();
     expect(screen.getByText("Failed")).toBeInTheDocument();
-    expect(screen.getByText("Exit code: 2")).toHaveClass("text-red-700");
+    expect(screen.getByText("bash: denied")).toHaveClass("text-red-700");
   });
 
   it("renders the running turn as a work log, in order, as plain text", () => {

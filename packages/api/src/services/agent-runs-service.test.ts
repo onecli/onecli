@@ -416,6 +416,16 @@ describe("Runs evidence query boundaries", () => {
           output: "b",
         },
       },
+      {
+        turnId: "turn",
+        payload: {
+          type: "tool.finished",
+          callId: "c3",
+          name: "bash",
+          output: "",
+          exitCode: 1,
+        },
+      },
       { turnId: "turn", payload: { type: "tool.finished", callId: 7 } },
       { turnId: "turn", payload: { type: "text", text: "done" } },
     ]);
@@ -428,8 +438,25 @@ describe("Runs evidence query boundaries", () => {
         input: '{"command":"ls"}',
         output: "a",
         isError: true,
+        exitCode: null,
       },
-      { callId: "c2", name: "read", input: null, output: "b", isError: false },
+      {
+        callId: "c2",
+        name: "read",
+        input: null,
+        output: "b",
+        isError: false,
+        exitCode: null,
+      },
+      // A command that exited non-zero is a status, not a tool error.
+      {
+        callId: "c3",
+        name: "bash",
+        input: null,
+        output: "",
+        isError: false,
+        exitCode: 1,
+      },
     ]);
     expect(run.toolNames).toEqual(["bash", "read"]);
   });

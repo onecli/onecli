@@ -20,6 +20,7 @@ const state = vi.hoisted(() => ({
 vi.mock("@/hooks/use-approvals", () => ({
   usePendingChannelApprovals: () => ({ data: state.items }),
   useDecideChannelAction: () => ({ mutate: state.mutate, isPending: false }),
+  useApproveCustomConnection: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 
 const { useActionApprovalCards } = await import("./use-action-approval-cards");
@@ -37,6 +38,7 @@ const action = (
   conversationId: "conv-home",
   createdAt: "2026-10-08T05:26:08Z",
   expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+  customConnection: null,
   ...over,
 });
 
@@ -87,10 +89,10 @@ describe("inline action approvals in the chat", () => {
     state.items = [action({})];
     render(<Cards agentId="donna" conversationId="conv-home" />);
     await userEvent.click(screen.getByRole("button", { name: "Approve" }));
-    expect(state.mutate).toHaveBeenCalledWith(
-      { approvalId: "act-1", decision: "approve" },
-      expect.anything(),
-    );
+    expect(state.mutate).toHaveBeenCalledWith({
+      approvalId: "act-1",
+      decision: "approve",
+    });
   });
 
   it("renders nothing when there is nothing to decide", () => {

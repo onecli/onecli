@@ -1,9 +1,11 @@
-import { mkdtempSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type {
   AgentEvent,
+  AttachmentManifestEntry,
   Harness,
   HarnessEvent,
   SupervisorMessage,
@@ -120,6 +122,7 @@ const steer = (
   conversationId: string,
   message = "also do this",
   context?: string,
+  attachments?: AttachmentManifestEntry[],
 ): SupervisorWorkItem => ({
   kind: "turn.message",
   turnId,
@@ -127,6 +130,7 @@ const steer = (
   conversationId,
   message,
   ...(context && { context }),
+  ...(attachments && { attachments }),
 });
 
 /** A long turn, so a steer sent mid-run has room to land inside it. */
@@ -738,5 +742,244 @@ describe("steering into the live turn", () => {
       .filter((m) => m.event.type === "text")
       .map((m) => m.turnId);
     expect(texts).toEqual(["t1"]);
+  });
+});
+
+/**
+ * A follow-up WITH files steers with them: its parts reach the socket ahead
+ * of its frame and apply on the sync chain, the steer waits for them to
+ * land, then hands the inlineable images to the harness WITH the words. The
+ * fake harness echoes each image's media type and size in its reply, which
+ * is how these tests read what the "model" was actually handed.
+ */
+describe("steering a follow-up that carries files", () => {
+  /** A real file, chunked into the parts a runner would stream. */
+  const fileParts = (
+    followUpId: string,
+    name: string,
+    mimeType: string,
+    bytes: Buffer,
+  ) => {
+    const entry = {
+      id: `att-${name}`,
+      path: `attachments/${followUpId}/${name}`,
+      name,
+      mimeType,
+      sizeBytes: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    };
+    const part: SupervisorWorkItem = {
+      kind: "attachment.part",
+      turnId: followUpId,
+      attachmentId: entry.id,
+      path: entry.path,
+      name: entry.name,
+      mimeType: entry.mimeType,
+      sizeBytes: entry.sizeBytes,
+      sha256: entry.sha256,
+      part: 1,
+      of: 1,
+      dataBase64: bytes.toString("base64"),
+    };
+    return { entry, part };
+  };
+  const PNG = Buffer.from("fake-png-bytes");
+
+  /**
+   * A supervisor whose sync chain is HELD: a home sync is in flight and its
+   * apply waits on `release`, so a file part queued behind it lands only
+   * once the test lets it. The steer for that file must wait just as long,
+   * and nothing else may.
+   */
+  const startWithHeldSync = (homeDir: string, t: TestTransport) => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const run = runSupervisor(
+      config(homeDir),
+      createFakeHarness({ script: () => longScript() }),
+      t.transport,
+      { applySync: () => held },
+    );
+    return { run, release };
+  };
+  const homeSync: SupervisorWorkItem = {
+    kind: "skills.changed",
+    generation: 1,
+    part: 1,
+    of: 1,
+    files: [],
+  };
+
+  const replyOf = (t: TestTransport, followUpId: string) =>
+    t
+      .of("event")
+      .flatMap((m) =>
+        m.turnId === followUpId && m.event.type === "text"
+          ? [m.event.text]
+          : [],
+      )
+      .join("");
+
+  it("waits for the image to land on disk, then steers the words WITH it into the live run", async () => {
+    // MUTATION-TESTED: hand an entry over before its files land and the
+    // image is not on disk to inline; never drain again on the landing and
+    // the steer never goes at all.
+    const homeDir = home("sup-steer-files-");
+    const t = createTestTransport();
+    const { run, release } = startWithHeldSync(homeDir, t);
+    t.push(deliver("t1", "cv-a"));
+    await t.until(
+      () => t.of("event").some((m) => m.event.type === "text.delta"),
+      "the turn to start streaming",
+    );
+
+    const image = fileParts("f1", "photo.png", "image/png", PNG);
+    const pdf = fileParts("f1", "spec.pdf", "application/pdf", PNG);
+    // A home sync is mid-apply when the files arrive, so they queue behind.
+    t.push(homeSync);
+    t.push(image.part);
+    t.push(pdf.part);
+    t.push(
+      steer("f1", "t1", "cv-a", "what is this?", undefined, [
+        image.entry,
+        pdf.entry,
+      ]),
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(replyOf(t, "f1")).toBe("");
+    release();
+
+    await t.until(() => t.of("turn.result").length === 1, "the turn to end");
+    await t.finish(run);
+
+    expect(followUpsOf(t, "t1")).toEqual([{ turnId: "f1", outcome: "joined" }]);
+    // The image rode the steer (its base64 length is what the fake echoes);
+    // the PDF is not inlineable, so it sits on disk for the read tool only.
+    const base64Length = PNG.toString("base64").length;
+    expect(replyOf(t, "f1")).toBe(
+      `[steered: what is this? [image image/png ${base64Length}]]`,
+    );
+    expect(existsSync(join(homeDir, image.entry.path))).toBe(true);
+    expect(existsSync(join(homeDir, pdf.entry.path))).toBe(true);
+  });
+
+  it("a Stop is NEVER held behind a follow-up's file write", async () => {
+    // MUTATION-TESTED: make the drain wait for an entry's files and the
+    // reader (which awaits it) holds the abort behind the file write.
+    const t = createTestTransport();
+    const { run, release } = startWithHeldSync(home("sup-steer-abort-"), t);
+    t.push(deliver("t1", "cv-a"));
+    await t.until(
+      () => t.of("event").some((m) => m.event.type === "text.delta"),
+      "the turn to start streaming",
+    );
+    const { entry, part } = fileParts("f1", "photo.png", "image/png", PNG);
+    t.push(homeSync);
+    t.push(part);
+    t.push(steer("f1", "t1", "cv-a", "what is this?", undefined, [entry]));
+    t.push({ kind: "turn.abort", turnId: "t1", conversationId: "cv-a" });
+
+    // The run stops while the file is STILL held.
+    await t.until(() => t.of("turn.result").length === 1, "the turn to end");
+    expect(t.of("turn.result")[0]).toMatchObject({
+      turnId: "t1",
+      status: "aborted",
+    });
+    release();
+    await t.finish(run);
+  });
+
+  it("a follow-up with files that reaches the turn's FIRST-event drain never stalls the run's own events while it waits", async () => {
+    // MUTATION-TESTED: make the drain wait for an entry's files and the
+    // run's first event (which awaits it) freezes behind the file write.
+    const t = createTestTransport();
+    let releaseSync!: () => void;
+    const held = new Promise<void>((resolve) => (releaseSync = resolve));
+    // The run's first event waits on `openRun`, so the follow-up and its
+    // (held) file are queued before the turn's first-event drain runs.
+    let openRun!: () => void;
+    const runGate = new Promise<void>((resolve) => (openRun = resolve));
+    let runStarted = false;
+    const base = createFakeHarness({ script: () => longScript() });
+    const harness: Harness = {
+      ...base,
+      onFailure: base.onFailure.bind(base),
+      dispose: base.dispose.bind(base),
+      startSession: async (options) => {
+        const session = await base.startSession(options);
+        return {
+          sessionRef: session.sessionRef,
+          abort: session.abort.bind(session),
+          steer: session.steer?.bind(session),
+          async *runTurn(input) {
+            runStarted = true;
+            await runGate;
+            yield* session.runTurn(input);
+          },
+        };
+      },
+    };
+    const run = runSupervisor(
+      config(home("sup-steer-early-")),
+      harness,
+      t.transport,
+      { applySync: () => held },
+    );
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => runStarted, "the run to begin");
+    const { entry, part } = fileParts("f1", "photo.png", "image/png", PNG);
+    t.push(homeSync);
+    t.push(part);
+    t.push(steer("f1", "t1", "cv-a", "what is this?", undefined, [entry]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    openRun();
+
+    // The run streams to its end while the file is STILL held.
+    await t.until(() => t.of("turn.result").length === 1, "the turn to end");
+    expect(t.of("turn.result")[0]).toMatchObject({
+      turnId: "t1",
+      status: "done",
+    });
+    releaseSync();
+    await t.finish(run);
+  });
+
+  it("a follow-up whose files land after its turn ended is left to promotion, never injected into a later run", async () => {
+    const t = createTestTransport();
+    const steered: string[] = [];
+    const base = createFakeHarness({ script: () => [{ type: "turn.done" }] });
+    const harness: Harness = {
+      ...base,
+      onFailure: base.onFailure.bind(base),
+      dispose: base.dispose.bind(base),
+      startSession: async (options) => {
+        const session = await base.startSession(options);
+        return {
+          sessionRef: session.sessionRef,
+          abort: session.abort.bind(session),
+          runTurn: session.runTurn.bind(session),
+          steer: async (input) => {
+            steered.push(input.id);
+            return session.steer?.(input);
+          },
+        };
+      },
+    };
+    const run = runSupervisor(
+      config(home("sup-steer-late-")),
+      harness,
+      t.transport,
+    );
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "t1 to end");
+    const { entry, part } = fileParts("f1", "photo.png", "image/png", PNG);
+    t.push(part);
+    t.push(steer("f1", "t1", "cv-a", "too late", undefined, [entry]));
+    t.push(deliver("t2", "cv-a", "the next message"));
+    await t.until(() => t.of("turn.result").length === 2, "t2 to end");
+    await t.finish(run);
+
+    expect(steered).toEqual([]);
   });
 });

@@ -34,6 +34,8 @@ export interface FakeGatewayServer {
   calls: RecordedGatewayCall[];
   /** Answered in order; when empty, requests are HELD — the long-poll. */
   script: { status: number; body: unknown }[];
+  /** How many long-polls are held right now, waiting for an answer. */
+  heldCount: () => number;
   /** Answer every currently-held long-poll. */
   releaseHeld: (status: number, body: unknown) => void;
   close: () => Promise<void>;
@@ -73,6 +75,7 @@ export const startFakeGatewayServer = async (): Promise<FakeGatewayServer> => {
     url: `http://127.0.0.1:${port}`,
     calls,
     script,
+    heldCount: () => held.length,
     releaseHeld: (status, body) => {
       for (const res of held.splice(0)) answer(res, status, body);
     },
@@ -99,6 +102,8 @@ export const createFakeControlPlane = (
   decideGroup: async () => ({ kind: "refused" as const, message: "no" }),
   decideReach: async () => ({ kind: "already_settled" as const }),
   decideAction: async () => ({ kind: "already_settled" as const }),
+  stopFromCard: async () => ({ kind: "idle" as const }),
+  actOnCardFollowUp: async () => ({ kind: "done" as const }),
   claimPrompt: async () => true,
   recordPromptMessage: async () => {},
   settlePrompt: async () => {},

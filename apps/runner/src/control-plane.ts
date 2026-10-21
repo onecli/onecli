@@ -1,12 +1,19 @@
 import {
   MAX_RUNNER_EVENTS_PER_POST,
+  RUNNER_REPLICA_HEADER,
+  runnerChannelClaimResponseSchema,
   runnerRegisterResponseSchema,
   runnerSandboxCheckResponseSchema,
+  runnerSandboxPortsResponseSchema,
   runnerSandboxesResponseSchema,
+  runnerReplicaSelfResponseSchema,
   runnerWorkResponseSchema,
   type RunnerCapabilities,
+  type RunnerChannelClaimRequest,
+  type RunnerChannelClaimResponse,
   type RunnerEvent,
   type RunnerSandboxesResponse,
+  type RunnerSpawnRequest,
   type RunnerWorkItem,
   runnerMemoryWriteResponseSchema,
   RUNNER_ATTACHMENT_HEADERS,
@@ -25,11 +32,25 @@ import {
  * house pattern for server-side HTTP in this repo.
  */
 
+export interface RunnerRegistration {
+  name: string;
+  capabilities: RunnerCapabilities;
+  /** This process's own name: the copy's identity in the control plane. */
+  replicaName: string;
+  /** Where this copy serves its port API, if it serves one. */
+  portApiUrl?: string;
+}
+
 export interface ControlPlaneClient {
+  /**
+   * Register this process as one copy of the runner. The answered copy id
+   * is named on every later call. A control plane that answers no copy id
+   * predates running as several copies: refused loudly, because nothing
+   * after this would be fenced to the copy that holds a sandbox's socket.
+   */
   register(
-    name: string,
-    capabilities: RunnerCapabilities,
-  ): Promise<{ runnerId: string }>;
+    registration: RunnerRegistration,
+  ): Promise<{ runnerId: string; replicaId: string }>;
   pollWork(wait: number, limit: number): Promise<RunnerWorkItem[]>;
   postEvents(events: RunnerEvent[]): Promise<void>;
   heartbeat(capabilities?: RunnerCapabilities): Promise<void>;
@@ -37,10 +58,43 @@ export interface ControlPlaneClient {
    * (the reap authority) plus — from a control plane new enough to send it —
    * what it currently believes about each (the vanished-pod arm's input). */
   listAssignedSandboxes(): Promise<RunnerSandboxesResponse>;
+  /**
+   * This copy's reconciler role on its own (`GET /v1/runner/replicas/self`),
+   * so a copy that will not reconcile never fetches the full listing.
+   * `undefined` when the api is too old to answer it (404): the listing's
+   * own `reconciler` then decides, as before. Throws on anything else.
+   */
+  isReconciler(): Promise<boolean | undefined>;
   /** The orphan sweep's authority: which of these sandbox ids exist NOWHERE
    * in the control plane. Throws on any failure — the sweep destroys nothing
    * without a positive answer. */
   checkSandboxIds(sandboxIds: string[]): Promise<string[]>;
+  /** The live shared ports of a sandbox this runner hosts: the ONLY source
+   * the port allowlist is armed from. Throws on any failure (the caller
+   * then arms nothing: fail closed). */
+  sandboxAllowedPorts(sandboxId: string): Promise<number[]>;
+  /**
+   * Record the spawn a start just created (its container and the SHA-256 of
+   * the bootstrap token baked into it), so any copy can accept its first
+   * connect. `false` when the start no longer applies (the sandbox moved
+   * on, or another copy owns it now): the start stands down. Throws on
+   * anything else.
+   */
+  recordSpawn(sandboxId: string, spawn: RunnerSpawnRequest): Promise<boolean>;
+  /** Take a supervisor's control channel as its socket opens. `null` when
+   * refused (hint-free); throws on transport failure. */
+  claimChannel(
+    claim: RunnerChannelClaimRequest,
+  ): Promise<RunnerChannelClaimResponse | null>;
+  /** A socket this copy held closed. A no-op server-side when that
+   * connection no longer holds the channel. */
+  releaseChannel(connectionId: string): Promise<void>;
+  /** Claim the stop of a container still running although its sandbox is
+   * parked. `false` when a start got there first. */
+  claimStrayStop(sandboxId: string, containerRef: string): Promise<boolean>;
+  /** A clean shutdown: hand this copy's sandboxes and channels over at once
+   * rather than after the liveness window. */
+  retire(): Promise<void>;
   /** Relay a platform-tool call (step 7) and return the control plane's
    * answer. Throws on transport failure — the caller turns that into a tool
    * error, never silence. */
@@ -102,8 +156,14 @@ export class ControlPlaneError extends Error {
  * - 503: no healthy target behind the load balancer — never processed, and a
  *   deploy window clears in seconds.
  *
- * NEVER retried: timeouts, network errors, 502/504 — the request may have
- * landed and the response been lost, exactly the duplicate-transcript case.
+ * - A request that never left: the connection was refused, or the host did
+ *   not resolve (an api mid-restart: a self-host compose service is briefly
+ *   absent from DNS, a listener briefly closed). Not one byte reached the
+ *   control plane, so this is as provably unapplied as a 503.
+ *
+ * NEVER retried: timeouts, resets and every other network error, and
+ * 502/504. The request may have landed and the response been lost, exactly
+ * the duplicate-transcript case.
  * 403 is deliberately NOT retried either, though it is provably unapplied:
  * a WAF content rule matching the batch body is deterministic (identical
  * bytes re-refused every time), and a WAF per-IP rate block outlasts this
@@ -117,6 +177,45 @@ export class ControlPlaneError extends Error {
 const RETRYABLE_EVENT_STATUSES = new Set([429, 500, 503]);
 const EVENT_POST_ATTEMPTS = 4;
 const EVENT_RETRY_BACKOFF_MS = [1_000, 4_000, 10_000];
+
+/** Socket codes for a request that never left this process. */
+const NEVER_SENT_CODES: ReadonlySet<string> = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+]);
+
+const neverLeft = (attempt: unknown): boolean =>
+  attempt instanceof Error &&
+  "code" in attempt &&
+  typeof attempt.code === "string" &&
+  NEVER_SENT_CODES.has(attempt.code);
+
+/**
+ * Whether a fetch failed before a single byte reached the control plane.
+ * fetch wraps the socket error as `cause`. With dual-stack address selection
+ * that cause is an AggregateError over each attempt, and its own `code` is
+ * just the FIRST attempt's, so every attempt is checked instead: one timeout
+ * or reset among them means the request may have landed.
+ */
+const requestNeverSent = (error: unknown): boolean => {
+  if (!(error instanceof Error) || !(error.cause instanceof Error)) {
+    return false;
+  }
+  const attempts: unknown[] =
+    error.cause instanceof AggregateError ? error.cause.errors : [error.cause];
+  return attempts.length > 0 && attempts.every(neverLeft);
+};
+
+/**
+ * The retry law above as one predicate: the post provably never applied, so
+ * sending it again cannot duplicate anything. Shared with the report chain,
+ * which re-sends a turn's end on exactly this verdict.
+ */
+export const isProvablyUnapplied = (error: unknown): boolean =>
+  error instanceof ControlPlaneError
+    ? RETRYABLE_EVENT_STATUSES.has(error.status)
+    : requestNeverSent(error);
 
 export interface ControlPlaneOptions {
   baseUrl: string;
@@ -139,39 +238,86 @@ export const createControlPlaneClient = ({
   fetchImpl = fetch,
   sleepImpl = defaultSleep,
 }: ControlPlaneOptions): ControlPlaneClient => {
-  const call = async (
+  const origin = baseUrl.replace(/\/$/, "");
+  /** Set by `register`; named on every call after it. */
+  let replicaId: string | undefined;
+
+  /** The headers every runner call carries: the runner credential, and the
+   * copy once registered. One place, so no call can forget the copy. */
+  const identity = (): Record<string, string> => ({
+    authorization: `Bearer ${token}`,
+    ...(replicaId !== undefined && { [RUNNER_REPLICA_HEADER]: replicaId }),
+  });
+
+  const send = async (
     path: string,
-    init: { method: "GET" | "POST"; body?: unknown; timeoutMs: number },
-  ): Promise<unknown> => {
-    const response = await fetchImpl(`${baseUrl.replace(/\/$/, "")}${path}`, {
+    init: {
+      method: "GET" | "POST" | "PUT" | "DELETE";
+      body?: unknown;
+      timeoutMs: number;
+    },
+  ): Promise<Response> =>
+    fetchImpl(`${origin}${path}`, {
       method: init.method,
       headers: {
-        authorization: `Bearer ${token}`,
+        ...identity(),
         ...(init.body !== undefined && { "content-type": "application/json" }),
       },
       ...(init.body !== undefined && { body: JSON.stringify(init.body) }),
       signal: AbortSignal.timeout(init.timeoutMs),
     });
 
-    if (!response.ok) {
-      throw new ControlPlaneError(
-        response.status,
-        `${init.method} ${path} failed: ${response.status}`,
-      );
-    }
+  const failed = (method: string, path: string, status: number) =>
+    new ControlPlaneError(status, `${method} ${path} failed: ${status}`);
 
+  const call = async (
+    path: string,
+    init: {
+      method: "GET" | "POST" | "PUT" | "DELETE";
+      body?: unknown;
+      timeoutMs: number;
+    },
+  ): Promise<unknown> => {
+    const response = await send(path, init);
+    if (!response.ok) throw failed(init.method, path, response.status);
     if (response.status === 204) return null;
     return response.json();
   };
 
+  /**
+   * A claim whose refusal is an ANSWER, not a failure: 409 (the state moved
+   * on) reads as `false`, success as `true`, anything else throws.
+   */
+  const applied = async (
+    path: string,
+    init: { method: "POST" | "PUT"; body: unknown; timeoutMs: number },
+  ): Promise<boolean> => {
+    const response = await send(path, init);
+    if (response.status === 409) return false;
+    if (!response.ok) throw failed(init.method, path, response.status);
+    return true;
+  };
+
+  const sandboxPath = (sandboxId: string, rest: string) =>
+    `/v1/runner/sandboxes/${encodeURIComponent(sandboxId)}/${rest}`;
+
   return {
-    async register(name, capabilities) {
-      const body = await call("/v1/runner/register", {
-        method: "POST",
-        body: { name, capabilities },
-        timeoutMs: 15_000,
-      });
-      return runnerRegisterResponseSchema.parse(body);
+    async register(registration) {
+      const body = runnerRegisterResponseSchema.parse(
+        await call("/v1/runner/register", {
+          method: "POST",
+          body: registration,
+          timeoutMs: 15_000,
+        }),
+      );
+      if (body.replicaId === undefined) {
+        throw new Error(
+          "the control plane is too old for this runner (it answered no " +
+            "runner copy id): deploy the api before the runner",
+        );
+      }
+      replicaId = body.replicaId;
+      return { runnerId: body.runnerId, replicaId: body.replicaId };
     },
 
     async pollWork(wait, limit) {
@@ -206,11 +352,7 @@ export const createControlPlaneClient = ({
             });
             break;
           } catch (error) {
-            if (
-              attempt >= EVENT_POST_ATTEMPTS ||
-              !(error instanceof ControlPlaneError) ||
-              !RETRYABLE_EVENT_STATUSES.has(error.status)
-            ) {
+            if (attempt >= EVENT_POST_ATTEMPTS || !isProvablyUnapplied(error)) {
               throw error;
             }
             await sleepImpl(EVENT_RETRY_BACKOFF_MS[attempt - 1] ?? 10_000);
@@ -257,7 +399,7 @@ export const createControlPlaneClient = ({
       // `invalid content-length header`, seen on the real e2e path). The
       // route's own cap reads the header fetch writes.
       const headers: Record<string, string> = {
-        authorization: `Bearer ${token}`,
+        ...identity(),
         "content-type": file.mimeType,
         [RUNNER_ATTACHMENT_HEADERS.sandboxId]: sandboxId,
         [RUNNER_ATTACHMENT_HEADERS.conversationId]: file.conversationId,
@@ -272,15 +414,12 @@ export const createControlPlaneClient = ({
       // Binary, so not through `call`. 60s: 25 MB over a slow link, bounded
       // under the supervisor tool's own ceiling only if the link is healthy —
       // a slower one surfaces as the tool's timeout, which is honest.
-      const response = await fetchImpl(
-        `${baseUrl.replace(/\/$/, "")}/v1/runner/attachments`,
-        {
-          method: "POST",
-          headers,
-          body: new Uint8Array(file.bytes),
-          signal: AbortSignal.timeout(60_000),
-        },
-      );
+      const response = await fetchImpl(`${origin}/v1/runner/attachments`, {
+        method: "POST",
+        headers,
+        body: new Uint8Array(file.bytes),
+        signal: AbortSignal.timeout(60_000),
+      });
       if (response.status === 413 || response.status === 400) {
         const body = (await response.json().catch(() => null)) as {
           error?: string;
@@ -291,10 +430,7 @@ export const createControlPlaneClient = ({
         };
       }
       if (!response.ok) {
-        throw new ControlPlaneError(
-          response.status,
-          `POST /v1/runner/attachments failed: ${response.status}`,
-        );
+        throw failed("POST", "/v1/runner/attachments", response.status);
       }
       return runnerAttachmentUploadResponseSchema.parse(await response.json());
     },
@@ -303,18 +439,15 @@ export const createControlPlaneClient = ({
       // Binary, so not through `call` (which JSON-parses). 30s: a 10MB file
       // over a slow link, still bounded well under the turn ceiling.
       const response = await fetchImpl(
-        `${baseUrl.replace(/\/$/, "")}/v1/runner/attachments/${encodeURIComponent(attachmentId)}`,
+        `${origin}/v1/runner/attachments/${encodeURIComponent(attachmentId)}`,
         {
           method: "GET",
-          headers: { authorization: `Bearer ${token}` },
+          headers: identity(),
           signal: AbortSignal.timeout(30_000),
         },
       );
       if (!response.ok) {
-        throw new ControlPlaneError(
-          response.status,
-          `GET /v1/runner/attachments failed: ${response.status}`,
-        );
+        throw failed("GET", "/v1/runner/attachments", response.status);
       }
       return Buffer.from(await response.arrayBuffer());
     },
@@ -332,6 +465,15 @@ export const createControlPlaneClient = ({
       return runnerSandboxesResponseSchema.parse(body);
     },
 
+    async isReconciler() {
+      const path = "/v1/runner/replicas/self";
+      const response = await send(path, { method: "GET", timeoutMs: 15_000 });
+      if (response.status === 404) return undefined;
+      if (!response.ok) throw failed("GET", path, response.status);
+      return runnerReplicaSelfResponseSchema.parse(await response.json())
+        .reconciler;
+    },
+
     async checkSandboxIds(sandboxIds: string[]) {
       // Same zod-parse-don't-cast law as listAssignedSandboxes, and for the same
       // reason: this answer decides what the orphan sweep force-deletes.
@@ -341,6 +483,59 @@ export const createControlPlaneClient = ({
         timeoutMs: 15_000,
       });
       return runnerSandboxCheckResponseSchema.parse(body).missing;
+    },
+
+    async sandboxAllowedPorts(sandboxId: string) {
+      const body = await call(sandboxPath(sandboxId, "ports"), {
+        method: "GET",
+        timeoutMs: 10_000,
+      });
+      return runnerSandboxPortsResponseSchema.parse(body).ports;
+    },
+
+    async recordSpawn(sandboxId, spawn) {
+      return applied(sandboxPath(sandboxId, "spawn"), {
+        method: "PUT",
+        body: spawn,
+        timeoutMs: 15_000,
+      });
+    },
+
+    async claimChannel(claim) {
+      // Parsed, not cast: the answer names the sandbox this socket will speak
+      // for, so a wrong-shaped 200 must throw rather than attribute frames.
+      const response = await send("/v1/runner/channels", {
+        method: "POST",
+        body: claim,
+        timeoutMs: 10_000,
+      });
+      if (response.status === 404) return null;
+      if (!response.ok) {
+        throw failed("POST", "/v1/runner/channels", response.status);
+      }
+      return runnerChannelClaimResponseSchema.parse(await response.json());
+    },
+
+    async releaseChannel(connectionId) {
+      await call(`/v1/runner/channels/${encodeURIComponent(connectionId)}`, {
+        method: "DELETE",
+        timeoutMs: 10_000,
+      });
+    },
+
+    async claimStrayStop(sandboxId, containerRef) {
+      return applied(sandboxPath(sandboxId, "stray-stop"), {
+        method: "POST",
+        body: { containerRef },
+        timeoutMs: 15_000,
+      });
+    },
+
+    async retire() {
+      await call("/v1/runner/replicas/self", {
+        method: "DELETE",
+        timeoutMs: 5_000,
+      });
     },
   };
 };

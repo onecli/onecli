@@ -1,4 +1,11 @@
-import { apiDelete, apiGet, apiPost, apiPut, workspaceScope } from "./client";
+import {
+  apiDelete,
+  apiGet,
+  apiPatch,
+  apiPost,
+  apiPut,
+  workspaceScope,
+} from "./client";
 
 /**
  * Channels (plans/hosted-agents-v2.md step 6): the agent-level presence
@@ -28,6 +35,12 @@ export interface AgentChannelPresence {
   identityRef: string | null;
   /** The app's handle in the workspace (Slack: "donna"), where we know it. */
   identityName: string | null;
+  /** The app's PROFILE icon (provider CDN URL) as last read, or null while it
+   * still shows the provider's stock mark. Absent on older servers. */
+  iconUrl?: string | null;
+  /** A pending socket presence a consent install left one step short: only
+   * the app-level token is left to paste. Absent on older servers. */
+  awaitingTransportCredential?: boolean;
   tenant: { externalId: string; name: string | null };
   /** The member who attached this presence, for the "Managed by" line. */
   managedBy: { name: string | null; email: string } | null;
@@ -72,6 +85,8 @@ export interface ChannelSpaceReach {
   label: string | null;
   state: ChannelReachState;
   decidedAt: string | null;
+  /** What the agent hears here. Optional: an older API omits it (= mentions). */
+  listen?: ChannelListenMode;
 }
 
 export interface AgentChannelsView {
@@ -104,14 +119,17 @@ export interface ChannelSetupMaterial {
 export interface CreatePresenceResult {
   presenceId: string;
   transport: ChannelTransport;
-  /** Events arm: the one-click consent URL. */
+  /** The one-click consent URL: always on events, and on socket when the
+   * deployment has the public HTTPS origin Slack's redirect needs. */
   installUrl: string | null;
   /** Socket arm: where the app-level token is generated + Install lives. */
   settingsUrl: string;
 }
 
 export interface CompletePresenceInput {
-  botToken: string;
+  /** Omitted on the socket arm after its one-click install: the server
+   * already holds the bot token. */
+  botToken?: string;
   appToken?: string;
   signingSecret?: string;
   appId?: string;
@@ -189,6 +207,14 @@ const agentBase = (agentId: string, sub = "") =>
 
 export const agentView = (agentId: string) =>
   apiGet<AgentChannelsView>(agentBase(agentId));
+
+/** Pull the app's icon from the provider now ("Sync image"). `changed` =
+ * the agent's image was just replaced by a new app icon. */
+export const syncIcon = (agentId: string, provider: ChannelProvider) =>
+  apiPost<{ changed: boolean }>(
+    agentBase(agentId, `/${provider}/icon/sync`),
+    {},
+  );
 
 export const manifest = (
   agentId: string,
@@ -381,14 +407,20 @@ export const inspectSharedInstall = (
 
 /** Finish an AGENT's own app install that began in Slack (no state names the
  * agent): the server offers the code to the org's waiting agent apps. A miss
- * leaves the code spendable for the shared-app inspect. */
+ * leaves the code spendable for the shared-app inspect. A matched socket app
+ * is installed but still awaits its app-level token. */
 export const finishAgentInstall = (
   provider: ChannelProvider,
   code: string,
   organizationId: string,
 ) =>
   apiPost<{
-    agent: { id: string; workspaceId: string } | null;
+    agent: {
+      id: string;
+      workspaceId: string;
+      /** Absent on older servers. */
+      awaitingTransportCredential?: boolean;
+    } | null;
     sharedAppConfigured: boolean;
   }>(
     `/v1/org/channels/${provider}/agent-install`,
@@ -439,6 +471,20 @@ export const decideActionApproval = (
     kind: "decided" | "already_settled";
     status?: ActionApprovalStatus;
   }>(`/v1/agents/${agentId}/approvals/${approvalId}/decision`, input);
+
+/** Approve an agent-proposed custom connection WITH the key the person
+ * typed. The key travels only in this request body. */
+export const approveCustomConnection = (
+  agentId: string,
+  approvalId: string,
+  value: string,
+) =>
+  apiPost<{
+    kind: "decided";
+    status: ActionApprovalStatus;
+  }>(`/v1/agents/${agentId}/approvals/${approvalId}/custom-connection`, {
+    value,
+  });
 
 export interface AgentContact {
   id: string;
@@ -516,4 +562,19 @@ export const setPeerPolicy = (
   apiPut<{ id: string; policy: string }>(
     `/v1/agents/${encodeURIComponent(agentId)}/links/${encodeURIComponent(peerAgentId)}`,
     { policy },
+  );
+
+/** What the agent hears in one channel: "mentions" (default) or "all" - it
+ * is the channel's point of contact and decides on its own when to answer. */
+export type ChannelListenMode = "mentions" | "all";
+
+export const setSpaceListen = (
+  agentId: string,
+  provider: ChannelProvider,
+  externalRef: string,
+  listen: ChannelListenMode,
+) =>
+  apiPatch<{ listen: ChannelListenMode }>(
+    agentBase(agentId, `/${provider}/reach/${encodeURIComponent(externalRef)}`),
+    { listen },
   );

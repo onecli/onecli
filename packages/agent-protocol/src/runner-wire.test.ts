@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ceilingWarningSteerId,
   isPlatformSteerId,
+  runnerAdvertises,
   runnerCapabilitiesSchema,
   runnerEventSchema,
   runnerEventsRequestSchema,
@@ -419,6 +420,55 @@ describe("turn.message context (runner wire)", () => {
       runnerWorkItemSchema.safeParse({ ...base, context: "x".repeat(16_001) })
         .success,
     ).toBe(false);
+  });
+
+  /** A follow-up's files ride the steer exactly like a turn's: the same
+   * metadata-only manifest, under the same per-message bound. */
+  const entry = (id: string) => ({
+    id,
+    path: `attachments/f-1/${id}.png`,
+    name: `${id}.png`,
+    mimeType: "image/png",
+    sizeBytes: 10,
+    sha256: "a".repeat(64),
+  });
+
+  it("carries a follow-up's attachment manifest, bounded like a turn's", () => {
+    const parsed = runnerWorkItemSchema.parse({
+      ...base,
+      attachments: [entry("a1")],
+    });
+    expect(parsed.kind === "turn.message" && parsed.attachments).toEqual([
+      entry("a1"),
+    ]);
+    const tooMany = Array.from({ length: 6 }, (_, i) => entry(`a${i}`));
+    expect(
+      runnerWorkItemSchema.safeParse({ ...base, attachments: tooMany }).success,
+    ).toBe(false);
+  });
+
+  it("a runner advertises that it delivers a follow-up's files; anything else reads as not", () => {
+    const base = {
+      maxSandboxes: 1,
+      backend: "docker",
+      homeDurability: "resident",
+    };
+    expect(
+      runnerAdvertises({ ...base, steerAttachments: true }, "steerAttachments"),
+    ).toBe(true);
+    // Absent, false, a stale blob that fails the schema, no runner at all:
+    // all the safe degrade (the files wait for their own turn).
+    expect(runnerAdvertises(base, "steerAttachments")).toBe(false);
+    expect(
+      runnerAdvertises(
+        { ...base, steerAttachments: false },
+        "steerAttachments",
+      ),
+    ).toBe(false);
+    expect(
+      runnerAdvertises({ steerAttachments: true }, "steerAttachments"),
+    ).toBe(false);
+    expect(runnerAdvertises(undefined, "steerAttachments")).toBe(false);
   });
 });
 

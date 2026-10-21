@@ -194,6 +194,13 @@ describe.skipIf(!PROOF_URL)("Global Policy over the public API", () => {
     // Create: live immediately (the Default Rule is materialized with it).
     const a = await create("alpha");
     expect(await enforced()).toEqual(["DEFAULT:allow", "alpha:block"]);
+    // The write's own publish records who made the change, before any
+    // explicit POST /publish could.
+    const applied = await call("GET", "/v1/org/policy/last-publish");
+    expect(applied.status).toBe(200);
+    expect(applied.json).toMatchObject({
+      appliedBy: { email: `${OWNER}@example.com` },
+    });
     const b = await create("beta", "allow");
     expect(await enforced()).toEqual([
       "DEFAULT:allow",

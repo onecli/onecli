@@ -5,12 +5,13 @@ import { RequestAppSlot as CloudRequestAppSlot } from "@/ee/apps/request-app-slo
 import { LocalRequestAppSlot } from "@/lib/components/request-app-slot-local";
 
 /**
- * Edition dispatcher for the "Request an app" slot, rendered as the first
- * item in the Apps grid: cloud opens an in-app dialog that collects the
- * request, emails the user an acknowledgment via Resend, and pings Discord;
- * other editions link to the OSS repo's GitHub issue form instead (the
- * Resend/Discord plumbing isn't configured there, so the in-app promise
- * would be false).
+ * Edition dispatcher for the "Request an app" slot, rendered in the Apps grid
+ * and at the end of an agent's Connect-an-app picker: cloud opens an in-app
+ * dialog that collects the request, emails the user an acknowledgment via
+ * Resend, and pings Discord; other editions link to the OSS repo's GitHub
+ * issue form instead (the Resend/Discord plumbing isn't configured there, so
+ * the in-app promise would be false). Both arms pre-fill `initialName`, the
+ * app the user searched for.
  *
  * Accepts optional controlled props so the parent can open the dialog
  * programmatically (e.g., via `?request=` URL param from the gateway).

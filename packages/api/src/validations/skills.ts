@@ -2,13 +2,13 @@ import { z } from "zod";
 
 /**
  * Zod surfaces for the skill routes (plans/hosted-agents-v2.md step 9).
- * Bounds live here so both doors — the workspace surface and the org surface —
+ * Bounds live here so both doors — the agent surface and the org surface —
  * enforce one contract; they are ALSO what makes the sync-frame protocol
  * safe: every cap below feeds the MAX_SYNC_PART_BYTES packing arithmetic in
  * home-sync-service, so nothing authorable can ever exceed one frame.
  */
 
-export const SKILL_SCOPES = ["agent", "workspace", "organization"] as const;
+export const SKILL_SCOPES = ["agent", "organization"] as const;
 export type SkillScope = (typeof SKILL_SCOPES)[number];
 
 /** The directory name inside the sandbox — kebab, immutable after create. */
@@ -40,7 +40,6 @@ export const MAX_SKILL_TOTAL_CHARS = 32_000;
 /** Availability bounds per tier (the MAX_CRONS_PER_AGENT reasoning); tiers
  * never cross-consume. */
 export const MAX_SKILLS_PER_AGENT = 10;
-export const MAX_SKILLS_PER_WORKSPACE = 20;
 export const MAX_SKILLS_PER_ORG = 20;
 
 const singleLine = (value: string) => !value.includes("\n");
@@ -108,14 +107,26 @@ const totalWithinBudget = (body: {
 
 const budgetMessage = `A skill's body and files together are limited to ${MAX_SKILL_TOTAL_CHARS.toLocaleString("en-US")} characters`;
 
-/** POST /v1/skills — workspace tier, or agent tier when agentId is present. */
+/** POST /v1/skills — always an agent's own skill (a hosted agent of the
+ * caller's workspace). Organization skills go through /v1/org/skills. */
 export const createSkillSchema = z
   .object({
     name: nameField,
     description: descriptionField,
     content: contentField,
     enabled: z.boolean().optional(),
-    agentId: z.string().trim().min(1).max(100).optional(),
+    // Only the MISSING case gets its own words (the default names no field);
+    // every other failure keeps Zod's message.
+    agentId: z
+      .string({
+        error: (issue) =>
+          issue.input === undefined
+            ? "agentId is required: the agent the skill belongs to"
+            : undefined,
+      })
+      .trim()
+      .min(1)
+      .max(100),
     files: filesField.optional(),
   })
   .strict()

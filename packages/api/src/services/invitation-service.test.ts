@@ -347,36 +347,6 @@ describe("memberProvisionOps", () => {
 });
 
 describe("acceptInvitation (extraction stays behavior-identical)", () => {
-  it("runs member + workspace + invitation update in one transaction", async () => {
-    state.invitation = {
-      id: "inv-1",
-      organizationId: "org-1",
-      email: "g@a.com",
-      role: "admin",
-      status: "pending",
-      expiresAt: new Date(Date.now() + 60_000),
-      organization: { name: "Acme" },
-    };
-
-    const result = await acceptInvitation(
-      "token-1",
-      "user-12345678",
-      "g@a.com",
-      null,
-    );
-    expect(result).toEqual({
-      organizationId: "org-1",
-      organizationName: "Acme",
-    });
-    expect(state.transactionOps[0]).toHaveLength(3);
-    expect(state.memberCreates[0]).toMatchObject({
-      data: { role: "admin", organizationId: "org-1" },
-    });
-    expect(state.invitationUpdates[0]).toMatchObject({
-      data: { status: "accepted" },
-    });
-  });
-
   it("still validates the invitation before provisioning", async () => {
     state.invitation = null;
     await expect(

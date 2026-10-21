@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { slackReach } from "./providers/slack/reach-card";
 import type { ChannelProvider } from "./types";
 
@@ -16,7 +16,8 @@ import type { ChannelProvider } from "./types";
  * This suite is that missing check. It implements the reach facet for a
  * fictional provider with deliberately un-Slack-like shapes — no `#`
  * channels, no `C…`/`U…` ids, a different address separator, and no notion
- * of a "workspace member" — and asserts the facet's own contract holds.
+ * of a "workspace member". It type-checks against the facet interface, which
+ * is the whole proof: the facet is implementable without Slack concepts.
  *
  * What it can prove: the facet is implementable without Slack concepts, its
  * kinds compose, and the pieces the generic service consumes (space key,
@@ -31,16 +32,18 @@ import type { ChannelProvider } from "./types";
  * satisfies the interface - written to fit, it could drift from what the
  * real provider does. `slackReach` is declared without a type annotation
  * (its shape is inferred, and only checked where the provider object is
- * assembled), so the arm below asserts the real facet and the fictional
- * one are the SAME contract. If Slack grew a method the interface does not
- * describe, or the interface grew one Slack does not implement, that arm
- * stops compiling.
+ * assembled), so the arm below pins the real facet to the same interface as
+ * the fictional one. If the interface grew a method Slack does not
+ * implement, that arm stops type-checking.
  */
 
 /** A fictional provider: threads addressed "room@42/thread@7", numeric ids,
  *  people addressed as "person@N", tenants as opaque org handles. */
-const teamsish: NonNullable<ChannelProvider["reach"]> = {
+type Facet = NonNullable<ChannelProvider["reach"]>;
+
+const teamsish: Facet = {
   spaceOf: (externalThreadId) => externalThreadId.split("/")[0] ?? "",
+  spaceThreadPrefix: (externalRef) => `${externalRef}/`,
 
   async spaceLabel({ credentialsJson, externalRef }) {
     if (!credentialsJson) return null;
@@ -93,6 +96,12 @@ const teamsish: NonNullable<ChannelProvider["reach"]> = {
       : { ok: true };
   },
 
+  async spaceMembership({ credentialsJson, externalRef }) {
+    // No credential = cannot tell; the reconciler changes nothing.
+    if (!credentialsJson) return { kind: "unknown" };
+    return { kind: externalRef.endsWith("!") ? "gone" : "member" };
+  },
+
   card: {
     async post({ grantId, subjectKind, agentName, subjectLabel }) {
       return {
@@ -108,129 +117,13 @@ const teamsish: NonNullable<ChannelProvider["reach"]> = {
 
 describe("the reach facet is provider-generic (contract, not Slack)", () => {
   it("the REAL Slack facet and the fictional one satisfy the SAME contract", () => {
-    // Both sides pinned to the interface. Without this the suite would only
-    // prove a purpose-built fake fits - which is circular.
-    const real: NonNullable<ChannelProvider["reach"]> = slackReach;
-    const fake: NonNullable<ChannelProvider["reach"]> = teamsish;
-
-    // The required surface, present on both - a provider author can read
-    // this list as "what I must implement".
-    for (const facet of [real, fake]) {
-      expect(typeof facet.spaceOf).toBe("function");
-      expect(typeof facet.spaceLabel).toBe("function");
-      expect(typeof facet.resolveGuestSpeaker).toBe("function");
-      expect(typeof facet.card.post).toBe("function");
-      expect(typeof facet.card.settle).toBe("function");
-    }
-    // `personLabel` is optional by contract: the person lane degrades to the
-    // raw ref rather than breaking for a provider that cannot resolve one.
-    expect(typeof real.personLabel).toBe("function");
-    expect(typeof fake.personLabel).toBe("function");
-  });
-
-  it("a non-Slack address shape yields its own space key", () => {
-    // No colon separator, no C-prefixed ids: the generic ledger stores
-    // whatever this returns and never parses it.
-    expect(teamsish.spaceOf("room@42/thread@7")).toBe("room@42");
-    expect(teamsish.spaceOf("room@1")).toBe("room@1");
-  });
-
-  it("both label kinds are optional-by-contract and degrade to null", async () => {
-    // The service must tolerate a provider that cannot resolve a label -
-    // the dashboard then shows the raw ref rather than breaking.
-    expect(
-      await teamsish.spaceLabel({
-        credentialsJson: null,
-        externalRef: "room@42",
-      }),
-    ).toBeNull();
-    expect(
-      await teamsish.personLabel?.({
-        credentialsJson: null,
-        externalRef: "person@9",
-      }),
-    ).toBeNull();
-    expect(
-      await teamsish.spaceLabel({
-        credentialsJson: "{}",
-        externalRef: "room@42",
-      }),
-    ).toBe("Room 42");
-    expect(
-      await teamsish.personLabel?.({
-        credentialsJson: "{}",
-        externalRef: "person@9",
-      }),
-    ).toBe("Person 9");
-  });
-
-  it("the same-tenant fence is the PROVIDER's verdict, however it computes it", async () => {
-    // Slack reads `team_id`; this provider parses the address. The generic
-    // guest lane only ever sees the boolean.
-    const inside = await teamsish.resolveGuestSpeaker({
-      credentialsJson: "{}",
-      externalUserId: "7#acme",
-      tenantExternalId: "acme",
-    });
-    expect(inside?.sameTenant).toBe(true);
-    expect(inside?.displayName).toBe("User 7");
-
-    const outside = await teamsish.resolveGuestSpeaker({
-      credentialsJson: "{}",
-      externalUserId: "7#other-corp",
-      tenantExternalId: "acme",
-    });
-    expect(outside?.sameTenant).toBe(false);
-  });
-
-  it("fails closed when the speaker cannot be verified", async () => {
-    expect(
-      await teamsish.resolveGuestSpeaker({
-        credentialsJson: null,
-        externalUserId: "7#acme",
-        tenantExternalId: "acme",
-      }),
-    ).toBeNull();
-  });
-
-  it("the card carries the SUBJECT KIND, so a provider can render person vs space differently", async () => {
-    const person = await teamsish.card.post({
-      credentialsJson: "{}",
-      recipientExternalUserId: "person@1",
-      grantId: "g-1",
-      agentName: "Ada",
-      subjectLabel: "Person 9",
-      subjectKind: "external_user",
-    });
-    const space = await teamsish.card.post({
-      credentialsJson: "{}",
-      recipientExternalUserId: "person@1",
-      grantId: "g-2",
-      agentName: "Ada",
-      subjectLabel: "Room 42",
-      subjectKind: "space",
-    });
-    // The kind reaches the renderer - the hook that lets a new provider ask
-    // the two-answer person question instead of the three-answer space one.
-    expect(person.channel).toContain("external_user");
-    expect(space.channel).toContain("space");
-    // And the handle it returns is opaque: any two strings the provider can
-    // later use to find its own message.
-    expect(typeof person.ts).toBe("string");
-  });
-
-  it("settle may be a no-op: a provider without message editing is still valid", async () => {
-    await expect(
-      teamsish.card.settle({
-        credentialsJson: "{}",
-        channel: "dm:x",
-        ts: "1",
-        subjectLabel: "Person 9",
-        outcome: "approved",
-        decidedByName: "Owner",
-        subjectKind: "external_user",
-      }),
-    ).resolves.toBeUndefined();
+    // A compile-time contract (tsc runs over test files in CI): both sides
+    // are pinned to the interface. Without the real side the suite would
+    // only prove a purpose-built fake fits, which is circular. Runtime
+    // assertions on the fake's own return values could never fail, so the
+    // proof lives in the types.
+    expectTypeOf(slackReach).toMatchTypeOf<Facet>();
+    expectTypeOf(teamsish).toEqualTypeOf<Facet>();
   });
 });
 

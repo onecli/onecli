@@ -28,10 +28,11 @@ import {
  * separate copies of it.
  *
  * Two laws hold across both directions:
- *  - **Typed LLM keys only.** Everything else (connections, custom secrets)
- *    belongs to `workspace-autoattach-service`, which gives a workspace's new
- *    resources to every agent. LLM keys are the exception because one is
- *    what an agent RUNS on: granting a second key re-points the agent's
+ *  - **Typed LLM keys only.** Connections and custom secrets are never
+ *    granted automatically: a workspace's new ones are on for no agent, and
+ *    one connected from an agent's context is on for that agent alone
+ *    (`agent-connect-grant-service`). LLM keys are the exception because one
+ *    is what an agent RUNS on: granting a second key re-points the agent's
  *    provider and respawns its sandbox.
  *  - **Widen only into emptiness.** Nothing here ever re-points an agent
  *    someone deliberately configured; it only turns "cannot run" into
@@ -57,7 +58,7 @@ const log = logger.child({ component: "llm-autoattach" });
 /**
  * Resolve the grant scope from the workspace ALONE.
  *
- * Every auto-attach entry point (here and `workspace-autoattach-service`)
+ * Every automatic grant's entry point (here and `agent-connect-grant-service`)
  * takes a workspace id rather than a `GrantScope`, and the org is read from
  * the workspace row here. That is a fencing decision, not a convenience: a
  * caller cannot pass an organization that disagrees with the workspace, so the
@@ -93,7 +94,7 @@ export const autoAttachScope = async (
 export const auditAutoGrants = async (
   scope: GrantScope,
   userId: string | null,
-  auto: "llm-autoattach" | "workspace-autoattach",
+  auto: "llm-autoattach" | "agent-connect",
   metadata: Record<string, string | string[]>,
 ): Promise<void> => {
   if (!userId) return;

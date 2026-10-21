@@ -11,6 +11,7 @@ import {
   highestSeq,
   mergeEvents,
   movesTurnStatus,
+  raisesApproval,
 } from "@/lib/chat/transcript";
 import type { TurnEvent } from "@/lib/api/types";
 
@@ -56,6 +57,13 @@ export const useConversationStream = (
      */
     onTurnBoundary?: () => void;
     /**
+     * Fires once per network read that carried a FINISHED platform tool that
+     * can raise an approval card (`raisesApproval`). The card rides a 15s
+     * poll; this refetches it the moment the agent says it is up, so the
+     * text and the card appear together.
+     */
+    onApprovalRaised?: () => void;
+    /**
      * The lowest seq the first connect must replay FROM (exclusive) — the
      * turns window's `oldestSeq - 1`, so the server replays only the turns
      * on screen instead of the whole history. `undefined` = not known yet:
@@ -98,6 +106,9 @@ export const useConversationStream = (
     setEvents(heldRef.current); // one setState per network read
     if (incoming.some(movesTurnStatus)) {
       options.onTurnBoundary?.();
+    }
+    if (incoming.some(raisesApproval)) {
+      options.onApprovalRaised?.();
     }
   });
 

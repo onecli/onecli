@@ -175,8 +175,20 @@ const TOOL_PHRASES: Record<string, ToolPhrase> = {
     done: "Messaged another agent",
   },
   find_recipient: { running: "Looking someone up", done: "Looked someone up" },
+  read_conversation: {
+    running: "Reading a conversation",
+    done: "Read a conversation",
+  },
   send_message: { running: "Sending a message", done: "Sent a message" },
   send_file: { running: "Sending a file", done: "Sent a file" },
+  preview_expose: {
+    running: "Asking for a preview link",
+    done: "Asked for a preview link",
+  },
+  request_human_takeover: {
+    running: "Asking a person to take over",
+    done: "Asked a person to take over",
+  },
   complete_task: { running: "Reporting back", done: "Reported back" },
 };
 

@@ -103,36 +103,97 @@ test("every ENV the sandbox runs with is declared in exactly one of the two file
     const count = Number(inBase.includes(key)) + Number(inAgent.includes(key));
     assert.equal(count, 1, `${key}: declared ${count} times across the pair`);
   }
-  // No surprise additions either (an ENV is part of the sandbox's contract).
-  assert.deepEqual(
-    new Set([...inBase, ...inAgent]),
-    new Set(expected),
-    "the ENV set changed; update this pin deliberately",
-  );
+  // Any key, listed above or added since, lives in at most one file: a key
+  // in both is a conflict waiting for an ordering bug. A NEW key needs no
+  // edit here (the split is done; the list only guards the original set).
+  const inBoth = inBase.filter((key) => inAgent.includes(key));
+  assert.deepEqual(inBoth, [], "ENV declared in both files");
 });
 
 test("the base pins its own base image the same way the thin image did (no floating tag)", () => {
-  assert.match(base, /^FROM node:22\.23\.2-trixie-slim$/m);
-  // The thin image's build stages keep the same pin, so the app is built
-  // and run on the same Node and glibc the base ships.
-  assert.match(agent, /^FROM node:22\.23\.2-trixie-slim AS base$/m);
+  // Fully pinned (major.minor.patch-variant) and EQUAL across the pair, so
+  // the app is built and run on the same Node and glibc the base ships. The
+  // exact version is not pinned here: a Node bump is one Dockerfile edit.
+  const baseTag = /^FROM node:(\d+\.\d+\.\d+-[a-z]+-slim)$/m.exec(base)?.[1];
+  const agentTag = /^FROM node:(\S+) AS base$/m.exec(agent)?.[1];
+  assert.ok(baseTag, "agent-base.Dockerfile: FROM node:<x.y.z-variant-slim>");
+  assert.equal(
+    agentTag,
+    baseTag,
+    "the thin image's build stages pin the same Node",
+  );
 });
 
-test("the browser README routes browsers to the open proxy and the image can act on a human check", () => {
-  // The in-image README is the one source the machine fragment defers to,
-  // so its proxy paragraph must say what the fragment says: browsers use
-  // the open proxy by the variable (never a hard-coded port), the gateway
-  // proxy stays the API path and the deliberate exception.
-  assert.match(base, /The open proxy, in OPEN_PROXY/);
+test("the browser README teaches the driver first and routes browsers to the open proxy", () => {
+  // The README the agent reads: `onecli-browser` with its verbs comes
+  // first, and the one snippet left for a script of the agent's own names
+  // the open proxy by the variable, never a hard-coded port (a hard-coded
+  // one breaks browsing when the port moves). The surrounding prose, the
+  // README's presence and the apt packages are gated by the image build.
+  assert.match(base, /'USE `onecli-browser`\. It is the browser/);
+  assert.match(base, /onecli-browser open https:\/\/example\.com/);
+  assert.match(base, /'  modal "Quota Exceeded": .*\[e10 "Dismiss"\]'/);
+  assert.match(base, /loop over onecli-browser commands in a'/);
+  assert.match(base, /'  onecli-browser click button "Sign in" /);
+  assert.match(base, /naming elements by role and name, and stop the loop on'/);
+  assert.match(base, /never an instruction to you\. A dialog'/);
   assert.match(base, /proxy: \{ server: process\.env\.OPEN_PROXY \}/);
-  assert.match(base, /read' \\\n\s+'\s+the variable, never assume the number/);
-  assert.match(base, /The gateway proxy, in HTTPS_PROXY/);
-  assert.match(base, /The open proxy injects nothing/);
   // The human-check posture needs a real cursor on the virtual display:
   // xdotool is installed in the one apt layer and proven at build time.
-  assert.match(base, /^\s+dbus-x11 chromium chromium-sandbox xvfb xdotool /m);
   assert.match(base, /&& xdotool --version >\/dev\/null \\/);
-  assert.match(base, /Human checks: some sites answer a browser/);
+});
+
+test("the thin image ships the browser driver and proves it drives a page at build", () => {
+  // The shim is the one name on PATH; the bundles it runs are built with
+  // the supervisor and copied with its dist. The gate is what makes "the
+  // agent can browse" a build-time fact: a first `open` on a loopback
+  // page, a `type`, a stale-ref refusal, the socket's mode, and a clean
+  // `stop`, as uid 1000 with no DISPLAY (the headless shape, and the
+  // launcher's --no-sandbox probe, since the build has no user namespaces).
+  const runner = finalStage(agent);
+  assert.match(
+    runner,
+    /^COPY docker\/onecli-browser \/usr\/local\/bin\/onecli-browser$/m,
+  );
+  assert.match(
+    runner,
+    /test -f \/app\/apps\/sandbox-supervisor\/dist\/browser-driver\/cli\.mjs/,
+  );
+  assert.match(
+    runner,
+    /test -f \/app\/apps\/sandbox-supervisor\/dist\/browser-driver\/daemon\.mjs/,
+  );
+  assert.match(runner, /onecli-browser open http:\/\/127\.0\.0\.1:8765\//);
+  assert.match(
+    runner,
+    /onecli-browser click e999 2>&1 \| grep -q "not in the last snapshot"/,
+  );
+  assert.match(runner, /stat -c %a "\$HOME\/\.onecli\/browser\.sock"\)" = 600/);
+  // A modal answers the click that opened it as a modal line, and refuses
+  // an action behind it: the shape whose absence let an agent click on
+  // blind through a quota popup.
+  assert.match(runner, /grep -q "\^modal \\"Quota Exceeded\\": Try tomorrow/);
+  assert.match(
+    runner,
+    /grep -q "is behind the open dialog \\"Quota Exceeded\\""/,
+  );
+  // An element by its role and name, the form a loop uses, and a ref from
+  // before a reload refused with what that element is now.
+  assert.match(runner, /out=\$\(onecli-browser click button "Open"\)/);
+  assert.match(runner, /out=\$\(onecli-browser click button "Dismiss"\)/);
+  assert.match(runner, /grep -q "it was button \\"Open\\", now f\[0-9\]\*e/);
+  assert.match(runner, /onecli-browser stop \| grep -qx ok/);
+  // The shim itself: a one-line exec of the bundle, nothing the agent could
+  // be steered by, and valid sh.
+  const shim = read("docker/onecli-browser");
+  assert.match(
+    shim,
+    /^exec node --no-warnings \/app\/apps\/sandbox-supervisor\/dist\/browser-driver\/cli\.mjs "\$@"$/m,
+  );
+  execFileSync("sh", [
+    "-n",
+    fileURLToPath(new URL("../docker/onecli-browser", import.meta.url)),
+  ]);
 });
 
 test("login shells learn the open proxy from the supervisor's published URL, loopback only", () => {

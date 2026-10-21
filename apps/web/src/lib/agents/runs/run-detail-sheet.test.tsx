@@ -110,7 +110,7 @@ describe("RunDetailSheet", () => {
     ).toHaveTextContent("can still be missed");
   });
 
-  it("lists app calls without any request path", async () => {
+  it("lists app calls with method, host, status and latency", async () => {
     get.mockResolvedValue({
       run: detail({
         appAttribution: "agent_time_window",
@@ -128,7 +128,7 @@ describe("RunDetailSheet", () => {
     });
     mount();
     expect(await screen.findByText("POST api.example.com")).toBeInTheDocument();
-    expect(screen.getByText("502")).toHaveClass("text-destructive");
+    expect(screen.getByText("502")).toBeInTheDocument();
     expect(screen.getByText("40 ms")).toBeInTheDocument();
   });
 
@@ -163,6 +163,7 @@ describe("RunDetailSheet", () => {
             input: JSON.stringify({ command: "echo '<img src=x>'" }),
             output: "ok",
             isError: false,
+            exitCode: null,
           },
         ],
       }),

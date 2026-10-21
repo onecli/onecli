@@ -29,16 +29,16 @@ scenario(
   "a turn that outlives the ceiling is warned, failed, and stopped",
   async (cx) => {
     const stack = await cx.startStack({
-      // Scenario-tiny clocks: the warning window opens 10s in (30 − 20) and
-      // the sweep lands at 30s. The window is deliberately WIDE — the ceiling
+      // Scenario-tiny clocks: the warning window opens 6s in (18 - 12) and
+      // the sweep lands at 18s. The window is deliberately WIDE: the ceiling
       // clock starts at the POST, and a real container boot eats the first
-      // several seconds, so a tight window can close before the turn is even
-      // `running` (which the warning arm requires). The stall arm stays at
-      // its default — a live supervisor heartbeats, so it never fires here
-      // (its proofs are pg-level).
+      // few seconds (measured 3-5 s on CI), so a tight window can close
+      // before the turn is even `running` (which the warning arm requires).
+      // The stall arm stays at its default: a live supervisor heartbeats, so
+      // it never fires here (its proofs are pg-level).
       apiEnv: {
-        TURN_CEILING_SECONDS: "30",
-        TURN_CEILING_WARNING_SECONDS: "20",
+        TURN_CEILING_SECONDS: "18",
+        TURN_CEILING_WARNING_SECONDS: "12",
       },
     });
     if (stack.runner === null) throw new Error("runner expected");

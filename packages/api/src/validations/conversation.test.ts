@@ -3,6 +3,18 @@ import { describe, expect, it } from "vitest";
 import * as conversation from "./conversation";
 import { isRawErrorPayload } from "./conversation";
 
+describe("transcript-rejection recovery", () => {
+  it("asks for a fresh restart without promising signed-history repair", () => {
+    const message = conversation.TURN_FAILURE_COPY.transcript_rejected?.message;
+    expect(message).toBe(conversation.TRANSCRIPT_REJECTED_MESSAGE);
+    expect(message).toContain(
+      "restart the agent from its menu in the dashboard",
+    );
+    expect(message).toContain("start it fresh");
+    expect(message).not.toMatch(/in a little while|repair the history/);
+  });
+});
+
 describe("isRawErrorPayload", () => {
   it.each([
     // The agent runtime's wrapper around a provider's error body: a 5xx no

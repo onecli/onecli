@@ -13,10 +13,9 @@ export interface SkillFileInput {
 
 export interface SkillSummary {
   id: string;
-  /** "agent" | "workspace" | "organization" */
+  /** "agent" | "organization" */
   scope: string;
   agentId: string | null;
-  workspaceId: string | null;
   organizationId: string | null;
   name: string;
   description: string;
@@ -37,8 +36,9 @@ export interface SkillInput {
   description: string;
   content: string;
   enabled?: boolean;
-  /** Present = agent tier (a hosted agent of this workspace); absent = workspace tier. */
-  agentId?: string;
+  /** The owning agent (a hosted agent of this workspace). Required: skills
+   *  created through /v1/skills always belong to one agent. */
+  agentId: string;
   files?: SkillFileInput[];
 }
 

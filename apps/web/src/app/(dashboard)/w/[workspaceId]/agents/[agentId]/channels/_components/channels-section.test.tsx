@@ -15,12 +15,18 @@ const state = vi.hoisted(() => ({
   view: undefined as unknown,
   attachData: undefined as unknown,
   manifest: { transport: "events", material: { name: "manifest" } } as unknown,
+  search: "",
+  onConnected: undefined as
+    | ((event: { provider?: string; pending?: boolean }) => void)
+    | undefined,
 }));
 
 const mocks = vi.hoisted(() => ({
   attach: vi.fn(),
   complete: vi.fn(),
   detach: vi.fn(),
+  replace: vi.fn(),
+  toastSuccess: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-channels", () => ({
@@ -36,6 +42,7 @@ vi.mock("@/hooks/use-channels", () => ({
     data: state.attachData,
   }),
   useCompleteChannel: () => ({ mutate: mocks.complete, isPending: false }),
+  useSyncAgentIcon: () => ({ mutate: vi.fn(), isPending: false }),
   useDetachChannel: () => ({ mutate: mocks.detach, isPending: false }),
   useChannelManifest: () => ({ data: state.manifest, isPending: false }),
 }));
@@ -45,12 +52,22 @@ vi.mock("../../_components/agent-page-frame", () => ({
 }));
 
 vi.mock("@/hooks/use-app-connected", () => ({
-  useAppMessages: () => {},
+  useAppMessages: ({
+    onConnected,
+  }: {
+    onConnected: (event: { provider?: string; pending?: boolean }) => void;
+  }) => {
+    state.onConnected = onConnected;
+  },
+}));
+
+vi.mock("sonner", () => ({
+  toast: { success: mocks.toastSuccess, error: vi.fn() },
 }));
 
 vi.mock("next/navigation", () => ({
-  useSearchParams: () => new URLSearchParams(""),
-  useRouter: () => ({ replace: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(state.search),
+  useRouter: () => ({ replace: mocks.replace }),
   usePathname: () => "/w/p1/agents/ag-1/channels",
 }));
 
@@ -95,8 +112,11 @@ const activePresence = (
 beforeEach(() => {
   state.view = view();
   state.attachData = undefined;
+  state.search = "";
   mocks.attach.mockClear();
   mocks.complete.mockClear();
+  mocks.replace.mockClear();
+  mocks.toastSuccess.mockClear();
   // The events arm opens its install popup synchronously in the click; jsdom
   // leaves `window.open` unimplemented, so stub it (the popup dance itself is
   // covered in slack-attach-card.test.tsx).
@@ -104,6 +124,42 @@ beforeEach(() => {
     "open",
     vi.fn(() => null),
   );
+});
+
+describe("the install-return landing", () => {
+  it("?connected says connected and strips the marker", () => {
+    state.search = "connected=slack&tab=x";
+    renderSection();
+
+    expect(mocks.toastSuccess).toHaveBeenCalledWith("Slack connected");
+    expect(mocks.replace).toHaveBeenCalledWith(
+      "/w/p1/agents/ag-1/channels?tab=x",
+      { scroll: false },
+    );
+  });
+
+  it("?installed says one step is left, never connected, and strips the marker", () => {
+    state.search = "installed=slack";
+    renderSection();
+
+    expect(mocks.toastSuccess).toHaveBeenCalledWith(
+      "Installed in Slack. One step left to finish.",
+    );
+    expect(mocks.replace).toHaveBeenCalledWith("/w/p1/agents/ag-1/channels", {
+      scroll: false,
+    });
+  });
+
+  it("a popup's pending message says one step is left", () => {
+    renderSection();
+
+    state.onConnected?.({ provider: "slack", pending: true });
+    expect(mocks.toastSuccess).toHaveBeenCalledWith(
+      "Installed in Slack. One step left to finish.",
+    );
+    state.onConnected?.({ provider: "slack" });
+    expect(mocks.toastSuccess).toHaveBeenLastCalledWith("Slack connected");
+  });
 });
 
 describe("the guided events arm", () => {
@@ -164,6 +220,49 @@ describe("the guided socket arm", () => {
       { botToken: "xoxb-bot", appToken: "xapp-1-secret" },
       expect.anything(),
     );
+  });
+
+  it("a consent install the SERVER flags as awaiting asks for the app-level token alone", () => {
+    state.view = view({
+      posture: { transport: "socket", available: ["events", "socket"] },
+      presences: [
+        activePresence({
+          status: "pending_setup",
+          transport: "socket",
+          externalId: "A900",
+          awaitingTransportCredential: true,
+        }),
+      ],
+    });
+    renderSection();
+
+    expect(screen.getByText("Installed in Slack")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /Open app settings/ }),
+    ).toHaveAttribute("href", "https://api.slack.com/apps/A900/general");
+    expect(screen.queryByLabelText("Bot token")).not.toBeInTheDocument();
+  });
+
+  it("a DETACHED socket app with a bot identity is NOT taken for a waiting install", () => {
+    // A detach keeps the row's identity but revokes its install: without the
+    // server's flag the card must resume, not offer a doomed one-field paste.
+    state.view = view({
+      posture: { transport: "socket", available: ["events", "socket"] },
+      presences: [
+        activePresence({
+          status: "pending_setup",
+          transport: "socket",
+          identityRef: "U777",
+          awaitingTransportCredential: false,
+        }),
+      ],
+    });
+    renderSection();
+
+    expect(screen.queryByText("Installed in Slack")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Resume setup" }),
+    ).toBeInTheDocument();
   });
 });
 

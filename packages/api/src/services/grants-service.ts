@@ -14,6 +14,7 @@ import { canonicalPolicy, entriesOutside } from "../lib/resource-axis";
 import { loadInjectionRules } from "./policy-simulate/load-rules";
 import { resolvePrincipalSet } from "./policy-simulate/principal-set";
 import { orgResourceBoundary } from "./policy-reflect/org-resource-boundary";
+import { grantedSecretSelection } from "./policy-reflect/injection";
 import {
   gatedActions,
   lockScope,
@@ -44,7 +45,7 @@ import { requestSandboxRespawn } from "./sandbox-service";
 import { bumpHomeForAgent } from "./home-sync-service";
 import { logger } from "../lib/logger";
 import { resolveAgentLlmCredential } from "./llm-credential-service";
-import { isLlmProviderId, LLM_PROVIDER_IDS } from "../llm/registry";
+import { isLlmProviderId } from "../llm/registry";
 import { signalWork } from "./due-work";
 
 /**
@@ -182,8 +183,8 @@ const requireAgent = async (scope: GrantScope, agentId: string) => {
  * key alone; a GENERIC secret is spliced at the wire like a connection, so the
  * payload is byte-identical before and after, and respawning would destroy a
  * working session to change nothing. That holds in both directions, attach and
- * detach, and matters because a new workspace secret reaches every agent at
- * once (`workspace-autoattach-service`).
+ * detach, and matters because a custom secret is often switched on for many
+ * agents in a row (its "choose agents" window).
  *
  * A `byo` agent has no sandbox at all, so this is a hosted-only concern.
  */
@@ -561,9 +562,10 @@ export const setConnectionGrant = async (
     requireConnection(scope, connectionId),
   ]);
   // `default` is the attach toggles' request, resolved here per provider to
-  // the shape every new attach gets (all tools allowed, requests outside the
-  // tool list needing approval). It names its catch-alls explicitly, so it
-  // never inherits a stored choice; `resources` keeps its tri-state.
+  // the shape every new attach gets (reads allowed, writes and requests
+  // outside the tool list needing approval). It names its catch-alls
+  // explicitly, so it never inherits a stored choice; `resources` keeps its
+  // tri-state.
   const input: ConnectionGrantInput =
     request.access === "default"
       ? {
@@ -797,74 +799,40 @@ export const removeSecretGrant = async (
   };
 };
 
-/** Default grants for `addDefaultGrants`: (agent × connection) default
- * attaches (`defaultConnectionGrant`) and (agent × secret) attaches. */
-export interface DefaultGrantRequest {
-  agentIds: string[];
-  connectionIds: string[];
-  secretIds: string[];
-}
-
-/** The (agent, resource) pairs `addDefaultGrants` actually wrote. */
-export interface DefaultGrantResult {
-  connections: { agentId: string; connectionId: string }[];
-  secrets: { agentId: string; secretId: string }[];
-}
-
 /**
- * Attach many (agent, resource) pairs at once, the workspace auto-attach's
- * writer. ONE transaction and ONE publish however many pairs, where the
- * per-pair writers above would publish once per pair: a new agent in a
- * workspace with N connections would otherwise burn N generations (pushing
- * every rollback target out of the retention window) and N round-trips through
- * the scope lock.
+ * Give ONE agent the product-default attach on ONE connection
+ * (`defaultConnectionGrant`, exactly what the attach toggles write), unless it
+ * already holds a stack for it. The connect-from-an-agent writer
+ * (`agent-connect-grant-service`): a connection added from an agent's context
+ * is on for that agent from the start.
  *
- * ADD-ONLY: a pair that already has any stack is left exactly as it is, so a
- * customized grant is never flattened back to the default. Each pair gets the
- * product-default attach (`defaultConnectionGrant`), exactly what the dialog
- * toggle writes, so turning one off is the same single detach.
+ * ADD-ONLY, unlike `setConnectionGrant`: an existing stack (a customized one
+ * included) is left exactly as it is, so re-adding an account the agent
+ * already narrowed never flattens it back to the default. The existence check
+ * and the append run under the scope lock, so a concurrent grant write can't
+ * slip a stack in between them. Nothing written means nothing published.
  *
- * Fenced like every grant write: agents must be the workspace's own, and
- * resources must be in the workspace+org pool; anything else is silently
- * skipped (a vanished row is a no-op, never an error).
- *
- * GENERIC secrets only. An LLM key changes a hosted agent's spawn payload, so
- * its grant needs the per-pair writer's respawn; it is refused here rather than
- * granted without one.
+ * Fenced like every grant write: the agent must be the workspace's own and
+ * the connection in the workspace+org pool (404 otherwise).
  */
-export const addDefaultGrants = async (
+export const attachDefaultConnectionGrant = async (
   scope: GrantScope,
-  request: DefaultGrantRequest,
+  agentId: string,
+  connectionId: string,
   userId: string | null,
-): Promise<DefaultGrantResult> => {
-  const empty: DefaultGrantResult = { connections: [], secrets: [] };
-  if (request.agentIds.length === 0) return empty;
-  const [connections, secrets] = await Promise.all([
-    request.connectionIds.length > 0
-      ? db.appConnection.findMany({
-          where: { id: { in: request.connectionIds }, ...poolWhere(scope) },
-          select: { id: true, provider: true, label: true },
-        })
-      : Promise.resolve([]),
-    request.secretIds.length > 0
-      ? db.secret.findMany({
-          where: {
-            id: { in: request.secretIds },
-            ...poolWhere(scope),
-            type: { notIn: LLM_PROVIDER_IDS },
-          },
-          select: { id: true, name: true },
-        })
-      : Promise.resolve([]),
+): Promise<{ changed: boolean }> => {
+  const [agent, connection] = await Promise.all([
+    requireAgent(scope, agentId),
+    requireConnection(scope, connectionId),
   ]);
-  if (connections.length === 0 && secrets.length === 0) return empty;
+  const desired = compileConnectionStack(
+    grantName(agent.name, connection.label ?? connection.provider),
+    connection.provider,
+    defaultConnectionGrant(connection.provider),
+  );
   // The default attach's catch-alls need approval: the same write-time gate
   // as `setConnectionGrant`, checked before the lock (it reads the plan).
-  if (
-    connections.some(
-      (c) => defaultConnectionGrant(c.provider).access === "custom",
-    )
-  ) {
+  if (desired.some((rule) => rule.requireApproval)) {
     await getRuleActionGate().assertAllowed(
       base(scope),
       gatedActions({ requireApproval: true }),
@@ -872,91 +840,89 @@ export const addDefaultGrants = async (
   }
 
   const scopeBase = base(scope);
-  const result = await db.$transaction(
-    async (tx) => {
-      await lockScope(tx, scopeBase);
-      // The agents and their existing stacks are read UNDER the lock. An agent
-      // delete holds this lock until it commits, so no agent here can vanish
-      // before the append (one that did would fail its identity connect and
-      // cost every other agent the grant), and no concurrent grant can slip a
-      // stack in between this check and the append.
-      const agents = await tx.agent.findMany({
-        where: { id: { in: request.agentIds }, workspaceId: scope.workspaceId },
-        select: { id: true, name: true },
-      });
-      const existing = await tx.policyRuleV2.findMany({
-        where: {
-          ...scopeBase,
-          status: "draft",
-          source: GRANT_SOURCE,
-          identities: { some: { agentId: { in: agents.map((a) => a.id) } } },
-        },
-        select: {
-          identities: { select: { agentId: true } },
-          targets: { select: { appConnectionId: true, secretId: true } },
-        },
-      });
-      const held = new Set(
-        existing.flatMap((row) =>
-          row.identities.flatMap((i) =>
-            row.targets.map(
-              (t) => `${i.agentId}:${t.appConnectionId ?? t.secretId}`,
-            ),
-          ),
-        ),
-      );
+  const changed = await db.$transaction(async (tx) => {
+    await lockScope(tx, scopeBase);
+    const existing = await readGrantRows(tx, scope, { agentId, connectionId });
+    if (existing.length > 0) return false;
+    await appendGrantRules(
+      tx,
+      scopeBase,
+      userId,
+      desired.map((rule) => ({
+        rule,
+        agentId,
+        target: connectionTarget(connectionId, rule),
+      })),
+    );
+    await publishDraftInTx(tx, scopeBase, userId);
+    return true;
+  });
+  if (changed) await refreshAgentHome(agentId);
+  return { changed };
+};
 
-      const written: DefaultGrantResult = { connections: [], secrets: [] };
-      const creates: GrantCreate[] = [];
-      for (const agent of agents) {
-        for (const connection of connections) {
-          if (held.has(`${agent.id}:${connection.id}`)) continue;
-          const name = grantName(
-            agent.name,
-            connection.label ?? connection.provider,
-          );
-          for (const rule of compileConnectionStack(
-            name,
-            connection.provider,
-            defaultConnectionGrant(connection.provider),
-          )) {
-            creates.push({
-              rule,
-              agentId: agent.id,
-              target: connectionTarget(connection.id, rule),
-            });
-          }
-          written.connections.push({
-            agentId: agent.id,
-            connectionId: connection.id,
-          });
-        }
-        for (const secret of secrets) {
-          if (held.has(`${agent.id}:${secret.id}`)) continue;
-          for (const rule of compileSecretGrant(
-            grantName(agent.name, secret.name),
-          )) {
-            creates.push({
-              rule,
-              agentId: agent.id,
-              target: secretTarget(secret.id),
-            });
-          }
-          written.secrets.push({ agentId: agent.id, secretId: secret.id });
-        }
-      }
-      if (creates.length === 0) return written;
-      await appendGrantRules(tx, scopeBase, userId, creates);
-      await publishDraftInTx(tx, scopeBase, userId);
-      return written;
-    },
-    // One row per pair: a large workspace's fan-out can outlast Prisma's 5s
-    // default interactive-transaction timeout (the backfill precedent).
-    { timeout: 60_000, maxWait: 10_000 },
+/** One agent's standing on one secret: the per-agent rows of the secret's
+ * "choose agents" window. */
+export interface SecretAgentAccessEntry {
+  agentId: string;
+  name: string;
+  /** A workspace grant (the switch's own state): detachable. */
+  granted: boolean;
+  /** Injected by an ORG rule with no workspace grant: on, and locked. */
+  orgGranted: boolean;
+}
+
+export interface SecretAgentAccess {
+  secretId: string;
+  agents: SecretAgentAccessEntry[];
+}
+
+/**
+ * Every agent of the workspace against one secret, the reverse view the
+ * custom connection's "choose agents" window toggles over (the secret twin of
+ * the connection's agent-access dialog). `orgGranted` follows the injection
+ * law the agent page's Custom tab reads (`grantedSecretSelection` over the
+ * PUBLISHED org rules), so a switch here never disagrees with that tab.
+ *
+ * Constant query count however many agents: one agent list, one grant-row
+ * read, one org rule load and one principal-set resolution (agent-independent
+ * by design), then a pure in-memory walk per agent.
+ */
+export const getSecretAgentAccess = async (
+  scope: GrantScope,
+  secretId: string,
+): Promise<SecretAgentAccess> => {
+  const secret = await requireSecret(scope, secretId);
+  const [agents, grantRows, orgRows, principals] = await Promise.all([
+    db.agent.findMany({
+      where: { workspaceId: scope.workspaceId },
+      select: { id: true, name: true },
+      orderBy: { name: "asc" },
+    }),
+    readGrantRows(db, scope, { secretId }),
+    loadInjectionRules(
+      { scope: "organization", organizationId: scope.organizationId },
+      "published",
+    ),
+    resolvePrincipalSet(scope.workspaceId, scope.organizationId),
+  ]);
+  const grantedAgentIds = new Set(
+    grantRows.flatMap((row) => row.identities.map((i) => i.agentId)),
   );
-  // Only connection grants reach an agent's instructions; generic secrets are
-  // spliced at the wire and never rendered.
-  const touched = new Set(result.connections.map((c) => c.agentId));
-  await Promise.all([...touched].map(refreshAgentHome));
-  return result;
+  const level = secret.scope === "organization" ? "organization" : "workspace";
+  return {
+    secretId,
+    agents: agents.map((agent) => {
+      const granted = grantedAgentIds.has(agent.id);
+      const viaOrg = grantedSecretSelection(orgRows, agent.id, principals);
+      return {
+        agentId: agent.id,
+        name: agent.name,
+        granted,
+        orgGranted:
+          !granted &&
+          (viaOrg.ids.includes(secretId) || viaOrg.levels.has(level)),
+      };
+    }),
+  };
 };

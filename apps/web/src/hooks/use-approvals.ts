@@ -16,11 +16,16 @@ import {
   type PendingApproval,
 } from "@/lib/api/approvals";
 import { listPendingChannelApprovals } from "@/lib/api/channel-approvals";
+import type { PendingChannelApprovalItem } from "@/lib/api/channel-approvals";
 import * as channels from "@/lib/api/channels";
 import type { ChannelProvider } from "@/lib/api/channels";
 import { getWorkspaceId } from "@/lib/api-fetch";
 import { queryKeys } from "@/lib/api/keys";
+import { invalidateGatewayCache } from "@/lib/api/cache";
+import { useInvalidateGrants } from "@/hooks/use-grants";
+import { listItem, patchItem } from "@/lib/api/optimistic";
 import { hasWorkspaceContext } from "@/lib/navigation";
+import { useOptimisticMutation } from "@/hooks/use-optimistic-mutation";
 
 /**
  * How far this browser's clock reads ahead of the gateway's, at most: every
@@ -315,63 +320,130 @@ export const usePendingChannelApprovals = () => {
   });
 };
 
+/** The bell's channel arm, every workspace's entry: a decision leaves the
+ * list on click (the gateway-approval convention) and comes back if it
+ * fails. */
+const leaveChannelBell = (qc: QueryClient, itemId: string) =>
+  patchItem(
+    qc,
+    [...queryKeys.approvals.all(), "channel"],
+    listItem<PendingChannelApprovalItem>((i) => i.id === itemId),
+    () => undefined,
+  );
+
+const refreshChannelBell = (qc: QueryClient) =>
+  Promise.all([
+    qc.invalidateQueries({
+      queryKey: [...queryKeys.approvals.all(), "channel"],
+    }),
+    qc.invalidateQueries({ queryKey: queryKeys.channels.all() }),
+  ]);
+
 /** Decide one action approval from the bell (approve / always-allow /
- * reject+reason) — the per-agent decide door, bell cache refreshed. */
-export const useDecideChannelAction = (agentId: string) => {
-  const qc = useQueryClient();
-  const workspaceId = getWorkspaceId();
-  return useMutation({
-    mutationFn: (input: {
+ * reject+reason) — the per-agent decide door. Instant: the ask leaves the
+ * bell on click, and the outcome (done, failed, already settled) is said
+ * when the server answers; the row is gone by then, so the hook says it. */
+export const useDecideChannelAction = (agentId: string) =>
+  useOptimisticMutation<
+    Awaited<ReturnType<typeof channels.decideActionApproval>>,
+    {
       approvalId: string;
       decision: "approve" | "approve_always" | "reject";
       reason?: string;
-    }) =>
-      channels.decideActionApproval(agentId, input.approvalId, {
-        decision: input.decision,
-        ...(input.reason !== undefined && { reason: input.reason }),
+    }
+  >({
+    family: "channel-bell",
+    itemKey: ({ approvalId }) => `channel-ask:${approvalId}`,
+    write: ({ approvalId, decision, reason }) =>
+      channels.decideActionApproval(agentId, approvalId, {
+        decision,
+        ...(reason !== undefined && { reason }),
       }),
-    onSuccess: () => {
-      if (workspaceId) {
-        qc.invalidateQueries({
-          queryKey: queryKeys.approvals.channel(workspaceId),
-        });
+    apply: (qc, { approvalId }) => leaveChannelBell(qc, approvalId),
+    succeeded: (outcome, { decision }) => {
+      if (outcome.kind === "already_settled") {
+        toast.info("Already decided elsewhere.");
+      } else if (decision === "reject") {
+        toast.success("Rejected. The agent was told.");
+      } else if (outcome.status === "failed") {
+        toast.error("Approved, but it failed. The agent was told.");
+      } else {
+        toast.success(
+          decision === "approve_always"
+            ? "Done. This recipient is now always allowed."
+            : "Approved and done.",
+        );
       }
-      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
     },
+    refresh: refreshChannelBell,
+    failure: (_qc, { decision }) =>
+      decision === "reject"
+        ? "Couldn't reject the request"
+        : "Couldn't approve the request",
+  });
+
+/** Approve an agent-proposed custom connection with the key the person
+ * typed. The server creates the secret and grants it to that agent only, so
+ * the bell, the secrets list, the agent's grant views and the gateway cache
+ * all refresh. Deliberately NOT optimistic: the card waits for the answer,
+ * because a refused key has to stay on screen to be corrected. */
+export const useApproveCustomConnection = (agentId: string) => {
+  const qc = useQueryClient();
+  const invalidateGrants = useInvalidateGrants();
+  return useMutation({
+    // The variables carry the pasted key: drop the mutation from the cache
+    // the moment nothing observes it (the card resets after it settles), not
+    // after the default 5 minutes. No onMutate snapshot keeps it either.
+    gcTime: 0,
+    mutationFn: (input: { approvalId: string; value: string }) =>
+      channels.approveCustomConnection(agentId, input.approvalId, input.value),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: queryKeys.secrets.all() });
+      void qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
+      // The approve writes a grant, so the agent's toggles, badges and
+      // effective-credential views refetch too, or the new connection reads
+      // as "off" until a reload.
+      invalidateGrants();
+      void invalidateGatewayCache();
+    },
+    // Settled either way: a 409 (decided elsewhere) must clear the card too.
+    onSettled: () => refreshChannelBell(qc),
   });
 };
 
 /** Decide one reach ask from the bell — space (3-way) or person (2-way),
- * through the existing per-agent reach doors. */
-export const useDecideChannelReach = (agentId: string, provider: string) => {
-  const qc = useQueryClient();
-  const workspaceId = getWorkspaceId();
-  return useMutation({
-    mutationFn: (input: {
+ * through the existing per-agent reach doors. Instant: the ask leaves the
+ * bell on click and comes back if the decision fails. */
+export const useDecideChannelReach = (agentId: string, provider: string) =>
+  useOptimisticMutation<
+    { kind: string },
+    {
+      itemId: string;
       externalRef: string;
       subjectKind: "space" | "external_user";
       state: "approved" | "members_only" | "blocked";
-    }) =>
-      input.subjectKind === "space"
+      /** Said once the server agrees ("Donna answers everyone in #ops"). */
+      confirmation: string;
+    }
+  >({
+    family: "channel-bell",
+    itemKey: ({ itemId }) => `channel-ask:${itemId}`,
+    write: ({ externalRef, subjectKind, state }) =>
+      subjectKind === "space"
         ? channels.setReachState(
             agentId,
             provider as ChannelProvider,
-            input.externalRef,
-            input.state,
+            externalRef,
+            state,
           )
         : channels.setPersonReachState(
             agentId,
             provider as ChannelProvider,
-            input.externalRef,
-            input.state === "members_only" ? "blocked" : input.state,
+            externalRef,
+            state === "members_only" ? "blocked" : state,
           ),
-    onSuccess: () => {
-      if (workspaceId) {
-        qc.invalidateQueries({
-          queryKey: queryKeys.approvals.channel(workspaceId),
-        });
-      }
-      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
-    },
+    apply: (qc, { itemId }) => leaveChannelBell(qc, itemId),
+    succeeded: (_result, { confirmation }) => toast.success(confirmation),
+    refresh: refreshChannelBell,
+    failure: () => "Couldn't save that decision",
   });
-};

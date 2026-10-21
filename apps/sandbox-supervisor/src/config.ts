@@ -3,10 +3,12 @@ import {
   agentChannelPresenceSchema,
   agentConnectionSchema,
   agentPeerSchema,
+  previewRelaunchSchema,
   type AgentChannelPresenceWire,
   type AgentConnectionWire,
   type AgentEffort,
   type AgentPeerWire,
+  type PreviewRelaunchWire,
 } from "@onecli/agent-protocol";
 import { z } from "zod";
 import { log } from "./log";
@@ -49,6 +51,14 @@ export interface SupervisorConfig {
    * home-sync part refreshes it mid-run. Empty = none listed.
    */
   connections: AgentConnectionWire[];
+  /**
+   * The preview shares to bring back on THIS boot (the spawn payload's
+   * `previewRelaunch`, JSON in `AGENT_PREVIEW_RELAUNCH`), present only when
+   * a person opening a preview link caused the wake. Each is started as a
+   * background process right after the home is rendered. Absent or empty =
+   * nothing to relaunch (every other wake, and the stdio dev driver).
+   */
+  previewRelaunch?: PreviewRelaunchWire[];
   /** Adapter id; undefined = the composition root's default adapter. */
   harness: string | undefined;
   /**
@@ -67,6 +77,15 @@ export interface SupervisorConfig {
   /** The runner relays files the agent sends back (send_file). False under
    * an older runner or the stdio dev driver: the tool is then not offered. */
   outboundAttachments: boolean;
+  /** The runner carries port streams, so preview_expose and its fragment
+   * are offered. Absent or false: neither is (never teach a missing tool). */
+  previews?: boolean;
+  /**
+   * The hosted platform's agent desktop is on for this sandbox (set by the
+   * hosted runner, which also carries port streams). Absent everywhere
+   * else: the desktop is the plain one, and nothing about it is reported.
+   */
+  hostedDesktop?: boolean;
   /**
    * Cadence of the turn-liveness heartbeat (`progress` frames) while a turn
    * is in flight. Test-only override, like the observer's `intervalMs` —
@@ -125,6 +144,11 @@ export const loadConfig = (): SupervisorConfig => ({
     process.env.AGENT_CONNECTIONS,
     agentConnectionSchema,
   ),
+  previewRelaunch: parseWireList(
+    "AGENT_PREVIEW_RELAUNCH",
+    process.env.AGENT_PREVIEW_RELAUNCH,
+    previewRelaunchSchema,
+  ),
   harness: process.env.AGENT_HARNESS || undefined,
   runnerWsUrl: process.env.RUNNER_WS_URL || undefined,
   bootstrapToken: process.env.SANDBOX_WS_TOKEN || undefined,
@@ -133,4 +157,9 @@ export const loadConfig = (): SupervisorConfig => ({
    * runner that advertises outboundAttachments; absent under an older
    * runner or the stdio dev driver, where the tool must not be offered. */
   outboundAttachments: process.env.RUNNER_OUTBOUND_ATTACHMENTS === "1",
+  /** The runner carries port streams (its port API is configured), so a
+   * preview can reach this sandbox. Absent: preview_expose is not offered. */
+  previews: process.env.RUNNER_PORT_STREAMS === "1",
+  /** The hosted platform's agent desktop (see the field). */
+  hostedDesktop: process.env.RUNNER_HOSTED_DESKTOP === "1",
 });

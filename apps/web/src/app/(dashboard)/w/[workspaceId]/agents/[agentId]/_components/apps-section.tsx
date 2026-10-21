@@ -15,10 +15,13 @@ import { ManagePermissionsDialog } from "./manage-permissions-dialog";
 export const AppsSection = ({
   agentId,
   onAddConnection,
+  foldInactive,
 }: {
   agentId: string;
   /** Opens the section's Add-connection picker — the empty state's CTA. */
   onAddConnection?: () => void;
+  /** See `AppsTab`'s `foldInactive`. */
+  foldInactive?: boolean;
 }) => {
   const searchParams = useSearchParams();
   const { data: connections = [] } = useConnections("workspace");
@@ -77,6 +80,7 @@ export const AppsSection = ({
         agentId={agentId}
         onManage={(connection) => setManageId(connection.id)}
         onAddConnection={onAddConnection}
+        foldInactive={foldInactive}
       />
       <ManagePermissionsDialog
         agentId={agentId}

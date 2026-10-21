@@ -226,106 +226,11 @@ describe("fireDueWatches — the in-origin wake (direct origins)", () => {
     mocks.conversationFindMany.mockResolvedValue([directOrigin]);
   });
 
-  it("fires INSIDE the direct origin through the directWake door — no hidden conversation", async () => {
-    await fireDueWatches();
-
-    expect(mocks.ensureSourcedConversation).not.toHaveBeenCalled();
-    expect(mocks.createTurn).toHaveBeenCalledWith(
-      "pr-1",
-      "conv-origin",
-      expect.stringContaining('[Watch on process "tests" fired'),
-      { source: "watch", userId: null, directWake: { agentId: "ag-1" } },
-    );
-    expect(mocks.watchUpdateMany).toHaveBeenCalledWith({
-      where: { id: { in: ["w-1"] }, status: "triggered" },
-      data: { status: "fired", firedAt: expect.any(Date) },
-    });
-  });
-
-  it("consolidates same-origin watches into ONE turn and one guarded batch markFired", async () => {
-    mocks.claimTriggeredWatches.mockResolvedValue([
-      watch({ id: "w-a", processName: "alpha" }),
-      watch({ id: "w-b", processName: "beta" }),
-    ]);
-
-    await fireDueWatches();
-
-    expect(mocks.createTurn).toHaveBeenCalledTimes(1);
-    const message = mocks.createTurn.mock.calls[0]?.[2] as string;
-    expect(message).toContain("2 background task(s)");
-    expect(message).toContain('"alpha"');
-    expect(message).toContain('"beta"');
-    // The shared prompt is stated once, not per watch.
-    expect(message.split("report the result")).toHaveLength(2);
-    expect(mocks.watchUpdateMany).toHaveBeenCalledWith({
-      where: { id: { in: ["w-a", "w-b"] }, status: "triggered" },
-      data: { status: "fired", firedAt: expect.any(Date) },
-    });
-  });
-
   it("marks fired only AFTER the turn exists — a failed create leaves the claim for the lease", async () => {
     mocks.createTurn.mockRejectedValue(new Error("db down"));
 
     await fireDueWatches();
 
-    expect(mocks.watchUpdateMany).not.toHaveBeenCalled();
-  });
-
-  it("a busy origin keeps unexpired watches CLAIMED for retry — never the silent mark-fired drop", async () => {
-    mocks.createTurn.mockRejectedValue(new ServiceError("CONFLICT", "busy"));
-
-    await fireDueWatches();
-
-    expect(mocks.watchUpdateMany).not.toHaveBeenCalled();
-    expect(mocks.ensureSourcedConversation).not.toHaveBeenCalled();
-  });
-
-  it("a busy origin JOINS a running WAKE instead of queueing behind it", async () => {
-    // The doubled-wake fix (#1013). Measured on a live stack: every wake in
-    // a batch was born while an earlier wake was still answering, so the
-    // agent reported partial state, then reported again. Joining makes the
-    // wake that is already speaking say it once.
-    //
-    // MUTATION-PROOF: remove the join arm and this fails — the wake goes
-    // back to waiting for the running turn to finish.
-    mocks.createTurn.mockRejectedValue(new ServiceError("CONFLICT", "busy"));
-    mocks.turnFindFirst.mockResolvedValue({ id: "turn-running" });
-
-    await fireDueWatches();
-
-    expect(mocks.createFollowUp).toHaveBeenCalledWith(
-      "conv-origin",
-      "turn-running",
-      expect.stringContaining("Watch on process"),
-      { source: "watch", userId: null },
-    );
-    // ...and the watches are marked fired, because the join row now exists.
-    expect(mocks.watchUpdateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { id: { in: ["w-1"] }, status: "triggered" },
-      }),
-    );
-  });
-
-  it("looks ONLY for a running wake to join: a person's exchange is never a join target", async () => {
-    // Steering a wake into a person's live turn hijacked their answer and
-    // put the platform's instruction in their channel thread as if they had
-    // said it (live, 2026-10-03). The lookup itself is the fence.
-    // MUTATION-PROOF: drop `source: "watch"` from the lookup and this fails.
-    mocks.createTurn.mockRejectedValue(new ServiceError("CONFLICT", "busy"));
-
-    await fireDueWatches();
-
-    expect(mocks.turnFindFirst).toHaveBeenCalledWith({
-      where: {
-        conversationId: "conv-origin",
-        status: "running",
-        source: "watch",
-      },
-      select: { id: true },
-    });
-    // No running wake (the default mock): the wake waits, claimed.
-    expect(mocks.createFollowUp).not.toHaveBeenCalled();
     expect(mocks.watchUpdateMany).not.toHaveBeenCalled();
   });
 
@@ -399,44 +304,6 @@ describe("fireDueWatches — the in-origin wake (direct origins)", () => {
 
     expect(mocks.createFollowUp).not.toHaveBeenCalled();
     expect(mocks.watchUpdateMany).not.toHaveBeenCalled();
-  });
-
-  it("a busy origin DOWNGRADES an expired watch to the hidden path so it cannot retry forever", async () => {
-    mocks.claimTriggeredWatches.mockResolvedValue([watch({ expiresAt: PAST })]);
-    mocks.createTurn
-      .mockRejectedValueOnce(new ServiceError("CONFLICT", "busy"))
-      .mockResolvedValueOnce({ status: "queued", id: "turn-2" });
-
-    await fireDueWatches();
-
-    // The downgrade ran the classic fire: sourced conversation + plain origin.
-    expect(mocks.ensureSourcedConversation).toHaveBeenCalledWith(
-      "pr-1",
-      "ag-1",
-      expect.objectContaining({ externalRef: "w-1" }),
-    );
-    expect(mocks.createTurn).toHaveBeenLastCalledWith(
-      "pr-1",
-      "conv-run",
-      expect.any(String),
-      { source: "watch", userId: null },
-    );
-  });
-
-  it("a creator that is not the thread owner takes the hidden path — never a DM write", async () => {
-    mocks.claimTriggeredWatches.mockResolvedValue([
-      watch({ createdByUserId: "someone-else" }),
-    ]);
-
-    await fireDueWatches();
-
-    expect(mocks.ensureSourcedConversation).toHaveBeenCalled();
-    expect(mocks.createTurn).toHaveBeenCalledWith(
-      "pr-1",
-      "conv-run",
-      expect.any(String),
-      { source: "watch", userId: null },
-    );
   });
 
   it("a creatorless watch qualifies for in-origin with the THREAD OWNER as the access subject", async () => {

@@ -379,3 +379,120 @@ describe("secret scope", () => {
     expect(seen?.header("x-test-key")).toBe(SECRET);
   });
 });
+
+/**
+ * Two custom secrets filling the same header on one host: the agent picks
+ * one with `x-onecli-connection-id`, exactly like two accounts of one app.
+ */
+describe("custom secret disambiguation", () => {
+  const COLLIDING = {
+    grantAll: true,
+    secrets: [
+      {
+        name: "Staging key",
+        hostPattern: "127.0.0.1",
+        headerName: "x-test-key",
+        value: "staging-value",
+      },
+      {
+        name: "Prod key",
+        hostPattern: "127.0.0.1",
+        headerName: "x-test-key",
+        value: "prod-value",
+      },
+    ],
+  } as const;
+
+  scenario("answers 409 with both secrets when unpinned", async (cx) => {
+    const upstream = await cx.upstream();
+    await cx.seed(COLLIDING);
+    const gw = await cx.startGateway();
+
+    const res = await throughProxy(gw.origin, {
+      url: upstream.url("/v1/models"),
+      token: cx.ids.agentToken,
+    });
+
+    expect(res.status).toBe(409);
+    expect(res.header("x-should-retry")).toBe("false");
+    const body = res.json() as {
+      error: string;
+      header: string;
+      connections: Array<{ id: string; label: string; provider: string }>;
+    };
+    expect(body).toMatchObject({
+      error: "multiple_connections",
+      header: "x-onecli-connection-id",
+    });
+    expect(body.connections.map((c) => c.id).sort()).toEqual([
+      `${cx.ids.workspace}-sec-0`,
+      `${cx.ids.workspace}-sec-1`,
+    ]);
+    expect(body.connections.map((c) => c.label).sort()).toEqual([
+      "Prod key",
+      "Staging key",
+    ]);
+    expect(body.connections.every((c) => c.provider === "custom")).toBe(true);
+    // No value ever reaches the agent.
+    expect(res.body).not.toContain("prod-value");
+    expect(res.body).not.toContain("staging-value");
+  });
+
+  scenario("injects only the pinned secret", async (cx) => {
+    const upstream = await cx.upstream();
+    await cx.seed(COLLIDING);
+    const gw = await cx.startGateway();
+
+    const res = await throughProxy(gw.origin, {
+      url: upstream.url("/v1/models"),
+      token: cx.ids.agentToken,
+      headers: { "x-onecli-connection-id": `${cx.ids.workspace}-sec-1` },
+    });
+
+    expect(res.status).toBe(200);
+    const [seen] = await upstream.waitForRequests(1);
+    expect(seen?.header("x-test-key")).toBe("prod-value");
+    // The pin is a gateway instruction, never forwarded upstream.
+    expect(seen?.header("x-onecli-connection-id")).toBeUndefined();
+    // Both choices are advertised for the next request.
+    expect(res.header("x-onecli-connections")).toContain(
+      `${cx.ids.workspace}-sec-0`,
+    );
+  });
+
+  scenario("rejects a pin outside the agent's pool", async (cx) => {
+    const upstream = await cx.upstream();
+    await cx.seed(COLLIDING);
+    const gw = await cx.startGateway();
+
+    const res = await throughProxy(gw.origin, {
+      url: upstream.url("/v1/models"),
+      token: cx.ids.agentToken,
+      headers: { "x-onecli-connection-id": "someone-elses-secret" },
+    });
+
+    expect(res.status).toBe(404);
+    expect(res.json()).toMatchObject({ error: "connection_not_found" });
+  });
+
+  scenario("different headers on one host are not a conflict", async (cx) => {
+    const upstream = await cx.upstream();
+    await cx.seed({
+      grantAll: true,
+      secrets: [
+        { hostPattern: "127.0.0.1", headerName: "x-key-a", value: "a" },
+        { hostPattern: "127.0.0.1", headerName: "x-key-b", value: "b" },
+      ],
+    });
+    const gw = await cx.startGateway();
+
+    await throughProxy(gw.origin, {
+      url: upstream.url("/v1/models"),
+      token: cx.ids.agentToken,
+    });
+
+    const [seen] = await upstream.waitForRequests(1);
+    expect(seen?.header("x-key-a")).toBe("a");
+    expect(seen?.header("x-key-b")).toBe("b");
+  });
+});

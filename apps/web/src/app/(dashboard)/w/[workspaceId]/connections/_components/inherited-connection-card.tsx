@@ -15,9 +15,11 @@ import {
 } from "@onecli/api/lib/github-org-access";
 import type { PageScope } from "@/lib/api";
 import { connectionAccessLevelLabel } from "@onecli/api/apps/access-level";
+import { connectionTags } from "@onecli/api/lib/connection-display";
 import { ConnectionAgentRows } from "./connection-agent-rows";
 import { GitHubOrgAccessNotice } from "./github-org-access-notice";
 import type { AccountCardConnection } from "./account-card-connection";
+import { accountTypeLabel } from "@/lib/connections/account-type-label";
 
 interface InheritedConnectionCardProps {
   connection: AccountCardConnection;
@@ -32,13 +34,6 @@ const metaString = (
 ): string | undefined => {
   const value = meta?.[key];
   return typeof value === "string" ? value : undefined;
-};
-
-const metaTags = (meta: Record<string, unknown> | null): string[] => {
-  const tags = meta?.tags;
-  return Array.isArray(tags)
-    ? tags.filter((t): t is string => typeof t === "string")
-    : [];
 };
 
 /**
@@ -62,7 +57,7 @@ export const InheritedConnectionCard = ({
     connection.provider,
     connection.metadata,
   );
-  const tags = metaTags(connection.metadata);
+  const tags = connectionTags(connection.metadata);
   const orgAccessIssues = connection.reauthRequiredAt
     ? []
     : extractGitHubOrgAccess(connection.metadata);
@@ -98,7 +93,7 @@ export const InheritedConnectionCard = ({
                   </span>
                 </>
               ) : (
-                (accountType ?? "Connected")
+                (accountTypeLabel(accountType) ?? "Connected")
               )}
               {accessLevel && (
                 <span className="text-muted-foreground/60 whitespace-nowrap">

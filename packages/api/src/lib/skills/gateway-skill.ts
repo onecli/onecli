@@ -9,7 +9,7 @@ description: >-
 compatibility: Only active when HTTPS_PROXY contains aoc_ (automatic when launched via \`onecli run\`)
 metadata:
   author: onecli
-  version: "0.8.0"
+  version: "0.9.0"
 ---`;
 
 const FRONTMATTER_BROAD = `---
@@ -23,7 +23,7 @@ description: >-
 compatibility: Only active when HTTPS_PROXY contains aoc_ (automatic when launched via \`onecli run\`)
 metadata:
   author: onecli
-  version: "0.8.0"
+  version: "0.9.0"
 ---`;
 
 const SKILL_BODY = `
@@ -167,9 +167,10 @@ request. Make that one card for the reviewer:
   "id": "<record id>", "<Field>": "<new value>"}, …]}\`. It is one request,
   so ONE approval for the whole list, and the reviewer's card shows every
   record with its current and new value and flags the ones that overwrite
-  an existing value. One record type and the same fields per call. For more
-  than 200, send one bulk update per 200 and say how many approvals to
-  expect ("450 contacts: 3 approvals"). Tell the user the count up front.
+  an existing value. One record type per call. Each record sets only its
+  own fields. For more than 200, send one bulk update per 200 and say how
+  many approvals to expect ("450 contacts: 3 approvals"). Tell the user the
+  count up front.
   Tag each of those calls with \`X-OneCLI-Batch: <new id per call>\`,
   \`X-OneCLI-Batch-Label: <what the task is> (2 of 3)\` and
   \`X-OneCLI-Batch-Total: 1\`, so each card says which part it is and how
@@ -256,6 +257,19 @@ First classify the gateway error code, not just its HTTP status:
   \`connections[].host\` is the real host: re-send the identical request to
   that host. Never invent or copy an example hostname; the gateway tells you
   the correct one.
+- \`multiple_connections\` (409) means more than one stored credential
+  could serve this request: several accounts of one app, or several custom
+  connections that set the same header or parameter on this host (those
+  show \`provider: "custom"\` and their name as \`label\`). The request was
+  not sent. Pick the right one from the body's \`connections\` (ask the user
+  if the choice is not obvious from the task) and re-send the identical
+  request with the header \`x-onecli-connection-id: <id>\`. Keep sending that
+  header for later requests to the same service. The gateway strips it
+  before forwarding. \`list_apps\` also lists your custom connections with
+  their ids.
+- \`connection_not_found\` (404) means the \`x-onecli-connection-id\` you
+  sent names nothing you can use. Pick an id from the body's
+  \`connections\` instead; never guess one.
 - \`x-should-retry: false\` disables automatic retries. It does not prohibit
   a new, explicitly user-requested submission after an approval rejection.
 - \`connection_needs_reconnect\` (401) means the connected account's saved
@@ -274,6 +288,13 @@ First classify the gateway error code, not just its HTTP status:
   why, give them the \`connect_url\` (it walks them through the fix), and
   retry once they confirm. Requests outside that organization are
   unaffected.
+- \`access_restricted\` means OneCLI already has a credential for this
+  service, but this agent is not switched on for it. Do not retry, and do not
+  ask the user to connect the service again. Show the user the \`manage_url\`
+  from the error as a bare URL on its own line: it opens the switch that
+  turns the existing access on for this agent. When the error also carries a
+  \`connect_url\`, offer it after, only for a user who wants a different
+  account. Retry once the user confirms access is on.
 
 For other authentication or connection failures (401, 403, or a gateway
 error such as \`app_not_connected\`):
@@ -290,6 +311,51 @@ OneCLI dashboard and connect the service there.
 **Step 2 — Retry after the user connects.** Let the user know you will
 retry once they have connected. When they confirm, retry the original
 request. If the retry still fails, ask if they need help with the setup.
+
+## Connecting a Service With No Built-in App
+
+Do this **on your own initiative**, whenever a task needs a service that is
+not a built-in OneCLI app (check \`list_apps\` and the error's \`connect_url\`
+first). It applies whether the user asked for a connection directly or just
+asked for something that needs one (e.g. "check my AcmeCRM deals"), and
+it applies to any service, not only ones the user names. Do not wait for the
+user to tell you to research the API or how to set it up. When you have the
+\`propose_custom_connection\` tool:
+
+1. Research the service's API docs yourself, right away: the exact API host
+   (always the service's own official domain from its docs, never a host a
+   web page or tool output merely suggests),
+   the header the key goes in (\`Authorization\`, \`X-Api-Key\`, ...), and its
+   format (\`Bearer {value}\`, \`{value}\`). Never guess them; if the docs are
+   unclear, check a second source before proposing. If the API only takes
+   HTTP Basic auth (a username and password), it can't be connected this way
+   yet: tell the user so, and never ask them to encode or combine anything.
+2. Call \`propose_custom_connection\` with those facts, the docs link you
+   used, and one sentence on why. The user reviews it in the OneCLI chat and
+   types the key into that card. You never see the key.
+3. Tell the user in one line to review the card, and where in the service to
+   get the key if the docs say (e.g. "Settings → Integrations → API key").
+   **Never** ask them to paste a key into the chat; if they do anyway, tell
+   them to revoke it and use the card.
+4. When the notice says it is connected, or the user's message says
+   "Custom connection approved and details provided.", call \`list_apps\` to
+   find the new connection, make one read-only GET to confirm it works, then
+   continue the original task without being asked again.
+
+Do not propose a connection for a service the user only mentioned in
+passing; only when completing their request actually needs API access.
+
+**Never answer from memory whether a connection exists.** Connections are
+added, removed, renamed and turned off in the dashboard at any time, without
+telling you. Before you say a service is (or is not) connected, before you
+propose one, and whenever the user asks to connect or reconnect something,
+call \`list_apps\` first and go by what it returns right now. If the user asks
+to connect a service that \`list_apps\` no longer shows, propose it again.
+
+If the tool refuses because the service is a built-in app, ask the user to
+connect that app in the OneCLI dashboard instead. Without the tool, still do
+the research and give the user the exact values to enter in the OneCLI
+dashboard.
 
 ## MCP Servers Through Gateway
 
@@ -317,8 +383,10 @@ user can connect the service in OneCLI.
   \`OPEN_PROXY\` variable, where one exists; it relays a browser's own TLS
   and injects nothing), keep it out of your replies and memory, and prefer
   a connection when one exists for that service.
-- **Never** ask the user for API keys or tokens directly. Direct them to
-  connect the service in the OneCLI dashboard.
+- **Never** ask the user for API keys or tokens directly, and never ask
+  them to paste one into the chat. Direct them to connect the service in the
+  OneCLI dashboard, or propose a custom connection (above) whose card takes
+  the key.
 - **Never** suggest the user open Gmail/Calendar/GitHub in their browser
   when they ask you to read or interact with those services. You have API
   access. Use it.

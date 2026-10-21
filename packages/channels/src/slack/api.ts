@@ -30,8 +30,24 @@ const CALL_TIMEOUT_MS = 15_000;
  * 429 is exactly what fails it. Retries are for the HTTP layer only —
  * `ok:false` refusals are deterministic and never retried. */
 const MAX_ATTEMPTS = 3;
-const RETRY_AFTER_CAP_MS = 10_000;
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const INLINE_RETRY_BUDGET_MS = 10_000;
+
+/** This shared module is client-reachable, so retries must not import Node's
+ * timer module. Remove the abort listener after a completed delay, and clear
+ * the timer immediately when its caller cancels. */
+const waitForRetry = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve, reject) => {
+    signal?.throwIfAborted();
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 
 /**
  * A Slack refusal (`ok: false`), carrying Slack's own error code verbatim —
@@ -41,7 +57,11 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * importing anything Slack-shaped.
  */
 export class SlackApiError extends ChannelProviderApiError {
-  constructor(method: string, code: string) {
+  constructor(
+    method: string,
+    code: string,
+    readonly retryAfterMs?: number,
+  ) {
     super("slack", method, code, `Slack ${method} refused: ${code}`);
     this.name = "SlackApiError";
   }
@@ -62,14 +82,17 @@ const slackCall = async <T extends z.ZodType>(
      * wholesale replaces). A 5xx can arrive AFTER Slack committed the call
      * (their edge failing on the way back), so retrying a create/post/
      * exchange risks a duplicate app, a double-posted message, or burning a
-     * single-use OAuth code. 429s always retry: rate limiting is by
-     * definition pre-execution. */
+     * single-use OAuth code. Rate limits are pre-execution, so 429s may
+     * retry within the inline budget, always honoring Retry-After. */
     retry5xx?: boolean;
+    signal?: AbortSignal;
   },
   schema: T,
 ): Promise<z.infer<T>> => {
   let response: Response | null = null;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    init.signal?.throwIfAborted();
+    const timeout = AbortSignal.timeout(CALL_TIMEOUT_MS);
     response = await fetch(`${apiBase()}/${method}`, {
       method: "POST",
       headers: {
@@ -82,12 +105,12 @@ const slackCall = async <T extends z.ZodType>(
         }),
       },
       body: new URLSearchParams(init.form ?? {}).toString(),
-      signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+      signal: init.signal ? AbortSignal.any([timeout, init.signal]) : timeout,
     });
     const retryable =
       response.status === 429 ||
       (init.retry5xx === true && response.status >= 500);
-    if (!retryable || attempt === MAX_ATTEMPTS) break;
+    if (!retryable) break;
     // Missing/empty header must fall to the backoff branch — Number(null)
     // is 0, which would re-hammer immediately (the exact behavior the
     // marketplace review fails apps for).
@@ -96,10 +119,25 @@ const slackCall = async <T extends z.ZodType>(
       retryAfterHeader === null || retryAfterHeader.trim() === ""
         ? Number.NaN
         : Number(retryAfterHeader);
-    const waitMs = Number.isFinite(retryAfterSeconds)
-      ? Math.min(retryAfterSeconds * 1000, RETRY_AFTER_CAP_MS)
-      : 500 * attempt;
-    await sleep(waitMs);
+    const retryAfterMs =
+      Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0
+        ? retryAfterSeconds * 1000
+        : undefined;
+    init.signal?.throwIfAborted();
+    if (
+      response.status === 429 &&
+      (attempt === MAX_ATTEMPTS || (retryAfterMs ?? 0) > INLINE_RETRY_BUDGET_MS)
+    ) {
+      await response.body?.cancel();
+      throw new SlackApiError(method, "ratelimited", retryAfterMs);
+    }
+    if (attempt === MAX_ATTEMPTS) break;
+    const waitMs = retryAfterMs ?? 500 * attempt;
+    await response.body?.cancel();
+    if (waitMs > INLINE_RETRY_BUDGET_MS) {
+      throw new SlackApiError(method, `http_${response.status}`, waitMs);
+    }
+    await waitForRetry(waitMs, init.signal);
   }
   if (!response) throw new Error(`Slack ${method} produced no response`);
   if (!response.ok) {
@@ -468,12 +506,25 @@ export const deleteMessage = (
 
 /** A message only `user` sees (`chat.postEphemeral`): how a click's refusal
  * reaches the clicker without rewriting the card everyone shares. `text` is
- * the caller's already-escaped mrkdwn. */
+ * the caller's already-escaped mrkdwn. `threadTs` puts it inside a thread
+ * (a refused Stop answers in the thread whose loader it clicked). */
 export const postEphemeral = (
   botToken: string,
-  input: { channel: string; user: string; text: string },
+  input: { channel: string; user: string; text: string; threadTs?: string },
 ) =>
-  slackCall("chat.postEphemeral", { token: botToken, form: input }, okEnvelope);
+  slackCall(
+    "chat.postEphemeral",
+    {
+      token: botToken,
+      form: {
+        channel: input.channel,
+        user: input.user,
+        text: input.text,
+        ...(input.threadTs && { thread_ts: input.threadTs }),
+      },
+    },
+    okEnvelope,
+  );
 
 /**
  * The agent-session work status (the native "Working…" loader an agent-flavor
@@ -986,6 +1037,9 @@ const usersInfoResponse = z.object({
         /** Where a manifest rename lands, ASYNCHRONOUSLY - the field the
          * teardown polls to confirm the tombstone before deleting. */
         real_name: z.string().optional(),
+        /** Avatar URLs (Slack CDN), smallest to largest. */
+        image_48: z.string().optional(),
+        image_72: z.string().optional(),
       })
       .optional(),
   }),
@@ -999,6 +1053,86 @@ export const usersInfo = (botToken: string, userId: string) =>
     { token: botToken, form: { user: userId }, retry5xx: true },
     usersInfoResponse,
   );
+
+const botsInfoResponse = z.object({
+  bot: z.object({
+    /** The app's PROFILE icon — the one set on the app's settings page
+     * (Display Information). Slack serves its generic plugin marks here
+     * until an icon is uploaded; `isSlackAppIconUrl` tells them apart. */
+    icons: z
+      .object({
+        image_48: z.string().optional(),
+        image_72: z.string().optional(),
+      })
+      .optional(),
+  }),
+});
+
+/** An app's bot record — its profile icon. Needs the bot token's
+ * `users:read` (in the manifest from day one). `botId` is the `bot_id`
+ * `authTest` answers for the app's own bot token. */
+export const botsInfo = (botToken: string, botId: string) =>
+  slackCall(
+    "bots.info",
+    { token: botToken, form: { bot: botId }, retry5xx: true },
+    botsInfoResponse,
+  );
+
+/**
+ * Whether a `bots.info` icon URL is an icon someone UPLOADED, and so the one
+ * host set the server may download it from. Uploads are served from Slack's
+ * avatar CDN; the stock marks an icon-less app answers with
+ * (`a.slack-edge.com/.../img/plugins/app/bot_48.png`, observed live) are not,
+ * so they never pass. When SLACK_CDN_BASE_URL points at a fake server (the
+ * test seam), that exact origin is the allowed one.
+ */
+export const isSlackAppIconUrl = (raw: string): boolean => {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  const base = process.env.SLACK_CDN_BASE_URL;
+  if (base) {
+    try {
+      const baseUrl = new URL(base);
+      return url.protocol === baseUrl.protocol && url.host === baseUrl.host;
+    } catch {
+      // Unparseable override — fall through to the production rule.
+    }
+  }
+  return (
+    url.protocol === "https:" &&
+    ["avatars.slack-edge.com", "ca.slack-edge.com"].includes(
+      url.hostname.toLowerCase(),
+    )
+  );
+};
+
+/**
+ * Download an uploaded app icon (public, so no token rides along). The URL
+ * comes from a Slack answer, but the server fetching it must never be
+ * steerable elsewhere: `isSlackAppIconUrl` hosts only, no redirects, a
+ * timeout, and `maxBytes` enforced mid-stream. Throws on any refusal.
+ */
+export const downloadSlackAppIcon = async (
+  url: string,
+  maxBytes: number,
+): Promise<Buffer> => {
+  if (!isSlackAppIconUrl(url)) throw new Error("not a Slack app icon URL");
+  const response = await fetch(url, {
+    redirect: "error",
+    signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error(`app icon download answered HTTP ${response.status}`);
+  }
+  const body = await readCappedBinaryBody(response, maxBytes);
+  if (!body.ok) throw new Error(`app icon download ${body.reason}`);
+  return body.bytes;
+};
 
 const usersListResponse = z.object({
   members: z.array(
@@ -1087,6 +1221,150 @@ export const conversationsList = (
     conversationsListResponse,
   );
 
+// ── A person's own token (xoxp): read-only, for the read tool ──────────────
+
+const userConversation = z.object({
+  id: z.string().min(1),
+  name: z.string().optional(),
+  is_channel: z.boolean().optional(),
+  is_group: z.boolean().optional(),
+  is_im: z.boolean().optional(),
+  is_mpim: z.boolean().optional(),
+  is_private: z.boolean().optional(),
+  is_archived: z.boolean().optional(),
+  /** The other person, on a 1:1 DM. */
+  user: z.string().optional(),
+});
+export type SlackUserConversation = z.infer<typeof userConversation>;
+
+/**
+ * One page of the conversations the TOKEN'S USER is a member of
+ * (`users.conversations`): channels, private channels, DMs and group DMs.
+ * With a user token this is exactly "what this person can see" - the read
+ * picker's universe. Scopes: channels:read, groups:read, im:read, mpim:read.
+ */
+export const usersConversations = (
+  userToken: string,
+  input: { cursor?: string; limit?: number } = {},
+) =>
+  slackCall(
+    "users.conversations",
+    {
+      token: userToken,
+      form: {
+        types: "public_channel,private_channel,im,mpim",
+        exclude_archived: "true",
+        limit: String(input.limit ?? 200),
+        ...(input.cursor && { cursor: input.cursor }),
+      },
+      retry5xx: true,
+    },
+    z.object({
+      channels: z.array(userConversation),
+      response_metadata: z
+        .object({ next_cursor: z.string().optional() })
+        .optional(),
+    }),
+  );
+
+/**
+ * One conversation as the TOKEN'S USER sees it (`conversations.info` with a
+ * user token) - Slack answers only for conversations that person can see.
+ * Same shape as `usersConversations` rows, plus `is_member` for channels.
+ */
+export const userConversationInfo = (userToken: string, channelId: string) =>
+  slackCall(
+    "conversations.info",
+    { token: userToken, form: { channel: channelId }, retry5xx: true },
+    z.object({
+      channel: userConversation.extend({
+        is_member: z.boolean().optional(),
+      }),
+    }),
+  );
+
+const historyMessage = z.object({
+  ts: z.string().min(1),
+  user: z.string().optional(),
+  bot_id: z.string().optional(),
+  username: z.string().optional(),
+  subtype: z.string().optional(),
+  text: z.string().optional(),
+  thread_ts: z.string().optional(),
+  /** How many replies sit in this message's thread. */
+  reply_count: z.number().optional(),
+  /** Who answered in this message's thread (the agent replies there). */
+  reply_users: z.array(z.string()).optional(),
+  /** The posting APP (a bot post carries no `user`): how the agent
+   * recognizes its own posts. */
+  app_id: z.string().optional(),
+});
+export type SlackHistoryMessage = z.infer<typeof historyMessage>;
+
+const historyResponse = z.object({
+  messages: z.array(historyMessage),
+  has_more: z.boolean().optional(),
+});
+
+/**
+ * One page of a conversation's history, newest first. Works with any token
+ * that can see the conversation (a user token: anything its user is in).
+ * `oldest` is a Slack ts (exclusive lower bound). Read-only: 5xx-retried.
+ * Also feeds the point-of-contact reply judge its context (bot token).
+ */
+export const conversationsHistory = (
+  token: string,
+  input: { channel: string; oldest?: string; latest?: string; limit?: number },
+) =>
+  slackCall(
+    "conversations.history",
+    {
+      token,
+      form: {
+        channel: input.channel,
+        limit: String(input.limit ?? 50),
+        ...(input.oldest && { oldest: input.oldest }),
+        // Exclusive upper bound: pass the oldest ts of the previous page to
+        // walk backwards through the whole history.
+        ...(input.latest && { latest: input.latest }),
+      },
+      retry5xx: true,
+    },
+    historyResponse,
+  );
+
+/** One thread's messages, parent first. Same rules as history. */
+export const conversationsReplies = (
+  token: string,
+  input: { channel: string; ts: string; limit?: number },
+) =>
+  slackCall(
+    "conversations.replies",
+    {
+      token,
+      form: {
+        channel: input.channel,
+        ts: input.ts,
+        limit: String(input.limit ?? 50),
+      },
+      retry5xx: true,
+    },
+    historyResponse,
+  );
+
+/**
+ * Revoke a token at Slack (`auth.revoke`) - the disconnect's provider half,
+ * so a disconnected person's token stops working at Slack too, not just in
+ * our table. Idempotent from our side: an already-dead token refuses with
+ * `invalid_auth`/`token_revoked`, which the caller treats as done.
+ */
+export const authRevoke = (token: string) =>
+  slackCall(
+    "auth.revoke",
+    { token, retry5xx: true },
+    z.object({ revoked: z.boolean().optional() }),
+  );
+
 /**
  * Open (or return) the 1:1 IM with a user - where the platform-composed
  * reach card is delivered. Needs `im:write` (already in the manifest's
@@ -1107,10 +1385,19 @@ export const conversationsOpen = (botToken: string, userId: string) =>
  * callers: a private channel the token cannot read answers an error they
  * swallow into the bare id / a fail-open verdict.
  */
-export const conversationsInfo = (botToken: string, channelId: string) =>
+export const conversationsInfo = (
+  botToken: string,
+  channelId: string,
+  options: { signal?: AbortSignal } = {},
+) =>
   slackCall(
     "conversations.info",
-    { token: botToken, form: { channel: channelId }, retry5xx: true },
+    {
+      token: botToken,
+      form: { channel: channelId },
+      retry5xx: true,
+      signal: options.signal,
+    },
     z.object({
       channel: z.object({
         id: z.string().min(1),
@@ -1167,6 +1454,36 @@ const oauthAccessResponse = z.object({
     })
     .optional(),
 });
+
+/**
+ * The USER-scope-only exchange ("Connect your Slack"): when the authorize
+ * URL asks only `user_scope`, Slack returns NO bot token and no
+ * `bot_user_id` at the top level - the person's token rides in
+ * `authed_user`. A separate schema, so the bot install's strict one (which
+ * must refuse a response with no bot token) stays as it is.
+ */
+const oauthUserAccessResponse = z.object({
+  team: z.object({ id: z.string().min(1) }),
+  authed_user: z.object({
+    id: z.string().min(1),
+    access_token: z.string().min(1),
+  }),
+});
+
+export const oauthUserAccess = (input: {
+  clientId: string;
+  clientSecret: string;
+  code: string;
+  redirectUri: string;
+}) =>
+  slackCall(
+    "oauth.v2.access",
+    {
+      basicAuth: { user: input.clientId, pass: input.clientSecret },
+      form: { code: input.code, redirect_uri: input.redirectUri },
+    },
+    oauthUserAccessResponse,
+  );
 
 /** The events arm's code exchange. Client creds go as HTTP Basic (Slack's
  * documented preference over form params); `redirect_uri` matches the sole

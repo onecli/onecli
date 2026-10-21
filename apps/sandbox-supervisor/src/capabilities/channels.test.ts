@@ -163,4 +163,34 @@ describe("channelsTools", () => {
       properties: { kind: { enum: ["person", "channel"] } },
     });
   });
+
+  it("read_conversation is listed (and taught) ONLY while someone shared a conversation", () => {
+    expect(channelsTools([live]).map((t) => t.name)).not.toContain(
+      "read_conversation",
+    );
+    expect(
+      channelsTools([{ ...live, readableConversations: 0 }]).map((t) => t.name),
+    ).not.toContain("read_conversation");
+    const withGrants = { ...live, readableConversations: 2 };
+    const tools = channelsTools([withGrants]);
+    expect(tools.map((t) => t.name)).toContain("read_conversation");
+    // Nothing required: with no conversation the tool lists what the asker
+    // may read, so a model never dead-ends on a missing argument.
+    expect(
+      tools.find((t) => t.name === "read_conversation")!.inputSchema,
+    ).toMatchObject({ required: [] });
+    expect(flat(channelsFragment([withGrants])!.body)).toContain(
+      "Call it with no arguments to see which conversations you may read here",
+    );
+    expect(flat(channelsFragment([withGrants])!.body)).toContain(
+      "never guess what was said in it",
+    );
+    expect(flat(channelsFragment([live])!.body)).not.toContain(
+      "read_conversation",
+    );
+    // A removed presence lists no tools at all, grants or not.
+    expect(channelsTools([{ ...removed, readableConversations: 3 }])).toEqual(
+      [],
+    );
+  });
 });

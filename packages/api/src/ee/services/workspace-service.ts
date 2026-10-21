@@ -36,10 +36,7 @@ export const deleteWorkspaceContent = async (
   // service key): snapshot and revoke BEFORE the agent cascade drops our end.
   const cleanupIds = await enqueueWorkspaceCleanup(tx, workspaceId);
   await tx.requestLog.deleteMany({ where: { workspaceId } });
-  // Workspace-tier skills: the FK is Restrict on purpose — this explicit line
-  // is the deletion path, and forgetting it fails the delete loudly.
-  // (Agent-tier skills cascade with their agents on the next line.)
-  await tx.skill.deleteMany({ where: { workspaceId } });
+  // Skills cascade with their agents on the next line.
   await tx.agent.deleteMany({ where: { workspaceId } });
   await tx.appConnection.deleteMany({ where: { workspaceId } });
   await tx.secret.deleteMany({ where: { workspaceId } });

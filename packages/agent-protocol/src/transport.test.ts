@@ -210,6 +210,23 @@ describe("turn.message context", () => {
     );
   });
 
+  it("carries the follow-up's attachment manifest", () => {
+    const attachments = [
+      {
+        id: "a1",
+        path: "attachments/f-1/photo.png",
+        name: "photo.png",
+        mimeType: "image/png",
+        sizeBytes: 10,
+        sha256: "a".repeat(64),
+      },
+    ];
+    const parsed = workItemSchema.parse({ ...base, attachments });
+    expect(parsed.kind === "turn.message" && parsed.attachments).toEqual(
+      attachments,
+    );
+  });
+
   it("rejects a context past its cap", () => {
     expect(
       workItemSchema.safeParse({ ...base, context: "x".repeat(16_001) })

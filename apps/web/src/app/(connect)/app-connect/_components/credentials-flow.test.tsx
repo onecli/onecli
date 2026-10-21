@@ -152,7 +152,35 @@ describe("CredentialsFlow option fields", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     const body = JSON.parse(
       String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
-    ) as { fields: Record<string, string> };
+    ) as { fields: Record<string, string>; agentId?: string };
     expect(body.fields).toEqual({ apiKey: "pd-key", region: "us" });
+    // A workspace connect names no agent: the account lands on for none.
+    expect(body).not.toHaveProperty("agentId");
+  });
+
+  it("sends the connecting agent, so the account lands on for it", async () => {
+    const { apiFetch } = await import("@/lib/api-fetch");
+    const fetchMock = vi.mocked(apiFetch);
+    fetchMock.mockClear();
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ id: "c1", label: null }), { status: 200 }),
+    );
+    render(
+      <CredentialsFlow
+        app={{ ...app, name: "PagerDuty", connectionType: "api_key" }}
+        fields={regionFields}
+        agentId="agent-7"
+        onSuccess={() => {}}
+        onError={() => {}}
+      />,
+    );
+    const key = document.getElementById("connect-apiKey") as HTMLInputElement;
+    fireEvent.change(key, { target: { value: "pd-key" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect PagerDuty" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const body = JSON.parse(
+      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+    ) as { agentId?: string };
+    expect(body.agentId).toBe("agent-7");
   });
 });

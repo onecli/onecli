@@ -4,6 +4,7 @@ import {
   workspaceFilePath,
   agentChatPath,
   agentPath,
+  agentComputerPath,
   agentsCreatePath,
   agentSectionPath,
   connectionsPath,
@@ -69,6 +70,29 @@ describe("agentSectionPath", () => {
     );
     expect(agentSectionPath("/w/abc/overview", "a1", "apps")).toBe(
       "/w/abc/agents/a1/apps",
+    );
+  });
+});
+
+describe("agentComputerPath", () => {
+  it("is the Computer section, deep-linked to an ask when one is given", () => {
+    expect(agentComputerPath("/w/abc/agents/a1/skills", "a1")).toBe(
+      "/w/abc/agents/a1/computer",
+    );
+    expect(
+      agentComputerPath(
+        "/w/abc/agents/a1/skills",
+        "a1",
+        "0b4a1c5e-1111-4222-8333-444455556666",
+      ),
+    ).toBe(
+      "/w/abc/agents/a1/computer?takeover=0b4a1c5e-1111-4222-8333-444455556666",
+    );
+  });
+
+  it("encodes the ask id, so it can never add a param or a path segment", () => {
+    expect(agentComputerPath("/w/abc/agents", "a1", "x&y=1/z")).toBe(
+      "/w/abc/agents/a1/computer?takeover=x%26y%3D1%2Fz",
     );
   });
 });

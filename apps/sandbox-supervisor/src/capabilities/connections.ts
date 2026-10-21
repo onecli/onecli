@@ -121,6 +121,12 @@ export const connectionsFragment = (
 - connection_host_mismatch (HTTP 421) means the app IS connected: re-send
   to the host the message names. It is never a reason to ask anyone to
   connect or add credentials.
+- access_restricted means OneCLI already has a credential for this service
+  but you are not switched on for it: show the error's manage_url (it turns
+  the existing access on for you), and offer its connect_url after it only
+  for someone who wants a different account. Never ask them to connect the
+  service again. Relay these links like any other below: bare, on their own
+  line, and only when they point at the OneCLI dashboard.
 - For other errors, on a 401, 403, or a JSON error such as app_not_connected:
   show the error's connect_url (or manage_url) to the person you work with as
   a bare URL on its own line — no angle brackets, no markdown link — and retry
@@ -282,10 +288,60 @@ export const connectionsTools: PlatformToolDefinition[] = [
   {
     name: "list_apps",
     description:
-      "List the external apps granted to you right now: name, connected account, the API host to call, sample endpoints, and a docs link. Live: reflects grants made after this conversation started. Call it before telling anyone an app is not connected.",
+      "List the external apps granted to you right now: name, connected account, the API host to call, sample endpoints, and a docs link, plus your custom connections (id, name, host). Live: reflects grants made after this conversation started. Call it before telling anyone an app is not connected.",
     inputSchema: {
       type: "object",
       properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    // Control-plane executed (no `execute`): the platform validates the
+    // proposal and holds it for the user, who reviews it in the chat card
+    // and types the key there. There is deliberately NO argument for the
+    // key: it never passes through the agent.
+    name: "propose_custom_connection",
+    description:
+      "Propose a custom API connection for a service that has no built-in OneCLI app (check list_apps first; if the service is a built-in app, ask the user to connect it instead). Research the service's API docs first: the exact API host, the header the key goes in, and its format. The user reviews your proposal in the OneCLI chat and enters the key there; you never see the key. Never ask the user to paste a key into the chat.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: 'Short display name, e.g. "AcmeCRM".',
+        },
+        hostPattern: {
+          type: "string",
+          description:
+            'The API hostname the key is sent to, e.g. "api.acmecrm.io" (no scheme or path; a leading "*." wildcard is allowed).',
+        },
+        pathPattern: {
+          type: "string",
+          description:
+            'Optional path prefix to scope the key to, starting with "/", e.g. "/v1/*".',
+        },
+        headerName: {
+          type: "string",
+          description:
+            'The request header that carries the key, e.g. "Authorization" or "X-Api-Key".',
+        },
+        valueFormat: {
+          type: "string",
+          description:
+            'How the header value is built, with {value} where the key goes exactly once, e.g. "Bearer {value}" or "{value}".',
+        },
+        docsUrl: {
+          type: "string",
+          description:
+            "https link to the API's authentication docs you used, so the user can verify.",
+        },
+        reason: {
+          type: "string",
+          description:
+            "One sentence for the user: why you need this connection.",
+        },
+      },
+      required: ["name", "hostPattern", "headerName", "valueFormat", "reason"],
       additionalProperties: false,
     },
   },

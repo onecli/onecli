@@ -67,6 +67,15 @@ describe("the background-processes tool surface", () => {
     }
   });
 
+  it("the fragment states the real watch default and how to ask for longer", () => {
+    // Derived from the manager's constants, so the text the agent reads can
+    // never drift from the expiry it gets.
+    const flat = processesFragment.body.replace(/\s+/g, " ");
+    expect(flat).toContain(
+      "Watches expire (default 1h; pass expiresInSeconds, up to 24h, when the work takes longer",
+    );
+  });
+
   it("routes each tool to its manager method and rejects bad args before the manager", () => {
     const manager = stubManager();
     const live = createProcessTools(manager);

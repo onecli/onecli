@@ -5,9 +5,16 @@
  * from the `slack-*` components it names — the generic surfaces (the
  * section, the rail mark, the sidebar mark) never import them directly.
  */
+import dynamic from "next/dynamic";
 import { SlackAttachCard } from "@/app/(dashboard)/w/[workspaceId]/agents/[agentId]/channels/_components/slack-attach-card";
 import { SlackPresenceCard } from "@/app/(dashboard)/w/[workspaceId]/agents/[agentId]/channels/_components/slack-presence-card";
 import type { ChannelProviderUi } from "../channel-providers";
+
+// "Connect your Slack" read grants (licensed: granular_access). Lazy, so the
+// licensed card never enters the free bundle's static graph.
+const SlackReadCard = dynamic(() =>
+  import("@/ee/slack-read/slack-read-card").then((m) => m.SlackReadCard),
+);
 
 /** The Slack brand mark as served from /public, and the display name —
  * every Slack card and mark reads them from this one place. */
@@ -20,4 +27,5 @@ export const slackProviderUi: ChannelProviderUi = {
   iconSrc: SLACK_ICON_SRC,
   PresenceCard: SlackPresenceCard,
   AttachCard: SlackAttachCard,
+  ReadAccessCard: SlackReadCard,
 };

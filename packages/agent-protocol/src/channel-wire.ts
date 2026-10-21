@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { APPROVAL_GROUP_ID_RE, APPROVAL_GROUP_MAX_IDS } from "@onecli/channels";
+import {
+  APPROVAL_GROUP_ID_RE,
+  APPROVAL_GROUP_MAX_IDS,
+  FOLLOW_UP_ACTIONS,
+} from "@onecli/channels";
 
 /**
  * The CHANNEL-ADAPTER ↔ control-plane wire (hosted-agents v2 step 6).
@@ -322,6 +326,23 @@ export const adapterIngestResponseSchema = z.discriminatedUnion("kind", [
     message: z.string().nullable(),
     channel: z.string().nullable(),
   }),
+  /**
+   * The provider's native Stop on a thread's loader. The control plane has
+   * already done everything shared (the abort, the loader settle); what is
+   * left is request-scoped: a refused clicker is owed a note only THEY see,
+   * in the thread they clicked in. Null = nothing to say (stopped, or idle).
+   */
+  z.object({
+    kind: z.literal("stop"),
+    notice: z
+      .object({
+        channel: z.string(),
+        threadTs: z.string(),
+        user: z.string(),
+        message: z.string(),
+      })
+      .nullable(),
+  }),
 ]);
 export type AdapterIngestResponse = z.infer<typeof adapterIngestResponseSchema>;
 
@@ -444,6 +465,70 @@ export const adapterActionDecisionResponseSchema = z.discriminatedUnion(
 );
 export type AdapterActionDecisionResponse = z.infer<
   typeof adapterActionDecisionResponseSchema
+>;
+
+// ── Card Stop (the narration card's own Stop button) ──────────────────────────
+
+/**
+ * A Stop pressed on the narration card, relayed by the socket arm. Carries
+ * only where the provider says the card sits and who pressed it; the
+ * control plane resolves the turn whose LIVE card that is on this presence
+ * and authorizes the clicker itself.
+ */
+export const adapterCardStopRequestSchema = z.object({
+  presenceId: z.string().min(1),
+  channel: z.string().min(1).max(200),
+  cardTs: z.string().min(1).max(200),
+  clickerExternalUserId: z.string().min(1).max(200),
+});
+export type AdapterCardStopRequest = z.infer<
+  typeof adapterCardStopRequestSchema
+>;
+
+/** `refused` is owed to the clicker alone (the adapter posts it
+ * ephemerally); `stopped` / `idle` owe nothing (the turn's close replaces
+ * the card with "Stopped."). */
+export const adapterCardStopResponseSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("stopped") }),
+  z.object({ kind: z.literal("idle") }),
+  z.object({ kind: z.literal("refused"), message: z.string() }),
+]);
+export type AdapterCardStopResponse = z.infer<
+  typeof adapterCardStopResponseSchema
+>;
+
+// ── Card row action (a control on a waiting message's row of the card) ───────
+
+/**
+ * A control pressed on a waiting message's row of the narration card,
+ * relayed by the socket arm: where the provider says the card sits, which
+ * row was pressed, and who pressed it. The row id is a pointer the control
+ * plane checks against the card's own turn, never an authority.
+ */
+export const adapterCardFollowUpActionRequestSchema = z.object({
+  presenceId: z.string().min(1),
+  channel: z.string().min(1).max(200),
+  cardTs: z.string().min(1).max(200),
+  clickerExternalUserId: z.string().min(1).max(200),
+  action: z.enum(FOLLOW_UP_ACTIONS),
+  followUpId: z.string().min(1).max(200),
+});
+export type AdapterCardFollowUpActionRequest = z.infer<
+  typeof adapterCardFollowUpActionRequestSchema
+>;
+
+/** `refused` is owed to the clicker alone (the adapter posts it
+ * ephemerally); `done` owes nothing (the row leaves the card once the agent
+ * reads the message). */
+export const adapterCardFollowUpActionResponseSchema = z.discriminatedUnion(
+  "kind",
+  [
+    z.object({ kind: z.literal("done") }),
+    z.object({ kind: z.literal("refused"), message: z.string() }),
+  ],
+);
+export type AdapterCardFollowUpActionResponse = z.infer<
+  typeof adapterCardFollowUpActionResponseSchema
 >;
 
 export const adapterPromptClaimResponseSchema = z.object({

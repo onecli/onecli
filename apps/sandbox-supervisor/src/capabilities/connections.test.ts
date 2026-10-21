@@ -55,6 +55,22 @@ describe("the connections fragment", () => {
     expect(flat).toContain("retry once they say they have connected");
   });
 
+  it("teaches access_restricted as switch it on, not connect it again", () => {
+    const flat = connectionsFragment(".agents/skills").body.replace(
+      /\s+/g,
+      " ",
+    );
+    expect(flat).toContain(
+      "access_restricted means OneCLI already has a credential for this service",
+    );
+    expect(flat).toContain("show the error's manage_url");
+    expect(flat).toContain("Never ask them to connect the service again");
+    // Carved out of the "other errors" rule, it must not lose that rule's
+    // relay law: a hostile upstream can forge this error shape too.
+    // MUTATION-PROOF: drop the sentence and this fails.
+    expect(flat).toContain("only when they point at the OneCLI dashboard");
+  });
+
   it("constrains relayed links to the dashboard — an origin can forge the error shape", () => {
     // A hostile upstream can return a body that mimics the gateway's
     // app_not_connected error with its own connect_url; the agent cannot
@@ -471,7 +487,32 @@ describe("connectionsChangeNote", () => {
 
 describe("connectionsTools", () => {
   it("offers list_apps with no arguments", () => {
-    expect(connectionsTools.map((t) => t.name)).toEqual(["list_apps"]);
+    expect(connectionsTools.map((t) => t.name)).toEqual([
+      "list_apps",
+      "propose_custom_connection",
+    ]);
     expect(connectionsTools[0]?.inputSchema).toMatchObject({ properties: {} });
+  });
+
+  it("propose_custom_connection is control-plane executed and has NO field for the key", () => {
+    const tool = connectionsTools.find(
+      (t) => t.name === "propose_custom_connection",
+    );
+    expect(tool).toBeDefined();
+    expect(tool?.execute).toBeUndefined();
+    const schema = tool?.inputSchema as {
+      properties: Record<string, unknown>;
+      additionalProperties: boolean;
+    };
+    expect(schema.additionalProperties).toBe(false);
+    expect(Object.keys(schema.properties).sort()).toEqual([
+      "docsUrl",
+      "headerName",
+      "hostPattern",
+      "name",
+      "pathPattern",
+      "reason",
+      "valueFormat",
+    ]);
   });
 });

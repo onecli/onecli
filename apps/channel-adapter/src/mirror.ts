@@ -21,6 +21,7 @@ import {
 } from "@onecli/api/validations/conversation";
 import { mentionNamesOf, plainMentionCandidatesOf } from "@onecli/channels";
 import type { AdapterMentionReportRequest } from "@onecli/agent-protocol";
+import { isNoReply } from "@onecli/agent-protocol/text";
 import { ControlPlaneError, type ControlPlaneClient } from "./control-plane";
 import {
   replyTargetForTurn,
@@ -31,10 +32,14 @@ import {
 /**
  * The gateway's "connect this app" dashboard links, recognized in an answer
  * so the channel can render them as a card with a button: the web chat's
- * ConnectorSuggestions, translated to the channel's native blocks. Two
- * shapes (the two of `parseConnectLink`'s shapes this card can act on):
+ * ConnectorSuggestions, translated to the channel's native blocks. Three
+ * shapes (the ones of `parseConnectLink`'s shapes this card can act on):
+ * - `…/agents/<id>/connections?attach=<provider>`: connected, but turned off
+ *   for this agent (`access_restricted`, which also offers a connect link for
+ *   the same app; the attach row wins, see `cardLinks`)
  * - `…/connections?connect=<provider>…`: nothing connected yet
  * - `…/connections/apps/<provider>`: connected, not attached to this agent
+ *   (the same answer when the gateway knows no agent)
  *
  * The app page also carries two refusals whose fix is NOT an attach:
  * `?reconnect=<id>` (the saved login was rejected) and `?org_access=<org>`
@@ -49,7 +54,7 @@ import {
 // WHOLE url — otherwise `…/apps/gmail?src=x` would card gmail and leave a
 // dangling `?src=x` in the prose.
 const CONNECT_LINK_RE =
-  /https?:\/\/[^\s<>|]+?\/connections(?:\?(?:[^\s<>|]*&)?connect=([a-z0-9-]{1,64})(?![\w-])(?:&[^\s<>|]*)?(?:#[^\s<>|]*)?|\/apps\/([a-z0-9-]{1,64})(?![\w/-])(?:[?#][^\s<>|]*)?)/g;
+  /https?:\/\/[^\s<>|]+?(?:\/agents\/[^\s<>|/?#]+\/connections\?(?:[^\s<>|]*&)?attach=([a-z0-9-]{1,64})(?![\w-])(?:&[^\s<>|]*)?(?:#[^\s<>|]*)?|\/connections(?:\?(?:[^\s<>|]*&)?connect=([a-z0-9-]{1,64})(?![\w-])(?:&[^\s<>|]*)?(?:#[^\s<>|]*)?|\/apps\/([a-z0-9-]{1,64})(?![\w/-])(?:[?#][^\s<>|]*)?))/g;
 
 export interface ConnectLink {
   url: string;
@@ -87,12 +92,13 @@ const namesNonAttachRefusal = (url: string): boolean => {
 const findConnectLinkMatches = (answer: string): ConnectLinkMatch[] => {
   const matches: ConnectLinkMatch[] = [];
   for (const match of answer.matchAll(CONNECT_LINK_RE)) {
-    const provider = match[1] ?? match[2];
+    const [, agentAttach, connect, appPage] = match;
+    const provider = agentAttach ?? connect ?? appPage;
     if (!provider) continue;
     // Shed trailing punctuation the model may have glued on.
     const url = match[0].replace(/[.,;:!?)\]]+$/, "");
-    const kind = match[1] ? "connect" : "attach";
-    if (kind === "attach" && namesNonAttachRefusal(url)) continue;
+    const kind = connect ? "connect" : "attach";
+    if (appPage && namesNonAttachRefusal(url)) continue;
     let start = match.index;
     let end = match.index + url.length;
     // A markdown-form link ("[label](url)") is lifted out whole — removing
@@ -114,19 +120,26 @@ const findConnectLinkMatches = (answer: string): ConnectLinkMatch[] => {
   return matches;
 };
 
-/** The card rows: one per provider (first occurrence wins), capped. */
+/** The card rows: one per provider, capped. A provider's first link decides
+ * its row, except that an attach link replaces a connect link: the
+ * `access_restricted` answer offers both for one app, and switching the
+ * existing account on is the fix it leads with. */
 const cardLinks = (matches: ConnectLinkMatch[]): ConnectLink[] => {
-  const seen = new Set<string>();
   const links: ConnectLink[] = [];
   for (const { url, provider, kind } of matches) {
-    if (seen.has(provider)) continue;
     // The web's isCardConnectLink law: only catalog apps get carded. A card
     // for a model-invented provider would strip the user's only real link
     // from the prose and assert a connection state as official UI (spoofed
     // favicon included) — an unknown id keeps its raw link instead.
     if (!getApp(provider)) continue;
-    if (links.length >= MAX_CONNECT_CARDS) break;
-    seen.add(provider);
+    const seen = links.findIndex((link) => link.provider === provider);
+    if (seen >= 0) {
+      if (links[seen]?.kind === "connect" && kind === "attach") {
+        links[seen] = { url, provider, kind };
+      }
+      continue;
+    }
+    if (links.length >= MAX_CONNECT_CARDS) continue;
     links.push({ url, provider, kind });
   }
   return links;
@@ -438,6 +451,8 @@ const PROVIDER_DOMAINS: Record<string, string> = {
   pagerduty: "pagerduty.com",
   coralogix: "coralogix.com",
   onyx: "onyx.app",
+  twilio: "twilio.com",
+  dripify: "dripify.com",
 };
 
 /** The app's favicon via Google's resolver — Slack's image elements accept
@@ -487,10 +502,11 @@ const transcriptOutcome = async (
 ): Promise<TranscriptOutcome> => {
   let since: number | undefined;
   let text: string | null = null;
-  // The turn's durable `error` event — the harness's terminal message, which
-  // for uncoded failures is the ONLY record (the supervisor deliberately
-  // sends no `turn.result.error` then, so `turn.error` is NULL). Last one
-  // wins, matching the `text` semantics and the web's transcript fold.
+  // The turn's durable `error` event — the harness's terminal message. The
+  // supervisor now sends it as `turn.result.error` on every failed turn, but
+  // a turn closed by an older supervisor (or one whose report was lost) can
+  // still hold `turn.error = NULL`, and this is then its only record. Last
+  // one wins, matching the `text` semantics and the web's transcript fold.
   let error: string | null = null;
   // Same pass: a follow-up's reply is a `text` stored under its own id.
   const wanted = new Set(followUpIds);
@@ -838,7 +854,7 @@ export const mirrorFinishedTurn = async (
   const fromProvider = item.turn.source === deps.provider;
   // An automated run's report (crons step 7, watches step 10): the turn is a
   // platform-materialized delivery whose message is the automation header,
-  // not a person's question — labelling it "(from the web)" would attribute
+  // not a person's question, and posting it as a web quote would attribute
   // automation to a human. One message: the report, or the header when the
   // run produced none. The icon distinguishes the two, and watch volume is
   // bounded by one-shot semantics (the decided answer to the posting-shape
@@ -856,9 +872,12 @@ export const mirrorFinishedTurn = async (
         followUp.id ? [followUp.id] : [],
       ),
     );
-    /** A joined follow-up's reply, when the agent wrote one. */
-    const replyTo = (followUp: { id?: string }): string | undefined =>
-      followUp.id ? outcome.replies.get(followUp.id) : undefined;
+    /** A joined follow-up's reply, when the agent wrote one. A deliberate
+     *  `[no reply]` is no reply at all here - nothing posts. */
+    const replyTo = (followUp: { id?: string }): string | undefined => {
+      const reply = followUp.id ? outcome.replies.get(followUp.id) : undefined;
+      return isNoReply(reply) ? undefined : reply;
+    };
     /** Claim a follow-up's reply for THIS post. True when there is a reply
      * and the claim won. An older control plane without the claim route
      * (404) never served the reply early either, so the pre-feed behavior
@@ -885,18 +904,22 @@ export const mirrorFinishedTurn = async (
     };
     // Precedence mirrors the web (turn-block prefers `turn.error`): the
     // agent's own text first; then the canonical/raw `turn.error`; then the
-    // transcript's durable error event — the only record an UNCODED harness
-    // failure leaves, which used to fall through to total silence here.
+    // transcript's durable error event for old or missing terminal reports.
     // An error that is a provider's raw response body posts as the generic
     // failure line instead (the web folds the raw text away; a shared
     // channel has no place for it at all).
     const error = item.turn.error ?? outcome.error;
-    const answer =
-      outcome.text ??
-      (error && isRawErrorPayload(error)
-        ? TURN_FAILED_RAW_ERROR_MESSAGE
-        : error) ??
-      null;
+    // The agent chose to stay silent (a point-of-contact channel): post
+    // nothing for the answer. Only a SUCCESSFUL silence - a failed turn whose
+    // text happens to read "[no reply]" still reports its failure.
+    const silent = isNoReply(outcome.text) && item.turn.status !== "failed";
+    const answer = silent
+      ? null
+      : (outcome.text ??
+        (error && isRawErrorPayload(error)
+          ? TURN_FAILED_RAW_ERROR_MESSAGE
+          : error) ??
+        null);
 
     // OUTBOUND MENTIONS (plan: platform-rendered, loud failure). Scan the
     // model text the mirror posts (the answer and every follow-up reply) for
@@ -924,6 +947,13 @@ export const mirrorFinishedTurn = async (
     // and posts alone.
     const failedWithPartialText =
       item.turn.status === "failed" && outcome.text !== null;
+    // A STOPPED turn whose post is its partial answer gets the closure word
+    // after it, as on the web (the text, then "Stopped."). Without it a Stop
+    // clicked after the agent had said anything left no sign in the thread
+    // that it took. An abort that carries an error posts that error alone,
+    // the web's precedence too.
+    const stoppedAfterText =
+      item.turn.status === "aborted" && outcome.text !== null && !error;
 
     // THE AGENT'S FILES (send_file): after the answer, as one share. Bytes
     // are pulled here (the work poll carries metadata only) and each pull
@@ -1021,8 +1051,8 @@ export const mirrorFinishedTurn = async (
           continue;
         }
         // A wake that joined this turn is the platform's instruction, not a
-        // person's words: it posts as its automation caption (never "(from
-        // the web)"), and what the agent said back to it, when it wrote
+        // person's words: it posts as its automation caption (never as a web
+        // quote), and what the agent said back to it, when it wrote
         // something, is the caption's body. Otherwise the answer is its
         // report.
         if (isAutomationSource(followUp.source)) {
@@ -1055,7 +1085,7 @@ export const mirrorFinishedTurn = async (
 
     if (item.turn.source === GREETING_SOURCE) {
       // The agent's first words on a brand-new thread. The instruction the
-      // platform posted is not a person's question (no "(from the web)"),
+      // platform posted is not a person's question (no web attribution),
       // and it is not a run report either (no header): on Slack the person
       // simply sees their agent say hello. A greeting with no answer (the
       // instruction failed) posts nothing — there is no failure to report
@@ -1125,6 +1155,12 @@ export const mirrorFinishedTurn = async (
             ...target,
             message: TURN_FAILED_PARTIAL_MESSAGE,
             warn: true,
+          });
+        } else if (stoppedAfterText) {
+          await deps.posts.failureNotice({
+            ...target,
+            message: TURN_STOPPED_MESSAGE,
+            warn: false,
           });
         }
       }
@@ -1225,7 +1261,9 @@ export const mirrorFollowUpReply = async (
 ): Promise<void> => {
   const { item } = deps;
   const claimed = await deps.controlPlane.claimReply(item.followUp.id);
-  if (!claimed) return;
+  // A deliberate silence (`[no reply]`) is claimed like any reply, so the
+  // feed stops serving it on every poll, and then posts nothing.
+  if (!claimed || isNoReply(item.reply)) return;
 
   const address = replyTargetForTurn(deps.threadAddress, item, item.followUp);
   const target: ChannelPostTarget = {

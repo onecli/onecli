@@ -140,15 +140,23 @@ describe("visibleWorkspacesWhere", () => {
 describe("hasWorkspaceAccessBinding", () => {
   beforeEach(() => {
     state.binding = null;
+    state.bindingProbes = [];
   });
 
-  it("is true when a matching binding exists", async () => {
-    state.binding = { id: "b1" };
-    await expect(hasWorkspaceAccessBinding("u1", "p1")).resolves.toBe(true);
-  });
-
-  it("is false with no binding", async () => {
-    await expect(hasWorkspaceAccessBinding("u1", "p1")).resolves.toBe(false);
+  it("matches a direct OR group-shared binding, fenced to the workspace", async () => {
+    // The boolean is exercised through canAccessWorkspace and the EE checker;
+    // the risk lives in the query: dropping the group arm locks out
+    // group-shared members, loosening the fence leaks access.
+    await hasWorkspaceAccessBinding("u1", "p1");
+    expect(state.bindingProbes[0]).toMatchObject({
+      where: {
+        workspaceId: "p1",
+        OR: [
+          { userId: "u1" },
+          { group: { members: { some: { userId: "u1" } } } },
+        ],
+      },
+    });
   });
 });
 

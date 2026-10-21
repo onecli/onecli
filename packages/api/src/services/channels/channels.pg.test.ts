@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import {
   afterAll,
+  afterEach,
   beforeAll,
   beforeEach,
   describe,
@@ -702,7 +703,14 @@ beforeEach(async () => {
   // cache entry would make decrypt-count assertions vacuous.
   decryptCache.resetDecryptCacheForTests();
   slackCalls = [];
-  slackHandlers = {};
+  slackHandlers = {
+    // Every socket paste proves its app-level token can open a socket. A
+    // live token is the default; a test that wants a refusal scripts one.
+    "apps.connections.open": () => ({
+      ok: true,
+      url: "wss://wss-primary.slack.com/link/?ticket=t",
+    }),
+  };
   cdnCalls = [];
   cdnHandlers = {};
   gatewayCalls = [];
@@ -1067,9 +1075,10 @@ describe.skipIf(!PROOF_URL)("withFreshIntegrationCredentials", () => {
   });
 
   it("a REFUSED rotation clears the credential and surfaces the re-paste state", async () => {
-    await seedIntegration({
+    const rotatedAt = new Date(Date.now() - 60_000);
+    const integration = await seedIntegration({
       credentials: await integrationCredentials(60),
-      rotatedAt: new Date(),
+      rotatedAt,
     });
     slackHandlers["tooling.tokens.rotate"] = () => ({
       ok: false,
@@ -1079,6 +1088,22 @@ describe.skipIf(!PROOF_URL)("withFreshIntegrationCredentials", () => {
     await expect(
       integrations.withFreshIntegrationCredentials(ORG, "slack", async () => 1),
     ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+    // A permanent clear keeps the failure timestamp EXACTLY (not a fresh
+    // one), and never rebinds the tenant.
+    expect(
+      await db.channelIntegration.findUniqueOrThrow({
+        where: { id: integration.id },
+        select: {
+          credentials: true,
+          credentialsRotatedAt: true,
+          externalId: true,
+        },
+      }),
+    ).toEqual({
+      credentials: null,
+      credentialsRotatedAt: rotatedAt,
+      externalId: "T111",
+    });
 
     // The needs-token derivation: connected once (rotatedAt set) but the
     // credential is now gone → hasCredentials false + needsCredentials true.
@@ -1112,7 +1137,11 @@ describe.skipIf(!PROOF_URL)("withFreshIntegrationCredentials", () => {
       slackHandlers["tooling.tokens.rotate"] = () => answer;
       const before = await db.channelIntegration.findUniqueOrThrow({
         where: { id: integration.id },
-        select: { credentials: true, credentialsRotatedAt: true },
+        select: {
+          credentials: true,
+          credentialsRotatedAt: true,
+          externalId: true,
+        },
       });
 
       const got = await integrations.withFreshIntegrationCredentials(
@@ -1126,10 +1155,16 @@ describe.skipIf(!PROOF_URL)("withFreshIntegrationCredentials", () => {
       expect(slackCallsFor("tooling.tokens.rotate")).toHaveLength(1);
       const after = await db.channelIntegration.findUniqueOrThrow({
         where: { id: integration.id },
-        select: { credentials: true, credentialsRotatedAt: true },
+        select: {
+          credentials: true,
+          credentialsRotatedAt: true,
+          externalId: true,
+        },
       });
       expect(after.credentials).toBe(before.credentials);
       expect(after.credentialsRotatedAt).toEqual(before.credentialsRotatedAt);
+      // A deferral never rebinds the tenant.
+      expect(after.externalId).toBe(before.externalId);
       const [view] = await integrations.getIntegrationView(ORG);
       expect(view).toMatchObject({
         hasCredentials: true,
@@ -1357,9 +1392,10 @@ describe.skipIf(!PROOF_URL)(
     });
 
     it("a REFUSED sweep rotation clears the credential and counts failed — re-paste surfaces", async () => {
+      const rotatedAt = SEVEN_HOURS_AGO();
       const integration = await seedIntegration({
         credentials: await integrationCredentials(12 * 3600),
-        rotatedAt: SEVEN_HOURS_AGO(),
+        rotatedAt,
       });
       slackHandlers["tooling.tokens.rotate"] = () => ({
         ok: false,
@@ -1371,9 +1407,11 @@ describe.skipIf(!PROOF_URL)(
       expect(result).toEqual({ rotated: 0, failed: 1, deferred: 0 });
       const row = await db.channelIntegration.findUniqueOrThrow({
         where: { id: integration.id },
-        select: { credentials: true },
+        select: { credentials: true, credentialsRotatedAt: true },
       });
       expect(row.credentials).toBeNull();
+      // The failure timestamp is kept exactly, not refreshed.
+      expect(row.credentialsRotatedAt).toEqual(rotatedAt);
       // The needs-token derivation: rotatedAt still set + credentials gone.
       const [view] = await integrations.getIntegrationView(ORG);
       expect(view).toMatchObject({
@@ -1398,7 +1436,11 @@ describe.skipIf(!PROOF_URL)(
       });
       const before = await db.channelIntegration.findUniqueOrThrow({
         where: { id: integration.id },
-        select: { credentials: true, credentialsRotatedAt: true },
+        select: {
+          credentials: true,
+          credentialsRotatedAt: true,
+          externalId: true,
+        },
       });
 
       expect(await integrations.rotateStaleIntegrations()).toEqual({
@@ -1408,10 +1450,15 @@ describe.skipIf(!PROOF_URL)(
       });
       const kept = await db.channelIntegration.findUniqueOrThrow({
         where: { id: integration.id },
-        select: { credentials: true, credentialsRotatedAt: true },
+        select: {
+          credentials: true,
+          credentialsRotatedAt: true,
+          externalId: true,
+        },
       });
       expect(kept.credentials).toBe(before.credentials);
       expect(kept.credentialsRotatedAt).toEqual(before.credentialsRotatedAt);
+      expect(kept.externalId).toBe(before.externalId);
       const [view] = await integrations.getIntegrationView(ORG);
       expect(view).toMatchObject({
         hasCredentials: true,
@@ -2017,6 +2064,8 @@ describe.skipIf(!PROOF_URL)("createPresence (the guided arm)", () => {
       clientId: "client-1",
       clientSecret: "client-secret-1",
       signingSecret: "signing-secret-1",
+      // The manifest carried our redirect: a resume can rebuild the URL.
+      oauthRedirect: true,
     });
   });
 
@@ -2094,7 +2143,7 @@ describe.skipIf(!PROOF_URL)("createPresence (the guided arm)", () => {
     expect(slackCalls).toHaveLength(0);
   });
 
-  it("an explicit socket request on events posture stamps socket", async () => {
+  it("an explicit socket request on events posture stamps socket, and installs by consent", async () => {
     initSelfUrl(EVENTS_SELF_URL);
     await seedIntegration({
       credentials: await integrationCredentials(12 * 3600),
@@ -2111,11 +2160,25 @@ describe.skipIf(!PROOF_URL)("createPresence (the guided arm)", () => {
     );
 
     expect(result.transport).toBe("socket");
-    expect(result.installUrl).toBeNull();
+    // A public HTTPS origin means Slack accepts our redirect, so the socket
+    // app gets the same one-click consent URL as events.
+    expect(result.installUrl).toContain("client_id=client-1");
+    expect(result.installUrl).toContain("&state=");
     const manifest = JSON.parse(
       slackCallsFor("apps.manifest.create")[0]!.form.get("manifest")!,
-    ) as { settings: { socket_mode_enabled: boolean } };
+    ) as {
+      settings: {
+        socket_mode_enabled: boolean;
+        event_subscriptions: { request_url?: string };
+      };
+      oauth_config: { redirect_urls?: string[] };
+    };
     expect(manifest.settings.socket_mode_enabled).toBe(true);
+    // Events still ride the socket: no inbound request URL is baked.
+    expect(manifest.settings.event_subscriptions.request_url).toBeUndefined();
+    expect(manifest.oauth_config.redirect_urls).toEqual([
+      `${EVENTS_SELF_URL}/v1/channels/slack/oauth/callback`,
+    ]);
     const row = await db.agentChannel.findUniqueOrThrow({
       where: { agentId_provider: { agentId, provider: "slack" } },
     });
@@ -2750,22 +2813,422 @@ describe.skipIf(!PROOF_URL)(
         }),
       ).toBe(0);
     });
+
+    describe("the SOCKET arm: Allow, then one app-token paste", () => {
+      const startSocketInstall = async (label: string) => {
+        initSelfUrl(EVENTS_SELF_URL);
+        await seedIntegration({
+          credentials: await integrationCredentials(12 * 3600),
+        });
+        const agentId = await seedAgent(label);
+        scriptManifestCreate();
+        const created = await agentChannels.createPresence(
+          WORKSPACE,
+          agentId,
+          "slack",
+          ADMIN,
+          "socket",
+        );
+        const state = new URL(created.installUrl!).searchParams.get("state")!;
+        slackHandlers["oauth.v2.access"] = () => ({
+          ok: true,
+          access_token: "xoxb-socket-bot",
+          bot_user_id: "UBOTS",
+          team: { id: "T111", name: "Acme" },
+        });
+        scriptAuthTest("T111", "Acme", "UBOTS", "donna");
+        return { agentId, state };
+      };
+
+      const callback = (state: string) =>
+        agentChannels.completePresenceFromOAuth({
+          state,
+          code: "slack-consent-code",
+          redirectUri: `${EVENTS_SELF_URL}/v1/channels/slack/oauth/callback`,
+        });
+
+      it("the consent stores the bot token but does NOT go live: no service key, still pending", async () => {
+        const { agentId, state } = await startSocketInstall("socket-oauth");
+
+        const completed = await callback(state);
+
+        expect(completed).toMatchObject({
+          awaitingTransportCredential: true,
+          agentId,
+          workspaceId: WORKSPACE,
+        });
+        const row = await db.agentChannel.findUniqueOrThrow({
+          where: { agentId_provider: { agentId, provider: "slack" } },
+        });
+        expect(completed.presenceId).toBe(row.id);
+        // pending_setup is what keeps the adapter from dialing a socket it
+        // has no app-level token for.
+        expect(row.status).toBe("pending_setup");
+        expect(row.apiKeyId).toBeNull();
+        expect(row.identityRef).toBe("UBOTS");
+        expect(
+          JSON.parse(await getCrypto().decrypt(row.credentials!)),
+        ).toMatchObject({ botToken: "xoxb-socket-bot", clientId: "client-1" });
+        expect(
+          await db.apiKey.count({
+            where: { userId: ADMIN, workspaceId: WORKSPACE, kind: "service" },
+          }),
+        ).toBe(0);
+      });
+
+      it("the app-token paste alone finishes it, after Slack accepts the token", async () => {
+        const { agentId, state } = await startSocketInstall("socket-finish");
+        await callback(state);
+
+        const presence = await agentChannels.completePresence(
+          WORKSPACE,
+          agentId,
+          "slack",
+          { appToken: "xapp-socket-app" },
+          ADMIN,
+        );
+
+        expect(presence.status).toBe("active");
+        // The probe used the PASTED app token, not the bot token.
+        const [probe] = slackCallsFor("apps.connections.open");
+        expect(probe?.token).toBe("xapp-socket-app");
+        const row = await db.agentChannel.findUniqueOrThrow({
+          where: { agentId_provider: { agentId, provider: "slack" } },
+        });
+        expect(row.apiKeyId).not.toBeNull();
+        expect(
+          JSON.parse(await getCrypto().decrypt(row.credentials!)),
+        ).toMatchObject({
+          botToken: "xoxb-socket-bot",
+          appToken: "xapp-socket-app",
+        });
+      });
+
+      it("a token Slack refuses is NOT stored and the presence stays pending", async () => {
+        const { agentId, state } = await startSocketInstall("socket-badapp");
+        await callback(state);
+        slackHandlers["apps.connections.open"] = () => ({
+          ok: false,
+          error: "invalid_auth",
+        });
+
+        await expect(
+          agentChannels.completePresence(
+            WORKSPACE,
+            agentId,
+            "slack",
+            { appToken: "xapp-revoked" },
+            ADMIN,
+          ),
+        ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+
+        const row = await db.agentChannel.findUniqueOrThrow({
+          where: { agentId_provider: { agentId, provider: "slack" } },
+        });
+        expect(row.status).toBe("pending_setup");
+        expect(
+          JSON.parse(await getCrypto().decrypt(row.credentials!)),
+        ).not.toHaveProperty("appToken");
+      });
+
+      it("an app-token-only paste BEFORE the install is refused (no bot token to borrow)", async () => {
+        initSelfUrl(EVENTS_SELF_URL);
+        await seedIntegration({
+          credentials: await integrationCredentials(12 * 3600),
+        });
+        const agentId = await seedAgent("socket-premature");
+        scriptManifestCreate();
+        await agentChannels.createPresence(
+          WORKSPACE,
+          agentId,
+          "slack",
+          ADMIN,
+          "socket",
+        );
+
+        await expect(
+          agentChannels.completePresence(
+            WORKSPACE,
+            agentId,
+            "slack",
+            { appToken: "xapp-early" },
+            ADMIN,
+          ),
+        ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+        expect(slackCallsFor("apps.connections.open")).toHaveLength(0);
+      });
+
+      it("an app-token-only paste on an EVENTS presence is refused", async () => {
+        initSelfUrl(EVENTS_SELF_URL);
+        await seedIntegration({
+          credentials: await integrationCredentials(12 * 3600),
+        });
+        const agentId = await seedAgent("events-apptoken-only");
+        scriptManifestCreate();
+        await agentChannels.createPresence(WORKSPACE, agentId, "slack", ADMIN);
+
+        await expect(
+          agentChannels.completePresence(
+            WORKSPACE,
+            agentId,
+            "slack",
+            { appToken: "xapp-x" },
+            ADMIN,
+          ),
+        ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+      });
+
+      it("the paste door only ever completes the CALLER's agent: another workspace's agent is not found", async () => {
+        const { agentId, state } = await startSocketInstall("socket-fence");
+        await callback(state);
+
+        await expect(
+          agentChannels.completePresence(
+            "ws-foreign-tenant",
+            agentId,
+            "slack",
+            { appToken: "xapp-intruder" },
+            ADMIN,
+          ),
+        ).rejects.toMatchObject({ code: "NOT_FOUND" });
+        const row = await db.agentChannel.findUniqueOrThrow({
+          where: { agentId_provider: { agentId, provider: "slack" } },
+        });
+        expect(row.status).toBe("pending_setup");
+        expect(slackCallsFor("apps.connections.open")).toHaveLength(0);
+      });
+
+      it("no public HTTPS origin: no consent URL and no redirect baked, so the two-token paste stays", async () => {
+        // Default posture: the http self-url Slack refuses as a redirect.
+        await seedIntegration({
+          credentials: await integrationCredentials(12 * 3600),
+        });
+        const agentId = await seedAgent("socket-no-https");
+        scriptManifestCreate();
+
+        const created = await agentChannels.createPresence(
+          WORKSPACE,
+          agentId,
+          "slack",
+          ADMIN,
+        );
+
+        expect(created.transport).toBe("socket");
+        expect(created.installUrl).toBeNull();
+        const manifest = JSON.parse(
+          slackCallsFor("apps.manifest.create")[0]!.form.get("manifest")!,
+        ) as { oauth_config: { redirect_urls?: string[] } };
+        expect(manifest.oauth_config.redirect_urls).toBeUndefined();
+      });
+
+      const awaiting = async (agentId: string) => {
+        const view = await agentChannels.getAgentChannels(WORKSPACE, agentId);
+        return view.presences[0]?.awaitingTransportCredential;
+      };
+
+      it("the view says the install awaits ONLY its app token, and stops once it lands", async () => {
+        const { agentId, state } = await startSocketInstall("socket-view");
+        // Before the Allow: nothing is installed, so nothing is awaited.
+        expect(await awaiting(agentId)).toBe(false);
+
+        await callback(state);
+        expect(await awaiting(agentId)).toBe(true);
+
+        await agentChannels.completePresence(
+          WORKSPACE,
+          agentId,
+          "slack",
+          { appToken: "xapp-view" },
+          ADMIN,
+        );
+        expect(await awaiting(agentId)).toBe(false);
+      });
+
+      it("a DETACHED socket app is not taken for a waiting install: re-attach is Allow, then one paste", async () => {
+        // The regression: a keep-app detach leaves a pending socket row with
+        // a bot identity, and its cleanup uninstalls the app, so the stored
+        // bot token is dead. It must never be offered the one-field paste.
+        const { agentId, state } = await startSocketInstall("socket-redo");
+        await callback(state);
+        await agentChannels.completePresence(
+          WORKSPACE,
+          agentId,
+          "slack",
+          { appToken: "xapp-first" },
+          ADMIN,
+        );
+        slackHandlers["apps.uninstall"] = () => ({ ok: true });
+        await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+          deleteRemote: false,
+        });
+        const shell = await db.agentChannel.findUniqueOrThrow({
+          where: { agentId_provider: { agentId, provider: "slack" } },
+        });
+        expect(shell.status).toBe("pending_setup");
+        expect(shell.identityRef).toBe("UBOTS");
+
+        expect(await awaiting(agentId)).toBe(false);
+        const opensBefore = slackCallsFor("apps.connections.open").length;
+        await expect(
+          agentChannels.completePresence(
+            WORKSPACE,
+            agentId,
+            "slack",
+            { appToken: "xapp-stale" },
+            ADMIN,
+          ),
+        ).rejects.toMatchObject({
+          code: "UNPROCESSABLE",
+          message:
+            "Install the app in Slack first, then paste the app-level token.",
+        });
+        expect(slackCallsFor("apps.connections.open")).toHaveLength(
+          opensBefore,
+        );
+
+        // Re-attach: the same app, a fresh consent URL, then one paste.
+        const resumed = await agentChannels.createPresence(
+          WORKSPACE,
+          agentId,
+          "slack",
+          ADMIN,
+        );
+        expect(resumed.presenceId).toBe(shell.id);
+        expect(resumed.installUrl).toContain("client_id=client-1");
+        const resumeState = new URL(resumed.installUrl!).searchParams.get(
+          "state",
+        )!;
+        slackHandlers["oauth.v2.access"] = () => ({
+          ok: true,
+          access_token: "xoxb-socket-bot-2",
+          bot_user_id: "UBOTS",
+          team: { id: "T111", name: "Acme" },
+        });
+        await callback(resumeState);
+        // The consent dropped the old app token: one paste is owed again.
+        expect(await awaiting(agentId)).toBe(true);
+        const reconsented = await db.agentChannel.findUniqueOrThrow({
+          where: { id: shell.id },
+        });
+        expect(
+          JSON.parse(await getCrypto().decrypt(reconsented.credentials!)),
+        ).not.toHaveProperty("appToken");
+
+        const presence = await agentChannels.completePresence(
+          WORKSPACE,
+          agentId,
+          "slack",
+          { appToken: "xapp-second" },
+          ADMIN,
+        );
+        expect(presence.status).toBe("active");
+        const row = await db.agentChannel.findUniqueOrThrow({
+          where: { id: shell.id },
+        });
+        expect(
+          JSON.parse(await getCrypto().decrypt(row.credentials!)),
+        ).toMatchObject({
+          botToken: "xoxb-socket-bot-2",
+          appToken: "xapp-second",
+        });
+      });
+
+      it("the two-token paste checks the app token with Slack too, before anything is stored", async () => {
+        // Without HTTPS the guided create gives no consent URL: both tokens
+        // are pasted, and a refused app token must not activate the agent.
+        await seedIntegration({
+          credentials: await integrationCredentials(12 * 3600),
+        });
+        const agentId = await seedAgent("socket-two-paste");
+        scriptManifestCreate();
+        await agentChannels.createPresence(WORKSPACE, agentId, "slack", ADMIN);
+        scriptAuthTest("T111", "Acme", "UBOTS", "donna");
+        slackHandlers["apps.connections.open"] = () => ({
+          ok: false,
+          error: "missing_scope",
+        });
+
+        await expect(
+          agentChannels.completePresence(
+            WORKSPACE,
+            agentId,
+            "slack",
+            { botToken: "xoxb-pasted", appToken: "xapp-noscope" },
+            ADMIN,
+          ),
+        ).rejects.toMatchObject({
+          code: "UNPROCESSABLE",
+          message: expect.stringContaining("didn't accept"),
+        });
+        const [probe] = slackCallsFor("apps.connections.open");
+        expect(probe?.token).toBe("xapp-noscope");
+        const row = await db.agentChannel.findUniqueOrThrow({
+          where: { agentId_provider: { agentId, provider: "slack" } },
+        });
+        expect(row.status).toBe("pending_setup");
+        expect(row.apiKeyId).toBeNull();
+      });
+
+      it("Slack's outage codes read as 'try again', not as a wrong token", async () => {
+        const { agentId, state } = await startSocketInstall("socket-outage");
+        await callback(state);
+        slackHandlers["apps.connections.open"] = () => ({
+          ok: false,
+          error: "service_unavailable",
+        });
+
+        await expect(
+          agentChannels.completePresence(
+            WORKSPACE,
+            agentId,
+            "slack",
+            { appToken: "xapp-fine" },
+            ADMIN,
+          ),
+        ).rejects.toMatchObject({
+          code: "UNPROCESSABLE",
+          message: expect.stringContaining("Couldn't reach Slack"),
+        });
+        expect(await awaiting(agentId)).toBe(true);
+      });
+
+      it("a ROTATING app token is refused before any Slack call: it would expire in 12 hours", async () => {
+        const { agentId, state } = await startSocketInstall("socket-rotating");
+        await callback(state);
+
+        await expect(
+          agentChannels.completePresence(
+            WORKSPACE,
+            agentId,
+            "slack",
+            { appToken: "xoxe.xapp-1-rotating" },
+            ADMIN,
+          ),
+        ).rejects.toMatchObject({
+          code: "UNPROCESSABLE",
+          message: expect.stringContaining("rotates"),
+        });
+        expect(slackCallsFor("apps.connections.open")).toHaveLength(0);
+      });
+    });
   },
 );
 
 describe.skipIf(!PROOF_URL)(
   "completeAgentInstallFromCode (an install begun in Slack, no state)",
   () => {
-    /** A waiting events presence whose stored client creds are `client-<tag>`
-     * (or `credentials`, for an app with no OAuth client). `updatedAt` pins
-     * the newest-first order the door offers the code in. */
+    /** A waiting presence (events unless `transport` says otherwise) whose
+     * stored client creds are `client-<tag>` (or `credentials`, for an app
+     * with no OAuth client). `updatedAt` pins the newest-first order the door
+     * offers the code in. */
     const seedWaitingApp = async (
       agentId: string,
       integrationId: string,
       tag: string,
       options: {
-        credentials?: Record<string, string>;
+        credentials?: Record<string, string | boolean>;
         updatedAt?: Date;
+        transport?: "events" | "socket";
       } = {},
     ) =>
       db.agentChannel.create({
@@ -2774,7 +3237,7 @@ describe.skipIf(!PROOF_URL)(
           integrationId,
           provider: "slack",
           externalId: `A-${tag}`,
-          transport: "events",
+          transport: options.transport ?? "events",
           status: "pending_setup",
           credentials: await getCrypto().encrypt(
             JSON.stringify(
@@ -2877,7 +3340,11 @@ describe.skipIf(!PROOF_URL)(
         code: "code-from-slack",
       });
 
-      expect(result).toMatchObject({ agentId: second, workspaceId: WORKSPACE });
+      expect(result).toMatchObject({
+        agentId: second,
+        workspaceId: WORKSPACE,
+        awaitingTransportCredential: false,
+      });
       expect(exchangedClients()).toEqual(["client-first", "client-second"]);
       const won = await db.agentChannel.findUniqueOrThrow({
         where: { agentId_provider: { agentId: second, provider: "slack" } },
@@ -3086,6 +3553,58 @@ describe.skipIf(!PROOF_URL)(
       });
       expect(row.status).toBe("pending_setup");
       expect(row.apiKeyId).toBeNull();
+    });
+
+    it("a waiting SOCKET app installed from Slack's side lands like the signed door: bot token stored, still pending, then the app-token paste finishes it", async () => {
+      // MUTATION-TESTED: restore the events-only candidate filter and the
+      // code finds no waiting app (null); land socket through the events
+      // activation instead and it goes live with no app-level token.
+      initSelfUrl(EVENTS_SELF_URL);
+      const integration = await seedIntegration();
+      const agentId = await seedAgent("stateless-socket");
+      await seedWaitingApp(agentId, integration.id, "socket", {
+        transport: "socket",
+        credentials: {
+          clientId: "client-socket",
+          clientSecret: "secret-socket",
+          signingSecret: "signing-socket",
+          oauthRedirect: true,
+        },
+      });
+      scriptCodeFor("socket");
+
+      const result = await agentChannels.completeAgentInstallFromCode({
+        organizationId: ORG,
+        actorUserId: ADMIN,
+        provider: "slack",
+        code: "code-from-slack",
+      });
+
+      expect(result).toMatchObject({
+        agentId,
+        workspaceId: WORKSPACE,
+        awaitingTransportCredential: true,
+      });
+      const row = await db.agentChannel.findUniqueOrThrow({
+        where: { agentId_provider: { agentId, provider: "slack" } },
+      });
+      expect(row.status).toBe("pending_setup");
+      expect(row.apiKeyId).toBeNull();
+      expect(row.identityRef).toBe("UBOT-socket");
+      expect(
+        JSON.parse(await getCrypto().decrypt(row.credentials!)),
+      ).toMatchObject({ botToken: "xoxb-socket", clientId: "client-socket" });
+      const view = await agentChannels.getAgentChannels(WORKSPACE, agentId);
+      expect(view.presences[0]?.awaitingTransportCredential).toBe(true);
+
+      const presence = await agentChannels.completePresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        { appToken: "xapp-socket" },
+        ADMIN,
+      );
+      expect(presence.status).toBe("active");
     });
   },
 );
@@ -7894,11 +8413,13 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
         where: { turnId: followUpId },
       });
       expect(row?.reaction).toBe(receipts.FOLLOW_UP_WAITING_REACTION);
+      // attachFollowUpReceipt writes the row BEFORE posting the mark.
+      expect(
+        slackCallsFor("reactions.add")
+          .find((c) => c.form.get("timestamp") === "1000.0002")
+          ?.form.get("name"),
+      ).toBe(receipts.FOLLOW_UP_WAITING_REACTION);
     });
-    const waiting = slackCallsFor("reactions.add").find(
-      (c) => c.form.get("timestamp") === "1000.0002",
-    );
-    expect(waiting?.form.get("name")).toBe(receipts.FOLLOW_UP_WAITING_REACTION);
 
     // 3. The supervisor delivered it and the daemon confirmed the join: the
     //    runner's batch settles the row (the control plane's fence) and the
@@ -7920,7 +8441,7 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
       ),
     ).toBe(true);
     const { markJoinedFollowUpsRead } = await import("../../routes/runner");
-    markJoinedFollowUpsRead(events);
+    markJoinedFollowUpsRead(turnId, events);
     expect(
       (await db.turn.findUniqueOrThrow({ where: { id: followUpId } })).status,
     ).toBe("joined");
@@ -8151,6 +8672,11 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
 });
 
 describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
+  // A card write deferred to the end of its window must never fire into the
+  // next test's fresh state: each test owns its own clock.
+  afterEach(() => {
+    receipts.takeDeferredCardRefreshesForTests();
+  });
   const seedSessionReceipt = async (
     turnId: string,
     cardThreadTs: string | null = null,
@@ -8427,7 +8953,7 @@ describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
     expect(slackCallsFor("chat.update")).toHaveLength(0);
   });
 
-  it("THROTTLES: an agent alternating tools cannot hammer Slack", async () => {
+  it("THROTTLES: an agent alternating tools cannot hammer Slack, and no step is lost", async () => {
     await seedSessionReceipt("turn-card-throttle");
     slackHandlers["chat.postMessage"] = () => ({
       ok: true,
@@ -8438,7 +8964,7 @@ describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
 
     // read → bash → read: the step CHANGES every call, so repeat
     // suppression alone would let all three through.
-    // MUTATION-PROOF: remove the interval check and this fails.
+    // MUTATION-PROOF: remove the window check and this fails.
     await receipts.narrateTurnActivity("turn-card-throttle", "Reading a file");
     await receipts.narrateTurnActivity(
       "turn-card-throttle",
@@ -8446,15 +8972,28 @@ describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
     );
     await receipts.narrateTurnActivity("turn-card-throttle", "Reading a file");
     expect(slackCallsFor("chat.update")).toHaveLength(0);
+    // The steps inside the window are recorded and owe ONE write at its
+    // end, so the card never sits on a step the agent has moved past.
+    expect(receipts.takeDeferredCardRefreshesForTests()).toEqual([
+      "turn-card-throttle",
+    ]);
 
-    // ...and once the floor passes, narration resumes: the throttle delays a
-    // step, it never silences the turn.
+    // ...and once the floor passes, the next write shows the latest steps.
     await pastThrottle("turn-card-throttle");
     await receipts.narrateTurnActivity(
       "turn-card-throttle",
       "Searching the web",
     );
     expect(slackCallsFor("chat.update")).toHaveLength(1);
+    const row = await db.channelTurnReceipt.findUniqueOrThrow({
+      where: { turnId: "turn-card-throttle" },
+    });
+    expect(row.cardSteps).toEqual([
+      "Reading a file",
+      "Running a command",
+      "Reading a file",
+      "Searching the web",
+    ]);
   });
 
   it("REMOVES the card when the answer posts — a loader is not a reply", async () => {
@@ -8734,8 +9273,9 @@ describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
     // down — otherwise its list (which never contained the winner's step)
     // overwrites the winner's, and a step silently disappears from the card.
     //
-    // MUTATION-PROOF: drop `if (claimed.count === 0) return;` and this
-    // fails — the card ends up showing only one of the two steps.
+    // MUTATION-PROOF: write the steps AFTER the provider call instead of
+    // before it, and this fails: the card ends up showing only one of the
+    // two steps.
     await seedSessionReceipt("turn-card-lost");
     slackHandlers["chat.postMessage"] = () => ({
       ok: true,
@@ -8809,6 +9349,321 @@ describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
     );
 
     expect(slackCallsFor("chat.postMessage")).toHaveLength(before);
+  });
+
+  describe("the messages waiting on the card (a row each, with Send now)", () => {
+    type Row = {
+      type: string;
+      text?: { text: string };
+      accessory?: { value: string; visible_to_user_ids: string[] };
+    };
+    const rowsOf = (form: URLSearchParams) =>
+      (JSON.parse(form.get("blocks") ?? "[]") as Row[]).filter(
+        (b) => b.type === "section",
+      );
+    const lastCardRows = () => {
+      const writes = [
+        ...slackCallsFor("chat.postMessage"),
+        ...slackCallsFor("chat.update"),
+      ];
+      return rowsOf(writes.at(-1)!.form);
+    };
+
+    /** A running turn with a posted card, and its integration's id. */
+    const seedPostedCard = async (key: string) => {
+      const { agentId, presenceId, integrationId } = await seedChannelAgent(
+        `rows-${key}`,
+        {
+          appMode: "agent",
+          presenceCredentials: await getCrypto().encrypt(
+            JSON.stringify({ botToken: "xoxb-rows" }),
+          ),
+        },
+      );
+      slackHandlers["chat.postMessage"] = () => ({
+        ok: true,
+        channel: "D970",
+        ts: "970.5001",
+      });
+      slackHandlers["chat.update"] = () => ({ ok: true });
+      slackHandlers["reactions.add"] = () => ({ ok: true });
+      const conversation = await db.conversation.create({
+        data: { agentId, source: "slack", externalRef: `D970-${key}` },
+        select: { id: true },
+      });
+      const target = await db.turn.create({
+        data: {
+          conversationId: conversation.id,
+          message: "the long task",
+          status: "running",
+          source: "slack",
+        },
+        select: { id: true },
+      });
+      await db.channelTurnReceipt.create({
+        data: {
+          turnId: target.id,
+          agentChannelId: presenceId,
+          channel: "D970",
+          messageTs: "970.0001",
+          kind: "session",
+        },
+      });
+      await receipts.narrateTurnActivity(target.id, "Running a command");
+      await db.channelTurnReceipt.update({
+        where: { turnId: target.id },
+        data: { cardAt: new Date(Date.now() - 10_000) },
+      });
+      return {
+        presenceId,
+        integrationId,
+        conversationId: conversation.id,
+        turnId: target.id,
+      };
+    };
+
+    const seedFollowUp = (
+      card: { conversationId: string; turnId: string },
+      input: { message: string; userId?: string; source?: string },
+    ) =>
+      db.turn.create({
+        data: {
+          conversationId: card.conversationId,
+          followUpOfTurnId: card.turnId,
+          message: input.message,
+          status: "joining",
+          source: input.source ?? "slack",
+          userId: input.userId ?? null,
+        },
+        select: { id: true },
+      });
+
+    it("a message accepted under the card appears as its row, with Send now for its LINKED author only", async () => {
+      const card = await seedPostedCard("appear");
+      await linkUser(card.integrationId, "U0ROWAUTHOR", MEMBER);
+      const followUp = await seedFollowUp(card, {
+        message: "and check the logs",
+        userId: MEMBER,
+      });
+      const guestFollowUp = await seedFollowUp(card, { message: "a guest" });
+
+      await receipts.attachFollowUpReceipt({
+        presenceId: card.presenceId,
+        followUpTurnId: followUp.id,
+        channel: "D970",
+        messageTs: "970.0002",
+      });
+
+      const rows = lastCardRows();
+      expect(rows.map((r) => r.text?.text)).toEqual([
+        expect.stringContaining("\u201cand check the logs\u201d"),
+        expect.stringContaining("\u201ca guest\u201d"),
+      ]);
+      expect(rows[0]?.accessory).toMatchObject({
+        value: followUp.id,
+        visible_to_user_ids: ["U0ROWAUTHOR"],
+      });
+      // Nobody could press a guest's: no control is drawn.
+      expect(rows[1]?.accessory).toBeUndefined();
+      expect(guestFollowUp.id).not.toBe(followUp.id);
+      // The row IS the mark under a loader: no emoji on the message.
+      expect(slackCallsFor("reactions.add")).toHaveLength(0);
+    });
+
+    it("a platform wake joined to the turn is never listed: nobody typed it", async () => {
+      const card = await seedPostedCard("automation");
+      await seedFollowUp(card, {
+        message: "cron: run the report",
+        source: "cron",
+      });
+      await receipts.refreshTurnCard(card.turnId);
+      expect(lastCardRows()).toEqual([]);
+    });
+
+    it("the row leaves the card once the agent reads the message", async () => {
+      const card = await seedPostedCard("leave");
+      const followUp = await seedFollowUp(card, { message: "read me" });
+      await receipts.refreshTurnCard(card.turnId);
+      expect(lastCardRows()).toHaveLength(1);
+
+      await db.turn.update({
+        where: { id: followUp.id },
+        data: { status: "joined" },
+      });
+      await db.channelTurnReceipt.update({
+        where: { turnId: card.turnId },
+        data: { cardAt: new Date(Date.now() - 10_000) },
+      });
+      await receipts.refreshTurnCard(card.turnId);
+      expect(lastCardRows()).toEqual([]);
+      // A refresh adds no step: the card still says what the agent does.
+      const row = await db.channelTurnReceipt.findUniqueOrThrow({
+        where: { turnId: card.turnId },
+      });
+      expect(row.cardSteps).toEqual(["Running a command"]);
+    });
+
+    it("a burst of changes inside the rate floor is ONE deferred render, never dropped", async () => {
+      // MUTATION-PROOF: make the in-window branch return without deferring
+      // and this fails: the row would only appear at the next step.
+      const card = await seedPostedCard("burst");
+      await receipts.refreshTurnCard(card.turnId);
+      const updates = slackCallsFor("chat.update").length;
+
+      await seedFollowUp(card, { message: "one" });
+      await receipts.refreshTurnCard(card.turnId);
+      await seedFollowUp(card, { message: "two" });
+      await receipts.refreshTurnCard(card.turnId);
+
+      // Inside the floor: nothing written now, one render owed.
+      expect(slackCallsFor("chat.update")).toHaveLength(updates);
+      expect(receipts.takeDeferredCardRefreshesForTests()).toEqual([
+        card.turnId,
+      ]);
+
+      // Its moment comes: it reads the state as it is THEN (both rows).
+      await db.channelTurnReceipt.update({
+        where: { turnId: card.turnId },
+        data: { cardAt: new Date(Date.now() - 10_000) },
+      });
+      await receipts.refreshTurnCard(card.turnId);
+      expect(slackCallsFor("chat.update")).toHaveLength(updates + 1);
+      expect(lastCardRows()).toHaveLength(2);
+    });
+
+    it("two refreshes at once write the card ONCE; the other is owed, not lost", async () => {
+      // MUTATION-PROOF: drop the clock compare-and-set and this fails: both
+      // read the same open window and both render (two writes for one).
+      const card = await seedPostedCard("rival");
+      const updates = slackCallsFor("chat.update").length;
+
+      await Promise.all([
+        receipts.refreshTurnCard(card.turnId),
+        receipts.refreshTurnCard(card.turnId),
+      ]);
+
+      expect(slackCallsFor("chat.update")).toHaveLength(updates + 1);
+      expect(receipts.takeDeferredCardRefreshesForTests()).toEqual([
+        card.turnId,
+      ]);
+    });
+
+    it("a message accepted while the FIRST post is in flight is shown once the card lands", async () => {
+      // MUTATION-PROOF: drop the poster's landed-revision check, or let an
+      // in-flight refresh return without marking itself owed, and this
+      // fails: the row would wait for the agent's next step to appear.
+      const { agentId, presenceId } = await seedChannelAgent("rows-inflight", {
+        appMode: "agent",
+        presenceCredentials: await getCrypto().encrypt(
+          JSON.stringify({ botToken: "xoxb-rows" }),
+        ),
+      });
+      let release: (() => void) | undefined;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      slackHandlers["chat.postMessage"] = async () => {
+        await held;
+        return { ok: true, channel: "D972", ts: "972.5001" };
+      };
+      slackHandlers["chat.update"] = () => ({ ok: true });
+      const conversation = await db.conversation.create({
+        data: { agentId, source: "slack", externalRef: "D972" },
+        select: { id: true },
+      });
+      const target = await db.turn.create({
+        data: {
+          conversationId: conversation.id,
+          message: "the long task",
+          status: "running",
+          source: "slack",
+        },
+        select: { id: true },
+      });
+      await db.channelTurnReceipt.create({
+        data: {
+          turnId: target.id,
+          agentChannelId: presenceId,
+          channel: "D972",
+          messageTs: "972.0001",
+          kind: "session",
+        },
+      });
+
+      const firstPost = receipts.narrateTurnActivity(
+        target.id,
+        "Running a command",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // The first post read what was waiting before this message existed.
+      await seedFollowUp(
+        { conversationId: conversation.id, turnId: target.id },
+        { message: "arrived mid-post" },
+      );
+      await receipts.refreshTurnCard(target.id);
+      // A slow post: its write window has passed by the time it lands.
+      await db.channelTurnReceipt.update({
+        where: { turnId: target.id },
+        data: { cardAt: new Date(Date.now() - 10_000) },
+      });
+      release?.();
+      await firstPost;
+
+      expect(rowsOf(slackCallsFor("chat.postMessage")[0]!.form)).toEqual([]);
+      expect(slackCallsFor("chat.update")).toHaveLength(1);
+      expect(lastCardRows().map((r) => r.text?.text)).toEqual([
+        expect.stringContaining("\u201carrived mid-post\u201d"),
+      ]);
+    });
+
+    it("no card posted yet: nothing is rendered, and the first step lists what waits", async () => {
+      const { agentId, presenceId } = await seedChannelAgent("rows-nocard", {
+        appMode: "agent",
+        presenceCredentials: await getCrypto().encrypt(
+          JSON.stringify({ botToken: "xoxb-rows" }),
+        ),
+      });
+      slackHandlers["chat.postMessage"] = () => ({
+        ok: true,
+        channel: "D971",
+        ts: "971.5001",
+      });
+      const conversation = await db.conversation.create({
+        data: { agentId, source: "slack", externalRef: "D971" },
+        select: { id: true },
+      });
+      const target = await db.turn.create({
+        data: {
+          conversationId: conversation.id,
+          message: "the long task",
+          status: "running",
+          source: "slack",
+        },
+        select: { id: true },
+      });
+      await db.channelTurnReceipt.create({
+        data: {
+          turnId: target.id,
+          agentChannelId: presenceId,
+          channel: "D971",
+          messageTs: "971.0001",
+          kind: "session",
+        },
+      });
+      await seedFollowUp(
+        { conversationId: conversation.id, turnId: target.id },
+        { message: "early" },
+      );
+
+      await receipts.refreshTurnCard(target.id);
+      expect(slackCallsFor("chat.postMessage")).toHaveLength(0);
+      expect(receipts.takeDeferredCardRefreshesForTests()).toEqual([]);
+
+      await receipts.narrateTurnActivity(target.id, "Reading a file");
+      expect(rowsOf(slackCallsFor("chat.postMessage")[0]!.form)).toHaveLength(
+        1,
+      );
+    });
   });
 });
 

@@ -23,6 +23,8 @@ const mocks = vi.hoisted(() => ({
   setPerson: vi.fn(),
   setSpace:
     vi.fn<(input: unknown, options: { onSuccess: () => void }) => void>(),
+  setListen:
+    vi.fn<(input: unknown, options: { onSuccess: () => void }) => void>(),
   setContact: vi.fn(),
   dismissPerson: vi.fn(),
   dismissSpace: vi.fn(),
@@ -37,6 +39,7 @@ vi.mock("sonner", () => ({
 vi.mock("@/hooks/use-channels", () => ({
   useSetPersonReachState: () => ({ mutate: mocks.setPerson, isPending: false }),
   useSetReachState: () => ({ mutate: mocks.setSpace, isPending: false }),
+  useSetSpaceListen: () => ({ mutate: mocks.setListen, isPending: false }),
   useSetContactPolicy: () => ({
     mutate: mocks.setContact,
     isPending: false,
@@ -121,10 +124,10 @@ describe("TwoWayRow (person)", () => {
     await userEvent.click(
       screen.getByRole("menuitem", { name: /Not allowed/ }),
     );
-    expect(mocks.setPerson).toHaveBeenCalledWith(
-      { externalRef: "U1", state: "blocked" },
-      expect.anything(),
-    );
+    expect(mocks.setPerson).toHaveBeenCalledWith({
+      externalRef: "U1",
+      state: "blocked",
+    });
     expect(mocks.setContact).not.toHaveBeenCalled();
   });
 
@@ -145,10 +148,10 @@ describe("TwoWayRow (person)", () => {
     await userEvent.click(
       screen.getByRole("menuitem", { name: /Without asking/ }),
     );
-    expect(mocks.setContact).toHaveBeenCalledWith(
-      { contactId: "c-1", policy: "allow" },
-      expect.anything(),
-    );
+    expect(mocks.setContact).toHaveBeenCalledWith({
+      contactId: "c-1",
+      policy: "allow",
+    });
     expect(mocks.setPerson).not.toHaveBeenCalled();
   });
 
@@ -237,11 +240,18 @@ describe("TwoWayRow (person)", () => {
 describe("TwoWayRow (channel)", () => {
   const space = (
     state: ChannelSpaceReach["state"],
+    listen: ChannelSpaceReach["listen"] = "mentions",
   ): MergedEntry<ChannelSpaceReach> => ({
     key: "C1",
     reach: {
       provider: "slack",
-      value: { externalRef: "C1", label: "#team", state, decidedAt: null },
+      value: {
+        externalRef: "C1",
+        label: "#team",
+        state,
+        decidedAt: null,
+        listen,
+      },
     },
     contact: null,
   });
@@ -267,10 +277,10 @@ describe("TwoWayRow (channel)", () => {
     await userEvent.click(
       screen.getByRole("menuitem", { name: /OneCLI users/ }),
     );
-    expect(mocks.setSpace).toHaveBeenCalledWith(
-      { externalRef: "C1", state: "members_only" },
-      expect.anything(),
-    );
+    expect(mocks.setSpace).toHaveBeenCalledWith({
+      externalRef: "C1",
+      state: "members_only",
+    });
   });
 
   it("never lowercases the brand in the accessible name", () => {
@@ -282,7 +292,7 @@ describe("TwoWayRow (channel)", () => {
     ).toBeDefined();
   });
 
-  it("the toast after a change keeps the brand too", async () => {
+  it("a change is instant and silent: the badge is the confirmation", async () => {
     renderChannel(space("approved"));
     await userEvent.click(
       screen.getByRole("button", { name: /^Who Donna answers in #team/ }),
@@ -290,10 +300,8 @@ describe("TwoWayRow (channel)", () => {
     await userEvent.click(
       screen.getByRole("menuitem", { name: /OneCLI users/ }),
     );
-    mocks.setSpace.mock.calls[0]![1].onSuccess();
-    expect(mocks.toastSuccess).toHaveBeenCalledWith(
-      "#team: Donna answers OneCLI users only",
-    );
+    // No per-click success toast (failures still speak, from the hook).
+    expect(mocks.toastSuccess).not.toHaveBeenCalled();
   });
 
   it("a channel it only posted to says the real default: the next message there asks", () => {
@@ -314,6 +322,46 @@ describe("TwoWayRow (channel)", () => {
       screen.getByText("Donna asks you before answering anyone in #ops."),
     ).toBeDefined();
     expect(screen.queryByText(/Not in channel/)).toBeNull();
+  });
+
+  it("Listens to: promote a channel to point of contact with THIS row's ref", async () => {
+    renderChannel(space("approved"));
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "What Donna hears in #team: Only @mentions. Change",
+      }),
+    );
+    await userEvent.click(
+      screen.getByRole("menuitem", {
+        name: /Every message \(point of contact\)/,
+      }),
+    );
+    expect(mocks.setListen).toHaveBeenCalledWith({
+      externalRef: "C1",
+      listen: "all",
+    });
+  });
+
+  it("a promoted channel shows the Point of contact badge", () => {
+    renderChannel(space("members_only", "all"));
+    expect(screen.getByText("Point of contact")).toBeDefined();
+    expect(
+      screen.getByRole("button", {
+        name: /^What Donna hears in #team: Every message/,
+      }),
+    ).toBeDefined();
+  });
+
+  it("can't promote a channel that answers no one: no menu, just the reason", () => {
+    for (const state of ["blocked", "pending"] as const) {
+      const view = renderChannel(space(state));
+      expect(
+        screen.queryByRole("button", { name: /^What Donna hears in #team/ }),
+      ).toBeNull();
+      expect(screen.getByText("Mentions")).toBeDefined();
+      view.unmount();
+    }
+    expect(mocks.setListen).not.toHaveBeenCalled();
   });
 
   it("Remove dismisses the channel reach row, and says which half", async () => {

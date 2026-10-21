@@ -6,6 +6,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { queryKeys } from "@/lib/api/keys";
 import { Pencil, Trash2 } from "lucide-react";
+import { AgentIcon } from "@/lib/agents/agent-icon";
 import { toast } from "sonner";
 import { Card } from "@onecli/ui/components/card";
 import { Button } from "@onecli/ui/components/button";
@@ -51,6 +52,9 @@ interface SecretCardProps {
   secretActions?: SecretActions;
   readOnly?: boolean;
   badge?: string;
+  /** Opens the secret's "choose agents" window. Omitted where agents can't be
+   * chosen (an org page, an LLM key). */
+  onChooseAgents?: () => void;
 }
 
 export const SecretCard = ({
@@ -59,6 +63,7 @@ export const SecretCard = ({
   secretActions,
   readOnly,
   badge,
+  onChooseAgents,
 }: SecretCardProps) => {
   const invalidateCache = useInvalidateGatewayCache();
   const queryClient = useQueryClient();
@@ -189,6 +194,17 @@ export const SecretCard = ({
 
           {!readOnly && (
             <div className="flex items-center gap-1">
+              {onChooseAgents && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7"
+                  onClick={onChooseAgents}
+                >
+                  <AgentIcon className="size-3.5" aria-hidden="true" />
+                  Agents
+                </Button>
+              )}
               <Button
                 variant="ghost"
                 size="icon"

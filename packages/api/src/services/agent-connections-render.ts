@@ -4,6 +4,7 @@ import {
   MAX_AGENT_CONNECTION_NAME_CHARS,
   MAX_AGENT_CONNECTIONS,
   cleanLabel,
+  customConnectionLabel,
   type AgentConnectionWire,
 } from "@onecli/agent-protocol";
 import { getApp } from "../apps/registry";
@@ -13,6 +14,7 @@ import {
   providerLevelKey,
 } from "./policy-reflect/injection";
 import { catalogFactsFor } from "./agent-connection-catalog";
+import { injectableSecretWhere } from "./injectable-secrets";
 import { loadInjectionRules } from "./policy-simulate/load-rules";
 import { resolvePrincipalSet } from "./policy-simulate/principal-set";
 
@@ -106,4 +108,55 @@ export const connectionsForRender = async (
     });
   }
   return out.slice(0, MAX_AGENT_CONNECTIONS);
+};
+
+/** One custom (generic) secret an agent can use, as `list_apps` shows it.
+ * Identity and routing only: never a value, never metadata. */
+export interface AgentCustomConnection {
+  /** Pin with `x-onecli-connection-id` when two of these collide. */
+  id: string;
+  name: string;
+  host: string;
+  /** Present only when the secret is scoped to a path. */
+  path?: string;
+}
+
+/**
+ * The custom (generic) secrets this agent's grants let the gateway inject,
+ * through the SAME selection the gateway and the container builder read
+ * (`injectableSecretWhere`: the org/workspace-fenced pool narrowed to the
+ * agent's published grants). The id lets the agent pin one when two set the
+ * same header on one host (the gateway's `multiple_connections` 409). Only
+ * id, name, host and path are selected: the value and metadata never leave
+ * the database here.
+ */
+export const customConnectionsForRender = async (
+  agentId: string,
+): Promise<AgentCustomConnection[]> => {
+  const agent = await db.agent.findUnique({
+    where: { id: agentId },
+    select: {
+      workspaceId: true,
+      workspace: { select: { organizationId: true } },
+    },
+  });
+  if (!agent) return [];
+  const where = await injectableSecretWhere(
+    { id: agentId },
+    agent.workspaceId,
+    agent.workspace.organizationId,
+  );
+  const rows = await db.secret.findMany({
+    where: { AND: [where, { type: "generic" }] },
+    select: { id: true, name: true, hostPattern: true, pathPattern: true },
+    orderBy: [{ hostPattern: "asc" }, { createdAt: "asc" }],
+    // The same cap as the app list.
+    take: MAX_AGENT_CONNECTIONS,
+  });
+  return rows.map((row) => ({
+    id: row.id,
+    name: customConnectionLabel(row.name),
+    host: row.hostPattern,
+    ...(row.pathPattern ? { path: row.pathPattern } : {}),
+  }));
 };

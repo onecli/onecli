@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * The memory tool arms of the platform-tool dispatch (step 8), mocked at the
@@ -44,7 +44,10 @@ const audit = vi.hoisted(() => ({ recordAuditEvent: vi.fn() }));
 
 const connectionsRender = vi.hoisted(() => ({
   connectionsForRender: vi.fn(),
+  customConnectionsForRender: vi.fn(),
 }));
+
+const agentDesktop = vi.hoisted(() => ({ callTool: vi.fn() }));
 
 const skillService = vi.hoisted(() => ({
   createSkill: vi.fn(),
@@ -101,8 +104,27 @@ vi.mock("./skill-service", () => ({
   deleteAgentSkillByName: skillService.deleteAgentSkillByName,
 }));
 
+// The GitHub library: no library skills unless a
+// test plants one, so the skill_* paths behave as before.
+const library = vi.hoisted(() => ({
+  names: [] as { name: string; description: string; repo: string }[],
+}));
+vi.mock("./skill-library-service", () => ({
+  libraryNamesForAgent: async () => library.names,
+}));
+
 vi.mock("./agent-connections-render", () => ({
   connectionsForRender: connectionsRender.connectionsForRender,
+  customConnectionsForRender: connectionsRender.customConnectionsForRender,
+}));
+
+const approvals = vi.hoisted(() => ({ requestActionApproval: vi.fn() }));
+
+vi.mock("./channels/action-approval-service", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("./channels/action-approval-service")
+  >()),
+  requestActionApproval: approvals.requestActionApproval,
 }));
 
 vi.mock("./audit-service", async (importOriginal) => ({
@@ -113,6 +135,7 @@ vi.mock("./audit-service", async (importOriginal) => ({
 const { executePlatformTool, takeMemoryWriteToken, resetMemoryWritePacing } =
   await import("./platform-tool-service");
 const { ServiceError } = await import("./errors");
+const { initAgentDesktop } = await import("../providers/hooks/agent-desktop");
 
 const MEMORY = {
   id: "mem-1",
@@ -287,7 +310,6 @@ describe("the skill tools", () => {
     id: "sk-1",
     scope: "agent",
     agentId: "ag-1",
-    workspaceId: null,
     organizationId: null,
     name: "release-checklist",
     description: "Use when cutting a release",
@@ -386,7 +408,6 @@ describe("the skill tools", () => {
     expect(response.ok).toBe(true);
     expect(skillService.listSkillsReachingAgent).toHaveBeenCalledWith(
       "ag-1",
-      "p1",
       "org-1",
     );
     const result = response.result as {
@@ -398,7 +419,7 @@ describe("the skill tools", () => {
       expect.objectContaining({ name: "org-tone", editable: false }),
     ]);
     expect(result.skills[0]).not.toHaveProperty("content");
-    expect(result.note).toContain("most specific one wins");
+    expect(result.note).toContain("yours wins");
     expect(audit.recordAuditEvent).not.toHaveBeenCalled();
   });
 
@@ -414,7 +435,6 @@ describe("the skill tools", () => {
     expect(response.ok).toBe(true);
     expect(skillService.updateAgentSkillByName).toHaveBeenCalledWith(
       "ag-1",
-      "p1",
       "org-1",
       "release-checklist",
       { enabled: false },
@@ -442,11 +462,11 @@ describe("the skill tools", () => {
     expect(audit.recordAuditEvent).not.toHaveBeenCalled();
   });
 
-  it("a broader-tier refusal reaches the model verbatim (the dashboard pointer)", async () => {
+  it("an org-tier refusal reaches the model verbatim (the dashboard pointer)", async () => {
     skillService.updateAgentSkillByName.mockRejectedValue(
       new ServiceError(
         "FORBIDDEN",
-        '"org-tone" is a organization skill, managed by the people you work with in the dashboard.',
+        '"org-tone" is an organization skill, managed by the people you work with in the dashboard.',
       ),
     );
     const response = await call("skill_update", {
@@ -457,12 +477,47 @@ describe("the skill tools", () => {
     expect(response.error).toContain("managed by the people you work with");
   });
 
+  it("a library skill (from the org's Git repo) is listed read-only and never written", async () => {
+    library.names = [
+      { name: "snowflake", description: "Query it", repo: "acme/skills" },
+    ];
+    try {
+      const listed = await call("skill_list", {});
+      expect(
+        (
+          listed.result as {
+            skills: { name: string; scope: string; editable: boolean }[];
+          }
+        ).skills,
+      ).toContainEqual(
+        expect.objectContaining({
+          name: "snowflake",
+          scope: "library",
+          editable: false,
+        }),
+      );
+      for (const [tool, args] of [
+        ["skill_update", { name: "snowflake", enabled: false }],
+        ["skill_delete", { name: "snowflake" }],
+        ["skill_create", { name: "snowflake", description: "d", content: "c" }],
+      ] as const) {
+        const res = await call(tool, args);
+        expect(res.ok, tool).toBe(false);
+        expect(res.error).toContain("managed in that Git repo");
+      }
+      expect(skillService.updateAgentSkillByName).not.toHaveBeenCalled();
+      expect(skillService.deleteAgentSkillByName).not.toHaveBeenCalled();
+      expect(skillService.createSkill).not.toHaveBeenCalled();
+    } finally {
+      library.names = [];
+    }
+  });
+
   it("skill_delete deletes by name and audits under the via-user", async () => {
     const response = await call("skill_delete", { name: "release-checklist" });
     expect(response.ok).toBe(true);
     expect(skillService.deleteAgentSkillByName).toHaveBeenCalledWith(
       "ag-1",
-      "p1",
       "org-1",
       "release-checklist",
     );
@@ -563,6 +618,36 @@ describe("list_apps", () => {
     docsUrl: "https://docs.granola.ai/introduction",
   };
 
+  beforeEach(() => {
+    connectionsRender.customConnectionsForRender.mockResolvedValue([]);
+  });
+
+  it("lists custom connections in their own section, with the pin hint", async () => {
+    connectionsRender.connectionsForRender.mockResolvedValue([]);
+    const custom = {
+      id: "sec-1",
+      name: "Prod key",
+      host: "api.example.com",
+      path: "/v2/*",
+    };
+    connectionsRender.customConnectionsForRender.mockResolvedValue([custom]);
+    const res = await call("list_apps", {});
+    expect(connectionsRender.customConnectionsForRender).toHaveBeenCalledWith(
+      "ag-1",
+    );
+    expect(res).toMatchObject({
+      ok: true,
+      result: { apps: [], customConnections: [custom] },
+    });
+    expect(JSON.stringify(res)).toContain("x-onecli-connection-id");
+  });
+
+  it("omits the custom section when there is none", async () => {
+    connectionsRender.connectionsForRender.mockResolvedValue([granola]);
+    const res = await call("list_apps", {});
+    expect(res.ok && "customConnections" in (res.result as object)).toBe(false);
+  });
+
   it("answers from the composer for the CALLING agent only", async () => {
     connectionsRender.connectionsForRender.mockResolvedValue([granola]);
     const res = await call("list_apps", {});
@@ -582,5 +667,107 @@ describe("list_apps", () => {
     const res = await call("list_apps", {});
     expect(res.ok).toBe(false);
     expect(connectionsRender.connectionsForRender).not.toHaveBeenCalled();
+  });
+});
+
+describe("request_human_takeover", () => {
+  // The tool is a hosted-platform one: the shared dispatcher only routes it
+  // through the agent-desktop seam, with the asking turn as provenance.
+  // Its own validation and words are pinned beside the implementation
+  // (ee/desktop/index.test.ts).
+  afterEach(() => initAgentDesktop(null));
+
+  it("routes the call through the seam for the CALLING agent, with the asking turn as provenance", async () => {
+    agentDesktop.callTool.mockResolvedValue({
+      ok: true,
+      result: { status: "requested" },
+    });
+    initAgentDesktop({
+      sweep: vi.fn(),
+      claimPushes: vi.fn(),
+      markActivity: vi.fn(),
+      mintTicket: vi.fn(),
+      callTool: agentDesktop.callTool,
+    });
+    const res = await call("request_human_takeover", {
+      reason: "Sign in to the portal",
+    });
+    expect(agentDesktop.callTool).toHaveBeenCalledWith({
+      agentId: "ag-1",
+      args: { reason: "Sign in to the portal" },
+      originConversationId: "conv-1",
+      originTurnId: "t-1",
+    });
+    expect(res).toEqual({ ok: true, result: { status: "requested" } });
+  });
+
+  it("is refused where the deployment has no hosted desktop (every self-host)", async () => {
+    initAgentDesktop(null);
+    const res = await call("request_human_takeover", { reason: "captcha" });
+    expect(res).toEqual({ ok: false, error: "This tool is not available." });
+    expect(agentDesktop.callTool).not.toHaveBeenCalled();
+  });
+});
+
+describe("propose_custom_connection", () => {
+  const proposal = {
+    name: "AcmeCRM",
+    hostPattern: "api.acmecrm.io",
+    headerName: "X-Api-Key",
+    valueFormat: "{value}",
+    docsUrl: "https://docs.acmecrm.io/auth",
+    reason: "You asked for your AcmeCRM campaigns.",
+  };
+
+  beforeEach(() => {
+    approvals.requestActionApproval.mockResolvedValue({
+      id: "aa-1",
+      status: "pending",
+    });
+  });
+
+  it("holds a valid proposal for the CALLING agent, anchored on the turn", async () => {
+    const res = await call("propose_custom_connection", proposal);
+    expect(approvals.requestActionApproval).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "ag-1",
+        action: "secret.create_custom",
+        payload: proposal,
+      }),
+    );
+    expect(res).toMatchObject({
+      ok: true,
+      result: { status: "held", approvalId: "aa-1", host: "api.acmecrm.io" },
+    });
+    expect(JSON.stringify(res)).toContain("Never ask them to paste the key");
+  });
+
+  it("refuses a value argument outright: nothing is held", async () => {
+    const res = await call("propose_custom_connection", {
+      ...proposal,
+      value: "sk-live-secret",
+    });
+    expect(res.ok).toBe(false);
+    expect(approvals.requestActionApproval).not.toHaveBeenCalled();
+    expect(JSON.stringify(res)).not.toContain("sk-live-secret");
+  });
+
+  it("refuses a catalog app's host and points at the real app", async () => {
+    const res = await call("propose_custom_connection", {
+      ...proposal,
+      hostPattern: "api.github.com",
+    });
+    expect(res.ok).toBe(false);
+    expect(JSON.stringify(res)).toContain("built-in OneCLI app");
+    expect(approvals.requestActionApproval).not.toHaveBeenCalled();
+  });
+
+  it("refuses a private host", async () => {
+    const res = await call("propose_custom_connection", {
+      ...proposal,
+      hostPattern: "169.254.169.254",
+    });
+    expect(res.ok).toBe(false);
+    expect(approvals.requestActionApproval).not.toHaveBeenCalled();
   });
 });

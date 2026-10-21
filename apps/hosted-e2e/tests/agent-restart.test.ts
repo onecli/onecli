@@ -1,6 +1,7 @@
 import { expect } from "vitest";
 import { scenario } from "../src/scenario.js";
 import {
+  containerOf,
   seedAnthropicGrant,
   seedHostedAgent,
   seedTenant,
@@ -62,7 +63,7 @@ scenario(
       transcriptText(await fetchTranscript(stack.v1, conversation.id)),
     );
     expect(before.turnsRun).toBe(1);
-    const containerBefore = stack.runner.containerRefOf(cx.ids.sandbox);
+    const containerBefore = await containerOf(cx.prisma, cx.ids.sandbox);
     expect(containerBefore).toBeTruthy();
 
     // The agent is BUSY when the person restarts it: a long run in flight.
@@ -107,7 +108,7 @@ scenario(
     );
     expect(fresh.turnsRun).toBe(1);
     expect(fresh.sessionRef).not.toBe(before.sessionRef);
-    const containerAfter = stack.runner.containerRefOf(cx.ids.sandbox);
+    const containerAfter = await containerOf(cx.prisma, cx.ids.sandbox);
     expect(containerAfter).toBeTruthy();
     expect(containerAfter).not.toBe(containerBefore);
 

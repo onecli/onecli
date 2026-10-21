@@ -26,7 +26,8 @@ import {
 } from "./effective-tools";
 import { injectionIdentityMatches } from "./injection";
 
-// The "Credential access" dialog's reflection (step 9.7b),
+// An agent's effective-credentials reflection (step 9.7b, read by the agent's
+// Connections section),
 // framed around EFFECTIVE ACCESS (the user decision — reflections lead with what
 // the rules ALLOW, never the raw injection view): the credentials an agent can
 // inject, each tagged with what it can actually DO under the enforced rules

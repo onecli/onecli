@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { ChevronDown, Settings2 } from "lucide-react";
 import { toast } from "sonner";
+import { useMutationState } from "@tanstack/react-query";
 import { Button } from "@onecli/ui/components/button";
 import { Switch } from "@onecli/ui/components/switch";
 import {
@@ -12,13 +13,21 @@ import {
 } from "@onecli/ui/components/tooltip";
 import { cn } from "@onecli/ui/lib/utils";
 import type { ConnectionGrantInput, ConnectionGrants } from "@/lib/api";
-import { useConnectionEffectiveAgents } from "@/lib/api/policy-visibility";
+import {
+  useConnectionEffectiveAgents,
+  type EffectiveAgentEntry,
+} from "@/lib/api/policy-visibility";
 import { agentConnectionState } from "@/lib/components/policy-reflect/agent-connection-state";
 import {
+  GRANTS_FAMILY,
+  grantTarget,
+  grantToastId,
   useConnectionGrants,
   useDetachConnectionForAgent,
   useSetConnectionGrantForAgent,
 } from "@/hooks/use-grants";
+import { optimisticKey } from "@/hooks/use-optimistic-mutation";
+import { usePinnedPlacement } from "@/hooks/use-stable-placement";
 import { ManageAgentPermissions } from "./manage-agent-permissions";
 import type { AccountCardConnection } from "./account-card-connection";
 
@@ -59,6 +68,11 @@ export interface ConnectionAgentRowsProps {
  * for this one account. Reads the enforced rules (the effective view) beside
  * the workspace grants, like the Agent access dialog, so an agent the org
  * grants shows as on and locked, and one the org blocks says so.
+ *
+ * Switches move on click (the grants hooks are optimistic). While an agent's
+ * write is settling, its row reads the grant alone: the effective view still
+ * describes the state before the click, so its "blocked" verdict is held
+ * back rather than shown beside a switch that already says otherwise.
  */
 export const ConnectionAgentRows = ({
   connection,
@@ -67,9 +81,38 @@ export const ConnectionAgentRows = ({
   const grantsQuery = useConnectionGrants(connection.id);
   const attach = useSetConnectionGrantForAgent();
   const detach = useDetachConnectionForAgent();
-  const [busyAgent, setBusyAgent] = useState<string | null>(null);
   const [managing, setManaging] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
+  // Agents of THIS connection with a grant write still settling.
+  const settlingAgents = new Set(
+    useMutationState({
+      filters: {
+        mutationKey: optimisticKey(GRANTS_FAMILY),
+        status: "pending",
+        predicate: (m) =>
+          grantTarget(m.state.variables)?.connectionId === connection.id,
+      },
+      select: (m) => grantTarget(m.state.variables)?.agentId ?? null,
+    }).filter((id): id is string => id !== null),
+  );
+  const grantByAgent = new Map(
+    (grantsQuery.data?.agents ?? []).map((g) => [g.agentId, g]),
+  );
+  const stateOf = (agent: EffectiveAgentEntry) => {
+    const state = agentConnectionState(agent, grantByAgent.has(agent.agentId));
+    return settlingAgents.has(agent.agentId)
+      ? { ...state, blocked: false }
+      : state;
+  };
+  // "On first" ordering, except a row the user just toggled keeps its slot
+  // until the next visit, so it never jumps out from under the pointer.
+  const effectiveById = new Map(
+    (effectiveQuery.data?.agents ?? []).map((a) => [a.agentId, a]),
+  );
+  const placement = usePinnedPlacement((agentId: string) => {
+    const agent = effectiveById.get(agentId);
+    return agent ? stateOf(agent).on : false;
+  });
 
   // Switches never render over unknown grant state: both views first.
   if (effectiveQuery.isPending || grantsQuery.isPending) {
@@ -98,19 +141,17 @@ export const ConnectionAgentRows = ({
     );
   }
 
-  const grantByAgent = new Map(
-    grantsQuery.data.agents.map((g) => [g.agentId, g]),
-  );
   const rows = agents.map((agent) => ({
     agent,
     grant: grantByAgent.get(agent.agentId),
-    state: agentConnectionState(agent, grantByAgent.has(agent.agentId)),
+    state: stateOf(agent),
   }));
   const onCount = rows.filter((r) => r.state.on).length;
   // On first, so the agents that matter are the ones always visible.
   const sorted = [...rows].sort(
     (a, b) =>
-      Number(b.state.on) - Number(a.state.on) ||
+      Number(placement.placeOf(b.agent.agentId)) -
+        Number(placement.placeOf(a.agent.agentId)) ||
       a.agent.name.localeCompare(b.agent.name),
   );
   const visible = expanded ? sorted : sorted.slice(0, VISIBLE_ROWS);
@@ -118,47 +159,44 @@ export const ConnectionAgentRows = ({
   const accountName = connection.label ?? connection.provider;
 
   const toggle = (agentId: string, agentName: string, next: boolean) => {
-    setBusyAgent(agentId);
-    const done = { onSettled: () => setBusyAgent(null) };
+    placement.pin(agentId);
     if (next) {
-      // The product default every attach toggle writes: catalog tools
-      // allowed, anything else needs approval.
-      attach.mutate(
-        { connectionId: connection.id, agentId, input: { access: "default" } },
-        {
-          ...done,
-          onSuccess: () =>
-            toast.success(`${agentName} can use ${accountName}`, {
-              action: {
-                label: "Permissions",
-                onClick: () => setManaging(agentId),
-              },
-            }),
+      // The product default every attach toggle writes: reads allowed,
+      // writes and anything else need approval. The toast is the door to
+      // narrow it, so it shows at once, with the switch.
+      attach.mutate({
+        connectionId: connection.id,
+        agentId,
+        input: { access: "default" },
+      });
+      toast.success(`${agentName} can use ${accountName}`, {
+        id: grantToastId(agentId, connection.id),
+        action: {
+          label: "Permissions",
+          onClick: () => setManaging(agentId),
         },
-      );
+      });
       return;
     }
     const previous = grantByAgent.get(agentId);
-    detach.mutate(
-      { connectionId: connection.id, agentId },
-      {
-        ...done,
-        onSuccess: () =>
-          toast(`${agentName} can no longer use ${accountName}`, {
-            action: previous
-              ? {
-                  label: "Undo",
-                  onClick: () =>
-                    attach.mutate({
-                      connectionId: connection.id,
-                      agentId,
-                      input: restoreInput(previous),
-                    }),
-                }
-              : undefined,
-          }),
-      },
-    );
+    detach.mutate({ connectionId: connection.id, agentId });
+    // Undo is offered at once: it queues behind the detach (writes to one
+    // agent × account run in order), so it can be pressed before the server
+    // has even answered. A failed detach replaces this with its error.
+    toast(`${agentName} can no longer use ${accountName}`, {
+      id: grantToastId(agentId, connection.id),
+      action: previous
+        ? {
+            label: "Undo",
+            onClick: () =>
+              attach.mutate({
+                connectionId: connection.id,
+                agentId,
+                input: restoreInput(previous),
+              }),
+          }
+        : undefined,
+    });
   };
 
   return (
@@ -228,7 +266,8 @@ export const ConnectionAgentRows = ({
             <Switch
               size="sm"
               checked={on}
-              disabled={busyAgent === agent.agentId || orgGranted}
+              // Locked only by the org, never by an in-flight write.
+              disabled={orgGranted}
               onCheckedChange={(next) =>
                 toggle(agent.agentId, agent.name, next)
               }

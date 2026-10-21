@@ -252,15 +252,13 @@ export const ChannelUserLinksCard = () => {
                         size="icon-xs"
                         variant="ghost"
                         aria-label={`Remove link for ${link.user.email}`}
-                        disabled={removeLink.isPending}
+                        // Instant: the row leaves on click; the hook
+                        // confirms, or puts it back and says why.
                         onClick={() =>
-                          removeLink.mutate(
-                            { provider: "slack", linkId: link.id },
-                            {
-                              onSuccess: () => toast.success("Link removed"),
-                              onError: (err) => toast.error(err.message),
-                            },
-                          )
+                          removeLink.mutate({
+                            provider: "slack",
+                            linkId: link.id,
+                          })
                         }
                       >
                         <Trash2 className="size-3.5" />

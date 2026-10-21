@@ -41,6 +41,12 @@ export const AUDIT_ACTIONS = {
   // (content recording is deliberately out of scope, privacy posture).
   SESSION_OPEN: "session_open",
   SESSION_CLOSE: "session_close",
+  // Desktop takeover: a person took the mouse and keyboard of an agent's
+  // screen, and gave them back (or an admin took them off a teammate, or
+  // the lease timed out). A human driving the agent's computer is policy
+  // surface, like a shell session.
+  CONTROL_TAKEN: "control_taken",
+  CONTROL_RELEASED: "control_released",
   // "Restart agent": a person reset every conversation of a hosted agent and
   // stopped its sandbox. First-class because it ends work in flight.
   RESTART: "restart",
@@ -87,9 +93,13 @@ export const AUDIT_SERVICES = {
   MEMORY: "memory",
   // Skills (hosted-agents v2 step 9): user-authored capabilities materialized
   // into sandboxes. Free — audited from the API routes on both doors
-  // (workspace and org); agent-authored skill_* tool writes are audited under
-  // the resolved creating user (viaAgent), agent-tier rows only.
+  // (/v1/skills for agent skills, /v1/org/skills for org skills);
+  // agent-authored skill_* tool writes are audited under the resolved
+  // creating user (viaAgent), agent-tier rows only.
   SKILL: "skill",
+  // The org's connected Git repo of skills: connect,
+  // disconnect, add/remove a library skill on an agent, its on/off switch.
+  SKILL_LIBRARY: "skill-library",
   // EE-only (policy-engine step 7): the org app-availability allowlist
   // (toggle + per-principal grants).
   APP_AVAILABILITY: "app-availability",
@@ -126,6 +136,12 @@ export const AUDIT_SERVICES = {
   CONVERSATION: "conversation",
   // Agent evals: test-question edits and runs. Free.
   EVAL: "eval",
+  // Sandbox ports: a port shared as a private preview link (CREATE, by a
+  // person or via an approved agent ask) or unshared (DELETE).
+  PREVIEW: "preview",
+  // The agent's desktop: watched (SESSION_OPEN, like a preview), taken
+  // over, handed back.
+  DESKTOP: "desktop",
 } as const;
 
 export const AUDIT_STATUS = {

@@ -65,6 +65,8 @@ export const ApprovalTimelineSlot = ({
         key={entry.card.approval.id}
         approval={entry.card.approval}
         settled={entry.card.settled}
+        via={entry.card.via}
+        result={entry.card.result}
       />
     );
   });

@@ -23,6 +23,8 @@ import {
 } from "../routes/removed-routes";
 import { dropboxFolderRoutes } from "./routes/dropbox-folders";
 import { googleDriveFolderRoutes } from "./routes/google-drive-folders";
+import { slackReadOverviewRoutes, slackReadRoutes } from "./slack-read";
+import { agentDesktopRoutes } from "./desktop/routes";
 
 export const registerEeRoutes = (app: Hono<ApiEnv>) => {
   app.route("/auth/sso", ssoLookupRoutes());
@@ -54,4 +56,13 @@ export const registerEeRoutes = (app: Hono<ApiEnv>) => {
   app.route("/org/role-mappings", orgRoleMappingRoutes());
   app.route("/apps/dropbox", dropboxFolderRoutes());
   app.route("/apps/google-drive", googleDriveFolderRoutes());
+  // "Connect your Slack" read grants, composed onto /agents (every path is
+  // 3+ segments under /:agentId/slack-read, so nothing shadows it).
+  app.route("/agents", slackReadRoutes());
+  // The workspace-level finder (which agents can read my Slack?).
+  app.route("/slack-read", slackReadOverviewRoutes());
+  // The agent's hosted desktop, composed onto /agents (every path is 3
+  // segments under /:agentId/desktop). Hosted platform only: absent off
+  // cloud (edition-dark 404).
+  app.route("/agents", agentDesktopRoutes());
 };

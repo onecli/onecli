@@ -22,9 +22,11 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 
 const narrateTurnActivity = vi.fn();
 const markFollowUpRead = vi.fn();
+const refreshTurnCard = vi.fn();
 vi.mock("../services/channels/turn-receipt-service", () => ({
   narrateTurnActivity: (...args: unknown[]) => narrateTurnActivity(...args),
   markFollowUpRead: (...args: unknown[]) => markFollowUpRead(...args),
+  refreshTurnCard: (...args: unknown[]) => refreshTurnCard(...args),
   clearTurnReceipts: vi.fn(),
   attachTurnReceipt: vi.fn(),
   attachFollowUpReceipt: vi.fn(),
@@ -41,6 +43,7 @@ const push = (events: unknown[]) =>
 beforeEach(() => {
   narrateTurnActivity.mockReset();
   markFollowUpRead.mockReset();
+  refreshTurnCard.mockReset();
 });
 
 describe("which event becomes the task row", () => {
@@ -125,9 +128,9 @@ describe("when the narration must stay silent", () => {
 
 describe("which event flips a follow-up's mark to read", () => {
   const mark = (events: unknown[]) =>
-    markJoinedFollowUpsRead(events as AgentEvent[]);
+    markJoinedFollowUpsRead("turn-1", events as AgentEvent[]);
 
-  it("marks every follow-up the batch confirmed joined, in order", () => {
+  it("marks every follow-up the batch confirmed joined, in order, and refreshes the turn's card ONCE", () => {
     mark([
       { type: "text.delta", text: "Sure." },
       { type: "message.joined", followUpId: "f1" },
@@ -135,14 +138,17 @@ describe("which event flips a follow-up's mark to read", () => {
       { type: "message.joined", followUpId: "f2" },
     ]);
     expect(markFollowUpRead.mock.calls).toEqual([["f1"], ["f2"]]);
+    // The read message's row leaves the card; one render covers the batch.
+    expect(refreshTurnCard.mock.calls).toEqual([["turn-1"]]);
   });
 
-  it("marks nothing when no join rode the batch", () => {
+  it("marks nothing and leaves the card alone when no join rode the batch", () => {
     mark([
       { type: "text.delta", text: "hi" },
       { type: "tool.started", callId: "c1", name: "bash" },
       { type: "turn.done" },
     ]);
     expect(markFollowUpRead).not.toHaveBeenCalled();
+    expect(refreshTurnCard).not.toHaveBeenCalled();
   });
 });

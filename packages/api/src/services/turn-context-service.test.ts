@@ -70,6 +70,9 @@ vi.mock("./agent-memory-service", () => ({
 vi.mock("./turn-service", () => ({
   buildContinuityBridge: bridge.buildContinuityBridge,
   buildOpenPromiseNote: bridge.buildOpenPromiseNote,
+  // Real co-importers of the mocked module still need this to exist (the
+  // channel ingestion service's card row actions).
+  requestSendNow: vi.fn(),
 }));
 
 // The approval note has its own pg proof; here it is out of frame.

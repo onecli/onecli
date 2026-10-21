@@ -11,17 +11,30 @@ import {
   getSetupMaterial,
 } from "../services/channels/agent-channel-service";
 import { isChannelProviderId } from "../services/channels/registry";
+import { syncPresenceIcon } from "../services/channels/presence-icons-service";
 import {
   dismissReachRow,
   setPersonReachState,
+  setSpaceListen,
   setSpaceReachState,
 } from "../services/channels/agent-reach-service";
 import {
   ACTION_APPROVAL_STATUSES,
+  actionRequiresSecretValue,
   decideActionApproval,
   listActionApprovals,
+  NEEDS_SECRET_VALUE_MESSAGE,
   type ActionApprovalStatus,
 } from "../services/channels/action-approval-service";
+import { RESUME_AFTER_CUSTOM_CONNECTION_MESSAGE } from "../services/custom-connection-proposal-service";
+import { sendConversationMessage } from "../services/follow-up-service";
+import { logger } from "../lib/logger";
+import {
+  CUSTOM_CONNECTION_ACTION,
+  customConnectionApproveSchema,
+} from "../validations/custom-connection";
+import { getResourceHooks } from "../providers";
+import { invalidateGatewayCache } from "../lib/gateway-invalidate";
 import {
   deleteContact,
   listContacts,
@@ -45,6 +58,7 @@ import {
   detachPresenceSchema,
   setPersonReachStateSchema,
   setReachStateSchema,
+  setSpaceListenSchema,
 } from "../validations/channels";
 import {
   AUDIT_ACTIONS,
@@ -52,6 +66,8 @@ import {
   AUDIT_SOURCE,
   recordAuditEvent,
 } from "../services/audit-service";
+
+const log = logger.child({ component: "agent-channels" });
 
 /**
  * The agent's channel surface: /v1/agents/:agentId/channels[/:provider/...] —
@@ -88,6 +104,35 @@ export const agentChannelRoutes = () => {
     return c.json(
       await getAgentChannels(workspaceId, c.req.param("agentId"), auth.userId),
     );
+  });
+
+  // POST /agents/:agentId/channels/:provider/icon/sync — the app card's
+  // "Sync image" button: pull the app's icon from the provider now and copy
+  // it onto the agent's image. Workspace-fenced (404). Audited like the
+  // image upload, the other door that writes the avatar; ids only.
+  app.post("/:agentId/channels/:provider/icon/sync", async (c) => {
+    const auth = c.get("auth");
+    const workspaceId = requireWorkspaceId(auth);
+    const agentId = c.req.param("agentId");
+    const provider = parseProvider(c.req.param("provider"));
+    const result = await syncPresenceIcon({ workspaceId, agentId, provider });
+    if (result.changed) {
+      await recordAuditEvent({
+        workspaceId,
+        userId: auth.userId,
+        userEmail: auth.userEmail,
+        action: AUDIT_ACTIONS.UPDATE,
+        service: AUDIT_SERVICES.AGENT,
+        source: AUDIT_SOURCE.API,
+        metadata: {
+          agentId,
+          field: "image",
+          via: "channel_icon_sync",
+          provider,
+        },
+      });
+    }
+    return c.json(result);
   });
 
   // GET /agents/:agentId/channels/:provider/manifest — the paste floor's
@@ -266,6 +311,38 @@ export const agentChannelRoutes = () => {
     return c.json(result);
   });
 
+  // PATCH /agents/:agentId/channels/:provider/reach/:externalRef - what the
+  // agent HEARS in this channel: `mentions` (default) or `all` (it is the
+  // channel's point of contact and decides when to answer). Same authority
+  // as the answer setting above: workspace access to the agent. Promoting
+  // needs a settlement that answers someone; the service enforces it.
+  app.patch("/:agentId/channels/:provider/reach/:externalRef", async (c) => {
+    const a = c.get("auth");
+    const workspaceId = requireWorkspaceId(a);
+    const provider = parseProvider(c.req.param("provider"));
+    const externalRef = c.req.param("externalRef");
+    if (externalRef.length === 0 || externalRef.length > 200) {
+      throw new ServiceError("UNPROCESSABLE", "Invalid channel reference");
+    }
+    const body = setSpaceListenSchema.safeParse(await parseBody(c.req.raw));
+    if (!body.success) {
+      throw new ServiceError(
+        "UNPROCESSABLE",
+        body.error.issues[0]?.message ?? "Invalid body",
+      );
+    }
+    const result = await setSpaceListen({
+      workspaceId,
+      agentId: c.req.param("agentId"),
+      provider,
+      externalRef,
+      listen: body.data.listen,
+      userId: a.userId,
+      userEmail: a.userEmail,
+    });
+    return c.json(result);
+  });
+
   // PUT /agents/:agentId/channels/:provider/reach/people/:externalRef — the
   // per-PERSON settlement. A separate path segment rather than a body field
   // so the two subject kinds can never collide on one key: a channel id and
@@ -430,10 +507,19 @@ export const agentChannelRoutes = () => {
         agentId: c.req.param("agentId"),
         agent: { workspaceId },
       },
-      select: { id: true },
+      select: { id: true, action: true },
     });
     if (!owned) {
       throw new ServiceError("NOT_FOUND", "This request no longer exists.");
+    }
+    // A value-requiring action (an agent-proposed custom connection) can be
+    // rejected here but only APPROVED through its own route, which carries
+    // the key. The service refuses it too; this gives the honest status.
+    if (
+      body.data.decision !== "reject" &&
+      actionRequiresSecretValue(owned.action)
+    ) {
+      throw new ServiceError("UNPROCESSABLE", NEEDS_SECRET_VALUE_MESSAGE);
     }
     const result = await decideActionApproval({
       approvalId: c.req.param("approvalId"),
@@ -443,6 +529,92 @@ export const agentChannelRoutes = () => {
     });
     if (result.kind === "refused") {
       throw new ServiceError("NOT_FOUND", result.message);
+    }
+    return c.json(result);
+  });
+
+  // POST /agents/:agentId/approvals/:approvalId/custom-connection — approve
+  // an agent-proposed custom connection WITH the key the person typed (the
+  // generic decision route can't carry it and refuses to approve it). The
+  // key lives in this request body and in memory for the handler call only:
+  // the request logger logs paths, never bodies, and nothing here echoes it.
+  // Decline uses the generic decision route with `reject`.
+  app.post("/:agentId/approvals/:approvalId/custom-connection", async (c) => {
+    const a = c.get("auth");
+    const workspaceId = requireWorkspaceId(a);
+    // A person at the dashboard, not a script holding an API key: the human
+    // review IS the control for where this key is sent.
+    if (a.scope !== "session") {
+      throw new ServiceError(
+        "FORBIDDEN",
+        "Approve this from the OneCLI dashboard.",
+      );
+    }
+    // Fenced at the QUERY to this workspace's agent and THIS action,
+    // not-found-shaped for anything else.
+    const owned = await db.actionApproval.findFirst({
+      where: {
+        id: c.req.param("approvalId"),
+        agentId: c.req.param("agentId"),
+        action: CUSTOM_CONNECTION_ACTION,
+        agent: { workspaceId },
+      },
+      select: { id: true, status: true, conversationId: true },
+    });
+    if (!owned) {
+      throw new ServiceError("NOT_FOUND", "This request no longer exists.");
+    }
+    if (owned.status !== "pending") {
+      throw new ServiceError("CONFLICT", "This request was already decided.");
+    }
+    const body = customConnectionApproveSchema.safeParse(
+      await parseBody(c.req.raw),
+    );
+    if (!body.success) {
+      // The issue message only: never echo the input.
+      throw new ServiceError(
+        "UNPROCESSABLE",
+        body.error.issues[0]?.message ?? "Enter the API key",
+      );
+    }
+    await getResourceHooks().beforeCreateSecret(a.organizationId);
+
+    const result = await decideActionApproval({
+      approvalId: owned.id,
+      decision: "approve",
+      deciderUserId: a.userId,
+      secretValue: body.data.value,
+    });
+    if (result.kind === "already_settled") {
+      throw new ServiceError("CONFLICT", "This request was already decided.");
+    }
+    if (result.kind === "refused") {
+      throw new ServiceError("CONFLICT", result.message);
+    }
+    if (result.status === "executed") {
+      // As the approver: the handler's audited writes flush by workspace API
+      // key, which a workspace may not have; this flush rides the session.
+      invalidateGatewayCache(c.req.raw);
+    }
+    if (result.status === "executed" && owned.conversationId) {
+      // Resume the agent so it tests the connection and carries on with the
+      // task that needed it, instead of waiting for the person to nudge it.
+      // Sent as the approver through the normal chat door (same fences as
+      // typing it). Best-effort: the connection already exists, so a failed
+      // nudge must not turn the approve into an error.
+      try {
+        await sendConversationMessage(
+          workspaceId,
+          owned.conversationId,
+          RESUME_AFTER_CUSTOM_CONNECTION_MESSAGE,
+          { source: "web", userId: a.userId },
+        );
+      } catch (err) {
+        log.warn(
+          { approvalId: owned.id, err: String(err) },
+          "custom connection approved; resuming the agent failed",
+        );
+      }
     }
     return c.json(result);
   });

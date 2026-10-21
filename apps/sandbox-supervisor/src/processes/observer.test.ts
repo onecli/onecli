@@ -174,6 +174,8 @@ describe("the implicit wake watch", () => {
     expect(watches).toHaveLength(1);
     expect(watches[0]).toMatchObject({ kind: "exit", status: "armed" });
     expect(watches[0]?.prompt).toBe(IMPLICIT_WAKE_PROMPT);
+    // The agent asked for this wake: it holds the box like a process_watch.
+    expect(watches[0]?.origin).toBe("agent");
   });
 
   it("ANY armed watch suppresses the implicit one (a wake is already guaranteed)", async () => {

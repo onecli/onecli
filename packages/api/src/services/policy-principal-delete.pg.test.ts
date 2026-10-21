@@ -1,13 +1,13 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { initEntitlementForTests } from "../lib/entitlements";
-import { proofDatabaseUrl } from "../testing/pg-proof.js";
+import { proofDatabaseUrl, waitForLockWaiters } from "../testing/pg-proof.js";
 
 /**
  * Deleting a USER or a GROUP on REAL PostgreSQL: the rules that named only
  * that principal go with it, so they never outlive it as identity-less
  * ("applies to everyone") rules. The agent half is
- * workspace-autoattach-service.pg.test.ts (#1167).
+ * agent-connect-grant-service.pg.test.ts (#1167).
  *
  * Decisions are read through the reflections' path (published org rules →
  * toSimRule → evaluateNew), the TS mirror of the gateway's engine. The bug,
@@ -321,21 +321,6 @@ describe.skipIf(!PROOF_URL)(
       expect(after._max.generation).toBe(before._max.generation);
     });
 
-    it("a SCIM group delete takes the same path", async () => {
-      await makeGroup(GROUP);
-      await db.group.update({ where: { id: GROUP }, data: { source: "scim" } });
-      await rule(ORG_SCOPE, "scim group block", "block", "g.example.test", [
-        { type: "group", id: GROUP },
-      ]);
-      await publish();
-
-      const { scimDeleteGroup } =
-        await import("../ee/services/org-directory-service");
-      await scimDeleteGroup(ORG, GROUP);
-
-      expect(await everyoneRules()).toEqual([]);
-    });
-
     it("never deadlocks against concurrent rule writes", async () => {
       for (let round = 0; round < 5; round++) {
         const victim = `${GROUP}-${round}`;
@@ -506,8 +491,8 @@ describe.skipIf(!PROOF_URL)(
       const deleting = (
         await import("../ee/services/group-service")
       ).deleteGroup(ORG, GROUP);
-      // Let the delete reach its row lock, then commit the writer.
-      await new Promise((r) => setTimeout(r, 300));
+      // Commit the writer only once the delete is parked on its row lock.
+      await waitForLockWaiters(db);
       release();
       await writer;
       await deleting;
@@ -528,7 +513,7 @@ describe.skipIf(!PROOF_URL)(
         userId: LEAVER,
         userEmail: `${LEAVER}@example.test`,
       });
-      await new Promise((r) => setTimeout(r, 300));
+      await waitForLockWaiters(db);
       release();
       await writer;
       await deleting;

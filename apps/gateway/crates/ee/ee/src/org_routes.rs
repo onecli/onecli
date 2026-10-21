@@ -66,29 +66,37 @@ async fn get_org_pending_approvals(
 
         info!(exclude_count = exclude.len(), "org approval poll started");
 
-        let mut pending = state.approval_store.list_pending_for_org(&org_id).await;
-        pending.retain(|a| !exclude.contains(a.id.as_str()));
+        let store = &state.approval_store;
+        let (org, exclude) = (org_id.as_str(), &exclude);
+        let list = move || async move {
+            let mut pending = store.list_pending_for_org(org).await;
+            pending.retain(|a| !exclude.contains(a.id.as_str()));
+            pending
+        };
+
+        let mut pending = list().await;
 
         let mut long_polled = false;
-        if pending.is_empty() {
-            long_polled = true;
-            let mut shutdown_signal = shutdown::subscribe();
-            // Same reason as the workspace-scoped poll: a 30-second hold would
-            // pin the drain for its whole window.
-            let got_new = tokio::select! {
-                got_new = state.approval_store.wait_for_new_for_org(
-                    &org_id,
-                    std::time::Duration::from_secs(30),
-                ) => got_new,
-                _ = shutdown_signal.wait() => false,
-            };
-            if got_new {
-                // Same burst coalescing as the workspace poll: a parallel
-                // task arrives as one set, not first-request-then-the-rest.
-                tokio::time::sleep(approval::BURST_COALESCE).await;
-                let mut fresh = state.approval_store.list_pending_for_org(&org_id).await;
-                fresh.retain(|a| !exclude.contains(a.id.as_str()));
-                pending = fresh;
+        if pending.is_empty() && params.long_poll() {
+            // Same subscribe-before-the-decisive-list order as the workspace
+            // poll, so an approval stored in between is never missed.
+            let new_approval = store.subscribe_new_for_org(org).await;
+            pending = list().await;
+            if pending.is_empty() {
+                long_polled = true;
+                let mut shutdown_signal = shutdown::subscribe();
+                // Same reason as the workspace-scoped poll: a 30-second hold would
+                // pin the drain for its whole window.
+                let got_new = tokio::select! {
+                    got_new = new_approval.wait(std::time::Duration::from_secs(30)) => got_new,
+                    _ = shutdown_signal.wait() => false,
+                };
+                if got_new {
+                    // Same burst coalescing as the workspace poll: a parallel
+                    // task arrives as one set, not first-request-then-the-rest.
+                    tokio::time::sleep(approval::BURST_COALESCE).await;
+                    pending = list().await;
+                }
             }
         }
 

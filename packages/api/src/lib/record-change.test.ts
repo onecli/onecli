@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  bulkTitle,
   cellOpOf,
   changeCounts,
   pluralLabel,
@@ -32,6 +33,16 @@ describe("record-change", () => {
     expect(shownValue("")).toBe("empty");
     expect(shownValue(null)).toBe("empty");
     expect(shownValue("Canada")).toBe("Canada");
+  });
+
+  it("titles a table as the gateway titles one request's", () => {
+    const rows = (n: number) => Array.from({ length: n }, () => ({}));
+    expect(bulkTitle({ objectLabel: "Account", rows: rows(9) })).toBe(
+      "Update 9 Accounts",
+    );
+    expect(
+      bulkTitle({ kind: "delete", objectLabel: "Opportunity", rows: rows(1) }),
+    ).toBe("Delete 1 Opportunity");
   });
 
   it("pluralizes labels as English, like the gateway's titles", () => {

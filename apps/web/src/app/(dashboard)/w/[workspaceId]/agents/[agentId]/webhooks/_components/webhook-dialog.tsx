@@ -63,7 +63,8 @@ export const WebhookDialog = ({
     setCreated(null);
   }, [open, editing]);
 
-  const busy = create.isPending || update.isPending || remove.isPending;
+  // A save holds the dialog (the server validates it); a delete is instant.
+  const busy = create.isPending || update.isPending;
   const onError = (error: Error) => toast.error(error.message);
   const close = () => onOpenChange(false);
 
@@ -148,16 +149,12 @@ export const WebhookDialog = ({
                   variant="ghost"
                   className="text-destructive hover:text-destructive"
                   disabled={busy}
-                  loading={remove.isPending}
-                  onClick={() =>
-                    remove.mutate(editing.id, {
-                      onSuccess: () => {
-                        toast.success("Webhook deleted");
-                        close();
-                      },
-                      onError,
-                    })
-                  }
+                  // Instant: the row leaves the list and the dialog closes
+                  // on click; the hook confirms, or puts the row back.
+                  onClick={() => {
+                    remove.mutate(editing.id);
+                    close();
+                  }}
                 >
                   Delete
                 </Button>

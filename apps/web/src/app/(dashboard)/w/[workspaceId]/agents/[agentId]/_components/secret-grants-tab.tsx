@@ -8,9 +8,12 @@ import { Card } from "@onecli/ui/components/card";
 import { useSecrets } from "@/hooks/use-secrets";
 import { useAgentGrants } from "@/hooks/use-grants";
 import { useEffectiveCredentials } from "@/lib/api/policy-visibility";
+import { agentActiveSets } from "@/hooks/use-agent-active-connections";
+import { usePinnedPlacement } from "@/hooks/use-stable-placement";
 import { connectionsPath } from "@/lib/navigation";
 import type { Secret } from "@/lib/api";
 import { SecretGrantRow } from "./secret-grant-row";
+import { InactiveConnections } from "./inactive-connections";
 
 interface SecretGrantsTabProps {
   agentId: string;
@@ -23,18 +26,23 @@ interface SecretGrantsTabProps {
   onAdd?: () => void;
   /** Opens the section's edit dialog for one secret. */
   onEdit?: (secret: Secret) => void;
+  /** Fold the secrets that are off for this agent away. Defaults to the
+   * Connections section's custom tab only (Models keeps every key in view,
+   * and so does the new agent's "choose connections" window). */
+  foldInactive?: boolean;
 }
 
 const COPY = {
   secret: {
-    empty: "No secrets yet",
-    hint: "Add a secret first, then give this agent access to it here.",
-    hintAdd: "Create a secret and this agent gets access to it automatically.",
-    cta: "Go to Secrets",
-    ctaAdd: "Add secret",
+    empty: "No custom connections yet",
+    hint: "Add a custom connection first, then give this agent access to it here.",
+    hintAdd:
+      "Add a custom connection and this agent gets access to it automatically.",
+    cta: "Go to Custom",
+    ctaAdd: "Add connection",
     sub: "/custom",
-    loading: "Loading secrets…",
-    error: "Couldn't load secrets for this agent.",
+    loading: "Loading custom connections…",
+    error: "Couldn't load custom connections for this agent.",
   },
   llm: {
     empty: "No LLM keys yet",
@@ -53,12 +61,20 @@ export const SecretGrantsTab = ({
   kind,
   onAdd,
   onEdit,
+  foldInactive = kind === "secret",
 }: SecretGrantsTabProps) => {
   const pathname = usePathname();
   const secretsQuery = useSecrets();
   const grantsQuery = useAgentGrants(agentId);
   const credentialsQuery = useEffectiveCredentials(agentId);
   const copy = COPY[kind];
+  // Active = attached to this agent or granted by the organization (the
+  // switch's own rule). A toggled row keeps its group until the next visit.
+  const { isActiveSecret } = agentActiveSets(
+    grantsQuery.data,
+    credentialsQuery.data,
+  );
+  const placement = usePinnedPlacement(isActiveSecret);
 
   if (
     secretsQuery.isPending ||
@@ -138,29 +154,48 @@ export const SecretGrantsTab = ({
     (credentialsQuery.data?.secrets ?? []).map((e) => [e.id, e]),
   );
 
+  const renderRow = (secret: (typeof pool)[number]) => {
+    const credential = credentialById.get(secret.id);
+    const granted = grantedIds.has(secret.id);
+    const orgGranted =
+      !granted &&
+      (credential?.provenance.some((p) => p.scope === "organization") ?? false);
+    return (
+      <SecretGrantRow
+        key={secret.id}
+        agentId={agentId}
+        secret={secret}
+        granted={granted}
+        orgGranted={orgGranted}
+        credentialStatus={credential?.status}
+        // An org-scoped key is not editable from a workspace surface —
+        // the workspace-fenced update can never own it.
+        onEdit={secret.scope === "organization" ? undefined : onEdit}
+        onBeforeToggle={() => placement.pin(secret.id)}
+      />
+    );
+  };
+
+  // Unfolded (Models, the new agent's chooser): every key in view.
+  if (!foldInactive) {
+    return <div className="divide-y">{pool.map(renderRow)}</div>;
+  }
+
+  const active = pool.filter((s) => placement.placeOf(s.id));
+  const inactive = pool.filter((s) => !placement.placeOf(s.id));
+
   return (
-    <div className="divide-y">
-      {pool.map((secret) => {
-        const credential = credentialById.get(secret.id);
-        const granted = grantedIds.has(secret.id);
-        const orgGranted =
-          !granted &&
-          (credential?.provenance.some((p) => p.scope === "organization") ??
-            false);
-        return (
-          <SecretGrantRow
-            key={secret.id}
-            agentId={agentId}
-            secret={secret}
-            granted={granted}
-            orgGranted={orgGranted}
-            credentialStatus={credential?.status}
-            // An org-scoped key is not editable from a workspace surface —
-            // the workspace-fenced update can never own it.
-            onEdit={secret.scope === "organization" ? undefined : onEdit}
-          />
-        );
-      })}
+    <div>
+      {active.length > 0 ? (
+        <div className="divide-y">{active.map(renderRow)}</div>
+      ) : (
+        <p className="text-muted-foreground py-6 text-center text-sm">
+          None are on for this agent yet. Turn one on below.
+        </p>
+      )}
+      <InactiveConnections count={inactive.length} noun="secrets">
+        {inactive.map(renderRow)}
+      </InactiveConnections>
     </div>
   );
 };

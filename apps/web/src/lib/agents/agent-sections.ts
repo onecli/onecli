@@ -1,7 +1,9 @@
 import {
   Brain,
   Cpu,
+  Globe,
   MessageSquare,
+  Monitor,
   Slack,
   Plug,
   ScrollText,
@@ -55,9 +57,11 @@ export interface AgentSection {
    * frame's guard stays kind-only, so a hand-typed URL still reaches the
    * section, which renders its own quiet empty state.
    */
-  instanceGated?: "ssh";
+  instanceGated?: "ssh" | "previews";
   /** Owns the page's full height — no scrolling section shell. */
   fullHeight?: boolean;
+  /** Standalone screen host: no dashboard chrome and no rail entry. */
+  theater?: boolean;
   /** The rail's ONE primary action — weight and colour on the ordinary row
    *  shape. A property of the section, not its cluster: Slack shares Chat's
    *  cluster without sharing its prominence. */
@@ -99,6 +103,18 @@ export const AGENT_SECTIONS: readonly AgentSection[] = [
     icon: Slack,
     group: "chat",
     hostedOnly: true,
+  },
+  {
+    // The standalone screen host for deep links and pop-outs. Kept in the
+    // table for the guard and switcher, but never offered in the rail.
+    // Hosted-only and preview-capable, just like the screen in Chat.
+    section: "computer",
+    title: "Computer",
+    icon: Monitor,
+    group: "chat",
+    hostedOnly: true,
+    instanceGated: "previews",
+    theater: true,
   },
   // Access: everything the agent can reach, in ONE section (§3.18 as
   // amended). Apps and custom secrets were two rail entries asking the same
@@ -164,6 +180,18 @@ export const AGENT_SECTIONS: readonly AgentSection[] = [
     instanceGated: "ssh",
   },
   {
+    // Shared ports (plans/sandbox-ports.md): private preview links to
+    // services running on the agent's computer, the web twin of SSH.
+    // Hosted-only (a BYO agent has no computer) and instance-gated: only
+    // deployments that serve previews show it.
+    section: "ports",
+    title: "Ports",
+    icon: Globe,
+    group: "advanced",
+    hostedOnly: true,
+    instanceGated: "previews",
+  },
+  {
     // Inbound webhooks: an external app's event triggers the agent.
     section: "webhooks",
     title: "Webhooks",
@@ -208,6 +236,9 @@ export const agentSectionBlocked = (section: string, kind: string): boolean =>
 /** Does this section own the page's full height (no scrolling shell)? */
 export const isFullHeightAgentSection = (section: string): boolean =>
   AGENT_SECTIONS.some((s) => s.section === section && s.fullHeight === true);
+
+export const isTheaterAgentSection = (section: string): boolean =>
+  AGENT_SECTIONS.some((s) => s.section === section && s.theater === true);
 
 /**
  * The section's display title for URL-derived surfaces (the header

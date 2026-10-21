@@ -152,7 +152,9 @@ scenario(
   async (cx) => {
     const { stack, runner, tap, conversationId, turnId } = await startLongTurn(
       cx,
-      [text("thinking out loud"), sleep(20_000), text("done thinking")],
+      // "The next step" is after the sleep; 6 s is about 3x the measured
+      // delivery latency, enough runway for the answer to land in it.
+      [text("thinking out loud"), sleep(6_000), text("done thinking")],
     );
     await tap.waitForFrame(
       (frame) =>

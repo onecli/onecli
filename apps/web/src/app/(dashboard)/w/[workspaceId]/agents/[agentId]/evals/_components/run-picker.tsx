@@ -42,6 +42,12 @@ export const RunPicker = ({
               {index === 0 && (
                 <span className="text-muted-foreground"> · latest</span>
               )}
+              {run.model && (
+                <span className="text-muted-foreground" translate="no">
+                  {" · "}
+                  {run.model}
+                </span>
+              )}
               {run.trigger === "scheduled" && (
                 <span className="text-muted-foreground"> · scheduled</span>
               )}

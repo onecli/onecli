@@ -2,13 +2,10 @@ import { Hono } from "hono";
 import type { ApiEnv } from "../types";
 import { auth, requireWorkspaceId, sessionAuth } from "../middleware/auth";
 import { getUser, updateProfile } from "../services/user-service";
-import { ensureApiKey, regenerateApiKey } from "../services/api-key-service";
 import {
-  recordAuditEvent,
-  AUDIT_ACTIONS,
-  AUDIT_SERVICES,
-  AUDIT_SOURCE,
-} from "../services/audit-service";
+  ensureWorkspaceApiKey,
+  regenerateApiKey,
+} from "../services/api-key-service";
 import {
   createSshKey,
   deleteSshKey,
@@ -82,21 +79,11 @@ export const userRoutes = () => {
   // GET /user/api-key
   app.get("/api-key", identity, async (c) => {
     const auth = c.get("auth");
-    const workspaceId = requireWorkspaceId(auth);
-    const { apiKey, created } = await ensureApiKey(auth.userId, {
-      workspaceId,
+    const apiKey = await ensureWorkspaceApiKey({
+      userId: auth.userId,
+      userEmail: auth.userEmail,
+      workspaceId: requireWorkspaceId(auth),
     });
-    if (created) {
-      await recordAuditEvent({
-        workspaceId,
-        userId: auth.userId,
-        userEmail: auth.userEmail,
-        action: AUDIT_ACTIONS.CREATE,
-        service: AUDIT_SERVICES.API_KEY,
-        source: AUDIT_SOURCE.API,
-        metadata: { scope: "workspace", autoProvisioned: true },
-      });
-    }
     return c.json({ apiKey });
   });
 

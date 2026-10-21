@@ -22,3 +22,19 @@ export const freePort = (): Promise<number> =>
       server.close((error) => (error ? reject(error) : resolve(port)));
     });
   });
+
+/**
+ * A free port that is NOT `excluded`: for a replacement process that must
+ * sit somewhere other than the address its predecessor used. Asking the OS
+ * (rather than pinning a neighbour such as `excluded + 1`) matters: a
+ * neighbour is not free just because the predecessor's port was, and
+ * anything on the host can be holding it (the other fork's servers, an
+ * outbound connection's local port). The OS can hand back the port the
+ * predecessor just released, so that one answer is refused and asked again.
+ */
+export const freePortOtherThan = async (excluded: number): Promise<number> => {
+  for (;;) {
+    const port = await freePort();
+    if (port !== excluded) return port;
+  }
+};

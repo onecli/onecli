@@ -18,8 +18,13 @@ const origins = resolveOriginsFromEnv();
 for (const line of formatOriginsBanner(origins)) logger.info(line);
 for (const warning of origins.warnings) logger.warn(warning);
 
-const server = serve({ fetch: app.fetch, port }, () => {
-  logger.info({ port }, "api-server listening");
+const server = serve({ fetch: app.fetch, port }, (info) => {
+  // The BOUND port, not the requested one: with PORT=0 the OS picks it, and
+  // a caller (the hosted E2E harness) reads it from this line.
+  logger.info(
+    { port: info.port },
+    `api-server listening on port ${String(info.port)}`,
+  );
 });
 
 // AWS Marketplace overage metering (no-op unless the listing is configured).

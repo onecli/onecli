@@ -4,23 +4,19 @@ import {
   MAX_SKILL_TOTAL_CHARS,
   MAX_SKILLS_PER_AGENT,
   MAX_SKILLS_PER_ORG,
-  MAX_SKILLS_PER_WORKSPACE,
   type SkillScope,
 } from "../validations/skills";
-import {
-  bumpHomeForAgent,
-  bumpHomeForOrganization,
-  bumpHomeForWorkspace,
-} from "./home-sync-service";
+import { bumpHomeForAgent, bumpHomeForOrganization } from "./home-sync-service";
 
 /**
  * User-authored skills (plans/hosted-agents-v2.md step 9, §3.7/§3.8).
  *
  * Truth lives here; sandboxes hold a regenerated read-only projection.
- * Three tiers with exactly one owner column each (the migration CHECKs);
- * the same name at different tiers is legal — the composer materializes the
- * most specific one. Scope logic is deliberately skill-local (the memory
- * precedent): resource-scope.ts is a two-tier helper and stays untouched.
+ * Two tiers with exactly one owner column each (the migration CHECKs): an
+ * agent's own skills and the organization's. The same name at both tiers is
+ * legal: the composer materializes the agent's own. Scope logic is
+ * deliberately skill-local (the memory precedent): resource-scope.ts is a
+ * workspace/org helper for other resources and stays untouched.
  *
  * Every write ends with the tier-matched home bump so RUNNING sandboxes
  * re-materialize within seconds; parked ones pick the change up at next boot.
@@ -30,7 +26,6 @@ const skillListSelect = {
   id: true,
   scope: true,
   agentId: true,
-  workspaceId: true,
   organizationId: true,
   name: true,
   description: true,
@@ -45,7 +40,6 @@ const skillDetailSelect = {
   id: true,
   scope: true,
   agentId: true,
-  workspaceId: true,
   organizationId: true,
   name: true,
   description: true,
@@ -64,7 +58,6 @@ export type SkillListItem = {
   id: string;
   scope: string;
   agentId: string | null;
-  workspaceId: string | null;
   organizationId: string | null;
   name: string;
   description: string;
@@ -129,14 +122,14 @@ const requireHostedAgent = async (workspaceId: string, agentId: string) => {
   return agent;
 };
 
-/** The three-tier visibility fence for the workspace door: a skill is visible
- * when it can REACH this workspace — its own rows, the org's rows, and the
- * workspace's agents' rows. */
+/** The visibility fence for the workspace door: a skill is visible when it
+ * can REACH this workspace: the org's rows and the workspace's agents'
+ * rows. */
 const workspaceVisibleWhere = (
   workspaceId: string,
   organizationId: string,
 ): Prisma.SkillWhereInput => ({
-  OR: [{ workspaceId }, { organizationId }, { agent: { workspaceId } }],
+  OR: [{ organizationId }, { agent: { workspaceId } }],
 });
 
 export const listSkillsForWorkspace = async (
@@ -173,8 +166,6 @@ const capMessageFor = (scope: SkillScope): string => {
   switch (scope) {
     case "agent":
       return `This agent already holds ${MAX_SKILLS_PER_AGENT} skills. Delete one first`;
-    case "workspace":
-      return `This workspace already holds ${MAX_SKILLS_PER_WORKSPACE} skills. Delete one first`;
     case "organization":
       return `This organization already holds ${MAX_SKILLS_PER_ORG} skills. Delete one first`;
   }
@@ -185,17 +176,8 @@ const assertTierCap = async (
   ownerId: string,
 ): Promise<void> => {
   const where =
-    scope === "agent"
-      ? { agentId: ownerId }
-      : scope === "workspace"
-        ? { workspaceId: ownerId }
-        : { organizationId: ownerId };
-  const max =
-    scope === "agent"
-      ? MAX_SKILLS_PER_AGENT
-      : scope === "workspace"
-        ? MAX_SKILLS_PER_WORKSPACE
-        : MAX_SKILLS_PER_ORG;
+    scope === "agent" ? { agentId: ownerId } : { organizationId: ownerId };
+  const max = scope === "agent" ? MAX_SKILLS_PER_AGENT : MAX_SKILLS_PER_ORG;
   const held = await db.skill.count({ where });
   if (held >= max) {
     throw new ServiceError("UNPROCESSABLE", capMessageFor(scope));
@@ -207,7 +189,7 @@ const duplicateNameError = (name: string) =>
 
 const createRow = async (
   scope: SkillScope,
-  owner: { agentId?: string; workspaceId?: string; organizationId?: string },
+  owner: { agentId: string } | { organizationId: string },
   input: SkillInput,
   creator: SkillCreator,
 ): Promise<SkillView> => {
@@ -239,28 +221,22 @@ const createRow = async (
   }
 };
 
-/** The workspace door's create: workspace tier, or agent tier when agentId is
- * given (a hosted agent of THIS workspace — the fence). */
+/** The workspace door's create: always an agent's own skill, for a hosted
+ * agent of THIS workspace (the fence). */
 export const createSkill = async (
   workspaceId: string,
-  input: SkillInput & { agentId?: string },
+  input: SkillInput & { agentId: string },
   creator: SkillCreator,
 ): Promise<SkillView> => {
-  if (input.agentId) {
-    await requireHostedAgent(workspaceId, input.agentId);
-    await assertTierCap("agent", input.agentId);
-    const skill = await createRow(
-      "agent",
-      { agentId: input.agentId },
-      input,
-      creator,
-    );
-    await bumpHomeForAgent(input.agentId);
-    return skill;
-  }
-  await assertTierCap("workspace", workspaceId);
-  const skill = await createRow("workspace", { workspaceId }, input, creator);
-  await bumpHomeForWorkspace(workspaceId);
+  await requireHostedAgent(workspaceId, input.agentId);
+  await assertTierCap("agent", input.agentId);
+  const skill = await createRow(
+    "agent",
+    { agentId: input.agentId },
+    input,
+    creator,
+  );
+  await bumpHomeForAgent(input.agentId);
   return skill;
 };
 
@@ -292,14 +268,11 @@ const requireWorkspaceWritableSkill = async (
   const skill = await db.skill.findFirst({
     where: {
       id: skillId,
-      OR: [{ workspaceId }, { agent: { workspaceId } }, { organizationId }],
+      OR: [{ agent: { workspaceId } }, { organizationId }],
     },
     select: {
       id: true,
-      scope: true,
       agentId: true,
-      workspaceId: true,
-      organizationId: true,
       content: true,
       enabled: true,
       description: true,
@@ -307,23 +280,16 @@ const requireWorkspaceWritableSkill = async (
     },
   });
   if (!skill) throw new ServiceError("NOT_FOUND", "Skill not found");
-  if (skill.organizationId) {
+  // The fence admits agent rows and the caller's org rows; anything without
+  // an agent is an org row, managed at org level.
+  const { agentId } = skill;
+  if (!agentId) {
     throw new ServiceError(
       "FORBIDDEN",
       "Organization skills are managed in organization settings",
     );
   }
-  return skill;
-};
-
-const bumpForRow = async (row: {
-  agentId: string | null;
-  workspaceId: string | null;
-  organizationId: string | null;
-}): Promise<void> => {
-  if (row.agentId) return bumpHomeForAgent(row.agentId);
-  if (row.workspaceId) return bumpHomeForWorkspace(row.workspaceId);
-  if (row.organizationId) return bumpHomeForOrganization(row.organizationId);
+  return { ...skill, agentId };
 };
 
 const applyPatch = async (
@@ -406,7 +372,7 @@ export const updateSkill = async (
     // a settings form re-sending stored values must cost nothing).
     return getSkillById(skillId);
   }
-  await bumpForRow(existing);
+  await bumpHomeForAgent(existing.agentId);
   return updated;
 };
 
@@ -421,7 +387,7 @@ export const deleteSkill = async (
     skillId,
   );
   await db.skill.delete({ where: { id: existing.id } });
-  await bumpForRow(existing);
+  await bumpHomeForAgent(existing.agentId);
 };
 
 const getSkillById = async (skillId: string): Promise<SkillView> => {
@@ -438,21 +404,20 @@ const getSkillById = async (skillId: string): Promise<SkillView> => {
 
 // ── The agent door (the skill_* MCP tools) ──────────────────────────────────
 // Writes are fenced to the AGENT TIER: a sandbox write must never change what
-// other agents load, so workspace/org rows — member-visible, human-managed —
-// answer FORBIDDEN with a dashboard pointer, and a name that exists nowhere
-// visible answers NOT_FOUND. Reads see all three tiers (the same set the
-// composer materializes, minus the shadow-merge — the agent needs to know
-// what exists and which rows are its own).
+// other agents load, so org rows — member-visible, human-managed — answer
+// FORBIDDEN with a dashboard pointer, and a name that exists nowhere visible
+// answers NOT_FOUND. Reads see both tiers (the same set the composer
+// materializes, minus the shadow-merge — the agent needs to know what exists
+// and which rows are its own).
 
-/** Every tier that reaches this agent, flat, scope marked — enabled and
+/** Both tiers that reach this agent, flat, scope marked — enabled and
  * disabled alike (an agent must see its own paused rows to re-enable them). */
 export const listSkillsReachingAgent = async (
   agentId: string,
-  workspaceId: string,
   organizationId: string,
 ): Promise<SkillListItem[]> => {
   const rows = await db.skill.findMany({
-    where: { OR: [{ agentId }, { workspaceId }, { organizationId }] },
+    where: { OR: [{ agentId }, { organizationId }] },
     orderBy: [{ scope: "asc" }, { name: "asc" }],
     select: skillListSelect,
   });
@@ -460,12 +425,10 @@ export const listSkillsReachingAgent = async (
 };
 
 /** The write fence for the agent door: the agent's OWN row by name, or the
- * honest refusal. A broader-tier row with that name is FORBIDDEN with a
- * pointer (the requireWorkspaceWritableSkill posture); an unknown name is
- * NOT_FOUND. */
+ * honest refusal. An org row with that name is FORBIDDEN with a pointer (the
+ * requireWorkspaceWritableSkill posture); an unknown name is NOT_FOUND. */
 const requireAgentOwnSkill = async (
   agentId: string,
-  workspaceId: string,
   organizationId: string,
   name: string,
 ) => {
@@ -473,9 +436,6 @@ const requireAgentOwnSkill = async (
     where: { agentId, name },
     select: {
       id: true,
-      agentId: true,
-      workspaceId: true,
-      organizationId: true,
       description: true,
       content: true,
       enabled: true,
@@ -483,14 +443,14 @@ const requireAgentOwnSkill = async (
     },
   });
   if (own) return own;
-  const broader = await db.skill.findFirst({
-    where: { name, OR: [{ workspaceId }, { organizationId }] },
-    select: { scope: true },
+  const orgRow = await db.skill.findFirst({
+    where: { name, organizationId },
+    select: { id: true },
   });
-  if (broader) {
+  if (orgRow) {
     throw new ServiceError(
       "FORBIDDEN",
-      `"${name}" is a ${broader.scope}-level skill, managed by the people you work with in the dashboard. You can only change your own agent skills — or create an agent skill with this name, which takes precedence for you.`,
+      `"${name}" is an organization skill, managed by the people you work with in the dashboard. You can only change your own agent skills. You can also create an agent skill with this name, which takes precedence for you.`,
     );
   }
   throw new ServiceError(
@@ -501,17 +461,11 @@ const requireAgentOwnSkill = async (
 
 export const updateAgentSkillByName = async (
   agentId: string,
-  workspaceId: string,
   organizationId: string,
   name: string,
   patch: SkillPatch,
 ): Promise<{ skill: SkillView; noop: boolean }> => {
-  const existing = await requireAgentOwnSkill(
-    agentId,
-    workspaceId,
-    organizationId,
-    name,
-  );
+  const existing = await requireAgentOwnSkill(agentId, organizationId, name);
   const updated = await applyPatch(existing.id, existing, patch);
   if (!updated) return { skill: await getSkillById(existing.id), noop: true };
   await bumpHomeForAgent(agentId);
@@ -520,16 +474,10 @@ export const updateAgentSkillByName = async (
 
 export const deleteAgentSkillByName = async (
   agentId: string,
-  workspaceId: string,
   organizationId: string,
   name: string,
 ): Promise<{ id: string }> => {
-  const existing = await requireAgentOwnSkill(
-    agentId,
-    workspaceId,
-    organizationId,
-    name,
-  );
+  const existing = await requireAgentOwnSkill(agentId, organizationId, name);
   await db.skill.delete({ where: { id: existing.id } });
   await bumpHomeForAgent(agentId);
   return { id: existing.id };
@@ -553,9 +501,6 @@ const requireOrgSkill = async (organizationId: string, skillId: string) => {
     where: { id: skillId, organizationId },
     select: {
       id: true,
-      agentId: true,
-      workspaceId: true,
-      organizationId: true,
       description: true,
       content: true,
       enabled: true,

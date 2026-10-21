@@ -10,6 +10,7 @@ import {
   recordAuditEvent,
 } from "../audit-service";
 import { cleanLabel } from "../../lib/format";
+import { dashboardUrl } from "../../lib/dashboard-url";
 import { logger } from "../../lib/logger";
 import { writeConversationNotice } from "../conversation-notice";
 import { previousRunStartedAt } from "../turn-service";
@@ -89,7 +90,15 @@ export interface ApprovedAction {
  * async-execution mode (ack first, execute after) is the recorded
  * follow-up if a future action genuinely needs it.
  */
-type ActionHandler = (approval: ApprovedAction) => Promise<void>;
+type ActionHandler = (
+  approval: ApprovedAction,
+  /** In-memory only, never persisted: the credential a
+   * `requiresSecretValue` action's approver typed. Undefined otherwise. */
+  context: { secretValue?: string },
+) => Promise<string | void>;
+// A handler may return a short platform-composed NOTE (never a secret) that
+// rides the executed outcome line to the person and the model, e.g. the id
+// of what it created.
 
 /**
  * One registered action: the execute handler, plus an optional standing-
@@ -105,6 +114,11 @@ interface RegisteredAction {
     approval: ApprovedAction,
     deciderUserId: string,
   ) => Promise<void>;
+  /** The approval can only execute with a credential the approver types
+   * (custom connections). The generic decide doors (dashboard decision
+   * route, Slack click) refuse to APPROVE it; only the action's dedicated
+   * route, which carries the value, can. Rejecting stays generic. */
+  requiresSecretValue?: boolean;
 }
 
 /**
@@ -119,13 +133,35 @@ const handlers = new Map<string, RegisteredAction>();
 export const registerActionHandler = (
   action: string,
   handler: ActionHandler,
-  options?: { alwaysAllow?: RegisteredAction["alwaysAllow"] },
+  options?: {
+    alwaysAllow?: RegisteredAction["alwaysAllow"];
+    requiresSecretValue?: boolean;
+  },
 ): void => {
   if (handlers.has(action)) {
     throw new Error(`action handler already registered: ${action}`);
   }
-  handlers.set(action, { handler, alwaysAllow: options?.alwaysAllow });
+  if (options?.requiresSecretValue && options.alwaysAllow) {
+    // A standing grant would let a later approve skip the value.
+    throw new Error(
+      `a secret-value action can't offer always-allow: ${action}`,
+    );
+  }
+  handlers.set(action, {
+    handler,
+    alwaysAllow: options?.alwaysAllow,
+    requiresSecretValue: options?.requiresSecretValue === true,
+  });
 };
+
+/** Whether approving this action needs a credential typed by the approver
+ * (so only its dedicated route can approve it; see `RegisteredAction`). */
+export const actionRequiresSecretValue = (action: string): boolean =>
+  handlers.get(action)?.requiresSecretValue === true;
+
+/** The refusal a generic door gives a value-requiring approve. */
+export const NEEDS_SECRET_VALUE_MESSAGE =
+  "This request needs a key that only you can enter. Review it in the OneCLI chat.";
 
 /** Whether an action offers the "always allow" upgrade — the card renderer
  * and the bell's listing ask this to decide whether the third button exists
@@ -236,6 +272,15 @@ const postActionApprovalCards = async (approvalId: string): Promise<void> => {
   const credentialsJson = await getCrypto().decrypt(presence.credentials);
   for (const owner of owed) {
     try {
+      // A value-requiring action is decided in the dashboard only: the
+      // card is a link there, never an Approve button. Built inside the
+      // guard: a misconfigured origin must fail the post, not the ask.
+      const reviewUrl = actionRequiresSecretValue(approval.action)
+        ? dashboardUrl(
+            `/agents/${encodeURIComponent(approval.agent.id)}/chat`,
+            { workspaceId: approval.agent.workspaceId },
+          )
+        : undefined;
       const ref = await cardUi.post({
         credentialsJson,
         recipientExternalUserId: owner.externalUserId,
@@ -243,6 +288,7 @@ const postActionApprovalCards = async (approvalId: string): Promise<void> => {
         agentName: approval.agent.name,
         summary: approval.summary,
         offerAlwaysAllow: actionSupportsAlwaysAllow(approval.action),
+        ...(reviewUrl && { reviewUrl }),
       });
       posted.push({ channel: ref.channel, ts: ref.ts, userId: owner.userId });
       await db.actionApproval.update({
@@ -283,6 +329,10 @@ export const decideActionApproval = async (input: {
   decision: "approve" | "approve_always" | "reject";
   deciderUserId: string;
   reason?: string;
+  /** The approver-typed credential for a `requiresSecretValue` action. Held
+   * in memory for the handler call only: never written to the row, the
+   * audit, the notice or a log. Only the action's dedicated route sets it. */
+  secretValue?: string;
 }): Promise<ActionDecisionResult> => {
   const approval = await db.actionApproval.findUnique({
     where: { id: input.approvalId },
@@ -304,6 +354,16 @@ export const decideActionApproval = async (input: {
     return { kind: "refused", message: "This request no longer exists." };
   }
   if (approval.status !== "pending") return { kind: "already_settled" };
+  // A value-requiring action can only be APPROVED with its value (the
+  // dedicated route). Checked BEFORE the flip so the generic doors leave the
+  // row pending for the real decision. Rejecting needs no value.
+  if (
+    input.decision !== "reject" &&
+    actionRequiresSecretValue(approval.action) &&
+    !input.secretValue
+  ) {
+    return { kind: "refused", message: NEEDS_SECRET_VALUE_MESSAGE };
+  }
   if (approval.expiresAt.getTime() < Date.now()) {
     // Lazily park an expired-but-unswept row so a click never approves a
     // dead ask. The same atomic flip as the sweep — a racing sweep or twin
@@ -363,7 +423,7 @@ export const decideActionApproval = async (input: {
   });
 
   let finalStatus: ActionApprovalStatus;
-  let failure: string | null = null;
+  let detail: string | null = null;
   if (input.decision === "reject") {
     finalStatus = "rejected";
   } else {
@@ -372,7 +432,7 @@ export const decideActionApproval = async (input: {
     const registered = handlers.get(approval.action);
     if (!registered) {
       finalStatus = "failed";
-      failure = `no handler registered for "${approval.action}"`;
+      detail = `no handler registered for "${approval.action}"`;
     } else {
       const frozen: ApprovedAction = {
         id: approval.id,
@@ -397,16 +457,24 @@ export const decideActionApproval = async (input: {
         }
       }
       try {
-        await registered.handler(frozen);
+        const note = await registered.handler(frozen, {
+          ...(registered.requiresSecretValue &&
+            input.secretValue !== undefined && {
+              secretValue: input.secretValue,
+            }),
+        });
         finalStatus = "executed";
+        if (typeof note === "string" && note) {
+          detail = cleanLabel(note, MAX_REASON_CHARS);
+        }
       } catch (err) {
         finalStatus = "failed";
-        failure = cleanLabel(String(err), MAX_REASON_CHARS);
+        detail = cleanLabel(String(err), MAX_REASON_CHARS);
       }
     }
     await db.actionApproval.update({
       where: { id: approval.id },
-      data: { status: finalStatus, ...(failure ? { reason: failure } : {}) },
+      data: { status: finalStatus, ...(detail ? { reason: detail } : {}) },
     });
   }
 
@@ -414,7 +482,7 @@ export const decideActionApproval = async (input: {
     approval,
     finalStatus,
     decider.name || decider.email,
-    input.decision === "reject" ? reason : failure,
+    input.decision === "reject" ? reason : detail,
   );
   return {
     kind: "decided",
@@ -607,7 +675,10 @@ const OUTCOME_LINES: Record<
   SettledStatus,
   (summary: string, detail: string | null) => string
 > = {
-  executed: (summary) => `Approved and done: ${summary}.`,
+  executed: (summary, note) =>
+    note
+      ? `Approved and done: ${summary}. ${note}`
+      : `Approved and done: ${summary}.`,
   rejected: (summary, reason) =>
     reason
       ? `Rejected: ${summary}. The reason given: "${reason}" - adjust and ask again if it still matters.`

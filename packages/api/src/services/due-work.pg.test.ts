@@ -18,11 +18,13 @@ type Db = typeof import("@onecli/db").db;
 type DueWork = typeof import("./due-work");
 type Placement = typeof import("./placement");
 type Sandboxes = typeof import("./sandbox-service");
+type Channels = typeof import("./runner-channel-service");
 
 let db: Db;
 let dueWork: DueWork;
 let placement: Placement;
 let sandboxes: Sandboxes;
+let channels: Channels;
 
 const P = "dw-";
 const ORG = `${P}org`;
@@ -105,9 +107,14 @@ beforeAll(async () => {
   process.env.RUNNER_ONLINE_THRESHOLD_SECONDS = "90";
 
   ({ db } = await import("@onecli/db"));
+  // Boot like the server: the runner poll reads edition seams (the hosted
+  // desktop's push claim on cloud), which fail loudly when never injected.
+  const { ensureEditionDefaults } = await import("../edition-defaults");
+  ensureEditionDefaults();
   dueWork = await import("./due-work");
   placement = await import("./placement");
   sandboxes = await import("./sandbox-service");
+  channels = await import("./runner-channel-service");
 
   await reset();
   await db.organization.create({ data: { id: ORG, name: ORG, slug: ORG } });
@@ -383,9 +390,10 @@ describe.skipIf(!PROOF_URL)("the runner fence on event application", () => {
     await seedSandbox("sb-lm", mine, RUNNER_A, { status: "running" });
     await seedSandbox("sb-lt", theirs, RUNNER_B, { status: "running" });
 
-    expect(await sandboxes.listRunnerSandboxes(RUNNER_A)).toEqual([
-      { id: `${P}sb-lm`, status: "running" },
-    ]);
+    const listing = await channels.listRunnerSandboxes(RUNNER_A, undefined);
+    expect(listing.rows).toEqual([{ id: `${P}sb-lm`, status: "running" }]);
+    // A single-process runner always reconciles.
+    expect(listing.reconciler).toBe(true);
   });
 
   it("respawn marks a live sandbox unprovisioned so the next poll restarts it", async () => {

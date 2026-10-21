@@ -34,6 +34,7 @@ describe("buildCsp", () => {
     vi.stubEnv("NEXT_PUBLIC_GATEWAY_API_URL", "https://api.onecli.sh");
     vi.stubEnv("COGNITO_DOMAIN", "auth.onecli.sh");
     vi.stubEnv("NEXT_PUBLIC_TURNSTILE_SITE_KEY", "");
+    vi.stubEnv("PREVIEW_DOMAIN", "");
   });
 
   afterEach(() => {
@@ -110,6 +111,19 @@ describe("buildCsp", () => {
     const connectSrc = directives(buildCsp("n")).get("connect-src")!;
     expect(connectSrc).not.toContain("https://auth.onecli.sh");
     expect(connectSrc).not.toMatch(/https:\/\/\s/);
+  });
+
+  it("admits the preview zone's WebSockets in connect-src only when a zone is configured (the desktop stream)", () => {
+    // No zone: nothing wss, no wildcard anywhere.
+    expect(directives(buildCsp("n")).get("connect-src")).not.toContain("wss:");
+    vi.stubEnv("PREVIEW_DOMAIN", "preview.example");
+    const connectSrc = directives(buildCsp("n")).get("connect-src")!;
+    expect(connectSrc).toContain("wss://*.preview.example");
+    // The zone's PAGES are not fetchable from the dashboard: wss only.
+    expect(connectSrc).not.toContain("https://*.preview.example");
+    // A junk value never reaches the policy.
+    vi.stubEnv("PREVIEW_DOMAIN", "evil.io; script-src *");
+    expect(buildCsp("n")).not.toContain("evil.io");
   });
 
   it("allows the human-verification widget's script and frame only when its sitekey is set", () => {

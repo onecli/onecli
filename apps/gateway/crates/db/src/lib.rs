@@ -34,6 +34,9 @@ pub struct AgentRow {
 #[derive(Debug, FromRow)]
 pub struct SecretRow {
     pub id: String,
+    /// User-chosen label. Shown to the agent (sanitized) when two custom
+    /// secrets collide on one injection slot.
+    pub name: String,
     /// "workspace" | "organization". Read by the budget module (`BudgetSecret`
     /// impl) to identify a budget-eligible credential by its actual scope.
     pub scope: String,
@@ -299,7 +302,7 @@ pub async fn find_secrets_by_workspace(
     workspace_id: &str,
 ) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT id, scope, type, value_source, encrypted_value, op_ref, host_pattern, path_pattern, injection_config, metadata FROM secrets WHERE workspace_id = $1"#,
+        r#"SELECT id, name, scope, type, value_source, encrypted_value, op_ref, host_pattern, path_pattern, injection_config, metadata FROM secrets WHERE workspace_id = $1"#,
     )
     .bind(workspace_id)
     .fetch_all(pool)
@@ -310,7 +313,7 @@ pub async fn find_secrets_by_workspace(
 /// Find all organization-level secrets.
 pub async fn find_secrets_by_org(pool: &PgPool, organization_id: &str) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT id, scope, type, value_source, encrypted_value, op_ref, host_pattern, path_pattern, injection_config, metadata
+        r#"SELECT id, name, scope, type, value_source, encrypted_value, op_ref, host_pattern, path_pattern, injection_config, metadata
            FROM secrets
            WHERE organization_id = $1 AND scope = 'organization'"#,
     )
@@ -516,6 +519,20 @@ pub struct InjectSelection {
     /// carrying a `secret_scope`: inject ALL the agent's secrets at that level
     /// (a level selection, no per-secret guard).
     pub secret_scopes: Vec<String>,
+}
+
+impl InjectSelection {
+    /// Whether the agent's allow rules select this connection: by its id
+    /// (`kind=connection`), or as one of ALL its connections of `provider` at
+    /// `scope` (`kind=app` + `connection_scope`).
+    #[must_use]
+    pub fn selects_connection(&self, id: &str, provider: &str, scope: &str) -> bool {
+        self.connections.contains_key(id)
+            || self
+                .app_scopes
+                .iter()
+                .any(|(p, s)| p == provider && s == scope)
+    }
 }
 
 /// The apps a connection's workspace may reach (a licensed posture, resolved
@@ -769,6 +786,46 @@ pub async fn find_app_connections_by_org(
     .context("querying app_connections by organization_id")
 }
 
+/// A connected app connection as the agent-facing guidance sees it: never its
+/// credential or label, only what decides whether an agent could be switched
+/// on for it.
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct GuidanceConnectionRow {
+    pub id: String,
+    pub provider: String,
+    /// "organization" | "workspace".
+    pub scope: String,
+    /// The provider refused the stored refresh token: only a reconnect revives
+    /// it, so switching an agent on for it would not help.
+    pub reauth_required: bool,
+}
+
+/// Every connected app connection of `providers` an agent of `workspace_id`
+/// could be granted: its workspace's own, plus the organization-level ones of
+/// `organization_id`. Fenced in the query, the same pool the grants surface
+/// offers (`poolWhere`), so another workspace's or organization's account is
+/// never seen.
+pub async fn find_guidance_connections(
+    pool: &PgPool,
+    workspace_id: &str,
+    organization_id: &str,
+    providers: &[&str],
+) -> Result<Vec<GuidanceConnectionRow>> {
+    sqlx::query_as::<_, GuidanceConnectionRow>(
+        r#"SELECT id, provider, scope, (reauth_required_at IS NOT NULL) AS reauth_required
+           FROM app_connections
+           WHERE status = 'connected' AND provider = ANY($3)
+             AND (workspace_id = $1 OR (organization_id = $2 AND scope = 'organization'))
+           ORDER BY connected_at"#,
+    )
+    .bind(workspace_id)
+    .bind(organization_id)
+    .bind(providers)
+    .fetch_all(pool)
+    .await
+    .context("querying guidance app_connections")
+}
+
 /// A connected connection's stored credential, as the refresh re-reads it
 /// under its lock (see [`find_connected_app_credentials`]).
 #[derive(Debug, Clone, FromRow)]
@@ -890,6 +947,35 @@ where
     .execute(executor)
     .await
     .context("marking app_connection reauth required")?;
+    Ok(done.rows_affected() == 1)
+}
+
+/// Record what an approved request's upstream answered (the gateway's
+/// `summary::outcome::RequestResult`) on its approval's request-log row, as
+/// `extra_data.approval_result`, keeping every other key (the telemetry
+/// update that stamps "approval_approved" merges the same way, so the two
+/// writes land in either order). Only an approval's row is touched.
+/// `true` = written.
+pub async fn record_approval_result<'e, E>(
+    executor: E,
+    log_id: &str,
+    result: &serde_json::Value,
+) -> Result<bool>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let done = sqlx::query(
+        r#"UPDATE request_logs
+           SET extra_data = COALESCE(extra_data, '{}'::jsonb)
+                            || jsonb_build_object('approval_result', $2::jsonb)
+           WHERE id = $1
+             AND extra_data ->> 'decision' IN ('approval_pending', 'approval_approved')"#,
+    )
+    .bind(log_id)
+    .bind(Json(result))
+    .execute(executor)
+    .await
+    .context("recording an approved request's result")?;
     Ok(done.rows_affected() == 1)
 }
 

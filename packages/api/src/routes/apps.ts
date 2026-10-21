@@ -57,6 +57,7 @@ import {
   linkConnectionToAppConfig,
   listConnectionsByProvider,
 } from "../services/connection-service";
+import { connectGitHubInstallation } from "../services/github-installation-connect-service";
 import {
   disconnectOwnedConnection,
   renameOwnedConnection,
@@ -86,7 +87,10 @@ import {
 } from "../services/app-blocklist-service";
 import { logger } from "../lib/logger";
 import { setPartialGrantParams } from "../apps/missing-permissions";
-import { attachNewConnectionToAllAgents } from "../services/workspace-autoattach-service";
+import {
+  grantConnectingAgent,
+  resolveConnectingAgent,
+} from "../services/agent-connect-grant-service";
 import { registerGitHubAppShareRoutes } from "./github-app-share";
 
 const docsBaseURL = "https://onecli.sh/docs/guides/credential-stubs";
@@ -419,6 +423,15 @@ export const appRoutes = () => {
     async (c) => {
       const provider = c.req.param("provider")!;
       const auth = c.get("auth");
+      // The agent this connect started from (its Connections section, the
+      // chat, an agent's connect link): a created or re-added connection is
+      // switched on for it. Resolved here, at the authenticated end and
+      // before any org interceptor, so an org connect naming one is refused
+      // like every other door, and the id the state signs is already fenced.
+      const rawAgentId = c.req.query("agent_id");
+      if (c.req.query("_org") && rawAgentId) {
+        await resolveConnectingAgent(null, rawAgentId);
+      }
 
       const orgResponse = await getOAuthOrg().tryHandleOrgAuthorize(
         auth,
@@ -452,6 +465,7 @@ export const appRoutes = () => {
       const connectionId = c.req.query("connectionId");
       const rawAgentName = c.req.query("agent_name");
       const agentName = rawAgentName ? rawAgentName.slice(0, 128) : undefined;
+      const agentId = await resolveConnectingAgent(workspaceId, rawAgentId);
 
       const accessLevel = resolveAccessLevel(
         appDef.connectionMethod,
@@ -492,12 +506,14 @@ export const appRoutes = () => {
         redirectPath,
         ...(connectionId ? { connectionId } : {}),
         ...(agentName ? { agentName } : {}),
+        ...(agentId ? { agentId } : {}),
         // The token level the provider is asked for. Signed so the callback
         // exchanges the code the same way the consent screen issued it.
         ...(accessLevel.value ? { accessLevel: accessLevel.value } : {}),
         // Who started the connect: the callback is unauthenticated, so this is
-        // the only way the auto-attach grants it makes can be attributed in
-        // the audit log. Signed with the rest of the state, so not forgeable.
+        // the only way the grant it makes for the connecting agent can be
+        // attributed in the audit log. Signed with the rest of the state, so
+        // not forgeable.
         ...(auth.userId ? { userId: auth.userId } : {}),
       });
 
@@ -593,6 +609,14 @@ export const appRoutes = () => {
       // Both resolved at the top so `appOrigin` could be derived from the state;
       // the checks stay here so the error responses are unchanged.
       if (!stateParam) {
+        // A GitHub App "Redirect on update" with no connect in flight: the
+        // user changed the installation's repos on GitHub itself. Nothing to
+        // connect or store, just tell the popup it was saved.
+        if (c.req.query("setup_action") === "update") {
+          return c.redirect(
+            `${appOrigin}/app-connect/${provider}?status=updated`,
+          );
+        }
         return errorRedirect("Missing state parameter");
       }
       if (!state || state.provider !== provider) {
@@ -687,7 +711,7 @@ export const appRoutes = () => {
 
       let reconnectId = state.connectionId as string | undefined;
 
-      if (!reconnectId) {
+      if (!reconnectId && provider !== "github-app") {
         const identity = extractLabel(metadata)?.toLowerCase().trim();
         if (identity) {
           const existing = await listConnectionsByProvider(
@@ -702,13 +726,45 @@ export const appRoutes = () => {
       }
 
       // The freshly-CREATED connection id rides the success redirect so the
-      // popup can offer the post-connect attach step. Reconnects deliberately
-      // don't — the existing connection keeps whatever grants it has.
+      // popup can offer the post-connect attach step. A consent that landed on
+      // an existing connection doesn't: its grants stay as they are (a fresh
+      // connect only adds the connecting agent, below).
       let createdId: string | null = null;
       // The connection this consent landed on, created or re-authenticated.
       let connectionId: string;
+      // The agent the connect started from (signed at /authorize, fenced
+      // there), and the actor: the callback is unauthenticated, so both come
+      // from the signed state.
+      const connectingAgentId =
+        typeof state.agentId === "string" ? state.agentId : undefined;
+      const actorId = typeof state.userId === "string" ? state.userId : null;
 
-      if (reconnectId) {
+      if (provider === "github-app") {
+        const result = await connectGitHubInstallation({
+          scope: { workspaceId: state.workspaceId },
+          organizationId: stateOrgId,
+          credentials,
+          options: { scopes, metadata, appConfigId: resolved.appConfigId },
+          reconnectId,
+          beforeCreate: () => getConnectionHooks().beforeCreate(stateOrgId),
+        });
+        if (result.status === "updated") {
+          deleteCookie(c, OAUTH_STATE_COOKIE, { path: redirectPath });
+          return c.redirect(
+            `${appOrigin}/app-connect/${provider}?status=updated`,
+          );
+        }
+        connectionId = result.connection.id;
+        if (result.status === "created") createdId = connectionId;
+        if (!state.connectionId) {
+          await grantConnectingAgent(
+            state.workspaceId,
+            connectionId,
+            connectingAgentId,
+            actorId,
+          );
+        }
+      } else if (reconnectId) {
         const updated = await reconnectConnection(
           { workspaceId: state.workspaceId },
           reconnectId,
@@ -720,6 +776,17 @@ export const appRoutes = () => {
           },
         );
         connectionId = updated.id;
+        // A fresh connect (no reconnect asked for) that landed on this
+        // account by name: on for the connecting agent too. An explicit
+        // Reconnect only refreshes credentials and grants nothing.
+        if (!state.connectionId) {
+          await grantConnectingAgent(
+            state.workspaceId,
+            updated.id,
+            connectingAgentId,
+            actorId,
+          );
+        }
       } else {
         await getConnectionHooks().beforeCreate(stateOrgId);
         const fresh = await createConnection(
@@ -734,14 +801,14 @@ export const appRoutes = () => {
         );
         createdId = fresh.id;
         connectionId = fresh.id;
-        // New workspace connection: on for every agent right away; the
-        // post-connect dialog is where the user turns agents off.
-        // (The callback is unauthenticated: the actor comes from the signed
-        // state, so the grants are attributable in the audit log.)
-        await attachNewConnectionToAllAgents(
+        // A new workspace connection is on for no agent, except the one the
+        // connect started from; the post-connect dialog is where the user
+        // turns others on.
+        await grantConnectingAgent(
           state.workspaceId,
           fresh.id,
-          typeof state.userId === "string" ? state.userId : null,
+          connectingAgentId,
+          actorId,
         );
       }
 
@@ -866,6 +933,13 @@ export const appRoutes = () => {
       const body = (await c.req
         .json()
         .catch(() => null)) as ConnectRequestBody | null;
+      // An org connect (`X-Organization-Id`) naming an agent is refused here,
+      // before the org interceptor takes the request: agents live in
+      // workspaces. The workspace arm resolves it below, once the workspace
+      // is known.
+      if (c.req.header("x-organization-id")) {
+        await resolveConnectingAgent(null, body?.agentId);
+      }
 
       // The org this connect actually lands in. The legacy `X-Organization-Id`
       // interceptor (`tryHandleOrgConnect`, below) re-scopes the request to the
@@ -926,6 +1000,13 @@ export const appRoutes = () => {
       }
 
       const workspaceId = requireWorkspaceId(auth);
+      // The agent this connect started from: a created or re-added
+      // connection is switched on for it. Fenced before anything is stored,
+      // so a foreign or unknown id is a 404 and leaves no connection behind.
+      const connectingAgentId = await resolveConnectingAgent(
+        workspaceId,
+        body?.agentId,
+      );
 
       // Workspace-scoped connect starts with no config link — body-provided
       // credentials have no minting config. The credentials-import branch below
@@ -938,8 +1019,9 @@ export const appRoutes = () => {
 
       let connection: { id: string };
       // The freshly-CREATED connection (never a reconnect/duplicate): the popup's
-      // post-connect attach step only offers grants for brand-new connections —
-      // an existing one already has whatever grants it has.
+      // post-connect attach step only offers grants for brand-new connections.
+      // An existing one keeps its grants (a re-add only adds the connecting
+      // agent).
       let created: { id: string; label: string | null } | null = null;
 
       if (body?.connectionId) {
@@ -972,6 +1054,14 @@ export const appRoutes = () => {
             credentials,
             workspaceConnectionOpts,
           );
+          // Connecting an account that is already here: every grant stays as
+          // it is, and it is on for the connecting agent too.
+          await grantConnectingAgent(
+            workspaceId,
+            duplicate.id,
+            connectingAgentId,
+            auth.userId,
+          );
         } else {
           await getConnectionHooks().beforeCreate(auth.organizationId);
           const fresh = await createConnection(
@@ -982,9 +1072,11 @@ export const appRoutes = () => {
           );
           connection = fresh;
           created = { id: fresh.id, label: fresh.label };
-          await attachNewConnectionToAllAgents(
+          // On for no agent, except the one the connect started from.
+          await grantConnectingAgent(
             workspaceId,
             fresh.id,
+            connectingAgentId,
             auth.userId,
           );
         }
@@ -1021,8 +1113,9 @@ export const appRoutes = () => {
 
       invalidateGatewayCache(c.req.raw);
 
-      // `connection` is present only for a brand-new connection — the popup's
-      // attach step keys on it (reconnects keep their existing grants).
+      // `connection` is present only for a brand-new connection: the popup's
+      // attach step keys on it (an existing one keeps its grants, plus the
+      // connecting agent on a re-add).
       return c.json(
         created ? { success: true, connection: created } : { success: true },
       );

@@ -3,6 +3,8 @@
 export interface DirectionHeaderProps {
   inbound: string;
   outbound: string;
+  /** Channels only: the "what it hears" column, ahead of the two directions. */
+  listen?: string;
 }
 
 /**
@@ -13,6 +15,7 @@ export interface DirectionHeaderProps {
 export const DirectionHeader = ({
   inbound,
   outbound,
+  listen,
 }: DirectionHeaderProps) => (
   <div
     className="text-muted-foreground hidden items-center gap-3 border-b py-2 text-xs sm:flex"
@@ -22,6 +25,7 @@ export const DirectionHeader = ({
     {/* Mirrors ContactRowFrame: status cells, gap-1, then the `…` column. */}
     <div className="flex items-center gap-1">
       <div className="flex items-center gap-2">
+        {listen && <span className="w-40 px-2 text-right">{listen}</span>}
         <span className="w-40 px-2 text-right">{inbound}</span>
         <span className="w-40 px-2 text-right">{outbound}</span>
       </div>

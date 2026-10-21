@@ -539,24 +539,6 @@ test("every application-Secret key a template reads is minted by the generator, 
   }
 });
 
-test("the generator Job may patch only its own Secret", () => {
-  const job = templates["job-secrets.yaml"];
-  const role = job.slice(
-    job.indexOf("kind: Role\n"),
-    job.indexOf("kind: RoleBinding"),
-  );
-  assert.match(
-    role,
-    /resources: \["secrets"\]\n\s+verbs: \["create"\]/,
-    "create cannot be name-scoped (the name is in the body)",
-  );
-  assert.match(
-    role,
-    /resourceNames: \[\{\{ \$name \| quote \}\}\]\n\s+verbs: \["get", "patch"\]/,
-  );
-  assert.doesNotMatch(role, /"(update|delete|list|watch)"/);
-});
-
 // ── rendered output, when helm is available ───────────────────────────────
 
 const helm = (() => {
@@ -840,18 +822,23 @@ test(
 );
 
 test(
-  "rendered: the generator mints the newer keys and may patch only its own Secret",
+  "rendered: the generator may patch only its own Secret",
   { skip: !helm && "helm not on PATH" },
   () => {
+    // Render-level, so it also proves `$name` binds to `onecli-secrets`.
+    // The newer keys being minted is implied by "every application-Secret
+    // key a template reads is minted by the generator".
     const out = render(["--set", "secrets.generate.enabled=true"]);
     const role = doc(out, "Role", "onecli-secrets-generate");
     assert.match(
       role,
+      /resources: \["secrets"\]\n\s+verbs: \["create"\]/,
+      "create cannot be name-scoped (the name is in the body)",
+    );
+    assert.match(
+      role,
       /resourceNames: \["onecli-secrets"\]\n\s+verbs: \["get", "patch"\]/,
     );
-    const tool = doc(out, "ConfigMap", "onecli-secret-tool");
-    for (const key of ["RUNNER_SESSION_KEY", "CHANNEL_ADAPTER_TOKEN"]) {
-      assert.match(tool, new RegExp(`${key}: \\(\\) =>`));
-    }
+    assert.doesNotMatch(role, /"(update|delete|list|watch)"/);
   },
 );

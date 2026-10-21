@@ -31,6 +31,7 @@ vi.mock("@/hooks/use-grants", () => ({
   }),
   useAttachSecret: () => ({ mutate: vi.fn(), isPending: false }),
   useDetachSecret: () => ({ mutate: vi.fn(), isPending: false }),
+  useGrantSettling: () => false,
 }));
 
 vi.mock("@/lib/api/policy-visibility", async (importOriginal) => {
@@ -91,5 +92,26 @@ describe("SecretGrantsTab", () => {
 
     expect(screen.getByText("ws-key")).toBeInTheDocument();
     expect(screen.queryByText("generic-token")).not.toBeInTheDocument();
+  });
+
+  const generic = (id: string) =>
+    ({ ...secret(id, "workspace"), type: "generic" }) as Secret;
+
+  it("folds custom secrets that are off for the agent by default", () => {
+    hoisted.secretsData = [generic("stripe")];
+    render(<SecretGrantsTab agentId="agent-1" kind="secret" />);
+
+    expect(screen.getByText(/None are on for this agent yet/)).toBeTruthy();
+    expect(screen.queryByText("stripe")).not.toBeInTheDocument();
+  });
+
+  it("keeps every custom secret in view unfolded, for the new agent's chooser", () => {
+    hoisted.secretsData = [generic("stripe")];
+    render(
+      <SecretGrantsTab agentId="agent-1" kind="secret" foldInactive={false} />,
+    );
+
+    expect(screen.getByText("stripe")).toBeInTheDocument();
+    expect(screen.queryByText(/None are on for this agent yet/)).toBeNull();
   });
 });

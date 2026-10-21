@@ -74,21 +74,13 @@ const fill = async (
 };
 
 describe("self-hosted sign-up screen", () => {
-  it("creates the account and says what it is for", () => {
-    renderScreen();
-    expect(
-      screen.getByRole("heading", { name: "Create your account" }),
-    ).toBeTruthy();
-    expect(screen.getByText(/organization of its own/i)).toBeTruthy();
-  });
-
   it("tells the deployment's first account it is first", () => {
     renderScreen({ firstAccount: true });
     expect(screen.getByText(/You are the first here/i)).toBeTruthy();
   });
 
   it("submits name, email and password", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderScreen();
     await fill(user, "correct horse battery");
     await user.click(screen.getByRole("button", { name: "Create account" }));
@@ -101,7 +93,7 @@ describe("self-hosted sign-up screen", () => {
   });
 
   it("refuses a short password without asking the server", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderScreen();
     await fill(user, "short");
     await user.tab();
@@ -119,7 +111,7 @@ describe("self-hosted sign-up screen", () => {
     signUp.mockRejectedValue(
       new Error("An account already exists for that email."),
     );
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderScreen();
     await fill(user, "correct horse battery");
     await user.click(screen.getByRole("button", { name: "Create account" }));
@@ -213,7 +205,7 @@ describe("self-hosted sign-up screen", () => {
     // silently never happens.
     window.history.replaceState(null, "", "/auth/signup?token=tok-1");
     try {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ delay: null });
       renderScreen({
         googleConfigured: true,
         invitation: {

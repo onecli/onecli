@@ -18,6 +18,7 @@ import {
   agentSectionPath,
   connectionsPath,
 } from "@/lib/navigation";
+import { withConnectLinkAgent } from "@/lib/connect-link-agent";
 import { connectPopupHeight, openConnectPopup } from "@/lib/connect-popup";
 import { queryKeys } from "@/lib/api/keys";
 import { useConnections } from "@/hooks/use-connections";
@@ -27,7 +28,7 @@ import { useAppMessages } from "@/hooks/use-app-connected";
 import { useEffectiveCredentials } from "@/lib/api/policy-visibility";
 import type { Connection } from "@/lib/api";
 import { ManagePermissionsDialog } from "../../_components/manage-permissions-dialog";
-import { AttachConnectionDialog } from "./attach-connection-dialog";
+import { AttachConnectionDialog } from "../../_components/attach-connection-dialog";
 import { ConnectAppPickerDialog } from "../../_components/connect-app-picker-dialog";
 import {
   findGitHubOrgAccess,
@@ -47,10 +48,10 @@ import {
  * The card is STATE-AWARE: once the provider has a connection it flips to
  * "Connected" with Reconnect and Manage (the agent page's own permissions
  * dialog, opened in place, under the same read-only law —
- * `useManageConnectionState`). A connect started FROM this card lands already
- * attached (every tool allowed, anything else needing approval) to every
- * agent of the workspace, this one included (the API's workspace
- * auto-attach); scoping down afterwards is exactly what Manage is for.
+ * `useManageConnectionState`). A connect started FROM this card carries this
+ * agent, so the new account lands switched on (reads allowed, writes and
+ * anything else needing approval) for it alone (the API's connecting-agent
+ * grant); scoping down afterwards is exactly what Manage is for.
  */
 
 /** The card under an agent answer that carried connect links. Memoized on
@@ -182,9 +183,9 @@ export const ConnectorSuggestionsCard = ({
       if (!provider || !initiated.current.has(provider)) return;
       initiated.current.delete(provider);
       // The pool changed even without a fresh id (the callback dedupes a
-      // repeat connect onto the existing account), and a fresh account
-      // arrives already granted to every agent: refresh the list, the grant
-      // views (this card's Attach/Manage state) and the count badges.
+      // repeat connect onto the existing account), and either way it arrives
+      // switched on for this agent: refresh the list, the grant views (this
+      // card's Attach/Manage state) and the count badges.
       invalidateGrants();
       void queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
     },
@@ -197,8 +198,15 @@ export const ConnectorSuggestionsCard = ({
     onConfigure: (provider) => {
       if (!initiated.current.has(provider)) return;
       initiated.current.delete(provider);
+      // The connect that follows the setup is still this agent's.
       router.push(
-        connectionsPath({ pathname }, `/apps/${encodeURIComponent(provider)}`),
+        withConnectLinkAgent(
+          connectionsPath(
+            { pathname },
+            `/apps/${encodeURIComponent(provider)}`,
+          ),
+          agentId,
+        ),
       );
     },
   });
@@ -216,10 +224,9 @@ export const ConnectorSuggestionsCard = ({
       <div className="bg-card max-w-md rounded-xl border">
         {/* The TITLE is what `hideHeader` drops (the greeting's own words
             already say why the card is there). The CONSENT LINE is not part
-            of that trade: a new account is on for every agent of the
-            workspace, and that has to be said where the click happens. Most
-            of all on the greeting card, which is the first connect UI a new
-            user ever meets. */}
+            of that trade: what a new account may do has to be said where the
+            click happens. Most of all on the greeting card, which is the
+            first connect UI a new user ever meets. */}
         {(!hideHeader || hasUnconnected) && (
           <div className="border-b px-4 py-2.5">
             {!hideHeader && (
@@ -237,9 +244,10 @@ export const ConnectorSuggestionsCard = ({
                   !hideHeader && "mt-0.5",
                 )}
               >
-                A new account is on for every agent in this workspace. Its tools
-                are allowed and anything else needs your approval (an app with
-                no tool list gets full access). Adjust it anytime under Manage.
+                Connecting turns the account on for this agent, not for your
+                other agents. Reads are allowed. Writes and anything else need
+                your approval (an app with no tool list gets full access).
+                Adjust it anytime under Manage.
               </p>
             )}
           </div>
@@ -463,6 +471,7 @@ export const ConnectorSuggestionsCard = ({
                     initiated.current.add(app.id);
                     openPopupOrExplain(app.id, {
                       agentName,
+                      agentId,
                       workspaceId,
                       height: connectPopupHeight(app),
                     });
@@ -528,9 +537,7 @@ export const ConnectorSuggestionsCard = ({
           agentId={agentId}
           open={pickerOpen}
           onOpenChange={setPickerOpen}
-          onConnected={() =>
-            toast.success("Connected. Every agent can now use it.")
-          }
+          onConnected={() => toast.success("Connected and on for this agent.")}
         />
       )}
 
@@ -567,6 +574,7 @@ export const ConnectorSuggestionsCard = ({
             initiated.current.add(attachProvider);
             openPopupOrExplain(attachProvider, {
               agentName: suggestion?.agentName,
+              agentId,
               workspaceId,
               ...(suggestion && {
                 height: connectPopupHeight(suggestion.app),

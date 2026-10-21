@@ -14,9 +14,11 @@ import {
  * FOUR gateway refusals mint dashboard links the card can absorb:
  * - `app_not_connected` → `…/connections?connect=<provider>&source=agent…`
  *   (nothing connected: the card's Connect button opens the OAuth popup)
- * - `access_restricted` → `…/connections/apps/<provider>` (an account exists
- *   but THIS agent has no grant: the card's Manage button opens the
- *   permissions dialog, which is exactly the attach surface)
+ * - `access_restricted` → `…/agents/<id>/connections?attach=<provider>`, or
+ *   `…/connections/apps/<provider>` when the gateway knows no agent (an
+ *   account exists but THIS agent is not switched on for it: the card's
+ *   Attach button opens the attach dialog). Its `connect_url` alternative
+ *   names the same app, so the attach row wins over the connect row.
  * - `connection_needs_reconnect` → `…/connections/apps/<provider>?reconnect=<id>`
  *   (the provider rejected that account's saved login: the card's Reconnect
  *   button re-authorizes exactly that account in the OAuth popup)
@@ -63,6 +65,13 @@ export const parseConnectLink = (href: string): ConnectSuggestion | null => {
     url = new URL(href);
   } catch {
     return null;
+  }
+
+  // access_restricted, agent-scoped: /agents/<id>/connections?attach=<provider>
+  if (/\/agents\/[^/]+\/connections$/.test(url.pathname)) {
+    const provider = url.searchParams.get("attach");
+    if (!provider || !PROVIDER_ID_RE.test(provider)) return null;
+    return { provider, kind: "attach" };
   }
 
   // app_not_connected: /connections?connect=<provider>
@@ -130,19 +139,21 @@ export type CardSuggestion = Omit<ConnectSuggestion, "provider"> & {
 /** Every connect link in one turn's text, deduped by provider and resolved
  * against the catalog — an unknown provider renders nothing (its link stays
  * in the prose as the fallback, see `isCardConnectLink`). A provider named
- * by more than one shape keeps the first occurrence. */
+ * by more than one shape keeps its first occurrence, except that an attach
+ * link replaces a connect link: `access_restricted` offers both for one app,
+ * and switching the existing account on is the fix it leads with. */
 export const extractConnectSuggestions = (text: string): CardSuggestion[] => {
-  const seen = new Set<string>();
-  const out: CardSuggestion[] = [];
+  const byProvider = new Map<string, CardSuggestion>();
   for (const match of text.matchAll(/https?:\/\/[^\s)\]>"']+/g)) {
     const parsed = parseConnectLink(
       match[0].replace(TRAILING_PUNCTUATION_RE, ""),
     );
-    if (!parsed || seen.has(parsed.provider)) continue;
-    seen.add(parsed.provider);
+    if (!parsed) continue;
     const { provider, ...rest } = parsed;
+    const seen = byProvider.get(provider);
+    if (seen && !(seen.kind === "connect" && rest.kind === "attach")) continue;
     const app = getApp(provider);
-    if (app) out.push({ app, ...rest });
+    if (app) byProvider.set(provider, { app, ...rest });
   }
-  return out;
+  return [...byProvider.values()];
 };

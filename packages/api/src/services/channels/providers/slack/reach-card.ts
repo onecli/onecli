@@ -2,6 +2,7 @@ import { escapeSlackText, spaceOfThreadAddress } from "@onecli/channels/slack";
 // Type-only: erased at compile, so the service -> registry -> provider ->
 // reach-card import chain stays acyclic at runtime.
 import type { ReachDecision } from "../../agent-reach-service";
+import type { SpaceMembershipResult } from "../../types";
 import { parseSlackPresenceCredentials } from "./types";
 import {
   updateBlocksMessage,
@@ -13,7 +14,9 @@ import {
   usersList,
   clampHeader,
   clampLabel,
+  SlackApiError,
 } from "@onecli/channels/slack";
+import { isSlackSystemUser } from "./interpret";
 
 /**
  * The Slack rendering of the reach card - the PLATFORM-composed owner DM
@@ -280,6 +283,7 @@ export const slackReach = {
    * (interpret.ts `groupThreadId`) - the space is the channel. Inverse
    * lives beside the renderer so provider-shaped reach logic has one home. */
   spaceOf: spaceOfThreadAddress,
+  spaceThreadPrefix: (externalRef: string): string => `${externalRef}:`,
 
   /** "#channel-name" for cards and the dashboard; null when the token
    * cannot read the channel (private, dead credential). Display only. */
@@ -395,6 +399,11 @@ export const slackReach = {
     isApp: boolean;
   } | null> {
     if (!input.credentialsJson) return null;
+    // Slack's system accounts are never guests (defense in depth behind the
+    // interpreter, which already keeps them off every speaker door): their
+    // directory entry reads same-tenant, which is exactly how "@Slack"
+    // once became a person knock.
+    if (isSlackSystemUser(input.externalUserId)) return null;
     try {
       const creds = parseSlackPresenceCredentials(input.credentialsJson);
       if (!creds.botToken) return null;
@@ -474,6 +483,43 @@ export const slackReach = {
       return { ok: true };
     } catch {
       return { ok: true }; // transport failure (or unreadable channel) — fail open
+    }
+  },
+
+  async spaceMembership(input: {
+    credentialsJson: string | null;
+    externalRef: string;
+    signal?: AbortSignal;
+  }): Promise<SpaceMembershipResult> {
+    if (!input.credentialsJson) return { kind: "unknown" };
+    let botToken: string | undefined;
+    try {
+      botToken = parseSlackPresenceCredentials(input.credentialsJson).botToken;
+    } catch {
+      return { kind: "unknown" };
+    }
+    if (!botToken) return { kind: "unknown" };
+    try {
+      const info = await conversationsInfo(botToken, input.externalRef, {
+        signal: input.signal,
+      });
+      if (info.channel.is_member === false) return { kind: "gone" };
+      return { kind: info.channel.is_member === true ? "member" : "unknown" };
+    } catch (err) {
+      // A private channel the bot was removed from is invisible to its
+      // token: Slack answers `channel_not_found` (verified in prod
+      // 2026-10-18 right after a kick). That, and only that, is a definite
+      // "gone" among the refusals; everything else (rate limit, missing
+      // scope, dead token, network) is unknown and changes nothing.
+      if (err instanceof SlackApiError && err.code === "channel_not_found") {
+        return { kind: "gone" };
+      }
+      return {
+        kind: "unknown",
+        ...(err instanceof SlackApiError && err.retryAfterMs !== undefined
+          ? { retryAfterMs: err.retryAfterMs }
+          : {}),
+      };
     }
   },
 

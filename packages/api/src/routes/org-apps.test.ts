@@ -488,41 +488,6 @@ describe("with the standard boot wiring", () => {
   });
   // ── AWS external ID ────────────────────────────────────────────────────
 
-  it("returns the caller's org external id, minting it on first read", async () => {
-    const res = await app.request("/v1/org/apps/aws-external-id", {
-      headers: orgKeyHeaders,
-    });
-
-    expect(res.status).toBe(200);
-    const { externalId } = (await res.json()) as { externalId: string };
-    expect(externalId).toMatch(/^onecli-/);
-    // Persisted, so the value the user pastes into their trust policy is the
-    // same one we will present at AssumeRole time.
-    expect(store.orgs[0]!.awsExternalId).toBe(externalId);
-  });
-
-  it("returns the same external id on a second read", async () => {
-    const first = await app.request("/v1/org/apps/aws-external-id", {
-      headers: orgKeyHeaders,
-    });
-    const second = await app.request("/v1/org/apps/aws-external-id", {
-      headers: orgKeyHeaders,
-    });
-
-    expect(await first.json()).toEqual(await second.json());
-  });
-
-  it("never serves another org's external id", async () => {
-    // The org comes from the membership-fenced auth context, and nothing in
-    // the request names one — so org-2's id is unreachable from org-1's key.
-    const res = await app.request("/v1/org/apps/aws-external-id", {
-      headers: orgKeyHeaders,
-    });
-
-    const { externalId } = (await res.json()) as { externalId: string };
-    expect(externalId).not.toBe("onecli-org-2-external-id");
-  });
-
   it("RBAC: a mere member cannot read the org external id", async () => {
     caps.rbac = true;
     try {

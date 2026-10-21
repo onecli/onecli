@@ -6,13 +6,30 @@ import {
   ensureDirectConversation,
   ensureSourcedConversation,
 } from "../conversation-service";
-import { createTurn } from "../turn-service";
+import { abortTurn, createTurn, requestSendNow } from "../turn-service";
 import { sendConversationMessage } from "../follow-up-service";
 import {
   createFailedAttachment,
   createPendingAttachment,
 } from "../attachment-service";
 import { channelProvider } from "./registry";
+import {
+  captureSpaceMembership,
+  captureSpaceDeparture,
+  commitSpaceDeparture,
+  spaceMembershipStillCurrent,
+  type SpaceMembershipSnapshot,
+} from "./space-membership-lifecycle";
+import {
+  lockMembershipPresence,
+  noteSpaceMembershipJoin,
+} from "./space-membership-state";
+import { reconcileSpaceMemberships } from "./space-membership-service";
+import {
+  findSessionTurn,
+  settleStoppedSession,
+  type LoaderAddress,
+} from "./turn-receipt-service";
 import { anchorRecipient } from "./recipient-search-service";
 import { mentionDirectoryOf } from "./mention-resolution-service";
 import type {
@@ -21,7 +38,7 @@ import type {
   SpeakerKind,
   ThreadLinkKind,
 } from "./types";
-import { normalizeMentionName } from "@onecli/channels";
+import { normalizeMentionName, type FollowUpAction } from "@onecli/channels";
 import { logger } from "../../lib/logger";
 // Type-only: the runtime import of the reach service stays dynamic (below)
 // so this hot ingestion path does not eagerly pull the reach module graph.
@@ -31,6 +48,7 @@ import {
   MAX_ATTACHMENT_ROWS_PER_MESSAGE,
   MAX_ATTACHMENTS_PER_MESSAGE,
 } from "@onecli/agent-protocol";
+import { ACTIVE_TURN_STATUSES } from "../../validations/conversation";
 
 const log = logger.child({ component: "channel-ingestion" });
 
@@ -317,25 +335,35 @@ const upsertThreadLink = async (input: {
   externalThreadId: string;
   kind: ThreadLinkKind;
   externalUserId: string | null;
-}): Promise<void> => {
-  await db.channelThreadLink.upsert({
-    where: {
-      agentChannelId_externalThreadId: {
-        agentChannelId: input.agentChannelId,
-        externalThreadId: input.externalThreadId,
+  membership?: SpaceMembershipSnapshot;
+}): Promise<boolean> => {
+  const { membership, ...data } = input;
+  return db.$transaction(async (tx) => {
+    const presence = await lockMembershipPresence(tx, input.agentChannelId);
+    if (!presence) return false;
+    if (
+      membership &&
+      !(await spaceMembershipStillCurrent(tx, membership, presence))
+    ) {
+      return false;
+    }
+    await tx.channelThreadLink.upsert({
+      where: {
+        agentChannelId_externalThreadId: {
+          agentChannelId: input.agentChannelId,
+          externalThreadId: input.externalThreadId,
+        },
       },
-    },
-    create: input,
-    // Repoint on re-link: if an admin re-maps this Slack user to a different
-    // platform user, `ensureDirectConversation` now resolves a DIFFERENT
-    // conversation, and the link must follow it — otherwise the new user's
-    // turns land in an unlinked conversation (invisible in Slack) while the
-    // mirror keeps posting the OLD user's web activity into this DM, a
-    // cross-user leak. A same-user repeat writes the same values (a no-op).
-    update: {
-      conversationId: input.conversationId,
-      externalUserId: input.externalUserId,
-    },
+      create: data,
+      // Re-linking follows the current conversation/user binding. Its revision
+      // invalidates any membership probe sampled before this routing write.
+      update: {
+        conversationId: input.conversationId,
+        externalUserId: input.externalUserId,
+        revision: { increment: 1 },
+      },
+    });
+    return true;
   });
 };
 
@@ -956,6 +984,14 @@ export interface GroupMessageInput {
   /** Files shared with the message (metadata refs; fetched after authorize). */
   files?: ChannelFileRef[];
   eventId: string;
+  /** Where the answer goes when the conversation spans more than one place
+   * (Slack: a thread root ts). Null or absent: the conversation's own
+   * address (a point-of-contact room: the channel itself). */
+  sourceThreadId?: string | null;
+  /** Heard in a promoted channel without being clearly addressed. A speaker
+   * the agent may not answer is ignored QUIETLY (no "link your account"
+   * reply to every passer-by). */
+  overheard?: boolean;
 }
 
 export const ingestGroupMessage = async (
@@ -979,6 +1015,7 @@ export const ingestGroupMessage = async (
   // which is what made the old ordering read as a bug.
   const gate = await checkChannelGate(presence, input);
   if (gate.kind !== "open") return gate.outcome;
+  const { membership } = gate;
 
   // THE APP ARM (PR 5a). An app has no identity to link (the email walk is
   // meaningless for a bot user), so the identity lane is skipped and the
@@ -995,7 +1032,7 @@ export const ingestGroupMessage = async (
     if (await personReachDenied(presence, input.externalUserId)) {
       return { kind: "ignored", reason: "person-reach-denied" };
     }
-    return admitGuest(presence, input);
+    return admitGuest(presence, input, membership);
   }
 
   // Lane 1 - IDENTITY: a workspace-authorized platform user. Runs inside an
@@ -1014,8 +1051,11 @@ export const ingestGroupMessage = async (
       if (await personReachDenied(presence, input.externalUserId)) {
         return { kind: "ignored", reason: "person-reach-denied" };
       }
-      const guest = await admitGuest(presence, input);
+      const guest = await admitGuest(presence, input, membership);
       if (guest) return guest;
+    }
+    if (input.overheard) {
+      return { kind: "ignored", reason: "overheard-unlinked-speaker" };
     }
     return { kind: "refused", message: speaker.refusal };
   }
@@ -1029,13 +1069,15 @@ export const ingestGroupMessage = async (
       ...(input.title && { title: input.title }),
     },
   );
-  await upsertThreadLink({
+  const linked = await upsertThreadLink({
     agentChannelId: presence.id,
     conversationId: conversation.id,
     externalThreadId: input.externalThreadId,
     kind: "group",
     externalUserId: null,
+    membership,
   });
+  if (!linked) return { kind: "ignored", reason: "stale-membership" };
   await seedRoomApps(presence, conversation.id, input.externalThreadId);
 
   // The speaker prefix uses OUR authenticated user's name — never the
@@ -1063,6 +1105,7 @@ export const ingestGroupMessage = async (
       `${speakerName}: ${input.text}`,
       speaker.userId,
       attachmentIds,
+      input.sourceThreadId,
     ),
   );
 };
@@ -1106,7 +1149,7 @@ const checkChannelGate = async (
   presence: PresenceRow,
   input: GroupMessageInput,
 ): Promise<
-  | { kind: "open"; state: ReachState }
+  | { kind: "open"; state: ReachState; membership?: SpaceMembershipSnapshot }
   | { kind: "closed"; outcome: IngestOutcome }
 > => {
   const providerId = presence.provider as ChannelProviderId;
@@ -1120,6 +1163,7 @@ const checkChannelGate = async (
     resolveSpaceReach,
     postReachCards,
     pendingReachMessage,
+    normalizeState,
   } = await import("./agent-reach-service");
 
   let state = await resolveSpaceReach({
@@ -1176,7 +1220,14 @@ const checkChannelGate = async (
       },
     };
   }
-  return { kind: "open", state };
+  const membership = await captureSpaceMembership(presence.id, space);
+  if (!membership?.grant || normalizeState(membership.grant.state) !== state) {
+    return {
+      kind: "closed",
+      outcome: { kind: "ignored", reason: "stale-membership" },
+    };
+  }
+  return { kind: "open", state, membership };
 };
 
 /**
@@ -1193,6 +1244,7 @@ const checkChannelGate = async (
 const admitGuest = async (
   presence: PresenceRow,
   input: GroupMessageInput,
+  membership?: SpaceMembershipSnapshot,
 ): Promise<IngestOutcome> => {
   const providerId = presence.provider as ChannelProviderId;
   const reach = channelProvider(providerId).reach;
@@ -1226,13 +1278,15 @@ const admitGuest = async (
       ...(input.title && { title: input.title }),
     },
   );
-  await upsertThreadLink({
+  const linked = await upsertThreadLink({
     agentChannelId: presence.id,
     conversationId: conversation.id,
     externalThreadId: input.externalThreadId,
     kind: "group",
     externalUserId: null,
+    membership,
   });
+  if (!linked) return { kind: "ignored", reason: "stale-membership" };
   await seedRoomApps(presence, conversation.id, input.externalThreadId);
 
   const speakerName = cleanName(guest.displayName ?? "someone");
@@ -1264,6 +1318,7 @@ const admitGuest = async (
       framed,
       null,
       attachmentIds,
+      input.sourceThreadId,
     ),
   );
 };
@@ -1296,6 +1351,10 @@ export const ingestGroupInvite = async (
   if (!(await recordEventOnce(presence.id, input.eventId))) {
     return { kind: "duplicate" };
   }
+
+  // A real self-join invalidates old probes even if the inviter is unknown
+  // or an approved grant does not change. Do this before any remote lookup.
+  if (input.channel) await noteSpaceMembershipJoin(presence.id);
 
   // `leave: false`, deliberately (docs-verified 2026-08-07): leaving a channel
   // needs `channels:manage`/`groups:write` — granting every agent bot the
@@ -1381,31 +1440,300 @@ export const ingestGroupLeave = async (
 ): Promise<void> => {
   const presence = await requirePresence(input.agentChannelId);
   if (!(await recordEventOnce(presence.id, input.eventId))) return;
+  const snapshot = await captureSpaceDeparture(presence.id, input.channel);
+  if (snapshot) await commitSpaceDeparture(snapshot);
+};
 
-  // Thread links for THIS channel: the group-thread address is provider-
-  // minted as `<channel>:<threadTs>` - match by the provider's own space
-  // key so the generic door never parses the format itself.
-  const reach = channelProvider(presence.provider as ChannelProviderId).reach;
-  const links = await db.channelThreadLink.findMany({
-    where: { agentChannelId: presence.id, kind: "group" },
-    select: { id: true, externalThreadId: true },
+/** System messages are hints, never speakers or instructions. Reconcile through
+ * the same durable claim/cursor path as maintenance, detached from Slack's ack. */
+export const ingestSystemNotice = async (input: {
+  agentChannelId: string;
+  eventId: string;
+}): Promise<void> => {
+  const presence = await requirePresence(input.agentChannelId);
+  if (!(await recordEventOnce(presence.id, input.eventId))) return;
+  void reconcileSpaceMemberships({ presenceId: presence.id, reason: "hint" })
+    .then((result) => {
+      if (result.cleaned > 0)
+        log.info(
+          { presenceId: presence.id, ...result },
+          "system notice reconciled space membership",
+        );
+    })
+    .catch((err: unknown) =>
+      log.warn(
+        { err, presenceId: presence.id },
+        "system notice reconcile failed",
+      ),
+    );
+};
+
+export interface SessionStopInput {
+  agentChannelId: string;
+  /** Who clicked (the provider user id), authorized like a speaker. */
+  externalUserId: string;
+  /** The stopped session's address (Slack: channel id + thread root ts). */
+  channel: string;
+  threadTs: string;
+  eventId: string;
+}
+
+/** What a Stop pressed on a channel surface came to. */
+export type StopOutcome =
+  /** The loader's turn was asked to stop (or ended in the same instant). */
+  | { kind: "stopped" }
+  /** Nothing of ours was working there. */
+  | { kind: "idle" }
+  /** The clicker may not stop this agent; nothing was stopped. */
+  | { kind: "refused"; message: string };
+
+export type SessionStopOutcome = { kind: "duplicate" } | StopOutcome;
+
+const REFUSAL_STOP = "You can't stop this agent. Ask its owner.";
+
+/**
+ * The provider's NATIVE Stop (Slack: `agent_session_stopped`, the button
+ * beside the agent session's loader in a thread): `stopLoaderTurn` below,
+ * addressed by the thread root, behind the at-least-once event ledger.
+ */
+export const ingestSessionStop = async (
+  input: SessionStopInput,
+): Promise<SessionStopOutcome> => {
+  const presence = await requirePresence(input.agentChannelId);
+  if (!(await recordEventOnce(presence.id, input.eventId))) {
+    return { kind: "duplicate" };
+  }
+  const address = {
+    presenceId: presence.id,
+    channel: input.channel,
+    threadTs: input.threadTs,
+  };
+  const outcome = await stopLoaderTurn(presence, input.externalUserId, address);
+  // The provider leaves the session in `processing` (Slack documents it),
+  // so an authorized stop, or a loader with nothing behind it, settles it
+  // here. A refused one does NOT: the agent is still working, and the
+  // loader saying so is the truth.
+  if (outcome.kind !== "refused") await settleStoppedSession(address);
+  return outcome;
+};
+
+export interface CardStopInput {
+  agentChannelId: string;
+  /** Who clicked (the provider user id), authorized like a speaker. */
+  externalUserId: string;
+  /** The narration card's address (Slack: channel id + the card's ts). */
+  channel: string;
+  cardTs: string;
+}
+
+/**
+ * The Stop button on the narration card: the control where no native loader
+ * stands (Slack: a top-level DM, where Slack draws no Stop of its own). The
+ * same core as the native Stop, addressed by the card instead of a thread.
+ *
+ * No dedupe ledger: an interactive click carries no event id, and it needs
+ * none. A second click finds the turn already flagged (the abort is
+ * idempotent) or already finished (`idle`). No settle either: there is no
+ * native session to move, and the turn's own close removes the card and
+ * posts "Stopped." in its place.
+ *
+ * The click names a card by where the provider says it sits, never by a
+ * value on the button, so only the turn whose LIVE card is that message on
+ * this presence can be reached.
+ */
+export const stopFromCard = async (
+  input: CardStopInput,
+): Promise<StopOutcome> => {
+  const presence = await requirePresence(input.agentChannelId);
+  return stopLoaderTurn(presence, input.externalUserId, {
+    presenceId: presence.id,
+    channel: input.channel,
+    cardTs: input.cardTs,
   });
-  const doomed = links.filter(
-    (link) => reach && reach.spaceOf(link.externalThreadId) === input.channel,
-  );
-  if (doomed.length > 0) {
-    await db.channelThreadLink.deleteMany({
-      where: { id: { in: doomed.map((l) => l.id) } },
-    });
+};
+
+/**
+ * The shared core of every Stop a person presses on a channel surface: the
+ * same Stop the web has, through the same `abortTurn`, as the PERSON who
+ * pressed it.
+ *
+ * The order is the security property, as on every door: resolve the turn
+ * the loader at that address belongs to, then authorize the clicker exactly
+ * as a speaker is authorized (linked, a live org member, workspace access),
+ * then abort AS them, so `abortTurn`'s own fence (a direct thread is its
+ * owner's alone) holds for a Stop from a channel exactly as for one from
+ * the web. Everything the web Stop does follows for free: the run is
+ * cancelled, waiting follow-ups are silenced, and the close posts
+ * "Stopped." back to the conversation.
+ *
+ * The work to stop is the LOADER'S OWN turn, never "whatever runs in that
+ * conversation": a DM is one conversation across many threads, so a
+ * conversation-wide pick could stop work nobody pressed Stop on. Fenced to
+ * this presence's agent as well, though the receipt row already is.
+ *
+ * There is no guest lane: a guest's turn has no owner to act as, and a
+ * stranger pressing Stop in a shared channel thread must not cancel work a
+ * member asked for. Only members can stop.
+ */
+const stopLoaderTurn = async (
+  presence: PresenceRow,
+  externalUserId: string,
+  address: LoaderAddress,
+): Promise<StopOutcome> => {
+  const loaderTurnId = await findSessionTurn(address);
+  const turn = loaderTurnId
+    ? await db.turn.findFirst({
+        where: {
+          id: loaderTurnId,
+          status: { in: [...ACTIVE_TURN_STATUSES] },
+          conversation: { agentId: presence.agent.id },
+        },
+        select: { id: true },
+      })
+    : null;
+  // Nothing of ours is working there: no loader row, or one left behind by
+  // a run that already ended. Nothing to authorize, nothing to stop.
+  if (!turn) return { kind: "idle" };
+
+  const speaker = await authorizeSpeaker(presence, externalUserId);
+  if ("refusal" in speaker) {
+    log.info(
+      { presenceId: presence.id, turnId: turn.id },
+      "stop refused: clicker not authorized",
+    );
+    return { kind: "refused", message: REFUSAL_STOP };
   }
 
-  const { parkGrantOnLeave } = await import("./agent-reach-service");
-  await parkGrantOnLeave({
-    agentId: presence.agent.id,
-    integrationId: presence.integrationId,
-    provider: presence.provider as ChannelProviderId,
-    externalRef: input.channel,
-  }).catch((err: unknown) =>
-    log.warn({ err, presenceId: presence.id }, "leave grant park failed"),
-  );
+  try {
+    await abortTurn(presence.agent.workspaceId, turn.id, speaker.userId);
+  } catch (err) {
+    if (!(err instanceof ServiceError)) throw err;
+    // CONFLICT: the turn ended between the read and the abort, so there is
+    // nothing left to stop and its close already answered. NOT_FOUND: the
+    // abort's own fence refused: a direct thread that is someone else's.
+    if (err.code === "NOT_FOUND") {
+      log.info(
+        { presenceId: presence.id, turnId: turn.id },
+        "stop refused: not the clicker's thread",
+      );
+      return { kind: "refused", message: REFUSAL_STOP };
+    }
+    if (err.code !== "CONFLICT") throw err;
+  }
+  return { kind: "stopped" };
+};
+
+export interface CardFollowUpActionInput {
+  agentChannelId: string;
+  /** Who clicked (the provider user id), authorized like a speaker. */
+  externalUserId: string;
+  /** The narration card's address (Slack: channel id + the card's ts). */
+  channel: string;
+  cardTs: string;
+  action: FollowUpAction;
+  /** The waiting message the clicked row shows. A pointer, never an
+   * authority: only a message of the card's own turn is reachable. */
+  followUpId: string;
+}
+
+/** What a click on a waiting message's row came to. `refused` is owed to
+ * the clicker alone; `done` owes nothing (the row leaves the card when the
+ * agent reads the message). */
+export type CardFollowUpActionOutcome =
+  | { kind: "done" }
+  | { kind: "refused"; message: string };
+
+const REFUSAL_NOT_YOURS = "Only the person who sent this message can do that.";
+const REFUSAL_GONE =
+  "That message isn't waiting anymore: the agent already read it, or the task ended.";
+
+/** Each row action is the web's own service for it, called as the person
+ * who pressed. A `Record` over the shared vocabulary, so an action added
+ * there does not compile until it has a service here. */
+const FOLLOW_UP_ACTION_SERVICES: Record<
+  FollowUpAction,
+  (workspaceId: string, followUpId: string, userId: string) => Promise<unknown>
+> = {
+  send_now: requestSendNow,
+};
+
+/**
+ * A control pressed on a waiting message's row of the agent's card (Slack:
+ * Send now beside "Waiting: …"), acted on AS the person who pressed it.
+ *
+ * The order is the security property, as on Stop:
+ *
+ *   1. the card resolves to its turn by where the provider says it sits, on
+ *      THIS presence (`findSessionTurn`, the Stop's own lookup), and the
+ *      message must be a follow-up of exactly that turn. A row id from
+ *      another card, another app or another tenant reads as gone: the
+ *      value on the button is a pointer, never an authority;
+ *   2. the clicker is authorized exactly like a speaker (linked, a live org
+ *      member, workspace access);
+ *   3. only the message's AUTHOR may act on it: in a shared thread
+ *      everyone sees the card, and one person's message is not another's
+ *      to rush. The card shows the control to the author alone, but that is
+ *      display, and this is the check;
+ *   4. the action runs through the web's own service as that person, so
+ *      its fence and its preconditions hold here exactly as there.
+ *
+ * Every refusal is a sentence for the clicker alone, and nothing is acted
+ * on. A guest has no account to act as, so there is no guest lane.
+ */
+export const actOnCardFollowUp = async (
+  input: CardFollowUpActionInput,
+): Promise<CardFollowUpActionOutcome> => {
+  const presence = await requirePresence(input.agentChannelId);
+  const cardTurnId = await findSessionTurn({
+    presenceId: presence.id,
+    channel: input.channel,
+    cardTs: input.cardTs,
+  });
+  const followUp = cardTurnId
+    ? await db.turn.findFirst({
+        where: {
+          id: input.followUpId,
+          followUpOfTurnId: cardTurnId,
+          conversation: { agentId: presence.agent.id },
+        },
+        select: { status: true, userId: true },
+      })
+    : null;
+  if (!followUp || followUp.status !== "joining") {
+    return { kind: "refused", message: REFUSAL_GONE };
+  }
+
+  const speaker = await authorizeSpeaker(presence, input.externalUserId);
+  if ("refusal" in speaker) {
+    return { kind: "refused", message: speaker.refusal };
+  }
+  if (followUp.userId !== speaker.userId) {
+    log.info(
+      { presenceId: presence.id, followUpId: input.followUpId },
+      "card follow-up action refused: not the message's author",
+    );
+    return { kind: "refused", message: REFUSAL_NOT_YOURS };
+  }
+
+  try {
+    await FOLLOW_UP_ACTION_SERVICES[input.action](
+      presence.agent.workspaceId,
+      input.followUpId,
+      speaker.userId,
+    );
+  } catch (err) {
+    // The service's own sentences are written for the person who pressed
+    // ("The agent already has this message", "…finished before it could
+    // read this message"), and a CONFLICT means nothing was asked for.
+    if (err instanceof ServiceError && err.code === "CONFLICT") {
+      return { kind: "refused", message: err.message };
+    }
+    // NOT_FOUND: the service's own fence (a direct thread that is someone
+    // else's) refused the clicker, who is then not its author here either.
+    if (err instanceof ServiceError && err.code === "NOT_FOUND") {
+      return { kind: "refused", message: REFUSAL_GONE };
+    }
+    throw err;
+  }
+  return { kind: "done" };
 };

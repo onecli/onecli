@@ -1,6 +1,48 @@
 import { db } from "@onecli/db";
 import { actionSupportsAlwaysAllow } from "./action-approval-service";
 import { normalizeState } from "./agent-reach-service";
+import {
+  CUSTOM_CONNECTION_ACTION,
+  customConnectionProposalSchema,
+  registrableDomainOf,
+} from "../../validations/custom-connection";
+
+/** An agent-proposed custom connection, as the approve card renders it.
+ * Every field is non-secret by construction (the proposal has no value). */
+export interface CustomConnectionProposalView {
+  name: string;
+  hostPattern: string;
+  /** The owner the key is sent to: the card highlights it. */
+  registrableDomain: string | null;
+  pathPattern: string | null;
+  headerName: string;
+  valueFormat: string;
+  docsUrl: string | null;
+  reason: string;
+}
+
+/** The structured view of a custom-connection payload, or null when the
+ * row is another action or its payload no longer validates (the bell then
+ * shows the generic row, where only decline goes through). */
+const customConnectionView = (
+  action: string,
+  payload: unknown,
+): CustomConnectionProposalView | null => {
+  if (action !== CUSTOM_CONNECTION_ACTION) return null;
+  const parsed = customConnectionProposalSchema.safeParse(payload);
+  if (!parsed.success) return null;
+  const p = parsed.data;
+  return {
+    name: p.name,
+    hostPattern: p.hostPattern,
+    registrableDomain: registrableDomainOf(p.hostPattern),
+    pathPattern: p.pathPattern ?? null,
+    headerName: p.headerName,
+    valueFormat: p.valueFormat,
+    docsUrl: p.docsUrl ?? null,
+    reason: p.reason,
+  };
+};
 
 /**
  * The approvals bell's CHANNEL arm (4d): every channel decision waiting on a
@@ -31,6 +73,9 @@ export interface PendingActionApprovalItem {
   /** ISO timestamps. */
   createdAt: string;
   expiresAt: string;
+  /** Set for an agent-proposed custom connection: the card renders it and
+   * asks for the key (approve goes through the dedicated route). */
+  customConnection: CustomConnectionProposalView | null;
 }
 
 export interface PendingReachAskItem {
@@ -70,6 +115,7 @@ export const listWorkspacePendingChannelApprovals = async (
         id: true,
         agentId: true,
         action: true,
+        payload: true,
         summary: true,
         conversationId: true,
         createdAt: true,
@@ -105,6 +151,7 @@ export const listWorkspacePendingChannelApprovals = async (
         conversationId: a.conversationId,
         createdAt: a.createdAt.toISOString(),
         expiresAt: a.expiresAt.toISOString(),
+        customConnection: customConnectionView(a.action, a.payload),
       }),
     ),
     ...asks

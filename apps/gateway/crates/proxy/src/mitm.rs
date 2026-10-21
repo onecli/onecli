@@ -120,6 +120,7 @@ pub async fn mitm(
                         Ok(ResolveResult::Resolved {
                             rules,
                             app_connections,
+                            secret_choices,
                         }) => {
                             let effective_host = rules.rewrite_host.as_deref().unwrap_or(&host);
                             if is_ws {
@@ -139,6 +140,7 @@ pub async fn mitm(
                                         connect::inject_connections_header(
                                             &mut resp,
                                             &app_connections,
+                                            &secret_choices,
                                         );
                                         Ok(resp)
                                     }
@@ -166,6 +168,7 @@ pub async fn mitm(
                                         connect::inject_connections_header(
                                             &mut resp,
                                             &app_connections,
+                                            &secret_choices,
                                         );
                                         Ok(resp)
                                     }
@@ -364,6 +367,9 @@ enum ResolveResult {
         /// transparent at the use sites.
         rules: Box<ResolvedRules>,
         app_connections: Vec<db::AppConnectionRow>,
+        /// Custom secrets colliding on a slot on this host, advertised in
+        /// `x-onecli-connections` next to the app connections.
+        secret_choices: Vec<ConnectionChoice>,
     },
     /// Multiple connections exist and no header was provided.
     Ambiguous(Vec<ConnectionChoice>),
@@ -407,7 +413,32 @@ async fn resolve_rules(
     )
     .await?;
 
-    let secret_rules = resp.injection_rules; // from secrets (path-scoped)
+    // Custom secrets that fill the same slot are disambiguated first, so a
+    // pin naming one never reaches the app resolver as an unknown id, and
+    // `secrets_serve` below reflects only the secret that will inject.
+    let (secret_rules, app_pin, secret_choices) = match connect::select_secret_rules(
+        resp.injection_rules,
+        &resp.app_connections,
+        hostname,
+        request_path,
+        connection_id,
+    ) {
+        connect::SecretSelection::Rules {
+            rules,
+            app_pin,
+            advertised,
+        } => (rules, app_pin, advertised),
+        connect::SecretSelection::Ambiguous(connections) => {
+            return Ok(ResolveResult::Ambiguous(connections));
+        }
+        connect::SecretSelection::NotFound(connections) => {
+            return Ok(ResolveResult::NotFound {
+                connection_id: connection_id.unwrap_or("").to_string(),
+                connections,
+            });
+        }
+    };
+    let connection_id = app_pin.as_deref();
     let mut app_rules: Vec<InjectionRule> = Vec::new();
     let mut pending_injections: Vec<crate::connect::PendingInjection> = Vec::new();
     let mut token_expires_at: Option<i64> = None;
@@ -585,6 +616,7 @@ async fn resolve_rules(
             host_mismatch,
         }),
         app_connections: resp.app_connections,
+        secret_choices,
     })
 }
 
@@ -627,6 +659,7 @@ mod tests {
                 name: "authorization".to_string(),
                 value: value.to_string(),
             }],
+            secret: None,
         }
     }
 
@@ -637,6 +670,7 @@ mod tests {
                 name: name.to_string(),
                 value: value.to_string(),
             }],
+            secret: None,
         }
     }
 
@@ -687,6 +721,147 @@ mod tests {
             .get("authorization")
             .map(|v| v.to_str().unwrap().to_string());
         (auth, request_path)
+    }
+
+    fn custom_rule(id: &str, scope: &str, value: &str) -> InjectionRule {
+        InjectionRule {
+            secret: Some(inject::secret_choice::SecretRef {
+                id: id.to_string(),
+                name: format!("Key {id}"),
+                scope: scope.to_string(),
+            }),
+            ..header_rule("*", value)
+        }
+    }
+
+    async fn resolve(store: &Arc<dyn CacheStore>, pin: Option<&str>, path: &str) -> ResolveResult {
+        let engine = PolicyEngine::test_stub();
+        resolve_rules(&ctx(), HOST, &engine, &**store, &[], pin, Some(path))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn colliding_custom_secrets_escalate_then_pin_selects() {
+        let store = cache::in_memory();
+        seed_connect(
+            &store,
+            HOST,
+            vec![
+                custom_rule("s1", "workspace", "one"),
+                custom_rule("s2", "workspace", "two"),
+            ],
+            vec![],
+        )
+        .await;
+
+        let ResolveResult::Ambiguous(choices) = resolve(&store, None, "/x").await else {
+            panic!("expected Ambiguous");
+        };
+        let ids: Vec<&str> = choices.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["s1", "s2"]);
+        assert_eq!(choices[0].provider, "custom");
+        assert_eq!(choices[0].label.as_deref(), Some("Key s1"));
+        assert_eq!(choices[0].host.as_deref(), Some(HOST));
+
+        let ResolveResult::Resolved {
+            rules,
+            secret_choices,
+            ..
+        } = resolve(&store, Some("s1"), "/x").await
+        else {
+            panic!("expected Resolved");
+        };
+        let (auth, _) = applied_auth("/x", &rules.injection_rules);
+        assert_eq!(auth.as_deref(), Some("one"));
+        assert_eq!(secret_choices.len(), 2, "both advertised");
+
+        let ResolveResult::NotFound { connection_id, .. } =
+            resolve(&store, Some("foreign"), "/x").await
+        else {
+            panic!("expected NotFound");
+        };
+        assert_eq!(connection_id, "foreign");
+    }
+
+    #[tokio::test]
+    async fn workspace_custom_secret_shadows_org_without_pin() {
+        let store = cache::in_memory();
+        seed_connect(
+            &store,
+            HOST,
+            vec![
+                custom_rule("org", "organization", "org"),
+                custom_rule("ws", "workspace", "ws"),
+            ],
+            vec![],
+        )
+        .await;
+        let ResolveResult::Resolved { rules, .. } = resolve(&store, None, "/x").await else {
+            panic!("expected Resolved");
+        };
+        assert_eq!(
+            applied_auth("/x", &rules.injection_rules).0.as_deref(),
+            Some("ws")
+        );
+        // A foreign pin on a non-colliding request is ignored, as before.
+        let ResolveResult::Resolved { rules, .. } = resolve(&store, Some("nope"), "/x").await
+        else {
+            panic!("expected Resolved");
+        };
+        assert_eq!(rules.injection_rules.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn secret_pin_does_not_break_app_resolution() {
+        // A pin naming a custom secret is not handed to the app resolver, so
+        // it never becomes an unknown-connection 404 on the app side.
+        let store = cache::in_memory();
+        seed_connect(
+            &store,
+            HOST,
+            vec![InjectionRule {
+                path_pattern: "/youtube/*".into(),
+                ..custom_rule("s1", "workspace", "yt")
+            }],
+            vec![app_conn("c1", "google-calendar")],
+        )
+        .await;
+        seed_app_injection(
+            &store,
+            "c1",
+            "google-calendar",
+            HOST,
+            vec![header_rule("/calendar/*", "Bearer cal")],
+        )
+        .await;
+        let ResolveResult::Resolved { rules, .. } =
+            resolve(&store, Some("s1"), "/calendar/v3/x").await
+        else {
+            panic!("expected Resolved");
+        };
+        assert_eq!(
+            applied_auth("/calendar/v3/x", &rules.injection_rules)
+                .0
+                .as_deref(),
+            Some("Bearer cal")
+        );
+    }
+
+    #[tokio::test]
+    async fn untagged_llm_rules_are_untouched() {
+        let store = cache::in_memory();
+        seed_connect(
+            &store,
+            HOST,
+            vec![header_rule("*", "a"), header_rule("*", "b")],
+            vec![],
+        )
+        .await;
+        let ResolveResult::Resolved { rules, .. } = resolve(&store, None, "/x").await else {
+            panic!("expected Resolved");
+        };
+        assert_eq!(rules.injection_rules.len(), 2);
     }
 
     #[tokio::test]

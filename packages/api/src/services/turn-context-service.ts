@@ -12,6 +12,7 @@ import { buildPeerContext } from "./channels/agent-peer-roster";
 import { buildApprovalOutcomeNote } from "./channels/action-approval-service";
 import { buildMentionContext } from "./channels/mention-resolution-service";
 import { buildSentContext } from "./channels/send-message-service";
+import { buildPointOfContactNote } from "./channels/agent-reach-service";
 import { buildContinuityBridge, buildOpenPromiseNote } from "./turn-service";
 
 const log = logger.child({ service: "turn-context" });
@@ -173,7 +174,7 @@ export const buildTurnContext = async (
   // referring to. A WAKE needs the opposite — it arrives with the
   // platform's instruction and no conversation at all, so it gets the
   // agent's own last reply, which is where an unfinished promise lives.
-  const [memory, mentions, peer, approvals, sent, bridge, promise] =
+  const [memory, mentions, peer, approvals, sent, bridge, promise, contact] =
     await Promise.all([
       buildMemoryContext(agentId, message),
       // Channel conversations only (the builder returns null elsewhere): how
@@ -220,6 +221,18 @@ export const buildTurnContext = async (
       isHuman || turn === null
         ? null
         : buildOpenPromiseNote(conversationId, turn.createdAt),
+      // A promoted channel's room: the agent hears everything there and
+      // decides whether to answer. Isolated: a reach read must never block
+      // the turn.
+      isHuman
+        ? buildPointOfContactNote(conversationId).catch((err: unknown) => {
+            log.warn(
+              { conversationId, err: String(err) },
+              "point-of-contact note failed; the turn ships without it",
+            );
+            return null;
+          })
+        : null,
     ]);
   if (
     !memory &&
@@ -228,7 +241,8 @@ export const buildTurnContext = async (
     !approvals &&
     !sent &&
     !bridge &&
-    !promise
+    !promise &&
+    !contact
   ) {
     return null;
   }
@@ -239,7 +253,7 @@ export const buildTurnContext = async (
   // bridge or the promise note sits NEAREST the message — it is the
   // immediate "what just landed" the person is most likely referring to, or
   // the commitment the wake must honor.
-  return [memory, mentions, peer, approvals, sent, bridge, promise]
+  return [contact, memory, mentions, peer, approvals, sent, bridge, promise]
     .filter((block): block is string => block !== null)
     .join("\n\n")
     .slice(0, MAX_TURN_CONTEXT_CHARS);

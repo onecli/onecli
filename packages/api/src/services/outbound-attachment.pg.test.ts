@@ -280,24 +280,6 @@ describe.skipIf(!PROOF_URL)("outbound attachments (send_file door)", () => {
     expect(await db.conversationAttachment.count()).toBe(0);
   });
 
-  it("CAP: the per-turn file count", async () => {
-    const ids = await seed("g");
-    for (let i = 0; i < MAX_OUTBOUND_ATTACHMENTS_PER_TURN; i += 1) {
-      const bytes = Buffer.from(`file ${i}`);
-      expect((await upload(RUNNER, ids, bytes, { name: `f${i}.txt` })).ok).toBe(
-        true,
-      );
-    }
-    const over = await upload(RUNNER, ids, Buffer.from("one more"), {
-      name: "over.txt",
-    });
-    expect(over.ok).toBe(false);
-    expect(!over.ok && over.error).toMatch(/per reply/);
-    expect(await db.conversationAttachment.count()).toBe(
-      MAX_OUTBOUND_ATTACHMENTS_PER_TURN,
-    );
-  });
-
   it("CAP under CONCURRENCY: a turn's files arriving together land exactly the cap — check-then-insert is serialized per conversation", async () => {
     // MUTATION-TESTED: drop the advisory lock in createOutboundAttachment
     // and this lands ~15 rows: every concurrent upload reads the same count.
@@ -311,6 +293,8 @@ describe.skipIf(!PROOF_URL)("outbound attachments (send_file door)", () => {
       MAX_OUTBOUND_ATTACHMENTS_PER_TURN,
     );
     expect(results.filter((r) => !r.ok)).toHaveLength(5);
+    // The model-facing refusal names the per-reply cap.
+    for (const r of results) if (!r.ok) expect(r.error).toMatch(/per reply/);
     expect(
       await db.conversationAttachment.count({
         where: { turnId: ids.turnId, direction: "outbound" },

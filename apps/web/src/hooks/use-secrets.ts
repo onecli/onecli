@@ -28,16 +28,19 @@ export const useCreateSecret = () => {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: secrets.create,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.secrets.all() });
-      qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
-      // Creating a workspace secret auto-attaches it (a custom secret to every
-      // agent, an LLM key to the keyless ones), so this is a grant write as
-      // well as a secret write: refresh both views.
-      qc.invalidateQueries({ queryKey: queryKeys.grants.all() });
-      qc.invalidateQueries({ queryKey: queryKeys.policy.all() });
-      qc.invalidateQueries({ queryKey: queryKeys.agents.all() });
+    onSuccess: async () => {
       invalidateGatewayCache();
+      // Awaited: the dialog closes onto a list that already shows the key.
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: queryKeys.secrets.all() }),
+        qc.invalidateQueries({ queryKey: queryKeys.counts.all() }),
+        // Creating a workspace LLM key auto-attaches it to the keyless
+        // agents, so this is a grant write as well as a secret write:
+        // refresh both views.
+        qc.invalidateQueries({ queryKey: queryKeys.grants.all() }),
+        qc.invalidateQueries({ queryKey: queryKeys.policy.all() }),
+        qc.invalidateQueries({ queryKey: queryKeys.agents.all() }),
+      ]);
     },
     onError: (err) =>
       toast.error(
@@ -70,9 +73,10 @@ export const useUpdateSecret = () => {
       secretId: string;
       input: Parameters<typeof updateSecret>[1];
     }) => updateSecret(secretId, input),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.secrets.all() });
+    onSuccess: async () => {
       invalidateGatewayCache();
+      // Awaited: the dialog closes onto the saved values.
+      await qc.invalidateQueries({ queryKey: queryKeys.secrets.all() });
       toast.success("Secret updated");
     },
     onError: () => toast.error("Failed to update secret"),

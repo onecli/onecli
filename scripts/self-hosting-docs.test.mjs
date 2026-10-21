@@ -164,13 +164,10 @@ test("nginx: the dashboard carve-out is by path only, every method to the dashbo
 
 test("the dashboard forwards non-page-load methods on its page paths to the api", () => {
   // The examples above are only correct because proxy.ts rewrites a POST on
-  // a dashboard page path to the api. Pin the two sides together: should the
-  // forward go, this test fails before a self-host copies a broken example.
-  const PROXY = read("apps/web/src/proxy.ts");
-  assert.match(PROXY, /const apiFormSubmitOnPagePath = /);
-  assert.match(PROXY, /NextResponse\.rewrite\(apiTarget\)/);
-  assert.match(PROXY, /getApiInternalUrl\(\)/);
-  // And compose hands the dashboard the in-network api address it needs.
+  // a dashboard page path to the api. The forward itself is driven with real
+  // requests by apps/web/src/proxy.form-forward.onprem.test.ts; what only
+  // this file pins is that compose hands the dashboard the in-network api
+  // address the forward needs.
   const COMPOSE = read("docker/docker-compose.yml");
   assert.match(COMPOSE, /API_INTERNAL_URL: http:\/\/api:10256/);
 });

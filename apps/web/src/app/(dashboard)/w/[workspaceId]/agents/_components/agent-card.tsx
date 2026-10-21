@@ -1,20 +1,17 @@
 "use client";
 
-import { useState } from "react";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
-import { KeyRound, MessageSquare, Settings2 } from "lucide-react";
+import { MessageSquare, Settings2 } from "lucide-react";
 import { Card } from "@onecli/ui/components/card";
 import { Button } from "@onecli/ui/components/button";
 import type { AgentGrantsSummary } from "@/lib/api";
+import type { AgentKind } from "@/lib/api/types";
 import { agentChatPath, agentSectionPath } from "@/lib/navigation";
 import { defaultAgentSection } from "@/lib/agents/agent-sections";
 import { AgentStatusPill } from "@/lib/agents/_components/agent-status-pill";
 import { AgentLastSeen } from "@/lib/agents/_components/agent-last-seen";
 import { useHostedAvailability } from "@/hooks/use-hosted-availability";
-// The read-only credential-access reflection, which reads the v2 policy
-// engine. Shared since step 10 — every edition renders it.
-import { CredentialAccessReflection } from "@/lib/components/policy-reflect";
 import { AgentActionsMenu } from "./agent-actions-menu";
 import { CredentialAvatars } from "./credential-avatars";
 
@@ -22,13 +19,11 @@ interface AgentCardProps {
   agent: {
     id: string;
     name: string;
-    identifier: string;
-    /** Prisma types the column as `string`; the card only asks "hosted?". */
-    kind: string;
-    createdAt: Date;
+    kind: AgentKind;
+    createdAt: string;
     /** Attached channel presences — the delete confirmation names them. */
     channels?: { provider: string }[];
-    lastSeenAt: Date | null;
+    lastSeenAt: string | null;
     /** Live background work is holding this agent's computer up (step 13). */
     workingInBackground?: boolean;
   };
@@ -48,7 +43,6 @@ export const AgentCard = ({ agent, summary }: AgentCardProps) => {
     agent.id,
     defaultAgentSection(agent.kind),
   );
-  const [secretsDialogOpen, setSecretsDialogOpen] = useState(false);
   // Read, not polled: the chat surface owns the poll; here the shared cache
   // is fresh enough for a card pill. BYO cards render no pill at all.
   const availability = useHostedAvailability();
@@ -79,9 +73,6 @@ export const AgentCard = ({ agent, summary }: AgentCardProps) => {
           </div>
 
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
-            <code className="bg-muted text-muted-foreground relative rounded px-1.5 py-0.5 font-mono">
-              {agent.identifier}
-            </code>
             <AgentLastSeen
               lastSeenAt={agent.lastSeenAt}
               createdAt={agent.createdAt}
@@ -89,14 +80,6 @@ export const AgentCard = ({ agent, summary }: AgentCardProps) => {
             <span className="text-muted-foreground">
               Created {new Date(agent.createdAt).toLocaleDateString()}
             </span>
-            <button
-              type="button"
-              onClick={() => setSecretsDialogOpen(true)}
-              className="text-muted-foreground hover:text-foreground relative inline-flex items-center gap-1.5 transition-colors"
-            >
-              <KeyRound className="size-3" />
-              Credential access
-            </button>
           </div>
         </div>
 
@@ -129,18 +112,9 @@ export const AgentCard = ({ agent, summary }: AgentCardProps) => {
               </Link>
             </Button>
           )}
-          <AgentActionsMenu
-            agent={agent}
-            onCredentialAccess={() => setSecretsDialogOpen(true)}
-          />
+          <AgentActionsMenu agent={agent} />
         </div>
       </div>
-
-      <CredentialAccessReflection
-        agent={{ id: agent.id, name: agent.name }}
-        open={secretsDialogOpen}
-        onOpenChange={setSecretsDialogOpen}
-      />
     </Card>
   );
 };

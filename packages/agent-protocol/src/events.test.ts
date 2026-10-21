@@ -6,6 +6,7 @@ import {
   type AgentEvent,
   PEER_TASK_OUTCOMES,
   readPeerTaskStamp,
+  readSupersededApprovalsStamp,
 } from "./events";
 import { supervisorMessageSchema, workItemSchema } from "./transport";
 
@@ -22,6 +23,14 @@ describe("agentEventSchema", () => {
       name: "read",
       output: "boom",
       isError: true,
+    },
+    // A command that ran and exited non-zero: a status, not a tool error.
+    {
+      type: "tool.finished",
+      callId: "c3",
+      name: "bash",
+      output: "",
+      exitCode: 1,
     },
     { type: "approval.pending", description: "wants to call github.com" },
     { type: "turn.done" },
@@ -142,6 +151,37 @@ describe("readPeerTaskStamp", () => {
       text: "Reported back",
     });
     expect(readPeerTaskStamp(parsed as Record<string, unknown>)).toBeNull();
+  });
+});
+
+describe("readSupersededApprovalsStamp", () => {
+  it("reads a list of ids and refuses anything else", () => {
+    expect(
+      readSupersededApprovalsStamp({ supersededApprovalIds: ["a1", "a2"] }),
+    ).toEqual(["a1", "a2"]);
+    expect(readSupersededApprovalsStamp({})).toEqual([]);
+    expect(readSupersededApprovalsStamp({ supersededApprovalIds: [] })).toEqual(
+      [],
+    );
+    expect(
+      readSupersededApprovalsStamp({ supersededApprovalIds: "a1" }),
+    ).toEqual([]);
+    expect(
+      readSupersededApprovalsStamp({ supersededApprovalIds: ["a1", 7] }),
+    ).toEqual([]);
+  });
+
+  it("STRIPS a sandbox-authored supersede stamp at the wire", () => {
+    // A sandbox must not be able to relabel a card "Replaced by your message".
+    const parsed = agentEventSchema.parse({
+      type: "notice",
+      level: "info",
+      text: "Replaced by your message",
+      supersededApprovalIds: ["a1"],
+    });
+    expect(
+      readSupersededApprovalsStamp(parsed as Record<string, unknown>),
+    ).toEqual([]);
   });
 });
 

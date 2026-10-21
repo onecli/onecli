@@ -1,13 +1,21 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { isActiveEvalRun } from "@onecli/api/validations/evals";
 import type {
   EvalQuestionInput,
   EvalScheduleInput,
 } from "@onecli/api/validations/evals";
-import { evals, type EvalRunDetail } from "@/lib/api";
+import {
+  evals,
+  type EvalQuestion,
+  type EvalRunDetail,
+  type EvalsView,
+} from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
+import { listItem, patchItem, throughField } from "@/lib/api/optimistic";
+import { useOptimisticMutation } from "@/hooks/use-optimistic-mutation";
 
 /** How often an active run is polled while it works. */
 const ACTIVE_RUN_POLL_MS = 2_000;
@@ -72,14 +80,29 @@ export const useSaveEvalQuestion = (agentId: string) => {
   });
 };
 
-export const useArchiveEvalQuestion = (agentId: string) => {
-  const invalidate = useInvalidateEvals(agentId);
-  return useMutation({
-    mutationFn: (questionId: string) =>
-      evals.archiveQuestion(agentId, questionId),
-    onSuccess: invalidate,
+/** Archive a test question, instantly: it leaves the list (and the confirm
+ * closes) on click; the confirmation follows the server, and a failure
+ * puts it back. */
+export const useArchiveEvalQuestion = (agentId: string) =>
+  useOptimisticMutation<void, string>({
+    family: `evals:${agentId}`,
+    itemKey: (questionId) => `eval-question:${agentId}:${questionId}`,
+    write: (questionId) => evals.archiveQuestion(agentId, questionId),
+    apply: (qc, questionId) =>
+      patchItem(
+        qc,
+        queryKeys.evals.agent(agentId),
+        throughField<EvalsView, "questions", EvalQuestion>(
+          "questions",
+          listItem((q) => q.id === questionId),
+        ),
+        () => undefined,
+      ),
+    succeeded: () => toast.success("Test question archived"),
+    refresh: (qc) =>
+      qc.invalidateQueries({ queryKey: queryKeys.evals.agent(agentId) }),
+    failure: () => "Couldn't archive the test question",
   });
-};
 
 export const useStartEvalRun = (agentId: string) => {
   const invalidate = useInvalidateEvals(agentId);

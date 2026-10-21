@@ -33,9 +33,9 @@ const log = logger.child({ component: "attachment-service" });
  * turn-create TRANSACTION binds the rows to their turn. The bind being
  * transactional with the turn row is load-bearing, not hygiene: `createTurn`
  * signals the runner poll before it returns, and both the dispatch composer
- * and the steer arm's attachment carve-out read this table — a turn (or
+ * and the steer arm's attachment gate read this table: a turn (or
  * follow-up) observable without its attachment rows would ship bare or steer
- * text-only, silently.
+ * words-only, silently.
  */
 
 /** The metadata shape everything renders from. NEVER includes `data`. */

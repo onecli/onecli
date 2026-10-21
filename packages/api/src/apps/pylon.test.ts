@@ -34,19 +34,10 @@ describe("pylon connect form", () => {
   const [tokenField, regionField] = fields;
 
   // The token is fields[0]: the connect handler stores that as the access
-  // token. The help link lands where tokens are CREATED (Settings → API
-  // Tokens, the page Pylon's docs point at), not the API reference, which is
-  // apiDocsUrl's job. Only Admins can create one, so the hint says so.
-  it("puts the token first and sends users to Settings → API Tokens", () => {
+  // token, and a non-secret token would be echoed in the UI.
+  it("puts the token first, as a secret", () => {
     expect(tokenField?.name).toBe("apiKey");
     expect(tokenField?.secret).toBe(true);
-    expect(tokenField?.helpUrl).toBe(
-      "https://app.usepylon.com/settings/api-tokens",
-    );
-    expect(tokenField?.helpUrl).not.toBe(pylon.apiDocsUrl);
-    expect(tokenField?.description).toMatch(/Admin/);
-    // Rendered on one line with the help label, so it must end a sentence.
-    expect(tokenField?.description).toMatch(/\.$/);
   });
 
   // The region is the credential field the gateway's host rewrite reads, so

@@ -10,10 +10,12 @@ import type {
 import { slackApprovalCardUi } from "./approval-card";
 import { isDeadCredentialError } from "@onecli/channels";
 import {
+  followUpActionClickOf,
   groupClickOf,
   postEphemeral,
   postMessage,
   SlackApiError,
+  turnStopClickOf,
   unpackThreadAddress,
 } from "@onecli/channels/slack";
 import { botTokenOf } from "./credentials";
@@ -224,7 +226,29 @@ const openTransport = (
           return;
         }
         const action = actionDecisionOf(payload);
-        if (action) handlers.onActionDecision(action);
+        if (action) {
+          handlers.onActionDecision(action);
+          return;
+        }
+        const cardStop = turnStopClickOf(payload);
+        if (cardStop) {
+          handlers.onCardStop({
+            channel: cardStop.channel,
+            cardTs: cardStop.messageTs,
+            clickerExternalUserId: cardStop.clickerExternalUserId,
+          });
+          return;
+        }
+        const rowAction = followUpActionClickOf(payload);
+        if (rowAction) {
+          handlers.onCardFollowUpAction({
+            channel: rowAction.channel,
+            cardTs: rowAction.messageTs,
+            clickerExternalUserId: rowAction.clickerExternalUserId,
+            action: rowAction.action,
+            followUpId: rowAction.followUpId,
+          });
+        }
       },
       onPermanentFailure: handlers.onPermanentFailure,
       onLog: (message, detail) =>
@@ -260,6 +284,21 @@ const respondToOutcome = async ({
     return;
   }
   if (outcome.kind === "ignored" || outcome.kind === "duplicate") return;
+  if (outcome.kind === "stop") {
+    // A refused Stop: a note only the clicker sees, in the thread they
+    // clicked in. Everything else about a Stop is already done (the abort,
+    // the loader settle) and the close posts "Stopped." on its own.
+    const notice = outcome.notice;
+    if (notice) {
+      await postEphemeral(credential, {
+        channel: notice.channel,
+        threadTs: notice.threadTs,
+        user: notice.user,
+        text: escapeSlackText(notice.message),
+      }).catch((err: unknown) => onLog("stop notice post failed", { err }));
+    }
+    return;
+  }
 
   const reply = outcome.reply;
   if (!reply) return;

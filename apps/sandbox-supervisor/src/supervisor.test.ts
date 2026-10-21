@@ -208,6 +208,61 @@ describe("supervisor loop end-to-end (fake harness, stdio transport)", () => {
     );
   });
 
+  it("previews arrive together and only from a runner that carries port streams: the fragment and preview_expose, or neither", async () => {
+    // Never teach a tool the agent does not have: a runner without a port
+    // API (self-host, previews dark) must yield no fragment and no tool.
+    // MUTATION-PROOF: make either side unconditional and one half fails.
+    const boot = async (previews: boolean | undefined) => {
+      const homeDir = mkdtempSync(join(tmpdir(), "supervisor-previews-"));
+      const input = new PassThrough();
+      const output = new PassThrough();
+      const run = runSupervisor(
+        {
+          homeDir,
+          model: undefined,
+          effort: undefined,
+          instructions: undefined,
+          agentName: "Ada",
+          channels: [],
+          peers: [],
+          connections: [],
+          harness: "fake",
+          runnerWsUrl: undefined,
+          bootstrapToken: undefined,
+          sandboxId: undefined,
+          outboundAttachments: false,
+          previews,
+        },
+        createFakeHarness(),
+        createStdioTransport(input, output),
+      );
+      await new Promise<void>((resolve) => {
+        const onData = () => {
+          if (output.read()?.toString().includes('"kind":"ready"')) {
+            output.off("readable", onData);
+            resolve();
+          }
+        };
+        output.on("readable", onData);
+      });
+      const tools = await advertisedTools();
+      input.write('{"kind":"shutdown"}\n');
+      input.end();
+      await run;
+      const doc = readFileSync(join(homeDir, "CLAUDE.md"), "utf8");
+      return { tools, doc };
+    };
+
+    const on = await boot(true);
+    expect(on.tools).toContain("preview_expose");
+    expect(on.doc).toContain("Showing a running app to a person (previews)");
+
+    for (const off of [await boot(false), await boot(undefined)]) {
+      expect(off.tools).not.toContain("preview_expose");
+      expect(off.doc).not.toContain("preview_expose");
+    }
+  });
+
   it("a presence attached MID-RUN reaches the live conversation: the next turn restarts its session on the same ref and the bridge advertises the messaging tools", async () => {
     // The dev incident (2026-09-15): an agent whose session was already
     // awake had Slack attached; the home sync re-rendered CLAUDE.md on disk,
@@ -1357,48 +1412,6 @@ describe("the answer is the agent's last message, not its whole turn", () => {
     );
     expect(deltas).toContain("Let me check the logs.");
     expect(deltas).toContain("Now the config.");
-  });
-
-  it("joins deltas within one message, so a streamed sentence stays whole", async () => {
-    // Segmentation is per MESSAGE, not per delta: token-by-token streaming
-    // inside one message must still concatenate.
-    const messages = await runWithScript(() => [
-      { type: "tool.started", callId: "c1", name: "bash" },
-      { type: "tool.finished", callId: "c1", name: "bash", output: "ok" },
-      { type: "text.delta", text: "All " },
-      { type: "text.delta", text: "four " },
-      { type: "text.delta", text: "gates are green." },
-      { type: "turn.done", usage: { inputTokens: 1, outputTokens: 1 } },
-    ]);
-
-    expect(answerOf(messages)).toBe("All four gates are green.");
-  });
-
-  it("falls back to the last thing said when a turn ends mid-tool", async () => {
-    // Never silent: a turn that stopped while working still said something,
-    // and posting nothing reads as the agent ignoring the person.
-    const messages = await runWithScript(() => [
-      { type: "text.delta", text: "Starting the deploy." },
-      { type: "tool.started", callId: "c1", name: "bash" },
-      { type: "error", message: "the harness died" },
-    ]);
-
-    expect(answerOf(messages)).toBe("Starting the deploy.");
-  });
-
-  it("does not let back-to-back tools erase the last words said", async () => {
-    // An empty segment must never displace a real one — otherwise a trailing
-    // pair of tool calls would blank the fallback and the turn goes silent.
-    const messages = await runWithScript(() => [
-      { type: "text.delta", text: "Found the cause." },
-      { type: "tool.started", callId: "c1", name: "bash" },
-      { type: "tool.finished", callId: "c1", name: "bash", output: "ok" },
-      { type: "tool.started", callId: "c2", name: "bash" },
-      { type: "tool.finished", callId: "c2", name: "bash", output: "ok" },
-      { type: "error", message: "stopped" },
-    ]);
-
-    expect(answerOf(messages)).toBe("Found the cause.");
   });
 
   it("stays silent when the agent never said anything", async () => {

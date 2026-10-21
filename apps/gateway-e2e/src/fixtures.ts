@@ -62,6 +62,9 @@ export interface SecretSpec extends InjectionSpec {
    * only shape `find_secrets_by_org` returns. Defaults to `workspace`.
    */
   readonly scope?: "workspace" | "organization";
+  /** Display name. Defaults to the row id. Shown to the agent when two
+   * custom secrets collide on one injection slot. */
+  readonly name?: string;
 }
 
 /**
@@ -185,6 +188,11 @@ export interface AppConnectionSpec {
    * agent that called one of the provider's generic hosts.
    */
   readonly metadata?: Prisma.InputJsonObject;
+  /**
+   * The provider refused the stored refresh token: the account is waiting on
+   * a reconnect (`reauth_required_at` set), as the gateway marks it.
+   */
+  readonly reauthRequired?: boolean;
 }
 
 export interface WorldSpec {
@@ -474,7 +482,7 @@ export const addSecret = async (
   await prisma.secret.create({
     data: {
       id,
-      name: id,
+      name: secret.name ?? id,
       type: secret.type ?? "generic",
       scope,
       // An org-scoped row must have a NULL workspace: `find_secrets_by_workspace`
@@ -563,6 +571,9 @@ export const seedWorld = async (
         label: connection.label ?? `${connection.provider}-${String(i)}`,
         status: "connected",
         ...(connection.metadata ? { metadata: connection.metadata } : {}),
+        ...(connection.reauthRequired === true
+          ? { reauthRequiredAt: new Date() }
+          : {}),
         credentials: await cryptoService.encrypt(
           JSON.stringify(
             connection.credentials ?? {

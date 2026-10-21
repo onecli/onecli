@@ -98,7 +98,10 @@ export const agentCronRoutes = () => {
         body.error.issues[0]?.message ?? "Invalid body",
       );
     }
-    const cron = await updateCron(workspaceId, agentId, cronId, body.data);
+    const cron = await updateCron(workspaceId, agentId, cronId, body.data, {
+      userId: a.userId,
+      organizationId: a.organizationId,
+    });
     await recordAuditEvent({
       workspaceId,
       userId: a.userId,
@@ -119,7 +122,10 @@ export const agentCronRoutes = () => {
     const workspaceId = requireWorkspaceId(a);
     const agentId = c.req.param("agentId");
     const cronId = c.req.param("cronId");
-    const cron = await runCronNow(workspaceId, agentId, cronId);
+    const cron = await runCronNow(workspaceId, agentId, cronId, {
+      userId: a.userId,
+      organizationId: a.organizationId,
+    });
     await recordAuditEvent({
       workspaceId,
       userId: a.userId,

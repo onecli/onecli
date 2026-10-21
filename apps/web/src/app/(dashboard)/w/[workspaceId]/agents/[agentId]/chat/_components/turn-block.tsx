@@ -69,6 +69,8 @@ export const TurnBlock = ({
   followUps,
   followUpRendered,
   modelsHref,
+  onOpenComputer,
+  computerHref,
   onConnectModelKey,
 }: {
   turn: Turn;
@@ -87,6 +89,12 @@ export const TurnBlock = ({
   followUpRendered?: (followUpId: string) => RenderedTurn | undefined;
   /** Where "Connect a model key" goes; omitted outside the agent page. */
   modelsHref?: string;
+  /** Open the agent's screen IN PLACE for its "Needs you" desktop ask, over
+   *  the conversation with Take control in view. Preferred over the deep
+   *  link when present. */
+  onOpenComputer?: (requestId: string) => void;
+  /** Deep link fallback. Without either action the notice is plain text. */
+  computerHref?: (requestId: string) => string;
   /** Open the add-key dialog IN PLACE (preferred over the Models link when
    *  provided): the fix happens over the chat instead of leaving it. */
   onConnectModelKey?: () => void;
@@ -96,17 +104,14 @@ export const TurnBlock = ({
   const joining = followUps?.filter(isJoiningTurn) ?? [];
   // SEND NOW has a run to act on only once the turn is
   // RUNNING, and helps only while it is inside a tool (a step with no
-  // result yet). A message with files never joins a live run, and holds
-  // every later one back with it (the API refuses those too).
+  // result yet). A message with files joins the live run like any other
+  // (the rare runner that cannot carry files there is refused by the API,
+  // and the click says so).
   const toolRunning =
     rendered?.tools.some((tool) => tool.output === undefined) === true &&
     !rendered.ended;
-  const firstWithFiles = joining.findIndex(
-    (followUp) => followUp.attachments.length > 0,
-  );
-  const sendNowFor = (followUp: Turn, index: number) =>
-    turn.status === "running" &&
-    (firstWithFiles === -1 || index < firstWithFiles)
+  const sendNowFor = (followUp: Turn) =>
+    turn.status === "running"
       ? { toolRunning, outcome: followUpRendered?.(followUp.id)?.sentNow }
       : undefined;
   // One turn, two speakers' files: what the person attached rides under
@@ -281,9 +286,29 @@ export const TurnBlock = ({
                 />
               </div>
             )}
-            {rendered?.notices.map((notice, index) => (
-              <TurnNotice key={`${index}-${notice}`} message={notice} />
-            ))}
+            {rendered?.notices.map((notice, index) => {
+              // The agent's open ask for a person on its screen: the one
+              // notice with somewhere to go. Settled asks are plain lines.
+              const ask = rendered.desktopRequests.get(index);
+              const open =
+                ask?.outcome === "pending"
+                  ? onOpenComputer
+                    ? {
+                        onClick: () => onOpenComputer(ask.id),
+                        label: "Open computer",
+                      }
+                    : computerHref
+                      ? { href: computerHref(ask.id), label: "Open computer" }
+                      : undefined
+                  : undefined;
+              return (
+                <TurnNotice
+                  key={`${index}-${notice}`}
+                  message={notice}
+                  action={open}
+                />
+              );
+            })}
             {errorText &&
               (keyFixLabel ? (
                 <TurnNotice
@@ -325,11 +350,11 @@ export const TurnBlock = ({
           it until the run picks it up and it moves into the exchange, but
           its status line may offer SEND NOW (and then say what happened,
           the answer folded under its own id). */}
-      {joining.map((followUp, index) => (
+      {joining.map((followUp) => (
         <FollowUpExchange
           key={followUp.id}
           followUp={followUp}
-          sendNow={sendNowFor(followUp, index)}
+          sendNow={sendNowFor(followUp)}
         />
       ))}
     </>

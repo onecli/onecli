@@ -12,6 +12,7 @@ const toToolCall = (tool: RunDetail["tools"][number]): ToolCall => ({
   ...(tool.input !== null && { input: tool.input }),
   ...(tool.output !== null && { output: tool.output }),
   ...(tool.isError && { isError: true }),
+  ...(tool.exitCode !== null && { exitCode: tool.exitCode }),
 });
 
 /**

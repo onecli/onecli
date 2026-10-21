@@ -6,7 +6,7 @@ use hyper::header::HeaderValue;
 use hyper::{Response, StatusCode};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
-use crate::connect::RestrictedCredential;
+use crate::connect::{InactiveApp, SecretKind};
 
 /// 407 Proxy Authentication Required — agent token is missing or invalid.
 pub fn proxy_auth_required() -> Response<axum::body::Body> {
@@ -68,6 +68,8 @@ pub const ERROR_CONNECTION_HOST_MISMATCH: &str = "connection_host_mismatch";
 pub use context::{
     dashboard_url, resolved_dashboard, scoped_url, DashboardUrlSource, DASHBOARD_URL_FALLBACK,
 };
+
+use context::ConnectingAgent;
 
 /// Build a JSON response with the given status code and body.
 /// Used directly for gateway-authored success responses (token-endpoint and
@@ -142,6 +144,27 @@ pub fn multiple_connections_axum(
     ))
 }
 
+/// The dashboard link that connects a new account of `provider`: the
+/// connections page with the app's connect flow open. With the agent that
+/// asked, the link names it twice: `agent_name` so the dashboard can say why,
+/// `agent_id` so the account connected through it is switched on for that
+/// agent (the API fences the id to the workspace before using it).
+fn connect_url(
+    provider: &str,
+    agent: Option<ConnectingAgent<'_>>,
+    workspace_id: Option<&str>,
+) -> String {
+    let base = scoped_url(dashboard_url(), "", workspace_id);
+    match agent {
+        Some(agent) => format!(
+            "{base}/connections?connect={provider}&source=agent&agent_name={}&agent_id={}",
+            utf8_percent_encode(agent.name, NON_ALPHANUMERIC),
+            utf8_percent_encode(agent.id, NON_ALPHANUMERIC)
+        ),
+        None => format!("{base}/connections?connect={provider}"),
+    }
+}
+
 /// JSON error response for requests to a known app that has no credentials configured.
 ///
 /// Returned when `injection_count == 0` and the upstream returns 401/403 for a host
@@ -150,17 +173,10 @@ pub fn app_not_connected<S>(
     status: StatusCode,
     provider: &str,
     display_name: &str,
-    agent_name: Option<&str>,
+    agent: Option<ConnectingAgent<'_>>,
     workspace_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let base = scoped_url(dashboard_url(), "", workspace_id);
-    let connect_url = match agent_name {
-        Some(name) => format!(
-            "{base}/connections?connect={provider}&source=agent&agent_name={}",
-            utf8_percent_encode(name, NON_ALPHANUMERIC)
-        ),
-        None => format!("{base}/connections?connect={provider}"),
-    };
+    let connect_url = connect_url(provider, agent, workspace_id);
     with_no_retry(json_error(
         status,
         serde_json::json!({
@@ -208,44 +224,34 @@ pub fn app_not_connected_unknown_provider<S>(
     ))
 }
 
-/// JSON error response when credentials exist for a host but the agent lacks access (selective mode).
+/// JSON error response when a secret exists for a host but this agent was not
+/// granted it.
 ///
-/// `credential` is the kind the workspace holds for the host, and it alone
-/// decides the link, because each kind is attached to an agent on a different
-/// page. The host never does: a custom secret on a host a registered app also
-/// serves (`app.posthog.com`) has no account on that app's page to attach.
-/// Without an agent id, each kind falls back to its workspace list.
-pub fn access_restricted<S>(
+/// `kind` alone decides the link, because each kind is attached to an agent on
+/// a different page. The host never does: a custom secret on a host a
+/// registered app also serves (`app.posthog.com`) has no account on that app's
+/// page to attach. Without an agent id, each kind falls back to its workspace
+/// list.
+pub fn secret_access_restricted<S>(
     status: StatusCode,
-    credential: RestrictedCredential,
+    kind: SecretKind,
     hostname: &str,
     path: &str,
     workspace_id: Option<&str>,
     agent_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let app = apps::guidance_provider_for(hostname, path);
-    let (provider, display_name) = app.unwrap_or((hostname, hostname));
+    let (provider, display_name) =
+        apps::guidance_provider_for(hostname, path).unwrap_or((hostname, hostname));
     let agent_page = |section: &str, workspace_list: &str| match agent_id {
         Some(agent) => format!("/agents/{agent}{section}"),
         None => workspace_list.to_string(),
     };
-    let (page, noun) = match (credential, app) {
-        // The app's page: its account cards carry the "Agent access" dialog
-        // (the attach surface since attach-model step 6), and it is the one
-        // shape the chat renders as a connect card.
-        (RestrictedCredential::AppConnection, Some((app_id, _))) => {
-            (format!("/connections/apps/{app_id}"), "account")
-        }
-        // A connected app whose path names no app (an unregistered API on a
-        // shared host): the agent's Apps tab.
-        (RestrictedCredential::AppConnection, None) => {
-            (agent_page("/connections", "/connections"), "account")
-        }
-        (RestrictedCredential::CustomSecret, _) => (
+    let (page, noun) = match kind {
+        SecretKind::Custom => (
             agent_page("/connections?tab=custom", "/connections/custom"),
             "secret",
         ),
-        (RestrictedCredential::LlmKey, _) => (agent_page("/models", "/connections/llms"), "key"),
+        SecretKind::LlmKey => (agent_page("/models", "/connections/llms"), "key"),
     };
     let manage_url = scoped_url(dashboard_url(), &page, workspace_id);
     with_no_retry(json_error(
@@ -255,6 +261,56 @@ pub fn access_restricted<S>(
             "message": format!("{display_name} credentials exist in OneCLI but this agent does not have access. Ask the user to attach the {noun} to this agent: {manage_url}"),
             "provider": provider,
             "manage_url": manage_url,
+        }),
+    ))
+}
+
+/// JSON error response when the workspace or organization already has a
+/// connected account of the app the request is for, and the agent is just not
+/// switched on for it.
+///
+/// `manage_url` opens the agent's Connections page with this app's switches
+/// already showing (`?attach=<provider>`), so turning it on is one click; the
+/// account is never named, the user picks it there. `connect_url` is the same
+/// link `app_not_connected` gives, for a user who wants a different account.
+/// Without an agent id, `manage_url` falls back to the app's page, whose
+/// account cards carry each agent's switch; the connect link names the agent
+/// only when it has both its id and its name (`ConnectingAgent`).
+pub fn app_access_restricted<S>(
+    status: StatusCode,
+    app: &InactiveApp,
+    agent_id: Option<&str>,
+    agent: Option<ConnectingAgent<'_>>,
+    workspace_id: Option<&str>,
+) -> Response<ForwardBody<S>> {
+    // A registry id (`google-calendar`), path- and query-safe as is and
+    // written raw like every other app link: the dashboard routes and the
+    // chat card's link parser expect it verbatim.
+    let provider = app.provider.as_str();
+    let display_name = apps::display_name_for_provider(provider).unwrap_or(provider);
+    let page = match agent_id {
+        Some(id) => format!("/agents/{id}/connections?attach={provider}"),
+        None => format!("/connections/apps/{provider}"),
+    };
+    let manage_url = scoped_url(dashboard_url(), &page, workspace_id);
+    let connect_url = connect_url(provider, agent, workspace_id);
+    let shared = if app.shared_by_organization {
+        " (shared by your organization)"
+    } else {
+        ""
+    };
+    with_no_retry(json_error(
+        status,
+        serde_json::json!({
+            "error": ERROR_ACCESS_RESTRICTED,
+            "message": format!(
+                "{display_name} is already connected in OneCLI{shared}, but it is turned off for this agent. \
+                 Ask the user to turn it on for this agent: {manage_url}\n\
+                 To use a different {display_name} account instead, they can connect one: {connect_url}"
+            ),
+            "provider": provider,
+            "manage_url": manage_url,
+            "connect_url": connect_url,
         }),
     ))
 }
@@ -659,6 +715,9 @@ pub fn upstream_timeout<S>() -> Response<ForwardBody<S>> {
 pub enum ApprovalRejection {
     Declined,
     Expired,
+    /// The person's newer message changed what they want: the agent reads it
+    /// and sends a revised request.
+    Superseded,
 }
 
 /// 403 Forbidden with automatic retries disabled; a new user request needs fresh approval.
@@ -670,6 +729,23 @@ pub fn manual_approval_denied<S>(
         ApprovalRejection::Declined => ("declined", "The reviewer declined this approval request."),
         ApprovalRejection::Expired => {
             ("expired", "This approval request expired without approval.")
+        }
+        // The person changed what they want: the agent must read that and
+        // revise, so the generic "ask before retrying" advice does not apply.
+        ApprovalRejection::Superseded => {
+            return with_no_retry(json_error(
+                StatusCode::FORBIDDEN,
+                serde_json::json!({
+                    "error": "manual_approval_denied",
+                    "reason": "superseded",
+                    "message": "The user sent a new message that changes this request, so it was \
+                         withdrawn before anyone approved it. The request was not forwarded to \
+                         the service. Read the user's latest message, then send a revised request \
+                         that reflects it; the revised request requires fresh approval before it \
+                         can execute. Do not resend this exact request unchanged.",
+                    "approval_id": approval_id,
+                }),
+            ));
         }
     };
     with_no_retry(json_error(
@@ -994,12 +1070,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn app_not_connected_includes_agent_name_in_url() {
+    async fn app_not_connected_includes_agent_name_and_id_in_url() {
         let resp: Response<TestBody> = app_not_connected(
             StatusCode::UNAUTHORIZED,
             "gmail",
             "Gmail",
-            Some("ChartDB Assistant"),
+            Some(ConnectingAgent {
+                id: "agent-7f3a",
+                name: "ChartDB Assistant",
+            }),
             None,
         );
         use http_body_util::BodyExt;
@@ -1010,8 +1089,8 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
         let url = json["connect_url"].as_str().unwrap();
         assert!(
-            url.contains("&source=agent&agent_name=ChartDB%20Assistant"),
-            "connect_url should include encoded agent_name, got: {url}"
+            url.contains("&source=agent&agent_name=ChartDB%20Assistant&agent_id=agent%2D7f3a"),
+            "connect_url should include the encoded agent name and id, got: {url}"
         );
     }
 
@@ -1021,7 +1100,10 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "gmail",
             "Gmail",
-            Some("Agent & Co=1"),
+            Some(ConnectingAgent {
+                id: "agent-1",
+                name: "Agent & Co=1",
+            }),
             None,
         );
         use http_body_util::BodyExt;
@@ -1095,12 +1177,12 @@ mod tests {
     }
 
     #[test]
-    fn access_restricted_preserves_status() {
-        let resp: Response<TestBody> = access_restricted(
+    fn secret_access_restricted_preserves_status() {
+        let resp: Response<TestBody> = secret_access_restricted(
             StatusCode::FORBIDDEN,
-            RestrictedCredential::AppConnection,
-            "api.resend.com",
-            "/emails",
+            SecretKind::Custom,
+            "api.example.com",
+            "/v1",
             None,
             None,
         );
@@ -1112,49 +1194,19 @@ mod tests {
         assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
     }
 
-    #[tokio::test]
-    async fn access_restricted_body_points_at_the_attach_surface() {
-        let resp: Response<TestBody> = access_restricted(
-            StatusCode::UNAUTHORIZED,
-            RestrictedCredential::AppConnection,
-            "api.resend.com",
-            "/emails",
-            None,
-            Some("agent-1"),
-        );
-        let json = body_json(resp).await;
-        assert_eq!(json["error"], "access_restricted");
-        assert_eq!(json["provider"], "resend");
-        assert!(json["message"]
-            .as_str()
-            .unwrap()
-            .contains("does not have access. Ask the user to attach the account"));
-        // Since attach-model step 6 the workspace policy console does not exist,
-        // so the remediation link must reach a surface that can actually grant
-        // the credential: the app's connections page, whose account cards carry
-        // the "Agent access" dialog. A link ending in "/policy" would 404.
-        let manage_url = json["manage_url"].as_str().unwrap();
-        assert!(manage_url.ends_with("/connections/apps/resend"));
-        assert!(!manage_url.contains("/policy"));
-    }
-
-    /// The `access_restricted` body for `credential` on `url` (host + path) in
-    /// workspace `ws1`, as (`manage_url` minus the dashboard origin, message).
-    async fn restricted_link(
-        credential: RestrictedCredential,
+    /// The `access_restricted` body for a secret of `kind` on `url` (host +
+    /// path) in workspace `ws1`, as (`manage_url` minus the dashboard origin,
+    /// message).
+    async fn secret_restricted_link(
+        kind: SecretKind,
         url: &str,
         agent: Option<&str>,
     ) -> (String, String) {
         let (host, path) = url.split_at(url.find('/').unwrap_or(url.len()));
-        let resp: Response<TestBody> = access_restricted(
-            StatusCode::FORBIDDEN,
-            credential,
-            host,
-            path,
-            Some("ws1"),
-            agent,
-        );
+        let resp: Response<TestBody> =
+            secret_access_restricted(StatusCode::FORBIDDEN, kind, host, path, Some("ws1"), agent);
         let json = body_json(resp).await;
+        assert_eq!(json["error"], "access_restricted");
         let manage_url = json["manage_url"].as_str().unwrap();
         let message = json["message"].as_str().unwrap();
         assert!(message.ends_with(manage_url), "{message}");
@@ -1167,62 +1219,44 @@ mod tests {
         )
     }
 
-    /// The link follows the denied credential's KIND, never the host. The prod
+    /// The link follows the denied secret's KIND, never the host. The prod
     /// incident: a custom PostHog secret, on a host that is also a registered
     /// app. Linking by host sent the user to the PostHog app page, which has no
     /// account to attach. Custom secrets and LLM keys are attached on the
     /// agent's own pages, and each falls back to its workspace list.
     #[tokio::test]
-    async fn access_restricted_links_the_page_that_attaches_the_denied_credential() {
-        use RestrictedCredential::{AppConnection, CustomSecret, LlmKey};
+    async fn secret_access_restricted_links_the_page_that_attaches_the_secret() {
         let agent = Some("ag-1");
         let posthog = "app.posthog.com/api/projects";
 
-        let (custom, message) = restricted_link(CustomSecret, posthog, agent).await;
+        let (custom, message) = secret_restricted_link(SecretKind::Custom, posthog, agent).await;
         assert_eq!(custom, "/w/ws1/agents/ag-1/connections?tab=custom");
         assert!(
             message.contains("attach the secret to this agent"),
             "{message}"
         );
-        let (custom, _) = restricted_link(CustomSecret, posthog, None).await;
+        let (custom, _) = secret_restricted_link(SecretKind::Custom, posthog, None).await;
         assert_eq!(custom, "/w/ws1/connections/custom");
 
         let anthropic = "api.anthropic.com/v1/messages";
-        let (key, message) = restricted_link(LlmKey, anthropic, agent).await;
+        let (key, message) = secret_restricted_link(SecretKind::LlmKey, anthropic, agent).await;
         assert_eq!(key, "/w/ws1/agents/ag-1/models");
         assert!(
             message.contains("attach the key to this agent"),
             "{message}"
         );
-        let (key, _) = restricted_link(LlmKey, anthropic, None).await;
+        let (key, _) = secret_restricted_link(SecretKind::LlmKey, anthropic, None).await;
         assert_eq!(key, "/w/ws1/connections/llms");
-
-        let (app, message) = restricted_link(AppConnection, posthog, agent).await;
-        assert_eq!(app, "/w/ws1/connections/apps/posthog");
-        assert!(
-            message.contains("attach the account to this agent"),
-            "{message}"
-        );
-        // An alias host names its owning app, as app_not_connected does.
-        let alias = "login.salesforce.com/services/oauth2/userinfo";
-        let (app, _) = restricted_link(AppConnection, alias, agent).await;
-        assert_eq!(app, "/w/ws1/connections/apps/salesforce");
-        // A shared host whose path names no app: the agent's Apps tab.
-        let shared = "www.googleapis.com/unregistered/v1/x";
-        let (app, _) = restricted_link(AppConnection, shared, agent).await;
-        assert_eq!(app, "/w/ws1/agents/ag-1/connections");
-        let (app, _) = restricted_link(AppConnection, shared, None).await;
-        assert_eq!(app, "/w/ws1/connections");
     }
 
-    /// `provider` keeps naming what the host is, whatever the kind: the app
-    /// id where a registered app serves the host, else the host itself.
+    /// `provider` keeps naming what the host is: the app id where a
+    /// registered app serves the host, else the host itself.
     #[tokio::test]
-    async fn access_restricted_provider_names_the_app_or_the_host() {
+    async fn secret_access_restricted_provider_names_the_app_or_the_host() {
         for (host, provider) in [("app.posthog.com", "posthog"), ("127.0.0.1", "127.0.0.1")] {
-            let resp: Response<TestBody> = access_restricted(
+            let resp: Response<TestBody> = secret_access_restricted(
                 StatusCode::FORBIDDEN,
-                RestrictedCredential::CustomSecret,
+                SecretKind::Custom,
                 host,
                 "/",
                 None,
@@ -1230,6 +1264,91 @@ mod tests {
             );
             assert_eq!(body_json(resp).await["provider"], provider, "{host}");
         }
+    }
+
+    fn resend(shared_by_organization: bool) -> InactiveApp {
+        InactiveApp {
+            provider: "resend".to_string(),
+            shared_by_organization,
+        }
+    }
+
+    /// An account of the app exists but is off for this agent: the agent is
+    /// told to have it switched on (the agent's Connections page, with the
+    /// app's switches open), with connecting another account as the
+    /// alternative. The same connect link app_not_connected gives.
+    #[tokio::test]
+    async fn app_access_restricted_offers_the_switch_then_the_connect_link() {
+        let resp: Response<TestBody> = app_access_restricted(
+            StatusCode::UNAUTHORIZED,
+            &resend(false),
+            Some("ag-1"),
+            Some(ConnectingAgent {
+                id: "ag-1",
+                name: "Mail Bot",
+            }),
+            Some("ws1"),
+        );
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
+        let json = body_json(resp).await;
+        assert_eq!(json["error"], "access_restricted");
+        assert_eq!(json["provider"], "resend");
+
+        let base = dashboard_url();
+        let manage_url = json["manage_url"].as_str().unwrap();
+        assert_eq!(
+            manage_url,
+            format!("{base}/w/ws1/agents/ag-1/connections?attach=resend")
+        );
+        let connect_url = json["connect_url"].as_str().unwrap();
+        assert_eq!(
+            connect_url,
+            format!(
+                "{base}/w/ws1/connections?connect=resend&source=agent&agent_name=Mail%20Bot&agent_id=ag%2D1"
+            )
+        );
+
+        let message = json["message"].as_str().unwrap();
+        assert!(
+            message.starts_with(
+                "Resend is already connected in OneCLI, but it is turned off for this agent."
+            ),
+            "{message}"
+        );
+        // The switch comes first, the connect link is the alternative.
+        let manage_at = message.find(manage_url).expect("manage_url in message");
+        let connect_at = message.find(connect_url).expect("connect_url in message");
+        assert!(manage_at < connect_at, "{message}");
+    }
+
+    /// Organization-shared accounts are named as such (the account itself
+    /// never is), and without an agent id the switch falls back to the app's
+    /// page, whose account cards carry each agent's switch.
+    #[tokio::test]
+    async fn app_access_restricted_names_org_sharing_and_falls_back_without_an_agent() {
+        let resp: Response<TestBody> = app_access_restricted(
+            StatusCode::FORBIDDEN,
+            &resend(true),
+            None,
+            None,
+            Some("ws1"),
+        );
+        let json = body_json(resp).await;
+        let base = dashboard_url();
+        assert_eq!(
+            json["manage_url"],
+            format!("{base}/w/ws1/connections/apps/resend")
+        );
+        assert_eq!(
+            json["connect_url"],
+            format!("{base}/w/ws1/connections?connect=resend")
+        );
+        let message = json["message"].as_str().unwrap();
+        assert!(
+            message.contains("connected in OneCLI (shared by your organization), but"),
+            "{message}"
+        );
     }
 
     #[tokio::test]
@@ -1422,6 +1541,32 @@ mod tests {
             "application/json"
         );
         assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
+    }
+
+    #[tokio::test]
+    async fn superseded_rejection_tells_the_agent_to_revise() {
+        use http_body_util::BodyExt;
+        let resp: Response<TestBody> =
+            manual_approval_denied("approval-9", ApprovalRejection::Superseded);
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
+        let bytes = match resp.into_body() {
+            Either::Left(full) => full.collect().await.expect("collect body").to_bytes(),
+            Either::Right(_) => panic!("expected full response"),
+        };
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+        assert_eq!(body["error"], "manual_approval_denied");
+        assert_eq!(body["reason"], "superseded");
+        assert_eq!(body["approval_id"], "approval-9");
+        let message = body["message"].as_str().expect("message");
+        for guidance in [
+            "new message that changes this request",
+            "not forwarded to the service",
+            "Read the user's latest message",
+            "requires fresh approval",
+        ] {
+            assert!(message.contains(guidance), "missing guidance: {guidance}");
+        }
     }
 
     #[tokio::test]

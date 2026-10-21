@@ -46,7 +46,10 @@ export interface RunToolCall {
   name: string;
   input: string | null;
   output: string | null;
+  /** The tool itself failed. */
   isError: boolean;
+  /** A shell command ran and exited with this non-zero status. */
+  exitCode: number | null;
 }
 
 export interface RunAppCall {

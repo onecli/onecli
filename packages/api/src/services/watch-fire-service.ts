@@ -58,9 +58,35 @@ const triggerSentence = (watch: DueWatchFire): string => {
       return "the process went quiet";
     case "lost":
       return "the process was lost when the machine restarted — it is no longer running";
+    case "parked":
+      return "the machine was put to sleep — it is no longer running";
     default:
       return "the watched condition occurred";
   }
+};
+
+/**
+ * A PARKED watch is settled without a turn. The platform chose to sleep the
+ * box because nothing was using it, so waking the agent to say so would
+ * only recreate the hold it just released (observed live: park → "lost"
+ * wake → the agent restarts the server → held again). The person gets one
+ * born-done line in the origin chat instead — enough to know the app is
+ * down and why — and the watch is marked fired like any other outcome. No
+ * origin (an unverifiable arm) means nobody to tell: fired silently.
+ */
+const settleParkedWatch = async (watch: DueWatchFire): Promise<void> => {
+  if (watch.originConversationId) {
+    await materializeAutomationDelivery(
+      watch.originConversationId,
+      `Background process "${cleanName(watch.processName ?? watch.processCommand)}" parked`,
+      "The machine was put to sleep (it was idle, or it was restarted), so this process is no longer running. It starts again when it is needed: open its preview link if it has one, or ask the agent to start it.",
+      "watch",
+    );
+  }
+  await db.processWatch.updateMany({
+    where: { id: watch.id, status: "triggered" },
+    data: { status: "fired", firedAt: new Date() },
+  });
 };
 
 export const buildWatchRunMessage = (watch: DueWatchFire): string => {
@@ -462,16 +488,37 @@ export const fireDueWatches = async (): Promise<number> => {
   await sweepLostProcesses();
   await sweepWatchCoherence();
   await sweepExpiredWatches();
-  const due = await claimTriggeredWatches();
+  const claimed = await claimTriggeredWatches();
+  // Parked watches never become turns: settle them as they are claimed, and
+  // let only the rest reach the partition (a parked watch in a bucket would
+  // otherwise wake the origin for a batch that is partly "nothing to do").
+  const settleParked = async (
+    watches: DueWatchFire[],
+  ): Promise<DueWatchFire[]> => {
+    const rest: DueWatchFire[] = [];
+    for (const watch of watches) {
+      if (watch.trigger !== "parked") {
+        rest.push(watch);
+        continue;
+      }
+      await settleParkedWatch(watch).catch((err: unknown) =>
+        log.error({ err, watchId: watch.id }, "parked watch settle failed"),
+      );
+    }
+    return rest;
+  };
+  const due = await settleParked(claimed);
   const { buckets, singles } = await partitionDue(due);
 
   if (buckets.length > 0) {
     const stragglers = await claimTriggeredWatchesForOrigins(
       buckets.map((bucket) => bucket.conversationId),
-    ).catch((err) => {
-      log.warn({ err }, "straggler claim failed; firing the first batch");
-      return [] as DueWatchFire[];
-    });
+    )
+      .then(settleParked)
+      .catch((err) => {
+        log.warn({ err }, "straggler claim failed; firing the first batch");
+        return [] as DueWatchFire[];
+      });
     if (stragglers.length > 0) {
       const claimedIds = new Set(due.map((watch) => watch.id));
       const fresh = stragglers.filter((watch) => !claimedIds.has(watch.id));
@@ -515,5 +562,5 @@ export const fireDueWatches = async (): Promise<number> => {
       log.error({ err, watchId: watch.id }, "watch fire failed");
     }
   }
-  return due.length;
+  return claimed.length;
 };

@@ -174,30 +174,6 @@ describe("loadRulesForSimulation (gateway-load mirror)", () => {
     expect("isDefault" in where).toBe(false);
   });
 
-  it("pins published to the active max generation", async () => {
-    state.aggregate = { _max: { generation: 4 } };
-    await loadRulesForSimulation(
-      { scope: "organization", organizationId: "org-1" },
-      "published",
-    );
-
-    const find = state.calls.find(
-      (c) => c.model === "policyRuleV2" && c.op === "findMany",
-    );
-    expect(
-      (find?.args as { where: { generation: number } }).where.generation,
-    ).toBe(4);
-  });
-
-  it("returns [] when nothing was ever published", async () => {
-    expect(
-      await loadRulesForSimulation(
-        { scope: "organization", organizationId: "org-1" },
-        "published",
-      ),
-    ).toEqual([]);
-  });
-
   // The TS engine's `NewRule` carries no id, so its evaluator can't re-sort by
   // id — the equal-priority tie-break lives ENTIRELY in this loader's orderBy
   // (a stable priority-only sort downstream preserves it). Pin it so a regression

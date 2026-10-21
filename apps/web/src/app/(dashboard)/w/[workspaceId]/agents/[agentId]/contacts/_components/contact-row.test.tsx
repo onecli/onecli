@@ -25,7 +25,11 @@ vi.mock("@/hooks/use-channels", () => ({
     variables: undefined,
   }),
   useDeleteContact: () => ({
-    mutate: mocks.remove,
+    // Instant remove: the row awaits only to say "removed" afterwards.
+    mutateAsync: (id: string) => {
+      mocks.remove(id);
+      return Promise.resolve();
+    },
     isPending: false,
     variables: undefined,
   }),
@@ -90,7 +94,7 @@ describe("ContactRow", () => {
     expect(mocks.remove).not.toHaveBeenCalled();
     expect(screen.getByText(/ask you again before messaging/)).toBeDefined();
     await userEvent.click(screen.getByRole("button", { name: "Remove" }));
-    expect(mocks.remove).toHaveBeenCalledWith("c-1", expect.anything());
+    expect(mocks.remove).toHaveBeenCalledWith("c-1");
   });
 
   it("cancel closes the dialog without firing", async () => {

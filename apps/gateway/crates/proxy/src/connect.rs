@@ -118,35 +118,91 @@ pub fn plan_for_subscription_status(status: &str) -> &str {
 
 // ── Data types ──────────────────────────────────────────────────────────
 
-/// The kind of credential a workspace holds for a host that the connecting
+/// What the workspace or organization holds for a host that the connecting
 /// agent was not granted. Each kind is attached to an agent on a different
 /// dashboard page, so `access_restricted` links by kind, never by host: a
 /// custom secret on a host a registered app also serves must not be sent to
 /// that app's page.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RestrictedCredential {
+    /// A secret that would inject on the host.
+    Secret(SecretKind),
+    /// Connected accounts of the host's apps exist. Holds the apps this agent
+    /// could be switched on for (each an [`InactiveApp`]); an empty list (every
+    /// account already granted, or waiting on a reconnect) still means the
+    /// host is credentialed, so the vault fallback stays off for it.
+    AppConnections(Vec<InactiveApp>),
+}
+
+/// Which page attaches a secret: split like the dashboard (`type ===
+/// "generic"` is the Custom tab, every other type an LLM key).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretKind {
     /// A `generic` secret: the agent's Connections page, Custom tab.
-    CustomSecret,
-    /// A typed LLM key (any other secret type: `anthropic`, `openai`): the
-    /// agent's Models page.
+    Custom,
+    /// A typed LLM key (`anthropic`, `openai`): the agent's Models page.
     LlmKey,
-    /// An app connection: the app's page, whose account cards carry the
-    /// "Agent access" dialog.
-    AppConnection,
+}
+
+/// An app the agent could use by being switched on for it: a connected
+/// account of `provider` in its workspace or organization that its grants do
+/// not select and that needs no reconnect. One entry per app, and never an
+/// account id or label: the agent only needs to know that turning it on is
+/// the fix, and the user picks the account on the page it is sent to.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InactiveApp {
+    pub provider: String,
+    /// Every such account is the organization's (shared with every
+    /// workspace) rather than this workspace's own.
+    pub shared_by_organization: bool,
+}
+
+/// The apps among `connections` the agent could be switched on for, in the
+/// order their first account was connected (see [`InactiveApp`]).
+fn inactive_apps(
+    connections: &[db::GuidanceConnectionRow],
+    selection: &db::InjectSelection,
+) -> Vec<InactiveApp> {
+    let mut inactive: Vec<InactiveApp> = Vec::new();
+    let switchable = connections.iter().filter(|c| {
+        !c.reauth_required && !selection.selects_connection(&c.id, &c.provider, &c.scope)
+    });
+    for c in switchable {
+        let organization = c.scope == "organization";
+        match inactive.iter_mut().find(|app| app.provider == c.provider) {
+            Some(app) => app.shared_by_organization &= organization,
+            None => inactive.push(InactiveApp {
+                provider: c.provider.clone(),
+                shared_by_organization: organization,
+            }),
+        }
+    }
+    inactive
+}
+
+/// The inactive app an uncredentialed auth failure on `hostname` + `path` is
+/// about, if any: one of the apps that serves that request, so an account of
+/// another app sharing the host (Calendar, for a Gmail path) is never offered.
+#[must_use]
+pub(crate) fn inactive_app_for<'a>(
+    inactive: &'a [InactiveApp],
+    hostname: &str,
+    path: &str,
+) -> Option<&'a InactiveApp> {
+    inactive
+        .iter()
+        .find(|app| apps::provider_explains(&app.provider, hostname, path))
 }
 
 /// The secret half of [`PolicyEngineExt::restricted_credential`]: the kind of
 /// secret in `secrets` that would inject on `hostname`. Same predicate as
 /// injection (`secret_injects_on_host`), so a host no secret would ever inject
 /// on (e.g. auth.openai.com) can't surface as a bogus `access_restricted`.
-/// Split like the dashboard (`type === "generic"` is the Custom tab, every
-/// other type an LLM key). When one host has both, the custom secret wins: it
-/// was scoped to this host on purpose, while a key's host follows from its type.
-fn restricted_secret_kind(
-    secrets: &[db::SecretRow],
-    hostname: &str,
-) -> Option<RestrictedCredential> {
+/// When one host has both, the custom secret wins: it was scoped to this host
+/// on purpose, while a key's host follows from its type.
+fn restricted_secret_kind(secrets: &[db::SecretRow], hostname: &str) -> Option<SecretKind> {
     secrets
         .iter()
         .filter(|s| {
@@ -159,12 +215,12 @@ fn restricted_secret_kind(
         })
         .map(|s| {
             if s.type_ == "generic" {
-                RestrictedCredential::CustomSecret
+                SecretKind::Custom
             } else {
-                RestrictedCredential::LlmKey
+                SecretKind::LlmKey
             }
         })
-        .max_by_key(|kind| *kind == RestrictedCredential::CustomSecret)
+        .max_by_key(|kind| *kind == SecretKind::Custom)
 }
 
 /// Result of policy resolution for a CONNECT request.
@@ -179,10 +235,10 @@ pub struct ConnectResponse {
     pub agent_id: Option<String>,
     pub agent_name: Option<String>,
     pub agent_identifier: Option<String>,
-    /// Set when the workspace has a credential (secret or app connection) for
-    /// this host that the agent can't access (selective mode): its kind, so an
-    /// upstream auth failure is answered with `access_restricted` pointing at
-    /// the page where that credential is attached, instead of "connect the app".
+    /// Set when the workspace or organization has a credential (secret or app
+    /// connection) for this host that the agent can't access: what it is, so
+    /// an upstream auth failure is answered with `access_restricted` pointing
+    /// at the page that switches it on, instead of "connect the app".
     /// Same field name as when it was a bare bool, on purpose: during a rolling
     /// deploy an entry written by the other version fails to parse, which reads
     /// as a cache miss and re-resolves, rather than defaulting to "not restricted".
@@ -327,13 +383,7 @@ async fn selected_app_connections(
             );
             let mut merged = org_result.map_err(db_err)?;
             merged.extend(workspace_result.map_err(db_err)?);
-            merged.retain(|c| {
-                selection.connections.contains_key(&c.id)
-                    || selection
-                        .app_scopes
-                        .iter()
-                        .any(|(provider, scope)| *provider == c.provider && *scope == c.scope)
-            });
+            merged.retain(|c| selection.selects_connection(&c.id, &c.provider, &c.scope));
             // Org-scoped credentials inject on every tier; only the
             // resource-scope stamping stays licensed (#39/#40) —
             // unlicensed, org connections inject UNSCOPED.
@@ -439,11 +489,104 @@ impl ConnectionChoice {
         }
     }
 
+    /// A custom (generic) secret offered as a choice. The label is the
+    /// sanitized secret name: user-controlled text reaching the agent.
+    pub fn from_secret(secret: &inject::secret_choice::SecretRef, host: &str) -> Self {
+        Self {
+            id: secret.id.clone(),
+            label: Some(inject::secret_choice::display_label(&secret.name)),
+            provider: CUSTOM_PROVIDER.to_string(),
+            display_name: Some("Custom"),
+            host: Some(host.to_string()),
+        }
+    }
+
     /// The same choice, annotated with the host its credential is bound to.
     #[must_use]
     pub fn with_host(mut self, host: Option<String>) -> Self {
         self.host = host;
         self
+    }
+}
+
+/// `provider` value of a custom-secret [`ConnectionChoice`].
+pub const CUSTOM_PROVIDER: &str = "custom";
+
+/// Per-request outcome of choosing among the custom secrets on a host.
+#[derive(Debug)]
+pub enum SecretSelection {
+    /// The secret rules to merge, at most one custom secret per slot.
+    /// `app_pin` is the pin to hand the app resolver: `None` when it named a
+    /// secret. `advertised` is every custom secret that collides on a slot on
+    /// this host, listed in `x-onecli-connections` so the agent learns the
+    /// ids before it hits a collision.
+    Rules {
+        rules: Vec<InjectionRule>,
+        app_pin: Option<String>,
+        advertised: Vec<ConnectionChoice>,
+    },
+    /// Two or more custom secrets fill one slot and no pin chose.
+    Ambiguous(Vec<ConnectionChoice>),
+    /// The pin names no allowed app connection or secret, and the custom
+    /// secrets on this request collide, so it cannot be ignored.
+    NotFound(Vec<ConnectionChoice>),
+}
+
+/// The colliding custom secrets on this host, as connection choices.
+fn secret_choices(rules: &[InjectionRule], host: &str) -> Vec<ConnectionChoice> {
+    inject::secret_choice::colliding_secrets(rules)
+        .iter()
+        .map(|s| ConnectionChoice::from_secret(s, host))
+        .collect()
+}
+
+/// Choose among the custom secrets that would fill the same injection slot
+/// for this request (see `inject::secret_choice`). `rules` and
+/// `app_connections` are the agent's already-fenced pools, so a pin can
+/// only ever select something the agent is allowed to use.
+#[must_use]
+pub fn select_secret_rules(
+    rules: Vec<InjectionRule>,
+    app_connections: &[db::AppConnectionRow],
+    host: &str,
+    request_path: Option<&str>,
+    pin: Option<&str>,
+) -> SecretSelection {
+    use inject::secret_choice::{
+        disambiguate_secret_rules, rules_name_secret, SecretDisambiguation,
+    };
+
+    let pin_is_secret = pin.is_some_and(|p| rules_name_secret(&rules, p));
+    let pin_is_app = pin.is_some_and(|p| app_connections.iter().any(|c| c.id == p));
+    let app_pin = if pin_is_secret {
+        None
+    } else {
+        pin.map(str::to_string)
+    };
+    let advertised = secret_choices(&rules, host);
+    match disambiguate_secret_rules(rules, request_path, pin.filter(|_| pin_is_secret)) {
+        SecretDisambiguation::Resolved(rules) => SecretSelection::Rules {
+            rules,
+            app_pin,
+            advertised,
+        },
+        SecretDisambiguation::Ambiguous(secrets) => {
+            if pin.is_some() && !pin_is_app {
+                // An unknown pin: answer like an unknown app connection id.
+                let mut choices: Vec<ConnectionChoice> = app_connections
+                    .iter()
+                    .map(ConnectionChoice::from_row)
+                    .collect();
+                choices.extend(advertised);
+                return SecretSelection::NotFound(choices);
+            }
+            SecretSelection::Ambiguous(
+                secrets
+                    .iter()
+                    .map(|s| ConnectionChoice::from_secret(s, host))
+                    .collect(),
+            )
+        }
     }
 }
 
@@ -455,20 +598,49 @@ pub fn extract_connection_id(headers: &hyper::HeaderMap) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Re-encode serialized JSON as pure ASCII: every non-ASCII char becomes a
+/// `\uXXXX` escape (surrogate pairs above the BMP). Non-ASCII only ever
+/// appears inside JSON strings, where `\u` escapes are equivalent, so the
+/// result parses to the same value. Needed because header bytes are not
+/// UTF-8 on the wire: clients decode them as Latin-1 (RFC 9110 §5.5 calls
+/// non-ASCII field values obsolete), so a raw UTF-8 label would reach the
+/// agent as mojibake, and `HeaderValue::to_str` refuses it outright.
+fn ascii_json(json: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        if c.is_ascii() {
+            out.push(c);
+        } else {
+            let mut buf = [0u16; 2];
+            for unit in c.encode_utf16(&mut buf) {
+                let _ = write!(out, "\\u{unit:04x}");
+            }
+        }
+    }
+    out
+}
+
 /// Inject the `x-onecli-connections` response header listing available connections.
+///
+/// `secret_choices` are custom secrets that collide on an injection slot on
+/// this host (see [`SecretSelection::Rules`]); they are listed after the
+/// apps. The JSON is ASCII-escaped so a non-ASCII label reads back intact.
 pub fn inject_connections_header<B>(
     resp: &mut hyper::Response<B>,
     app_connections: &[db::AppConnectionRow],
+    secret_choices: &[ConnectionChoice],
 ) {
-    if app_connections.is_empty() {
+    if app_connections.is_empty() && secret_choices.is_empty() {
         return;
     }
-    let choices: Vec<ConnectionChoice> = app_connections
+    let mut choices: Vec<ConnectionChoice> = app_connections
         .iter()
         .map(ConnectionChoice::from_row)
         .collect();
+    choices.extend(secret_choices.iter().cloned());
     if let Ok(json) = serde_json::to_string(&choices) {
-        match hyper::header::HeaderValue::from_str(&json) {
+        match hyper::header::HeaderValue::from_str(&ascii_json(&json)) {
             Ok(val) => {
                 resp.headers_mut().insert(CONNECTIONS_HEADER, val);
             }
@@ -603,16 +775,17 @@ pub trait PolicyEngineExt {
         cache: &dyn CacheStore,
     ) -> Result<(Vec<InjectionRule>, Option<String>, Option<i64>), TokenFailure>;
 
-    /// The kind of credential (secret or app connection) the workspace or org
-    /// holds for this host, regardless of what the agent was granted. Probed
-    /// only when no secret injects for this agent, so an uncredentialed auth
-    /// failure reads as "connected, but this agent lacks access" rather than
-    /// "not connected", and the kind names the page that fixes it. Secrets are
-    /// checked before app connections, so a host with both reports the secret.
+    /// What the workspace or org holds for this host that the agent's grants
+    /// (`selection`) do not attach. Probed only when no secret injects for this
+    /// agent, so an uncredentialed auth failure reads as "connected, but this
+    /// agent lacks access" rather than "not connected", and names the page that
+    /// fixes it. Secrets are checked before app connections, so a host with
+    /// both reports the secret.
     async fn restricted_credential(
         &self,
         agent: &db::AgentRow,
         hostname: &str,
+        selection: &db::InjectSelection,
     ) -> Option<RestrictedCredential>;
 
     /// Extract the access token from a connection's decrypted credentials,
@@ -727,7 +900,8 @@ impl PolicyEngineExt for PolicyEngine {
         // `access_restricted` error pointing at the attach surface instead of a
         // generic credential-not-found.
         let access_restricted = if injection_rules.is_empty() {
-            self.restricted_credential(agent, hostname).await
+            self.restricted_credential(agent, hostname, &inject_selection)
+                .await
         } else {
             None
         };
@@ -892,6 +1066,13 @@ impl PolicyEngineExt for PolicyEngine {
                     .clone()
                     .unwrap_or_else(|| "*".to_string()),
                 injections,
+                // Only custom secrets are disambiguation candidates: LLM keys
+                // are already collapsed to one per provider above.
+                secret: (secret.type_ == "generic").then(|| inject::secret_choice::SecretRef {
+                    id: secret.id.clone(),
+                    name: secret.name.clone(),
+                    scope: secret.scope.clone(),
+                }),
             });
         }
 
@@ -1535,6 +1716,7 @@ impl PolicyEngineExt for PolicyEngine {
                 .map(|(path_pattern, injections)| InjectionRule {
                     path_pattern,
                     injections,
+                    secret: None,
                 })
                 .collect();
 
@@ -1550,6 +1732,7 @@ impl PolicyEngineExt for PolicyEngine {
             rules.push(InjectionRule {
                 path_pattern: "*".to_string(),
                 injections: Vec::with_capacity(capacity),
+                secret: None,
             });
         }
 
@@ -1627,6 +1810,7 @@ impl PolicyEngineExt for PolicyEngine {
         &self,
         agent: &db::AgentRow,
         hostname: &str,
+        selection: &db::InjectSelection,
     ) -> Option<RestrictedCredential> {
         // Check 1: workspace or org secrets matching this host. A failed query
         // is logged and contributes nothing, as before: this only picks which
@@ -1645,12 +1829,13 @@ impl PolicyEngineExt for PolicyEngine {
             })
             .collect();
         if let Some(kind) = restricted_secret_kind(&secrets, hostname) {
-            return Some(kind);
+            return Some(RestrictedCredential::Secret(kind));
         }
 
-        // Check 2: workspace or org has app connections for this host. An
-        // alias host (login.salesforce.com) counts for its owning provider, so
-        // an ungranted agent is sent to the grant surface, not told to connect.
+        // Check 2: connected accounts of the host's apps in the agent's
+        // workspace or organization. An alias host (login.salesforce.com)
+        // counts for its owning provider, so an ungranted agent is sent to the
+        // switch, not told to connect.
         let mut providers = apps::providers_for_host(hostname);
         if let Some(alias) = apps::alias_host(hostname) {
             providers.push(alias.provider);
@@ -1658,40 +1843,24 @@ impl PolicyEngineExt for PolicyEngine {
         if providers.is_empty() {
             return None;
         }
-
-        let has_workspace_conns = match db::find_app_connections_by_workspace(
+        match db::find_guidance_connections(
             &self.pool,
             &agent.workspace_id,
+            &agent.organization_id,
+            &providers,
         )
         .await
         {
-            Ok(conns) => conns
-                .iter()
-                .any(|c| providers.contains(&c.provider.as_str())),
+            Ok(connections) if connections.is_empty() => None,
+            Ok(connections) => Some(RestrictedCredential::AppConnections(inactive_apps(
+                &connections,
+                selection,
+            ))),
             Err(e) => {
                 tracing::warn!(error = %e, "restricted_credential: app connections query failed");
-                false
+                None
             }
-        };
-        if has_workspace_conns {
-            return Some(RestrictedCredential::AppConnection);
         }
-
-        let has_org_conns = match db::find_app_connections_by_org(
-            &self.pool,
-            &agent.organization_id,
-        )
-        .await
-        {
-            Ok(conns) => conns
-                .iter()
-                .any(|c| providers.contains(&c.provider.as_str())),
-            Err(e) => {
-                tracing::warn!(error = %e, "restricted_credential: org app connections query failed");
-                false
-            }
-        };
-        has_org_conns.then_some(RestrictedCredential::AppConnection)
     }
     async fn resolve_access_token(
         &self,
@@ -2275,6 +2444,29 @@ fn credential_host_mismatch(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn connections_header_survives_non_ascii_labels() {
+        let choice = super::ConnectionChoice {
+            id: "sec-1".into(),
+            label: Some("Clé prod 🔑".into()),
+            provider: "custom".into(),
+            display_name: None,
+            host: None,
+        };
+        let mut resp = hyper::Response::new(());
+        super::inject_connections_header(&mut resp, &[], &[choice]);
+        let raw = resp
+            .headers()
+            .get(super::CONNECTIONS_HEADER)
+            .expect("header present")
+            .to_str()
+            .expect("ascii header");
+        assert!(raw.is_ascii());
+        let parsed: serde_json::Value = serde_json::from_str(raw).expect("valid json");
+        assert_eq!(parsed[0]["label"], "Clé prod 🔑");
+        assert_eq!(parsed[0]["id"], "sec-1");
+    }
+
     use super::*;
     async fn new_store() -> std::sync::Arc<dyn cache::CacheStore> {
         cache::in_memory()
@@ -2412,6 +2604,7 @@ mod tests {
             injection_rules: vec![InjectionRule {
                 path_pattern: "*".to_string(),
                 injections: vec![],
+                secret: None,
             }],
             app_connections: vec![],
             workspace_id: Some("proj_1".to_string()),
@@ -2461,7 +2654,10 @@ mod tests {
             agent_id: Some("agent_selective".to_string()),
             agent_name: Some("Selective Agent".to_string()),
             agent_identifier: None,
-            access_restricted: Some(RestrictedCredential::CustomSecret),
+            access_restricted: Some(RestrictedCredential::AppConnections(vec![InactiveApp {
+                provider: "resend".to_string(),
+                shared_by_organization: true,
+            }])),
             plan: "pro".to_string(),
             budget_bindings: vec![],
             policy_rules_v2: db::PolicyV2Rules::default(),
@@ -2481,30 +2677,31 @@ mod tests {
             .get("connect:org_restricted:proj_restricted:aoc_t:api.resend.com")
             .await;
         let cached = cached.expect("should be cached");
-        assert_eq!(
-            cached.access_restricted,
-            Some(RestrictedCredential::CustomSecret)
-        );
+        assert_eq!(cached, response);
         assert_eq!(cached.workspace_id.as_deref(), Some("proj_restricted"));
     }
 
     /// A rolling deploy shares the connect cache between versions. An entry
-    /// from the gateway that cached `access_restricted` as a bare bool must
-    /// read as a miss (re-resolve) here, never as "not restricted".
+    /// from a gateway that cached `access_restricted` in an older shape (a
+    /// bare bool, or the kind-only string) must read as a miss (re-resolve)
+    /// here, never as "not restricted".
     #[tokio::test]
-    async fn cached_bool_access_restricted_reads_as_a_miss() {
+    async fn cached_legacy_access_restricted_reads_as_a_miss() {
         let store = new_store().await;
-        let mut legacy = serde_json::to_value(ConnectResponse::default()).unwrap();
-        legacy["access_restricted"] = serde_json::Value::Bool(true);
-        store.set("connect:legacy", &legacy, 60).await;
+        for legacy_value in [serde_json::json!(true), serde_json::json!("app_connection")] {
+            let mut legacy = serde_json::to_value(ConnectResponse::default()).unwrap();
+            legacy["access_restricted"] = legacy_value.clone();
+            store.set("connect:legacy", &legacy, 60).await;
 
-        let cached: Option<ConnectResponse> = store.get("connect:legacy").await;
-        assert!(cached.is_none());
+            let cached: Option<ConnectResponse> = store.get("connect:legacy").await;
+            assert!(cached.is_none(), "{legacy_value}");
+        }
     }
 
     fn secret_row(type_: &str, host_pattern: &str) -> db::SecretRow {
         db::SecretRow {
             id: format!("{type_}-{host_pattern}"),
+            name: "secret".to_string(),
             scope: "workspace".to_string(),
             type_: type_.to_string(),
             value_source: "inline".to_string(),
@@ -2525,7 +2722,7 @@ mod tests {
         let secrets = [secret_row("generic", "app.posthog.com")];
         assert_eq!(
             restricted_secret_kind(&secrets, "app.posthog.com"),
-            Some(RestrictedCredential::CustomSecret)
+            Some(SecretKind::Custom)
         );
         assert_eq!(restricted_secret_kind(&secrets, "eu.posthog.com"), None);
     }
@@ -2536,14 +2733,14 @@ mod tests {
         let custom = || secret_row("generic", "api.anthropic.com");
         assert_eq!(
             restricted_secret_kind(&[key()], "api.anthropic.com"),
-            Some(RestrictedCredential::LlmKey)
+            Some(SecretKind::LlmKey)
         );
         // Both on one host: the custom secret was scoped there on purpose, so
         // its page wins whichever row the query returns first.
         for secrets in [[key(), custom()], [custom(), key()]] {
             assert_eq!(
                 restricted_secret_kind(&secrets, "api.anthropic.com"),
-                Some(RestrictedCredential::CustomSecret)
+                Some(SecretKind::Custom)
             );
         }
     }
@@ -2556,8 +2753,81 @@ mod tests {
         assert_eq!(restricted_secret_kind(&secrets, "auth.openai.com"), None);
         assert_eq!(
             restricted_secret_kind(&secrets, "api.openai.com"),
-            Some(RestrictedCredential::LlmKey)
+            Some(SecretKind::LlmKey)
         );
+    }
+
+    fn guidance_row(id: &str, provider: &str, scope: &str) -> db::GuidanceConnectionRow {
+        db::GuidanceConnectionRow {
+            id: id.to_string(),
+            provider: provider.to_string(),
+            scope: scope.to_string(),
+            reauth_required: false,
+        }
+    }
+
+    fn inactive(provider: &str, shared_by_organization: bool) -> InactiveApp {
+        InactiveApp {
+            provider: provider.to_string(),
+            shared_by_organization,
+        }
+    }
+
+    /// One entry per app, in the order its first account was connected; it
+    /// reads as the organization's only while every such account is.
+    #[test]
+    fn inactive_apps_groups_accounts_by_app() {
+        let rows = [
+            guidance_row("c1", "resend", "organization"),
+            guidance_row("c2", "gmail", "organization"),
+            guidance_row("c3", "gmail", "workspace"),
+            guidance_row("c4", "resend", "organization"),
+        ];
+        assert_eq!(
+            inactive_apps(&rows, &db::InjectSelection::default()),
+            vec![inactive("resend", true), inactive("gmail", false)]
+        );
+    }
+
+    /// An account the agent already holds, by id or through a provider-level
+    /// grant at its level, is not "off"; one waiting on a reconnect cannot be
+    /// fixed by switching it on. An app left with no such account is absent.
+    #[test]
+    fn inactive_apps_skips_granted_and_reauth_accounts() {
+        let mut needs_reconnect = guidance_row("c3", "github", "workspace");
+        needs_reconnect.reauth_required = true;
+        let rows = [
+            guidance_row("c1", "resend", "workspace"),
+            guidance_row("c2", "gmail", "organization"),
+            needs_reconnect,
+            guidance_row("c4", "gmail", "workspace"),
+        ];
+        let mut selection = db::InjectSelection::default();
+        selection.connections.insert("c1".to_string(), None);
+        selection
+            .app_scopes
+            .push(("gmail".to_string(), "organization".to_string()));
+        assert_eq!(
+            inactive_apps(&rows, &selection),
+            vec![inactive("gmail", false)]
+        );
+    }
+
+    /// On a host several apps share, only the app serving the request's path
+    /// is offered: a Calendar account never answers for a Gmail request.
+    #[test]
+    fn inactive_app_for_follows_the_request_path() {
+        let apps = [inactive("google-calendar", true), inactive("gmail", false)];
+        let host = "www.googleapis.com";
+        assert_eq!(
+            inactive_app_for(&apps, host, "/gmail/v1/users/me/messages"),
+            Some(&apps[1])
+        );
+        assert_eq!(
+            inactive_app_for(&apps[..1], host, "/gmail/v1/users/me/messages"),
+            None
+        );
+        assert_eq!(inactive_app_for(&apps, host, "/drive/v3/files"), None);
     }
 
     // ── credential_host_mismatch ─────────────────────────────────────────
@@ -3102,6 +3372,7 @@ mod tests {
                 name: "authorization".to_string(),
                 value: format!("Bearer {token}"),
             }],
+            secret: None,
         }
     }
 
@@ -3933,6 +4204,7 @@ mod deferred_injection_tests {
                     name: "authorization".to_string(),
                     value: "Bearer cached".to_string(),
                 }],
+                secret: None,
             }],
             None,
             None,

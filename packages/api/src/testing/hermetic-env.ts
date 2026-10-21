@@ -154,9 +154,11 @@ export const AMBIENT_HAZARD_VARS: readonly string[] = [
   "CHANNEL_ADAPTER_TOKEN",
   "RUNNER_ONLINE_THRESHOLD_SECONDS",
   "SANDBOX_IDLE_STOP_SECONDS",
+  "SANDBOX_BACKGROUND_CAP_SECONDS",
   "TURN_CEILING_SECONDS",
   "TURN_CEILING_WARNING_SECONDS",
   "TURN_STALL_SECONDS",
+  "STALE_DISPATCH_SECONDS",
   "MAX_HELD_AWAKE_SANDBOXES",
   "SANDBOX_DEFAULT_TIMEZONE",
   // SSH front door
@@ -171,6 +173,10 @@ export const AMBIENT_HAZARD_VARS: readonly string[] = [
   "SSH_MAX_SESSION_SECONDS",
   "SSH_IDLE_TIMEOUT_SECONDS",
   "SSH_SESSION_LEASE_SECONDS",
+  // Sandbox ports / previews — presence lights the preview routes and the
+  // agent's Ports section.
+  "PREVIEW_DOMAIN",
+  "PREVIEW_RELAY_SECRET",
   // Published egress identity (plans/stable-egress-identity.md) — presence
   // flips GET /v1/instance/egress from 404 to a live feed at module load,
   // and a malformed ambient value throws at import.

@@ -45,3 +45,48 @@ export const completeTaskArgsSchema = z
     peer: z.string().trim().min(1).max(80).optional(),
   })
   .strict();
+
+/** read_conversation's bounds, shared by the args schema and the read
+ * service: a window reaches back a year at most (older history is reached
+ * by paging, which has no age limit), and one page is at most 200 messages
+ * (Slack's recommended page size). */
+export const READ_MAX_LOOKBACK_HOURS = 365 * 24;
+export const READ_MAX_LIMIT = 200;
+
+/**
+ * read_conversation — the model-facing args. `conversation` is a name from
+ * the agent's own read grants ("#weekly-reports", "@alex"); `thread` is a
+ * message id from a previous read.
+ */
+const MESSAGE_ID = /^\d{1,12}\.\d{1,9}$/;
+/** Not a message id = dropped, so a model slip widens nothing and fails nothing. */
+const messageIdOrNothing = z
+  .string()
+  .trim()
+  .optional()
+  .transform((v) => (v && MESSAGE_ID.test(v) ? v : undefined));
+
+export const readConversationArgsSchema = z
+  .object({
+    // Omitted = "what may I read?" (the list, audience-fenced).
+    conversation: z.string().trim().max(120).optional(),
+    // Out-of-range windows clamp rather than fail.
+    sinceHours: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .transform((v) =>
+        v === undefined ? v : Math.min(v, READ_MAX_LOOKBACK_HOURS),
+      ),
+    thread: messageIdOrNothing,
+    // Page back through history: the `nextBefore` of the previous result.
+    before: messageIdOrNothing,
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .transform((v) => (v === undefined ? v : Math.min(v, READ_MAX_LIMIT))),
+  })
+  .strict();

@@ -19,12 +19,11 @@ import { proofDatabaseUrl } from "../testing/pg-proof.js";
  *
  *   1. GET /v1/org/membership answers the caller's real role.
  *   2. Members are refused 403 on every share route, at both mounts.
- *   3. An admin lists, reads repos and shares; the new connection is audited
- *      and arrives granted to every agent of the workspace (auto-attach ran
- *      inside the audited action).
+ *   3. An admin shares an installation with the org: the connection moves up
+ *      (same id, no copy), audited. Shared from an agent's page, it is on
+ *      for that agent; a foreign agent is refused before anything moves.
  *   4. Another tenant's installation is invisible (404).
- *   5. Promote refuses a shared connection (422); the old capabilities route
- *      is gone.
+ *   5. The old capabilities route is gone.
  *
  * GitHub's HTTP API is the only stub. Env-gated like the other proof suites.
  */
@@ -55,6 +54,18 @@ const session = (user: string, workspaceId?: string) => ({
   ...(workspaceId && { "x-workspace-id": workspaceId }),
   "content-type": "application/json",
 });
+
+/** The agents holding a grant on `connectionId`, read through the real
+ * grants route the post-connect dialog reads. */
+const grantedAgents = async (connectionId: string) => {
+  const res = await app.request(`/v1/connections/${connectionId}/grants`, {
+    headers: session(ADMIN, WS_B),
+  });
+  expect(res.status).toBe(200);
+  return ((await res.json()) as { agents: { agentId: string }[] }).agents
+    .map((a) => a.agentId)
+    .sort();
+};
 
 const mockGitHub = () =>
   vi.stubGlobal(
@@ -270,11 +281,6 @@ describe.skipIf(!PROOF_URL)(
       const calls: [string, string, RequestInit][] = [
         ["GET", "/v1/apps/github-app/installations", {}],
         [
-          "GET",
-          `/v1/apps/github-app/installations/${source.id}/repositories`,
-          {},
-        ],
-        [
           "POST",
           "/v1/apps/github-app/connections",
           { body: JSON.stringify({ sourceConnectionId: source.id }) },
@@ -295,13 +301,12 @@ describe.skipIf(!PROOF_URL)(
         expect(res.status, `${method} ${path}`).toBe(403);
       }
       expect(
-        await db.appConnection.count({
-          where: { sourceConnectionId: source.id },
-        }),
-      ).toBe(0);
+        (await db.appConnection.findUniqueOrThrow({ where: { id: source.id } }))
+          .scope,
+      ).toBe("workspace");
     });
 
-    it("an admin shares into a workspace: audited, pinned, granted to every agent", async () => {
+    it("an admin shares an installation with the org: it moves up, audited, no copy", async () => {
       const source = await seedOriginal({ workspaceId: WS_A }, "111");
 
       const list = await app.request("/v1/apps/github-app/installations", {
@@ -309,60 +314,265 @@ describe.skipIf(!PROOF_URL)(
       });
       expect(list.status).toBe(200);
       expect(await list.json()).toMatchObject([
-        { sourceConnectionId: source.id, origin: "another_workspace" },
+        { sourceConnectionId: source.id, connectedHere: 0 },
       ]);
 
-      const repos = await app.request(
-        `/v1/apps/github-app/installations/${source.id}/repositories`,
+      const shared = await app.request("/v1/apps/github-app/connections", {
+        method: "POST",
+        headers: session(ADMIN, WS_B),
+        body: JSON.stringify({ sourceConnectionId: source.id }),
+      });
+      expect(shared.status).toBe(200);
+      expect(((await shared.json()) as { id: string }).id).toBe(source.id);
+
+      const row = await db.appConnection.findUniqueOrThrow({
+        where: { id: source.id },
+      });
+      expect(row).toMatchObject({
+        scope: "organization",
+        organizationId: ORG,
+        workspaceId: null,
+      });
+      expect(
+        await db.appConnection.count({
+          where: {
+            provider: "github-app",
+            OR: [
+              { organizationId: ORG },
+              { workspaceId: { in: [WS_A, WS_B] } },
+            ],
+          },
+        }),
+      ).toBe(1);
+
+      const audit = await db.auditLog.findFirst({
+        where: { userId: ADMIN, action: "update" },
+        orderBy: { createdAt: "desc" },
+      });
+      expect(audit?.metadata).toEqual({
+        connectionId: source.id,
+        provider: "github-app",
+        change: "promoted_to_organization",
+      });
+      expect(JSON.stringify(audit?.metadata)).not.toMatch(/ghs_|PRIVATE KEY/);
+      // Shared from the Connections page: on for no new agent.
+      expect(await grantedAgents(source.id)).toEqual([]);
+      const again = await app.request("/v1/apps/github-app/connections", {
+        method: "POST",
+        headers: session(ADMIN, WS_B),
+        body: JSON.stringify({ sourceConnectionId: source.id }),
+      });
+      expect(again.status).toBe(409);
+    });
+
+    it("edit a connection's repositories over HTTP: audited without secrets; members refused", async () => {
+      const source = await seedOriginal({ workspaceId: WS_B }, "111");
+      for (const [method, path, init] of [
+        [
+          "GET",
+          `/v1/apps/github-app/connections/${source.id}/repositories`,
+          {},
+        ],
+        [
+          "PATCH",
+          `/v1/apps/github-app/connections/${source.id}`,
+          { body: JSON.stringify({ repositories: ["acme/web"] }) },
+        ],
+      ] as [string, string, RequestInit][]) {
+        const res = await app.request(path, {
+          method,
+          headers: session(MEMBER, WS_B),
+          ...init,
+        });
+        expect(res.status, `${method} ${path}`).toBe(403);
+      }
+
+      const listed = await app.request(
+        `/v1/apps/github-app/connections/${source.id}/repositories`,
         { headers: session(ADMIN, WS_B) },
       );
-      expect(await repos.json()).toEqual({ repos: GRANTED, truncated: false });
+      expect(await listed.json()).toEqual({
+        available: GRANTED,
+        truncated: false,
+        selected: null,
+      });
+
+      const edited = await app.request(
+        `/v1/apps/github-app/connections/${source.id}`,
+        {
+          method: "PATCH",
+          headers: session(ADMIN, WS_B),
+          body: JSON.stringify({ repositories: ["acme/web"] }),
+        },
+      );
+      expect(edited.status).toBe(200);
+      expect(await edited.json()).toEqual({
+        id: source.id,
+        repositories: ["acme/web"],
+      });
+      const audit = await db.auditLog.findFirst({
+        where: { userId: ADMIN, action: "update" },
+        orderBy: { createdAt: "desc" },
+      });
+      // Exactly ids and a count: nothing else (no token, key or repo names).
+      expect(audit?.metadata).toEqual({
+        connectionId: source.id,
+        provider: "github-app",
+        repositories: 1,
+      });
+      expect(JSON.stringify(audit?.metadata)).not.toMatch(/ghs_|PRIVATE KEY/);
+
+      // A workspace route never reaches another workspace's row.
+      const crossed = await app.request(
+        `/v1/apps/github-app/connections/${source.id}`,
+        {
+          method: "PATCH",
+          headers: session(ADMIN, WS_A),
+          body: JSON.stringify({ repositories: null }),
+        },
+      );
+      expect(crossed.status).toBe(404);
+    });
+
+    it("shared from an agent's page: on for that agent alone", async () => {
+      const source = await seedOriginal({ workspaceId: WS_A }, "111");
 
       const created = await app.request("/v1/apps/github-app/connections", {
         method: "POST",
         headers: session(ADMIN, WS_B),
         body: JSON.stringify({
           sourceConnectionId: source.id,
-          repositories: ["acme/web"],
+          agentId: AGENT_1,
         }),
       });
-      expect(created.status).toBe(201);
+      expect(created.status).toBe(200);
       const body = (await created.json()) as { id: string };
 
-      const row = await db.appConnection.findUniqueOrThrow({
-        where: { id: body.id },
-      });
-      expect(row).toMatchObject({
-        workspaceId: WS_B,
-        sourceConnectionId: source.id,
-      });
-
-      // Audited, with ids only (no token or key in the metadata).
-      const audit = await db.auditLog.findFirst({
-        where: { userId: ADMIN, action: "create" },
-        orderBy: { createdAt: "desc" },
-      });
-      expect(audit?.metadata).toMatchObject({
-        connectionId: body.id,
-        sourceConnectionId: source.id,
-        repositories: ["acme/web"],
-      });
-      expect(JSON.stringify(audit?.metadata)).not.toMatch(/ghs_|PRIVATE KEY/);
-
-      // Every agent of the workspace holds a grant on the new connection.
       const grants = await app.request(`/v1/connections/${body.id}/grants`, {
         headers: session(ADMIN, WS_B),
       });
-      expect(grants.status).toBe(200);
       const grantBody = (await grants.json()) as {
         agents: { agentId: string; resources: unknown }[];
       };
-      expect(grantBody.agents.map((a) => a.agentId).sort()).toEqual([
-        AGENT_1,
-        AGENT_2,
-      ]);
-      // The grants view now carries `resources` (null = unrestricted).
+      expect(grantBody.agents.map((a) => a.agentId)).toEqual([AGENT_1]);
+      // The grants view carries `resources` (null = unrestricted).
       expect(grantBody.agents[0]).toHaveProperty("resources", null);
+    });
+
+    it("GET is read-only, PATCH requires repositories and POST refresh persists with a safe audit", async () => {
+      for (const [target, mount, workspaceId] of [
+        [{ workspaceId: WS_B }, "/v1/apps", WS_B],
+        [{ organizationId: ORG }, "/v1/org/apps", undefined],
+      ] as const) {
+        const source = await seedOriginal(target, workspaceId ? "111" : "222");
+        const before = await db.appConnection.update({
+          where: { id: source.id },
+          data: {
+            metadata: {
+              username: "acme",
+              repos: ["acme/old"],
+              repositorySelection: "all",
+            },
+          },
+        });
+        const root = `${mount}/github-app/connections/${source.id}`;
+        const auditsBefore = await db.auditLog.count({
+          where: { userId: ADMIN },
+        });
+        const listed = await app.request(`${root}/repositories`, {
+          headers: session(ADMIN, workspaceId),
+        });
+        expect(listed.status).toBe(200);
+        expect(await listed.json()).toEqual({
+          available: GRANTED,
+          truncated: false,
+          selected: null,
+        });
+        expect(
+          await db.appConnection.findUniqueOrThrow({
+            where: { id: source.id },
+          }),
+        ).toEqual(before);
+        expect(await db.auditLog.count({ where: { userId: ADMIN } })).toBe(
+          auditsBefore,
+        );
+        const invalid = await app.request(root, {
+          method: "PATCH",
+          headers: session(ADMIN, workspaceId),
+          body: "{}",
+        });
+        expect(invalid.status).toBe(400);
+        expect(
+          await db.appConnection.findUniqueOrThrow({
+            where: { id: source.id },
+          }),
+        ).toEqual(before);
+        const denied = await app.request(`${root}/repository-refresh`, {
+          method: "POST",
+          headers: session(MEMBER, workspaceId),
+        });
+        expect(denied.status).toBe(403);
+        const refreshed = await app.request(`${root}/repository-refresh`, {
+          method: "POST",
+          headers: session(ADMIN, workspaceId),
+        });
+        expect(refreshed.status).toBe(200);
+        expect(await refreshed.json()).toEqual({
+          available: GRANTED,
+          truncated: false,
+          selected: null,
+        });
+        const after = await db.appConnection.findUniqueOrThrow({
+          where: { id: source.id },
+        });
+        expect(after.credentials).toBe(before.credentials);
+        expect(after.metadata).toMatchObject({
+          username: "acme",
+          repos: GRANTED,
+        });
+        const audit = await db.auditLog.findFirst({
+          where: { userId: ADMIN, action: "update" },
+          orderBy: { createdAt: "desc" },
+        });
+        expect(audit?.metadata).toEqual({
+          connectionId: source.id,
+          provider: "github-app",
+          change: "repositories_refreshed",
+        });
+        expect(JSON.stringify(audit?.metadata)).not.toMatch(
+          /ghs_|PRIVATE KEY|acme\//,
+        );
+        expect(await db.auditLog.count({ where: { userId: ADMIN } })).toBe(
+          auditsBefore + 1,
+        );
+      }
+    });
+
+    it("refuses an agent of another workspace before creating anything", async () => {
+      const source = await seedOriginal({ workspaceId: WS_A }, "111");
+      await db.agent.create({
+        data: {
+          id: `${P}agent-ws-a`,
+          name: "Other workspace agent",
+          identifier: `${P}agent-ws-a`,
+          accessToken: `aoc_${P}agent-ws-a`,
+          workspaceId: WS_A,
+        },
+      });
+
+      const res = await app.request("/v1/apps/github-app/connections", {
+        method: "POST",
+        headers: session(ADMIN, WS_B),
+        body: JSON.stringify({
+          sourceConnectionId: source.id,
+          agentId: `${P}agent-ws-a`,
+        }),
+      });
+      expect(res.status).toBe(404);
+      expect(
+        (await db.appConnection.findUniqueOrThrow({ where: { id: source.id } }))
+          .scope,
+      ).toBe("workspace");
     });
 
     it("another tenant's installation is invisible, even by id", async () => {
@@ -379,30 +589,7 @@ describe.skipIf(!PROOF_URL)(
       expect(res.status).toBe(404);
     });
 
-    it("promote refuses a shared connection; the capabilities route is gone", async () => {
-      const source = await seedOriginal({ workspaceId: WS_A }, "111");
-      const created = (await (
-        await app.request("/v1/apps/github-app/connections", {
-          method: "POST",
-          headers: session(ADMIN, WS_B),
-          body: JSON.stringify({
-            sourceConnectionId: source.id,
-            repositories: ["acme/web"],
-          }),
-        })
-      ).json()) as { id: string };
-
-      const promote = await app.request(
-        `/v1/connections/${created.id}/promote`,
-        { method: "POST", headers: session(ADMIN, WS_B), body: "{}" },
-      );
-      expect(promote.status).toBe(422);
-      const memberPromote = await app.request(
-        `/v1/connections/${source.id}/promote`,
-        { method: "POST", headers: session(MEMBER, WS_B), body: "{}" },
-      );
-      expect(memberPromote.status).toBe(403);
-
+    it("the capabilities route is gone", async () => {
       const capabilities = await app.request("/v1/connections/capabilities", {
         headers: session(ADMIN, WS_B),
       });

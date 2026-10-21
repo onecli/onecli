@@ -226,7 +226,7 @@ const grantRows = (extra: Record<string, unknown> = {}) =>
   });
 
 describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
-  it("default attach: tools allowed, requests outside the tool list need approval", async () => {
+  it("default attach: reads allowed, writes and unlisted requests need approval", async () => {
     await grants.setConnectionGrant(
       SCOPE,
       AGENT,
@@ -234,13 +234,20 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
       { access: "default" },
       null,
     );
-    const listed = await decide({
-      path: "/gmail/v1/users/me/drafts",
-      method: "POST",
+    const read = await decide({
+      path: "/gmail/v1/users/me/messages/abc",
+      method: "GET",
       winner: CONN_WORK,
     });
-    expect(listed.action).toBe("allow");
-    expect(listed.requireApproval).toBeFalsy();
+    expect(read.action).toBe("allow");
+    expect(read.requireApproval).toBeFalsy();
+    expect(
+      await decide({
+        path: "/gmail/v1/users/me/drafts",
+        method: "POST",
+        winner: CONN_WORK,
+      }),
+    ).toMatchObject({ action: "allow", requireApproval: true });
     expect(
       await decide({
         path: "/gmail/v1/users/me/history",

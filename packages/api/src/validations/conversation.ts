@@ -100,17 +100,31 @@ export type AutomationSource = (typeof AUTOMATION_SOURCES)[number];
  *     reply, which a first-contact greeting has no use for.
  *
  * What the greeting DOES share with an automation is its render shape: no
- * user typed it, so it wears no user bubble and gets no "(from the web)"
+ * user typed it, so it wears no user bubble and gets no web
  * attribution. That is `isPlatformAuthoredSource` below, which is what the
  * render paths test — never `AUTOMATION_SOURCES`.
  */
 export const GREETING_SOURCE = "greeting";
 
+/**
+ * The platform resuming an agent after a person finished a desktop step:
+ * "Alex took control of your desktop and is done. Continue." Posted with
+ * no user, into the thread the agent asked from. The greeting's twin in every respect that matters: a TURN source
+ * only (no client may mint a "desktop" conversation), platform-authored
+ * (no user bubble, no "(from the web)"), and FOREGROUND, so it never ranks
+ * behind the automation cohort and never relays into the next human turn
+ * as an automation delivery. The one difference is the thread: the
+ * greeting runs on a brand-new direct thread, this one wherever the ask
+ * came from, through the direct-wake door for a direct thread.
+ */
+export const DESKTOP_RESUME_SOURCE = "desktop";
+
 /** Every source a TURN may carry: conversation sources plus the turn-only
- * ones (the greeting, a peer task's report). */
+ * ones (the greeting, a desktop resume, a peer task's report). */
 export type TurnSource =
   | ConversationSource
   | typeof GREETING_SOURCE
+  | typeof DESKTOP_RESUME_SOURCE
   | typeof PEER_TASK_SOURCE;
 
 /**
@@ -131,7 +145,9 @@ export const isAutomationSource = (
  * a user bubble", which is about authorship, not about scheduling priority.
  */
 export const isPlatformAuthoredSource = (source: string): boolean =>
-  source === GREETING_SOURCE || isAutomationSource(source);
+  source === GREETING_SOURCE ||
+  source === DESKTOP_RESUME_SOURCE ||
+  isAutomationSource(source);
 
 /** A turn's lifecycle. The first three are the ACTIVE set the partial unique
  * index fences — at most one of them per conversation. `joining`/`joined` are
@@ -340,17 +356,12 @@ export const HARNESS_NO_TERMINAL_MESSAGE =
 
 /** The model provider rejected the conversation itself as malformed. Its
  * stored history is replayed whole on every turn, so resending as-is fails
- * the same way. The known causes (#1194: a stop interrupted the agent mid
- * save and left its history duplicated; an image stored in a format the
- * provider rejects) are repaired the next time the agent starts, which an
- * idle stop brings about on its own and "Restart agent" (the agent's menu in
- * the dashboard) brings about at once; any other cause needs whoever
- * operates the agent. The copy names the dashboard because it is also shown
- * in Slack, where no menu exists. It promises neither outcome: it says the
- * problem is the conversation's saved history, not the person's message, and
- * what to try. */
+ * the same way. Boot-time repair covers duplicated tool ids and unsupported
+ * images, but not rejected signed payloads. An explicit dashboard restart
+ * clears the saved session reference and starts fresh for every family.
+ * Name the dashboard because this copy also appears in shared channels. */
 export const TRANSCRIPT_REJECTED_MESSAGE =
-  "The agent couldn't continue because this conversation's saved history is damaged. To start it fresh, restart the agent from its menu in the dashboard. Or send your message again in a little while: it tries to repair the history the next time it restarts. If this keeps happening, contact whoever operates this agent.";
+  "The agent couldn't continue because this conversation's saved history is damaged. To start it fresh, restart the agent from its menu in the dashboard, then send your message again. If this keeps happening, contact whoever operates this agent.";
 
 /** The Slack mirror's last-resort line for a FAILED turn that produced no
  * answer text and no error anywhere — silence would read as the agent

@@ -40,6 +40,8 @@ const OTHER_WORKSPACE = `${P}proj-other`;
 const RUNNER_A = `${P}runner-a`;
 /** Steers, but predates SEND NOW: never handed a `turn.send_now`. */
 const RUNNER_OLD = `${P}runner-old`;
+/** Steers and sends now, but predates delivering a follow-up's files. */
+const RUNNER_PRE_FILES = `${P}runner-pre-files`;
 const USER_A = `${P}user-a`;
 const USER_B = `${P}user-b`;
 
@@ -47,7 +49,7 @@ const WEB_A = { source: "web", userId: USER_A } as const;
 
 const reset = async () => {
   await db.sandbox.deleteMany({
-    where: { runnerId: { in: [RUNNER_A, RUNNER_OLD] } },
+    where: { runnerId: { in: [RUNNER_A, RUNNER_OLD, RUNNER_PRE_FILES] } },
   });
   await db.policyRuleTarget.deleteMany({
     where: { rule: { logicalId: { startsWith: P } } },
@@ -219,7 +221,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   if (!PROOF_URL) return;
   await db.sandbox.deleteMany({
-    where: { runnerId: { in: [RUNNER_A, RUNNER_OLD] } },
+    where: { runnerId: { in: [RUNNER_A, RUNNER_OLD, RUNNER_PRE_FILES] } },
   });
   await db.agent.deleteMany({ where: { identifier: { startsWith: P } } });
   await db.runner.deleteMany({ where: { id: { startsWith: P } } });
@@ -235,6 +237,12 @@ beforeEach(async () => {
         id: RUNNER_A,
         name: "send-now-capable",
         token: `rnr_${P}a`,
+        capabilities: { ...base, sendNow: true, steerAttachments: true },
+      },
+      {
+        id: RUNNER_PRE_FILES,
+        name: "send-now-pre-files",
+        token: `rnr_${P}pre-files`,
         capabilities: { ...base, sendNow: true },
       },
       {
@@ -338,11 +346,11 @@ describe.skipIf(!PROOF_URL)("the SEND NOW door", () => {
     ).rejects.toMatchObject({ code: "CONFLICT" });
   });
 
-  it("CONFLICT for a message with files, and for one sent after it: neither joins a live run", async () => {
-    const s = await seedWaiting("door-files");
+  /** A waiting message with one file, then a text message sent after it. */
+  const sendFileThenText = async (conversationId: string) => {
     const attachment = await db.conversationAttachment.create({
       data: {
-        conversationId: s.conversationId,
+        conversationId,
         userId: USER_A,
         source: "web",
         name: "notes.txt",
@@ -356,19 +364,37 @@ describe.skipIf(!PROOF_URL)("the SEND NOW door", () => {
     });
     const withFile = await followUps.sendConversationMessage(
       WORKSPACE,
-      s.conversationId,
+      conversationId,
       "see attached",
       WEB_A,
       [attachment.id],
     );
     const behind = await followUps.sendConversationMessage(
       WORKSPACE,
-      s.conversationId,
+      conversationId,
       "and this",
       WEB_A,
     );
+    return [withFile.turn.id, behind.turn.id];
+  };
 
-    for (const id of [withFile.turn.id, behind.turn.id]) {
+  it("a message with files, and one sent after it, can be read now: both join the live run", async () => {
+    const s = await seedWaiting("door-files");
+    for (const id of await sendFileThenText(s.conversationId)) {
+      await expect(
+        turns.requestSendNow(WORKSPACE, id, USER_A),
+      ).resolves.toEqual({ requested: true });
+      expect(await flag(id)).toBe(true);
+    }
+  });
+
+  it("CONFLICT for a message with files, and for one sent after it, when the runner cannot deliver files into a live run", async () => {
+    // MUTATION-TESTED: drop the capability check and this accepts a request
+    // for messages that wait for the run to end, a click that can do nothing.
+    const s = await seedWaiting("door-files-old", {
+      runnerId: RUNNER_PRE_FILES,
+    });
+    for (const id of await sendFileThenText(s.conversationId)) {
       await expect(
         turns.requestSendNow(WORKSPACE, id, USER_A),
       ).rejects.toMatchObject({

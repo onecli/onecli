@@ -7,8 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import { conversations, grants, secrets } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
-import type { Turn } from "@/lib/api";
-import type { SecretActions } from "@/app/(dashboard)/w/[workspaceId]/connections/_components/types";
+import type { SavedSecret, Turn } from "@/lib/api";
 import { DirectThreadSection } from "./direct-thread-section";
 
 // The unit here is the in-place key door: notice → dialog → create → attach
@@ -18,6 +17,7 @@ import { DirectThreadSection } from "./direct-thread-section";
 // resend's fresh-cache read exercises the same keys the section writes.
 vi.mock("next/navigation", () => ({
   usePathname: () => "/w/ws-1/agents/agent-1/chat",
+  useRouter: () => ({ push: vi.fn() }),
   // Real-router behavior for the greeting seam: params reflect the current
   // URL at render time (jsdom keeps window.location in sync with the
   // history calls the tests and the section itself make).
@@ -26,6 +26,10 @@ vi.mock("next/navigation", () => ({
 
 vi.mock("../../_components/agent-page-frame", () => ({
   useAgentPageAgent: () => ({ id: "agent-1", name: "Agent" }),
+}));
+
+vi.mock("@/hooks/use-instance", () => ({
+  useInstance: () => ({ previews: undefined }),
 }));
 
 vi.mock("@/hooks/use-hosted-availability", () => ({
@@ -67,19 +71,35 @@ vi.mock("@/hooks/use-conversation-stream", () => ({
 }));
 
 vi.mock("./chat-thread", () => ({
-  ChatThread: ({ onConnectModelKey }: { onConnectModelKey?: () => void }) => (
-    <button data-testid="connect-key" onClick={() => onConnectModelKey?.()}>
+  ChatThread: ({
+    onConnectModelKey,
+    pinnedSend,
+  }: {
+    onConnectModelKey?: () => void;
+    pinnedSend?: boolean;
+  }) => (
+    <button
+      data-testid="connect-key"
+      data-pinned-send={pinnedSend}
+      onClick={() => onConnectModelKey?.()}
+    >
       connect key
     </button>
   ),
 }));
 
-// The composer stub surfaces the one prop this section computes for it —
-// `initialDraft` — so the greeting seam (URL flag → draft text) is testable
-// without the real textarea (whose own behavior composer.test.tsx covers).
+// The composer stub is one button that sends a fixed message through
+// `onSend` (composer.test.tsx covers the real textarea).
 vi.mock("./composer", () => ({
-  Composer: ({ initialDraft }: { initialDraft?: string }) => (
-    <div data-testid="composer" data-initial-draft={initialDraft ?? ""} />
+  Composer: ({
+    onSend,
+  }: {
+    onSend: (outgoing: { message: string }) => void;
+  }) => (
+    <button
+      data-testid="composer"
+      onClick={() => onSend({ message: "hello" })}
+    />
   ),
 }));
 vi.mock("./offline-banner", () => ({ OfflineBanner: () => null }));
@@ -90,19 +110,17 @@ vi.mock(
     SecretDialog: ({
       open,
       onSaved,
-      secretActions,
     }: {
       open: boolean;
-      onSaved?: () => void;
-      secretActions?: Partial<SecretActions>;
+      onSaved?: (created: SavedSecret | undefined) => void;
     }) =>
       open ? (
         <button
           data-testid="save-secret"
           onClick={() => {
-            void secretActions
-              ?.createSecret?.({ name: "n", type: "anthropic" } as never)
-              .then(() => onSaved?.())
+            void secrets
+              .create({ name: "n", type: "anthropic" } as never)
+              .then(({ id }) => onSaved?.({ id, name: "n" }))
               .catch(() => {
                 /* the real dialog toasts and does NOT call onSaved */
               });
@@ -227,18 +245,6 @@ describe("the chat's in-place model-key door", () => {
 
     await waitFor(() => expect(grants.attachSecret).toHaveBeenCalled());
     await new Promise((r) => setTimeout(r, 0));
-    expect(conversations.sendMessage).not.toHaveBeenCalled();
-  });
-
-  it("never attaches (or re-sends) when the create failed", async () => {
-    arrange([turn()]);
-    vi.mocked(secrets.create).mockRejectedValue(new Error("nope"));
-    renderSection();
-
-    await openDoorAndSave();
-
-    await new Promise((r) => setTimeout(r, 0));
-    expect(grants.attachSecret).not.toHaveBeenCalled();
     expect(conversations.sendMessage).not.toHaveBeenCalled();
   });
 
@@ -455,5 +461,86 @@ describe("the single reveal", () => {
         ([, options]) => options?.replayFloor === undefined,
       ),
     ).toBe(true);
+  });
+});
+
+describe("the send pin", () => {
+  afterEach(() => {
+    vi.mocked(conversations.ensureDirect).mockReset();
+    vi.mocked(conversations.turns).mockReset();
+    vi.mocked(conversations.sendMessage).mockReset();
+  });
+
+  const arrange = (turns: Turn[]) => {
+    vi.mocked(conversations.ensureDirect).mockResolvedValue({
+      id: "conv-1",
+    } as never);
+    vi.mocked(conversations.turns).mockResolvedValue({
+      turns,
+      hasMore: false,
+      oldestSeq: null,
+    });
+  };
+  const pinnedSend = () => screen.getByTestId("connect-key").dataset.pinnedSend;
+  const sendFromComposer = async () => {
+    await waitFor(() =>
+      expect(screen.getByTestId("connect-key")).toBeInTheDocument(),
+    );
+    await userEvent.click(screen.getByTestId("composer"));
+  };
+
+  it("pins a message sent while nothing runs, for as long as the send lives", async () => {
+    // MUTATION-TESTED: without it a fresh send scrolls to the bottom and
+    // follows every line, the behavior this PR replaces.
+    arrange([turn({ status: "done", errorCode: null, error: null })]);
+    vi.mocked(conversations.sendMessage).mockResolvedValue({
+      kind: "turn",
+      turn: turn({ id: "t2", status: "queued", errorCode: null, error: null }),
+    } as never);
+    renderSection();
+    await sendFromComposer();
+    await waitFor(() => expect(conversations.sendMessage).toHaveBeenCalled());
+    await waitFor(() => expect(pinnedSend()).toBe("true"));
+  });
+
+  it("never pins a follow-up into a live run", async () => {
+    arrange([turn({ status: "running", errorCode: null, error: null })]);
+    vi.mocked(conversations.sendMessage).mockReturnValue(
+      new Promise(() => undefined) as never,
+    );
+    renderSection();
+    await sendFromComposer();
+    await waitFor(() => expect(conversations.sendMessage).toHaveBeenCalled());
+    expect(pinnedSend()).toBe("false");
+  });
+
+  it("drops the pin when the send fails", async () => {
+    // MUTATION-TESTED: a pin kept past a failed send reserved a
+    // viewport-tall gap under the newest history row.
+    arrange([turn({ status: "done", errorCode: null, error: null })]);
+    let reject!: (error: Error) => void;
+    vi.mocked(conversations.sendMessage).mockReturnValue(
+      new Promise((_, fail) => {
+        reject = fail;
+      }) as never,
+    );
+    renderSection();
+    await sendFromComposer();
+    await waitFor(() => expect(pinnedSend()).toBe("true"));
+    reject(new Error("nope"));
+    await waitFor(() => expect(pinnedSend()).toBe("false"));
+  });
+
+  it("pins the model-key resend like any fresh send", async () => {
+    arrange([turn()]);
+    vi.mocked(secrets.create).mockResolvedValue({ id: "sec-9" } as never);
+    vi.mocked(grants.attachSecret).mockResolvedValue({} as never);
+    vi.mocked(conversations.sendMessage).mockReturnValue(
+      new Promise(() => undefined) as never,
+    );
+    renderSection();
+    await openDoorAndSave();
+    await waitFor(() => expect(conversations.sendMessage).toHaveBeenCalled());
+    await waitFor(() => expect(pinnedSend()).toBe("true"));
   });
 });

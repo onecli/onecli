@@ -1,7 +1,6 @@
 "use client";
 
-import { Check, ChevronDown, Loader2, Slash, UserCheck } from "lucide-react";
-import { toast } from "sonner";
+import { Check, ChevronDown, Slash, UserCheck } from "lucide-react";
 import { Badge } from "@onecli/ui/components/badge";
 import { Button } from "@onecli/ui/components/button";
 import {
@@ -59,22 +58,14 @@ export const InboundPersonControl = ({
 
   const choose = (state: "approved" | "blocked") => {
     if (state === person.state) return;
-    setState.mutate(
-      { externalRef: person.externalRef, state },
-      {
-        onSuccess: () =>
-          toast.success(
-            `${subject} → ${agentName}: ${state === "approved" ? "allowed" : "not allowed"}`,
-          ),
-        onError: (err) =>
-          toast.error(err instanceof Error ? err.message : "Update failed"),
-      },
-    );
+    // Instant: the badge shows the new answer on click; a failure puts it
+    // back and says why. Never frozen while saving.
+    setState.mutate({ externalRef: person.externalRef, state });
   };
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild disabled={setState.isPending}>
+      <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
           size="sm"
@@ -83,12 +74,6 @@ export const InboundPersonControl = ({
             approved ? "allowed" : "not allowed"
           }. Change`}
         >
-          {setState.isPending ? (
-            <Loader2
-              className="size-3.5 animate-spin motion-reduce:hidden"
-              aria-hidden
-            />
-          ) : null}
           <Badge
             variant="secondary"
             className={

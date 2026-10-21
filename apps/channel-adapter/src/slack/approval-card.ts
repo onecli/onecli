@@ -17,18 +17,23 @@ import {
 } from "@onecli/channels/slack";
 import {
   batchArrival,
+  batchArrivalNote,
   groupApprovals,
   isOddOneOut,
   orderGroupRows,
   recordNounOf,
   summarizeChanges,
 } from "@onecli/api/lib/approval-groups";
+import { mergeBatchTables } from "@onecli/api/lib/batch-table";
 import {
+  BULK_VERBS,
+  bulkTitle,
   CHANGE_WORDS,
   cellOpOf,
   changeCounts,
   pluralLabel,
   shownValue,
+  UNTOUCHED_CELL,
 } from "@onecli/api/lib/record-change";
 import type {
   ApprovalCardUi,
@@ -238,7 +243,10 @@ export const bulkCsv = (bulk: Bulk): string => {
     const cells = bulk.fields.map((_, i) => {
       if (kind === "delete") return csvValue(row.old?.[i]);
       const op = cellOpOf(row, i);
-      if (op === "untouched") return "";
+      // A field an UPDATE leaves alone is said, never a blank cell (which
+      // reads as "set to empty" in a table of changes). A created record
+      // has nothing to keep: its unset field stays blank.
+      if (op === "untouched") return kind === "update" ? UNTOUCHED_CELL : "";
       if (!compare) return csvValue(row.new[i]);
       const dot = CHANGE_WORDS[op].dot;
       return op === "overwrite" || op === "clear"
@@ -262,19 +270,16 @@ export const bulkCsv = (bulk: Bulk): string => {
  *  created or deleted record carries its dot on its name. */
 const KIND_COPY = {
   update: {
-    verb: "Update",
     approve: "Approve",
     file: "what each change does",
     dot: "",
   },
   create: {
-    verb: "Create",
     approve: "Approve",
     file: "what will be created",
     dot: `${CHANGE_WORDS.fill.dot} `,
   },
   delete: {
-    verb: "Delete",
     approve: "Delete",
     file: "what will be deleted",
     dot: `${CHANGE_WORDS.clear.dot} `,
@@ -435,7 +440,7 @@ const singleRecordCardBlocks = (
   );
   const headerAction = approval.summary?.action
     ? clampHeader(approval.summary.action)
-    : `${kindCopy(bulk).verb} ${bulk.objectLabel}`;
+    : `${BULK_VERBS[bulk.kind ?? "update"]} ${bulk.objectLabel}`;
   return [
     {
       type: "header",
@@ -491,11 +496,12 @@ const bulkCardBlocks = (
   approval: PendingApproval,
   bulk: Bulk,
   reviewUrl?: string,
+  merged?: MergedBatch,
 ): unknown[] => {
   const total = bulk.rows.length;
   const read = bulk.oldValuesRead === true;
   const objectNoun = pluralLabel(bulk.objectLabel.toLowerCase(), total);
-  const part = partOf(approval.batch?.label);
+  const part = merged ? null : partOf(approval.batch?.label);
   const legend =
     bulk.kind === "delete"
       ? `${CHANGE_WORDS.clear.dot} Deletes *${total}*${read ? "" : "   _(their current values couldn't be read)_"}`
@@ -524,12 +530,21 @@ const bulkCardBlocks = (
           ? ` ${part.of - part.n} more ${part.of - part.n === 1 ? "card follows" : "cards follow"}.`
           : ""
       }`
-    : `One approval covers all ${total}, exactly as in the table.`;
-  const footer = footerLine(
-    approval.agent?.name,
-    approval.host,
-    approval.expiresAt ? new Date(approval.expiresAt).getTime() : null,
-  );
+    : merged
+      ? `One approval covers all ${total} (${count(merged.ids.length, "request")}), exactly as in the table.`
+      : `One approval covers all ${total}, exactly as in the table.`;
+  const footer = merged
+    ? footerLine(
+        approval.agent?.name,
+        approval.host,
+        merged.expiresAt,
+        "first expires",
+      )
+    : footerLine(
+        approval.agent?.name,
+        approval.host,
+        approval.expiresAt ? new Date(approval.expiresAt).getTime() : null,
+      );
   const hidden = bulk.hiddenFields ?? [];
   const hiddenNote = hidden.length
     ? `:warning: The table shows ${bulk.fields.length} of ${bulk.fields.length + hidden.length} fields. Also set, not shown: ${hidden
@@ -545,7 +560,7 @@ const bulkCardBlocks = (
       text: {
         type: "plain_text",
         text: clampHeader(
-          `🛡️ Approval needed · ${kindCopy(bulk).verb} ${total} ${pluralLabel(bulk.objectLabel, total)}${
+          `🛡️ Approval needed · ${bulkTitle(bulk)}${
             part ? ` (part ${part.n} of ${part.of})` : ""
           }`,
         ),
@@ -561,6 +576,19 @@ const bulkCardBlocks = (
     },
     ...(hiddenNote
       ? [{ type: "context", elements: [{ type: "mrkdwn", text: hiddenNote }] }]
+      : []),
+    ...(merged?.label
+      ? [
+          {
+            type: "context",
+            elements: [
+              {
+                type: "mrkdwn",
+                text: `The agent says: “${oneLine(merged.label)}”`,
+              },
+            ],
+          },
+        ]
       : []),
     {
       type: "context",
@@ -579,15 +607,18 @@ const bulkCardBlocks = (
             type: "plain_text",
             text: `${kindCopy(bulk).approve} all ${total}`,
           },
-          action_id: "channel_approve",
-          value: approval.id,
+          // A merged batch decides EXACTLY the requests it merged, through
+          // the group click (the control plane refuses any id this presence
+          // never posted), never one id standing for the rest.
+          action_id: merged ? GROUP_APPROVE_ACTION : "channel_approve",
+          value: merged ? merged.packedIds : approval.id,
         },
         {
           type: "button",
           style: "danger",
           text: { type: "plain_text", text: "Deny" },
-          action_id: "channel_deny",
-          value: approval.id,
+          action_id: merged ? GROUP_DENY_ACTION : "channel_deny",
+          value: merged ? merged.packedIds : approval.id,
         },
         // Slack's phone app opens a CSV as plain text, one cell per line;
         // the OneCLI page shows the same table on any screen. A link button
@@ -612,6 +643,45 @@ const bulkCardBlocks = (
  * and readability both say a card is not a spreadsheet). */
 const MENU_ROWS = 15;
 const LISTED_ROWS = 35;
+
+/** A tagged batch read as one table, with what its card says beyond the
+ *  table: the requests it covers, the agent's label, the first deadline. */
+export interface MergedBatch {
+  /** The first request: who asked and from where. */
+  lead: PendingApproval;
+  bulk: Bulk;
+  /** Every request merged: exactly what Approve all / Deny decide. */
+  ids: string[];
+  /** `ids` packed for the group buttons. */
+  packedIds: string;
+  label: string | null;
+  expiresAt: number | null;
+}
+
+/**
+ * A tagged batch whose every request is itself a list of records, as ONE
+ * table and its CSV. The rule is the shared one (`mergeBatchTables`), so
+ * the web card and this one always agree; here it also needs the ids to
+ * fit one group button. Anything else: null, the group card's rows.
+ */
+export const mergeBatchBulk = (
+  live: readonly PendingApproval[],
+): MergedBatch | null => {
+  const merged = mergeBatchTables(live);
+  const lead = merged?.approvals[0];
+  if (!merged || !lead) return null;
+  const ids = merged.approvals.map((a) => a.id);
+  const packedIds = packGroupIds(ids);
+  if (!packedIds) return null;
+  return {
+    lead,
+    bulk: merged.bulk,
+    ids,
+    packedIds,
+    label: merged.label,
+    expiresAt: merged.expiresAt,
+  };
+};
 
 const oneLine = (raw: string): string =>
   clampLabel(escapeSlackText(normalizeLines(raw).replace(/\n+/g, " ")));
@@ -676,15 +746,41 @@ const OUTCOME_ICON = {
 } as const;
 
 /**
- * The GROUPED card: one message for one task's approvals. Every row is its
- * own held request; Approve all / Deny all carry EXACTLY the live ids shown
- * (the control plane refuses any id not posted on this presence). A row
- * whose action differs from the card's main one is pinned first and
+ * The GROUPED card, and the table its CSV carries when it has one. A batch
+ * of record lists reads as the one table it is while none of it is
+ * decided (`mergeBatchBulk`); anything else is the card's rows. The one
+ * place that decides it, so the blocks and the CSV never disagree.
+ */
+const groupCard = (
+  view: GroupCardView,
+): { blocks: unknown[]; table: Bulk | null } => {
+  const merged = view.settled.length === 0 ? mergeBatchBulk(view.live) : null;
+  return merged
+    ? {
+        blocks: bulkCardBlocks(
+          merged.lead,
+          merged.bulk,
+          view.reviewUrl,
+          merged,
+        ),
+        table: merged.bulk,
+      }
+    : { blocks: rowsCardBlocks(view), table: null };
+};
+
+export const groupCardBlocks = (view: GroupCardView): unknown[] =>
+  groupCard(view).blocks;
+
+/**
+ * The grouped card as rows: one message for one task's approvals. Every row
+ * is its own held request; Approve all / Deny all carry EXACTLY the live ids
+ * shown (the control plane refuses any id not posted on this presence). A
+ * row whose action differs from the card's main one is pinned first and
  * flagged, so a delete among creates can't hide. Template text is ours;
  * every dynamic field is escaped, and the agent's batch label/total are
  * shown as the agent's claim.
  */
-export const groupCardBlocks = (view: GroupCardView): unknown[] => {
+const rowsCardBlocks = (view: GroupCardView): unknown[] => {
   const [group] = groupApprovals(view.live);
   // Odd actions first, then by record name: the same order the web lists.
   const live = group ? orderGroupRows(group, group.approvals) : [];
@@ -894,15 +990,18 @@ export const groupCardBlocks = (view: GroupCardView): unknown[] => {
     [...view.live, ...view.settled].map((a) => a.createdAt),
     view.now ?? Date.now(),
   );
-  if (arrival.arriving || arrival.missing > 0) {
+  const note = batchArrivalNote(arrival);
+  if (note) {
     blocks.push({
       type: "context",
       elements: [
         {
           type: "mrkdwn",
+          // Shared copy (ours, no dynamic text). While the batch arrives
+          // this card has no Approve all yet, so it says when it comes.
           text: arrival.arriving
-            ? `:hourglass_flowing_sand: ${arrival.arrived} of ${arrival.total} here, waiting for the rest… Approve all appears once they are in.`
-            : `${arrival.missing} of ${arrival.total} never arrived. Approve all covers the ${arrival.arrived} shown.`,
+            ? `:hourglass_flowing_sand: ${note} Approve all appears once they are in.`
+            : note,
         },
       ],
     });
@@ -954,13 +1053,17 @@ export const slackApprovalCardUi: ApprovalCardUi = {
     const text = live
       ? `${count(live, "approval")} needed`
       : `${count(input.view.settled.length, "request")} decided`;
-    const blocks = groupCardBlocks(input.view);
+    const { blocks, table } = groupCard(input.view);
     try {
       await updateBlocksMessage(input.credential, {
         channel: input.channel,
         ts: input.ts,
         text,
         blocks,
+        // Once the batch no longer reads as one table (a request decided
+        // elsewhere), its CSV goes too: it would list changes no longer
+        // asked. A card that still does keeps the CSV it was posted with.
+        ...(!table && { fileIds: [] }),
       });
     } catch (err) {
       if (!isGone(err)) throw err;
@@ -972,20 +1075,23 @@ export const slackApprovalCardUi: ApprovalCardUi = {
     // A tagged batch posts as the batch card with every row that has
     // arrived, so the reviewer never sees a single-request card (or "1 of
     // 20") turn into a batch a moment later.
-    const batched = (input.approval.batch?.total ?? 0) > 1;
-    const bulk = input.approval.summary?.bulk;
-    const blocksFor = (withTable: boolean) =>
-      batched
-        ? groupCardBlocks({
+    const grouped =
+      (input.approval.batch?.total ?? 0) > 1
+        ? groupCard({
             live: input.batch?.length ? input.batch : [input.approval],
             settled: [],
             ...(input.reviewUrl && { reviewUrl: input.reviewUrl }),
           })
+        : null;
+    const bulk = grouped ? grouped.table : input.approval.summary?.bulk;
+    const blocksFor = (withTable: boolean) =>
+      grouped
+        ? grouped.blocks
         : approvalCardBlocks(input.approval, input.reviewUrl, withTable);
     // A list of records rides as a CSV IN the card's own message: Slack
     // shows a file only when it is shared with its message (one attached
     // later by chat.update is linked but never shown, measured live).
-    if (!batched && bulk && bulk.rows.length > 1) {
+    if (bulk && bulk.rows.length > 1) {
       try {
         return await shareFileWithBlocks(input.credential, {
           channel: input.channel,

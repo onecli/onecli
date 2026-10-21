@@ -62,11 +62,23 @@ export const buildCsp = (nonce: string): string => {
     process.env.COGNITO_DOMAIN?.trim() ||
     process.env.NEXT_PUBLIC_COGNITO_DOMAIN?.trim();
 
+  // The sandbox preview zone: the agent's screen streams over a WebSocket
+  // straight to `wss://<share>.<zone>`, so the zone's hosts must be
+  // connectable. `wss:` only (a page there is still a navigation, never a
+  // fetch from here), and only the zone the deployment configures.
+  // Absent = dark.
+  const previewDomain = process.env.PREVIEW_DOMAIN?.trim().toLowerCase();
+  const previewZone =
+    previewDomain && /^[a-z0-9.-]+$/.test(previewDomain)
+      ? [`wss://*.${previewDomain}`]
+      : [];
+
   const connectSrc = [
     "'self'",
     // One entry when the gateway rides the api origin (cloud does).
     ...new Set([apiOrigin(), gatewayHttpOrigin()]),
     ...(cognitoDomain ? [`https://${cognitoDomain}`] : []),
+    ...previewZone,
     "https://*.amazoncognito.com",
     "https://*.auth.us-east-1.amazoncognito.com",
     "https://cognito-idp.us-east-1.amazonaws.com",

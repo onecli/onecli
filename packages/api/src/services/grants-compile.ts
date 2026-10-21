@@ -57,20 +57,30 @@ const defaultUnlisted = (provider: string): UnlistedChoice =>
   catalogBlocksUnlisted(provider) ? "never" : "ask";
 
 /**
- * What a new attach writes: every catalog tool allowed, requests outside the
- * tool list needing approval (AWS included: Needs approval is a valid
- * catch-all there, only Always allow is not). An app with no catalog has no
- * tool list to split on, so it keeps full access.
+ * What a new attach writes: read tools allowed, every write/delete tool and
+ * every request outside the tool list needing approval (AWS included: Needs
+ * approval is a valid catch-all there, only Always allow is not), so a fresh
+ * connection never changes anything without a human saying yes. An app with
+ * no catalog has no tool list to split on, so it keeps full access.
  */
 export const defaultConnectionGrant = (
   provider: string,
 ): ConnectionGrantInput => {
-  const tools = catalogToolIds(provider);
-  if (tools.length === 0) return { access: "full" };
+  const groups = getAppPermissionDefinition(provider)?.groups ?? [];
+  const toolsOf = (category: "read" | "write") =>
+    sorted(
+      groups
+        .filter((g) => g.category === category)
+        .flatMap((g) => g.tools.map((t) => t.id)),
+    );
+  const ask = toolsOf("write");
+  // Write wins: a tool listed under both is held for approval.
+  const allow = toolsOf("read").filter((t) => !ask.includes(t));
+  if (allow.length + ask.length === 0) return { access: "full" };
   return {
     access: "custom",
-    allow: sorted(tools),
-    ask: [],
+    allow,
+    ask,
     otherReads: "ask",
     otherWrites: "ask",
   };

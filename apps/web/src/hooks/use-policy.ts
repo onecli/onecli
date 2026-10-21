@@ -2,7 +2,12 @@
 // Editable policy engine (policy_rules_v2). Every write is enforced the moment
 // it returns: the server publishes inside the write's transaction and its
 // withAudit wrapper flushes the gateway, so there is nothing to apply here.
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 import { toast } from "sonner";
 import { policy, type PageScope, type PolicyRuleV2 } from "@/lib/api";
 import type {
@@ -10,6 +15,13 @@ import type {
   UpdatePolicyRuleInput,
 } from "@/lib/api/policy";
 import { queryKeys } from "@/lib/api/keys";
+import {
+  installItem,
+  listItem,
+  patchItem,
+  wholeValue,
+} from "@/lib/api/optimistic";
+import { useOptimisticMutation } from "@/hooks/use-optimistic-mutation";
 
 /** The scope's rules (excludes the terminal Default Rule). */
 export const usePolicyRules = (scope: PageScope = "workspace") =>
@@ -24,18 +36,22 @@ export const usePolicyDefault = (scope: PageScope = "workspace") =>
     queryFn: () => policy.getDefault(scope),
   });
 
-const useInvalidatePolicy = () => {
-  const qc = useQueryClient();
-  return () => {
-    qc.invalidateQueries({ queryKey: queryKeys.policy.all() });
+const invalidatePolicyViews = (qc: QueryClient) =>
+  Promise.all([
+    qc.invalidateQueries({ queryKey: queryKeys.policy.all() }),
     // The reflections READ these rules but are keyed by the resource they
     // describe, so a policy write has to reach them too — otherwise the
-    // credential-access and agent-access dialogs keep serving pre-write verdicts
-    // for the query's stale window. They are the only surface showing effective
-    // access now, so a stale verdict there reads as a security answer.
-    qc.invalidateQueries({ queryKey: queryKeys.agents.all() });
-    qc.invalidateQueries({ queryKey: queryKeys.connections.all() });
-  };
+    // agent's Connections section and the agent-access dialog keep serving
+    // pre-write verdicts for the query's stale window. They are the only
+    // surfaces showing effective access, so a stale verdict there reads as a
+    // security answer.
+    qc.invalidateQueries({ queryKey: queryKeys.agents.all() }),
+    qc.invalidateQueries({ queryKey: queryKeys.connections.all() }),
+  ]);
+
+const useInvalidatePolicy = () => {
+  const qc = useQueryClient();
+  return () => invalidatePolicyViews(qc);
 };
 
 export const useCreatePolicyRule = (scope: PageScope = "workspace") => {
@@ -53,10 +69,40 @@ export const useUpdatePolicyRule = (scope: PageScope = "workspace") => {
   return useMutation({
     mutationFn: ({ id, input }: { id: string; input: UpdatePolicyRuleInput }) =>
       policy.updateRule(id, input, scope),
+    // Returned: the rule form's Saving… lasts until the table shows the
+    // saved rule, so it never closes onto the old one.
     onSuccess: () => invalidate(),
     onError: (err: Error) => toast.error(err.message),
   });
 };
+
+const ruleRow = (id: string) => listItem<PolicyRuleV2>((r) => r.id === id);
+
+/**
+ * Enable / disable a rule from its row menu, instantly: the row un-mutes
+ * (or mutes) on click, and a failure puts it back. Enforcement is the
+ * server's: the write publishes atomically, and the effective-access views
+ * refresh once it settles.
+ */
+export const useSetPolicyRuleEnabled = (scope: PageScope = "workspace") =>
+  useOptimisticMutation<PolicyRuleV2, { id: string; enabled: boolean }>({
+    family: `policy:${scope}`,
+    itemKey: ({ id }) => `policy-rule:${id}`,
+    write: ({ id, enabled }) => policy.updateRule(id, { enabled }, scope),
+    apply: (qc, { id, enabled }) =>
+      patchItem(qc, queryKeys.policy.rules(scope), ruleRow(id), (r) =>
+        r ? { ...r, enabled } : r,
+      ),
+    confirm: (qc, rule, { id }) =>
+      installItem(qc, queryKeys.policy.rules(scope), ruleRow(id), rule),
+    refresh: invalidatePolicyViews,
+    failure: (qc, { id, enabled }) => {
+      const name = qc
+        .getQueryData<PolicyRuleV2[]>(queryKeys.policy.rules(scope))
+        ?.find((r) => r.id === id)?.name;
+      return `Couldn't ${enabled ? "enable" : "disable"} ${name ? `"${name}"` : "the rule"}`;
+    },
+  });
 
 export const useDeletePolicyRule = (scope: PageScope = "workspace") => {
   const invalidate = useInvalidatePolicy();
@@ -111,11 +157,27 @@ export const useReorderPolicyRules = (scope: PageScope = "workspace") => {
   });
 };
 
-export const useSetPolicyDefault = (scope: PageScope = "workspace") => {
-  const invalidate = useInvalidatePolicy();
-  return useMutation({
-    mutationFn: (action: "allow" | "block") => policy.setDefault(action, scope),
-    onSuccess: () => invalidate(),
-    onError: (err: Error) => toast.error(err.message),
+/** The Default Rule's Allowed / Blocked choice, instantly. */
+export const useSetPolicyDefault = (scope: PageScope = "workspace") =>
+  useOptimisticMutation<PolicyRuleV2, "allow" | "block">({
+    family: `policy:${scope}`,
+    itemKey: () => `policy-default:${scope}`,
+    write: (action) => policy.setDefault(action, scope),
+    apply: (qc, action) =>
+      patchItem(
+        qc,
+        queryKeys.policy.default(scope),
+        wholeValue<PolicyRuleV2>(),
+        (rule) => (rule ? { ...rule, action } : rule),
+      ),
+    confirm: (qc, rule) =>
+      installItem(
+        qc,
+        queryKeys.policy.default(scope),
+        wholeValue<PolicyRuleV2>(),
+        rule,
+      ),
+    refresh: invalidatePolicyViews,
+    failure: (_qc, action) =>
+      `Couldn't set the default to ${action === "allow" ? "Allowed" : "Blocked"}`,
   });
-};

@@ -108,7 +108,7 @@ const landing = (data: Record<string, unknown>) =>
   });
 
 /** A landing's tell: the grant views refreshed so a new account (already
- * granted to every agent by the API's workspace auto-attach) shows attached.
+ * granted to this agent by the API's connecting-agent grant) shows attached.
  * A thunk, because query keys carry the URL's workspace scope, resolved at
  * call time: a module-level constant would capture "default" and make the
  * negative assertions vacuous. */
@@ -150,15 +150,17 @@ describe("ConnectorSuggestions card", () => {
     const [url, windowName] = openSpy.mock.calls[0] ?? [];
     expect(url).toContain("/app-connect/gmail?");
     expect(url).toContain("agent_name=Arik");
+    // The connect carries THIS agent: the new account lands on for it alone.
+    expect(url).toContain("agent_id=agent-1");
     expect(url).toContain("workspaceId=ws-1");
     expect(windowName).toBe("connect-gmail-new");
   });
 
-  it("discloses the workspace-wide auto-grant at the point of consent for unconnected rows", () => {
+  it("discloses at the point of consent that connecting turns the account on for this agent alone", () => {
     renderCard(GMAIL_CONNECT_URL);
     expect(
       screen.getByText(
-        /on for every agent in this workspace\. Its tools are allowed and anything else needs your approval \(an app with no tool list gets full access\)/,
+        /Connecting turns the account on for this agent, not for your other agents\. Reads are allowed\. Writes and anything else need your approval \(an app with no tool list gets full access\)/,
       ),
     ).toBeInTheDocument();
   });
@@ -338,7 +340,7 @@ describe("ConnectorSuggestions card", () => {
     expect(invalidateSpy).not.toHaveBeenCalled();
 
     // Initiated from this card → the same message refreshes the grant views
-    // (the API already granted the new account to every agent) and counts.
+    // (the API already granted the new account to this agent) and counts.
     await userEvent.click(
       screen.getByRole("button", { name: "Connect Gmail" }),
     );
@@ -390,7 +392,7 @@ describe("ConnectorSuggestions card", () => {
   it("hides the consent line when every suggested app is already connected", () => {
     renderCard(GMAIL_CONNECT_URL, { connections: [connectedGmail] });
     expect(
-      screen.queryByText(/on for every agent in this workspace/),
+      screen.queryByText(/Connecting turns the account on for this agent/),
     ).toBeNull();
   });
 
@@ -441,6 +443,10 @@ describe("ConnectorSuggestions card", () => {
     expect(pushMock).toHaveBeenCalledTimes(1);
     expect(pushMock).toHaveBeenCalledWith(
       expect.stringContaining("/connections/apps/gmail"),
+    );
+    // The setup page gets this agent, so the connect after it is its own.
+    expect(pushMock).toHaveBeenCalledWith(
+      expect.stringContaining("source=agent&agent_id=agent-1"),
     );
   });
 
@@ -664,30 +670,6 @@ describe("ConnectorSuggestions attach rows", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     routeParams = { agentId: "agent-1" };
-  });
-
-  it("names the missing grant and opens the attach dialog from the Attach button", async () => {
-    renderAttachCard();
-    expect(
-      screen.getByText("Connected, not attached to this agent"),
-    ).toBeInTheDocument();
-
-    await userEvent.click(
-      screen.getByRole("button", { name: "Attach Gmail for this agent" }),
-    );
-    const dialog = screen.getByRole("dialog");
-    expect(dialog).toHaveTextContent("Attach Gmail");
-    expect(
-      screen.getByRole("switch", { name: "Attach Gmail" }),
-    ).not.toBeChecked();
-  });
-
-  it("reads Manage with the attached count once a grant exists", () => {
-    renderAttachCard({ grantedConnectionIds: ["conn-1"] });
-    expect(screen.getByText("1 attached account")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Manage Gmail for this agent" }),
-    ).toBeInTheDocument();
   });
 
   it("counts only status-connected accounts — a granted but broken connection is not 'attached'", () => {

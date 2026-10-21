@@ -14,6 +14,7 @@ const loadGetGatewayFetchOptions = async (edition: string) => {
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
 });
 
 describe("getGatewayFetchOptions", () => {
@@ -25,10 +26,16 @@ describe("getGatewayFetchOptions", () => {
     });
   });
 
-  it("unset edition parses as onprem and behaves identically", async () => {
-    const getGatewayFetchOptions = await loadGetGatewayFetchOptions("");
+  // Without the header the gateway falls back to the user's default
+  // workspace, so approvals in any other workspace would be invisible from
+  // that workspace's own pages.
+  it("onprem: names the active workspace from the /w/<id>/ URL", async () => {
+    vi.stubGlobal("window", {
+      location: { pathname: "/w/ws-1/agents/ag-1/chat" },
+    });
+    const getGatewayFetchOptions = await loadGetGatewayFetchOptions("onprem");
     await expect(getGatewayFetchOptions()).resolves.toEqual({
-      headers: {},
+      headers: { "X-Workspace-Id": "ws-1" },
       credentials: "include",
     });
   });

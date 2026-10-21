@@ -10,13 +10,13 @@ import {
   it,
   vi,
 } from "vitest";
+import type { AgentKind } from "@/lib/api/types";
 
 const restart = vi.fn();
 const idle = { mutate: vi.fn(), isPending: false };
 
 vi.mock("@/hooks/use-agents", () => ({
   useDeleteAgent: () => idle,
-  useRegenerateToken: () => idle,
   useRenameAgent: () => idle,
   useRestartAgent: () => ({ mutate: restart, isPending: false }),
 }));
@@ -34,11 +34,10 @@ beforeAll(() => {
 beforeEach(() => restart.mockReset());
 afterEach(cleanup);
 
-const renderMenu = (kind: string, channels?: { provider: string }[]) =>
+const renderMenu = (kind: AgentKind, channels?: { provider: string }[]) =>
   render(
     <AgentActionsMenu
       agent={{ id: "agent-1", name: "Donna", kind, channels }}
-      onCredentialAccess={vi.fn()}
     />,
   );
 
@@ -57,9 +56,7 @@ describe("AgentActionsMenu: Restart agent", () => {
   it("is offered for a hosted agent only", async () => {
     renderMenu("byo");
     await openMenu();
-    expect(
-      screen.getByRole("menuitem", { name: /rotate token/i }),
-    ).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: /rename/i })).toBeTruthy();
     expect(
       screen.queryByRole("menuitem", { name: /restart agent/i }),
     ).toBeNull();

@@ -13,11 +13,12 @@ export const ChecksHelp = () => (
       </p>
       <p>
         A custom check hands the answer and your success criteria to an AI
-        judge, using the agent&apos;s own model key. It checks each fact in
-        substance, not wording, applies your pass rule, and shows its reasoning
-        per criterion. Judges can vary between runs, so read the reasoning on a
-        surprising result. When the judge cannot run, the result is
-        inconclusive.
+        judge. The judge uses the agent&apos;s own model key and model, or the
+        provider&apos;s default model when the agent&apos;s model cannot judge.
+        It checks each fact in substance, not wording, applies your pass rule,
+        and shows its reasoning per criterion. Judges can vary between runs, so
+        read the reasoning on a surprising result. When the judge cannot run,
+        the result is inconclusive.
       </p>
       <p>
         App checks look at the agent&apos;s gateway activity while the question

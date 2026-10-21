@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { Badge } from "@onecli/ui/components/badge";
 import { Button } from "@onecli/ui/components/button";
 import { Switch } from "@onecli/ui/components/switch";
-import { useRunCronNow, useUpdateCron } from "@/hooks/use-crons";
+import { useRunCronNow, useSetCronEnabled } from "@/hooks/use-crons";
 import type { AgentCron } from "@/lib/api";
 
 export interface CronRowProps {
@@ -40,7 +40,7 @@ const outcomeLabel = (cron: AgentCron): string | null => {
 };
 
 export const CronRow = ({ agentId, cron, onEdit }: CronRowProps) => {
-  const update = useUpdateCron(agentId);
+  const setEnabled = useSetCronEnabled(agentId);
   const runNow = useRunCronNow(agentId);
   const outcome = outcomeLabel(cron);
 
@@ -104,19 +104,11 @@ export const CronRow = ({ agentId, cron, onEdit }: CronRowProps) => {
         <Switch
           size="sm"
           checked={cron.enabled}
-          disabled={update.isPending}
+          // Instant, never frozen while saving: the switch IS the status, so
+          // its move is the confirmation; a failure puts it back and says why.
           aria-label={`${cron.enabled ? "Pause" : "Resume"} ${cron.name}`}
           onCheckedChange={(next) =>
-            update.mutate(
-              { cronId: cron.id, input: { enabled: next } },
-              {
-                onSuccess: () =>
-                  toast.success(
-                    next ? `"${cron.name}" resumed` : `"${cron.name}" paused`,
-                  ),
-                onError: (error) => toast.error(String(error.message)),
-              },
-            )
+            setEnabled.mutate({ cronId: cron.id, enabled: next })
           }
         />
       </div>

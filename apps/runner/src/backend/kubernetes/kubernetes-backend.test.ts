@@ -825,6 +825,10 @@ describe("scripts", () => {
         '#!/bin/sh\nfor a in "$@"; do :; done\ncase "$a" in *deny-refused*) exit 7;; *deny-open*) exit 0;; *allow-ok*) exit 0;; *allow-dead*) exit 7;; esac\nexit 1\n',
       );
       chmodSync(join(dir, "curl"), 0o755);
+      // The script sleeps between probes; a no-op stub keeps the loop logic
+      // identical without paying real seconds for it.
+      writeFileSync(join(dir, "sleep"), "#!/bin/sh\nexit 0\n");
+      chmodSync(join(dir, "sleep"), 0o755);
       const run = (deny: string, allow: string) => {
         try {
           execFileSync("sh", [join(dir, "gate.sh")], {

@@ -11,6 +11,7 @@ import { SecretInput } from "@/components/secret-input";
 import type { ChannelTransport } from "@/lib/api";
 import { useChannelManifest, useCompleteChannel } from "@/hooks/use-channels";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
+import { slackAppSettingsUrl } from "@/lib/agents/slack-presence";
 import { InstallStep } from "@/app/(dashboard)/w/[workspaceId]/settings/install/_components/install-step";
 
 interface SlackManifestFloorProps {
@@ -145,7 +146,7 @@ export const SlackManifestFloor = ({
           <div className="space-y-3">
             <Button variant="outline" size="sm" asChild>
               <a
-                href={`https://api.slack.com/apps/${encodeURIComponent(reattachAppId)}/general`}
+                href={slackAppSettingsUrl(reattachAppId)}
                 target="_blank"
                 rel="noreferrer"
               >

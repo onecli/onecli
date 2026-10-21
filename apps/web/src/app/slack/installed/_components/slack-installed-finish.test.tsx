@@ -39,7 +39,11 @@ const state = vi.hoisted(() => ({
     organizationId: string;
   }[],
   agentResult: {
-    agent: null as { id: string; workspaceId: string } | null,
+    agent: null as {
+      id: string;
+      workspaceId: string;
+      awaitingTransportCredential?: boolean;
+    } | null,
     sharedAppConfigured: true,
   },
   agentFail: null as string | null,
@@ -61,7 +65,11 @@ vi.mock("@/hooks/use-org-channels", async () => {
           vars: { provider: string; code: string; organizationId: string },
           opts: {
             onSuccess: (r: {
-              agent: { id: string; workspaceId: string } | null;
+              agent: {
+                id: string;
+                workspaceId: string;
+                awaitingTransportCredential?: boolean;
+              } | null;
               sharedAppConfigured: boolean;
             }) => void;
           },
@@ -158,6 +166,24 @@ describe("SlackInstalledFinish (an agent's own app, installed from Slack)", () =
     ]);
     expect(state.inspectCalls).toHaveLength(0);
     expect(state.finishCalls).toHaveLength(0);
+  });
+
+  it("a matched SOCKET app lands on the one-step-left marker, never 'connected'", async () => {
+    state.agentResult = {
+      agent: {
+        id: "agent-1",
+        workspaceId: "ws-1",
+        awaitingTransportCredential: true,
+      },
+      sharedAppConfigured: true,
+    };
+    render(<SlackInstalledFinish code="socket-code" organization={ORG} />);
+    await waitFor(() =>
+      expect(state.replaced).toEqual([
+        "/w/ws-1/agents/agent-1/channels?installed=slack",
+      ]),
+    );
+    expect(state.inspectCalls).toHaveLength(0);
   });
 
   it("no match and no shared app: points at the agent's Resume setup, never the shared-app refusal", async () => {

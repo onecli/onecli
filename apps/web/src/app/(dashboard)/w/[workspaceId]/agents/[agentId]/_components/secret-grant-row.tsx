@@ -6,7 +6,11 @@ import { Button } from "@onecli/ui/components/button";
 import { Switch } from "@onecli/ui/components/switch";
 import type { Secret } from "@/lib/api";
 import type { CredentialAccessStatus } from "@/lib/api/policy-visibility";
-import { useAttachSecret, useDetachSecret } from "@/hooks/use-grants";
+import {
+  useAttachSecret,
+  useDetachSecret,
+  useGrantSettling,
+} from "@/hooks/use-grants";
 import { EffectivePill } from "./effective-pill";
 import { KeyHealthBadge } from "./key-health-badge";
 
@@ -21,6 +25,8 @@ interface SecretGrantRowProps {
   /** Open the edit dialog for this secret. Omitted where editing has no home
    *  (the Connections section's generic tab keeps its own management page). */
   onEdit?: (secret: Secret) => void;
+  /** Called before a toggle writes, so the list can keep this row in place. */
+  onBeforeToggle?: () => void;
 }
 
 export const SecretGrantRow = ({
@@ -30,10 +36,13 @@ export const SecretGrantRow = ({
   orgGranted,
   credentialStatus,
   onEdit,
+  onBeforeToggle,
 }: SecretGrantRowProps) => {
   const attach = useAttachSecret();
   const detach = useDetachSecret();
-  const busy = attach.isPending || detach.isPending;
+  // The effective verdict describes the state before an in-flight toggle:
+  // hidden until its refetch lands.
+  const settling = useGrantSettling(agentId, "secret", secret.id);
 
   return (
     <div className="flex items-center justify-between gap-4 py-3">
@@ -71,9 +80,11 @@ export const SecretGrantRow = ({
         {/* The switch is the status for the ordinary cases: off = unattached,
             on + working = usable. A pill appears only when it adds something
             the switch cannot — Limited, Blocked, Network only. */}
-        {credentialStatus !== undefined && credentialStatus !== "usable" && (
-          <EffectivePill status={credentialStatus} />
-        )}
+        {!settling &&
+          credentialStatus !== undefined &&
+          credentialStatus !== "usable" && (
+            <EffectivePill status={credentialStatus} />
+          )}
         {onEdit && (
           <Button
             variant="ghost"
@@ -81,15 +92,18 @@ export const SecretGrantRow = ({
             aria-label={`Edit ${secret.name}`}
             onClick={() => onEdit(secret)}
           >
-            <Pencil className="size-4" aria-hidden />
+            <Pencil className="size-3.5" aria-hidden />
           </Button>
         )}
         <Switch
           size="sm"
           checked={granted || orgGranted}
-          disabled={busy || orgGranted}
+          // Locked only by the org, never by an in-flight write: the switch
+          // moves on click and the next click is queued behind it.
+          disabled={orgGranted}
           aria-label={`${granted || orgGranted ? "Detach" : "Attach"} ${secret.name}`}
           onCheckedChange={(next) => {
+            onBeforeToggle?.();
             if (next) {
               attach.mutate({ agentId, secretId: secret.id });
             } else {

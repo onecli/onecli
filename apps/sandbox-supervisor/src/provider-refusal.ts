@@ -65,11 +65,13 @@ export const isTrialCreditExhausted = (message: string): boolean =>
  *   and its sibling, a `tool_result` no `tool_use` asked for (issue #1194: a
  *   torn checkpoint doubled the history);
  * - an image block whose media type the provider does not accept (an agent
- *   that opened a `.bmp` or `.ico` stored it as `image/bmp`/`image/x-icon`).
- * The jcode adapter repairs both at its next boot.
+ *   that opened a `.bmp` or `.ico` stored it as `image/bmp`/`image/x-icon`);
+ * - a provider-rejected encrypted search result or signed thinking block.
+ * The jcode adapter repairs the tool-result and image shapes at boot. Signed
+ * replay failures are not repaired here.
  */
 const TRANSCRIPT_REJECTED_SHAPE =
-  /tool_use`? ids were found without `?tool_result|unexpected `?tool_use_id`? found in `?tool_result|image\.source\.base64\.media_type: Input should be/i;
+  /tool_use`? ids were found without `?tool_result|unexpected `?tool_use_id`? found in `?tool_result|image\.source\.base64\.media_type: Input should be|\bInvalid `?(?:encrypted_content`? in `?(?:web_)?search_result|signature`? in `?thinking)`? block\b/i;
 
 export const isTranscriptRejected = (message: string): boolean =>
   TRANSCRIPT_REJECTED_SHAPE.test(message);

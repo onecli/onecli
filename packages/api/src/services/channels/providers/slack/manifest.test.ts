@@ -2,13 +2,17 @@ import { describe, expect, it } from "vitest";
 import {
   agentAppDescription,
   agentAppDescriptionWithOwner,
+  BOT_EVENTS,
   BOT_SCOPES,
   botScopesFor,
   buildAgentManifest,
   tombstoneAppName,
+  withAgentBotEvents,
   withAppName,
   withSyncedAppName,
   withTombstoneName,
+  USER_READ_SCOPES,
+  withUserReadScopes,
 } from "./manifest";
 
 /**
@@ -77,6 +81,38 @@ describe("the app_home messages tab", () => {
 });
 
 describe("buildAgentManifest", () => {
+  it("bakes the OAuth redirect whenever there is a public HTTPS origin, socket included", () => {
+    // The redirect is a browser hop, not an inbound delivery, so a socket
+    // app can install by consent too; only Slack's HTTPS rule gates it.
+    type Shape = {
+      oauth_config: { redirect_urls?: string[] };
+      settings: {
+        socket_mode_enabled: boolean;
+        event_subscriptions: { request_url?: string };
+      };
+    };
+    const socketHttps = buildAgentManifest({
+      agentName: "donna",
+      transport: "socket",
+      publicApiUrl: "https://api.example.com",
+    }) as Shape;
+    expect(socketHttps.oauth_config.redirect_urls).toEqual([
+      "https://api.example.com/v1/channels/slack/oauth/callback",
+    ]);
+    // Still a socket app: no inbound event delivery is configured.
+    expect(socketHttps.settings.socket_mode_enabled).toBe(true);
+    expect(
+      socketHttps.settings.event_subscriptions.request_url,
+    ).toBeUndefined();
+
+    const socketLocal = buildAgentManifest({
+      agentName: "donna",
+      transport: "socket",
+      publicApiUrl: null,
+    }) as Shape;
+    expect(socketLocal.oauth_config.redirect_urls).toBeUndefined();
+  });
+
   it("bakes the FULL agent scope list into oauth_config — the manifest is a grant surface", () => {
     // The other grant surface is the provider's rebuilt authorize URL; the
     // pg suite pins that one to botScopesFor(appMode).join(","). Both must
@@ -308,5 +344,129 @@ describe("the manifest subscribes the app to its own removal", () => {
       expect(events, transport).toContain("app_uninstalled");
       expect(events, transport).toContain("tokens_revoked");
     }
+  });
+});
+
+describe("withUserReadScopes (Connect your Slack)", () => {
+  const REDIRECT = "https://api.example.com/v1/channels/slack/oauth/callback";
+
+  it("adds the read-only user scopes and the redirect, keeping everything else", () => {
+    const before = {
+      display_information: { name: "Deploy Agent" },
+      oauth_config: {
+        scopes: { bot: ["chat:write"] },
+        redirect_urls: ["https://other.example/cb"],
+      },
+    };
+    const next = withUserReadScopes(before, REDIRECT)!;
+    const oauth = next.oauth_config as {
+      scopes: { bot: string[]; user: string[] };
+      redirect_urls: string[];
+    };
+    expect(oauth.scopes.bot).toEqual(["chat:write"]);
+    expect(oauth.scopes.user).toEqual([...USER_READ_SCOPES]);
+    expect(oauth.redirect_urls).toEqual(["https://other.example/cb", REDIRECT]);
+    expect(next.display_information).toEqual({ name: "Deploy Agent" });
+  });
+
+  it("is idempotent: nothing to change returns null (no manifest update)", () => {
+    const once = withUserReadScopes({ oauth_config: {} }, REDIRECT)!;
+    expect(withUserReadScopes(once, REDIRECT)).toBeNull();
+  });
+
+  it("the user scopes are read-only: no write, no search, no files", () => {
+    for (const scope of USER_READ_SCOPES) {
+      expect(scope).toMatch(/:(read|history)$/);
+    }
+    expect(USER_READ_SCOPES).not.toContain("search:read");
+  });
+});
+
+describe("the native Stop", () => {
+  it("subscribes every new app to agent_session_stopped on BOTH transports: without it Slack shows the loader with no Stop button", () => {
+    for (const transport of ["socket", "events"] as const) {
+      const manifest = buildAgentManifest({
+        agentName: "Deploy Agent",
+        transport,
+        publicApiUrl: transport === "events" ? "https://api.example" : null,
+      }) as { settings: { event_subscriptions: { bot_events: string[] } } };
+      expect(
+        manifest.settings.event_subscriptions.bot_events,
+        transport,
+      ).toContain("agent_session_stopped");
+    }
+  });
+});
+
+describe("withAgentBotEvents (the existing-app event sync)", () => {
+  const exported = (botEvents: unknown) => ({
+    display_information: { name: "Deploy Agent" },
+    oauth_config: { scopes: { bot: ["chat:write"] } },
+    settings: {
+      socket_mode_enabled: true,
+      event_subscriptions: {
+        request_url: "https://api.example/v1/channels/slack/events",
+        bot_events: botEvents,
+      },
+      interactivity: { is_enabled: true },
+    },
+  });
+
+  it("adds only what is missing, keeping everything else in the exported manifest", () => {
+    const before = exported(["message.im", "app_mention"]);
+    const after = withAgentBotEvents(before) as ReturnType<typeof exported>;
+    expect(after.settings.event_subscriptions.bot_events).toEqual([
+      "message.im",
+      "app_mention",
+      ...BOT_EVENTS.filter((e) => e !== "message.im" && e !== "app_mention"),
+    ]);
+    // Everything that is not the event list is untouched.
+    expect(after.display_information).toEqual(before.display_information);
+    expect(after.oauth_config).toEqual(before.oauth_config);
+    expect(after.settings.socket_mode_enabled).toBe(true);
+    expect(after.settings.interactivity).toEqual(before.settings.interactivity);
+    expect(after.settings.event_subscriptions.request_url).toBe(
+      before.settings.event_subscriptions.request_url,
+    );
+    // The input is not mutated (the caller may retry with it).
+    expect(before.settings.event_subscriptions.bot_events).toEqual([
+      "message.im",
+      "app_mention",
+    ]);
+  });
+
+  it("keeps an event someone subscribed by hand", () => {
+    const after = withAgentBotEvents(
+      exported(["reaction_added", "message.im"]),
+    ) as ReturnType<typeof exported>;
+    expect(after.settings.event_subscriptions.bot_events).toContain(
+      "reaction_added",
+    );
+  });
+
+  it("answers null when nothing is missing, so the caller skips the write", () => {
+    expect(withAgentBotEvents(exported([...BOT_EVENTS]))).toBeNull();
+    expect(
+      withAgentBotEvents(exported(["reaction_added", ...BOT_EVENTS])),
+    ).toBeNull();
+  });
+
+  it("builds the subscription when the export has none at all", () => {
+    const after = withAgentBotEvents({
+      display_information: { name: "x" },
+    }) as { settings: { event_subscriptions: { bot_events: string[] } } };
+    expect(after.settings.event_subscriptions.bot_events).toEqual([
+      ...BOT_EVENTS,
+    ]);
+  });
+
+  it("ignores junk entries in the exported list rather than writing them back", () => {
+    const after = withAgentBotEvents(
+      exported(["message.im", 42, null]),
+    ) as ReturnType<typeof exported>;
+    expect(after.settings.event_subscriptions.bot_events).toEqual([
+      "message.im",
+      ...BOT_EVENTS.filter((e) => e !== "message.im"),
+    ]);
   });
 });

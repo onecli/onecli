@@ -415,5 +415,8 @@ thread on Slack. Up to ${MAX_OUTBOUND_ATTACHMENTS_PER_TURN} files per reply,
 ${Math.floor(MAX_OUTBOUND_ATTACHMENT_BYTES / (1024 * 1024))}MB each; a sent
 file stays downloadable for ${ATTACHMENT_RETENTION_DAYS} days, so say so if
 the person may need it later. The result says sent, or exactly why not —
-read it before telling the person the file is on its way.`,
+read it before telling the person the file is on its way.
+For a chart, graph or diagram, render it to an image (PNG) and send the
+file. Never tell the person to look at a card, panel or picture you have
+not sent.`,
 };

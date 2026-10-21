@@ -1,7 +1,6 @@
 "use client";
 
-import { Check, ChevronDown, Globe, Loader2, Lock, Slash } from "lucide-react";
-import { toast } from "sonner";
+import { Check, ChevronDown, Globe, Lock, Slash } from "lucide-react";
 import { Badge } from "@onecli/ui/components/badge";
 import { Button } from "@onecli/ui/components/button";
 import {
@@ -102,34 +101,20 @@ export const InboundSpaceControl = ({
 
   const choose = (state: (typeof ORDER)[number]) => {
     if (state === current) return;
-    setReach.mutate(
-      { externalRef: space.externalRef, state },
-      {
-        onSuccess: () =>
-          toast.success(
-            `${subject}: ${agentName} answers ${SETTLEMENTS[state].answers}`,
-          ),
-        onError: (err) =>
-          toast.error(err instanceof Error ? err.message : "Update failed"),
-      },
-    );
+    // Instant: the badge shows the new answer on click; a failure puts it
+    // back and says why. Never frozen while saving.
+    setReach.mutate({ externalRef: space.externalRef, state });
   };
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild disabled={setReach.isPending}>
+      <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
           size="sm"
           className="gap-1.5 px-2"
           aria-label={`Who ${agentName} answers in ${subject}: ${settled.answers}. Change`}
         >
-          {setReach.isPending ? (
-            <Loader2
-              className="size-3.5 animate-spin motion-reduce:hidden"
-              aria-hidden
-            />
-          ) : null}
           <Badge variant="secondary" className={settled.badge}>
             <settled.icon className="size-3" aria-hidden />
             {settled.label}

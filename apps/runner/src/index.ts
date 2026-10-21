@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { RunnerEvent, WorkItem } from "@onecli/agent-protocol";
+import type { WorkItem } from "@onecli/agent-protocol";
 import { ConfigError, loadConfig, type RunnerConfig } from "./config";
 import { installationFingerprint } from "./installation";
 import { ControlPlaneError, createControlPlaneClient } from "./control-plane";
@@ -14,10 +14,14 @@ import {
 import { createKubernetesBackend } from "./backend/kubernetes/kubernetes-backend";
 import type { SandboxBackend } from "./backend/types";
 import { createRunner } from "./runner";
+import { createChannelPlane } from "./ws/channel-plane";
 import { createRunnerWsServer } from "./ws/server";
 import { parseSessionKeyring } from "./ws/session";
 import { createSupervisorMessageHandler } from "./supervisor-messages";
 import { createTurnEventCollector } from "./turn-events";
+import { createReportChain } from "./report-chain";
+import { createPortHub } from "./port-hub";
+import { startPortApi } from "./port-api";
 import { log } from "./log";
 
 /**
@@ -121,9 +125,6 @@ const readOwnNamespace = async (): Promise<string | null> => {
   }
 };
 
-/** Queue depth past which reports are dropped rather than accumulated. */
-const MAX_QUEUED_REPORTS = 200;
-
 /** Longest a drain may hold the process open at shutdown. */
 const SHUTDOWN_DRAIN_MS = 5_000;
 
@@ -158,41 +159,13 @@ const main = async (): Promise<void> => {
    * Serializing globally rather than per turn is deliberate — one chain is
    * simpler than a map of them, and every post is bounded by the client's 15s
    * timeout, so a dead control plane delays reporting rather than wedging it.
+   * The chain is bounded and lossy by design; see report-chain.ts for the
+   * bounds and for the one report it re-sends.
    */
-  let reportChain: Promise<void> = Promise.resolve();
-  /** How many posts are queued behind the one in flight. */
-  let queuedReports = 0;
-
-  const report = (event: RunnerEvent): void => {
-    // BOUNDED. Each post is capped at 15s per attempt — with the client's
-    // bounded retry (retryable statuses only), a post can hold the chain
-    // head ~75s worst case — while a sandbox — untrusted, running
-    // model-driven code — can enqueue as fast as it emits. Unbounded, the
-    // queue grows closures holding up to 256 KB each, in the one process that
-    // holds the docker socket and hosts every tenant on the box.
-    if (queuedReports >= MAX_QUEUED_REPORTS) {
-      log("warn", "report queue full; dropping an event", {
-        sandboxId: "sandboxId" in event ? event.sandboxId : undefined,
-        kind: event.kind,
-      });
-      return;
-    }
-    queuedReports += 1;
-    reportChain = reportChain
-      .then(() =>
-        controlPlane.postEvents([event]).catch((error: unknown) => {
-          log("warn", "failed to report a supervisor message", {
-            // From the event itself — every kind carries the real one.
-            sandboxId: "sandboxId" in event ? event.sandboxId : undefined,
-            kind: event.kind,
-            error: String(error),
-          });
-        }),
-      )
-      .finally(() => {
-        queuedReports -= 1;
-      });
-  };
+  const { report, drained: reportsDrained } = createReportChain({
+    post: (events) => controlPlane.postEvents(events),
+    warn: (message, fields) => log("warn", message, fields),
+  });
 
   // Text is buffered here rather than posted per token (§3.17's delta law);
   // the collector also chunks so a flush can never exceed the wire's cap.
@@ -203,10 +176,8 @@ const main = async (): Promise<void> => {
   // ref is assigned immediately below, before any connection can exist.
   let sendToSandbox: (sandboxId: string, item: WorkItem) => boolean = () =>
     false;
-  // Same late-bind as sendToSandbox: the message handler needs the runner's
-  // container map, but the handler is built before the runner. Reassigned to
-  // the real lookup immediately after createRunner, before any connection
-  // (and so any process.state frame) can exist.
+  // Same late-bind: the handler stamps process and port frames with the
+  // container the sandbox's socket authenticated as, which the server knows.
   let containerRefOf: (sandboxId: string) => string | undefined = () =>
     undefined;
   // The resumable channel's keyring. Parsed HERE (not in loadConfig) so the
@@ -216,14 +187,13 @@ const main = async (): Promise<void> => {
   log("info", "supervisor session resumption", {
     enabled: keyring !== null,
   });
+  // The control plane's channel records: every socket is claimed there, so
+  // whichever copy a supervisor reaches can serve it.
+  const channels = createChannelPlane({ client: controlPlane });
   const wsServer = createRunnerWsServer({
     port: config.wsPort,
-    ...(keyring && {
-      sessions: {
-        keyring,
-        containerRefOf: (sandboxId) => containerRefOf(sandboxId),
-      },
-    }),
+    channels,
+    ...(keyring && { keyring }),
     onMessage: createSupervisorMessageHandler({
       report,
       collector,
@@ -272,6 +242,24 @@ const main = async (): Promise<void> => {
         controlPlane.uploadAttachment(sandboxId, file),
       sendToSandbox: (sandboxId, item) => sendToSandbox(sandboxId, item),
       containerRefOf: (sandboxId) => containerRefOf(sandboxId),
+      portHub: {
+        handle: (sandboxId, message) => portHub.handle(sandboxId, message),
+      },
+      // A freshly booted supervisor starts with an EMPTY allowlist (fail
+      // closed). Arm it from the control plane right away, so a share made
+      // while the box slept works on the first preview request.
+      onReady: (sandboxId) => {
+        if (!config.portApi) return;
+        void controlPlane
+          .sandboxAllowedPorts(sandboxId)
+          .then((ports) => portHub.setAllowed(sandboxId, ports))
+          .catch((error: unknown) =>
+            log("warn", "port allowlist arm failed", {
+              sandboxId,
+              error: String(error),
+            }),
+          );
+      },
     }),
   });
   sendToSandbox = (sandboxId, item) => {
@@ -280,19 +268,40 @@ const main = async (): Promise<void> => {
     connection.send(item);
     return true;
   };
+  containerRefOf = (sandboxId) => wsServer.containerRefOf(sandboxId);
+
+  // Sandbox ports (plans/sandbox-ports.md §7): the stream hub rides the same
+  // supervisor sockets; the preview relay reaches it through the internal
+  // stream API below (only when configured — self-host never serves it).
+  const portHub = createPortHub({
+    sendToSandbox: (sandboxId, item) => sendToSandbox(sandboxId, item),
+  });
+  const portApi = config.portApi
+    ? await startPortApi({
+        port: config.portApi.port,
+        host: config.portApi.host,
+        token: config.portApi.token,
+        hub: portHub,
+        allowedPorts: (sandboxId) =>
+          controlPlane.sandboxAllowedPorts(sandboxId),
+      })
+    : undefined;
+  wsServer.onDisconnect((sandboxId) => {
+    portHub.sandboxGone(sandboxId);
+    portApi?.sandboxGone(sandboxId);
+  });
 
   const runner = createRunner({ config, backend, controlPlane, wsServer });
-  containerRefOf = (sandboxId) => runner.containerRefOf(sandboxId);
 
   /**
    * Shutdown has to DRAIN, not just stop.
    *
    * Buffered transcript text and a queued `turn.finished` both live in this
    * process: the collector holds up to a flush interval of events, and every
-   * report is queued on `reportChain`. Exiting without emptying them loses
+   * report is queued on the report chain. Exiting without emptying them loses
    * that text and — far worse — can strand a turn that actually finished,
-   * which the active-turn index then blocks its conversation on until the
-   * ceiling half an hour later. On every deploy.
+   * which the active-turn index then blocks its conversation on until a
+   * control-plane sweep fails it. On every deploy.
    */
   const shutdown = (signal: string) => {
     log("info", "shutting down", { signal });
@@ -300,12 +309,16 @@ const main = async (): Promise<void> => {
       await runner.stop().catch((error: unknown) => {
         log("warn", "shutdown error", { error: String(error) });
       });
+      // Previews stop taking new streams first; live ones die with the
+      // supervisor sockets the runner just closed.
+      await portApi?.close().catch(() => undefined);
       collector.flushAll();
       // Bounded: a control plane that is itself down must not hold the
       // process open past its termination grace period. The runner's own
-      // settle covers in-flight lifecycle work and ITS report chain.
+      // settle covers in-flight lifecycle work and ITS report chain; the
+      // channel plane's covers the releases of the sockets it just drained.
       await Promise.race([
-        Promise.all([runner.settle(), reportChain]),
+        Promise.all([runner.settle(), reportsDrained(), channels.settled()]),
         new Promise((resolve) => setTimeout(resolve, SHUTDOWN_DRAIN_MS)),
       ]);
     };

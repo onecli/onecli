@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { proofDatabaseUrl } from "../testing/pg-proof.js";
 import type { ConnectionGrantInput } from "../validations/grants";
+import { catalogToolIds } from "../apps/app-permissions/validate";
 
 const PROOF_URL = proofDatabaseUrl();
 
@@ -20,6 +21,17 @@ let compile: typeof import("./grants-compile");
 let RULE_INCLUDE: (typeof import("./policy-service"))["RULE_INCLUDE"];
 
 const P = "grant-default-";
+
+/** What THIS migration writes (the default as of 2026-10-11: every catalog
+ * tool allowed, unlisted needs approval). The live default moved on later
+ * (writes need approval), but a migration's output is fixed history. */
+const migratedGrant = (provider: string): ConnectionGrantInput => ({
+  access: "custom",
+  allow: [...catalogToolIds(provider)].sort(),
+  ask: [],
+  otherReads: "ask",
+  otherWrites: "ask",
+});
 const WORKSPACE = `${P}ws`;
 const AGENT = `${P}agent`;
 
@@ -168,7 +180,7 @@ describe.skipIf(!PROOF_URL)(
             compile.compileConnectionStack(
               `G ${provider}`,
               provider,
-              compile.defaultConnectionGrant(provider),
+              migratedGrant(provider),
             ),
           ),
           provider,
@@ -207,7 +219,7 @@ describe.skipIf(!PROOF_URL)(
         const expected = compile.compileConnectionStack(
           "G gitlab",
           "gitlab",
-          compile.defaultConnectionGrant("gitlab"),
+          migratedGrant("gitlab"),
           conditions,
         );
         expect(compile.stackEquals(rows, expected), copy.status).toBe(true);

@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { toast } from "sonner";
 import { Ban, CircleCheck, CircleMinus, Hand, Settings2 } from "lucide-react";
 import { AgentIcon } from "@/lib/agents/agent-icon";
 import { Button } from "@onecli/ui/components/button";
@@ -14,6 +13,7 @@ import type {
 } from "@/lib/api/policy-visibility";
 import {
   useDetachConnectionForAgent,
+  useGrantSettling,
   useSetConnectionGrantForAgent,
 } from "@/hooks/use-grants";
 import { agentSectionPath } from "@/lib/navigation";
@@ -103,7 +103,10 @@ export const ConnectionAgentAccessRow = ({
   const pathname = usePathname();
   const attach = useSetConnectionGrantForAgent();
   const detach = useDetachConnectionForAgent();
-  const busy = attach.isPending || detach.isPending;
+  // While this agent's write settles, the effective view still describes
+  // the state before the click: its status element is held back, never
+  // guessed, so it can't contradict the switch.
+  const settling = useGrantSettling(agent.agentId, "connection", connectionId);
 
   // Injected by an ORG rule (not a workspace grant): locked on — not detachable
   // at workspace level.
@@ -117,8 +120,9 @@ export const ConnectionAgentAccessRow = ({
   const decisions = agent.credential.status !== "none" ? agent.decisions : null;
   const narrowed =
     decisions !== null && decisions.allowedTools < decisions.totalTools;
-  const status: "pill" | "count" | "approval" | null =
-    agent.access === "blocked" || agent.access === "unknown"
+  const status: "pill" | "count" | "approval" | null = settling
+    ? null
+    : agent.access === "blocked" || agent.access === "unknown"
       ? "pill"
       : narrowed
         ? "count"
@@ -179,7 +183,10 @@ export const ConnectionAgentAccessRow = ({
         <Switch
           size="sm"
           checked={on}
-          disabled={busy || orgGranted}
+          // Locked only by the org, never by an in-flight write: the switch
+          // moves on click (the grants hooks are optimistic), and its
+          // success needs no toast. A failure puts it back and says why.
+          disabled={orgGranted}
           aria-label={`${on ? "Detach" : "Attach"} ${agent.name}`}
           onCheckedChange={(next) => {
             if (next) {
@@ -189,10 +196,7 @@ export const ConnectionAgentAccessRow = ({
                 input: { access: "default" },
               });
             } else {
-              detach.mutate(
-                { connectionId, agentId: agent.agentId },
-                { onSuccess: () => toast.success("Access removed") },
-              );
+              detach.mutate({ connectionId, agentId: agent.agentId });
             }
           }}
         />

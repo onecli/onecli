@@ -26,6 +26,34 @@ export const extractLabel = (
 };
 
 /**
+ * The label a reconnect writes. A name the user chose (it differs from what
+ * the provider called the old account) survives. A provider-derived name
+ * follows the account now signed in, so a different account never wears the
+ * old one's name. No new identity (a bare token persist) keeps the label.
+ */
+export const reconnectLabel = (
+  existing: { label: string | null; metadata: unknown },
+  metadata: Record<string, unknown> | undefined,
+): string | null => {
+  const fresh = extractLabel(metadata);
+  if (!fresh) return existing.label;
+  const previous = extractLabel(asRecord(existing.metadata) ?? undefined);
+  const renamedByUser = existing.label !== null && existing.label !== previous;
+  return renamedByUser ? existing.label : fresh;
+};
+
+/**
+ * The short tags a connection shows beside its name (a GitHub App's repos, a
+ * provider region), from non-secret metadata of any JSON shape.
+ */
+export const connectionTags = (metadata: unknown): string[] => {
+  const raw = asRecord(metadata)?.tags;
+  return Array.isArray(raw)
+    ? raw.filter((t): t is string => typeof t === "string")
+    : [];
+};
+
+/**
  * Host-bound providers: their credential is injected ONLY on one stored
  * tenant host, read by the gateway from this credential field (the gateway
  * rule's `credential_host_field`, `apps/gateway/crates/apps/src/lib.rs`), and

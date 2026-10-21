@@ -170,6 +170,79 @@ describe("connection", () => {
     expect(DEFAULT_MAX_ATTEMPTS).toBeGreaterThanOrEqual(40);
   });
 
+  describe("reconnect delay", () => {
+    // A runner copy closes every socket it holds at once when it rolls or
+    // stops (hundreds of sandboxes). Without jitter they all redial in the
+    // same instant, and keep retrying in lockstep. Equal jitter: each delay
+    // is a random point in [half, all] of the exponential step, so the cap
+    // is never exceeded (the runner's resume grace is derived from it) and
+    // no sandbox redials before half the step (the leaving copy may still be
+    // in the balancer's rotation for a moment).
+    const delays = (random: () => number, failures: number) => {
+      vi.useFakeTimers();
+      try {
+        const spy = vi.spyOn(globalThis, "setTimeout");
+        const sockets: FakeSocket[] = [];
+        createWsTransport({
+          url: "ws://runner:8484",
+          token: "boot-token",
+          sandboxId: "sb-test",
+          socketFactory: (url) => {
+            const socket = createFakeSocket(url);
+            sockets.push(socket);
+            return socket as unknown as WebSocket;
+          },
+          minBackoffMs: 500,
+          maxBackoffMs: 15_000,
+          maxAttempts: Infinity,
+          random,
+        });
+        sockets[0]!.open();
+        const seen: number[] = [];
+        for (let i = 0; i < failures; i += 1) {
+          spy.mockClear();
+          sockets[sockets.length - 1]!.fail();
+          const call = spy.mock.calls.find(([, ms]) => typeof ms === "number");
+          seen.push(Number(call?.[1]));
+          vi.runOnlyPendingTimers();
+        }
+        spy.mockRestore();
+        return seen;
+      } finally {
+        vi.useRealTimers();
+      }
+    };
+
+    it("stays inside [half, all] of each exponential step, the cap included", () => {
+      // MUTATION-PROOF: drop the jitter (low and high runs match), let it
+      // exceed the step (high run passes the cap), or start it at zero (low
+      // run redials at once).
+      // The steps: the minimum twice (the first retry after an open is
+      // floored at it), then doubling to the cap.
+      const steps = [500, 500, 1000, 2000, 4000, 8000, 15_000, 15_000];
+      const low = delays(() => 0, steps.length);
+      const high = delays(() => 0.999_999, steps.length);
+      expect(low).toEqual(steps.map((step) => step / 2));
+      for (const [i, ms] of high.entries()) {
+        expect(ms).toBeLessThanOrEqual(steps[i]!);
+        expect(ms).toBeGreaterThan(low[i]!);
+      }
+    });
+
+    it("spreads a fleet that lost its runner copy at the same instant", () => {
+      // Fifty sandboxes, one shared outage: their first redials must not
+      // land together. MUTATION-PROOF: ignore `random` and every delay is
+      // the same.
+      let seed = 1;
+      const lcg = () => {
+        seed = (seed * 1_103_515_245 + 12_345) % 2 ** 31;
+        return seed / 2 ** 31;
+      };
+      const firsts = Array.from({ length: 50 }, () => delays(lcg, 1)[0]!);
+      expect(new Set(firsts).size).toBeGreaterThan(40);
+    });
+  });
+
   it("ignores a superseded socket, so the retry budget cannot be reset", async () => {
     // A late `open` from a socket that has already been replaced would reset
     // `attempts` for a connection nobody uses — defeating the bound whose
@@ -226,6 +299,27 @@ describe("connection", () => {
       (raw) => (JSON.parse(raw) as { kind: string }).kind,
     );
     expect(after).toContain("progress");
+  });
+
+  it("drops port stream frames while the channel is down", async () => {
+    // The runner tears a sandbox's streams down when its channel drops, so a
+    // buffered port frame would replay against a stream nobody holds.
+    const { transport, sockets } = setup();
+    transport.send({ kind: "port.data", streamId: "s1", dataBase64: "AA==" });
+    transport.send({ kind: "ready", harness: "fake" });
+    sockets[0]!.open();
+
+    const kinds = sockets[0]!.sent.map(
+      (raw) => (JSON.parse(raw) as { kind: string }).kind,
+    );
+    expect(kinds).toContain("ready");
+    expect(kinds).not.toContain("port.data");
+
+    transport.send({ kind: "port.data", streamId: "s1", dataBase64: "AA==" });
+    const after = sockets[0]!.sent.map(
+      (raw) => (JSON.parse(raw) as { kind: string }).kind,
+    );
+    expect(after).toContain("port.data");
   });
 
   it("gives up after the attempt limit and ends the stream", async () => {
@@ -581,31 +675,53 @@ describe("resumable session", () => {
     expect(envelopes(sockets[2]!).map((e) => e.seq)).toEqual([3]);
   });
 
-  it("falls back to the bootstrap token ONCE when the session is refused, then gives up normally", async () => {
-    // Budget: the open resets attempts to 0; session refused = 1, bootstrap
-    // refused = 2, and 2 is the limit, so the stream ends right after.
+  it("keeps presenting its session after a refused reconnect: the bootstrap token is spent and can never help", async () => {
+    // A refused dial is what a closing or crashed runner copy answers while
+    // the balancer still routes to it, so a supervisor sees refusals on
+    // ordinary rolls. The token was used up by the first connect (a session
+    // is only ever handed on a connected socket), so falling back to it
+    // could only throw the one credential that still works away.
+    // Budget: the open resets attempts to 0; two refusals = 2, the limit.
     const { transport, sockets } = setup({ sandboxId: "sb-1", maxAttempts: 2 });
     sockets[0]!.open();
     sockets[0]!.emit(session("v1.k1.cred"));
     sockets[0]!.fail();
     await vi.waitFor(() => expect(sockets.length).toBe(2));
-    expect(new URL(sockets[1]!.url).searchParams.get("session")).toBe(
-      "v1.k1.cred",
-    );
-    // Refused (the key rotated away, or the container was recreated).
-    sockets[1]!.fail();
+    sockets[1]!.fail(); // refused: closed before it ever opened
     await vi.waitFor(() => expect(sockets.length).toBe(3));
-    // One bootstrap attempt with the original token …
-    expect(new URL(sockets[2]!.url).searchParams.get("token")).toBe(
-      "boot-token",
-    );
-    expect(new URL(sockets[2]!.url).searchParams.get("session")).toBeNull();
+    for (const socket of sockets.slice(1)) {
+      const params = new URL(socket.url).searchParams;
+      expect(params.get("session")).toBe("v1.k1.cred");
+      expect(params.get("sandbox")).toBe("sb-1");
+      expect(params.get("token")).toBeNull();
+    }
+    // The ordinary finite budget still ends a session nobody accepts.
     sockets[2]!.fail();
-    // … and then the ordinary finite budget ends the stream.
     const items: WorkItem[] = [];
     for await (const item of transport.incoming()) items.push(item);
     expect(items).toEqual([]);
     expect(sockets).toHaveLength(3);
+  });
+
+  it("resumes on the copy that accepts it after refusals, with its unacked tail", async () => {
+    const { transport, sockets } = setup({ sandboxId: "sb-1" });
+    sockets[0]!.open();
+    sockets[0]!.emit(session("v1.k1.cred"));
+    transport.send({ kind: "ready", harness: "x" });
+    sockets[0]!.fail();
+    await vi.waitFor(() => expect(sockets.length).toBe(2));
+    sockets[1]!.fail();
+    await vi.waitFor(() => expect(sockets.length).toBe(3));
+    sockets[2]!.fail();
+    await vi.waitFor(() => expect(sockets.length).toBe(4));
+    // Another copy takes it, under the same key: the session resumes and
+    // the unacked frame replays with its original seq.
+    expect(new URL(sockets[3]!.url).searchParams.get("session")).toBe(
+      "v1.k1.cred",
+    );
+    sockets[3]!.open();
+    sockets[3]!.emit(session("v1.k1.cred", 0));
+    expect(envelopes(sockets[3]!).map((e) => e.seq)).toEqual([1]);
   });
 
   it("still drops liveness heartbeats while down, session or not", () => {

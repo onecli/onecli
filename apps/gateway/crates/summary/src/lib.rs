@@ -39,9 +39,12 @@ mod gmail;
 mod google_calendar;
 mod google_drive;
 mod google_sheets;
+/// What an approved request actually did (see `outcome.rs`).
+pub mod outcome;
 mod outlook_calendar;
 mod outlook_mail;
 mod salesforce;
+mod twilio;
 mod zoom;
 
 pub use records::{ContextField, CurrentRecord, RecordResolver, Subject};
@@ -287,6 +290,7 @@ static SALESFORCE: salesforce::Salesforce = salesforce::Salesforce;
 static ZOOM: zoom::Zoom = zoom::Zoom;
 static GOOGLE_SHEETS: google_sheets::GoogleSheets = google_sheets::GoogleSheets;
 static GOOGLE_DRIVE: google_drive::GoogleDrive = google_drive::GoogleDrive;
+static TWILIO: twilio::Twilio = twilio::Twilio;
 
 /// Resolve the summarizer for a OneCLI provider id. `None` for providers
 /// without a dedicated summarizer — the caller falls back to the generic
@@ -301,6 +305,7 @@ fn summarizer(provider: &str) -> Option<&'static dyn RequestSummarizer> {
         "zoom" => Some(&ZOOM),
         "google-sheets" => Some(&GOOGLE_SHEETS),
         "google-drive" => Some(&GOOGLE_DRIVE),
+        "twilio" => Some(&TWILIO),
         _ => None,
     }
 }

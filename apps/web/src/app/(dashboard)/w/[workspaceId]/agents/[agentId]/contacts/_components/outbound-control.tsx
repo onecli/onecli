@@ -3,12 +3,10 @@
 import {
   Check,
   ChevronDown,
-  Loader2,
   ShieldCheck,
   Slash,
   UserCheck,
 } from "lucide-react";
-import { toast } from "sonner";
 import { Badge } from "@onecli/ui/components/badge";
 import { Button } from "@onecli/ui/components/button";
 import {
@@ -98,39 +96,23 @@ export const OutboundControl = ({
   }
 
   const mine = POLICIES[contact.policy];
-  const busy =
-    setPolicy.isPending && setPolicy.variables?.contactId === contact.id;
 
   const choose = (policy: Policy) => {
     if (policy === contact.policy) return;
-    setPolicy.mutate(
-      { contactId: contact.id, policy },
-      {
-        onSuccess: () =>
-          toast.success(
-            `${agentName} → ${subject}: ${POLICIES[policy].badge.toLowerCase()}`,
-          ),
-        onError: (err) =>
-          toast.error(err instanceof Error ? err.message : "Update failed"),
-      },
-    );
+    // Instant: the badge shows the new standing on click; a failure puts it
+    // back and says why. Never frozen while saving.
+    setPolicy.mutate({ contactId: contact.id, policy });
   };
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild disabled={busy}>
+      <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
           size="sm"
           className="gap-1.5 px-2"
           aria-label={`Can ${agentName} message ${subject} on its own: ${mine.badge.toLowerCase()}. Change`}
         >
-          {busy ? (
-            <Loader2
-              className="size-3.5 animate-spin motion-reduce:hidden"
-              aria-hidden
-            />
-          ) : null}
           <Badge variant="secondary" className={mine.badgeClass}>
             <mine.Icon className="size-3" aria-hidden />
             {mine.badge}

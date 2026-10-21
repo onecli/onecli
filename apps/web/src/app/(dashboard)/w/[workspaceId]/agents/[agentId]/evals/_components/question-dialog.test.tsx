@@ -49,7 +49,7 @@ vi.mock("@/lib/api/policy-visibility", () => ({
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 const { QuestionDialog } = await import("./question-dialog");
-const { CRITERIA_TEMPLATE } = await import("./eval-copy");
+const { CRITERIA_TEMPLATE, EXAMPLE_QUESTION } = await import("./eval-copy");
 
 const question: EvalQuestion = {
   id: "q-1",
@@ -179,6 +179,94 @@ describe("QuestionDialog", () => {
       kind: "custom",
       expectedApps: [],
     });
+  });
+
+  it("fills the selected check's example and focuses the question", async () => {
+    mount(null);
+    const user = userEvent.setup();
+    const questionField = screen.getByLabelText("Question");
+
+    await user.click(screen.getByRole("button", { name: "try an example" }));
+
+    expect(questionField).toHaveValue(EXAMPLE_QUESTION.text.question);
+    expect(questionField).toHaveFocus();
+    expect(screen.getByLabelText("Expected keywords")).toHaveValue(
+      EXAMPLE_QUESTION.text.expected,
+    );
+    expect(screen.queryByRole("button", { name: "try an example" })).toBeNull();
+  });
+
+  it("swaps an untouched example for the new check's one, and saves it", async () => {
+    api.addQuestion.mockResolvedValue({ ...question, id: "q-4" });
+    const { onClose } = mount(null);
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "try an example" }));
+    await user.click(screen.getByRole("radio", { name: /Number check/ }));
+    expect(screen.getByLabelText("Question")).toHaveValue(
+      EXAMPLE_QUESTION.numeric.question,
+    );
+    expect(screen.getByLabelText("Expected number")).toHaveValue(
+      EXAMPLE_QUESTION.numeric.expected,
+    );
+
+    await user.click(screen.getByRole("radio", { name: /Custom check/ }));
+    expect(screen.getByLabelText("Success criteria")).toHaveValue(
+      EXAMPLE_QUESTION.custom.expected,
+    );
+    await user.click(screen.getByRole("button", { name: "Add question" }));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(api.addQuestion).toHaveBeenCalledWith("ag-1", {
+      ...EXAMPLE_QUESTION.custom,
+      kind: "custom",
+      expectedApps: [],
+    });
+  });
+
+  it("keeps an edited example when the check changes", async () => {
+    mount(null);
+    const user = userEvent.setup();
+    const questionField = screen.getByLabelText("Question");
+
+    await user.click(screen.getByRole("button", { name: "try an example" }));
+    await user.type(questionField, " Today");
+    await user.click(screen.getByRole("radio", { name: /Number check/ }));
+
+    expect(questionField).toHaveValue(
+      `${EXAMPLE_QUESTION.text.question} Today`,
+    );
+    expect(screen.getByLabelText("Expected number")).toHaveValue(
+      EXAMPLE_QUESTION.text.expected,
+    );
+  });
+
+  it("offers no example over typed text", async () => {
+    mount(null);
+    const user = userEvent.setup();
+
+    await user.type(screen.getByLabelText("Question"), "Mine");
+
+    expect(screen.queryByRole("button", { name: "try an example" })).toBeNull();
+  });
+
+  it("offers no example when editing a question", () => {
+    mount(question);
+    expect(screen.queryByRole("button", { name: "try an example" })).toBeNull();
+  });
+
+  it("keeps a saved question's text when its check changes, even if it matches an example", async () => {
+    mount({ ...question, ...EXAMPLE_QUESTION.text, kind: "text" });
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("radio", { name: /Number check/ }));
+
+    expect(screen.getByLabelText("Question")).toHaveValue(
+      EXAMPLE_QUESTION.text.question,
+    );
+    expect(screen.getByLabelText("Expected number")).toHaveValue(
+      EXAMPLE_QUESTION.text.expected,
+    );
   });
 
   it("moves between check kinds with the arrow keys", async () => {

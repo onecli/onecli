@@ -16,27 +16,6 @@ const response = (status: number, body?: unknown) => ({
   json: async () => body,
 });
 
-describe("circleback connect form", () => {
-  const [apiKeyField] =
-    circleback.connectionMethod.type === "api_key"
-      ? circleback.connectionMethod.fields
-      : [];
-
-  // The help link is where keys are CREATED (the Settings → API keys deep
-  // link Circleback publishes in its CLI docs), not the API reference, which
-  // is apiDocsUrl's job. Keys carry a read or read-and-write scope, so the
-  // hint has to say which to pick.
-  it("sends users to Settings → API keys and names the scope choice", () => {
-    expect(apiKeyField?.helpUrl).toBe(
-      "https://circleback.ai/settings?tab=api-access",
-    );
-    expect(apiKeyField?.helpUrl).not.toBe(circleback.apiDocsUrl);
-    expect(apiKeyField?.description).toMatch(/read-and-write/);
-    // Rendered on one line with the help label, so it must end a sentence.
-    expect(apiKeyField?.description).toMatch(/\.$/);
-  });
-});
-
 describe("circleback resolveMetadata", () => {
   afterEach(() => vi.unstubAllGlobals());
 

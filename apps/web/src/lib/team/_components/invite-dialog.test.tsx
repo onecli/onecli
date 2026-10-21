@@ -36,7 +36,7 @@ const invite = async (emailed: boolean) => {
   create.mockImplementation((_input, opts) =>
     opts?.onSuccess?.({ id: "inv-1", joinUrl: JOIN_URL, emailed }),
   );
-  const user = userEvent.setup();
+  const user = userEvent.setup({ delay: null });
   render(<InviteDialog open onOpenChange={() => {}} />);
   await user.type(
     screen.getByPlaceholderText("name@example.com"),

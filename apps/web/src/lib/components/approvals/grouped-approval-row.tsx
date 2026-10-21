@@ -1,16 +1,19 @@
 "use client";
 
-import { Check, Info, X } from "lucide-react";
+import { Check, Info, TriangleAlert, X } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { cn } from "@onecli/ui/lib/utils";
 import type {
   ApprovalDecisionInput,
   ApprovalDetail,
+  GroupedOutcome,
   PendingApproval,
-  SettledOutcome,
 } from "@/lib/api/approvals";
 import { ApprovalLink } from "./approval-link";
 import { rowsBesideTitle, subjectRow } from "./approval-rows";
+import { withDecidedVia } from "./decided-via";
+import { approvalResultLine } from "@onecli/api/lib/approval-result";
+import type { ApprovalResult } from "@/lib/api/approval-outcomes";
 
 /** Fields a row shows: the record's identifying values, never all of it. */
 const ROW_FIELDS = 3;
@@ -68,7 +71,7 @@ export const groupRowFields = (
 };
 
 const OUTCOME_BADGE: Record<
-  SettledOutcome,
+  GroupedOutcome,
   { label: string; icon: typeof Check | null; className: string }
 > = {
   approved: {
@@ -106,6 +109,8 @@ export const GroupedApprovalRow = ({
   odd,
   busy,
   outcome,
+  via,
+  result,
   onDecide,
   onDetails,
 }: {
@@ -114,7 +119,11 @@ export const GroupedApprovalRow = ({
   /** Not the card's main action: flagged so it can't hide in the batch. */
   odd: boolean;
   busy: boolean;
-  outcome?: SettledOutcome;
+  outcome?: GroupedOutcome;
+  /** Where a person decided it (`slack`, `web`), when known. */
+  via?: string;
+  /** What an approved request actually did upstream, when known. */
+  result?: ApprovalResult;
   onDecide: (decision: ApprovalDecisionInput) => void;
   onDetails: () => void;
 }) => {
@@ -126,6 +135,11 @@ export const GroupedApprovalRow = ({
     (layout.ownRecord && approval.summary?.subject?.verb) || action;
   const name = fields[0]?.value ?? action;
   const badge = outcome ? OUTCOME_BADGE[outcome] : null;
+  // An approval that did not do what it said: the row says so (the short
+  // count on the badge, the reason on hover).
+  const resultLine =
+    outcome === "approved" ? approvalResultLine(result) : undefined;
+  const failure = resultLine?.failed ? resultLine : undefined;
   return (
     <li
       className={cn(
@@ -162,13 +176,29 @@ export const GroupedApprovalRow = ({
       {badge ? (
         <span
           role="status"
+          title={failure?.text}
           className={cn(
             "inline-flex h-6 shrink-0 items-center gap-1 rounded-md border px-1.5 text-xs font-medium",
-            badge.className,
+            failure
+              ? "border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-300"
+              : badge.className,
           )}
         >
-          {badge.icon && <badge.icon aria-hidden="true" className="size-3.5" />}
-          {badge.label}
+          {failure ? (
+            <TriangleAlert aria-hidden="true" className="size-3.5" />
+          ) : (
+            badge.icon && <badge.icon aria-hidden="true" className="size-3.5" />
+          )}
+          {outcome ? withDecidedVia(badge.label, outcome, via) : badge.label}
+          {failure && (
+            <>
+              {/* The badge fits the count; the whole line (with the
+                  upstream's reason) is the tooltip, and what a screen reader
+                  reads, so it never depends on a mouse hover. */}
+              <span aria-hidden="true"> · {failure.short}</span>
+              <span className="sr-only"> · {failure.text}</span>
+            </>
+          )}
         </span>
       ) : (
         <>

@@ -1,9 +1,23 @@
 "use client";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 import { skills } from "@/lib/api";
-import type { Skill, SkillInput, SkillPatch } from "@/lib/api";
+import type { Skill, SkillInput, SkillPatch, SkillSummary } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
+import {
+  combineRollbacks,
+  listItem,
+  patchItem,
+  throughField,
+  wholeValue,
+} from "@/lib/api/optimistic";
+import { useOptimisticMutation } from "@/hooks/use-optimistic-mutation";
+import { toast } from "sonner";
 
 // Skill mutations are headless (the crons/memories convention): the section
 // owns the toasts. No `invalidateGatewayCache()` — the gateway reads no
@@ -36,9 +50,8 @@ export const useCreateSkill = () => {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (input: SkillInput) => skills.create(input),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.skills.all() });
-    },
+    // Returned: Saving… lasts until the new row is listed.
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.skills.all() }),
   });
 };
 
@@ -54,17 +67,7 @@ export const useUpdateSkill = () => {
       qc.setQueryData(queryKeys.skills.detail(skillId), (prev?: Skill) =>
         prev ? { ...prev, ...updated } : updated,
       );
-      qc.invalidateQueries({ queryKey: queryKeys.skills.all() });
-    },
-  });
-};
-
-export const useDeleteSkill = () => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (skillId: string) => skills.remove(skillId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.skills.all() });
+      return qc.invalidateQueries({ queryKey: queryKeys.skills.all() });
     },
   });
 };
@@ -87,9 +90,7 @@ export const useCreateOrgSkill = () => {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (input: Omit<SkillInput, "agentId">) => skills.orgCreate(input),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.skills.all() });
-    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.skills.all() }),
   });
 };
 
@@ -102,17 +103,92 @@ export const useUpdateOrgSkill = () => {
       qc.setQueryData(queryKeys.skills.orgDetail(skillId), (prev?: Skill) =>
         prev ? { ...prev, ...updated } : updated,
       );
-      qc.invalidateQueries({ queryKey: queryKeys.skills.all() });
+      return qc.invalidateQueries({ queryKey: queryKeys.skills.all() });
     },
   });
 };
 
-export const useDeleteOrgSkill = () => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (skillId: string) => skills.orgRemove(skillId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.skills.all() });
-    },
-  });
+const skillInList = (skillId: string) =>
+  throughField<{ skills: SkillSummary[] }, "skills", SkillSummary>(
+    "skills",
+    listItem((s) => s.id === skillId),
+  );
+
+const skillName = (qc: QueryClient, skillId: string) => {
+  for (const [, data] of qc.getQueriesData<{ skills: SkillSummary[] }>({
+    queryKey: queryKeys.skills.all(),
+  })) {
+    const found = skillInList(skillId).get(data ?? { skills: [] });
+    if (found) return found.name;
+  }
+  return undefined;
 };
+
+/**
+ * Pause / resume a skill from its row's switch, instantly, on either door
+ * (the agent/workspace list or the org list): the click patches the skill
+ * in every cached list and detail that holds it.
+ */
+export const useSetSkillEnabled = (isOrg: boolean) =>
+  useOptimisticMutation<Skill, { skillId: string; enabled: boolean }>({
+    family: "skills",
+    itemKey: ({ skillId }) => `skill:${skillId}`,
+    write: ({ skillId, enabled }) =>
+      isOrg
+        ? skills.orgUpdate(skillId, { enabled })
+        : skills.update(skillId, { enabled }),
+    apply: (qc, { skillId, enabled }) =>
+      combineRollbacks(
+        patchItem(qc, queryKeys.skills.list(), skillInList(skillId), (s) =>
+          s ? { ...s, enabled } : s,
+        ),
+        patchItem(qc, queryKeys.skills.org(), skillInList(skillId), (s) =>
+          s ? { ...s, enabled } : s,
+        ),
+        patchItem(
+          qc,
+          isOrg
+            ? queryKeys.skills.orgDetail(skillId)
+            : queryKeys.skills.detail(skillId),
+          wholeValue<Skill>(),
+          (s) => (s ? { ...s, enabled } : s),
+        ),
+      ),
+    refresh: (qc) => qc.invalidateQueries({ queryKey: queryKeys.skills.all() }),
+    failure: (qc, { skillId, enabled }) =>
+      `Couldn't ${enabled ? "resume" : "pause"} "${skillName(qc, skillId) ?? "the skill"}"`,
+  });
+
+/** Delete a skill, instantly, from either door: it leaves every cached
+ * list on click (the dialog closes with it); the confirmation follows the
+ * server, and a failure puts the row back. */
+const useRemoveSkill = (isOrg: boolean) =>
+  useOptimisticMutation<void, string>({
+    family: "skills",
+    itemKey: (skillId) => `skill:${skillId}`,
+    write: (skillId) =>
+      isOrg ? skills.orgRemove(skillId) : skills.remove(skillId),
+    apply: (qc, skillId) =>
+      combineRollbacks(
+        patchItem(
+          qc,
+          queryKeys.skills.list(),
+          skillInList(skillId),
+          () => undefined,
+        ),
+        patchItem(
+          qc,
+          queryKeys.skills.org(),
+          skillInList(skillId),
+          () => undefined,
+        ),
+      ),
+    succeeded: () => toast.success("Skill deleted"),
+    refresh: (qc) => qc.invalidateQueries({ queryKey: queryKeys.skills.all() }),
+    failure: (qc, skillId) =>
+      `Couldn't delete "${skillName(qc, skillId) ?? "the skill"}"`,
+  });
+
+export const useDeleteSkill = () => useRemoveSkill(false);
+
+export const useDeleteOrgSkill = () => useRemoveSkill(true);

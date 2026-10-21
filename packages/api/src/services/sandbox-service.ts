@@ -2,10 +2,16 @@ import { db } from "@onecli/db";
 import type { RunnerEvent, SandboxStartPayload } from "@onecli/agent-protocol";
 import { signalWork } from "./due-work";
 import { failStrandedTurns, reviveColdTurns } from "./turn-service";
+import {
+  closeRuntimeInterval,
+  openRuntimeInterval,
+  type IntervalEndReason,
+} from "./runtime-ledger";
 import { buildContainerConfig } from "./container-config-service";
 import { channelPresencesForRender } from "./channels/agent-channel-service";
 import { peersForRender } from "./channels/agent-peer-roster";
 import { connectionsForRender } from "./agent-connections-render";
+import { previewRelaunchesFor } from "./sandbox-port-service";
 import { resolveAgentModel } from "../llm/resolve";
 import {
   AGENT_RESTARTED_MESSAGE,
@@ -63,6 +69,7 @@ export const buildSandboxStartPayload = async (
   const sandbox = await db.sandbox.findFirst({
     where: { id: sandboxId, runnerId },
     select: {
+      wakeReason: true,
       agent: {
         select: {
           id: true,
@@ -129,6 +136,15 @@ export const buildSandboxStartPayload = async (
   // the `connections` capability — so it calls the org's real host instead
   // of guessing a generic one.
   const connections = await connectionsForRender(agent.id);
+  // The shares' relaunch commands, ONLY when a preview hit is what woke the
+  // box (the relay's wake stamps the reason; the ready report clears it). A
+  // message or a schedule wakes a quiet box: its apps stay down until the
+  // agent or a viewer wants them, which keeps those wakes fast and the
+  // box's awake time honest.
+  const previewRelaunch =
+    sandbox.wakeReason === "preview"
+      ? await previewRelaunchesFor(agent.id)
+      : [];
 
   return {
     ok: true,
@@ -160,6 +176,7 @@ export const buildSandboxStartPayload = async (
       channels,
       peers,
       connections,
+      ...(previewRelaunch.length > 0 && { previewRelaunch }),
       warnings: config.warnings ?? [],
     },
   };
@@ -177,14 +194,55 @@ export type SandboxLifecycleEvent = Extract<
 >;
 
 /**
+ * The ledger's tag for a run the runner just reported over: the stop
+ * claim's own reason when the control plane asked for this stop (`idle`,
+ * `evict`, `restart`), else the runner's word (`stopped` for a stop nobody
+ * claimed, `failed` for a death). Read inside the closing transaction so the
+ * tag and the close agree.
+ */
+const intervalEndReasonFor = async (
+  tx: Pick<typeof db, "sandbox">,
+  sandboxId: string,
+  status: "stopped" | "failed",
+): Promise<IntervalEndReason> => {
+  if (status === "failed") return "failed";
+  const row = await tx.sandbox.findUnique({
+    where: { id: sandboxId },
+    select: { stopReason: true },
+  });
+  switch (row?.stopReason) {
+    case "restart":
+      return "restart";
+    case "idle":
+    case "evict":
+      return row.stopReason;
+    default:
+      return "stopped";
+  }
+};
+
+/**
  * Apply one runner-reported lifecycle event. Fenced by `runnerId` via
  * `updateMany` — an event naming a sandbox this runner does not own matches
  * zero rows and is silently inert (never an error that would tell a caller
  * whether the id exists).
+ *
+ * From a runner running as several copies (`replicaId` set), each report is
+ * also fenced to the copy entitled to make it:
+ * - `supervisor.ready` speaks for the supervisor, so only the copy holding
+ *   its channel may report it;
+ * - a status naming the container it observed (`observedContainerRef`)
+ *   applies only while that is still the sandbox's container, whichever
+ *   copy observed it;
+ * - any other status (a start's progress or failure, a stop's outcome) is
+ *   the reporting copy's own lifecycle work, and applies only while that
+ *   copy still owns the sandbox's lifecycle, so a copy that lost ownership
+ *   can never overwrite the new owner's start.
  */
 export const applyRunnerEvent = async (
   runnerId: string,
   event: SandboxLifecycleEvent,
+  replicaId?: string,
 ): Promise<void> => {
   if (event.kind === "home.synced") {
     // The sync ack (step 9): applied only where it can still be true — the
@@ -219,14 +277,31 @@ export const applyRunnerEvent = async (
 
   if (event.kind === "supervisor.ready") {
     const { count } = await db.sandbox.updateMany({
-      where: { id: event.sandboxId, runnerId },
-      data: { status: "running", lastActiveAt: new Date() },
+      where: {
+        id: event.sandboxId,
+        runnerId,
+        ...(replicaId !== undefined && { channelReplicaId: replicaId }),
+      },
+      data: {
+        status: "running",
+        lastActiveAt: new Date(),
+        // The boot this wake asked for has happened: the reason is spent
+        // (the start payload read it; a later wake must state its own).
+        wakeReason: null,
+      },
     });
     // A turn queued while this sandbox was booting is dispatchable exactly
     // now — wake the held poll rather than making it wait out a re-check.
     if (count > 0) signalWork();
     return;
   }
+
+  // Which copy's report this is (see the function doc). Container-observed
+  // reports carry their own fence below; every other status is the owner's.
+  const reporterFence =
+    replicaId !== undefined && event.observedContainerRef === undefined
+      ? { ownerReplicaId: replicaId }
+      : {};
 
   // The container/home ref is written UNCONDITIONALLY whenever the event
   // carries one, split out of the status transition below (step 10). The ref
@@ -238,66 +313,109 @@ export const applyRunnerEvent = async (
   // `container_ref` load-bearing (keep-awake + process liveness), so it must
   // land on its own fence (id + runnerId) rather than ride the guarded write.
   if (event.containerRef !== undefined || event.homeRef !== undefined) {
-    await db.sandbox.updateMany({
-      where: { id: event.sandboxId, runnerId },
-      data: {
-        ...(event.containerRef !== undefined && {
-          containerRef: event.containerRef,
-        }),
-        ...(event.homeRef !== undefined && {
-          homeRef: event.homeRef,
-        }),
-      },
+    await db.$transaction(async (tx) => {
+      const { count } = await tx.sandbox.updateMany({
+        where: { id: event.sandboxId, runnerId, ...reporterFence },
+        data: {
+          ...(event.containerRef !== undefined && {
+            containerRef: event.containerRef,
+          }),
+          ...(event.homeRef !== undefined && {
+            homeRef: event.homeRef,
+          }),
+        },
+      });
+      // The ledger opens on the first report that names the container, in
+      // the same transaction as the ref it is keyed on; idempotent on the
+      // ref, so the runner's retries and a second copy's observation of
+      // the same start never open a second run.
+      if (count > 0 && event.containerRef !== undefined) {
+        await openRuntimeInterval(tx, event.sandboxId, event.containerRef);
+      }
     });
   }
 
-  const { count } = await db.sandbox.updateMany({
-    where: {
-      id: event.sandboxId,
-      runnerId,
-      // A lifecycle report describes something the runner OBSERVED, and by
-      // the time it lands the control plane may have moved on. Two of them
-      // are therefore only applied where they can still be true:
-      //
-      // `stopped` — applying it over a fresh start silently undoes that
-      // start, and since the runner re-observes the same dead container every
-      // reconcile tick, the two then fight forever: start, knocked back,
-      // start, knocked back. Live, that pinned a sandbox and its turn for six
-      // minutes.
-      //
-      // `starting` — the claim itself is what set `starting`, so a sandbox
-      // already reading `running` has been reported ready by its supervisor
-      // and this report is from the older start batch. The two travel by
-      // different paths (the poll's reply vs the supervisor's channel) and
-      // are not ordered against each other, so the late one would drag a
-      // live sandbox back and strand every turn until the 5-minute stale
-      // claim expired.
-      //
-      // Everything else is a fact the runner alone knows and still wins.
-      ...(event.status === "stopped" && {
-        status: { in: ["running", "stopping"] },
-      }),
-      ...(event.status === "starting" && { status: { not: "running" } }),
-      // `failed` — reports are fire-and-forget with retries, so a DELAYED
-      // duplicate (the runner's reconcile re-observing a corpse) can land
-      // after a successful re-start reached `running`. Unguarded it would
-      // knock the live sandbox back to `failed`, strand its turns through
-      // the arm below, and park the queue. Every legitimate failed reporter
-      // (start catch, capacity refusal, stop failure, boot-crash
-      // classification) reports while the row is starting/stopping — the
-      // guard costs none of them. (step 4)
-      ...(event.status === "failed" && { status: { not: "running" } }),
-    },
-    data: {
-      status: event.status,
-      // containerRef/homeRef are NOT written here — they land in the
-      // unconditional write above, off the status guard (step 10), so a
-      // ready that raced ahead of the `starting` report can never cost us
-      // the ref.
-      // A container that reached `running` on its own (a restart with no new
-      // turn) still counts as active, so the idle clock starts from here.
-      ...(event.status === "running" && { lastActiveAt: new Date() }),
-    },
+  const { count } = await db.$transaction(async (tx) => {
+    const updated = await tx.sandbox.updateMany({
+      where: {
+        id: event.sandboxId,
+        runnerId,
+        ...reporterFence,
+        // A report about ONE container (reconcile saw it dead, vanished or
+        // channelless) applies only while it is still the sandbox's container.
+        // With several runner copies, one copy's observation can arrive just
+        // after another copy started a fresh container; it must not knock the
+        // fresh one down. Reports without it (a start's own progress, a
+        // supervisor's own word) keep today's guards only.
+        ...(event.observedContainerRef !== undefined && {
+          containerRef: event.observedContainerRef,
+        }),
+        // A lifecycle report describes something the runner OBSERVED, and by
+        // the time it lands the control plane may have moved on. Two of them
+        // are therefore only applied where they can still be true:
+        //
+        // `stopped` — applying it over a fresh start silently undoes that
+        // start, and since the runner re-observes the same dead container every
+        // reconcile tick, the two then fight forever: start, knocked back,
+        // start, knocked back. Live, that pinned a sandbox and its turn for six
+        // minutes.
+        //
+        // `starting` — the claim itself is what set `starting`, so a sandbox
+        // already reading `running` has been reported ready by its supervisor
+        // and this report is from the older start batch. The two travel by
+        // different paths (the poll's reply vs the supervisor's channel) and
+        // are not ordered against each other, so the late one would drag a
+        // live sandbox back and strand every turn until the 5-minute stale
+        // claim expired.
+        //
+        // Everything else is a fact the runner alone knows and still wins.
+        ...(event.status === "stopped" && {
+          status: { in: ["running", "stopping"] },
+        }),
+        ...(event.status === "starting" && { status: { not: "running" } }),
+        // `failed` — reports are fire-and-forget with retries, so a DELAYED
+        // duplicate (the runner's reconcile re-observing a corpse) can land
+        // after a successful re-start reached `running`. Unguarded it would
+        // knock the live sandbox back to `failed`, strand its turns through
+        // the arm below, and park the queue. Every legitimate failed reporter
+        // (start catch, capacity refusal, stop failure, boot-crash
+        // classification) reports while the row is starting/stopping — the
+        // guard costs none of them. (step 4)
+        ...(event.status === "failed" && { status: { not: "running" } }),
+      },
+      data: {
+        status: event.status,
+        // containerRef/homeRef are NOT written here — they land in the
+        // unconditional write above, off the status guard (step 10), so a
+        // ready that raced ahead of the `starting` report can never cost us
+        // the ref.
+        // A container that reached `running` on its own (a restart with no new
+        // turn) still counts as active, so the idle clock starts from here.
+        ...(event.status === "running" && { lastActiveAt: new Date() }),
+        // A box that is not running listens on nothing: the discovered ports
+        // go with the container, so the Ports section never offers a share
+        // of a port that died with it. Its screen goes with it too.
+        ...(event.status !== "running" && {
+          listeningPorts: [],
+          desktopViewable: null,
+        }),
+      },
+    });
+    // The run is over: close its ledger row in the same transaction as the
+    // status that ends it (guarded like the status, so a stale duplicate
+    // report closes nothing). The stop claim's own reason is the honest
+    // tag when there is one; a stop nobody claimed is the runner's word.
+    if (
+      updated.count > 0 &&
+      (event.status === "stopped" || event.status === "failed")
+    ) {
+      await closeRuntimeInterval(
+        tx,
+        event.sandboxId,
+        await intervalEndReasonFor(tx, event.sandboxId, event.status),
+      );
+    }
+    return updated;
   });
 
   /**
@@ -485,22 +603,6 @@ const applyStartFailureReason = async (
 };
 
 /**
- * The sandboxes this runner should be hosting — the reconcile truth — with
- * what the control plane currently believes about each. The ids are the reap
- * authority (anything labeled ours and absent is destroyed); the statuses
- * feed the vanished-pod arm (a sandbox believed `running` with no backend
- * snapshot died out-of-band and must be reported `stopped`).
- */
-export const listRunnerSandboxes = async (
-  runnerId: string,
-): Promise<Array<{ id: string; status: string }>> => {
-  return db.sandbox.findMany({
-    where: { runnerId },
-    select: { id: true, status: true },
-  });
-};
-
-/**
  * The orphan sweep's authority (step 13): which of these ids exist NOWHERE —
  * deliberately unfenced by runner, because a stale-label orphan is by
  * definition labeled with some OTHER (usually dead) runner's id. Existence is
@@ -554,6 +656,14 @@ export const requestSandboxRespawn = async (
       data: { status: "unprovisioned" },
     });
     if (count === 0) return { revived: 0, stranded: 0 };
+    // The flip IS the end of this run (the runner recreates the container
+    // from scratch); close its ledger row here, not on the stop report the
+    // old container may or may not manage to send.
+    const sandbox = await tx.sandbox.findUnique({
+      where: { agentId },
+      select: { id: true },
+    });
+    if (sandbox) await closeRuntimeInterval(tx, sandbox.id, "respawn");
 
     /**
      * The respawn destroys the container, and with it every harness session

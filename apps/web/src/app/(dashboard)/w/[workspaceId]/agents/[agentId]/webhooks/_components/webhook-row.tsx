@@ -1,7 +1,6 @@
 "use client";
 
 import { Check, Copy, Pencil } from "lucide-react";
-import { toast } from "sonner";
 import type {
   WebhookDisabledReason,
   WebhookOutcome,
@@ -9,7 +8,7 @@ import type {
 import { Badge } from "@onecli/ui/components/badge";
 import { Button } from "@onecli/ui/components/button";
 import { Switch } from "@onecli/ui/components/switch";
-import { useUpdateWebhook } from "@/hooks/use-webhooks";
+import { useSetWebhookEnabled } from "@/hooks/use-webhooks";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import type { AgentWebhook } from "@/lib/api";
 
@@ -46,7 +45,7 @@ const statusLabel = (hook: AgentWebhook): string => {
 };
 
 export const WebhookRow = ({ agentId, hook, onEdit }: WebhookRowProps) => {
-  const update = useUpdateWebhook(agentId);
+  const setEnabled = useSetWebhookEnabled(agentId);
   const { copied, copy } = useCopyToClipboard();
 
   return (
@@ -90,19 +89,11 @@ export const WebhookRow = ({ agentId, hook, onEdit }: WebhookRowProps) => {
         <Switch
           size="sm"
           checked={hook.enabled}
-          disabled={update.isPending}
+          // Instant, never frozen while saving: the switch IS the status, so
+          // its move is the confirmation; a failure puts it back and says why.
           aria-label={`${hook.enabled ? "Pause" : "Resume"} ${hook.name}`}
           onCheckedChange={(next) =>
-            update.mutate(
-              { id: hook.id, input: { enabled: next } },
-              {
-                onSuccess: () =>
-                  toast.success(
-                    next ? `"${hook.name}" resumed` : `"${hook.name}" paused`,
-                  ),
-                onError: (error) => toast.error(error.message),
-              },
-            )
+            setEnabled.mutate({ id: hook.id, enabled: next })
           }
         />
       </div>

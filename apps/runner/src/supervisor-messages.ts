@@ -9,6 +9,7 @@ import {
   type SupervisorMessage,
   type WorkItem,
 } from "@onecli/agent-protocol";
+import type { PortHub } from "./port-hub";
 import type { TurnEventCollector } from "./turn-events";
 import { log } from "./log";
 
@@ -53,16 +54,17 @@ export const FILE_UPLOAD_STALE_MS = 60_000;
  */
 
 export interface SupervisorMessageHandlerDeps {
-  /** Queue an event for the control plane (ordered, bounded — see index.ts). */
+  /** Queue an event for the control plane (ordered, bounded, and lossy:
+   * see report-chain.ts). */
   report: (event: RunnerEvent) => void;
   collector: Pick<TurnEventCollector, "add" | "flush">;
   /**
    * Relay a platform-tool call to the control plane and return its answer
    * (step 7). Awaited on its OWN path, never through `report` — the report
-   * chain is ordered-but-lossy by design (drops under backpressure, swallows
-   * failed posts), which is fine for advisory events and fatal for an RPC:
-   * a dropped event costs a reconnect, a dropped reply hangs a tool call
-   * into its timeout.
+   * chain is ordered-but-lossy by design (drops under backpressure, and
+   * re-sends nothing but a provably-unsent turn end), which is fine for
+   * advisory events and fatal for an RPC: a dropped event costs a
+   * reconnect, a dropped reply hangs a tool call into its timeout.
    */
   toolCall: (
     sandboxId: string,
@@ -101,6 +103,17 @@ export interface SupervisorMessageHandlerDeps {
    * no record of this sandbox's container, so the fact cannot be stamped.
    */
   containerRefOf: (sandboxId: string) => string | undefined;
+  /**
+   * Sandbox ports (plans/sandbox-ports.md §7): the byte-stream hub. Port
+   * frames are routed straight to it on the ws message path (never the lossy
+   * report chain — they are a live pipe, not events). Optional so callers
+   * that don't serve previews (tests, self-host) are unaffected; frames then
+   * drop, and a supervisor never gets asked to open a stream anyway.
+   */
+  portHub?: Pick<PortHub, "handle">;
+  /** A supervisor finished booting: arm what only a live channel can hold
+   * (the port allowlist). Fire-and-forget; never blocks the report chain. */
+  onReady?: (sandboxId: string) => void;
 }
 
 /** A reassembled, checksum-verified outbound file, ready for the api. */
@@ -151,6 +164,8 @@ export const createSupervisorMessageHandler = ({
   uploadAttachment,
   sendToSandbox,
   containerRefOf,
+  portHub,
+  onReady,
   now = () => Date.now(),
 }: SupervisorMessageHandlerDeps) => {
   const relayToolCall = async (
@@ -461,6 +476,7 @@ export const createSupervisorMessageHandler = ({
         break;
       case "ready":
         report({ kind: "supervisor.ready", sandboxId });
+        onReady?.(sandboxId);
         break;
       case "home.synced":
         // The sync ack (step 9) rides the ordered report chain. `sandboxId`
@@ -513,6 +529,12 @@ export const createSupervisorMessageHandler = ({
         // batches, and a control plane that predates the kind rejects one
         // heartbeat's POST instead of poisoning a shared batch. As with
         // `event`, `sandboxId` is the authenticated channel's.
+        //
+        // The turn's buffered events go FIRST: the control plane stamps only
+        // a running turn, and the first beat arrives right behind the
+        // `turn.started` still sitting in the buffer. Posted ahead of it,
+        // that beat would land on a turn not yet running and stamp nothing.
+        collector.flush(message.turnId);
         report({
           kind: "turn.progress",
           sandboxId,
@@ -555,26 +577,82 @@ export const createSupervisorMessageHandler = ({
           ...(message.followUps && { followUps: message.followUps }),
         });
         break;
-      case "unhealthy":
+      case "unhealthy": {
         // A sandbox that says it can no longer serve turns IS stopped, as far
         // as the control plane is concerned — the supervisor ends its process
         // right after saying so, which stops the container.
         //
-        // `stopped` rather than `failed`, deliberately: it is the same report
-        // `deliverTurn` makes for an unreachable sandbox, so it rejoins the
+        // `stopped` rather than `failed`, deliberately: it rejoins the
         // ordinary wake path with no retry backoff, and it fails the turns
         // whose harness session just went away.
+        //
+        // Stamped with the container this socket authenticated as: the copy
+        // holding the socket need not own the sandbox's lifecycle, and the
+        // control plane applies an observed-container report only while it
+        // is still the sandbox's container. No container known means no
+        // socket: nothing true to say.
         log("warn", "sandbox reported itself unhealthy", {
           sandboxId,
           reason: message.reason,
         });
+        const containerRef = containerRefOf(sandboxId);
+        if (!containerRef) break;
         report({
           kind: "sandbox.status",
           sandboxId,
           status: "stopped",
           error: message.reason,
+          observedContainerRef: containerRef,
         });
         break;
+      }
+      case "port.opened":
+      case "port.data":
+      case "port.ack":
+      case "port.close":
+      case "port.error":
+        // A live byte pipe: straight to the hub, synchronously. `sandboxId`
+        // is the authenticated channel's — the hub fences streams on it.
+        portHub?.handle(sandboxId, message);
+        break;
+      case "ports.state": {
+        // Port discovery (plans/sandbox-ports.md §7): same chain and same
+        // stamping rule as process.state. The control plane keys the set on
+        // the sandbox row, so the dashboard reads it from the DB in every
+        // edition. An unstampable frame is dropped; the ~30s re-send heals it.
+        const containerRef = containerRefOf(sandboxId);
+        if (!containerRef) {
+          log("warn", "ports state with no known container; dropping", {
+            sandboxId,
+          });
+          break;
+        }
+        report({
+          kind: "sandbox.ports",
+          sandboxId,
+          containerRef,
+          ports: message.ports,
+        });
+        break;
+      }
+      case "desktop.state": {
+        // Desktop presence: the same chain and stamping rule as
+        // ports.state; it rides the same re-send beat.
+        const containerRef = containerRefOf(sandboxId);
+        if (!containerRef) {
+          log("warn", "desktop state with no known container; dropping", {
+            sandboxId,
+          });
+          break;
+        }
+        report({
+          kind: "sandbox.desktop",
+          sandboxId,
+          containerRef,
+          viewable: message.viewable,
+        });
+        break;
+      }
       default: {
         const unreachable: never = message;
         throw new Error(

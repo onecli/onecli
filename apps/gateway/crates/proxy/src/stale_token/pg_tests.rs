@@ -292,6 +292,7 @@ impl World {
                     name: "authorization".to_string(),
                     value: format!("Bearer {token}"),
                 }],
+                secret: None,
             }],
             pending_injections: Vec::new(),
             policy_rules_v2: db::PolicyV2Rules::default(),
