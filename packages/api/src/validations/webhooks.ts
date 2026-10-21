@@ -85,14 +85,57 @@ const fields = {
 export const createWebhookSchema = z.object(fields).strict();
 export type WebhookInput = z.infer<typeof createWebhookSchema>;
 
+/** The editable fields, shared by the dashboard's PATCH and the agent's
+ * update_webhook, so the two doors accept exactly the same values. */
+const updateFields = {
+  name: fields.name.optional(),
+  instructions: fields.instructions.optional(),
+  enabled: z.boolean().optional(),
+};
+
+const NOTHING_TO_UPDATE =
+  "Nothing to update: pass name, instructions, or enabled";
+const hasChange = (v: Partial<Record<keyof typeof updateFields, unknown>>) =>
+  v.name !== undefined ||
+  v.instructions !== undefined ||
+  v.enabled !== undefined;
+
 /** PATCH /v1/agents/:agentId/webhooks/:webhookId — partial; `enabled` is the
  * pause switch (re-enabling clears an auto-disable reason). */
 export const updateWebhookSchema = z
-  .object({
-    name: fields.name.optional(),
-    instructions: fields.instructions.optional(),
-    enabled: z.boolean().optional(),
-  })
+  .object(updateFields)
   .strict()
-  .refine((v) => Object.keys(v).length > 0, "Nothing to update");
+  .refine(hasChange, NOTHING_TO_UPDATE);
 export type WebhookUpdate = z.infer<typeof updateWebhookSchema>;
+
+// ── The agent's webhook tools (list_webhooks, webhook_runs, update_webhook) ──
+// The agent manages EXISTING webhooks only: it never mints one (that would
+// hand it a public URL it could leak) and never sees a URL or token.
+
+const webhookIdField = z.string().trim().min(1).max(100);
+
+/** list_webhooks takes no arguments. */
+export const listWebhooksArgsSchema = z.object({}).strict();
+
+/** Most past runs one webhook_runs call returns, and the default. */
+const WEBHOOK_RUNS_TOOL_MAX = 10;
+export const WEBHOOK_RUNS_TOOL_DEFAULT = 5;
+
+/** webhook_runs */
+export const webhookRunsArgsSchema = z
+  .object({
+    webhookId: webhookIdField,
+    limit: z.number().int().min(1).max(WEBHOOK_RUNS_TOOL_MAX).optional(),
+  })
+  .strict();
+
+/** update_webhook: the dashboard's PATCH fields, by id. Also the frozen
+ * payload of the approval it holds, re-validated when a person approves. */
+export const updateWebhookArgsSchema = z
+  .object({ webhookId: webhookIdField, ...updateFields })
+  .strict()
+  .refine(hasChange, NOTHING_TO_UPDATE);
+export type WebhookUpdateArgs = z.infer<typeof updateWebhookArgsSchema>;
+
+/** The action-approval action an agent's update_webhook holds under. */
+export const WEBHOOK_UPDATE_ACTION = "webhook.update";

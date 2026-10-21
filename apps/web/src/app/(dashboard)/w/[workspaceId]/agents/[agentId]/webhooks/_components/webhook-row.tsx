@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, Copy, Pencil } from "lucide-react";
+import { Check, Copy } from "lucide-react";
 import type {
   WebhookDisabledReason,
   WebhookOutcome,
@@ -11,6 +11,7 @@ import { Switch } from "@onecli/ui/components/switch";
 import { useSetWebhookEnabled } from "@/hooks/use-webhooks";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import type { AgentWebhook } from "@/lib/api";
+import { WebhookActionsMenu } from "./webhook-actions-menu";
 
 export interface WebhookRowProps {
   agentId: string;
@@ -78,14 +79,12 @@ export const WebhookRow = ({ agentId, hook, onEdit }: WebhookRowProps) => {
           )}
           {copied ? "Copied" : "Copy URL"}
         </Button>
-        <Button
-          variant="ghost"
-          size="icon-xs"
-          aria-label={`Edit ${hook.name}`}
-          onClick={onEdit}
-        >
-          <Pencil className="size-3.5" />
-        </Button>
+        <WebhookActionsMenu
+          agentId={agentId}
+          webhookId={hook.id}
+          name={hook.name}
+          onEdit={onEdit}
+        />
         <Switch
           size="sm"
           checked={hook.enabled}

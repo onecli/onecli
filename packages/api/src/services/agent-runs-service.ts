@@ -364,6 +364,12 @@ export const listRuns = async (
         // another workspace's agent is never in this list.
         agent: { workspaceId, workspace: { organizationId } },
         ...visibleConversations(viewerUserId, isAdmin),
+        // A webhook's runs live in its own sourced conversation, keyed by
+        // the webhook id. Narrowing only: the fences above still apply.
+        ...(query.webhookId && {
+          source: "webhook",
+          externalRef: query.webhookId,
+        }),
       },
       status: query.failedOnly
         ? { in: ["failed", "aborted"] }

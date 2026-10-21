@@ -6,6 +6,10 @@ import {
   customConnectionProposalSchema,
   registrableDomainOf,
 } from "../../validations/custom-connection";
+import {
+  WEBHOOK_UPDATE_ACTION,
+  updateWebhookArgsSchema,
+} from "../../validations/webhooks";
 
 /** An agent-proposed custom connection, as the approve card renders it.
  * Every field is non-secret by construction (the proposal has no value). */
@@ -44,6 +48,30 @@ const customConnectionView = (
   };
 };
 
+/** An agent's held webhook change, as the approve card renders it: the full
+ * text, since the one-line summary is clamped. */
+export interface WebhookChangeView {
+  name: string | null;
+  instructions: string | null;
+  enabled: boolean | null;
+}
+
+/** The structured view of a webhook-change payload, or null for another
+ * action or a payload that no longer validates (the generic row then). */
+const webhookChangeView = (
+  action: string,
+  payload: unknown,
+): WebhookChangeView | null => {
+  if (action !== WEBHOOK_UPDATE_ACTION) return null;
+  const parsed = updateWebhookArgsSchema.safeParse(payload);
+  if (!parsed.success) return null;
+  return {
+    name: parsed.data.name ?? null,
+    instructions: parsed.data.instructions ?? null,
+    enabled: parsed.data.enabled ?? null,
+  };
+};
+
 /**
  * The approvals bell's CHANNEL arm (4d): every channel decision waiting on a
  * human in one workspace — pending one-shot action approvals and pending
@@ -76,6 +104,8 @@ export interface PendingActionApprovalItem {
   /** Set for an agent-proposed custom connection: the card renders it and
    * asks for the key (approve goes through the dedicated route). */
   customConnection: CustomConnectionProposalView | null;
+  /** Set for an agent's webhook change: the card shows the full change. */
+  webhookChange: WebhookChangeView | null;
 }
 
 export interface PendingReachAskItem {
@@ -152,6 +182,7 @@ export const listWorkspacePendingChannelApprovals = async (
         createdAt: a.createdAt.toISOString(),
         expiresAt: a.expiresAt.toISOString(),
         customConnection: customConnectionView(a.action, a.payload),
+        webhookChange: webhookChangeView(a.action, a.payload),
       }),
     ),
     ...asks

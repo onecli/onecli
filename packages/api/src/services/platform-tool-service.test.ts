@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MAX_TOOL_RESULT_CHARS } from "@onecli/agent-protocol";
 
 /**
  * The memory tool arms of the platform-tool dispatch (step 8), mocked at the
@@ -25,7 +26,19 @@ const state = vi.hoisted(() => ({
       workspace: { organizationId: string };
     };
   } | null,
-  conversation: { id: "conv-1" } as { id: string } | null,
+  conversation: {
+    id: "conv-1",
+    source: "web",
+    direct: true,
+    userId: "user-9",
+    externalRef: null,
+  } as {
+    id: string;
+    source: string;
+    direct: boolean;
+    userId: string | null;
+    externalRef: string | null;
+  } | null,
   turn: { id: "t-1", userId: "user-9" } as {
     id: string;
     userId: string | null;
@@ -55,6 +68,14 @@ const skillService = vi.hoisted(() => ({
   updateAgentSkillByName: vi.fn(),
   deleteAgentSkillByName: vi.fn(),
 }));
+
+const webhookService = vi.hoisted(() => ({
+  listWebhooks: vi.fn(),
+  listWebhookRuns: vi.fn(),
+  requestWebhookUpdate: vi.fn(),
+}));
+
+const access = vi.hoisted(() => ({ canAccessWorkspaceAsUser: vi.fn() }));
 
 vi.mock("@onecli/db", () => ({
   Prisma: {},
@@ -127,6 +148,10 @@ vi.mock("./channels/action-approval-service", async (importOriginal) => ({
   requestActionApproval: approvals.requestActionApproval,
 }));
 
+vi.mock("./agent-webhook-service", () => webhookService);
+
+vi.mock("./workspace-access-check", () => access);
+
 vi.mock("./audit-service", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./audit-service")>()),
   recordAuditEvent: audit.recordAuditEvent,
@@ -166,7 +191,13 @@ beforeEach(() => {
       workspace: { organizationId: "org-1" },
     },
   };
-  state.conversation = { id: "conv-1" };
+  state.conversation = {
+    id: "conv-1",
+    source: "web",
+    direct: true,
+    userId: "user-9",
+    externalRef: null,
+  };
   state.turn = { id: "t-1", userId: "user-9" };
   memoryService.upsertMemoryByKey.mockResolvedValue({
     memory: MEMORY,
@@ -178,6 +209,7 @@ beforeEach(() => {
     { ...MEMORY, snippet: "Deploys run from **CI**.", rank: 0.5 },
   ]);
   memoryService.getMemoryByKey.mockResolvedValue(MEMORY);
+  access.canAccessWorkspaceAsUser.mockResolvedValue(true);
 });
 
 describe("memory_save", () => {
@@ -769,5 +801,232 @@ describe("propose_custom_connection", () => {
     });
     expect(res.ok).toBe(false);
     expect(approvals.requestActionApproval).not.toHaveBeenCalled();
+  });
+});
+
+describe("the webhook tools", () => {
+  const HOOK = {
+    id: "wh-1",
+    agentId: "ag-1",
+    name: "Meeting notes",
+    instructions: "Save the notes to Drive.",
+    url: "https://api.example.test/v1/hooks/whk_secret",
+    enabled: true,
+    disabledReason: null,
+    lastReceivedAt: new Date("2026-10-13T14:10:00Z"),
+    lastOutcome: "ok",
+    createdAt: new Date("2026-10-01T00:00:00Z"),
+  };
+  const run = (event: string) => ({
+    turnId: "t-run",
+    status: "done",
+    receivedAt: "2026-10-13T14:10:00.000Z",
+    finishedAt: "2026-10-13T14:11:00.000Z",
+    instructions: "Save the notes to Drive.",
+    event,
+    report: "Saved.",
+    error: null,
+  });
+  /** Every arm, so each refusal is proven for reads and the write alike. */
+  const ARMS = [
+    ["list_webhooks", {}],
+    ["webhook_runs", { webhookId: "wh-1" }],
+    ["update_webhook", { webhookId: "wh-1", enabled: false }],
+  ] as const;
+  const untouched = () => {
+    expect(webhookService.listWebhooks).not.toHaveBeenCalled();
+    expect(webhookService.listWebhookRuns).not.toHaveBeenCalled();
+    expect(webhookService.requestWebhookUpdate).not.toHaveBeenCalled();
+  };
+
+  beforeEach(() => {
+    webhookService.listWebhooks.mockResolvedValue([HOOK]);
+    webhookService.listWebhookRuns.mockResolvedValue([]);
+    webhookService.requestWebhookUpdate.mockResolvedValue({
+      kind: "held",
+      approvalId: "act-1",
+      name: "Meeting notes",
+    });
+  });
+
+  it("list_webhooks never hands the agent a URL or token, only the dashboard page", async () => {
+    const response = await call("list_webhooks", {});
+    expect(response.ok).toBe(true);
+    const text = JSON.stringify(response.result);
+    expect(text).not.toContain("whk_");
+    expect(text).not.toContain("/v1/hooks/");
+    expect(response.result).toMatchObject({
+      manageUrl: expect.stringMatching(
+        /^https?:\/\/[^/]+\/w\/p1\/agents\/ag-1\/webhooks$/,
+      ),
+      webhooks: [
+        {
+          webhookId: "wh-1",
+          name: "Meeting notes",
+          instructions: "Save the notes to Drive.",
+          enabled: true,
+          lastOutcome: "ok",
+        },
+      ],
+    });
+    expect(webhookService.listWebhooks).toHaveBeenCalledWith("p1", "ag-1");
+  });
+
+  it("webhook_runs is fenced to the calling agent and defaults to 5", async () => {
+    await call("webhook_runs", { webhookId: "wh-1" });
+    expect(webhookService.listWebhookRuns).toHaveBeenCalledWith(
+      "p1",
+      "ag-1",
+      "wh-1",
+      5,
+    );
+  });
+
+  it("webhook_runs bounds the page it asks for", async () => {
+    const response = await call("webhook_runs", {
+      webhookId: "wh-1",
+      limit: 500,
+    });
+    expect(response.ok).toBe(false);
+    untouched();
+  });
+
+  it("webhook_runs drops the oldest runs until an escape-heavy page fits the result cap", async () => {
+    // 1,000 quotes serialize to 2,000 chars, and a control character to 6:
+    // ten such runs would be over 64k, so a URL holder could otherwise make
+    // the history unreadable.
+    const hostile = `${'"'.repeat(500)}${"\u0001".repeat(500)}`;
+    webhookService.listWebhookRuns.mockResolvedValue(
+      Array.from({ length: 10 }, (_, i) => ({
+        ...run(hostile),
+        turnId: `t-${i}`,
+        report: hostile,
+        instructions: hostile,
+      })),
+    );
+    const response = await call("webhook_runs", {
+      webhookId: "wh-1",
+      limit: 10,
+    });
+    expect(response.ok).toBe(true);
+    const result = response.result as { runs: { turnId: string }[] };
+    expect(JSON.stringify(result).length).toBeLessThan(MAX_TOOL_RESULT_CHARS);
+    expect(result.runs.length).toBeGreaterThan(0);
+    expect(result.runs.length).toBeLessThan(10);
+    // Newest first, so the newest survive.
+    expect(result.runs[0]?.turnId).toBe("t-0");
+    expect(response.result).toHaveProperty("omitted");
+  });
+
+  it("update_webhook from the owner's private chat holds the change for approval, writing nothing", async () => {
+    const response = await call("update_webhook", {
+      webhookId: "wh-1",
+      instructions: "Save to the Meetings folder.",
+    });
+    expect(response).toMatchObject({
+      ok: true,
+      result: { status: "held", approvalId: "act-1", name: "Meeting notes" },
+    });
+    expect(webhookService.requestWebhookUpdate).toHaveBeenCalledWith({
+      workspaceId: "p1",
+      agentId: "ag-1",
+      conversationId: "conv-1",
+      originTurnId: "t-1",
+      change: {
+        webhookId: "wh-1",
+        instructions: "Save to the Meetings folder.",
+      },
+    });
+    // The agent's ask audits nothing: the person's approval is the write.
+    expect(audit.recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it("update_webhook with a change already waiting says it was dropped, not queued", async () => {
+    webhookService.requestWebhookUpdate.mockResolvedValue({
+      kind: "busy",
+      approvalId: "act-0",
+      name: "Meeting notes",
+    });
+    const response = await call("update_webhook", {
+      webhookId: "wh-1",
+      enabled: false,
+    });
+    expect(response).toMatchObject({
+      ok: true,
+      result: { status: "not_changed", approvalId: "act-0" },
+    });
+  });
+
+  it.each(ARMS)(
+    "%s refuses a shared conversation, even when a member typed the turn",
+    async (tool, args) => {
+      // A channel thread: a guest's message there steers into this run.
+      state.conversation = {
+        id: "conv-1",
+        source: "slack",
+        direct: false,
+        userId: null,
+        externalRef: "C1:1.2",
+      };
+      const response = await call(tool, args);
+      expect(response.ok).toBe(false);
+      expect(response.error).toMatch(/own private chat/);
+      untouched();
+    },
+  );
+
+  it.each(ARMS)("%s refuses an automated run", async (tool, args) => {
+    state.conversation = {
+      id: "conv-1",
+      source: "webhook",
+      direct: false,
+      userId: null,
+      externalRef: "wh-1",
+    };
+    state.turn = { id: "t-1", userId: null };
+    expect((await call(tool, args)).ok).toBe(false);
+    untouched();
+  });
+
+  it.each(ARMS)(
+    "%s refuses a turn in a private thread that its owner did not type",
+    async (tool, args) => {
+      state.turn = { id: "t-1", userId: null };
+      expect((await call(tool, args)).ok).toBe(false);
+      untouched();
+    },
+  );
+
+  it.each(ARMS)("%s refuses with no calling context", async (tool, args) => {
+    expect((await call(tool, args, false)).ok).toBe(false);
+    untouched();
+  });
+
+  it.each(ARMS)(
+    "%s refuses an owner who lost workspace access",
+    async (tool, args) => {
+      access.canAccessWorkspaceAsUser.mockResolvedValue(false);
+      expect((await call(tool, args)).ok).toBe(false);
+      untouched();
+    },
+  );
+
+  it("update_webhook needs an actual change", async () => {
+    const response = await call("update_webhook", { webhookId: "wh-1" });
+    expect(response).toEqual({
+      ok: false,
+      error: "Nothing to update: pass name, instructions, or enabled",
+    });
+  });
+
+  it("a foreign webhook id reads as not found", async () => {
+    webhookService.requestWebhookUpdate.mockRejectedValue(
+      new ServiceError("NOT_FOUND", "Webhook not found"),
+    );
+    const response = await call("update_webhook", {
+      webhookId: "other",
+      enabled: true,
+    });
+    expect(response).toEqual({ ok: false, error: "Webhook not found" });
   });
 });

@@ -1081,6 +1081,33 @@ describe("a model-provider refusal on a live harness", () => {
     expect(t.of("unhealthy")).toHaveLength(0);
   });
 
+  it("codes a model-endpoint 404 model_endpoint_not_found, keeping the raw error beside it", async () => {
+    // The live incident: a proxy in front of the provider retried to the
+    // wrong path and answered 404. Setup, not the message and not the key,
+    // so it gets its own code instead of the generic line.
+    const NOT_FOUND =
+      'Anthropic API error (404 Not Found): {"error":{"code":"404","message": "Resource not found"}}';
+    const t = createTestTransport();
+    const harness = createFakeHarness({
+      script: () => [{ type: "error", message: NOT_FOUND }],
+    });
+    const run = runSupervisor(
+      config(home("sup-endpoint-404-")),
+      harness,
+      t.transport,
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the failed turn");
+    await t.finish(run);
+
+    const [failed] = t.of("turn.result");
+    expect(failed?.status).toBe("failed");
+    expect(failed?.errorCode).toBe("model_endpoint_not_found");
+    expect(failed?.error).toBe(NOT_FOUND);
+    expect(t.of("unhealthy")).toHaveLength(0);
+  });
+
   it("codes a rejected transcript transcript_rejected, never as a key problem", async () => {
     // #1194: the provider rejects the stored conversation itself. That 400
     // carries no key-problem token, but it must not fall through to the

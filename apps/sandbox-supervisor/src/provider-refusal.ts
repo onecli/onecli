@@ -77,6 +77,33 @@ export const isTranscriptRejected = (message: string): boolean =>
   TRANSCRIPT_REJECTED_SHAPE.test(message);
 
 /**
+ * The MODEL ENDPOINT answering 404: the provider does not know the
+ * configured model, or the request reached something with no such route (a
+ * wrong endpoint address, a proxy in front of the provider forwarding to a
+ * path it does not serve). Setup, not the message and not the key: a new
+ * key never fixes it, and a resend only helps when a proxy misrouted a
+ * single call. Matched on the harness's own wrapper around a model-endpoint
+ * HTTP failure ("Anthropic API error (404 Not Found)", "API Error: 404"),
+ * never on a bare "404": a tool's output quoting a 404 must keep its raw
+ * passthrough.
+ *
+ * Observed live: a proxy's retry that forwarded to a path the backend does
+ * not serve, answering a cloud-style `{"error":{"code":"404", ...}}` body
+ * behind the Anthropic wrapper.
+ *
+ * The gateway's OWN 404s (`credential_not_found`, an unknown connection)
+ * are not this: they carry a readable message naming the fix, so they keep
+ * the passthrough like the policy refusals.
+ */
+const MODEL_ENDPOINT_NOT_FOUND_SHAPE = /\bapi error:?\s*\(?404\b/i;
+const GATEWAY_NOT_FOUND_SHAPE = /"error"\s*:\s*"credential_not_found"/i;
+
+export const isModelEndpointNotFound = (message: string): boolean =>
+  MODEL_ENDPOINT_NOT_FOUND_SHAPE.test(message) &&
+  !GATEWAY_NOT_FOUND_SHAPE.test(message) &&
+  !GATEWAY_POLICY_SHAPES.test(message);
+
+/**
  * Whether a harness terminal error is the MODEL PROVIDER refusing the
  * request (usage limit, exhausted credits, revoked key) — the one live-
  * harness failure a person can actually fix, so it earns a code and

@@ -355,6 +355,7 @@ const APPROVAL_TOOLS = [
   "send_message",
   "message_agent",
   "preview_expose",
+  "update_webhook",
 ] as const;
 
 /**

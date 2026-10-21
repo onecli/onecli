@@ -27,6 +27,8 @@ export const runsQuerySchema = z
     // Cursor syntax (`<createdAt ISO>~<turn id>`) is validated in the service.
     before: z.string().min(1).max(200).optional(),
     source: z.string().min(1).max(40).optional(),
+    // One webhook's runs (its own conversation), for a webhook's "View runs".
+    webhookId: z.string().min(1).max(100).optional(),
     userId: z.string().min(1).max(100).optional(),
     app: z.string().min(1).max(100).optional(),
     failed: z

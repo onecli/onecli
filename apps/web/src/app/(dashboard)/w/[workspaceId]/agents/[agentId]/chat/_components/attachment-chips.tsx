@@ -14,13 +14,14 @@ import {
 import { cn } from "@onecli/ui/lib/utils";
 import type { AttachmentMeta } from "@/lib/api/types";
 import { useDownloadAttachment } from "@/hooks/use-attachments";
-import { AttachmentThumb } from "./attachment-thumb";
+import { ImagePreviewDialog } from "./image-preview-dialog";
 
 /**
  * A message's attachments, under its bubble: raster images as thumbnails,
  * everything else as name+size chips, failed channel fetches as an honest
  * destructive chip, expired ones (retention took the bytes) as a quiet
- * inert chip. Clicking any live one SAVES the file (never navigates —
+ * inert chip. Clicking an image opens a larger in-app preview (with a
+ * Download button); clicking any other live file SAVES it (never navigates;
  * see `useDownloadAttachment`). Shared by the optimistic pending row (local
  * object URLs) and settled rows (authenticated blob fetch) — the same
  * no-drift rule as UserBubble itself.
@@ -52,9 +53,6 @@ export const AttachmentChips = ({
       )}
     >
       {attachments.map((attachment) => {
-        const busy =
-          download.isPending && download.variables?.id === attachment.id;
-
         if (attachment.status === "failed") {
           return (
             <div
@@ -87,29 +85,16 @@ export const AttachmentChips = ({
 
         if (isPreviewableImageType(attachment.mimeType)) {
           return (
-            <button
+            <ImagePreviewDialog
               key={attachment.id}
-              type="button"
-              onClick={() => download.mutate(attachment)}
-              disabled={busy}
-              aria-label={`Save ${attachment.name}`}
-              className="focus-visible:ring-ring relative rounded-md focus-visible:ring-2 focus-visible:outline-none"
-            >
-              <AttachmentThumb
-                conversationId={conversationId}
-                attachmentId={attachment.id}
-                name={attachment.name}
-                objectUrl={attachment.objectUrl}
-              />
-              {busy && (
-                <span className="bg-background/70 absolute inset-0 flex items-center justify-center rounded-md">
-                  <Loader2 className="size-4 animate-spin" aria-hidden />
-                </span>
-              )}
-            </button>
+              conversationId={conversationId}
+              attachment={attachment}
+            />
           );
         }
 
+        const busy =
+          download.isPending && download.variables?.id === attachment.id;
         return (
           <button
             key={attachment.id}

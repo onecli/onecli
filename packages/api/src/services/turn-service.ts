@@ -1732,6 +1732,22 @@ export const finishTurn = async (report: FinishTurnInput): Promise<void> => {
         "watch fire-claim release failed after turn close",
       ),
   );
+
+  // A failed channel turn left a person with an error and no answer: tell
+  // the owners. Detached on purpose: a Slack call must never hold the
+  // runner's report (the service swallows its own failures too).
+  if (input.status === "failed") alertOwnersOfFailure(input.turnId);
+};
+
+/** The failed-turn owner alert, detached. Dynamic import: the channels
+ * provider registry reaches this module through the ingestion service, so
+ * a static import back would be a cycle (the settlePairTurn idiom). */
+const alertOwnersOfFailure = (turnId: string): void => {
+  void import("./channels/turn-failure-notice-service")
+    .then(({ notifyOwnersOfFailedTurn }) => notifyOwnersOfFailedTurn(turnId))
+    .catch((err: unknown) =>
+      log.warn({ err, turnId }, "failed-turn owner alert could not start"),
+    );
 };
 
 /** Delivery headers repeat the automation's operator/agent-named label —
@@ -1762,6 +1778,10 @@ type AutomationSettleInput = Pick<
  */
 export const settleSweptTurns = async (swept: SweptTurn[]): Promise<void> => {
   for (const turn of swept) {
+    // A swept turn failed too (a stall, the time limit): same owner alert
+    // as a reported failure. The service re-reads the row and skips
+    // anything that is not a person's channel turn.
+    alertOwnersOfFailure(turn.turnId);
     await settleAutomationRun({
       conversationId: turn.conversationId,
       turnId: turn.turnId,

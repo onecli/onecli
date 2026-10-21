@@ -33,9 +33,20 @@ vi.mock("./follow-up-service", () => ({
 vi.mock("./turn-service", () => ({
   cleanAutomationName: (raw: string) => raw.replace(/\n/g, " ").trim(),
 }));
+// The approval registry (update_webhook's held change) is proven in the pg
+// suite; here it only has to load.
+vi.mock("./channels/action-approval-service", () => ({
+  expireActionApprovals: vi.fn(),
+  registerActionHandler: vi.fn(),
+  requestActionApproval: vi.fn(),
+}));
 
-const { receiveWebhook, buildWebhookRunMessage, renderWebhookPayload } =
-  await import("./agent-webhook-service");
+const {
+  receiveWebhook,
+  buildWebhookRunMessage,
+  renderWebhookPayload,
+  splitWebhookRunMessage,
+} = await import("./agent-webhook-service");
 const { MAX_WEBHOOK_PAYLOAD_CHARS, WEBHOOK_FAILURE_DISABLE_THRESHOLD } =
   await import("../validations/webhooks");
 
@@ -194,5 +205,26 @@ describe("buildWebhookRunMessage", () => {
     // The payload sits whole between two copies of a fence it never contains.
     expect(body).toBe(`${fence}\n${payload}\n${fence}`);
     expect(payload.includes(fence)).toBe(false);
+  });
+});
+
+describe("splitWebhookRunMessage (the webhook_runs view of a stored run)", () => {
+  it("round-trips the builder: instructions and the fenced payload", () => {
+    const message = buildWebhookRunMessage(
+      "Meeting notes",
+      "Save the notes to Drive.\n\nUse Hebrew.",
+      '{\n  "title": "Standup"\n}',
+    );
+    expect(splitWebhookRunMessage(message)).toEqual({
+      instructions: "Save the notes to Drive.\n\nUse Hebrew.",
+      event: '```\n{\n  "title": "Standup"\n}\n```',
+    });
+  });
+
+  it("returns an unrecognized message whole, as the event", () => {
+    expect(splitWebhookRunMessage("hello")).toEqual({
+      instructions: null,
+      event: "hello",
+    });
   });
 });

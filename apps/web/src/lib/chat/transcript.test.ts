@@ -548,6 +548,7 @@ describe("raisesApproval", () => {
       "mcp__onecli__send_message",
       "message_agent",
       "mcp__onecli__preview_expose",
+      "mcp__onecli__update_webhook",
     ]) {
       expect(raisesApproval(finished(name)), name).toBe(true);
     }

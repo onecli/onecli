@@ -27,6 +27,7 @@ import {
 import { log } from "./log";
 import {
   isProviderRefusal,
+  isModelEndpointNotFound,
   isTranscriptRejected,
   isTrialCreditExhausted,
 } from "./provider-refusal";
@@ -47,6 +48,7 @@ import {
   connectionsTools,
 } from "./capabilities/connections";
 import { cronsFragment, cronsTools } from "./capabilities/crons";
+import { webhooksFragment, webhooksTools } from "./capabilities/webhooks";
 import {
   createSendFileTools,
   sendFileFragment,
@@ -319,6 +321,9 @@ export const runSupervisor = async (
     fragments: [
       connectionsFragment(harness.capabilities.skillsDir),
       cronsFragment,
+      // Unconditional like crons: webhooks are a hosted-agent platform
+      // property, and the tools answer "none yet" when there are none.
+      webhooksFragment,
       memoryFragment,
       // The channels section (where the agent can be talked to, and the
       // send_message/find_recipient teaching) is spliced in HERE by the
@@ -524,6 +529,7 @@ export const runSupervisor = async (
     // that change brought — the doc and the tools move together.
     tools: () => [
       ...cronsTools,
+      ...webhooksTools,
       ...memoryTools,
       // The messaging tools follow the channels section's condition: present
       // exactly when a LIVE presence exists — read from the SAME mutable
@@ -847,7 +853,9 @@ export const runSupervisor = async (
      * error EVENT's code (the adapter mints them; the catch arm's raw throw
      * never does), and outrank the provider-refusal prose match. A rejected
      * transcript is checked before the refusal shapes too: its 400 must
-     * never read as a key problem (#1194).
+     * never read as a key problem (#1194). A model-endpoint 404 comes last:
+     * a 404 whose body also names a refusal (a quota page behind a proxy)
+     * keeps the more actionable key copy.
      */
     const classify = (raw: string | undefined): string | undefined =>
       failureCode(runtime) ??
@@ -860,7 +868,9 @@ export const runSupervisor = async (
             ? TURN_FAILURE_CODES.trialCreditExhausted
             : raw && isProviderRefusal(raw)
               ? TURN_FAILURE_CODES.modelProviderError
-              : undefined);
+              : raw && isModelEndpointNotFound(raw)
+                ? TURN_FAILURE_CODES.modelEndpointNotFound
+                : undefined);
 
     /**
      * Which of the agent's words this turn keeps as its answer (answer.ts:

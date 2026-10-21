@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isModelEndpointNotFound,
   isProviderRefusal,
   isTranscriptRejected,
   isTrialCreditExhausted,
@@ -152,5 +153,42 @@ describe("isProviderRefusal", () => {
     '{"error":"access_restricted","message":"Credentials exist for this host but none are assigned to this agent."}',
   ])("never re-dresses a OneCLI policy refusal: %s", (message) => {
     expect(isProviderRefusal(message)).toBe(false);
+  });
+});
+
+/** A proxy in front of the provider forwarding to a path the backend does
+ * not serve, behind jcode's Anthropic wrapper. */
+const PROXY_WRONG_PATH_404 =
+  'Anthropic API error (404 Not Found): {"error":{"code":"404","message": "Resource not found"}}';
+
+describe("isModelEndpointNotFound", () => {
+  it.each([
+    PROXY_WRONG_PATH_404,
+    // The other wrapper spelling the harness uses.
+    'API Error: 404 {"type":"error","error":{"type":"not_found_error","message":"model: claude-nonexistent"}}',
+    // A proxy's HTML 404 page behind the wrapper.
+    "Anthropic API error (404 Not Found): <html><body><h1>404 Not Found</h1></body></html>",
+  ])("classifies a model-endpoint 404: %s", (message) => {
+    expect(isModelEndpointNotFound(message)).toBe(true);
+  });
+
+  it("is not a key problem and not a damaged transcript", () => {
+    expect(isProviderRefusal(PROXY_WRONG_PATH_404)).toBe(false);
+    expect(isTranscriptRejected(PROXY_WRONG_PATH_404)).toBe(false);
+  });
+
+  it.each([
+    // A tool's own output merely quoting a 404 is not the model endpoint.
+    "Error: GET https://example.com/data returned 404 Not Found",
+    "HTTP 404 from the docs site",
+    // Other model-endpoint statuses keep their own handling.
+    'API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"}}',
+    'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 214937 tokens > 200000 maximum"}}',
+    // A status that merely starts with 404 is not 404.
+    "API Error: 4040 something",
+    // The gateway's OWN 404 names its fix; it keeps the passthrough.
+    'API Error: 404 {"error":"credential_not_found","message":"No credentials configured for api.example.com in OneCLI."}',
+  ])("keeps the raw passthrough for: %s", (message) => {
+    expect(isModelEndpointNotFound(message)).toBe(false);
   });
 });

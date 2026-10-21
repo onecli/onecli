@@ -127,6 +127,17 @@ export const agentRunsPath = (
     `/activity?${new URLSearchParams({ tab: "runs", agent: agentId, view }).toString()}`,
   );
 
+/** Activity's Runs tab narrowed to ONE webhook's runs (its "View runs"). */
+export const agentWebhookRunsPath = (
+  currentPathname: string,
+  agentId: string,
+  webhookId: string,
+): string =>
+  withWorkspacePrefix(
+    currentPathname,
+    `/activity?${new URLSearchParams({ tab: "runs", agent: agentId, view: "webhook", webhook: webhookId }).toString()}`,
+  );
+
 /**
  * Where "Get Started" lands: the workspace's agent roster with its create flow
  * already open (`?new=1`). Creating the first agent IS getting started — the

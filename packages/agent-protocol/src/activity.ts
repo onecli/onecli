@@ -166,6 +166,18 @@ const TOOL_PHRASES: Record<string, ToolPhrase> = {
     done: "Checked its schedule",
   },
   cancel_task: { running: "Cancelling a task", done: "Cancelled a task" },
+  list_webhooks: {
+    running: "Checking its webhooks",
+    done: "Checked its webhooks",
+  },
+  webhook_runs: {
+    running: "Reading a webhook's history",
+    done: "Read a webhook's history",
+  },
+  update_webhook: {
+    running: "Asking to change a webhook",
+    done: "Asked to change a webhook",
+  },
   skill_create: { running: "Writing a skill", done: "Wrote a skill" },
   skill_update: { running: "Updating a skill", done: "Updated a skill" },
   skill_list: { running: "Reading its skills", done: "Read its skills" },

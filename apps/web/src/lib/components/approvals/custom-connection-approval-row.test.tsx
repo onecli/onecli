@@ -42,6 +42,7 @@ const item = (
   conversationId: "conv-1",
   createdAt: new Date().toISOString(),
   expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+  webhookChange: null,
   customConnection: {
     name: "AcmeCRM",
     hostPattern: "api.acmecrm.io",

@@ -138,6 +138,15 @@ export const isAutomationSource = (
 ): source is AutomationSource =>
   (AUTOMATION_SOURCES as readonly string[]).includes(source);
 
+/** The sources whose turn message nobody typed: the greeting, a desktop
+ * resume, and every automation. One list, so a query can fence on the same
+ * set the predicate below tests. */
+export const PLATFORM_AUTHORED_SOURCES = [
+  GREETING_SOURCE,
+  DESKTOP_RESUME_SOURCE,
+  ...AUTOMATION_SOURCES,
+] as const satisfies readonly TurnSource[];
+
 /**
  * Nobody typed this turn's message — the platform authored it (an automation
  * header, or the greeting instruction). The render surfaces branch on THIS,
@@ -145,9 +154,7 @@ export const isAutomationSource = (
  * a user bubble", which is about authorship, not about scheduling priority.
  */
 export const isPlatformAuthoredSource = (source: string): boolean =>
-  source === GREETING_SOURCE ||
-  source === DESKTOP_RESUME_SOURCE ||
-  isAutomationSource(source);
+  PLATFORM_AUTHORED_SOURCES.some((authored) => authored === source);
 
 /** A turn's lifecycle. The first three are the ACTIVE set the partial unique
  * index fences — at most one of them per conversation. `joining`/`joined` are
@@ -224,6 +231,7 @@ export const LIFECYCLE_TURN_ERROR_CODES = [
   "harness_busy",
   "harness_no_terminal",
   "image_unavailable",
+  "model_endpoint_not_found",
   "transcript_rejected",
   "turn_stalled",
   "turn_time_limit",
@@ -363,6 +371,15 @@ export const HARNESS_NO_TERMINAL_MESSAGE =
 export const TRANSCRIPT_REJECTED_MESSAGE =
   "The agent couldn't continue because this conversation's saved history is damaged. To start it fresh, restart the agent from its menu in the dashboard, then send your message again. If this keeps happening, contact whoever operates this agent.";
 
+/** The model endpoint answered 404: an unknown model name, a wrong endpoint
+ * address, or a proxy in front of the provider forwarding to a path it does
+ * not serve. Setup, not the person's message and not the key, so the call to
+ * action is the operator. A resend helps only when a proxy misrouted a single
+ * call, so it comes second. Shown in shared channels too, so it names no
+ * internals. */
+export const MODEL_ENDPOINT_NOT_FOUND_MESSAGE =
+  'The agent couldn\'t reach its model: the model endpoint answered "not found". This is usually a setup problem with the model name or endpoint, not your message, so contact whoever operates this agent. Sending it again helps only if this was a one-time glitch.';
+
 /** The Slack mirror's last-resort line for a FAILED turn that produced no
  * answer text and no error anywhere — silence would read as the agent
  * ignoring the person (the seen-reaction is already stripped by the time the
@@ -453,6 +470,10 @@ export const TURN_FAILURE_COPY: Partial<
   transcript_rejected: {
     code: "transcript_rejected",
     message: TRANSCRIPT_REJECTED_MESSAGE,
+  },
+  model_endpoint_not_found: {
+    code: "model_endpoint_not_found",
+    message: MODEL_ENDPOINT_NOT_FOUND_MESSAGE,
   },
 };
 

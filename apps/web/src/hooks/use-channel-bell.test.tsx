@@ -34,6 +34,7 @@ const ask = (id: string): PendingChannelApprovalItem => ({
   conversationId: null,
   createdAt: "2026-10-15T10:00:00Z",
   expiresAt: "2026-10-16T10:00:00Z",
+  webhookChange: null,
   customConnection: null,
 });
 

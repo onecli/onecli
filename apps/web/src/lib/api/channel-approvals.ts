@@ -20,6 +20,15 @@ export interface PendingActionApprovalItem {
   /** Set for an agent-proposed custom connection: the card reviews it and
    * takes the key (approve goes through the dedicated route). */
   customConnection: CustomConnectionProposalView | null;
+  /** Set for an agent's webhook change: the card shows the full change. */
+  webhookChange: WebhookChangeView | null;
+}
+
+/** An agent's held webhook change: each field it sets, null when unchanged. */
+export interface WebhookChangeView {
+  name: string | null;
+  instructions: string | null;
+  enabled: boolean | null;
 }
 
 /** An agent-proposed custom connection as the approve card renders it.

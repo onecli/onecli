@@ -30,6 +30,9 @@ vi.mock("@/hooks/use-runs", () => ({
   },
 }));
 vi.mock("@/lib/agents/runs", () => ({ RunDetailSheet: () => null }));
+vi.mock("@/hooks/use-webhooks", () => ({
+  useWebhooks: () => ({ data: undefined }),
+}));
 vi.mock("next/image", () => ({
   default: ({ alt }: { alt?: string }) => (
     // eslint-disable-next-line @next/next/no-img-element
@@ -105,6 +108,29 @@ describe("Activity Runs tab", () => {
     expect(last()).toEqual({ failed: true });
     fireEvent.click(screen.getByRole("button", { name: "All" }));
     expect(last()).toEqual({});
+  });
+
+  it("narrows to one webhook only with an agent and the Webhooks filter, and the chip clears it", () => {
+    const onClearWebhook = vi.fn();
+    render(
+      <Harness
+        agentId="ag-1"
+        webhookId="wh-1"
+        initialView="webhook"
+        onClearWebhook={onClearWebhook}
+        onViewNetwork={vi.fn()}
+      />,
+    );
+    expect(last()).toEqual({
+      agentId: "ag-1",
+      source: "webhook",
+      webhookId: "wh-1",
+    });
+    fireEvent.click(screen.getByRole("button", { name: /One webhook/ }));
+    expect(onClearWebhook).toHaveBeenCalled();
+    // A contradicting filter never carries the webhook along.
+    fireEvent.click(screen.getByRole("button", { name: "Failed" }));
+    expect(last()).toEqual({ agentId: "ag-1", failed: true });
   });
 
   it("the Live switch toggles the list's Live mode", () => {

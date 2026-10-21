@@ -25,11 +25,12 @@ import { NetworkTab } from "./network-tab";
 const ALL_AGENTS = "all";
 
 /** The Activity URL: `?tab=runs`, `?agent=<id>`, `?view=<runs filter>`,
- *  `?from=…&to=…`. */
+ *  `?webhook=<id>` (one webhook's runs), `?from=…&to=…`. */
 interface ActivityUrl {
   tab?: "runs";
   agent?: string;
   view?: Exclude<RunsView, "all">;
+  webhook?: string;
   from?: string;
   to?: string;
 }
@@ -76,6 +77,11 @@ export const ActivityContent = () => {
     to: params.get("to") ?? undefined,
   });
   const scope = parsed.success ? parsed.data : {};
+  // One webhook's runs: an opaque id the API fences; only a sane-looking one
+  // reaches the query (the server re-validates and scopes it either way).
+  const rawWebhook = params.get("webhook");
+  const webhookId =
+    rawWebhook && /^[\w-]{1,100}$/.test(rawWebhook) ? rawWebhook : undefined;
 
   const go = (next: ActivityUrl, history: "push" | "replace" = "replace") => {
     const q = new URLSearchParams();
@@ -133,6 +139,7 @@ export const ActivityContent = () => {
       {tab === "runs" ? (
         <RunsTab
           agentId={scope.agentId}
+          webhookId={webhookId}
           view={view}
           onViewChange={(next) =>
             go({
@@ -140,6 +147,9 @@ export const ActivityContent = () => {
               agent: scope.agentId,
               view: next === "all" ? undefined : next,
             })
+          }
+          onClearWebhook={() =>
+            go({ tab: "runs", agent: scope.agentId, view: "webhook" })
           }
           onViewNetwork={viewRunNetwork}
         />

@@ -16,6 +16,7 @@ import { Textarea } from "@onecli/ui/components/textarea";
 import type { PendingActionApprovalItem } from "@/lib/api/channel-approvals";
 import { useDecideChannelAction } from "@/hooks/use-approvals";
 import { formatAge } from "./format-age";
+import { WebhookChangePreview } from "./webhook-change-preview";
 
 interface GenericActionApprovalRowProps {
   item: PendingActionApprovalItem;
@@ -64,6 +65,9 @@ export const GenericActionApprovalRow = ({
           {formatAge(item.createdAt)}
         </span>
       </div>
+      {item.webhookChange && (
+        <WebhookChangePreview change={item.webhookChange} />
+      )}
       <div className="flex items-center justify-between gap-2">
         <Button
           variant="ghost"
@@ -102,6 +106,9 @@ export const GenericActionApprovalRow = ({
                 <p className="text-foreground text-sm break-words">
                   {item.summary}
                 </p>
+                {item.webhookChange && (
+                  <WebhookChangePreview change={item.webhookChange} />
+                )}
                 <p className="text-xs">
                   Nothing happens until you decide. Asked{" "}
                   {formatAge(item.createdAt)} ago.
