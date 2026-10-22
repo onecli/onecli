@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.16.0](https://github.com/onecli/onecli/compare/v2.15.0...v2.16.0) (2026-10-22)
+
+
+### Features
+
+* agents manage their webhooks, failed channel replies alert the owner, image previews in chat ([#622](https://github.com/onecli/onecli/issues/622)) ([903f2cf](https://github.com/onecli/onecli/commit/903f2cfad35000d92a470f8aa8b52d468f750b3e))
+
 ## [2.15.0](https://github.com/onecli/onecli/compare/v2.14.0...v2.15.0) (2026-10-21)
 
 
