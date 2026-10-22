@@ -209,9 +209,15 @@ fn text_snippet(text: &str, content_type: &str) -> Option<String> {
 
     let decoded = match cte.as_str() {
         "base64" => {
-            let cleaned: String = region.chars().filter(|c| !c.is_whitespace()).collect();
+            let cleaned: Vec<u8> = region
+                .bytes()
+                .filter(|b| !b.is_ascii_whitespace())
+                .collect();
+            // The message may be a truncated prefix, so decode only the whole
+            // 4-char groups that arrived.
+            let keep = cleaned.len() - cleaned.len() % 4;
             let bytes = base64::engine::general_purpose::STANDARD
-                .decode(cleaned)
+                .decode(&cleaned[..keep])
                 .ok()?;
             String::from_utf8_lossy(&bytes).into_owned()
         }
@@ -404,6 +410,25 @@ Content-Disposition: attachment; filename=\"a.png\"\n\n--B--\n";
         assert_eq!(
             parse(msg2.as_bytes()).attachments,
             vec!["a.png".to_string()]
+        );
+    }
+
+    #[test]
+    fn base64_body_snippet_survives_a_truncated_prefix() {
+        // The summarizer only sees a prefix of the request, so a long base64
+        // body can be cut mid-group. The whole groups that did arrive still
+        // decode.
+        let headers =
+            "To: a@b.com\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n";
+        let full = format!("{headers}SGVsbG8gd29ybGQsIHRoaXMgaXMgdGhlIGZ1bGwgcmVwb3J0IGJvZHku");
+        assert_eq!(
+            parse(full.as_bytes()).body.as_deref(),
+            Some("Hello world, this is the full report body.")
+        );
+        let truncated = format!("{headers}SGVsbG8gd29ybGQsIHRoaXMgaXMgdGhlIGZ1bGwgcmVwb3J0IGJvZH");
+        assert_eq!(
+            parse(truncated.as_bytes()).body.as_deref(),
+            Some("Hello world, this is the full report bo")
         );
     }
 
