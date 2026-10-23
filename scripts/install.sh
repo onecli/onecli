@@ -251,13 +251,13 @@ provision_ssh_env() {
   # leaving the terminator (which rides the runner profile) to crash-loop and
   # abort `up -d --wait` with an opaque error. Unquoted $DOCKER by the file's
   # convention — it may be `node /stub` in tests.
-  _material=$($DOCKER run --rm node:22.23.2-alpine node -e "$GEN_SSH_MATERIAL_JS" 2>/dev/null)
+  _material=$($DOCKER run --rm node:22.23.4-alpine node -e "$GEN_SSH_MATERIAL_JS" 2>/dev/null)
   if [ -z "$_material" ]; then
-    _material=$($DOCKER run --rm node:22.23.2-alpine node -e "$GEN_SSH_MATERIAL_JS" 2>/dev/null)
+    _material=$($DOCKER run --rm node:22.23.4-alpine node -e "$GEN_SSH_MATERIAL_JS" 2>/dev/null)
   fi
   if [ -z "$_material" ]; then
     echo "Error: could not generate the SSH front door's key material." >&2
-    echo "It needs a one-time pull of node:22.23.2-alpine; check Docker Hub reachability and re-run the installer." >&2
+    echo "It needs a one-time pull of node:22.23.4-alpine; check Docker Hub reachability and re-run the installer." >&2
     echo "(Or set COMPOSE_PROFILES without 'runner' to install without hosted agents / SSH.)" >&2
     return 1
   fi
