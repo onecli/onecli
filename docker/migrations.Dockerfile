@@ -12,7 +12,7 @@
 # ──────────────────────────────────────────────
 # Stage 1: Prepare Node.js base
 # ──────────────────────────────────────────────
-FROM node:22.23.2-alpine3.24 AS base
+FROM node:22.23.4-alpine3.24 AS base
 RUN corepack enable && corepack prepare pnpm@9.0.0 --activate
 WORKDIR /app
 
@@ -36,7 +36,7 @@ RUN pnpm install --frozen-lockfile
 # ──────────────────────────────────────────────
 # Stage 4: Runner
 # ──────────────────────────────────────────────
-FROM node:22.23.2-alpine3.24 AS runner
+FROM node:22.23.4-alpine3.24 AS runner
 # Only packages/db ships here — Apache-2.0, no enterprise-licensed ee/ paths
 # (unlike the serving images).
 LABEL org.opencontainers.image.licenses="Apache-2.0"

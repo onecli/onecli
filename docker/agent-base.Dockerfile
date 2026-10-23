@@ -31,7 +31,7 @@
 # a glibc binary needing glibc >= 2.39 and a dynamic libssl (the thin image's
 # build proves the fit). The Node pin is shared with the thin image's build
 # stages, so the app is built and run on the same Node and glibc.
-FROM node:22.23.2-trixie-slim
+FROM node:22.23.4-trixie-slim
 
 # tini as PID 1: Node is not an init (signal handling differs, orphans are
 # never reaped). Common tools are the agent's hands — every outbound request

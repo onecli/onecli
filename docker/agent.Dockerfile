@@ -38,7 +38,7 @@ ARG AGENT_BASE_IMAGE=onecli-agent-base:local
 # ──────────────────────────────────────────────
 # Stage 1: Prepare Node.js base
 # ──────────────────────────────────────────────
-FROM node:22.23.2-trixie-slim AS base
+FROM node:22.23.4-trixie-slim AS base
 # openssl: the jcode linux binaries link libssl dynamically (found by the
 # proof below — the darwin build is self-contained, the linux one is not);
 # installing `openssl` pulls the release's matching libssl runtime.

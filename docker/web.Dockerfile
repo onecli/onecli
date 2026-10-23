@@ -4,7 +4,7 @@
 # ──────────────────────────────────────────────
 # Stage 1: Prepare Node.js base
 # ──────────────────────────────────────────────
-FROM node:22.23.2-alpine3.24 AS base
+FROM node:22.23.4-alpine3.24 AS base
 RUN corepack enable && corepack prepare pnpm@9.0.0 --activate
 WORKDIR /app
 
@@ -47,7 +47,7 @@ RUN --mount=type=cache,target=/app/apps/web/.next/cache \
 # ──────────────────────────────────────────────
 # Stage 5: Production runner
 # ──────────────────────────────────────────────
-FROM node:22.23.2-alpine3.24 AS runner
+FROM node:22.23.4-alpine3.24 AS runner
 # Dual-licensed image contents: Apache-2.0 plus the enterprise-licensed ee/
 # paths compiled/bundled into every edition — see LICENSE and
 # LICENSE-ENTERPRISE at the repository root.
