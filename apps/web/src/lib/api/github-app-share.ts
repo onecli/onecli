@@ -1,4 +1,4 @@
-import { apiGet, apiPost } from "./client";
+import { apiGet, apiPatch, apiPost } from "./client";
 import { appsPath, type PageScope } from "./scope";
 
 /** A GitHub App installation already connected somewhere in the org. */
@@ -8,18 +8,10 @@ export interface SharedGitHubInstallation {
   account: string | null;
   accountType: string | null;
   avatarUrl: string | null;
-  /** What the GitHub org owner granted the installation: "all" | "selected". */
-  repositorySelection: string | null;
-  origin: "this_scope" | "organization" | "another_workspace";
   connectedHere: number;
 }
 
-export interface InstallationRepos {
-  repos: string[];
-  truncated: boolean;
-}
-
-export interface CreatedSharedConnection {
+export interface SharedGitHubConnection {
   id: string;
   provider: string;
   label: string | null;
@@ -30,22 +22,45 @@ export const listInstallations = (scope: PageScope = "workspace") =>
     appsPath(scope, "/github-app/installations"),
   );
 
-export const listRepos = (
-  sourceConnectionId: string,
+/** Share an installation with the whole org: its connection moves up. */
+export const shareWithOrganization = (
+  input: { sourceConnectionId: string; agentId?: string },
   scope: PageScope = "workspace",
 ) =>
-  apiGet<InstallationRepos>(
-    appsPath(
-      scope,
-      `/github-app/installations/${encodeURIComponent(sourceConnectionId)}/repositories`,
-    ),
-  );
-
-export const createConnection = (
-  input: { sourceConnectionId: string; repositories?: string[] },
-  scope: PageScope = "workspace",
-) =>
-  apiPost<CreatedSharedConnection>(
+  apiPost<SharedGitHubConnection>(
     appsPath(scope, "/github-app/connections"),
     input,
+  );
+
+/** A connection's repositories: live from GitHub (`selected` null = all). */
+export interface ConnectionRepositories {
+  available: string[];
+  truncated: boolean;
+  selected: string[] | null;
+}
+
+export const refreshConnectionRepositories = (
+  connectionId: string,
+  scope: PageScope = "workspace",
+) =>
+  apiPost<ConnectionRepositories>(
+    appsPath(
+      scope,
+      `/github-app/connections/${encodeURIComponent(connectionId)}/repository-refresh`,
+    ),
+    {},
+  );
+
+/** `repositories` null = every repo the installation covers. */
+export const setConnectionRepositories = (
+  connectionId: string,
+  repositories: string[] | null,
+  scope: PageScope = "workspace",
+) =>
+  apiPatch<{ id: string; repositories: string[] | null }>(
+    appsPath(
+      scope,
+      `/github-app/connections/${encodeURIComponent(connectionId)}`,
+    ),
+    { repositories },
   );

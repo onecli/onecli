@@ -1,4 +1,6 @@
 import type {
+  AdapterCardFollowUpActionResponse,
+  AdapterCardStopResponse,
   AdapterIngestResponse,
   AdapterPresence,
   AdapterReplyItem,
@@ -125,6 +127,31 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
     }
   };
 
+  /** A card click the control plane refused is told to the clicker alone
+   * (the card everyone shares is not rewritten for it); anything else owes
+   * nothing back. Shared by every control on the card. */
+  const tellRefusedClicker = async (
+    runtime: PresenceRuntime,
+    click: { channel: string; clickerExternalUserId: string },
+    result: AdapterCardStopResponse | AdapterCardFollowUpActionResponse,
+  ): Promise<void> => {
+    const { credential } = runtime;
+    if (
+      result.kind !== "refused" ||
+      !credential ||
+      !runtime.provider.notifyClicker
+    ) {
+      return;
+    }
+    await runtime.provider.notifyClicker({
+      credential,
+      channel: click.channel,
+      user: click.clickerExternalUserId,
+      text: result.message,
+      onLog: log,
+    });
+  };
+
   const openSocket = (runtime: PresenceRuntime): void => {
     runtime.socket = runtime.provider.openTransport(runtime.presence, {
       onEvent: ({ event, eventId }) => {
@@ -173,6 +200,38 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
           })
           .catch((err: unknown) =>
             log("action decision forward failed", { err }),
+          );
+      },
+      onCardStop: (input) => {
+        // Forward, then tell a refused clicker alone (the card everyone
+        // shares is not rewritten for it). A stop owes nothing here: the
+        // turn's close replaces the card with "Stopped.".
+        void controlPlane
+          .stopFromCard({
+            presenceId: runtime.presence.presenceId,
+            channel: input.channel,
+            cardTs: input.cardTs,
+            clickerExternalUserId: input.clickerExternalUserId,
+          })
+          .then((result) => tellRefusedClicker(runtime, input, result))
+          .catch((err: unknown) => log("card stop forward failed", { err }));
+      },
+      onCardFollowUpAction: (input) => {
+        // The same: forward, and only a refusal is owed back, to the
+        // clicker alone. Done owes nothing: the row leaves the card when
+        // the agent reads the message.
+        void controlPlane
+          .actOnCardFollowUp({
+            presenceId: runtime.presence.presenceId,
+            channel: input.channel,
+            cardTs: input.cardTs,
+            clickerExternalUserId: input.clickerExternalUserId,
+            action: input.action,
+            followUpId: input.followUpId,
+          })
+          .then((result) => tellRefusedClicker(runtime, input, result))
+          .catch((err: unknown) =>
+            log("card follow-up action forward failed", { err }),
           );
       },
       onPermanentFailure: (reason) => {

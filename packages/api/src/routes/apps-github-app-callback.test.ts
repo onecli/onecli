@@ -19,7 +19,7 @@ const WORKSPACE_KEY = "oc_test-workspace-key";
 
 vi.hoisted(() => {
   process.env.NEXT_PUBLIC_EDITION = "onprem";
-  process.env.SECRET_ENCRYPTION_KEY = "test-oauth-state-secret";
+  process.env.SECRET_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
   process.env.OAUTH_STATE_SECRET = "test-oauth-state-secret";
   delete process.env.API_URL;
 });
@@ -34,10 +34,45 @@ const { privateKey } = generateKeyPairSync("rsa", {
 });
 
 const created = vi.hoisted(() => [] as Record<string, unknown>[]);
+// Where the installation is already connected in the org (null = nowhere).
+const alreadyConnected = vi.hoisted(() => ({
+  row: null as null | {
+    id: string;
+    scope: string;
+    workspaceId: string | null;
+  },
+}));
+const storedIdentity = vi.hoisted(() => ({
+  appId: "1000",
+  installationId: "111",
+}));
+const reconnects = vi.hoisted(() => [] as string[]);
+const granted = vi.hoisted(
+  () => [] as { connectionId: string; agentId: string | undefined }[],
+);
 
 vi.mock("@onecli/db", () => ({
-  Prisma: {},
+  Prisma: { TransactionIsolationLevel: { ReadCommitted: "ReadCommitted" } },
   db: {
+    $transaction: async <T>(run: (tx: unknown) => Promise<T>) =>
+      run({
+        $queryRaw: async () => [{ locked: 1 }],
+        workspace: { findFirst: async () => ({ id: "ws-1" }) },
+        appConnection: {
+          findFirst: async () => ({
+            credentials: await (await import("../providers"))
+              .getCrypto()
+              .encrypt(
+                JSON.stringify({
+                  type: "github_app",
+                  app_id: storedIdentity.appId,
+                  installation_id: storedIdentity.installationId,
+                  private_key: privateKey,
+                }),
+              ),
+          }),
+        },
+      }),
     apiKey: {
       findUnique: async ({ where }: { where: { key: string } }) =>
         where.key === WORKSPACE_KEY
@@ -51,7 +86,22 @@ vi.mock("@onecli/db", () => ({
     user: {
       findUnique: async () => ({ email: "admin@example.com" }),
     },
+    // The connecting-agent fence's lookup: only "agent-1" is ws-1's.
+    agent: {
+      findFirst: async ({
+        where,
+      }: {
+        where: { id: string; workspaceId: string };
+      }) =>
+        where.id === "agent-1" && where.workspaceId === "ws-1"
+          ? { id: "agent-1" }
+          : null,
+    },
   },
+}));
+
+vi.mock("../services/home-sync-service", () => ({
+  bumpHomeForScope: async () => {},
 }));
 
 vi.mock("../services/workspace-access-check", () => ({
@@ -76,12 +126,26 @@ vi.mock("../services/connection-service", () => ({
     created.push(credentials);
     return { id: "conn-new" };
   },
-  reconnectConnection: async () => ({ id: "conn-old" }),
+  reconnectConnection: async (_scope: unknown, id: string) => {
+    reconnects.push(id);
+    return { id };
+  },
   linkConnectionToAppConfig: async () => undefined,
+  findInstallationConnection: async () => alreadyConnected.row,
 }));
 
-vi.mock("../services/workspace-autoattach-service", () => ({
-  attachNewConnectionToAllAgents: async () => undefined,
+// The real fence; only the grant is recorded.
+vi.mock("../services/agent-connect-grant-service", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("../services/agent-connect-grant-service")
+  >()),
+  grantConnectingAgent: async (
+    _workspaceId: string,
+    connectionId: string,
+    agentId: string | undefined,
+  ) => {
+    granted.push({ connectionId, agentId });
+  },
 }));
 
 vi.mock("../lib/gateway-invalidate", () => ({
@@ -128,6 +192,11 @@ describe("GitHub App connect through /authorize and the callback (platform app)"
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
     created.length = 0;
+    granted.length = 0;
+    alreadyConnected.row = null;
+    storedIdentity.appId = PLATFORM_APP_ID;
+    storedIdentity.installationId = "111";
+    reconnects.length = 0;
   });
 
   const configure = () => {
@@ -139,8 +208,8 @@ describe("GitHub App connect through /authorize and the callback (platform app)"
   };
 
   /** `/authorize` in the user's browser; returns the state it signed. */
-  const authorize = async () => {
-    const res = await app.request("/v1/apps/github-app/authorize", {
+  const authorize = async (query = "") => {
+    const res = await app.request(`/v1/apps/github-app/authorize${query}`, {
       headers: {
         authorization: `Bearer ${WORKSPACE_KEY}`,
         host: "api.example.com",
@@ -161,8 +230,8 @@ describe("GitHub App connect through /authorize and the callback (platform app)"
     });
 
   /** GitHub's setup redirect back to this browser; returns leg 2's state. */
-  const setupRedirect = async (installationId: string) => {
-    const state = await authorize();
+  const setupRedirect = async (installationId: string, query = "") => {
+    const state = await authorize(query);
     const res = await callback(
       { installation_id: installationId, setup_action: "update", state },
       state,
@@ -179,8 +248,9 @@ describe("GitHub App connect through /authorize and the callback (platform app)"
 
   it("a setup redirect (install or update) stores nothing and detours through GitHub", async () => {
     configure();
-    await setupRedirect("111");
+    await setupRedirect("111", "?agent_id=agent-1");
     expect(created).toEqual([]);
+    expect(granted).toEqual([]);
   });
 
   it("GitHub's return connects the user's own installation", async () => {
@@ -197,6 +267,98 @@ describe("GitHub App connect through /authorize and the callback (platform app)"
         access_token: "ghs_111",
       }),
     ]);
+    // A workspace connect: on for nobody.
+    expect(granted).toEqual([{ connectionId: "conn-new", agentId: undefined }]);
+  });
+
+  it("never connects twice a GitHub account the org already has: back from GitHub it lands on 'updated'", async () => {
+    for (const row of [
+      { id: "conn-org", scope: "organization", workspaceId: null },
+      { id: "conn-ws2", scope: "workspace", workspaceId: "ws-2" },
+    ]) {
+      configure();
+      alreadyConnected.row = row;
+      const next = await setupRedirect("111");
+      const res = await callback({ code: "user-code", state: next }, next);
+      expect(res.headers.get("location")).toContain("status=updated");
+      expect(created).toEqual([]);
+    }
+  });
+
+  it("re-connecting an installation this workspace already has refreshes it in place", async () => {
+    configure();
+    alreadyConnected.row = {
+      id: "conn-old",
+      scope: "workspace",
+      workspaceId: "ws-1",
+    };
+    const next = await setupRedirect("111");
+    const res = await callback({ code: "user-code", state: next }, next);
+    expect(res.headers.get("location")).toContain("status=success");
+    expect(created).toEqual([]);
+  });
+
+  it("explicit reconnect still dedupes an installation owned by another scope", async () => {
+    configure();
+    alreadyConnected.row = {
+      id: "conn-org",
+      scope: "organization",
+      workspaceId: null,
+    };
+    const next = await setupRedirect(
+      "111",
+      "?connectionId=conn-old&agent_id=agent-1",
+    );
+    const res = await callback({ code: "user-code", state: next }, next);
+    expect(res.headers.get("location")).toContain("status=updated");
+    expect(res.headers.get("set-cookie")).toContain("Max-Age=0");
+    expect(reconnects).toEqual([]);
+    expect(created).toEqual([]);
+    expect(granted).toEqual([]);
+  });
+
+  it("explicit reconnect refreshes only the same installation and never grants the connecting agent", async () => {
+    configure();
+    alreadyConnected.row = {
+      id: "conn-old",
+      scope: "workspace",
+      workspaceId: "ws-1",
+    };
+    const next = await setupRedirect(
+      "111",
+      "?connectionId=conn-old&agent_id=agent-1",
+    );
+    const res = await callback({ code: "user-code", state: next }, next);
+    expect(res.headers.get("location")).toContain("status=success");
+    expect(reconnects).toEqual(["conn-old"]);
+    expect(created).toEqual([]);
+    expect(granted).toEqual([]);
+    expect(res.headers.get("location")).not.toContain("connected=");
+  });
+
+  it.each(["appId", "installationId"] as const)(
+    "explicit reconnect rejects a mismatched stored %s",
+    async (field) => {
+      configure();
+      storedIdentity[field] = "999";
+      const next = await setupRedirect("111", "?connectionId=conn-old");
+      const res = await callback({ code: "user-code", state: next }, next);
+      expect(res.headers.get("location")).toContain("status=error");
+      expect(reconnects).toEqual([]);
+      expect(created).toEqual([]);
+      expect(granted).toEqual([]);
+    },
+  );
+
+  it("keeps the connecting agent across GitHub's two legs, so the installation lands on for it", async () => {
+    configure();
+    const next = await setupRedirect("111", "?agent_id=agent-1");
+
+    const res = await callback({ code: "user-code", state: next }, next);
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toContain("status=success");
+    expect(granted).toEqual([{ connectionId: "conn-new", agentId: "agent-1" }]);
   });
 
   it("refuses another tenant's installation id", async () => {
@@ -218,6 +380,19 @@ describe("GitHub App connect through /authorize and the callback (platform app)"
     const res = await callback({ code: "user-code", state: next });
 
     expect(res.headers.get("location")).toContain("status=error");
+    expect(created).toEqual([]);
+  });
+
+  it("a repo change made on GitHub (no connect in flight) lands on 'updated' and stores nothing", async () => {
+    configure();
+    const res = await callback({
+      installation_id: "111",
+      setup_action: "update",
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toContain(
+      "/app-connect/github-app?status=updated",
+    );
     expect(created).toEqual([]);
   });
 
@@ -250,7 +425,7 @@ describe("GitHub App connect through /authorize and the callback (platform app)"
     expect(created).toEqual([]);
   });
 
-  it("connects directly while the platform OAuth client is not configured", async () => {
+  it("a self-host without the platform OAuth client connects directly (cloud refuses: github-app.test.ts)", async () => {
     vi.stubEnv("GITHUB_APP_ID", PLATFORM_APP_ID);
     vi.stubEnv("GITHUB_APP_SLUG", "onecli");
     stubGitHub();

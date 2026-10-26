@@ -7,8 +7,18 @@ import { abortTurn, createTurn } from "./turn-service";
 import { getEvalRunEvidence } from "./agent-runs-service";
 import { scoreEval } from "./eval-scoring";
 import { judgeAnswer } from "./eval-judge";
+import {
+  loadAgentForLlm,
+  resolveAgentLlmCredential,
+} from "./llm-credential-service";
+import { resolveAgentModel } from "../llm/resolve";
 import { logger } from "../lib/logger";
-import { ACTIVE_TURN_STATUSES, EVAL_SOURCE } from "../validations/conversation";
+import {
+  ACTIVE_TURN_STATUSES,
+  EVAL_SOURCE,
+  TURN_FAILED_RAW_ERROR_MESSAGE,
+  isRawErrorPayload,
+} from "../validations/conversation";
 import { RUN_WINDOW_SLACK_MS } from "../validations/runs";
 import {
   ACTIVE_EVAL_RUN_STATUSES,
@@ -75,6 +85,8 @@ export interface EvalRunSummary {
   /** Who started it: a person (`manual`) or the eval schedule. */
   trigger: EvalRunTrigger;
   configVersion: string;
+  /** The model the agent answered with; null on older runs, or with no key. */
+  model: string | null;
   total: number;
   counts: EvalOutcomeCounts;
   error: string | null;
@@ -263,6 +275,7 @@ const runSelect = {
   status: true,
   trigger: true,
   configVersion: true,
+  model: true,
   total: true,
   results: true,
   error: true,
@@ -299,6 +312,7 @@ const parseRun = (row: RunRow) => {
         : "failed",
       trigger: z.enum(EVAL_RUN_TRIGGERS).catch("manual").parse(row.trigger),
       configVersion: row.configVersion,
+      model: row.model,
       total: row.total,
       counts: countEvalOutcomes(results, parsed.success ? row.total : 0),
       error: parsed.success ? row.error : UNREADABLE_RUN_ERROR,
@@ -401,6 +415,24 @@ export class NoEvalQuestionsError extends ServiceError {
   }
 }
 
+/**
+ * The model this agent runs right now, exactly as its sandbox resolves it
+ * (`sandbox-service`): the stored choice when it belongs to the granted
+ * key's provider, else that provider's default. Null when it has no key.
+ */
+const agentRunModel = async (
+  workspaceId: string,
+  organizationId: string,
+  agentId: string,
+): Promise<string | null> => {
+  const agent = await loadAgentForLlm(workspaceId, agentId);
+  if (!agent) return null;
+  const credential = await resolveAgentLlmCredential(agent, organizationId);
+  return credential
+    ? resolveAgentModel(agent, credential.provider).model
+    : null;
+};
+
 /** Admit one run per agent: no active run and no active eval turn. The
  * worker starts after the admission commits. `scheduled` runs come from the
  * eval schedule (`eval-schedule-fire-service.ts`), on its creator's
@@ -413,6 +445,10 @@ export const startRun = async (
   trigger: EvalRunTrigger = "manual",
 ): Promise<EvalRunSummary> => {
   await requireHostedAgent(workspaceId, agentId);
+  // Resolved before the admission lock: it reads the key (several queries),
+  // and nothing it reads needs the lock. Like the configuration fingerprint,
+  // it is the model at admission.
+  const model = await agentRunModel(workspaceId, organizationId, agentId);
   const { run, questions } = await db.$transaction(async (tx) => {
     await lockAgent(tx, workspaceId, agentId);
     await failStaleRuns(tx, workspaceId, agentId);
@@ -431,6 +467,7 @@ export const startRun = async (
         createdByUserId: userId,
         trigger,
         configVersion: await agentConfigVersion(tx, agentId),
+        model,
         total: questions.length,
       },
       select: runSelect,
@@ -438,7 +475,7 @@ export const startRun = async (
     return { run: parseRun(run).summary, questions };
   });
   void executeRun(
-    { workspaceId, organizationId, userId, agentId },
+    { workspaceId, organizationId, userId, agentId, model },
     run.id,
     questions,
   );
@@ -452,6 +489,9 @@ interface RunContext {
   organizationId: string;
   userId: string;
   agentId: string;
+  /** The model the run was admitted on. The judge grades on it, falling
+   * back to the provider's default when it cannot run it (`eval-judge`). */
+  model: string | null;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -482,10 +522,13 @@ const waitForTurn = async (turnId: string, timeoutMs: number) => {
 };
 
 /** Why a settled turn did not complete, or null when it did. */
-const turnFailure = (turn: { status: string; error: string | null }) =>
-  turn.status === "done"
+const turnFailure = (turn: { status: string; error: string | null }) => {
+  if (turn.error && isRawErrorPayload(turn.error))
+    return TURN_FAILED_RAW_ERROR_MESSAGE;
+  return turn.status === "done"
     ? turn.error
     : (turn.error ?? (turn.status === "aborted" ? "Stopped" : "Failed"));
+};
 
 /** A thrown question outcome the run cannot continue past: the turn may
  * still be running, so asking the next question could overlap it. */
@@ -578,6 +621,7 @@ const askQuestion = async (
         ? await judgeAnswer({
             agent: { id: ctx.agentId, workspaceId: ctx.workspaceId },
             organizationId: ctx.organizationId,
+            model: ctx.model,
             question: q.question,
             criteria: q.expected,
             answer: evidence.answer,

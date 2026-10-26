@@ -6,6 +6,9 @@ export interface PolicyDialogContentProps {
    * resources live (e.g. Dropbox folders) instead of reading them from
    * connect-time metadata. Providers that don't need it simply ignore it. */
   connectionId: string;
+  /** Where the connection lives, for providers that read their resource
+   * list live from the provider (GitHub) at that level. */
+  connectionScope?: "workspace" | "organization";
   metadata: Record<string, unknown>;
   policy: Record<string, unknown> | null;
   onPolicyChange: (policy: Record<string, unknown> | null) => void;

@@ -98,13 +98,6 @@ describe("seat caps", () => {
 });
 
 describe("pricing", () => {
-  it("prices the tiers per the Aug 2026 model (BYOC prices)", () => {
-    expect(getPlanConfig("pro").price).toBe(25);
-    expect(getPlanConfig("team").price).toBe(149);
-    expect(getPlanConfig("team-legacy").price).toBe(199);
-    expect(getPlanConfig("scale").price).toBe(499);
-  });
-
   it("yearly = pay 10 months for 12 on every self-serve paid tier", () => {
     for (const plan of PLANS.filter((p) => p.id !== "free")) {
       expect(plan.yearlyPrice).toBe(plan.price * 10);

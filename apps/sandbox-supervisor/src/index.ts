@@ -25,6 +25,7 @@ import {
   publishDisplay,
   startDesktop,
 } from "./desktop";
+import type { SupervisorAddon } from "./addons";
 
 /**
  * Entrypoint of the in-sandbox supervisor. The ONLY place an adapter id maps
@@ -130,10 +131,19 @@ const main = async (): Promise<void> => {
   // child inherits. Best-effort: a sandbox whose desktop fails to come up
   // runs without one, as an image without the pieces does. Taken down on
   // both exits: the signal path (below) and the clean one (after the loop).
+  //
+  // The hosted platform layers its agent desktop on top (licensed code,
+  // loaded only when the hosted runner says so and it can carry the screen).
+  const hosted =
+    config.hostedDesktop && config.previews
+      ? (await import("./ee/desktop")).createHostedDesktop(config.homeDir)
+      : undefined;
+  if (hosted) log("info", "hosted desktop on");
   let closeDesktop = () => {};
+  let desktopStarted = false;
   if (desktopAvailable(process.env)) {
     try {
-      const desktop = await startDesktop(process.env);
+      const desktop = await startDesktop(process.env, hosted?.layer);
       process.env.DISPLAY = desktop.display;
       if (desktop.dbusAddress) {
         process.env.DBUS_SESSION_BUS_ADDRESS = desktop.dbusAddress;
@@ -141,6 +151,7 @@ const main = async (): Promise<void> => {
       publishDisplay(desktop.display);
       closeDesktop = () => desktop.close();
       registerSignalCleanup(closeDesktop);
+      desktopStarted = true;
       log("info", "desktop ready", { display: desktop.display });
     } catch (error) {
       log("warn", "desktop did not start", { error: String(error) });
@@ -148,9 +159,10 @@ const main = async (): Promise<void> => {
   } else {
     log("info", "desktop not started: this image has no window manager");
   }
+  const addon: SupervisorAddon | undefined = hosted?.addon(desktopStarted);
 
   try {
-    await runSupervisor(config, harness, selectTransport(config));
+    await runSupervisor(config, harness, selectTransport(config), { addon });
   } finally {
     closeDesktop();
   }

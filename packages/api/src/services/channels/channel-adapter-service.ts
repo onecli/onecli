@@ -585,8 +585,8 @@ export interface AdapterWorkItem {
     status: string;
     source: string;
     userId: string | null;
-    /** Display name of the person behind `userId`, for cross-surface
-     * attribution ("(from the web — Jonathan)"). Resolved server-side. */
+    /** Display name of the person behind `userId`, for the mirror's
+     * cross-surface attribution. Resolved server-side. */
     userName: string | null;
     message: string;
     error: string | null;
@@ -775,10 +775,10 @@ export const getAdapterWork = async (
   // turns'.
   const liveReplies = await pendingReplies(byConversation);
 
-  // Who spoke, by name — one batched lookup for the cross-surface
-  // attribution lines ("(from the web — Jonathan)"). Follow-up authors are
-  // resolved too: on a group thread they can differ from the turn's asker,
-  // and the mirror must not put one member's words under another's name.
+  // Who spoke, by name: one batched lookup for the mirror's cross-surface
+  // attribution. Follow-up authors are resolved too: on a group thread they
+  // can differ from the turn's asker, and the mirror must not put one
+  // member's words under another's name.
   const userIds = [
     ...new Set(
       [...finishedTurns, ...joinedFollowUps, ...liveReplies]
@@ -796,8 +796,8 @@ export const getAdapterWork = async (
   // Display name or nothing — never an email-derived fallback: the mirror
   // posts this into a Slack thread whose audience is Slack-defined (guests,
   // external members), not fenced to workspace membership, so a member's
-  // email local-part must not travel there. A name-less member mirrors as
-  // the unnamed "(from the web)".
+  // email local-part must not travel there. A name-less member mirrors with
+  // an unnamed attribution.
   const userNameById = new Map(users.map((u) => [u.id, u.name ?? null]));
 
   // Attachment names, batched for turns AND follow-ups: the mirror's WIRE

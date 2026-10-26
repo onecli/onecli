@@ -27,7 +27,7 @@ const cardOf = (
       path: "/",
       headers: {},
       app: "salesforce",
-      agent: { id: "ofer", name: "Ofer" },
+      agent: { id: "ada", name: "Ada" },
       summary: { action: "Create Contact", details: [] },
       createdAt,
       expiresAt: createdAt,
@@ -96,6 +96,76 @@ describe("approvalTimeline", () => {
     if (live?.kind !== "group") throw new Error("expected a group");
     expect(live.group.approvals).toHaveLength(4);
     expect(live.settled).toEqual([]);
+  });
+
+  it("a REPLACED request never groups: its revision is a full card of its own", () => {
+    // The live shape: Create 4 Accounts, then "NYC", then "New York",
+    // then "Boston": each replaced the last, and the agent sent its
+    // revision at once. The browser saw the old one leave on the SAME poll
+    // that brought the revision (`settledAt` after the revision's `at`),
+    // so the time test piled them onto one grouped card and the live
+    // revision lost its table.
+    const first = cardOf({}, "replaced");
+    const second = cardOf({}, "replaced");
+    const live = cardOf();
+    first.settledAt = live.at + 5_000;
+    second.settledAt = live.at + 5_000;
+    const entries = approvalTimeline([first, second, live]);
+    expect(entries.map((e) => e.kind)).toEqual(["single", "single", "single"]);
+    const last = entries[2];
+    if (last?.kind !== "single") throw new Error("expected a single");
+    expect(last.card.approval.id).toBe(live.approval.id);
+    expect(last.card.settled).toBeUndefined();
+  });
+
+  it("a replaced request never joins a live one even when their times overlap", () => {
+    // Order-independent: the replaced one created AFTER the live one (a
+    // race between two quick messages) still stays out of its card.
+    const live = cardOf();
+    const replaced = cardOf({}, "replaced");
+    replaced.settledAt = replaced.at + 1;
+    const entries = approvalTimeline([live, replaced]);
+    expect(entries.map((e) => e.kind).sort()).toEqual(["single", "single"]);
+    expect(entries.some((e) => e.kind === "single" && !e.card.settled)).toBe(
+      true,
+    );
+  });
+
+  it("a resend after an approval in Slack is its own card, the approved one a record", () => {
+    // Live: approved in Slack, Salesforce rejected every record, the agent
+    // fixed them and re-sent 5s later. The browser saw the approval leave on
+    // the SAME poll that brought the resend, so by the poll's clock the
+    // departure came after it and the two shared one grouped card ("Decided
+    // elsewhere" over a live "Create 9 Accounts"). The record's decision
+    // time puts the approval first: two entries, the resend a full card.
+    const approved = cardOf({
+      summary: { action: "Create 9 Accounts", details: [] },
+    });
+    const resend = cardOf({
+      summary: { action: "Create 9 Accounts", details: [] },
+    });
+    approved.settled = "approved";
+    approved.via = "slack";
+    approved.settledAt = resend.at - 5_000;
+    const entries = approvalTimeline([approved, resend]);
+    expect(entries.map((e) => e.kind)).toEqual(["single", "single"]);
+    const [record, live] = entries;
+    if (record?.kind !== "single" || live?.kind !== "single") {
+      throw new Error("expected two singles");
+    }
+    expect(record.card.via).toBe("slack");
+    expect(live.card.settled).toBeUndefined();
+  });
+
+  it("a request first seen after the decided one was last seen live is a new attempt", () => {
+    // Before the record answers, a departure is stamped with the last time
+    // it was seen STILL pending (not the poll that noticed it leave): the
+    // resend was created after that, so it never joins the decided card.
+    const approved = cardOf({}, "decided");
+    const resend = cardOf();
+    approved.settledAt = resend.at - 1;
+    const entries = approvalTimeline([approved, resend]);
+    expect(entries.map((e) => e.kind)).toEqual(["single", "single"]);
   });
 
   it("a task the agent announced as several is a group from its first request", () => {

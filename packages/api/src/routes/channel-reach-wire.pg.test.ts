@@ -31,6 +31,8 @@ const PROOF_URL = proofDatabaseUrl();
 type Db = typeof import("@onecli/db").db;
 let db: Db;
 let app: ReturnType<typeof import("../app").createApiApp>;
+/** Drains the detached Slack replies (fireReply) so negatives are exact. */
+let settleDetachedReplies: () => Promise<void>;
 let getCrypto: typeof import("../providers").getCrypto;
 
 const P = "rchwire-";
@@ -153,6 +155,8 @@ beforeAll(async () => {
   providers.initSelfUrl(SELF_URL);
 
   const { createApiApp } = await import("../app");
+  settleDetachedReplies = (await import("./channel-inbound-slack"))
+    .settleDetachedRepliesForTests;
   app = createApiApp(
     { getSession: async () => currentSession },
     { selfUrl: SELF_URL },
@@ -588,7 +592,7 @@ describe.skipIf(!PROOF_URL)(
       expect(blockedMember.status).toBe(200);
       // Nothing said and nothing queued. Asserted after a real settle
       // window so this cannot pass merely by racing the detached poster.
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      await settleDetachedReplies();
       expect(slackCallsFor("chat.postMessage").length).toBe(postsBeforeBlock);
       expect(
         await db.turn.count({
@@ -838,6 +842,161 @@ describe.skipIf(!PROOF_URL)(
         },
       );
       expect(noSession.status).toBe(401);
+
+      // ── 10. POINT OF CONTACT over the real wire: the dashboard PATCH, the
+      // view, the intro, and an UN-mentioned message through the signed
+      // events door, judged by the fast model on the agent's own key. ──
+      const channelUrl = `/v1/agents/${agent.id}/channels/slack/reach/C-WIRE`;
+      const patchListen = (listen: unknown) =>
+        app.request(channelUrl, {
+          method: "PATCH",
+          headers: {
+            "content-type": "application/json",
+            "x-workspace-id": WORKSPACE,
+          },
+          body: JSON.stringify({ listen }),
+        });
+      const listenInView = async () => {
+        const res = await app.request(`/v1/agents/${agent.id}/channels`, {
+          headers: { "x-workspace-id": WORKSPACE },
+        });
+        const body = (await res.json()) as {
+          presences: { spaces?: { externalRef: string; listen: string }[] }[];
+        };
+        return body.presences[0]?.spaces?.find(
+          (s) => s.externalRef === "C-WIRE",
+        )?.listen;
+      };
+
+      // Unauthenticated: refused before anything is read.
+      expect((await patchListen("all")).status).toBe(401);
+      currentSession = { id: OWNER, email: `${OWNER}@example.com` };
+      // The channel is blocked (8b): promoting would hear everything and
+      // answer no one, so the door refuses it.
+      expect((await patchListen("all")).status).toBe(422);
+      expect((await patchListen("everything")).status).toBe(422);
+      expect(await listenInView()).toBe("mentions");
+
+      const reopen = await app.request(channelUrl, {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json",
+          "x-workspace-id": WORKSPACE,
+        },
+        body: JSON.stringify({ state: "members_only" }),
+      });
+      expect(reopen.status).toBe(200);
+
+      const postsBeforePromote = slackCallsFor("chat.postMessage").length;
+      const promoted = await patchListen("all");
+      expect(promoted.status).toBe(200);
+      expect(await promoted.json()).toEqual({ listen: "all" });
+      await waitForSlackCall("chat.postMessage", postsBeforePromote + 1);
+      const intro = slackCallsFor("chat.postMessage").at(-1);
+      expect(intro?.form.get("channel")).toBe("C-WIRE");
+      expect(intro?.form.get("text")).toContain(
+        "I'm now the point of contact for this channel",
+      );
+      expect(await listenInView()).toBe("all");
+      const promoteAudit = await db.auditLog.findFirstOrThrow({
+        where: { userId: OWNER, action: "update", service: "channel" },
+        orderBy: { createdAt: "desc" },
+      });
+      expect(promoteAudit.metadata).toMatchObject({
+        externalRef: "C-WIRE",
+        listen: "all",
+      });
+      // Saving the same value again is a no-op: no second intro.
+      expect((await patchListen("all")).status).toBe(200);
+      // The intro is posted by the listen PATCH, not the inbound door's
+      // detached replies, so this negative keeps a real settle window.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(slackCallsFor("chat.postMessage").length).toBe(
+        postsBeforePromote + 1,
+      );
+      currentSession = null;
+
+      // The judge runs on the agent's own key (the seeded placeholder is
+      // unreadable), against the fake model on the faked origin.
+      await db.secret.update({
+        where: { id: secret.id },
+        data: { encryptedValue: await getCrypto().encrypt("sk-ant-wire") },
+      });
+      slackHandlers["conversations.history"] = () => ({
+        messages: [{ ts: "600.0", user: "U-OWNER", text: "morning all" }],
+      });
+      // The reply judge's answer block, as the model is asked to write it.
+      let verdict = "WHO: OTHER\nWHERE: CHANNEL";
+      slackHandlers["v1/messages"] = () => ({
+        content: [{ type: "text", text: verdict }],
+      });
+      await db.turn.updateMany({
+        where: { conversation: { agentId: agent.id } },
+        data: { status: "done", finishedAt: new Date() },
+      });
+      const turnsBefore = await db.turn.count({
+        where: { conversation: { agentId: agent.id } },
+      });
+      const overheard = (ts: string, text: string) =>
+        postEvent({
+          type: "message",
+          channel: "C-WIRE",
+          channel_type: "channel",
+          user: "U-OWNER",
+          text,
+          ts,
+        });
+
+      // Addressed to someone else: heard, judged, and left alone.
+      expect((await overheard("600.1", "Sam, did you push it?")).status).toBe(
+        200,
+      );
+      expect(
+        await db.turn.count({
+          where: { conversation: { agentId: agent.id } },
+        }),
+      ).toBe(turnsBefore);
+      const judgeCall = slackCallsFor("v1/messages")[0];
+      expect(judgeCall).toBeDefined();
+      expect(JSON.parse(judgeCall?.raw ?? "{}")).toMatchObject({
+        model: "claude-haiku-5-5",
+        thinking: { type: "disabled" },
+        output_config: { effort: "low" },
+      });
+      // The judge read the room on this channel with the presence's token.
+      expect(
+        slackCallsFor("conversations.history").at(-1)?.form.get("channel"),
+      ).toBe("C-WIRE");
+
+      // For the agent: a real turn, answered in the channel.
+      verdict = "WHO: AGENT\nWHERE: CHANNEL";
+      expect(
+        (await overheard("600.2", "can you summarize the deploy?")).status,
+      ).toBe(200);
+      const roomTurn = await db.turn.findFirstOrThrow({
+        where: {
+          conversation: { agentId: agent.id, externalRef: "C-WIRE" },
+          message: { endsWith: "can you summarize the deploy?" },
+        },
+        select: { userId: true, sourceThreadId: true },
+      });
+      expect(roomTurn.userId).toBe(OWNER);
+      expect(roomTurn.sourceThreadId).toBeNull();
+
+      // Settling the channel to "No one" ends the promotion: a later
+      // re-open is a fresh, announced decision, never a silent resume.
+      currentSession = { id: OWNER, email: `${OWNER}@example.com` };
+      const reblock = await app.request(channelUrl, {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json",
+          "x-workspace-id": WORKSPACE,
+        },
+        body: JSON.stringify({ state: "blocked" }),
+      });
+      expect(reblock.status).toBe(200);
+      expect(await listenInView()).toBe("mentions");
+      currentSession = null;
     });
   },
 );

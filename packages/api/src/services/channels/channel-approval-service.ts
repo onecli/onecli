@@ -20,6 +20,7 @@ import {
 } from "./gateway-approvals";
 import { channelProvider } from "./registry";
 import type { ChannelProviderId } from "./types";
+import { followApprovedResults } from "../approval-result-followup";
 
 /**
  * One decide flow for BOTH transports: the events arm's interactivity route
@@ -230,6 +231,15 @@ export const decideApprovalsFromChannel = async (input: {
     where: { id: clicker.userId },
     select: { name: true, email: true },
   });
+  if (input.decision === "approve") {
+    followApprovedResults({
+      workspaceId: presence.agent.workspaceId,
+      organizationId: presence.agent.workspace.organizationId,
+      agentId: presence.agent.id,
+      approvalIds: decided,
+      decidedByName: decidedBy?.name || decidedBy?.email || "a teammate",
+    });
+  }
   await Promise.all(
     decided.map((approvalId) =>
       recordAuditEvent({
@@ -341,8 +351,15 @@ export const decideApprovalFromChannel = async (input: {
     },
   });
 
-  return {
-    kind: "decided",
-    decidedByName: decidedBy?.name || decidedBy?.email || "a teammate",
-  };
+  const decidedByName = decidedBy?.name || decidedBy?.email || "a teammate";
+  if (input.decision === "approve") {
+    followApprovedResults({
+      workspaceId: presence.agent.workspaceId,
+      organizationId: presence.agent.workspace.organizationId,
+      agentId: presence.agent.id,
+      approvalIds: [input.approvalId],
+      decidedByName,
+    });
+  }
+  return { kind: "decided", decidedByName };
 };

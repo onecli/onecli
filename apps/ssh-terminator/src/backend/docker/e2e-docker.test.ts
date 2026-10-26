@@ -25,15 +25,17 @@ import { createDockerBackend } from "./index";
  * hijacked stream in both framings, stdin half-close, and exit codes.
  */
 
-const sshAvailable = ((): boolean => {
+/** Probed lazily, only once the env flag opts in, so a skipped run never
+ * pays a `docker info` round-trip. */
+const sshAvailable = (): boolean => {
   const probe = spawnSync("ssh", ["-V"]);
   return probe.error === undefined;
-})();
+};
 
-const dockerAvailable = ((): boolean => {
+const dockerAvailable = (): boolean => {
   const probe = spawnSync("docker", ["info"], { timeout: 10_000 });
   return probe.error === undefined && probe.status === 0;
-})();
+};
 
 /** node:22-alpine ships the `node` user (uid 1000) the exec pins; the boot
  * script adds bash (the shell payload target) and bridges alpine's
@@ -137,7 +139,7 @@ const startFakeControlPlane = async (
 // behind ONECLI_DOCKER_E2E=1 so CI stays green and it runs on demand
 // (`ONECLI_DOCKER_E2E=1 pnpm --filter @onecli/ssh-terminator test`).
 const enabled =
-  process.env.ONECLI_DOCKER_E2E === "1" && dockerAvailable && sshAvailable;
+  process.env.ONECLI_DOCKER_E2E === "1" && dockerAvailable() && sshAvailable();
 
 describe.skipIf(!enabled)(
   "docker substrate e2e (real daemon + OpenSSH)",

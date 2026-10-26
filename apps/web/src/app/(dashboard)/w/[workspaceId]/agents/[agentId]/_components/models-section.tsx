@@ -35,8 +35,8 @@ export const ModelsSection = ({ agentId }: { agentId: string }) => {
   );
 
   // Create-then-attach: a key minted here is granted to THIS agent the
-  // moment it lands (the shared SecretActions interception seam).
-  const { secretActions, onSaved } = useCreateThenAttachSecret(agentId);
+  // moment it lands.
+  const { onSaved } = useCreateThenAttachSecret(agentId);
 
   return (
     <div className="flex flex-col gap-6">
@@ -90,7 +90,6 @@ export const ModelsSection = ({ agentId }: { agentId: string }) => {
           "openrouter",
           "local",
         ]}
-        secretActions={secretActions}
       />
       {/* Edit door: replace the stored value (write-only) or rename. Keyed so
           a different row always mounts a fresh form; the row survives the

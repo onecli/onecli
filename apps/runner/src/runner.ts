@@ -3,8 +3,10 @@ import {
   MAX_SANDBOX_CHECK_IDS,
   SESSION_RESUME_GRACE_MS,
   TURN_FAILURE_CODES,
+  type AttachmentManifestEntry,
   type RunnerCapabilities,
   type RunnerEvent,
+  type RunnerSandboxesResponse,
   type RunnerWorkItem,
   type SandboxStartFailureReason,
   type SandboxStartPayload,
@@ -17,9 +19,16 @@ import {
   ImageUnavailableError,
   SandboxCapacityError,
   type SandboxBackend,
+  type SandboxSnapshot,
 } from "./backend/types";
 import { createKeyedChains, createSemaphore } from "./executor";
-import type { RunnerWsServer, SupervisorConnection } from "./ws/server";
+import { classifySandbox, vanishedSandboxes } from "./reconcile-classify";
+import {
+  hashBootstrapToken,
+  mintBootstrapToken,
+  type RunnerWsServer,
+  type SupervisorConnection,
+} from "./ws/server";
 import { log } from "./log";
 
 /**
@@ -42,12 +51,6 @@ import { log } from "./log";
 
 /** How long a work poll asks the server to hold. */
 const POLL_WAIT_SECONDS = 25;
-/**
- * How often a held delivery re-checks for its reconnecting sandbox's channel.
- * Local map reads only; the supervisor's own backoff is what paces the
- * actual reconnects.
- */
-const RECONNECT_POLL_MS = 250;
 const POLL_LIMIT = 5;
 const HEARTBEAT_MS = 30_000;
 /** Backoff bounds when the control plane is unreachable. */
@@ -63,25 +66,31 @@ const RETRY_MAX_MS = 30_000;
  */
 const START_HEARTBEAT_MS = 120_000;
 /**
- * How long after a start COMPLETES the reconcile waits before classifying a
- * dead, never-connected container as a boot crash. Generous against a slow
- * supervisor boot: misclassifying a healthy boot parks the whole turn queue
- * 150s later, while a real crash only waits this long once.
+ * How long after its spawn is recorded a dead, never-connected container
+ * waits before it is a boot crash. Generous against a slow supervisor boot:
+ * misclassifying a healthy boot parks the whole turn queue 150s later,
+ * while a real crash only waits this long once.
  */
 const BOOT_DIAL_IN_GRACE_MS = 180_000;
 /**
- * How long a RESTARTED process waits for a sandbox it inherited at boot to
- * redial with its session before treating its silence as death. Deliberately
- * much shorter than the supervisor's whole retry budget
- * (`SESSION_RESUME_GRACE_MS`, ~15.5 min): a session-holding supervisor redials
- * within a second of losing its runner and keeps retrying every <=15 s, so it
- * is back as soon as the new process is reachable (normally well under a
- * minute after boot). One still silent after this is not coming back, and
- * every turn held for it waits until the grace ends. 3 min leaves a wide
- * margin over a normal reconnect. A drop the LIVE process saw keeps the full
- * budget: that supervisor is known to be mid-retry.
+ * How long the reconciler waits for a sandbox whose holder copy died (or
+ * whose channel predates channel records) to reconnect before treating its
+ * silence as death. Much shorter than the supervisor's whole retry budget
+ * (`SESSION_RESUME_GRACE_MS`, ~15.5 min, the grace for a drop a live copy
+ * saw): a session-holding supervisor redials within a second of losing its
+ * copy and keeps retrying every <=15 s, so it is back as soon as any copy
+ * is reachable. 3 min leaves a wide margin over a normal reconnect.
  */
 const INHERITED_RESUME_GRACE_MS = 180_000;
+
+/**
+ * How a closed channel's container is looked at: this many looks, this far
+ * apart. A SIGKILL'd container reads `running` for ~100 ms after its socket
+ * closes; 5 looks over ~2 s cover any substrate's lag without letting a
+ * live, reconnecting supervisor's container cost more than a few reads.
+ */
+const CLOSED_CHANNEL_LOOKS = 5;
+const CLOSED_CHANNEL_LOOK_MS = 500;
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => {
@@ -119,6 +128,15 @@ export const payloadHash = (payload: SandboxStartPayload): string =>
     .digest("hex");
 
 /**
+ * Loopback is never egress. Without it in NO_PROXY, an agent's own
+ * `curl http://localhost:8080` (checking the service it just started) is
+ * sent to the gateway and comes back empty (observed live: the gateway
+ * logged every such call as `HTTP_PROXY host=localhost`). Exempting it
+ * moves nothing off the fence: loopback stays inside the guest.
+ */
+const LOOPBACK_NO_PROXY = ["localhost", "127.0.0.1", "::1"];
+
+/**
  * Keep the sandbox's control channel OFF the proxy.
  *
  * The bootstrap payload sets `HTTPS_PROXY` and `NODE_USE_ENV_PROXY=1` so that
@@ -130,17 +148,23 @@ export const payloadHash = (payload: SandboxStartPayload): string =>
  * §3.4 names two legal destinations from a sandbox — the gateway and its
  * runner — so exempting the runner is the rule, not a hole in it. The network
  * remains the enforcement: everything else still has nowhere to go.
+ *
+ * `loopback` adds LOOPBACK_NO_PROXY as well; only a harness that routes
+ * loopback THROUGH the gateway on purpose turns it off.
  */
 export const noProxyForRunner = (
   advertisedHost: string,
   payloadEnv: Record<string, string>,
+  loopback = true,
 ): Record<string, string> => {
   const existing = payloadEnv.NO_PROXY ?? payloadEnv.no_proxy ?? "";
   const hosts = existing
     .split(",")
     .map((entry) => entry.trim())
     .filter(Boolean);
-  if (!hosts.includes(advertisedHost)) hosts.push(advertisedHost);
+  for (const h of [advertisedHost, ...(loopback ? LOOPBACK_NO_PROXY : [])]) {
+    if (!hosts.includes(h)) hosts.push(h);
+  }
   const value = hosts.join(",");
   // Both spellings: tools differ on which they read.
   return { NO_PROXY: value, no_proxy: value };
@@ -156,11 +180,14 @@ export interface RunnerDeps {
   startHeartbeatMs?: number;
   bootDialInGraceMs?: number;
   /**
-   * How long a RESTARTED process waits for the supervisors it inherited to
-   * reconnect before treating their silence as death. Tests only; production
+   * How long the reconciler waits for a sandbox whose holder copy died to
+   * reconnect before treating its silence as death. Tests only; production
    * uses `INHERITED_RESUME_GRACE_MS`.
    */
   inheritedResumeGraceMs?: number;
+  /** The interval between looks at a closed channel's container. Tests
+   * only; production uses `CLOSED_CHANNEL_LOOK_MS`. */
+  closedChannelLookMs?: number;
 }
 
 type StartItem = Extract<RunnerWorkItem, { kind: "sandbox.start" }>;
@@ -174,14 +201,6 @@ export interface Runner {
   /** One reconcile pass against the control plane's sandbox list. */
   reconcile(): Promise<void>;
   /**
-   * The container this runner most recently spawned for a sandbox (step 10),
-   * or undefined if none. Used to stamp process.state events — a supervisor
-   * connection can only exist if THIS process minted its token after
-   * spawning the container, so the entry is always present before any frame
-   * could arrive.
-   */
-  containerRefOf(sandboxId: string): string | undefined;
-  /**
    * Resolves once every enqueued work item and every queued report has
    * settled. `tick` only ENQUEUES — this is the deterministic drain
    * tests (and the shutdown path) wait on.
@@ -189,6 +208,13 @@ export interface Runner {
   settle(): Promise<void>;
   /** The long-running loop: poll forever until `stop()`. */
   run(): Promise<void>;
+  /**
+   * Leave gracefully: stop polling, retire this copy's identity (it is
+   * handed nothing new, and its sandboxes and the reconciler role pass on
+   * at once), hand every supervisor socket over to another copy (`drain`),
+   * and run whatever the poll in flight brings back. Sandboxes are left
+   * running.
+   */
   stop(): Promise<void>;
 }
 
@@ -239,12 +265,11 @@ const transientRegisterStatus = (status: number): boolean =>
 const registerWithRetry = async (
   controlPlane: ControlPlaneClient,
   controlPlaneUrl: string,
-  name: string,
-  capabilities: RunnerCapabilities,
-): Promise<{ runnerId: string }> => {
+  registration: Parameters<ControlPlaneClient["register"]>[0],
+): Promise<{ runnerId: string; replicaId: string }> => {
   for (let attempt = 1; ; attempt += 1) {
     try {
-      return await controlPlane.register(name, capabilities);
+      return await controlPlane.register(registration);
     } catch (error) {
       if (
         error instanceof ControlPlaneError &&
@@ -281,14 +306,16 @@ export const createRunner = ({
   startHeartbeatMs = START_HEARTBEAT_MS,
   bootDialInGraceMs = BOOT_DIAL_IN_GRACE_MS,
   inheritedResumeGraceMs = INHERITED_RESUME_GRACE_MS,
+  closedChannelLookMs = CLOSED_CHANNEL_LOOK_MS,
 }: RunnerDeps): Runner => {
   let running = false;
+  /** Set the moment `stop` begins: the sockets that close from then on are
+   * this copy's own drain, not containers dying. */
+  let stopping = false;
+  /** The poll loop, while `run` drives it: `stop` waits for its last poll. */
+  let loop: Promise<void> = Promise.resolve();
   let heartbeatTimer: NodeJS.Timeout | undefined;
   let reconcileTimer: NodeJS.Timeout | undefined;
-  // sandboxId → the container ref we spawned for it (step 10). Populated the
-  // instant a container is created, cleared when it is stopped or reaped, so
-  // it is authoritative for any supervisor frame that can reach us.
-  const sandboxContainers = new Map<string, string>();
 
   /**
    * THE LIFECYCLE EXECUTOR. Every work item runs on its sandbox's
@@ -329,18 +356,26 @@ export const createRunner = ({
    * credentials), and one settlement report satisfies both claims. */
   const queuedStarts = new Map<string, { item: StartItem }>();
   const queuedStops = new Map<string, { item: StopItem }>();
+  /** sandboxId → this copy's starts and stops for it, from enqueue until
+   * each has reported. A start and a stop can both be in flight (a start
+   * queued behind an executing stop), hence a count. Either one closes the
+   * container's socket and speaks for the sandbox itself. */
+  const lifecycleInFlight = new Map<string, number>();
+  const beginLifecycle = (sandboxId: string): void => {
+    lifecycleInFlight.set(
+      sandboxId,
+      (lifecycleInFlight.get(sandboxId) ?? 0) + 1,
+    );
+  };
+  const endLifecycle = (sandboxId: string): void => {
+    const left = (lifecycleInFlight.get(sandboxId) ?? 1) - 1;
+    if (left > 0) lifecycleInFlight.set(sandboxId, left);
+    else lifecycleInFlight.delete(sandboxId);
+  };
   /** sandboxId → payload hash of the start EXECUTING right now. A twin with
    * the same hash is absorbed (recreating an identical container buys
    * nothing); a differing hash queues — the recreate is then correct. */
   const executingStartHash = new Map<string, string>();
-  /**
-   * sandboxId → when its last start SETTLED SUCCESSFULLY. The boot-crash
-   * classifier's attempt fence: a dead, never-connected container is only a
-   * crash once its start fully completed and the dial-in grace elapsed —
-   * otherwise reconcile would misread a healthy-but-slow boot, and `failed`
-   * lands unguarded control-plane-side.
-   */
-  const startCompletedAt = new Map<string, number>();
   const startHeartbeats = new Map<string, NodeJS.Timeout>();
   /**
    * Fresh creates admitted past the capacity check but not yet visibly
@@ -390,6 +425,13 @@ export const createRunner = ({
     // Dispatch composes the manifest + context note only when this is
     // advertised, so an older runner's turns simply ship bare.
     attachments: true,
+    // And ahead of a mid-run follow-up's `turn.message` the same way: the
+    // steer arm hands a follow-up with files only to a runner saying so.
+    steerAttachments: true,
+    // This build forwards `desktop.control` to the supervisor and relays
+    // its `desktop.state`. The claim arm is gated on it, so an older runner
+    // never meets the kind.
+    desktopControl: true,
     // This build reassembles `file.part` runs and relays them to
     // POST /v1/runner/attachments (send_file). The control plane hands the
     // supervisor the tool only when its runner advertises this, so an agent
@@ -405,6 +447,24 @@ export const createRunner = ({
       // sandbox whose status never arrived, so a failed report must not take
       // the runner down.
       log("warn", "failed to report events", { error: String(error) });
+    }
+  };
+
+  /** Stop and remove one container, logging rather than throwing: the
+   * cleanup arms (a stood-down start, a boot-crash corpse) must never fail
+   * the path that called them. */
+  const removeQuietly = async (
+    containerRef: string,
+    sandboxId: string,
+  ): Promise<void> => {
+    try {
+      await backend.stopSandbox(containerRef, sandboxId);
+      await backend.removeSandbox(containerRef, sandboxId);
+    } catch (error) {
+      log("warn", "failed to remove a container", {
+        sandboxId,
+        error: String(error),
+      });
     }
   };
 
@@ -476,15 +536,15 @@ export const createRunner = ({
       if (existing) {
         await backend.stopSandbox(existing.containerRef, item.sandboxId);
         await backend.removeSandbox(existing.containerRef, item.sandboxId);
-        sandboxContainers.delete(item.sandboxId);
-        inheritedAt.delete(item.sandboxId);
       }
 
       // The workspace is the wake's placement for a home it has to BIRTH
       // (a brand-new agent on a snapshot backend: disk and device come up
       // before the sandbox exists); an existing home ignores it.
       await backend.wakeHome(homeRef, item.payload.workspaceId);
-      const bootstrapToken = wsServer.issueToken(item.sandboxId);
+      // Minted here and never kept: the control plane holds only its hash,
+      // so whichever copy the supervisor reaches can admit it, once.
+      const bootstrapToken = mintBootstrapToken();
       const containerRef = await backend.createSandbox({
         sandboxId: item.sandboxId,
         ...(item.payload.workspaceId && {
@@ -493,7 +553,11 @@ export const createRunner = ({
         image: config.agentImage,
         env: {
           ...item.payload.env,
-          ...noProxyForRunner(config.advertisedHost, item.payload.env),
+          ...noProxyForRunner(
+            config.advertisedHost,
+            item.payload.env,
+            config.noProxyLoopback,
+          ),
           ...(item.payload.model && { AGENT_MODEL: item.payload.model }),
           ...(item.payload.effort && { AGENT_EFFORT: item.payload.effort }),
           ...(item.payload.harness && {
@@ -519,14 +583,32 @@ export const createRunner = ({
           ...(item.payload.connections && {
             AGENT_CONNECTIONS: JSON.stringify(item.payload.connections),
           }),
+          // The preview apps to bring back on this boot (only on a wake a
+          // preview hit caused — the control plane composes it then and
+          // only then), same rule.
+          ...(item.payload.previewRelaunch && {
+            AGENT_PREVIEW_RELAUNCH: JSON.stringify(
+              item.payload.previewRelaunch,
+            ),
+          }),
           SANDBOX_ID: item.sandboxId,
-          RUNNER_WS_URL: `ws://${config.advertisedHost}:${config.wsPort}`,
+          RUNNER_WS_URL: `ws://${config.advertisedHost}:${config.advertisedPort}`,
           SANDBOX_WS_TOKEN: bootstrapToken,
           // The supervisor offers send_file only when THIS runner can
           // relay the bytes (capabilities.outboundAttachments) — a runner
           // that predates the frame would drop it on validation and the
           // model would wait out a timeout for a file that never left.
           RUNNER_OUTBOUND_ATTACHMENTS: "1",
+          // Same rule for previews: preview_expose (and the fragment that
+          // teaches it) only where this runner can carry port streams, i.e.
+          // its port API is configured. Otherwise the agent would be taught
+          // a tool whose every call fails.
+          ...(config.portApi && { RUNNER_PORT_STREAMS: "1" }),
+          // The hosted platform's agent desktop: only on the hosted
+          // backend, and only where the screen can be carried (port
+          // streams). Every other runner leaves the plain desktop alone.
+          ...(config.backend === "cloud" &&
+            config.portApi && { RUNNER_HOSTED_DESKTOP: "1" }),
         },
         files: item.payload.files,
         homeRef,
@@ -535,14 +617,34 @@ export const createRunner = ({
         resumable: wsServer.resumable,
       });
 
-      // Record the container BEFORE start. On Docker the create returns
-      // before the container runs, so the map is populated before the
-      // supervisor can dial in. On the cloud backend the create returns only
-      // once the sandbox RUNS, so the supervisor may already be connected:
-      // `containerKnown` hands it the session it could not get
-      // at connect (the credential is signed over this ref).
-      sandboxContainers.set(item.sandboxId, containerRef);
-      wsServer.containerKnown(item.sandboxId);
+      // Record the spawn BEFORE start: from here on any copy can admit its
+      // supervisor's first connect (the control plane matches the token's
+      // hash and names this container). On Docker the create returns before
+      // the container runs, so the record always lands first. On a
+      // substrate whose create returns once the sandbox runs, a supervisor
+      // that dialled in earlier was refused and redials within seconds.
+      //
+      // Refused means this start no longer applies: the sandbox moved on
+      // (deleted, respawned) or another copy owns its lifecycle now. Stand
+      // down and remove what was just created; nothing is reported, since
+      // the row is someone else's business. (Its capacity admission frees
+      // itself: the next check prunes an admitted id with no container.)
+      const recorded = await controlPlane
+        .recordSpawn(item.sandboxId, {
+          containerRef,
+          tokenHash: hashBootstrapToken(bootstrapToken),
+        })
+        .catch(async (error: unknown) => {
+          await removeQuietly(containerRef, item.sandboxId);
+          throw error;
+        });
+      if (!recorded) {
+        log("info", "start no longer applies; standing down", {
+          sandboxId: item.sandboxId,
+        });
+        await removeQuietly(containerRef, item.sandboxId);
+        return [];
+      }
 
       await backend.startSandbox(containerRef);
 
@@ -564,9 +666,6 @@ export const createRunner = ({
         homeRef,
       });
     } catch (error) {
-      // Safe for a token that was never issued (the daemon died before the
-      // mint) — revoke is a keyed delete, not a handle.
-      wsServer.revokeToken(item.sandboxId);
       // A failed fresh create holds no capacity — without this a string of
       // failures would eat the admitted set until nothing could start.
       admittedNew.delete(item.sandboxId);
@@ -643,16 +742,11 @@ export const createRunner = ({
    * backend throws; each caller decides what a failure means. */
   const stopContainer = async (sandboxId: string, ref: string) => {
     await backend.stopSandbox(ref, sandboxId);
-    // The container is gone — its process rows are now stale by definition
-    // (the control plane's lost sweep will terminalize them).
-    sandboxContainers.delete(sandboxId);
-    inheritedAt.delete(sandboxId);
-    // A deliberate stop ends the boot-crash attempt window with it — and
-    // releases the sandbox's admitted-capacity slot: a stopped container
-    // stays listed (not running) forever on some substrates, so the
-    // in-check prune alone would hold its slot and refuse admissible
-    // starts with capacity to spare.
-    startCompletedAt.delete(sandboxId);
+    // A deliberate stop releases the sandbox's admitted-capacity slot: a
+    // stopped container stays listed (not running) forever on some
+    // substrates, so the in-check prune alone would hold its slot and refuse
+    // admissible starts with capacity to spare. (Its process rows are now
+    // stale; the control plane's lost sweep terminalizes them.)
     admittedNew.delete(sandboxId);
     // Addressed by name: a park of a home that was never born is the
     // backend's no-op, so this needs no lookup first.
@@ -667,17 +761,6 @@ export const createRunner = ({
    * grows past the live sandboxes.
    */
   const deliveryChains = new Map<string, Promise<void>>();
-  /**
-   * Turns currently HELD for a reconnecting sandbox, by id. While a turn is
-   * held the control plane still reads its sandbox as `running` (the
-   * runner withholds `stopped` for the grace, on purpose), so the
-   * stale-dispatch window re-hands the same turn to this runner every
-   * ~90 s. Each copy must be recognised as the turn already in hand: a
-   * live supervisor runs every turn.deliver it receives, and the failure
-   * path would post one channel-loss batch per copy, and several copies can
-   * pile up behind one hold.
-   */
-  const heldTurns = new Set<string>();
   const enqueueDelivery = (
     sandboxId: string,
     task: () => Promise<void>,
@@ -698,57 +781,55 @@ export const createRunner = ({
   };
 
   /**
-   * Is a sandbox's channel merely DOWN FOR THE MOMENT? True while its
-   * session-holding supervisor dropped inside the resume grace: it is
-   * reconnecting under its own retry budget, and the runner must neither
-   * report it dead nor fail its turns until that budget is spent.
+   * Pull a message's files from the control plane and stream each one down
+   * the sandbox's channel as `attachment.part` frames, ahead of the message
+   * frame they belong to (the same-socket order plus the supervisor's
+   * sync-queue apply is the whole "files are on disk before the words"
+   * guarantee). One file that fails to pull or verify is skipped, logged,
+   * and the message still goes (the agent's read fails honestly; the note
+   * said what was expected). Returns false when the socket closed mid-way:
+   * the caller decides what that means for its message.
+   *
+   * The socket is re-resolved per file: it may have closed during a pull
+   * (frames to a closed socket would throw and lose the remaining files).
+   * A closed socket is never waited for here: the supervisor may come back
+   * on another copy, which is handed the message's work from then on.
    */
-  /**
-   * sandboxId → when THIS process inherited it running at boot. The old
-   * process's channel state died with it, so a restarted runner has no
-   * `disconnectedAt` for the sandboxes it took over; their supervisors are
-   * reconnecting under a session key this process shares, and the only
-   * anchor it has for "how long have they been trying" is its own boot.
-   * An entry is forgotten the moment the sandbox connects (the ws server's
-   * own state takes over from there) or is recreated/reaped.
-   */
-  const inheritedAt = new Map<string, number>();
-
-  const reconnecting = (sandboxId: string): boolean => {
-    // Pure: callers check for a live connection first. Two anchors, in
-    // precedence order: the ws server's own drop time (a channel THIS
-    // process saw close, which exists from the sandbox's first dial-in on)
-    // and, only before that, the boot time this process inherited the
-    // container at. The boot anchor is never consulted once the server has
-    // a drop time, so it needs no release.
-    const droppedAt = wsServer.disconnectedAt(sandboxId);
-    if (droppedAt !== undefined) {
-      return Date.now() - droppedAt < SESSION_RESUME_GRACE_MS;
-    }
-    const inherited = inheritedAt.get(sandboxId);
-    return (
-      inherited !== undefined && Date.now() - inherited < inheritedResumeGraceMs
-    );
-  };
-
-  /**
-   * The live connection, now or once the reconnecting supervisor is back:
-   * polls while `reconnecting` holds, and resolves undefined the moment it
-   * stops holding with no channel (the grace ran out, or the sandbox was
-   * recreated and its session state cleared). The poll is cheap and local
-   * (two map reads), and it is the ONE place a held delivery waits.
-   */
-  const awaitConnection = async (
+  const streamAttachments = async (
     sandboxId: string,
-  ): Promise<SupervisorConnection | undefined> => {
-    for (;;) {
-      const live = wsServer.connection(sandboxId);
-      if (live) return live;
-      if (!reconnecting(sandboxId)) return undefined;
-      await new Promise((resolve) =>
-        setTimeout(resolve, RECONNECT_POLL_MS).unref?.(),
-      );
+    messageId: string,
+    manifest: readonly AttachmentManifestEntry[],
+  ): Promise<boolean> => {
+    for (const entry of manifest) {
+      try {
+        const bytes = await controlPlane.fetchAttachment(entry.id);
+        if (!verifyPulledAttachment(entry, bytes)) {
+          log("warn", "attachment bytes failed verification; skipped", {
+            attachmentId: entry.id,
+            turnId: messageId,
+          });
+          continue;
+        }
+        const live = wsServer.connection(sandboxId);
+        if (!live) {
+          log("warn", "sandbox channel closed mid attachment delivery", {
+            sandboxId,
+            turnId: messageId,
+          });
+          return false;
+        }
+        for (const frame of attachmentPartFrames(messageId, entry, bytes)) {
+          live.send(frame);
+        }
+      } catch (error) {
+        log("warn", "attachment pull failed; message delivers without it", {
+          attachmentId: entry.id,
+          turnId: messageId,
+          error: String(error),
+        });
+      }
     }
+    return true;
   };
 
   /**
@@ -766,44 +847,19 @@ export const createRunner = ({
    * expected). Steers/aborts that overtake this async delivery are safe by
    * the supervisor's own machinery (steer inbox, pending aborts).
    *
-   * A sandbox whose session-holding supervisor is RECONNECTING (the runner
-   * just restarted) is not a dead sandbox: the turn is held on the sandbox's
-   * delivery chain and handed over the moment the channel returns, or fails
-   * exactly as a channelless one does once the resume grace runs out.
+   * The control plane hands a turn only to the copy holding the sandbox's
+   * open socket, so arriving here without one means the socket closed in
+   * between (the supervisor is reconnecting, possibly to another copy). The
+   * turn is GIVEN BACK, never failed: a death report for a turn the harness
+   * never started re-queues it invisibly (the control plane's revival door),
+   * and it is dispatched again to whichever copy holds the socket next.
+   * Whether the sandbox itself is dead is the reconciler's call, from the
+   * control plane's facts, never this copy's.
    */
   const deliverTurn = (
     item: Extract<RunnerWorkItem, { kind: "turn.deliver" }>,
   ): RunnerEvent[] => {
-    /**
-     * The sandbox is not connected and not coming back. Say so rather than
-     * dropping the turn — silence would leave it dispatched until the stale
-     * sweep. ONE shape for every channel loss, sync or mid-delivery.
-     *
-     * ORDER MATTERS: `stopped` first, then the turn. The control plane's
-     * two death doors recover differently. Stopped-first, the strand door
-     * revives the never-started turn, flips the box to `unprovisioned` and
-     * wakes a fresh boot; the turn report then finds a `queued` row and is
-     * inert. Finished-first, the finish door revives the turn but must NOT
-     * wake (the box still reads `running`), and this process's own poll can
-     * run between the two reports: it claims the revived turn straight back
-     * against the still-`running` box, so when the `stopped` lands the
-     * revival is already spent and the strand door fails the turn, never
-     * run, with the restart copy. Seen on CI (resumable-channel, the
-     * misconfigured-address leg). Both reports still go in one batch; only
-     * the order is fixed.
-     */
-    const channelLoss = (): RunnerEvent[] => [
-      // Correct the control plane's view FIRST. It still reads `running` —
-      // that belief is why this turn was dispatched here at all — and a
-      // `running` sandbox is never re-started, so without this the agent
-      // stays unreachable until the next reconcile tick. Reporting it now
-      // means the user's retry lands on the ordinary wake path instead of
-      // failing again.
-      {
-        kind: "sandbox.status",
-        sandboxId: item.sandboxId,
-        status: "stopped",
-      },
+    const giveBack = (): RunnerEvent[] => [
       {
         kind: "turn.finished",
         sandboxId: item.sandboxId,
@@ -811,114 +867,57 @@ export const createRunner = ({
         turnId: item.turnId,
         status: "failed",
         // Raw prose stays for an old control plane; a new one maps the
-        // CODE to its canonical copy — and, for a turn that never started,
-        // revives it invisibly instead of failing it at all.
+        // CODE to its canonical copy and, for a turn that never started,
+        // revives it instead of failing it at all.
         error: "The agent was restarting. Send the message again.",
         errorCode: TURN_FAILURE_CODES.agentRestarted,
       },
     ];
 
-    const sendTurnFrame = (target: SupervisorConnection) => {
-      target.send({
-        kind: "turn.deliver",
-        turnId: item.turnId,
-        conversationId: item.conversationId,
-        message: item.message,
-        ...(item.resumeSessionRef && {
-          resumeSessionRef: item.resumeSessionRef,
-        }),
-        // Delivery-only memory context (step 8) — forwarded verbatim; the
-        // supervisor concatenates, the transcript never sees it.
-        ...(item.context && { context: item.context }),
-        ...(item.attachments &&
-          item.attachments.length > 0 && { attachments: item.attachments }),
-      });
+    const turnFrame = {
+      kind: "turn.deliver" as const,
+      turnId: item.turnId,
+      conversationId: item.conversationId,
+      message: item.message,
+      ...(item.resumeSessionRef && {
+        resumeSessionRef: item.resumeSessionRef,
+      }),
+      // Delivery-only memory context (step 8) — forwarded verbatim; the
+      // supervisor concatenates, the transcript never sees it.
+      ...(item.context && { context: item.context }),
+      ...(item.attachments &&
+        item.attachments.length > 0 && { attachments: item.attachments }),
     };
 
     const connection = wsServer.connection(item.sandboxId);
-    const manifest = item.attachments ?? [];
-
-    // The fast path: connected, nothing to pull. Everything else rides the
-    // sandbox's delivery chain, because it has to WAIT for something.
-    if (connection && manifest.length === 0) {
-      sendTurnFrame(connection);
-      return [];
-    }
-    if (!connection && !reconnecting(item.sandboxId)) {
-      log("warn", "turn delivered to a sandbox with no live channel", {
-        sandboxId: item.sandboxId,
-        turnId: item.turnId,
-      });
-      return channelLoss();
-    }
-
     if (!connection) {
-      if (heldTurns.has(item.turnId)) {
-        log("info", "re-dispatch of a turn already held; absorbed", {
-          sandboxId: item.sandboxId,
-          turnId: item.turnId,
-        });
-        return [];
-      }
-      heldTurns.add(item.turnId);
-      log("info", "holding a turn for a reconnecting sandbox", {
+      log("info", "turn for a socket that just closed; giving it back", {
         sandboxId: item.sandboxId,
         turnId: item.turnId,
       });
+      return giveBack();
+    }
+    const manifest = item.attachments ?? [];
+    if (manifest.length === 0) {
+      connection.send(turnFrame);
+      return [];
     }
 
     const deliver = async (): Promise<void> => {
-      for (const entry of manifest) {
-        try {
-          const bytes = await controlPlane.fetchAttachment(entry.id);
-          if (!verifyPulledAttachment(entry, bytes)) {
-            log("warn", "attachment bytes failed verification; skipped", {
-              attachmentId: entry.id,
-              turnId: item.turnId,
-            });
-            continue;
-          }
-          // Re-resolve per file: the channel may have died mid-pull (frames
-          // to a closed socket would throw and the chain's catch would eat
-          // the remaining files), or may be reconnecting and worth waiting for.
-          const live = await awaitConnection(item.sandboxId);
-          if (!live) {
-            log("warn", "sandbox channel closed mid attachment delivery", {
-              sandboxId: item.sandboxId,
-              turnId: item.turnId,
-            });
-            await report(channelLoss());
-            return;
-          }
-          for (const frame of attachmentPartFrames(item.turnId, entry, bytes)) {
-            live.send(frame);
-          }
-        } catch (error) {
-          log("warn", "attachment pull failed; turn delivers without it", {
-            attachmentId: entry.id,
-            turnId: item.turnId,
-            error: String(error),
-          });
-        }
-      }
-      const live = await awaitConnection(item.sandboxId);
-      if (!live) {
-        log(
-          "warn",
-          "turn held for a reconnecting sandbox that never came back",
-          {
-            sandboxId: item.sandboxId,
-            turnId: item.turnId,
-          },
-        );
-        await report(channelLoss());
+      // A socket that closed mid-pull is given back, never waited for: the
+      // supervisor may come back on another copy, which is then handed it.
+      if (!(await streamAttachments(item.sandboxId, item.turnId, manifest))) {
+        await report(giveBack());
         return;
       }
-      sendTurnFrame(live);
+      const live = wsServer.connection(item.sandboxId);
+      if (!live) {
+        await report(giveBack());
+        return;
+      }
+      live.send(turnFrame);
     };
-    enqueueDelivery(item.sandboxId, () =>
-      deliver().finally(() => heldTurns.delete(item.turnId)),
-    );
+    enqueueDelivery(item.sandboxId, deliver);
     return [];
   };
 
@@ -947,61 +946,145 @@ export const createRunner = ({
   };
 
   /**
+   * Forward a frame that must stay BEHIND whatever this sandbox's delivery
+   * chain is still sending (a turn or a follow-up pulling its files): a
+   * steer, or a Send now, overtaking it would reach the supervisor before
+   * the message it follows. With nothing in flight it goes at once, the
+   * common case; otherwise it rides the chain. Either way the channel is
+   * resolved when the frame is SENT, and a missing one is a strict no-op
+   * (`onNoChannel` logs it): recovery for both kinds lives control-plane
+   * side (a steer that never arrived promotes; a Send now was a wish about
+   * a live run).
+   */
+  const forwardInOrder = (
+    sandboxId: string,
+    send: (connection: SupervisorConnection) => void,
+    onNoChannel: () => void,
+  ): void => {
+    const sendNowOrSkip = () => {
+      const connection = wsServer.connection(sandboxId);
+      if (connection) send(connection);
+      else onNoChannel();
+    };
+    if (!deliveryChains.has(sandboxId)) {
+      sendNowOrSkip();
+      return;
+    }
+    enqueueDelivery(sandboxId, async () => sendNowOrSkip());
+  };
+
+  /**
    * Steer a mid-run follow-up down the control channel. No channel is a
    * strict NO-OP, deliberately unlike deliverTurn's corrective events: a
    * steer's recovery lives control-plane-side (the target turn strand-fails
    * and the follow-up is PROMOTED into an ordinary queued turn), so a
    * synthetic failure here would terminalize a message that is about to run
-   * anyway — and a `stopped` report would knock a healthy-but-reconnecting
+   * anyway, and a `stopped` report would knock a healthy-but-reconnecting
    * sandbox into a needless respawn cycle.
+   *
+   * A follow-up WITH files pulls them first, on the sandbox's delivery
+   * chain, exactly like a turn's, then sends its frame. It starts only on a
+   * live socket (none: skipped, promotion covers it), and a socket that
+   * closes mid-pull is skipped the same way, never waited for on this copy:
+   * the supervisor may come back on another one. Promotion then runs the
+   * message as an ordinary turn, files included.
    */
   const steerMessage = (
     item: Extract<RunnerWorkItem, { kind: "turn.message" }>,
   ): RunnerEvent[] => {
-    const connection = wsServer.connection(item.sandboxId);
-    if (!connection) {
-      log("info", "steer skipped — no live channel; promotion will cover it", {
+    const manifest = item.attachments ?? [];
+    const skipped = () =>
+      log("info", "steer skipped, no live channel; promotion will cover it", {
         sandboxId: item.sandboxId,
         turnId: item.turnId,
       });
+    const sendSteer = (connection: SupervisorConnection) =>
+      connection.send({
+        kind: "turn.message",
+        turnId: item.turnId,
+        targetTurnId: item.targetTurnId,
+        conversationId: item.conversationId,
+        message: item.message,
+        // The delivery-only frame, forwarded verbatim like a turn's context:
+        // the supervisor prepends it, the transcript never sees it.
+        ...(item.context && { context: item.context }),
+        ...(manifest.length > 0 && { attachments: manifest }),
+      });
+    if (manifest.length === 0) {
+      forwardInOrder(item.sandboxId, sendSteer, skipped);
       return [];
     }
-    connection.send({
-      kind: "turn.message",
-      turnId: item.turnId,
-      targetTurnId: item.targetTurnId,
-      conversationId: item.conversationId,
-      message: item.message,
-      // The delivery-only frame, forwarded verbatim like a turn's context:
-      // the supervisor prepends it, the transcript never sees it.
-      ...(item.context && { context: item.context }),
+    if (!wsServer.connection(item.sandboxId)) {
+      skipped();
+      return [];
+    }
+    enqueueDelivery(item.sandboxId, async () => {
+      if (!(await streamAttachments(item.sandboxId, item.turnId, manifest))) {
+        skipped();
+        return;
+      }
+      const live = wsServer.connection(item.sandboxId);
+      if (live) sendSteer(live);
+      else skipped();
     });
     return [];
   };
 
   /**
-   * Forward a SEND NOW request. No channel is a strict NO-OP
-   * like a steer's: the request is best-effort by design, the follow-up is
-   * still read after the tool ends (or promoted if the run strands), and
-   * nothing is gained by inventing an outcome the sandbox never reported.
+   * Forward a SEND NOW request, behind the steer it asks about (the claim
+   * always composes it after that steer's delivery, and a steer pulling
+   * files is still on the chain). No channel is a strict NO-OP like a
+   * steer's: the request is best-effort by design, the follow-up is still
+   * read after the tool ends (or promoted if the run strands), and nothing
+   * is gained by inventing an outcome the sandbox never reported.
    */
   const sendNow = (
     item: Extract<RunnerWorkItem, { kind: "turn.send_now" }>,
   ): RunnerEvent[] => {
-    const connection = wsServer.connection(item.sandboxId);
-    if (!connection) {
-      log("info", "send now skipped, no live channel", {
-        sandboxId: item.sandboxId,
-        turnId: item.turnId,
-      });
-      return [];
-    }
-    connection.send({
-      kind: "turn.send_now",
-      turnId: item.turnId,
-      targetTurnId: item.targetTurnId,
-      conversationId: item.conversationId,
-    });
+    forwardInOrder(
+      item.sandboxId,
+      (connection) =>
+        connection.send({
+          kind: "turn.send_now",
+          turnId: item.turnId,
+          targetTurnId: item.targetTurnId,
+          conversationId: item.conversationId,
+        }),
+      () =>
+        log("info", "send now skipped, no live channel", {
+          sandboxId: item.sandboxId,
+          turnId: item.turnId,
+        }),
+    );
+    return [];
+  };
+
+  /**
+   * Desktop control: a person took or gave back the screen. A
+   * pass-through on the sandbox's channel, in order with the steers it may
+   * precede. No live channel is a NO-OP like sendNow's: the control plane
+   * re-sends the current state on its next change, and the supervisor's
+   * handler is idempotent.
+   */
+  const desktopControl = (
+    item: Extract<RunnerWorkItem, { kind: "desktop.control" }>,
+  ): RunnerEvent[] => {
+    forwardInOrder(
+      item.sandboxId,
+      (connection) =>
+        connection.send({
+          kind: "desktop.control",
+          controlled: item.controlled,
+          ...(item.controllerName !== undefined && {
+            controllerName: item.controllerName,
+          }),
+        }),
+      () =>
+        log("info", "desktop control skipped, no live channel", {
+          sandboxId: item.sandboxId,
+          controlled: item.controlled,
+        }),
+    );
     return [];
   };
 
@@ -1070,6 +1153,8 @@ export const createRunner = ({
         return sendNow(item);
       case "skills.changed":
         return syncHome(item);
+      case "desktop.control":
+        return desktopControl(item);
       default: {
         const unreachable: never = item;
         throw new Error(`unhandled work item: ${JSON.stringify(unreachable)}`);
@@ -1078,20 +1163,21 @@ export const createRunner = ({
   };
 
   /**
-   * Dead-but-expected containers already reported, keyed by containerRef —
-   * ONE report per corpse. The control plane's stopped-guard (`stopped`
-   * applies only over running/stopping) makes duplicates inert anyway, but a
-   * deliberately-parked sandbox is also dead-with-no-channel, and without the
-   * dedupe every reconcile tick would re-report every parked container
-   * forever. Bounded by the containers this process ever observes.
+   * Containers this copy has already REPORTED (dead or channelless, or a
+   * boot crash), keyed by containerRef: one report per container. The
+   * control plane's guards make repeats inert anyway, but a deliberately
+   * parked sandbox is also dead-with-no-channel, and without this every
+   * pass would re-report every parked container forever. Bounded by the
+   * containers this copy ever observes.
    */
   const reportedDead = new Set<string>();
 
   /**
-   * Stray containers (running, channelless, their row already parked) this
-   * process has stopped, keyed by containerRef — one stop per container; a
-   * failed stop drops its ref so the next pass retries. Bounded like
-   * `reportedDead`: by the containers this process ever observes.
+   * Containers this copy has claimed and is stopping as strays: one stop
+   * per container. Separate from `reportedDead` on purpose: the usual
+   * stray WAS reported first (the report is what parked its row), and the
+   * stop it then needs must not be swallowed by that report's dedupe. A
+   * refused claim or a failed stop drops its ref so the next pass retries.
    */
   const strayStopped = new Set<string>();
 
@@ -1244,210 +1330,169 @@ export const createRunner = ({
     }
   };
 
-  const reconcilePass = async (): Promise<void> => {
-    const assigned = await controlPlane.listAssignedSandboxes();
-    const expected = new Set(assigned.sandboxIds);
-    const unreachable: RunnerEvent[] = [];
+  /**
+   * When THIS copy became the reconciler (null while it is not): the
+   * earliest moment it could have started watching sandboxes whose holder
+   * died reconnect elsewhere, so the inherited grace never starts before it.
+   */
+  let reconcilerSince: number | null = null;
 
-    // Statuses first, snapshots second — so a sandbox can only APPEAR between
-    // the reads, never leave a healthy sandbox looking vanished: reporting
-    // `stopped` requires "believed running" to predate "no sandbox exists".
-    const snapshots = await backend.listSandboxes();
-    for (const snapshot of snapshots) {
-      if (expected.has(snapshot.sandboxId)) {
+  /**
+   * One container's verdict, acted on. Every report names the container it
+   * is about (`observedContainerRef`), so the control plane applies it only
+   * while that is still the sandbox's container: an observation that lands
+   * after another copy started a fresh one changes nothing.
+   */
+  const actOn = async (
+    snapshot: SandboxSnapshot,
+    assigned: RunnerSandboxesResponse,
+    since: number,
+  ): Promise<RunnerEvent[]> => {
+    const { sandboxId, containerRef } = snapshot;
+    const verdict = classifySandbox({
+      snapshot,
+      believed: assigned.statuses?.[sandboxId],
+      channel: assigned.channels?.[sandboxId],
+      now: Date.now(),
+      reconcilerSince: since,
+      sessions: wsServer.resumable,
+      graces: {
+        bootDialInMs: bootDialInGraceMs,
+        droppedMs: SESSION_RESUME_GRACE_MS,
+        inheritedMs: inheritedResumeGraceMs,
+      },
+    });
+    if (verdict === "leave") return [];
+    if (
+      verdict === "stray"
+        ? strayStopped.has(containerRef)
+        : reportedDead.has(containerRef)
+    ) {
+      return [];
+    }
+
+    switch (verdict) {
+      case "boot-crash":
         /**
-         * RUNNING BUT UNREACHABLE — report it, don't leave it stranded.
-         *
-         * The control-channel token is single-use and lives in this process's
-         * memory, so a supervisor that lost its channel across a runner
-         * restart can never re-authenticate: the container runs, the control
-         * plane still reads `running`, and every turn dispatched to it fails
-         * "sandbox was not reachable" — forever, because a `running` sandbox
-         * is never re-started.
-         *
-         * Saying `stopped` is simply the truth from the control plane's point
-         * of view, and it rejoins the ordinary wake path: the next message
-         * flips it to `unprovisioned` and the start arm recreates the
-         * container with a fresh token. No new recovery machinery.
-         *
-         * `awaitingConnection` is what keeps this from fighting a start: a
-         * sandbox that has been handed a token but has not dialled in yet is
-         * mid-boot, not stranded.
+         * BOOT CRASH: the spawn died before its supervisor ever connected,
+         * and its dial-in grace is over. Unclassified, the control plane
+         * would respawn it every 30s for the full turn ceiling while the
+         * churn pins capacity. `start_failed` rides the 150s patience
+         * window (the queue parks with honest copy), and the corpse is
+         * removed: it still holds its home, which the control plane can
+         * neither archive nor release while the dead container exists.
          */
-        /**
-         * BOOT CRASH — the container we spawned died before its supervisor
-         * ever dialled in. Its token was never consumed, so
-         * `awaitingConnection` stays true FOREVER and both arms below are
-         * structurally blind to it; unclassified, the control plane
-         * respawns it every 30s for the full turn ceiling while the churn
-         * pins its capacity. Every conjunct is an attempt fence: the ref must be
-         * OUR spawn, its start must have fully SETTLED (a mid-boot sandbox is
-         * dead-looking for minutes while its image pulls), the phase — when
-         * the substrate reports one — must be genuinely TERMINAL (a create
-         * can return optimistically at its image-watch budget with the sandbox
-         * still Pending; "not running" alone would classify a boot that is
-         * merely slow), the dial-in grace must have elapsed, and one
-         * classification per corpse — a repeat report while the re-start is
-         * still `starting` would land, and old control planes apply `failed`
-         * with no status guard at all.
-         */
-        const completedAt = startCompletedAt.get(snapshot.sandboxId);
-        const terminalPhase =
-          snapshot.phase == null ||
-          snapshot.phase === "Failed" ||
-          snapshot.phase === "Succeeded";
-        const bootCrashed =
-          !snapshot.running &&
-          terminalPhase &&
-          wsServer.awaitingConnection(snapshot.sandboxId) &&
-          sandboxContainers.get(snapshot.sandboxId) === snapshot.containerRef &&
-          !queuedStarts.has(snapshot.sandboxId) &&
-          !executingStartHash.has(snapshot.sandboxId) &&
-          completedAt !== undefined &&
-          Date.now() - completedAt > bootDialInGraceMs &&
-          !reportedDead.has(snapshot.containerRef);
-        if (bootCrashed) {
-          reportedDead.add(snapshot.containerRef);
-          log("warn", "sandbox exited before its supervisor connected", {
-            sandboxId: snapshot.sandboxId,
-          });
-          unreachable.push({
+        reportedDead.add(containerRef);
+        log("warn", "sandbox exited before its supervisor connected", {
+          sandboxId,
+        });
+        await removeQuietly(containerRef, sandboxId);
+        admittedNew.delete(sandboxId);
+        return [
+          {
             kind: "sandbox.status",
-            sandboxId: snapshot.sandboxId,
+            sandboxId,
             status: "failed",
             error: "sandbox exited before the supervisor connected",
-            // `start_failed` rides the 150s patience window: the control
-            // plane parks the waiting queue with honest copy, which is also
-            // what stops the 30s respawn churn and frees the node.
             reasonCode: "start_failed" satisfies SandboxStartFailureReason,
-          });
-          // Remove the corpse: it still holds its home volume, and the
-          // control plane's lifecycle machinery can neither archive the home
-          // nor release its capacity while the dead container exists.
+            observedContainerRef: containerRef,
+          },
+        ];
+      case "stray":
+        /**
+         * A STRAY: running, no channel, and the control plane already parked
+         * its row. A report would change nothing, so it is stopped, through
+         * the deliberate stop's own body, once the control plane agrees no
+         * start has taken it (the claim moves the row to `stopping` under
+         * this copy, fenced on the container). The stop's `stopped` then
+         * lands like any stop's.
+         */
+        strayStopped.add(containerRef);
+        if (!(await controlPlane.claimStrayStop(sandboxId, containerRef))) {
+          strayStopped.delete(containerRef);
+          return [];
+        }
+        log("warn", "stopping a running container whose sandbox is parked", {
+          sandboxId,
+        });
+        chains.enqueue(sandboxId, async () => {
           try {
-            await backend.stopSandbox(
-              snapshot.containerRef,
-              snapshot.sandboxId,
-            );
-            await backend.removeSandbox(
-              snapshot.containerRef,
-              snapshot.sandboxId,
-            );
+            await stopContainer(sandboxId, containerRef);
+            await enqueueReport([
+              {
+                kind: "sandbox.status",
+                sandboxId,
+                status: "stopped",
+                observedContainerRef: containerRef,
+              },
+            ]);
           } catch (error) {
-            log("warn", "failed to remove a boot-crashed container", {
-              sandboxId: snapshot.sandboxId,
+            strayStopped.delete(containerRef);
+            log("warn", "stopping a stray container failed; retrying", {
+              sandboxId,
               error: String(error),
             });
           }
-          sandboxContainers.delete(snapshot.sandboxId);
-          inheritedAt.delete(snapshot.sandboxId);
-          wsServer.revokeToken(snapshot.sandboxId);
-          startCompletedAt.delete(snapshot.sandboxId);
-          admittedNew.delete(snapshot.sandboxId);
-          continue;
-        }
+        });
+        return [];
+      case "channelless":
+      case "dead":
+        /**
+         * RUNNING BUT UNREACHABLE, or DEAD WITH NO CHANNEL. Saying `stopped`
+         * is the truth from the control plane's view, and it rejoins the
+         * ordinary wake path: the strand law revives or fails the in-flight
+         * turns and the next message recreates the container. A sandbox
+         * parked deliberately absorbs the report as a no-op (the status
+         * guard), and one report per container keeps a parked one from
+         * being re-reported every pass.
+         */
+        reportedDead.add(containerRef);
+        log("warn", "sandbox has no control channel; reporting it stopped", {
+          sandboxId,
+          running: snapshot.running,
+        });
+        return [
+          {
+            kind: "sandbox.status",
+            sandboxId,
+            status: "stopped",
+            observedContainerRef: containerRef,
+          },
+        ];
+    }
+  };
 
-        if (!snapshot.running) {
-          // A dead container has no supervisor to reconnect: whatever grace
-          // it held ends here, so the arm below reports it and a turn held
-          // for it fails now rather than after the whole budget.
-          wsServer.forgetSession(snapshot.sandboxId);
-          inheritedAt.delete(snapshot.sandboxId);
-        }
-        const channelless =
-          !wsServer.connection(snapshot.sandboxId) &&
-          !wsServer.awaitingConnection(snapshot.sandboxId) &&
-          // A session-holding supervisor still inside its retry budget is
-          // reconnecting, not gone: the runner just restarted under it.
-          !reconnecting(snapshot.sandboxId);
-        if (snapshot.running && channelless) {
-          const believed = assigned.statuses?.[snapshot.sandboxId];
-          /**
-           * A STRAY: running, no channel, and the control plane already
-           * parked its row (`stopped`/`failed`). The report below is a no-op
-           * against that row (`stopped` applies only over running/stopping),
-           * so reporting it every pass would leave the container, and
-           * everything it holds, running until some message recreates it —
-           * the shape a supervisor that gave up but never exited leaves
-           * behind. Only this process can see the container, so it stops
-           * it, through the deliberate stop's own body.
-           *
-           * Fences: a status this pass actually read (an old control plane
-           * sends none: report only, as before); never `running` (the report
-           * IS what moves that row), never a claim in flight (`starting`,
-           * `stopping`) and never `unprovisioned` (a start is due and
-           * recreates the container itself); never with a start of our own
-           * queued or executing, nor a stop of our own queued (it stops this
-           * very container); one stop per container ref.
-           */
-          if (
-            (believed === "stopped" || believed === "failed") &&
-            !queuedStarts.has(snapshot.sandboxId) &&
-            !executingStartHash.has(snapshot.sandboxId) &&
-            !queuedStops.has(snapshot.sandboxId) &&
-            !strayStopped.has(snapshot.containerRef)
-          ) {
-            const { sandboxId, containerRef } = snapshot;
-            strayStopped.add(containerRef);
-            log(
-              "warn",
-              "stopping a running container whose sandbox is parked",
-              {
-                sandboxId,
-              },
-            );
-            // On the sandbox's chain, so it serializes with any start the
-            // control plane hands over meanwhile. No report: the row is
-            // already where this stop leaves it.
-            chains.enqueue(sandboxId, async () => {
-              try {
-                await stopContainer(sandboxId, containerRef);
-              } catch (error) {
-                strayStopped.delete(containerRef);
-                log(
-                  "warn",
-                  "stopping a stray container failed; retrying next pass",
-                  {
-                    sandboxId,
-                    error: String(error),
-                  },
-                );
-              }
-            });
-            continue;
-          }
-          log("warn", "sandbox is running but has no control channel", {
-            sandboxId: snapshot.sandboxId,
-          });
-          unreachable.push({
-            kind: "sandbox.status",
-            sandboxId: snapshot.sandboxId,
-            status: "stopped",
-          });
-        } else if (
-          !snapshot.running &&
-          channelless &&
-          !reportedDead.has(snapshot.containerRef)
-        ) {
-          /**
-           * DEAD BUT EXPECTED — the double-death shape: the container died
-           * while THIS PROCESS was down (host reboot, docker restart), so the
-           * channel close was never observed and no unhealthy/stopped report
-           * ever fired. The control plane may still read `running` with a
-           * turn in flight; left alone that turn waits out the whole ceiling.
-           * Saying `stopped` once is the truth: the strand law then fails or
-           * revives the in-flight turns, and a sandbox that was parked
-           * DELIBERATELY absorbs the report as a no-op (the status guard).
-           */
-          reportedDead.add(snapshot.containerRef);
-          log("warn", "sandbox container is dead with no channel; reporting", {
-            sandboxId: snapshot.sandboxId,
-          });
-          unreachable.push({
-            kind: "sandbox.status",
-            sandboxId: snapshot.sandboxId,
-            status: "stopped",
-          });
+  const reconcilePass = async (): Promise<void> => {
+    // One copy reconciles (the oldest live one, picked by the control plane;
+    // a single-process runner always does), so N copies never report or
+    // destroy the same container N times. The others only serve sockets,
+    // and ask for their role alone: the listing is every sandbox's row, and
+    // a copy that will not reconcile needs none of it. An api too old to
+    // answer the role read alone (`undefined`) leaves the listing to say.
+    const standDown = () => {
+      reconcilerSince = null;
+      missingWhileRunning = new Set();
+    };
+    if ((await controlPlane.isReconciler()) === false) return standDown();
+    const assigned = await controlPlane.listAssignedSandboxes();
+    if (assigned.reconciler === false) return standDown();
+    const since = (reconcilerSince ??= Date.now());
+    const expected = new Set(assigned.sandboxIds);
+    const reports: RunnerEvent[] = [];
+
+    // Statuses first, snapshots second, so a sandbox can only APPEAR between
+    // the reads, never leave a healthy sandbox looking vanished.
+    const snapshots = await backend.listSandboxes();
+    /** This copy's own lifecycle work in flight: its verdicts wait. */
+    const busy = (sandboxId: string) =>
+      queuedStarts.has(sandboxId) ||
+      executingStartHash.has(sandboxId) ||
+      queuedStops.has(sandboxId);
+
+    for (const snapshot of snapshots) {
+      if (expected.has(snapshot.sandboxId)) {
+        if (!busy(snapshot.sandboxId)) {
+          reports.push(...(await actOn(snapshot, assigned, since)));
         }
         continue;
       }
@@ -1457,8 +1502,6 @@ export const createRunner = ({
       try {
         await backend.stopSandbox(snapshot.containerRef, snapshot.sandboxId);
         await backend.removeSandbox(snapshot.containerRef, snapshot.sandboxId);
-        sandboxContainers.delete(snapshot.sandboxId);
-        inheritedAt.delete(snapshot.sandboxId);
         admittedNew.delete(snapshot.sandboxId);
       } catch (error) {
         log("warn", "failed to reap sandbox container", {
@@ -1469,84 +1512,51 @@ export const createRunner = ({
     }
 
     /**
-     * THE VANISHED-POD ARM — the reverse diff the loop above cannot see.
-     * Every arm above requires a snapshot to exist, but a sandbox deleted
-     * out-of-band (a host failure, an eviction, a manual delete,
-     * a `docker rm`) leaves NO snapshot at all: the
-     * control plane keeps reading `running`, a `running` sandbox is never
-     * re-started, turns black-hole until the 30-minute ceiling, and only
-     * idle-stop eventually unwedges it. So: a sandbox the control plane
-     * believes is `running` with no snapshot, absent on TWO consecutive
-     * passes (see `missingWhileRunning`), is reported `stopped` — the truth,
-     * and the house recovery: the strand law revives or fails its in-flight
-     * turns and the next message lands on the ordinary wake path.
+     * THE VANISHED-POD ARM: a sandbox the control plane believes `running`
+     * with no container at all (deleted out of band), absent on TWO
+     * consecutive passes, is reported `stopped`: the strand law then
+     * revives or fails its turns and the next message wakes it. A sandbox
+     * with lifecycle work in flight here counts as present (its create may
+     * be mid-call). No `reportedDead`: a landed report flips the row off
+     * `running`, so pacing is inherent.
      *
-     * Fences, each load-bearing: `running` only, because `starting`/
-     * `stopping` are the 300s stale-claim's business and everything else
-     * expects no sandbox (a deliberate park flips to `stopping` at claim time,
-     * so it never enters); a queued or executing start, whose create call is
-     * legitimately absent from snapshots mid-flight (the capacity prune
-     * documents the same caveat); a queued stop, which will report `stopped`
-     * itself. An old control plane sends no statuses — the arm stays inert
-     * (and the memory resets, keeping "consecutive" literal).
-     *
-     * No `reportedDead` here: pacing is inherent. A successful report flips
-     * the row off `running`; a lost one leaves it `running`, so the sandbox
-     * is re-marked and re-reported one pass later — self-healing, one
-     * report per two passes at worst.
+     * The report names the container the control plane believes it has
+     * (the one found missing): the reconciler is often not the sandbox's
+     * owner, and a named report applies whoever owns it, but only while
+     * that container is still the sandbox's, so a start that replaced it
+     * meanwhile is never knocked down.
      */
-    if (assigned.statuses) {
-      const present = new Set(snapshots.map((s) => s.sandboxId));
-      const stillMissing = new Set<string>();
-      for (const [sandboxId, status] of Object.entries(assigned.statuses)) {
-        if (status !== "running" || present.has(sandboxId)) continue;
-        if (
-          queuedStarts.has(sandboxId) ||
-          executingStartHash.has(sandboxId) ||
-          queuedStops.has(sandboxId)
-        ) {
-          continue;
-        }
-        if (!missingWhileRunning.has(sandboxId)) {
-          stillMissing.add(sandboxId);
-          continue;
-        }
-        log(
-          "warn",
-          "sandbox vanished from the backend while believed running",
-          {
-            sandboxId,
-          },
-        );
-        unreachable.push({
-          kind: "sandbox.status",
-          sandboxId,
-          status: "stopped",
-        });
-        // The sandbox is gone; drop what this process remembered about it — the
-        // same pair a deliberate stop clears. `admittedNew` is load-bearing:
-        // the capacity prune skips ids with an executing start, so the
-        // recovery start for THIS sandbox would count its own stale
-        // admission and refuse itself at_capacity on a full runner. (No
-        // token revoke: `running` means the supervisor connected, so the
-        // single-use token was already consumed.)
-        sandboxContainers.delete(sandboxId);
-        inheritedAt.delete(sandboxId);
-        startCompletedAt.delete(sandboxId);
-        admittedNew.delete(sandboxId);
-      }
-      missingWhileRunning = stillMissing;
-    } else {
-      missingWhileRunning = new Set();
+    const present = new Set(snapshots.map((snapshot) => snapshot.sandboxId));
+    for (const sandboxId of Object.keys(assigned.statuses ?? {})) {
+      if (busy(sandboxId)) present.add(sandboxId);
+    }
+    const vanished = vanishedSandboxes(
+      assigned.statuses,
+      present,
+      missingWhileRunning,
+    );
+    missingWhileRunning = vanished.missing;
+    for (const sandboxId of vanished.report) {
+      log("warn", "sandbox vanished from the backend while believed running", {
+        sandboxId,
+      });
+      const believedRef = assigned.channels?.[sandboxId]?.containerRef;
+      reports.push({
+        kind: "sandbox.status",
+        sandboxId,
+        status: "stopped",
+        ...(believedRef && { observedContainerRef: believedRef }),
+      });
+      // The sandbox is gone: release its admitted-capacity slot, or the
+      // recovery start for it would count its own stale admission.
+      admittedNew.delete(sandboxId);
     }
 
     // Volumes are reaped separately: a sandbox whose container was already
     // removed still leaves its (durable, deliberately persistent) home.
     for (const home of await backend.listHomes()) {
       if (expected.has(home.sandboxId)) continue;
-      log("info", "reaping orphaned home", {
-        sandboxId: home.sandboxId,
-      });
+      log("info", "reaping orphaned home", { sandboxId: home.sandboxId });
       try {
         await backend.destroyHome(home.ref);
       } catch (error) {
@@ -1557,9 +1567,9 @@ export const createRunner = ({
       }
     }
 
-    if (unreachable.length > 0) await report(unreachable);
+    if (reports.length > 0) await report(reports);
 
-    // Last, so the owned truth settles first — and its internal try/catch
+    // Last, so the owned truth settles first, and its internal try/catch
     // discipline means a sweep problem can never fail reconcile (or boot).
     await sweepStaleOrphans();
   };
@@ -1583,6 +1593,112 @@ export const createRunner = ({
       reconcileInFlight = false;
     }
   };
+
+  /**
+   * A SOCKET CLOSED: did its container die? The copy that held the socket is
+   * the only party that sees the close the moment it happens, so it looks at
+   * that sandbox's container right away. Dead: it is reported `stopped` now,
+   * stamped with that container (a report about a container that was already
+   * replaced changes nothing), so the next message wakes the sandbox on the
+   * ordinary path. Without this, work for it waits for a socket that can
+   * never come back until the reconciler's next pass (a minute in
+   * production), and the next message sits queued meanwhile. Alive: its
+   * supervisor is reconnecting (here or to another copy) and nothing is
+   * said. Lifecycle work in flight here speaks for itself. One report per
+   * container, shared with the reconciler's.
+   *
+   * The socket closes a moment BEFORE the substrate reads the container as
+   * exited (a SIGKILL'd container still reads `running` for ~100 ms), so one
+   * look right at the close would call a dying container alive. A few short
+   * looks cover it; a live supervisor's container stays running throughout.
+   * The container looked at is the one the socket was FOR: gone from the
+   * substrate (a deleted pod) is as dead as exited, and a newer container
+   * for the sandbox (a start replaced it) is not this check's business.
+   *
+   * Closes that land together share ONE listing per look (a node lost takes
+   * many sockets at once, and a listing is a cluster API call). Closes from
+   * a copy's own shutdown are not looked at: its drain closed them, and the
+   * supervisors move to another copy.
+   */
+  /** sandboxId → a closed socket still being looked at: the container it
+   * was for, and how many looks it has had. */
+  const closedPending = new Map<
+    string,
+    { containerRef: string; looks: number }
+  >();
+  let closedSweep: Promise<void> | undefined;
+
+  const closedStillOpen = (sandboxId: string, containerRef: string) =>
+    !reportedDead.has(containerRef) &&
+    !lifecycleInFlight.has(sandboxId) &&
+    !wsServer.connection(sandboxId);
+
+  const lookAtClosed = async (): Promise<void> => {
+    const snapshots = await backend.listSandboxes();
+    const dead: RunnerEvent[] = [];
+    for (const [sandboxId, entry] of closedPending) {
+      // Checked after the listing: a start may have begun meanwhile.
+      if (!closedStillOpen(sandboxId, entry.containerRef)) {
+        closedPending.delete(sandboxId);
+        continue;
+      }
+      const own = snapshots.filter((s) => s.sandboxId === sandboxId);
+      if (own.some((s) => s.containerRef !== entry.containerRef)) {
+        closedPending.delete(sandboxId);
+        continue;
+      }
+      if (own.some((s) => s.running)) {
+        entry.looks += 1;
+        // Still running after every look: its supervisor is reconnecting.
+        if (entry.looks >= CLOSED_CHANNEL_LOOKS)
+          closedPending.delete(sandboxId);
+        continue;
+      }
+      closedPending.delete(sandboxId);
+      reportedDead.add(entry.containerRef);
+      log("warn", "sandbox's container died with its control channel", {
+        sandboxId,
+        gone: own.length === 0,
+      });
+      dead.push({
+        kind: "sandbox.status",
+        sandboxId,
+        status: "stopped",
+        observedContainerRef: entry.containerRef,
+      });
+    }
+    if (dead.length > 0) await report(dead);
+  };
+
+  const sweepClosed = async (): Promise<void> => {
+    for (let first = true; closedPending.size > 0; first = false) {
+      if (!first) await sleep(closedChannelLookMs);
+      await lookAtClosed();
+    }
+  };
+
+  const startClosedSweep = (): void => {
+    if (closedSweep) return;
+    closedSweep = sweepClosed()
+      .catch((error: unknown) => {
+        // The reconciler's next pass catches whatever this one missed.
+        log("warn", "could not check closed channels' containers", {
+          error: String(error),
+        });
+        closedPending.clear();
+      })
+      .finally(() => {
+        closedSweep = undefined;
+      });
+  };
+
+  wsServer.onDisconnect((sandboxId, containerRef) => {
+    // Off the sandbox's chain (the looks must not hold a start or a stop
+    // behind them); the in-flight lifecycle checks keep it out of their way.
+    if (stopping) return;
+    closedPending.set(sandboxId, { containerRef, looks: 0 });
+    startClosedSweep();
+  });
 
   /**
    * Route one claimed item onto its sandbox's chain. Cross-sandbox
@@ -1616,9 +1732,7 @@ export const createRunner = ({
       }
       const slot = { item };
       queuedStarts.set(item.sandboxId, slot);
-      // A fresh attempt voids the previous completion — the boot-crash
-      // classifier must never age a corpse across attempts.
-      startCompletedAt.delete(item.sandboxId);
+      beginLifecycle(item.sandboxId);
       beginStartHeartbeat(item.sandboxId);
       chains.enqueue(item.sandboxId, async () => {
         queuedStarts.delete(slot.item.sandboxId);
@@ -1627,11 +1741,6 @@ export const createRunner = ({
         const release = await startSlots.acquire();
         try {
           const events = await startSandbox(live);
-          const failed = events.some(
-            (event) =>
-              event.kind === "sandbox.status" && event.status === "failed",
-          );
-          if (!failed) startCompletedAt.set(live.sandboxId, Date.now());
           // Clear THEN enqueue, synchronously: no heartbeat can land after
           // the settlement it belongs to (the report chain orders the rest).
           // UNLESS a hash-differing twin is queued behind this start — the
@@ -1644,6 +1753,7 @@ export const createRunner = ({
         } finally {
           release();
           executingStartHash.delete(live.sandboxId);
+          endLifecycle(live.sandboxId);
           if (!queuedStarts.has(live.sandboxId)) {
             stopStartHeartbeat(live.sandboxId);
           }
@@ -1660,10 +1770,15 @@ export const createRunner = ({
       }
       const slot = { item };
       queuedStops.set(item.sandboxId, slot);
+      beginLifecycle(item.sandboxId);
       // Semaphore-exempt (see the executor comment above).
       chains.enqueue(item.sandboxId, async () => {
         queuedStops.delete(slot.item.sandboxId);
-        await enqueueReport(await stopSandbox(slot.item));
+        try {
+          await enqueueReport(await stopSandbox(slot.item));
+        } finally {
+          endLifecycle(slot.item.sandboxId);
+        }
       });
       return;
     }
@@ -1685,27 +1800,35 @@ export const createRunner = ({
 
   const settle = async (): Promise<void> => {
     await chains.settled();
-    // Deliveries (attachment pulls, a turn held for a reconnecting sandbox)
-    // ride their own per-sandbox chains; a drain that ignored them would
-    // report settled with a turn still in hand.
+    // Deliveries (attachment pulls) ride their own per-sandbox chains; a
+    // drain that ignored them would report settled with a turn in hand.
     await Promise.all([...deliveryChains.values()]);
+    // The closed-socket sweep too (it may be looking at a dead container).
+    await closedSweep;
     await reportChain;
   };
 
   return {
     async start() {
       await backend.prepare();
-      await wsServer.listen();
 
-      const { runnerId } = await registerWithRetry(
+      // Register BEFORE listening: a copy admits sockets only once it has an
+      // identity, because every channel claim names the copy that holds it.
+      const { runnerId, replicaId } = await registerWithRetry(
         controlPlane,
         config.controlPlaneUrl,
-        config.name,
-        capabilities(),
+        {
+          name: config.name,
+          capabilities: capabilities(),
+          replicaName: config.replicaName,
+          ...(config.portApi && { portApiUrl: config.portApi.advertisedUrl }),
+        },
       );
       registeredRunnerId = runnerId;
       log("info", "registered with control plane", {
         runnerId,
+        replicaId,
+        replicaName: config.replicaName,
         backend: backend.id,
       });
 
@@ -1714,25 +1837,7 @@ export const createRunner = ({
       // containers and volumes (a per-process id would leak them silently).
       backend.identify(runnerId);
 
-      // Re-learn the containers this process never spawned: after a restart
-      // every running sandbox is one of those, and the map is what stamps
-      // `process.state` and what a session credential is verified against.
-      // Running only: a corpse must never let a credential through. (No
-      // merge needed: nothing has been spawned yet, start() precedes work.)
-      const bootedAt = Date.now();
-      for (const snapshot of await backend.listSandboxes()) {
-        if (!snapshot.running) continue;
-        sandboxContainers.set(snapshot.sandboxId, snapshot.containerRef);
-        // The grace is for a supervisor that can present a session: one
-        // spawned by a keyed runner (the container carries that mark), met
-        // by a keyed successor. Either side missing and no reconnect can
-        // ever succeed, so the inherited container is channelless right
-        // now and the old behaviour (report it stopped) is the right one.
-        if (wsServer.resumable && snapshot.resumable) {
-          inheritedAt.set(snapshot.sandboxId, bootedAt);
-        }
-      }
-
+      await wsServer.listen();
       await reconcile();
 
       heartbeatTimer = setInterval(() => {
@@ -1755,38 +1860,59 @@ export const createRunner = ({
     tick,
     reconcile,
     settle,
-    containerRefOf: (sandboxId) => sandboxContainers.get(sandboxId),
 
-    async run() {
+    run() {
       running = true;
-      let backoff = RETRY_MIN_MS;
-      while (running) {
-        try {
-          await tick();
-          backoff = RETRY_MIN_MS;
-        } catch (error) {
-          if (!running) break;
-          log("warn", "poll cycle failed", {
-            error: String(error),
-            retryInMs: backoff,
-          });
-          await sleep(backoff);
-          backoff = Math.min(backoff * 2, RETRY_MAX_MS);
+      loop = (async () => {
+        let backoff = RETRY_MIN_MS;
+        while (running) {
+          try {
+            await tick();
+            backoff = RETRY_MIN_MS;
+          } catch (error) {
+            if (!running) break;
+            log("warn", "poll cycle failed", {
+              error: String(error),
+              retryInMs: backoff,
+            });
+            await sleep(backoff);
+            backoff = Math.min(backoff * 2, RETRY_MAX_MS);
+          }
         }
-      }
+      })();
+      return loop;
     },
 
     async stop() {
       running = false;
+      stopping = true;
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       if (reconcileTimer) clearInterval(reconcileTimer);
       for (const sandboxId of [...startHeartbeats.keys()]) {
         stopStartHeartbeat(sandboxId);
       }
+      // Give up this copy's identity FIRST, the moment shutdown starts: the
+      // control plane hands it nothing new from here on (its poll already
+      // parked on the server included), and the sandboxes it owned and the
+      // reconciler role pass on at once instead of after the liveness
+      // window. Best effort: a control plane that is down meanwhile only
+      // means the window does the handover.
+      await controlPlane.retire().catch((error: unknown) => {
+        log("warn", "could not retire this runner copy", {
+          error: String(error),
+        });
+      });
+      // Then hand every supervisor over to another copy (they reconnect,
+      // with their sessions, wherever the balancer sends them).
+      await wsServer.drain();
+      // The poll in flight may still return work claimed just before the
+      // retire landed. It is this copy's by record, so it is run, not
+      // dropped: a start still starts, and a turn whose socket just closed
+      // is given back for whichever copy holds the socket next.
+      await loop;
       await wsServer.close();
-      // Sandboxes are deliberately left running: a stopped runner is a
-      // restart, and parked-or-running are both safe states for a container
-      // whose control plane will reconcile it on the next boot.
+      // Sandboxes are deliberately left running: a stopped copy is a roll or
+      // a restart, and the others (or its successor) carry on with them.
     },
   };
 };

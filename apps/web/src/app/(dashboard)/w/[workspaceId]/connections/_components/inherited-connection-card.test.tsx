@@ -56,6 +56,19 @@ describe("InheritedConnectionCard", () => {
     expect(screen.getByText(/Personal access/)).toBeInTheDocument();
   });
 
+  it("names a GitHub organization as GitHub's, never as a OneCLI organization", () => {
+    render(
+      <InheritedConnectionCard
+        connection={{
+          ...orgShared({ accountType: "Organization" }),
+          provider: "github-app",
+        }}
+      />,
+    );
+    expect(screen.getByText(/GitHub organization/)).toBeInTheDocument();
+    expect(screen.queryByText(/^Organization$/)).toBeNull();
+  });
+
   it("names no level for a connection made before it was recorded", () => {
     render(
       <InheritedConnectionCard

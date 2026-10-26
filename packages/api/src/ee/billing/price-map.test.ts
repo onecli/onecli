@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { Plan } from "./plans";
 import { buildPriceToPlan } from "./price-map";
 
 describe("buildPriceToPlan", () => {
@@ -27,41 +28,46 @@ describe("buildPriceToPlan", () => {
     expect(map[""]).toBeUndefined();
   });
 
-  it("resolves many price ids onto one plan (monthly, yearly, hosted, legacy, self-hosted)", () => {
-    // Mirrors the production split: current BYOC + hosted prices → "team",
-    // the retired $199/$1,990/$200 prices → "team-legacy" (their
-    // grandfathered limits).
-    const map = buildPriceToPlan([
-      ["price_team_149", "team"],
-      ["price_team_149_yearly", "team"],
-      ["price_team_hosted", "team"],
-      ["price_team_hosted_yearly", "team"],
-      ["price_team_199", "team-legacy"],
-      ["price_team_199_yearly", "team-legacy"],
-      ["price_team_legacy_200", "team-legacy"],
-      ["price_scale", "scale"],
-      ["price_scale_yearly", "scale"],
-      ["price_scale_self_hosted", "scale"],
-      ["price_scale_self_hosted_yearly", "scale"],
-    ]);
-    expect(map["price_team_legacy_200"]).toBe("team-legacy");
-    expect(map["price_team_199"]).toBe("team-legacy");
-    expect(map["price_team_149_yearly"]).toBe("team");
-    expect(map["price_team_hosted"]).toBe("team");
-    expect(
-      Object.entries(map)
-        .filter(([, plan]) => plan === "team")
-        .map(([id]) => id),
-    ).toHaveLength(4);
-    expect(
-      Object.entries(map)
-        .filter(([, plan]) => plan === "team-legacy")
-        .map(([id]) => id),
-    ).toHaveLength(3);
-    expect(
-      Object.entries(map)
-        .filter(([, plan]) => plan === "scale")
-        .map(([id]) => id),
-    ).toHaveLength(4);
+  it("maps every production price slot onto its plan (PRICE_TO_PLAN)", async () => {
+    // The real map, not a hand-built mirror: each env slot gets a distinct
+    // sentinel, so a slot remapped (e.g. a retired $199 price to "team") or
+    // dropped fails here. A live price left unmapped would silently resolve
+    // its orgs to the "pro" fallback and rewrite their plan.
+    const slots = {
+      STRIPE_PRO_PRICE_ID: "pro",
+      STRIPE_PRO_YEARLY_PRICE_ID: "pro",
+      STRIPE_TEAM_BASE_PRICE_ID: "team",
+      STRIPE_TEAM_YEARLY_PRICE_ID: "team",
+      STRIPE_TEAM_HOSTED_PRICE_ID: "team",
+      STRIPE_TEAM_HOSTED_YEARLY_PRICE_ID: "team",
+      STRIPE_TEAM_LEGACY_199_PRICE_ID: "team-legacy",
+      STRIPE_TEAM_LEGACY_199_YEARLY_PRICE_ID: "team-legacy",
+      STRIPE_TEAM_LEGACY_PRICE_ID: "team-legacy",
+      STRIPE_SCALE_PRICE_ID: "scale",
+      STRIPE_SCALE_YEARLY_PRICE_ID: "scale",
+      STRIPE_SCALE_SELF_HOSTED_PRICE_ID: "scale",
+      STRIPE_SCALE_SELF_HOSTED_YEARLY_PRICE_ID: "scale",
+      STRIPE_ENTERPRISE_PRICE_ID: "enterprise",
+    } as const satisfies Record<string, Plan>;
+    for (const name of Object.keys(slots)) {
+      vi.stubEnv(name, `price_${name.toLowerCase()}`);
+    }
+    try {
+      vi.resetModules();
+      const { PRICE_TO_PLAN, KNOWN_BASE_PRICE_IDS } =
+        await import("./price-map");
+      const expected = Object.fromEntries(
+        Object.entries(slots).map(([name, plan]) => [
+          `price_${name.toLowerCase()}`,
+          plan,
+        ]),
+      );
+      expect(PRICE_TO_PLAN).toEqual(expected);
+      expect([...KNOWN_BASE_PRICE_IDS].sort()).toEqual(
+        Object.keys(expected).sort(),
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

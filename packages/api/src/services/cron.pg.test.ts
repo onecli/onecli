@@ -438,7 +438,10 @@ describe.skipIf(!PROOF_URL)("one-shot schedules", () => {
     });
     const cronService = await import("./agent-cron-service");
     await expect(
-      cronService.runCronNow(WORKSPACE, agentId, cron.id),
+      cronService.runCronNow(WORKSPACE, agentId, cron.id, {
+        userId: USER,
+        organizationId: ORG,
+      }),
     ).rejects.toThrow(/already ran to completion/);
   });
 });

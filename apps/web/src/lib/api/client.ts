@@ -9,11 +9,15 @@ import { apiFetch } from "@/lib/api-fetch";
  */
 export class ApiError extends Error {
   readonly status: number;
+  /** The refusal's structured `error.details`, when the server sent any
+   * (e.g. what a refused switch would remove). */
+  readonly details: unknown;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, details?: unknown) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -57,6 +61,14 @@ export const refusal = async (res: Response): Promise<ApiError> => {
   return new ApiError(
     refusalMessage(body) ?? `Request failed: ${res.status}`,
     res.status,
+    typeof body === "object" &&
+      body !== null &&
+      "error" in body &&
+      typeof body.error === "object" &&
+      body.error !== null &&
+      "details" in body.error
+      ? body.error.details
+      : undefined,
   );
 };
 

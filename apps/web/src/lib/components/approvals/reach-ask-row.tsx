@@ -1,8 +1,5 @@
 "use client";
 
-import { useState } from "react";
-import { Loader2 } from "lucide-react";
-import { toast } from "sonner";
 import { Button } from "@onecli/ui/components/button";
 import type { PendingReachAskItem } from "@/lib/api/channel-approvals";
 import { useDecideChannelReach } from "@/hooks/use-approvals";
@@ -20,41 +17,33 @@ interface ReachAskRowProps {
  */
 export const ReachAskRow = ({ item }: ReachAskRowProps) => {
   const decide = useDecideChannelReach(item.agentId, item.provider);
-  const [choosing, setChoosing] = useState<string | null>(null);
 
   const subject =
     item.subjectLabel ??
     (item.subjectKind === "space" ? "a channel" : "someone");
   const isSpace = item.subjectKind === "space";
 
-  const submit = (state: "approved" | "members_only" | "blocked") => {
-    setChoosing(state);
-    decide.mutate(
-      {
-        externalRef: item.externalRef,
-        subjectKind: item.subjectKind,
-        state,
-      },
-      {
-        onSuccess: () =>
-          toast.success(
-            state === "approved"
-              ? isSpace
-                ? `${item.agentName} answers everyone in ${subject}`
-                : `${subject} can talk to ${item.agentName}`
-              : state === "blocked"
-                ? isSpace
-                  ? `${item.agentName} stays silent in ${subject}`
-                  : `${subject} is blocked`
-                : "OneCLI teammates only",
-          ),
-        onError: (err) => toast.error(String(err)),
-        onSettled: () => setChoosing(null),
-      },
-    );
-  };
+  // Instant: the ask leaves the bell on click (this row unmounts with it),
+  // and the hook says the outcome once the server agrees, or puts the ask
+  // back with the reason if it doesn't.
+  const submit = (state: "approved" | "members_only" | "blocked") =>
+    decide.mutate({
+      itemId: item.id,
+      externalRef: item.externalRef,
+      subjectKind: item.subjectKind,
+      state,
+      confirmation:
+        state === "approved"
+          ? isSpace
+            ? `${item.agentName} answers everyone in ${subject}`
+            : `${subject} can talk to ${item.agentName}`
+          : state === "blocked"
+            ? isSpace
+              ? `${item.agentName} stays silent in ${subject}`
+              : `${subject} is blocked`
+            : "OneCLI teammates only",
+    });
 
-  const pending = decide.isPending;
   const choiceButton = (
     state: "approved" | "members_only" | "blocked",
     label: string,
@@ -62,17 +51,9 @@ export const ReachAskRow = ({ item }: ReachAskRowProps) => {
     <Button
       variant={state === "approved" ? "default" : "outline"}
       size="xs"
-      disabled={pending}
       onClick={() => submit(state)}
     >
-      {pending && choosing === state ? (
-        <Loader2
-          aria-hidden="true"
-          className="size-3 animate-spin motion-reduce:hidden"
-        />
-      ) : (
-        label
-      )}
+      {label}
     </Button>
   );
 

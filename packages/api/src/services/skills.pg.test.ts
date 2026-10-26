@@ -4,11 +4,12 @@ import { proofDatabaseUrl } from "../testing/pg-proof.js";
 
 /**
  * Skills on REAL PostgreSQL (step 9). What only pg can prove: the
- * one-owner and scope-coherence CHECKs, the three per-tier uniques under
- * NULLS DISTINCT, the fences with planted foreign-tenant negatives, the
- * per-tier caps that never cross-consume, the FORBIDDEN-vs-404 split on the
+ * one-owner and scope-coherence CHECKs (two tiers: agent / organization —
+ * the retired workspace scope is refused), the per-tier uniques under NULLS
+ * DISTINCT, the fences with planted foreign-tenant negatives, the per-tier
+ * caps that never cross-consume, the FORBIDDEN-vs-404 split on the
  * workspace door, and the deletion paths (agent cascade; the hand-written
- * workspace/org cascades whose Restrict FKs fail loudly when forgotten).
+ * org cascade whose Restrict FK fails loudly when forgotten).
  */
 
 const PROOF_URL = proofDatabaseUrl();
@@ -60,7 +61,6 @@ const resetAll = async () => {
     where: {
       OR: [
         { name: { startsWith: P } },
-        { workspaceId: { startsWith: P } },
         { organizationId: { startsWith: P } },
         { agent: { identifier: { startsWith: P } } },
       ],
@@ -137,11 +137,12 @@ const input = (name: string) => ({
 
 describe.skipIf(!PROOF_URL)("the schema constraints", () => {
   it("exactly one owner column, and scope must name it", async () => {
+    const agent = await seedAgent("constraints");
     await expect(
       db.skill.create({
         data: {
-          scope: "workspace",
-          workspaceId: WORKSPACE,
+          scope: "agent",
+          agentId: agent,
           organizationId: ORG,
           name: "two-owners",
           description: "d",
@@ -153,7 +154,7 @@ describe.skipIf(!PROOF_URL)("the schema constraints", () => {
       db.skill.create({
         data: {
           scope: "agent",
-          workspaceId: WORKSPACE,
+          organizationId: ORG,
           name: "wrong-scope",
           description: "d",
           content: "c",
@@ -162,43 +163,73 @@ describe.skipIf(!PROOF_URL)("the schema constraints", () => {
     ).rejects.toThrow(/skills_scope_coherent/);
   });
 
-  it("per-tier name uniqueness; the SAME name across tiers coexists (the shadowing precondition)", async () => {
-    await db.skill.create({
-      data: {
-        scope: "workspace",
-        workspaceId: WORKSPACE,
-        name: "deploy",
-        description: "d",
-        content: "c",
-      },
-    });
+  it("the retired workspace scope is refused at the database", async () => {
+    await expect(
+      db.skill.create({
+        data: {
+          scope: "workspace",
+          organizationId: ORG,
+          name: "retired-scope",
+          description: "d",
+          content: "c",
+        },
+      }),
+    ).rejects.toThrow(/skills_scope_coherent/);
+    // The deprecated workspace_id column (kept until the contract
+    // migration) can never be set — the old door's exact shape is refused.
     await expect(
       db.skill.create({
         data: {
           scope: "workspace",
           workspaceId: WORKSPACE,
-          name: "deploy",
+          name: "old-door",
           description: "d",
           content: "c",
         },
       }),
-    ).rejects.toMatchObject({ code: "P2002" });
+    ).rejects.toThrow(/skills_one_owner|skills_scope_coherent/);
+    const agent = await seedAgent("ws-pinned");
+    await expect(
+      db.skill.create({
+        data: {
+          scope: "agent",
+          agentId: agent,
+          workspaceId: WORKSPACE,
+          name: "sneaky",
+          description: "d",
+          content: "c",
+        },
+      }),
+    ).rejects.toThrow(/skills_one_owner/);
+  });
+
+  it("per-tier name uniqueness; the SAME name across tiers coexists (the shadowing precondition)", async () => {
+    const agent = await seedAgent("unique");
+    await skillService.createSkill(
+      WORKSPACE,
+      { ...input("deploy"), agentId: agent },
+      CREATOR,
+    );
+    await expect(
+      skillService.createSkill(
+        WORKSPACE,
+        { ...input("deploy"), agentId: agent },
+        CREATOR,
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
     // Same name, org tier — legal, the composer shadows.
-    await db.skill.create({
-      data: {
-        scope: "organization",
-        organizationId: ORG,
-        name: "deploy",
-        description: "d",
-        content: "c",
-      },
-    });
+    await skillService.createOrgSkill(ORG, input("deploy"), CREATOR);
   });
 
   it("skill files are unique per path and die with their skill", async () => {
+    const agent = await seedAgent("files");
     const skill = await skillService.createSkill(
       WORKSPACE,
-      { ...input("with-files"), files: [{ path: "ref.md", content: "r" }] },
+      {
+        ...input("with-files"),
+        agentId: agent,
+        files: [{ path: "ref.md", content: "r" }],
+      },
       CREATOR,
     );
     await expect(
@@ -212,16 +243,13 @@ describe.skipIf(!PROOF_URL)("the schema constraints", () => {
 });
 
 describe.skipIf(!PROOF_URL)("the fences", () => {
-  it("foreign workspace and foreign org rows are invisible, hint-free", async () => {
-    await db.skill.create({
-      data: {
-        scope: "workspace",
-        workspaceId: FOREIGN_WORKSPACE,
-        name: "foreign-workspace-skill",
-        description: "d",
-        content: "c",
-      },
-    });
+  it("foreign agents' and foreign org rows are invisible, hint-free", async () => {
+    const foreignAgent = await seedAgent("foreign-owner", FOREIGN_WORKSPACE);
+    const foreignAgentRow = await skillService.createSkill(
+      FOREIGN_WORKSPACE,
+      { ...input("foreign-agent-skill"), agentId: foreignAgent },
+      CREATOR,
+    );
     const foreignOrgRow = await db.skill.create({
       data: {
         scope: "organization",
@@ -237,6 +265,12 @@ describe.skipIf(!PROOF_URL)("the fences", () => {
 
     await expect(
       skillService.getSkill(WORKSPACE, ORG, foreignOrgRow.id),
+    ).rejects.toThrow("Skill not found");
+    await expect(
+      skillService.getSkill(WORKSPACE, ORG, foreignAgentRow.id),
+    ).rejects.toThrow("Skill not found");
+    await expect(
+      skillService.deleteSkill(WORKSPACE, ORG, foreignAgentRow.id),
     ).rejects.toThrow("Skill not found");
     // A FOREIGN org's row through the workspace write door: hint-free 404,
     // never the FORBIDDEN pointer (that is for the CALLER'S org rows).
@@ -286,35 +320,44 @@ describe.skipIf(!PROOF_URL)("the fences", () => {
 
 describe.skipIf(!PROOF_URL)("caps and reserved names", () => {
   it("each tier caps independently — tiers never cross-consume", async () => {
-    for (let i = 0; i < 20; i += 1) {
-      await db.skill.create({
-        data: {
-          scope: "workspace",
-          workspaceId: WORKSPACE,
-          name: `filler-${i}`,
-          description: "d",
-          content: "c",
-        },
-      });
+    const agent = await seedAgent("capped");
+    for (let i = 0; i < 10; i += 1) {
+      await skillService.createSkill(
+        WORKSPACE,
+        { ...input(`filler-${i}`), agentId: agent },
+        CREATOR,
+      );
     }
     await expect(
-      skillService.createSkill(WORKSPACE, input("one-more"), CREATOR),
-    ).rejects.toThrow("already holds 20 skills");
-    // A full workspace tier leaves the agent tier untouched.
-    const agent = await seedAgent("capfree");
+      skillService.createSkill(
+        WORKSPACE,
+        { ...input("one-more"), agentId: agent },
+        CREATOR,
+      ),
+    ).rejects.toThrow("already holds 10 skills");
+    // A full agent tier leaves another agent and the org tier untouched.
+    const other = await seedAgent("capfree");
     const created = await skillService.createSkill(
       WORKSPACE,
-      { ...input("agent-skill"), agentId: agent },
+      { ...input("agent-skill"), agentId: other },
       CREATOR,
     );
     expect(created.scope).toBe("agent");
+    const orgRow = await skillService.createOrgSkill(
+      ORG,
+      input("org-skill"),
+      CREATOR,
+    );
+    expect(orgRow.scope).toBe("organization");
   });
 
   it("the merged-row budget re-check blocks a PATCH that smuggles the sum over", async () => {
+    const agent = await seedAgent("near-cap");
     const skill = await skillService.createSkill(
       WORKSPACE,
       {
         ...input("near-cap"),
+        agentId: agent,
         content: "x".repeat(20_000),
         files: [{ path: "a.md", content: "y".repeat(10_000) }],
       },
@@ -329,8 +372,9 @@ describe.skipIf(!PROOF_URL)("caps and reserved names", () => {
 });
 
 describe.skipIf(!PROOF_URL)("deletion paths", () => {
-  it("agent delete cascades its agent-tier skills only", async () => {
+  it("agent delete cascades its own skills only", async () => {
     const agent = await seedAgent("cascade");
+    const sibling = await seedAgent("sibling");
     await skillService.createSkill(
       WORKSPACE,
       { ...input("agent-owned"), agentId: agent },
@@ -338,7 +382,7 @@ describe.skipIf(!PROOF_URL)("deletion paths", () => {
     );
     await skillService.createSkill(
       WORKSPACE,
-      input("workspace-owned"),
+      { ...input("sibling-owned"), agentId: sibling },
       CREATOR,
     );
     await db.agent.delete({ where: { id: agent } });
@@ -346,16 +390,11 @@ describe.skipIf(!PROOF_URL)("deletion paths", () => {
       (s) => s.name,
     );
     expect(names).not.toContain("agent-owned");
-    expect(names).toContain("workspace-owned");
+    expect(names).toContain("sibling-owned");
   });
 
-  it("deleteWorkspaceContent removes workspace-tier rows; org rows survive (the Restrict proof)", async () => {
+  it("deleteWorkspaceContent removes its agents' skills; org rows survive", async () => {
     const agent = await seedAgent("proj-del", WORKSPACE_B);
-    await skillService.createSkill(
-      WORKSPACE_B,
-      input("workspace-owned"),
-      CREATOR,
-    );
     await skillService.createSkill(
       WORKSPACE_B,
       { ...input("agent-owned"), agentId: agent },
@@ -370,7 +409,6 @@ describe.skipIf(!PROOF_URL)("deletion paths", () => {
     const names = (await db.skill.findMany({ select: { name: true } })).map(
       (s) => s.name,
     );
-    expect(names).not.toContain("workspace-owned");
     expect(names).not.toContain("agent-owned");
     expect(names).toContain("org-survivor");
   });
@@ -393,28 +431,33 @@ describe.skipIf(!PROOF_URL)("deletion paths", () => {
 });
 
 describe.skipIf(!PROOF_URL)("the agent door (the skill_* tools)", () => {
-  it("lists every tier that reaches the agent, disabled rows included, foreign rows never", async () => {
+  it("lists both tiers that reach the agent, disabled rows included, foreign rows never", async () => {
     const agent = await seedAgent("lister");
+    const sibling = await seedAgent("lister-sibling");
+    const foreignAgent = await seedAgent("lister-foreign", FOREIGN_WORKSPACE);
     await skillService.createSkill(
       WORKSPACE,
       { ...input("mine"), agentId: agent, enabled: false },
       CREATOR,
     );
-    await skillService.createSkill(WORKSPACE, input("shared"), CREATOR);
     await skillService.createOrgSkill(ORG, input("org-wide"), CREATOR);
-    // Foreign-tenant negatives: same names elsewhere must not bleed in.
-    await skillService.createSkill(FOREIGN_WORKSPACE, input("shared"), CREATOR);
+    // Negatives: a sibling's row and foreign-tenant rows must not bleed in.
+    await skillService.createSkill(
+      WORKSPACE,
+      { ...input("sibling-skill"), agentId: sibling },
+      CREATOR,
+    );
+    await skillService.createSkill(
+      FOREIGN_WORKSPACE,
+      { ...input("mine"), agentId: foreignAgent },
+      CREATOR,
+    );
     await skillService.createOrgSkill(FOREIGN_ORG, input("org-wide"), CREATOR);
 
-    const rows = await skillService.listSkillsReachingAgent(
-      agent,
-      WORKSPACE,
-      ORG,
-    );
+    const rows = await skillService.listSkillsReachingAgent(agent, ORG);
     expect(rows.map((row) => `${row.scope}:${row.name}`).sort()).toEqual([
       "agent:mine",
       "organization:org-wide",
-      "workspace:shared",
     ]);
     // The disabled own row is visible — that is how it gets re-enabled.
     expect(rows.find((row) => row.name === "mine")?.enabled).toBe(false);
@@ -443,7 +486,6 @@ describe.skipIf(!PROOF_URL)("the agent door (the skill_* tools)", () => {
 
     const changed = await skillService.updateAgentSkillByName(
       agent,
-      WORKSPACE,
       ORG,
       "mine",
       { enabled: false },
@@ -456,13 +498,9 @@ describe.skipIf(!PROOF_URL)("the agent door (the skill_* tools)", () => {
     });
     expect(afterChange.homeDesiredGeneration).toBe(2);
 
-    const noop = await skillService.updateAgentSkillByName(
-      agent,
-      WORKSPACE,
-      ORG,
-      "mine",
-      { enabled: false },
-    );
+    const noop = await skillService.updateAgentSkillByName(agent, ORG, "mine", {
+      enabled: false,
+    });
     expect(noop.noop).toBe(true);
     const afterNoop = await db.sandbox.findUniqueOrThrow({
       where: { id: sandbox.id },
@@ -471,11 +509,11 @@ describe.skipIf(!PROOF_URL)("the agent door (the skill_* tools)", () => {
     expect(afterNoop.homeDesiredGeneration).toBe(2);
   });
 
-  it("a broader-tier name answers FORBIDDEN with the dashboard pointer, not a write", async () => {
+  it("an org-tier name answers FORBIDDEN with the dashboard pointer, not a write", async () => {
     const agent = await seedAgent("fenced");
-    await skillService.createSkill(WORKSPACE, input("shared"), CREATOR);
+    await skillService.createOrgSkill(ORG, input("shared"), CREATOR);
     await expect(
-      skillService.updateAgentSkillByName(agent, WORKSPACE, ORG, "shared", {
+      skillService.updateAgentSkillByName(agent, ORG, "shared", {
         enabled: false,
       }),
     ).rejects.toMatchObject({
@@ -483,7 +521,7 @@ describe.skipIf(!PROOF_URL)("the agent door (the skill_* tools)", () => {
       message: expect.stringContaining("dashboard"),
     });
     await expect(
-      skillService.deleteAgentSkillByName(agent, WORKSPACE, ORG, "shared"),
+      skillService.deleteAgentSkillByName(agent, ORG, "shared"),
     ).rejects.toMatchObject({ code: "FORBIDDEN" });
     // The row survived both refusals.
     expect(await db.skill.count({ where: { name: "shared" } })).toBe(1);
@@ -501,7 +539,7 @@ describe.skipIf(!PROOF_URL)("the agent door (the skill_* tools)", () => {
     // a name that exists nowhere.
     for (const name of ["theirs", "never-existed"]) {
       await expect(
-        skillService.updateAgentSkillByName(agent, WORKSPACE, ORG, name, {
+        skillService.updateAgentSkillByName(agent, ORG, name, {
           enabled: false,
         }),
       ).rejects.toMatchObject({
@@ -518,7 +556,7 @@ describe.skipIf(!PROOF_URL)("the agent door (the skill_* tools)", () => {
       { ...input("mine"), agentId: agent },
       CREATOR,
     );
-    await skillService.deleteAgentSkillByName(agent, WORKSPACE, ORG, "mine");
+    await skillService.deleteAgentSkillByName(agent, ORG, "mine");
     expect(await db.skill.count({ where: { agentId: agent } })).toBe(0);
   });
 
@@ -534,7 +572,7 @@ describe.skipIf(!PROOF_URL)("the agent door (the skill_* tools)", () => {
       CREATOR,
     );
     await expect(
-      skillService.updateAgentSkillByName(agent, WORKSPACE, ORG, "fat", {
+      skillService.updateAgentSkillByName(agent, ORG, "fat", {
         content: "y".repeat(13_000),
       }),
     ).rejects.toMatchObject({ code: "UNPROCESSABLE" });

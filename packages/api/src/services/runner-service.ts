@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { db } from "@onecli/db";
 import {
+  runnerAdvertises,
   runnerCapabilitiesSchema,
   type RunnerCapabilities,
 } from "@onecli/agent-protocol";
@@ -32,11 +33,43 @@ export interface RegisterRunnerInput {
   token: string;
   name: string;
   capabilities: RunnerCapabilities;
+  /** The registering process's own name; present = a copy-aware runner. */
+  replicaName?: string;
+  /** Where that copy serves its port API (sandbox previews), if it does. */
+  portApiUrl?: string;
 }
 
 export type RegisterRunnerResult =
-  | { ok: true; runnerId: string }
+  | { ok: true; runnerId: string; replicaId?: string }
   | { ok: false };
+
+/** How long a copy that stopped heartbeating keeps its row before the next
+ * registration removes it. Long past any liveness question (the threshold
+ * is seconds), short enough that a fleet of rolled pods never accumulates. */
+const DEAD_REPLICA_RETENTION_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Record one copy of a runner, and drop the copies that died a day ago.
+ * Each process registers once at boot, so every restart is a new copy: the
+ * row is that process's identity for its whole life, never reused.
+ */
+const registerReplica = async (
+  runnerId: string,
+  name: string,
+  portApiUrl: string | undefined,
+): Promise<string> => {
+  await db.runnerReplica.deleteMany({
+    where: {
+      runnerId,
+      lastSeenAt: { lt: new Date(Date.now() - DEAD_REPLICA_RETENTION_MS) },
+    },
+  });
+  const replica = await db.runnerReplica.create({
+    data: { runnerId, name, portApiUrl: portApiUrl ?? null },
+    select: { id: true },
+  });
+  return replica.id;
+};
 
 /**
  * Register (or re-register) a runner. Re-registration is the normal restart
@@ -48,27 +81,36 @@ export const registerRunner = async ({
   token,
   name,
   capabilities,
+  replicaName,
+  portApiUrl,
 }: RegisterRunnerInput): Promise<RegisterRunnerResult> => {
   const existing = await db.runner.findUnique({
     where: { token },
     select: { id: true },
   });
 
+  let runnerId: string;
   if (existing) {
     await db.runner.update({
       where: { id: existing.id },
       data: { name, capabilities, lastSeenAt: new Date() },
     });
-    return { ok: true, runnerId: existing.id };
+    runnerId = existing.id;
+  } else {
+    if (!RUNNER_TOKEN || !safeEqual(token, RUNNER_TOKEN)) return { ok: false };
+    const created = await db.runner.create({
+      data: { token, name, capabilities, lastSeenAt: new Date() },
+      select: { id: true },
+    });
+    runnerId = created.id;
   }
 
-  if (!RUNNER_TOKEN || !safeEqual(token, RUNNER_TOKEN)) return { ok: false };
-
-  const created = await db.runner.create({
-    data: { token, name, capabilities, lastSeenAt: new Date() },
-    select: { id: true },
-  });
-  return { ok: true, runnerId: created.id };
+  if (replicaName === undefined) return { ok: true, runnerId };
+  return {
+    ok: true,
+    runnerId,
+    replicaId: await registerReplica(runnerId, replicaName, portApiUrl),
+  };
 };
 
 /**
@@ -85,8 +127,7 @@ export const runnerSupportsAttachments = async (
     where: { id: runnerId },
     select: { capabilities: true },
   });
-  const parsed = runnerCapabilitiesSchema.safeParse(runner?.capabilities);
-  return parsed.success && parsed.data.attachments === true;
+  return runnerAdvertises(runner?.capabilities, "attachments");
 };
 
 export const heartbeatRunner = async (

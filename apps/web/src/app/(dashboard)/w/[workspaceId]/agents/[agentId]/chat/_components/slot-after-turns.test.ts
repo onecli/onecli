@@ -31,4 +31,11 @@ describe("slotAfterTurns", () => {
     expect(slotAfterTurns(turns, [early]).atEnd).toEqual([early]);
     expect(slotAfterTurns([], [early]).atEnd).toEqual([early]);
   });
+
+  it("keeps the final turn's cards in its row when that row is pinned", () => {
+    const duringLast = at("2026-10-08T05:21:00Z");
+    const { afterTurn, atEnd } = slotAfterTurns(turns, [duringLast], "t3");
+    expect(afterTurn.get("t3")).toEqual([duringLast]);
+    expect(atEnd).toEqual([]);
+  });
 });

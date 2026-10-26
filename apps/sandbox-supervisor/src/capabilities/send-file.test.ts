@@ -375,4 +375,20 @@ describe("send_file: the fragment", () => {
     expect(flat).toMatch(/read it before telling/);
     expect(sendFileFragment.body).not.toMatch(/jcode/i);
   });
+
+  it("says viewing a file is not sending it, and to never point at anything unsent", () => {
+    // Observed live: an agent opened its chart with the read tool, then wrote
+    // "here's the pie chart" without sending it; another pointed at an applet
+    // card "right above your message". The person saw nothing either time.
+    const flat = sendFileFragment.body.replace(/\s+/g, " ");
+    expect(flat).toContain(
+      "send_file is the only way a file reaches the person",
+    );
+    expect(flat).toContain("shows it to you alone");
+    expect(flat).toContain("render it to an image (PNG) and send the file");
+    expect(flat).toContain(
+      "Never point the person at a file, chart, card or panel you have not sent",
+    );
+    expect(tool().description).toContain("shows it to you alone");
+  });
 });

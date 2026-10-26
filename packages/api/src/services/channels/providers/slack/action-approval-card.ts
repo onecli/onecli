@@ -25,6 +25,9 @@ import { parseSlackPresenceCredentials } from "./types";
 export const ACTION_APPROVE_ACTION = "action_approve";
 export const ACTION_APPROVE_ALWAYS_ACTION = "action_approve_always";
 export const ACTION_REJECT_ACTION = "action_reject";
+/** The link-only card's URL button. Deliberately NOT in
+ * ACTION_APPROVAL_DECISIONS: clicking it decides nothing. */
+export const ACTION_REVIEW_LINK_ACTION = "action_review_link";
 
 /** Click vocabulary for the inbound interactivity routes — one place, both
  * arms read it (the REACH_ACTION_DECISIONS idiom). */
@@ -49,9 +52,40 @@ export const actionApprovalCardBlocks = (input: {
   /** Offer the "always allow" upgrade — only for actions whose registration
    * declares a standing-grant hook (the service asks the registry). */
   offerAlwaysAllow?: boolean;
+  /** Dashboard-only decision (the approver must type a key): a link-only
+   * card, no Approve/Reject buttons at all. */
+  reviewUrl?: string;
 }): unknown[] => {
   const agent = clampHeader(escapeSlackText(input.agentName));
   const summary = clampLabel(neutralizeSummary(escapeSlackText(input.summary)));
+  if (input.reviewUrl) {
+    return [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `*${agent}* asks: ${summary}\nThis needs a key, so it can only be approved in OneCLI. Never paste the key into Slack.`,
+        },
+      },
+      {
+        type: "actions",
+        elements: [
+          {
+            // A URL button: Slack opens the link; the click payload carries
+            // no decision this card's action vocabulary would honor.
+            type: "button",
+            text: {
+              type: "plain_text",
+              text: "Review in OneCLI",
+              emoji: false,
+            },
+            action_id: ACTION_REVIEW_LINK_ACTION,
+            url: input.reviewUrl,
+          },
+        ],
+      },
+    ];
+  }
   // Just the ask and the buttons: a header and a how-it-works paragraph
   // read as noise around a one-line question. Reject-with-reason stays on
   // the dashboard.
@@ -132,6 +166,7 @@ export const slackActionApprovalCard = {
     agentName: string;
     summary: string;
     offerAlwaysAllow?: boolean;
+    reviewUrl?: string;
   }): Promise<{ channel: string; ts: string }> {
     const creds = parseSlackPresenceCredentials(input.credentialsJson);
     if (!creds.botToken) throw new Error("presence has no bot token");

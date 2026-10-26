@@ -1,7 +1,12 @@
+import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { SESSION_RESUME_GRACE_MS } from "@onecli/agent-protocol";
+import {
+  SESSION_RESUME_GRACE_MS,
+  TURN_FAILURE_CODES,
+} from "@onecli/agent-protocol";
 import type {
   RunnerEvent,
+  RunnerSandboxChannel,
   RunnerWorkItem,
   SandboxStartPayload,
   WorkItem,
@@ -11,7 +16,12 @@ import { ControlPlaneError } from "./control-plane";
 import type { ControlPlaneClient } from "./control-plane";
 import { ImageUnavailableError, SandboxCapacityError } from "./backend/types";
 import { createFakeBackend, type FakeBackend } from "./backend/fake";
-import { createRunner, payloadHash, type Runner } from "./runner";
+import {
+  createRunner,
+  noProxyForRunner,
+  payloadHash,
+  type Runner,
+} from "./runner";
 import type { RunnerWsServer } from "./ws/server";
 
 /**
@@ -25,12 +35,14 @@ const config: RunnerConfig = {
   token: "rnr_test",
   controlPlaneUrl: "http://localhost:10256",
   name: "test runner",
+  replicaName: "pod-test",
   backend: "fake",
   agentImage: "onecli-agent:test",
   sandboxNetwork: "onecli-sandboxes",
   networkInternal: true,
   wsPort: 8484,
   advertisedHost: "runner",
+  advertisedPort: 8484,
   maxSandboxes: 2,
   limits: { memoryMb: 1024, cpus: 1, pids: 256 },
   reconcileSeconds: 60,
@@ -45,6 +57,8 @@ const config: RunnerConfig = {
   cloudWakeWaitSeconds: 900,
   cloudImageWaitSeconds: 240,
   lifecycleConcurrency: 1,
+  portApi: null,
+  noProxyLoopback: true,
 };
 
 const payload = (
@@ -79,16 +93,33 @@ let queued: RunnerWorkItem[];
 let expectedSandboxIds: string[];
 /** Per-sandbox control-plane statuses; undefined = an old control plane. */
 let expectedStatuses: Record<string, string> | undefined;
-let issuedTokens: string[];
+/** Per-sandbox channel facts the control plane answers (the reconciler's
+ * input); a sandbox without an entry reads as an unrecorded channel. */
+let channelFacts: Record<string, RunnerSandboxChannel>;
+/** Whether the control plane names this copy the reconciler. */
+let reconciler: boolean;
+/** The role read's answer; `undefined` = an api too old to answer it. */
+let roleAnswer: () => Promise<boolean | undefined>;
+let listings: number;
+/** Every spawn the runner recorded with the control plane, in order. */
+let spawns: Array<{
+  sandboxId: string;
+  containerRef: string;
+  tokenHash: string;
+}>;
+/** The control plane's answer to the next spawn records. */
+let spawnAccepted: boolean;
+/** Stray-stop claims, and the control plane's answer to them. */
+let strayClaims: Array<{ sandboxId: string; containerRef: string }>;
+let strayClaimAccepted: boolean;
+let retired: number;
 /** sandboxId → what the runner pushed down its control channel. */
 let delivered: Map<string, WorkItem[]>;
-/** Sandboxes with a live channel; anything else has no connection. */
+/** Sandboxes with a live socket on this copy; anything else has none. */
 let connected: Set<string>;
-/** sandboxId → when its session-holding channel dropped (the resume grace). */
-let sessionDroppedAt: Map<string, number>;
-/** Every `containerKnown` the runner told the server about, with the ref the
- * runner had recorded at that moment (what the server would sign over). */
-let knownContainers: Array<{ sandboxId: string; ref: string | undefined }>;
+let drained: number;
+/** The listener the runner registered for a supervisor socket closing. */
+let onSocketClosed: (sandboxId: string, containerRef: string) => void;
 let controlPlane: ControlPlaneClient;
 let wsServer: RunnerWsServer;
 let runner: Runner;
@@ -99,48 +130,64 @@ beforeEach(() => {
   queued = [];
   expectedSandboxIds = [];
   expectedStatuses = undefined;
-  issuedTokens = [];
+  channelFacts = {};
+  reconciler = true;
+  roleAnswer = async () => reconciler;
+  listings = 0;
+  spawns = [];
+  spawnAccepted = true;
+  strayClaims = [];
+  strayClaimAccepted = true;
+  retired = 0;
   delivered = new Map();
   connected = new Set();
-  sessionDroppedAt = new Map();
-  knownContainers = [];
+  drained = 0;
 
   controlPlane = {
-    register: async () => ({ runnerId: "r-1" }),
+    register: async () => ({ runnerId: "r-1", replicaId: "copy-1" }),
     pollWork: async () => queued.splice(0, queued.length),
     postEvents: async (events) => {
       posted.push(...events);
     },
     heartbeat: async () => {},
-    listAssignedSandboxes: async () => ({
-      sandboxIds: expectedSandboxIds,
-      ...(expectedStatuses && { statuses: expectedStatuses }),
-    }),
+    listAssignedSandboxes: async () => {
+      listings += 1;
+      return {
+        sandboxIds: expectedSandboxIds,
+        ...(expectedStatuses && { statuses: expectedStatuses }),
+        channels: channelFacts,
+        reconciler,
+      };
+    },
+    isReconciler: () => roleAnswer(),
     // Default: everything asked about exists (nothing is an orphan), so the
     // sweep is inert unless a test arms it. orphan-sweep.test.ts overrides.
     checkSandboxIds: async () => [],
+    sandboxAllowedPorts: async () => [],
     toolCall: async () => ({ ok: true, result: null }),
     memoryWrite: async () => ({ ok: true }),
     uploadAttachment: async () => ({ ok: true, attachmentId: "att-fake" }),
     fetchAttachment: async () => Buffer.alloc(0),
+    recordSpawn: async (sandboxId, spawn) => {
+      spawns.push({ sandboxId, ...spawn });
+      return spawnAccepted;
+    },
+    claimChannel: async () => null,
+    releaseChannel: async () => undefined,
+    claimStrayStop: async (sandboxId, containerRef) => {
+      strayClaims.push({ sandboxId, containerRef });
+      return strayClaimAccepted;
+    },
+    retire: async () => {
+      retired += 1;
+    },
   };
 
   wsServer = {
-    issueToken: (sandboxId) => {
-      const token = `boot-${sandboxId}-${issuedTokens.length}`;
-      issuedTokens.push(token);
-      return token;
-    },
     resumable: true,
-    revokeToken: () => {},
-    awaitingConnection: () => false,
-    disconnectedAt: (sandboxId) => sessionDroppedAt.get(sandboxId),
-    forgetSession: (sandboxId) => sessionDroppedAt.delete(sandboxId),
-    containerKnown: (sandboxId) =>
-      knownContainers.push({
-        sandboxId,
-        ref: runner.containerRefOf(sandboxId),
-      }),
+    onDisconnect: (listener) => {
+      onSocketClosed = listener;
+    },
     connection: (sandboxId) =>
       connected.has(sandboxId)
         ? {
@@ -153,13 +200,25 @@ beforeEach(() => {
             },
           }
         : undefined,
+    containerRefOf: () => undefined,
     listen: async () => {},
+    boundPort: () => 0,
+    drain: async () => {
+      drained += 1;
+    },
     close: async () => {},
     crash: async () => {},
   };
 
   runner = createRunner({ config, backend, controlPlane, wsServer });
 });
+
+/** The control plane's channel facts for one sandbox. */
+const facts = (
+  channel: string,
+  since: number | null,
+  containerRef: string | null,
+): RunnerSandboxChannel => ({ channel, since, containerRef });
 
 /**
  * `tick` only ENQUEUES — the executor runs items on per-sandbox
@@ -182,16 +241,81 @@ describe("start", () => {
     expect(record?.spec.limits).toEqual(config.limits);
   });
 
-  it("tells the ws server the container is known the moment it records the ref, so a supervisor that dialled in first is handed its session", async () => {
-    // The cloud backend's create returns only once the sandbox runs; its
-    // supervisor is often connected by then. Without this call such a
-    // supervisor never holds a session. The ref must be in the map AT the
-    // call (the server signs over it).
+  it("records the spawn with the control plane (container + token hash) before the container starts, so ANY copy can admit its first connect", async () => {
+    let startedWhenRecorded: boolean | undefined;
+    controlPlane.recordSpawn = async (sandboxId, spawn) => {
+      startedWhenRecorded = backend.sandboxes.get(sandboxId)?.running;
+      spawns.push({ sandboxId, ...spawn });
+      return true;
+    };
     queued.push(startItem());
     await drive();
 
-    const ref = backend.sandboxes.get("sb-1")?.containerRef;
-    expect(knownContainers).toEqual([{ sandboxId: "sb-1", ref }]);
+    const record = backend.sandboxes.get("sb-1");
+    const token = record?.spec.env.SANDBOX_WS_TOKEN ?? "";
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
+    expect(spawns).toEqual([
+      {
+        sandboxId: "sb-1",
+        containerRef: record?.containerRef,
+        tokenHash: createHash("sha256").update(token).digest("hex"),
+      },
+    ]);
+    // Only the hash leaves the copy, and it is recorded BEFORE the start.
+    expect(JSON.stringify(spawns)).not.toContain(token);
+    expect(startedWhenRecorded).toBe(false);
+  });
+
+  it("stands down when the control plane refuses the spawn (the start no longer applies): removes the container, reports nothing", async () => {
+    spawnAccepted = false;
+    queued.push(startItem());
+    await drive();
+
+    expect(backend.sandboxes.get("sb-1")).toBeUndefined();
+    // Only the pre-create progress report; nothing about the stood-down
+    // container (the row belongs to whoever owns it now).
+    expect(posted.filter((e) => "containerRef" in e && e.containerRef)).toEqual(
+      [],
+    );
+    expect(
+      posted.some((e) => e.kind === "sandbox.status" && e.status === "failed"),
+    ).toBe(false);
+  });
+
+  it("a stood-down start gives its capacity slot back", async () => {
+    // A refused spawn holds nothing; keeping its admission would refuse the
+    // next admissible start at_capacity on a full copy. MUTATION-PROOF: keep
+    // the slot and sb-2 is refused.
+    runner = createRunner({
+      config: { ...config, maxSandboxes: 1 },
+      backend,
+      controlPlane,
+      wsServer,
+    });
+    spawnAccepted = false;
+    queued.push(startItem("sb-1"));
+    await drive();
+    spawnAccepted = true;
+    queued.push(startItem("sb-2"));
+    await drive();
+
+    expect(backend.sandboxes.get("sb-2")?.running).toBe(true);
+  });
+
+  it("fails the start, and removes the container, when the spawn cannot be recorded at all", async () => {
+    controlPlane.recordSpawn = async () => {
+      throw new ControlPlaneError(503, "down");
+    };
+    queued.push(startItem());
+    await drive();
+
+    expect(backend.sandboxes.get("sb-1")).toBeUndefined();
+    expect(posted.at(-1)).toMatchObject({
+      kind: "sandbox.status",
+      sandboxId: "sb-1",
+      status: "failed",
+      reasonCode: "start_failed",
+    });
   });
 
   it("resolves the home by provisioning it (an idempotent ensure), never by enumerating every home, a cost that grows with the fleet", async () => {
@@ -278,14 +402,61 @@ describe("start", () => {
     expect(backend.sandboxes.get("sb-2")?.spec.env.AGENT_CHANNELS).toBe("[]");
   });
 
-  it("gives the sandbox a single-use control-channel token and its runner URL", async () => {
-    queued.push(startItem());
+  it("turns the hosted agent desktop on only for the cloud backend that carries port streams", async () => {
+    const portApi = {
+      host: "0.0.0.0",
+      port: 8485,
+      token: "port-api-secret",
+      advertisedUrl: "http://10.0.0.7:8485",
+    };
+    const envFor = async (overrides: Partial<RunnerConfig>) => {
+      backend = createFakeBackend();
+      runner = createRunner({
+        config: { ...config, ...overrides },
+        backend,
+        controlPlane,
+        wsServer,
+      });
+      queued.push(startItem("sb-1"));
+      await drive();
+      return backend.sandboxes.get("sb-1")?.spec.env ?? {};
+    };
+    expect(
+      (await envFor({ backend: "cloud", portApi })).RUNNER_HOSTED_DESKTOP,
+    ).toBe("1");
+    // A self-hosted runner (docker, kubernetes), even with port streams,
+    // and a cloud runner that cannot carry the screen: the plain desktop.
+    for (const overrides of [
+      { backend: "docker", portApi },
+      { backend: "kubernetes", portApi },
+      { backend: "cloud", portApi: null },
+    ]) {
+      expect(await envFor(overrides)).not.toHaveProperty(
+        "RUNNER_HOSTED_DESKTOP",
+      );
+    }
+  });
+
+  it("gives the sandbox a fresh single-use control-channel token and the ADVERTISED runner URL", async () => {
+    runner = createRunner({
+      config: { ...config, wsPort: 9001, advertisedPort: 8484 },
+      backend,
+      controlPlane,
+      wsServer,
+    });
+    queued.push(startItem("sb-1"), startItem("sb-2"));
     await drive();
 
     const env = backend.sandboxes.get("sb-1")?.spec.env ?? {};
+    // Behind a balancer the sandbox dials the balancer's port, not the
+    // copy's own listen port.
     expect(env.RUNNER_WS_URL).toBe("ws://runner:8484");
-    expect(env.SANDBOX_WS_TOKEN).toBe(issuedTokens[0]);
     expect(env.SANDBOX_ID).toBe("sb-1");
+    expect(env.SANDBOX_WS_TOKEN).toMatch(/^[0-9a-f]{64}$/);
+    expect(env.SANDBOX_WS_TOKEN).not.toContain("sb-1");
+    expect(backend.sandboxes.get("sb-2")?.spec.env.SANDBOX_WS_TOKEN).not.toBe(
+      env.SANDBOX_WS_TOKEN,
+    );
   });
 
   it("reports starting with the refs, and NOT running (that is the supervisor's word)", async () => {
@@ -549,124 +720,695 @@ describe("reconcile (the teardown path)", () => {
   });
 });
 
-describe("a sandbox that is running but unreachable", () => {
-  // The control-channel token is single-use and lives in the runner's memory,
-  // so a supervisor that lost its channel across a runner restart can never
-  // re-authenticate. Left alone, the container runs, the control plane still
-  // reads `running`, and every turn fails "not reachable" — forever, because
-  // a `running` sandbox is never re-started.
-
-  it("reports it as stopped so the normal wake path can recover it", async () => {
+/**
+ * Reconcile reads the CONTROL PLANE's channel facts, never this process's
+ * memory: with several copies behind one address, a sandbox's socket may be
+ * held by any of them, and a copy that restarted remembers nothing. Every
+ * report names the container it is about, so a late one never moves a
+ * sandbox whose container was replaced meanwhile.
+ */
+describe("reconcile verdicts come from the control plane's channel facts", () => {
+  /** sb-1 started and running; its channel facts set by the caller. */
+  const started = async (): Promise<string> => {
     queued.push(startItem("sb-1"));
     await drive();
     expectedSandboxIds = ["sb-1"];
+    expectedStatuses = { "sb-1": "running" };
     posted.length = 0;
-    // No live channel and no token outstanding = stranded, not booting.
-
-    await runner.reconcile();
-
-    expect(posted).toEqual([
-      { kind: "sandbox.status", sandboxId: "sb-1", status: "stopped" },
-    ]);
+    return backend.sandboxes.get("sb-1")!.containerRef;
+  };
+  const stopped = (containerRef: string): RunnerEvent => ({
+    kind: "sandbox.status",
+    sandboxId: "sb-1",
+    status: "stopped",
+    observedContainerRef: containerRef,
   });
 
-  it("says NOTHING about a sandbox that is still dialling in", async () => {
-    // A freshly-created sandbox holds a token and has not connected yet.
-    // Reporting it stopped would fight its own start.
-    queued.push(startItem("sb-1"));
-    await drive();
-    expectedSandboxIds = ["sb-1"];
-    posted.length = 0;
-    wsServer.awaitingConnection = () => true;
+  it("says nothing while ANOTHER copy holds the socket, though this copy has none", async () => {
+    // The multi-copy law: no socket here is not no socket anywhere.
+    const ref = await started();
+    channelFacts = { "sb-1": facts("held", Date.now(), ref) };
 
     await runner.reconcile();
 
+    expect(connected.has("sb-1")).toBe(false);
     expect(posted).toEqual([]);
   });
 
-  it("says nothing about a sandbox with a live channel", async () => {
-    queued.push(startItem("sb-1"));
-    await drive();
-    expectedSandboxIds = ["sb-1"];
-    posted.length = 0;
-    connected.add("sb-1");
-
+  it("says nothing about a sandbox still dialling in", async () => {
+    const ref = await started();
+    channelFacts = { "sb-1": facts("awaiting", Date.now(), ref) };
     await runner.reconcile();
-
     expect(posted).toEqual([]);
   });
 
-  it("reports a DEAD expected container once — then stays quiet", async () => {
-    // The double-death shape: the container died while the runner itself was
-    // down (a host reboot), so the channel close was never observed and no
-    // report ever fired — the control plane may still read `running` with a
-    // turn in flight, which would otherwise wait out the whole ceiling. One
-    // `stopped` report is the truth; a sandbox that was parked DELIBERATELY
-    // absorbs the same report as a no-op (the control plane's status guard),
-    // so the dedupe below exists only to stop per-tick churn.
-    // MUTATION-PROOF: delete the dead-but-expected arm and the first expect
-    // fails; delete the reportedDead dedupe and the second one does.
-    queued.push(startItem("sb-1"));
-    await drive();
-    const ref = backend.sandboxes.get("sb-1")?.containerRef;
-    await backend.stopSandbox(ref!);
-    expectedSandboxIds = ["sb-1"];
-    posted.length = 0;
+  it("waits out the resume grace after a drop, then reports it stopped, stamped with its container", async () => {
+    const ref = await started();
+    channelFacts = { "sb-1": facts("dropped", Date.now() - 1_000, ref) };
+    await runner.reconcile();
+    expect(posted).toEqual([]);
+
+    channelFacts = {
+      "sb-1": facts("dropped", Date.now() - SESSION_RESUME_GRACE_MS - 1, ref),
+    };
+    await runner.reconcile();
+    expect(posted).toEqual([stopped(ref)]);
+  });
+
+  it("gives a sandbox whose holder died the inherited grace, then reports it", async () => {
+    runner = createRunner({
+      config,
+      backend,
+      controlPlane,
+      wsServer,
+      inheritedResumeGraceMs: 30,
+    });
+    const ref = await started();
+    channelFacts = { "sb-1": facts("lost", Date.now() - 60_000, ref) };
 
     await runner.reconcile();
-    expect(posted).toEqual([
-      { kind: "sandbox.status", sandboxId: "sb-1", status: "stopped" },
-    ]);
+    expect(posted).toEqual([]);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await runner.reconcile();
+    expect(posted).toEqual([stopped(ref)]);
+  });
 
+  it("restarts the inherited grace when it loses the reconciler role and gets it back", async () => {
+    // Another copy reconciled meanwhile; this one watched nothing. Its own
+    // clock must not count time it did not spend watching.
+    // MUTATION-PROOF: keep reconcilerSince across a lost role and the last
+    // expect fails.
+    runner = createRunner({
+      config,
+      backend,
+      controlPlane,
+      wsServer,
+      inheritedResumeGraceMs: 30,
+    });
+    const ref = await started();
+    channelFacts = { "sb-1": facts("lost", Date.now() - 60_000, ref) };
+    await runner.reconcile();
+    reconciler = false;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await runner.reconcile();
+    reconciler = true;
+
+    await runner.reconcile();
+    expect(posted).toEqual([]);
+  });
+
+  it("ships a 3 min inherited grace: a lost holder's sandbox is left alone at 179 s and reported at 181 s", async () => {
+    // The DEFAULT, no `inheritedResumeGraceMs` override (the runner from
+    // beforeEach). Fails if the default regresses to the supervisor's whole
+    // ~15.5 min reconnect budget, the bug the 3 min grace was set for. The
+    // end-to-end leg runs a shortened grace; this is the default's one pin.
+    const ref = await started();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const t0 = Date.now();
+      channelFacts = { "sb-1": facts("lost", t0 - 60_000, ref) };
+      // The first pass as reconciler anchors the grace at t0.
+      await runner.reconcile();
+      expect(posted).toEqual([]);
+
+      vi.setSystemTime(t0 + 179_000);
+      await runner.reconcile();
+      expect(posted).toEqual([]);
+
+      vi.setSystemTime(t0 + 181_000);
+      await runner.reconcile();
+      expect(posted).toEqual([stopped(ref)]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports an unrecorded channel at once when no supervisor could resume (no keyring here)", async () => {
+    runner = createRunner({
+      config,
+      backend,
+      controlPlane,
+      wsServer: { ...wsServer, resumable: false },
+    });
+    const ref = await started();
+    await runner.reconcile();
+    expect(posted).toEqual([stopped(ref)]);
+  });
+
+  it("gives no grace to a container spawned WITHOUT sessions, even under a keyed copy: its supervisor can never resume", async () => {
+    queued.push(startItem("sb-1"));
+    runner = createRunner({
+      config,
+      backend,
+      controlPlane,
+      wsServer: { ...wsServer, resumable: false },
+    });
+    await drive();
+    expect(backend.sandboxes.get("sb-1")!.spec.resumable).toBe(false);
+    const ref = backend.sandboxes.get("sb-1")!.containerRef;
+    expectedSandboxIds = ["sb-1"];
     posted.length = 0;
+    runner = createRunner({ config, backend, controlPlane, wsServer });
+
+    await runner.reconcile();
+
+    expect(posted).toEqual([stopped(ref)]);
+  });
+
+  it("leaves a container alone when the facts are about a NEWER one (a start replaced it)", async () => {
+    await started();
+    channelFacts = {
+      "sb-1": facts(
+        "dropped",
+        Date.now() - SESSION_RESUME_GRACE_MS - 1,
+        "ct-new",
+      ),
+    };
+    await runner.reconcile();
+    expect(posted).toEqual([]);
+  });
+
+  it("reports a DEAD container at once, grace or no grace, and only once", async () => {
+    // A dead container has no supervisor to come back. MUTATION-PROOF: drop
+    // the reportedDead dedupe and the second expect fails.
+    const ref = await started();
+    channelFacts = { "sb-1": facts("dropped", Date.now() - 1_000, ref) };
+    backend.sandboxes.get("sb-1")!.running = false;
+
+    await runner.reconcile();
+    expect(posted).toEqual([stopped(ref)]);
+    posted.length = 0;
+    await runner.reconcile();
+    expect(posted).toEqual([]);
+  });
+
+  it("leaves a dead container whose socket is still HELD: its holder sees the close", async () => {
+    const ref = await started();
+    channelFacts = { "sb-1": facts("held", Date.now(), ref) };
+    backend.sandboxes.get("sb-1")!.running = false;
     await runner.reconcile();
     expect(posted).toEqual([]);
   });
 });
 
 /**
- * THE ZOMBIE BACKSTOP. A running container with no channel whose row the
- * control plane has already parked (`stopped`/`failed`/`unprovisioned`): the
- * report above is a no-op against that row (the status guard only applies
- * `stopped` over running/stopping), so reporting it every pass does nothing
- * forever. That is the shape a supervisor that gave up but never exited
- * leaves behind. The runner is the only party that sees the container, so
- * it stops it, through the ordinary stop path.
+ * A socket closes: was it the container dying? The copy that held the
+ * socket looks at THAT container at once. Dead: it is reported stopped now
+ * (stamped with that container), so the next message wakes the sandbox on
+ * the ordinary path instead of waiting for a socket that cannot come back
+ * until the reconciler's next pass. Alive: the supervisor is reconnecting
+ * (to this copy or another), and nothing is said.
  */
-describe("a running container the control plane no longer expects to run", () => {
-  /** A started sandbox whose channel is gone, as reconcile will find it. */
-  const zombie = async (status: string | undefined): Promise<string> => {
+describe("a supervisor socket closing", () => {
+  beforeEach(() => {
+    runner = createRunner({
+      config,
+      backend,
+      controlPlane,
+      wsServer,
+      closedChannelLookMs: 5,
+    });
+  });
+
+  const started = async (): Promise<string> => {
+    await runner.start();
     queued.push(startItem("sb-1"));
     await drive();
-    expectedSandboxIds = ["sb-1"];
-    expectedStatuses = status === undefined ? undefined : { "sb-1": status };
     posted.length = 0;
     return backend.sandboxes.get("sb-1")!.containerRef;
   };
 
+  it("reports a container that died with it, at once and stamped with it", async () => {
+    // MUTATION-PROOF: drop the listener (the report never comes), or report
+    // without the container stamp (it could knock down a fresh start).
+    const ref = await started();
+    backend.sandboxes.get("sb-1")!.running = false;
+
+    onSocketClosed("sb-1", ref);
+    await runner.settle();
+
+    expect(posted).toEqual([
+      {
+        kind: "sandbox.status",
+        sandboxId: "sb-1",
+        status: "stopped",
+        observedContainerRef: ref,
+      },
+    ]);
+    // One report per container: the reconciler's next pass stays quiet.
+    expectedSandboxIds = ["sb-1"];
+    expectedStatuses = { "sb-1": "running" };
+    channelFacts = { "sb-1": facts("dropped", Date.now(), ref) };
+    posted.length = 0;
+    await runner.reconcile();
+    expect(posted).toEqual([]);
+    await runner.stop();
+  });
+
+  it("says nothing when the container is alive (the supervisor is reconnecting)", async () => {
+    const ref = await started();
+    onSocketClosed("sb-1", ref);
+    await runner.settle();
+    expect(posted).toEqual([]);
+    await runner.stop();
+  });
+
+  it("catches a container still reading `running` at the close that dies a moment later", async () => {
+    // The real ordering: the socket closes BEFORE the substrate reads the
+    // killed container as exited. One look would call it alive and the next
+    // message would wait for the reconciler. MUTATION-PROOF: look once.
+    const ref = await started();
+    const record = backend.sandboxes.get("sb-1")!;
+    const list = backend.listSandboxes.bind(backend);
+    let looks = 0;
+    backend.listSandboxes = async () => {
+      looks += 1;
+      if (looks === 2) record.running = false;
+      return list();
+    };
+
+    onSocketClosed("sb-1", ref);
+    await runner.settle();
+
+    expect(posted).toEqual([
+      {
+        kind: "sandbox.status",
+        sandboxId: "sb-1",
+        status: "stopped",
+        observedContainerRef: ref,
+      },
+    ]);
+    await runner.stop();
+  });
+
+  it("stops looking once the supervisor is back on this copy", async () => {
+    const ref = await started();
+    const list = backend.listSandboxes.bind(backend);
+    let looks = 0;
+    backend.listSandboxes = async () => {
+      looks += 1;
+      connected.add("sb-1");
+      return list();
+    };
+    onSocketClosed("sb-1", ref);
+    await runner.settle();
+    expect(looks).toBe(1);
+    expect(posted).toEqual([]);
+    await runner.stop();
+  });
+
+  it("says nothing while a stop of its own is in flight for that sandbox", async () => {
+    // The stop speaks for the sandbox. The close lands while the stop is
+    // mid-way (its listing held). MUTATION-PROOF: drop the in-flight-stop
+    // fence and the check reports the container ahead of the stop.
+    const ref = await started();
+    const release = backend.holdNext("list");
+    queued.push({ kind: "sandbox.stop", sandboxId: "sb-1", containerRef: ref });
+    await runner.tick(0);
+    backend.sandboxes.get("sb-1")!.running = false;
+    onSocketClosed("sb-1", ref);
+    release();
+    await runner.settle();
+    expect(posted.filter((e) => "observedContainerRef" in e)).toEqual([]);
+    await runner.stop();
+  });
+
+  it("says nothing while a start of its own is replacing that container", async () => {
+    // A start recreates the container: the old one is gone and its socket
+    // closes with it. MUTATION-PROOF: drop the start's in-flight mark and
+    // the check reports the old container as gone mid-start.
+    const ref = await started();
+    const release = backend.holdNext("create");
+    queued.push(startItem("sb-1"));
+    await runner.tick(0);
+    await vi.waitFor(() => expect(backend.sandboxes.has("sb-1")).toBe(false));
+    onSocketClosed("sb-1", ref);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    release();
+    await runner.settle();
+    expect(posted.filter((e) => "observedContainerRef" in e)).toEqual([]);
+    await runner.stop();
+  });
+
+  it("stays quiet for a start queued behind its stop once the stop is done", async () => {
+    // Both in flight at once: the stop finishing must not clear the start's
+    // mark. MUTATION-PROOF: track a set instead of a count and the check
+    // reports the old container while the start is replacing it.
+    const ref = await started();
+    const releaseStop = backend.holdNext("stop");
+    queued.push({ kind: "sandbox.stop", sandboxId: "sb-1", containerRef: ref });
+    await runner.tick(0);
+    const releaseCreate = backend.holdNext("create");
+    queued.push(startItem("sb-1"));
+    await runner.tick(0);
+    releaseStop();
+    await vi.waitFor(() => expect(backend.sandboxes.has("sb-1")).toBe(false));
+    onSocketClosed("sb-1", ref);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    releaseCreate();
+    await runner.settle();
+    expect(posted.filter((e) => "observedContainerRef" in e)).toEqual([]);
+    await runner.stop();
+  });
+
+  it("speaks again once its own stop and start are done", async () => {
+    // MUTATION-PROOF: never clear a stop's mark and the next close of the
+    // fresh container is muted for good.
+    const ref = await started();
+    queued.push({ kind: "sandbox.stop", sandboxId: "sb-1", containerRef: ref });
+    await drive();
+    queued.push(startItem("sb-1"));
+    await drive();
+    posted.length = 0;
+    const fresh = backend.sandboxes.get("sb-1")!;
+    fresh.running = false;
+    onSocketClosed("sb-1", fresh.containerRef);
+    await runner.settle();
+    expect(posted).toEqual([
+      {
+        kind: "sandbox.status",
+        sandboxId: "sb-1",
+        status: "stopped",
+        observedContainerRef: fresh.containerRef,
+      },
+    ]);
+    await runner.stop();
+  });
+
+  it("reports a container that is GONE from the substrate (a deleted pod)", async () => {
+    // A cluster backend's shape: a pod deleted out of band is not listed at
+    // all, never as `running: false`. Gone is as dead as exited.
+    // MUTATION-PROOF: treat an absent container as alive and nothing is
+    // reported.
+    const ref = await started();
+    backend.sandboxes.delete("sb-1");
+    onSocketClosed("sb-1", ref);
+    await runner.settle();
+    expect(posted).toEqual([
+      {
+        kind: "sandbox.status",
+        sandboxId: "sb-1",
+        status: "stopped",
+        observedContainerRef: ref,
+      },
+    ]);
+    await runner.stop();
+  });
+
+  it("says nothing when a newer container already replaced the one the socket was for", async () => {
+    // A start recreated it; the old socket's close is history, and the new
+    // container's supervisor is on its way in. MUTATION-PROOF: ignore the
+    // newer container and the check reports the old one, since the newer
+    // one is still booting (not `running` yet).
+    await started();
+    backend.sandboxes.get("sb-1")!.running = false;
+    onSocketClosed("sb-1", "ct-before-the-start");
+    await runner.settle();
+    expect(posted).toEqual([]);
+    await runner.stop();
+  });
+
+  it("spreads its looks over time, so a container that dies by the clock is caught", async () => {
+    // The substrate's lag is time, not a number of reads. Looks here are
+    // 5 ms apart (20 ms in all); the container dies 10 ms after the close.
+    // MUTATION-PROOF: drop the wait between looks and all five land at
+    // once, before it reads dead.
+    const ref = await started();
+    const record = backend.sandboxes.get("sb-1")!;
+    const closedAt = Date.now();
+    const list = backend.listSandboxes.bind(backend);
+    backend.listSandboxes = async () => {
+      if (Date.now() - closedAt >= 10) record.running = false;
+      return list();
+    };
+
+    onSocketClosed("sb-1", ref);
+    await runner.settle();
+
+    expect(posted).toEqual([
+      {
+        kind: "sandbox.status",
+        sandboxId: "sb-1",
+        status: "stopped",
+        observedContainerRef: ref,
+      },
+    ]);
+    await runner.stop();
+  });
+
+  it("looks at many closes together with one listing per look", async () => {
+    // A node lost takes many sockets at once, and each listing is a cluster
+    // API call. MUTATION-PROOF: list per closed socket and the count grows
+    // with the sockets.
+    await runner.start();
+    for (const id of ["sb-1", "sb-2"]) {
+      queued.push(startItem(id));
+    }
+    await drive();
+    posted.length = 0;
+    const list = backend.listSandboxes.bind(backend);
+    let listings = 0;
+    backend.listSandboxes = async () => {
+      listings += 1;
+      return list();
+    };
+    const one = backend.sandboxes.get("sb-1")!;
+    const two = backend.sandboxes.get("sb-2")!;
+    one.running = false;
+    onSocketClosed("sb-1", one.containerRef);
+    onSocketClosed("sb-2", two.containerRef);
+    await runner.settle();
+
+    expect(posted).toEqual([
+      {
+        kind: "sandbox.status",
+        sandboxId: "sb-1",
+        status: "stopped",
+        observedContainerRef: one.containerRef,
+      },
+    ]);
+    // sb-2 stays running: five looks, one listing each, shared with sb-1.
+    expect(listings).toBe(5);
+    await runner.stop();
+  });
+
+  it("says nothing about the sockets its own shutdown closes", async () => {
+    // A stopping copy hands every supervisor on: those closes are its own
+    // drain. MUTATION-PROOF: check them anyway and the stop reports (and
+    // lists for) every container it is handing over.
+    const ref = await started();
+    const list = backend.listSandboxes.bind(backend);
+    let listings = 0;
+    backend.listSandboxes = async () => {
+      listings += 1;
+      return list();
+    };
+    backend.sandboxes.get("sb-1")!.running = false;
+    wsServer.drain = async () => {
+      onSocketClosed("sb-1", ref);
+    };
+    await runner.stop();
+    await runner.settle();
+    expect(posted).toEqual([]);
+    expect(listings).toBe(0);
+  });
+
+  it("gives a close that lands mid-sweep its full looks", async () => {
+    // MUTATION-PROOF: end the sweep after the first close's looks and the
+    // later container, which dies on its last look, is never reported.
+    await runner.start();
+    for (const id of ["sb-1", "sb-2"]) {
+      queued.push(startItem(id));
+    }
+    await drive();
+    posted.length = 0;
+    const one = backend.sandboxes.get("sb-1")!;
+    const two = backend.sandboxes.get("sb-2")!;
+    const list = backend.listSandboxes.bind(backend);
+    let listings = 0;
+    backend.listSandboxes = async () => {
+      listings += 1;
+      // sb-2 closes during sb-1's second look (listing 2), so its own five
+      // looks are listings 2-6; it dies on the last, after sb-1's are done.
+      if (listings === 2) onSocketClosed("sb-2", two.containerRef);
+      if (listings === 6) two.running = false;
+      return list();
+    };
+    onSocketClosed("sb-1", one.containerRef);
+    await runner.settle();
+
+    expect(posted).toEqual([
+      {
+        kind: "sandbox.status",
+        sandboxId: "sb-2",
+        status: "stopped",
+        observedContainerRef: two.containerRef,
+      },
+    ]);
+    await runner.stop();
+  });
+
+  it("says nothing about a container the reconciler already reported", async () => {
+    // One report per container, whichever path saw it first. MUTATION-PROOF:
+    // drop the shared dedupe and the close reports it a second time.
+    const ref = await started();
+    backend.sandboxes.get("sb-1")!.running = false;
+    expectedSandboxIds = ["sb-1"];
+    expectedStatuses = { "sb-1": "running" };
+    channelFacts = { "sb-1": facts("dropped", Date.now(), ref) };
+    await runner.reconcile();
+    expect(posted).toHaveLength(1);
+    posted.length = 0;
+    onSocketClosed("sb-1", ref);
+    await runner.settle();
+    expect(posted).toEqual([]);
+    await runner.stop();
+  });
+});
+
+/**
+ * ONE copy reconciles (the oldest live one, named by the control plane), so
+ * N copies never report, stop or reap the same object N times. The others
+ * only serve sockets.
+ */
+describe("a copy that is not the reconciler", () => {
+  it("reports, stops, reaps and sweeps nothing", async () => {
+    // MUTATION-PROOF: ignore `reconciler: false` and every expect fails.
+    queued.push(startItem("sb-dead"), startItem("sb-orphan"));
+    await drive();
+    const deadRef = backend.sandboxes.get("sb-dead")!.containerRef;
+    backend.sandboxes.get("sb-dead")!.running = false;
+    expectedSandboxIds = ["sb-dead", "sb-gone"];
+    expectedStatuses = { "sb-dead": "running", "sb-gone": "running" };
+    channelFacts = { "sb-dead": facts("dropped", Date.now(), deadRef) };
+    reconciler = false;
+    const checkSpy = vi.spyOn(controlPlane, "checkSandboxIds");
+    posted.length = 0;
+
+    await runner.reconcile();
+    await runner.reconcile();
+
+    expect(posted).toEqual([]);
+    expect(backend.sandboxes.has("sb-orphan")).toBe(true);
+    expect(backend.homes.has("sb-orphan")).toBe(true);
+    expect(checkSpy).not.toHaveBeenCalled();
+  });
+
+  it("asks for its role alone and never fetches the sandbox listing", async () => {
+    // The listing is every sandbox's row; a copy that will not reconcile
+    // needs none of it. MUTATION-PROOF: list first (the old order) and the
+    // count is one per pass.
+    reconciler = false;
+    await runner.reconcile();
+    await runner.reconcile();
+    expect(listings).toBe(0);
+
+    reconciler = true;
+    await runner.reconcile();
+    expect(listings).toBe(1);
+  });
+
+  it("falls back to the listing's role when the api is too old to answer it alone", async () => {
+    // A runner deployed before its api: the role read 404s (`undefined`),
+    // and the listing still carries the role, as before. MUTATION-PROOF:
+    // read `undefined` as "not the reconciler" and an old api leaves no
+    // copy reconciling at all; read it as "the reconciler" and every copy
+    // reconciles.
+    roleAnswer = async () => undefined;
+    queued.push(startItem("sb-dead"));
+    await drive();
+    const ref = backend.sandboxes.get("sb-dead")!.containerRef;
+    backend.sandboxes.get("sb-dead")!.running = false;
+    expectedSandboxIds = ["sb-dead"];
+    expectedStatuses = { "sb-dead": "running" };
+    channelFacts = { "sb-dead": facts("dropped", Date.now(), ref) };
+    posted.length = 0;
+
+    reconciler = false;
+    await runner.reconcile();
+    expect(listings).toBeGreaterThan(0);
+    expect(posted).toEqual([]);
+
+    reconciler = true;
+    await runner.reconcile();
+    expect(posted).toEqual([
+      {
+        kind: "sandbox.status",
+        sandboxId: "sb-dead",
+        status: "stopped",
+        observedContainerRef: ref,
+      },
+    ]);
+  });
+});
+
+/**
+ * THE STRAY BACKSTOP. A running container with no channel whose row the
+ * control plane has already parked (`stopped`/`failed`): a report would
+ * change nothing (the status guard absorbs it), so the reconciler stops it
+ * itself, once the control plane agrees no start has taken the sandbox.
+ */
+describe("a running container the control plane no longer expects to run", () => {
+  /** A started sandbox whose channel dropped past the grace. */
+  const zombie = async (status: string | undefined): Promise<string> => {
+    queued.push(startItem("sb-1"));
+    await drive();
+    const ref = backend.sandboxes.get("sb-1")!.containerRef;
+    expectedSandboxIds = ["sb-1"];
+    expectedStatuses = status === undefined ? undefined : { "sb-1": status };
+    channelFacts = {
+      "sb-1": facts("dropped", Date.now() - SESSION_RESUME_GRACE_MS - 1, ref),
+    };
+    posted.length = 0;
+    return ref;
+  };
+
   it.each(["stopped", "failed"])(
-    "is STOPPED (home parked, nothing reported) when its row reads `%s`",
+    "is claimed, STOPPED (home parked) and reported stopped when its row reads `%s`",
     async (status) => {
-      // MUTATION-PROOF: drop the backstop and the container stays running
-      // (and the old per-pass report comes back).
+      // The claim moved the row to `stopping` under this copy; the report is
+      // what lands it, like any stop's. MUTATION-PROOF: drop the backstop
+      // and the container stays running.
       const ref = await zombie(status);
       const stopSpy = vi.spyOn(backend, "stopSandbox");
 
       await runner.reconcile();
       await runner.settle();
 
+      expect(strayClaims).toEqual([{ sandboxId: "sb-1", containerRef: ref }]);
       expect(stopSpy).toHaveBeenCalledWith(ref, "sb-1");
       expect(backend.sandboxes.get("sb-1")?.running).toBe(false);
       expect(backend.parks).toContain("fake-home-sb-1");
-      // The row is already where this stop leaves it; a report would only
-      // be absorbed by the control plane's status guard.
-      expect(posted).toEqual([]);
+      expect(posted).toEqual([
+        {
+          kind: "sandbox.status",
+          sandboxId: "sb-1",
+          status: "stopped",
+          observedContainerRef: ref,
+        },
+      ]);
     },
   );
 
-  it("is stopped ONCE: a pass that finds it still listed does not stop it again", async () => {
-    // The stop is ref-bound and idempotent, but a container that lingers in
-    // the listing (a slow substrate) must not draw a stop every pass.
+  it("is left running when the control plane refuses the claim (a start took it), and asked about again next pass", async () => {
+    // MUTATION-PROOF: stop without the claim and the container dies under
+    // the start that owns it; keep the ref deduped after a refusal and the
+    // second claim never comes.
+    await zombie("stopped");
+    strayClaimAccepted = false;
+    const stopSpy = vi.spyOn(backend, "stopSandbox");
+
+    await runner.reconcile();
+    await runner.settle();
+    await runner.reconcile();
+    await runner.settle();
+
+    expect(stopSpy).not.toHaveBeenCalled();
+    expect(strayClaims).toHaveLength(2);
+    expect(posted).toEqual([]);
+  });
+
+  it("is stopped ONCE: a pass that finds it still listed does not claim or stop it again", async () => {
     // MUTATION-PROOF: drop the per-ref dedupe and the spy sees two calls.
     const ref = await zombie("stopped");
     const stopSpy = vi.spyOn(backend, "stopSandbox");
@@ -680,10 +1422,32 @@ describe("a running container the control plane no longer expects to run", () =>
 
     expect(stopSpy).toHaveBeenCalledTimes(1);
     expect(stopSpy).toHaveBeenCalledWith(ref, "sb-1");
+    expect(strayClaims).toHaveLength(1);
+  });
+
+  it("the REAL sequence: reported once while its row reads running, then STOPPED once the report has parked the row", async () => {
+    // The report and the stop are separate acts on the same container: the
+    // report's dedupe must not swallow the stop the parked row then calls
+    // for (the zombie shape). MUTATION-PROOF: share one dedupe between them
+    // and the container is never stopped.
+    const ref = await zombie("running");
+    const stopSpy = vi.spyOn(backend, "stopSandbox");
+
+    await runner.reconcile();
+    await runner.settle();
+    expect(stopSpy).not.toHaveBeenCalled();
+    expect(posted).toHaveLength(1);
+
+    expectedStatuses = { "sb-1": "stopped" };
+    await runner.reconcile();
+    await runner.settle();
+
+    expect(strayClaims).toEqual([{ sandboxId: "sb-1", containerRef: ref }]);
+    expect(stopSpy).toHaveBeenCalledWith(ref, "sb-1");
+    expect(backend.sandboxes.get("sb-1")?.running).toBe(false);
   });
 
   it("is tried AGAIN on the next pass when the stop itself failed", async () => {
-    // A transient backend error must not leave the stray running for good.
     // MUTATION-PROOF: keep the ref deduped after a failed stop and the second
     // pass does nothing.
     await zombie("stopped");
@@ -693,6 +1457,7 @@ describe("a running container the control plane no longer expects to run", () =>
     await runner.reconcile();
     await runner.settle();
     expect(backend.sandboxes.get("sb-1")?.running).toBe(true);
+    expect(posted).toEqual([]);
 
     await runner.reconcile();
     await runner.settle();
@@ -700,52 +1465,33 @@ describe("a running container the control plane no longer expects to run", () =>
     expect(backend.sandboxes.get("sb-1")?.running).toBe(false);
   });
 
-  it("is only REPORTED, never stopped, while its row reads `running` (the report is what moves the row)", async () => {
-    // MUTATION-PROOF: let `running` into the parked set and this stops a
-    // container the control plane still believes is serving.
-    await zombie("running");
-    const stopSpy = vi.spyOn(backend, "stopSandbox");
-
-    await runner.reconcile();
-    await runner.settle();
-
-    expect(stopSpy).not.toHaveBeenCalled();
-    expect(posted).toEqual([
-      { kind: "sandbox.status", sandboxId: "sb-1", status: "stopped" },
-    ]);
-  });
-
-  it.each(["starting", "stopping", "unprovisioned"])(
-    "is left alone while its row reads `%s` (a claim in flight, or a start that is due, owns it)",
+  it.each(["running", "starting", "stopping", "unprovisioned", undefined])(
+    "is only REPORTED, never stopped, while its row reads `%s` (the report is what moves the row)",
     async (status) => {
-      await zombie(status);
+      // MUTATION-PROOF: let any of these into the parked set and this stops
+      // a container the control plane has not parked; a missing status (the
+      // field is optional on the wire) must never read as parked.
+      const ref = await zombie(status);
       const stopSpy = vi.spyOn(backend, "stopSandbox");
 
       await runner.reconcile();
       await runner.settle();
 
       expect(stopSpy).not.toHaveBeenCalled();
+      expect(strayClaims).toEqual([]);
+      expect(posted).toEqual([
+        {
+          kind: "sandbox.status",
+          sandboxId: "sb-1",
+          status: "stopped",
+          observedContainerRef: ref,
+        },
+      ]);
     },
   );
 
-  it("is only reported against an OLD control plane that sends no statuses", async () => {
-    // MUTATION-PROOF: treat a missing status as parked and this stops it.
-    await zombie(undefined);
-    const stopSpy = vi.spyOn(backend, "stopSandbox");
-
-    await runner.reconcile();
-    await runner.settle();
-
-    expect(stopSpy).not.toHaveBeenCalled();
-    expect(posted).toEqual([
-      { kind: "sandbox.status", sandboxId: "sb-1", status: "stopped" },
-    ]);
-  });
-
   it("is left alone while a start for it is QUEUED (the start recreates it anyway)", async () => {
-    // The realistic race: a message arrived, the start is claimed and
-    // queued behind an executing stop, and reconcile still reads the old
-    // status. MUTATION-PROOF: drop the start fence and a second stop lands.
+    // MUTATION-PROOF: drop the start fence and a second stop lands.
     await zombie("stopped");
     const stopSpy = vi.spyOn(backend, "stopSandbox");
     const release = backend.holdNext("stop");
@@ -762,20 +1508,17 @@ describe("a running container the control plane no longer expects to run", () =>
     // The held stop, then the start's own recreate (stop + remove + create):
     // two calls. A reconcile-issued stop would be a third.
     expect(stopSpy).toHaveBeenCalledTimes(2);
+    expect(strayClaims).toEqual([]);
   });
 
   it("is left alone while a start for it is EXECUTING (the old container is still listed mid-recreate)", async () => {
-    // The start has begun (its queue slot is drained) and is recreating;
-    // a substrate can still list the old container running with no channel
-    // while the row reads the old status. MUTATION-PROOF: drop the
-    // executing-start fence and reconcile stops the container being replaced.
+    // MUTATION-PROOF: drop the executing-start fence and reconcile stops the
+    // container being replaced.
     const oldRef = await zombie("stopped");
     const old = backend.sandboxes.get("sb-1")!;
     const release = backend.holdNext("create");
     queued.push(startItem("sb-1"));
     await runner.tick(0);
-    // The recreate removed the old record and is held inside create; put the
-    // old container back, still running, as a lagging substrate would list it.
     await vi.waitFor(() => expect(backend.sandboxes.has("sb-1")).toBe(false));
     backend.sandboxes.set("sb-1", { ...old, running: true });
     const stopSpy = vi.spyOn(backend, "stopSandbox");
@@ -785,11 +1528,10 @@ describe("a running container the control plane no longer expects to run", () =>
     release();
     await runner.settle();
     expect(stopSpy).not.toHaveBeenCalledWith(oldRef, "sb-1");
+    expect(strayClaims).toEqual([]);
   });
 
   it("is left alone while a deliberate stop for it is QUEUED (that stop ends this very container)", async () => {
-    // One stop executing (its slot drained, held), a second queued behind
-    // it, and reconcile still finds the container running with a parked row.
     // MUTATION-PROOF: drop the queued-stop fence and reconcile adds a third.
     await zombie("stopped");
     const stopSpy = vi.spyOn(backend, "stopSandbox");
@@ -805,316 +1547,199 @@ describe("a running container the control plane no longer expects to run", () =>
     release();
     await runner.settle();
     expect(stopSpy).toHaveBeenCalledTimes(2);
+    expect(strayClaims).toEqual([]);
   });
 });
 
 /**
- * The resumable channel (runner restart survival). A supervisor that holds a
- * session reconnects by itself; the runner's job is to NOT treat the gap as a
- * death for as long as the supervisor is still inside its retry budget
- * (`SESSION_RESUME_GRACE_MS`), and to hold a turn for it rather than fail it.
+ * A copy's lifetime: it takes an identity before it admits a socket, and on
+ * the way out it hands every supervisor to the other copies before giving
+ * the identity up, so the sandboxes it owned pass on at once.
  */
-describe("a sandbox whose session-holding channel dropped (the resume grace)", () => {
-  const turnItem = (): RunnerWorkItem => ({
-    kind: "turn.deliver",
-    sandboxId: "sb-1",
-    conversationId: "cv-1",
-    turnId: "t-1",
-    message: "hello",
+describe("a copy's start and stop", () => {
+  it("registers with its copy name and its port-API address BEFORE it listens", async () => {
+    const order: string[] = [];
+    const register = vi.fn(async () => {
+      order.push("register");
+      return { runnerId: "r-1", replicaId: "copy-1" };
+    });
+    const copy = createRunner({
+      config: {
+        ...config,
+        portApi: {
+          host: "0.0.0.0",
+          port: 8485,
+          token: "port-api-secret",
+          advertisedUrl: "http://10.0.0.7:8485",
+        },
+      },
+      backend,
+      controlPlane: { ...controlPlane, register },
+      wsServer: {
+        ...wsServer,
+        listen: async () => {
+          order.push("listen");
+        },
+      },
+    });
+
+    await copy.start();
+
+    expect(order).toEqual(["register", "listen"]);
+    expect(register).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "test runner",
+        replicaName: "pod-test",
+        portApiUrl: "http://10.0.0.7:8485",
+      }),
+    );
+    await copy.stop();
   });
 
-  it("is NOT reported stopped while the drop is inside the grace", async () => {
-    queued.push(startItem("sb-1"));
-    await drive();
-    expectedSandboxIds = ["sb-1"];
-    posted.length = 0;
-    sessionDroppedAt.set("sb-1", Date.now() - 1_000);
-
-    await runner.reconcile();
-
-    expect(posted).toEqual([]);
+  it("registers WITHOUT a port-API address when this copy serves none", async () => {
+    const register = vi.fn<ControlPlaneClient["register"]>(async () => ({
+      runnerId: "r-1",
+      replicaId: "copy-1",
+    }));
+    const copy = createRunner({
+      config,
+      backend,
+      controlPlane: { ...controlPlane, register },
+      wsServer,
+    });
+    await copy.start();
+    expect(register.mock.calls[0]?.[0]).not.toHaveProperty("portApiUrl");
+    await copy.stop();
   });
 
-  it("IS reported stopped once the drop is older than the grace — the supervisor has given up", async () => {
-    queued.push(startItem("sb-1"));
-    await drive();
-    expectedSandboxIds = ["sb-1"];
-    posted.length = 0;
-    sessionDroppedAt.set("sb-1", Date.now() - SESSION_RESUME_GRACE_MS - 1);
+  it("stops by retiring, THEN draining its sockets, THEN closing", async () => {
+    // Retiring first is what makes the control plane hand this copy nothing
+    // new from here on (the Temporal lesson: tell the server the moment the
+    // shutdown starts); its supervisors then reconnect to the other copies,
+    // whose claims never wait on this one. Closing before draining would
+    // cut the sockets without the 1012 that sends them straight to another
+    // copy. MUTATION-PROOF: reorder or drop a step.
+    const order: string[] = [];
+    const copy = createRunner({
+      config,
+      backend,
+      controlPlane: {
+        ...controlPlane,
+        // Finishes a beat later: `drain` must wait for it, not just follow
+        // its call.
+        retire: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          order.push("retire");
+        },
+      },
+      wsServer: {
+        ...wsServer,
+        drain: async () => {
+          order.push("drain");
+        },
+        close: async () => {
+          order.push("close");
+        },
+      },
+    });
+    await copy.start();
+    await copy.stop();
+    expect(order).toEqual(["retire", "drain", "close"]);
+  });
 
-    await runner.reconcile();
+  it("waits for its in-flight poll before closing, and runs what it brought back", async () => {
+    // The poll parked on the server when the copy stops can still return
+    // work claimed just before the retire landed. That work is this copy's
+    // (the control plane recorded it so): a start still runs, and a turn
+    // whose socket is gone by then is given back for another copy, never
+    // dropped. MUTATION-PROOF: stop without awaiting the run loop.
+    let answerPoll: (items: RunnerWorkItem[]) => void = () => {};
+    let pollParked: () => void = () => {};
+    const parked = new Promise<void>((resolve) => {
+      pollParked = resolve;
+    });
+    let polls = 0;
+    const copy = createRunner({
+      config,
+      backend,
+      controlPlane: {
+        ...controlPlane,
+        pollWork: async () => {
+          polls += 1;
+          if (polls > 1) return [];
+          pollParked();
+          return new Promise<RunnerWorkItem[]>((resolve) => {
+            answerPoll = resolve;
+          });
+        },
+      },
+      wsServer,
+    });
+    await copy.start();
+    const looping = copy.run();
+    await parked;
 
-    expect(posted).toEqual([
-      { kind: "sandbox.status", sandboxId: "sb-1", status: "stopped" },
+    let stopped = false;
+    const stopping = copy.stop().then(() => {
+      stopped = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(stopped).toBe(false);
+    expect(retired).toBe(1);
+
+    answerPoll([
+      {
+        kind: "turn.deliver",
+        sandboxId: "sb-gone",
+        conversationId: "cv-1",
+        turnId: "t-1",
+        message: "hi",
+      },
     ]);
-  });
-
-  it("re-learns the container map at boot from the backend, so a RESTARTED process can stamp and verify", async () => {
-    // A container this process never spawned: exactly what a runner finds
-    // after a deploy. Without the seed, the first process.state frame is
-    // dropped and every session reconnect is refused (unknown container).
-    queued.push(startItem("sb-old"));
-    await drive();
-    expectedSandboxIds = ["sb-old"];
-    // Simulate the restart: a fresh runner over the same backend, no memory.
-    runner = createRunner({ config, backend, controlPlane, wsServer });
-    expect(runner.containerRefOf("sb-old")).toBeUndefined();
-
-    await runner.start();
-
-    expect(runner.containerRefOf("sb-old")).toBe(
-      backend.sandboxes.get("sb-old")!.containerRef,
+    await stopping;
+    await looping;
+    await copy.settle();
+    expect(polls).toBe(1);
+    expect(posted).toContainEqual(
+      expect.objectContaining({
+        kind: "turn.finished",
+        turnId: "t-1",
+        errorCode: TURN_FAILURE_CODES.agentRestarted,
+      }),
     );
   });
 
-  it("a RESTARTED process grants boot-seeded sandboxes the resume grace from its own boot, so the first reconcile does not report them stopped", async () => {
-    // The whole point of the feature. The new process has no memory of the
-    // old channel's drop (that state died with the old process), so the
-    // grace must be anchored on something it DOES know: its own boot, for
-    // every running container it inherited. Without this the very first
-    // reconcile reports every inherited sandbox stopped, and the feature
-    // only "works" when the supervisor wins the race.
-    queued.push(startItem("sb-1"));
-    await drive();
-    expectedSandboxIds = ["sb-1"];
-    runner = createRunner({ config, backend, controlPlane, wsServer });
-    posted.length = 0;
-
-    await runner.start();
-    await runner.reconcile();
-
-    expect(posted).toEqual([]);
-  });
-
-  it("a RESTARTED process reports an inherited sandbox stopped once its boot grace is spent with no channel", async () => {
-    queued.push(startItem("sb-1"));
-    await drive();
-    expectedSandboxIds = ["sb-1"];
-    runner = createRunner({
+  it("still closes when retiring fails: the liveness window does the handover", async () => {
+    let closed = false;
+    const copy = createRunner({
       config,
       backend,
-      controlPlane,
-      wsServer,
-      inheritedResumeGraceMs: 30,
+      controlPlane: {
+        ...controlPlane,
+        retire: async () => {
+          throw new ControlPlaneError(503, "down");
+        },
+      },
+      wsServer: {
+        ...wsServer,
+        close: async () => {
+          closed = true;
+        },
+      },
     });
-    posted.length = 0;
+    await copy.start();
+    await expect(copy.stop()).resolves.toBeUndefined();
+    expect(closed).toBe(true);
+  });
 
+  it("leaves its sandboxes running when it stops (a roll, not a teardown)", async () => {
     await runner.start();
-    expect(posted).toEqual([]); // start()'s own pass: inside the grace
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    await runner.reconcile();
-
-    expect(posted).toEqual([
-      { kind: "sandbox.status", sandboxId: "sb-1", status: "stopped" },
-    ]);
-  });
-
-  describe("the DEFAULT inherited grace (3 min, not the supervisor's whole ~15.5 min budget)", () => {
-    // A session-holding supervisor redials within a second of losing its
-    // runner and keeps retrying (backoff capped at 15 s), so it reconnects as
-    // soon as the new process is reachable, normally well under a minute
-    // after boot. One that is still silent minutes later is not coming back,
-    // and every turn held for it waits until the grace ends. 3 min leaves a
-    // wide margin over a normal reconnect and caps that wait (and the old
-    // 15.5 min) at 3 min.
-    it("holds an inherited sandbox just under 3 min after boot", async () => {
-      vi.useFakeTimers({ toFake: ["Date"] });
-      try {
-        const t0 = Date.parse("2026-10-13T12:00:00Z");
-        vi.setSystemTime(t0);
-        queued.push(startItem("sb-1"));
-        await drive();
-        expectedSandboxIds = ["sb-1"];
-        runner = createRunner({ config, backend, controlPlane, wsServer });
-        await runner.start();
-        posted.length = 0;
-
-        vi.setSystemTime(t0 + 3 * 60_000 - 1_000);
-        await runner.reconcile();
-        expect(posted).toEqual([]);
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it("reports it stopped just past 3 min", async () => {
-      vi.useFakeTimers({ toFake: ["Date"] });
-      try {
-        const t0 = Date.parse("2026-10-13T12:00:00Z");
-        vi.setSystemTime(t0);
-        queued.push(startItem("sb-1"));
-        await drive();
-        expectedSandboxIds = ["sb-1"];
-        runner = createRunner({ config, backend, controlPlane, wsServer });
-        await runner.start();
-        posted.length = 0;
-
-        vi.setSystemTime(t0 + 3 * 60_000 + 1_000);
-        await runner.reconcile();
-        expect(posted).toEqual([
-          { kind: "sandbox.status", sandboxId: "sb-1", status: "stopped" },
-        ]);
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it("leaves a channel this process SAW drop on the full budget: that supervisor is mid-retry, not unknown", async () => {
-      // The 3 min cap is for inherited containers only. A drop observed by
-      // the live process (a network blip, a load balancer resetting the
-      // flow) keeps the supervisor's whole retry budget as its grace, as
-      // before.
-      sessionDroppedAt.set("sb-1", Date.now() - 5 * 60_000);
-      queued.push(startItem("sb-1"));
-      await drive();
-      expectedSandboxIds = ["sb-1"];
-      posted.length = 0;
-      await runner.reconcile();
-      expect(posted).toEqual([]);
-    });
-  });
-
-  it("WITHOUT a keyring a restarted process reports inherited sandboxes stopped at once — the pre-feature behaviour, kept", async () => {
-    // No keyring = no supervisor can ever reconnect, so waiting would only
-    // delay the recovery the wake path provides.
     queued.push(startItem("sb-1"));
     await drive();
-    expectedSandboxIds = ["sb-1"];
-    runner = createRunner({
-      config,
-      backend,
-      controlPlane,
-      wsServer: { ...wsServer, resumable: false },
-    });
-    posted.length = 0;
-
-    // start() runs its own reconcile pass; the explicit one is a second.
-    await runner.start();
-
-    expect(posted).toEqual([
-      { kind: "sandbox.status", sandboxId: "sb-1", status: "stopped" },
-    ]);
-  });
-
-  it("a container spawned by a runner WITHOUT sessions gets no grace from a keyed successor: its supervisor holds no session and can never reconnect", async () => {
-    // The first deploy of the feature, and every roll where the previous
-    // process ran keyless: the inherited supervisor is still retrying the
-    // single-use token that died with that process, with nothing else to
-    // present. Granting it the grace would hold its next turn for the whole
-    // ~15 min budget instead of the ordinary cold wake the old contract
-    // gives. The container itself carries the fact (spawned with sessions
-    // on, or not), so the successor can tell.
-    queued.push(startItem("sb-1"));
-    runner = createRunner({
-      config,
-      backend,
-      controlPlane,
-      wsServer: { ...wsServer, resumable: false },
-    });
-    await drive();
-    expect(backend.sandboxes.get("sb-1")!.spec.resumable).toBe(false);
-    expectedSandboxIds = ["sb-1"];
-    runner = createRunner({ config, backend, controlPlane, wsServer });
-    posted.length = 0;
-
-    await runner.start();
-
-    expect(posted).toEqual([
-      { kind: "sandbox.status", sandboxId: "sb-1", status: "stopped" },
-    ]);
-  });
-
-  it("a container spawned WITH sessions carries the mark, and a keyed successor inherits its grace", async () => {
-    queued.push(startItem("sb-1"));
-    await drive();
-    expect(backend.sandboxes.get("sb-1")!.spec.resumable).toBe(true);
-    expectedSandboxIds = ["sb-1"];
-    runner = createRunner({ config, backend, controlPlane, wsServer });
-    posted.length = 0;
-
-    await runner.start();
-    await runner.reconcile();
-
-    expect(posted).toEqual([]);
-  });
-
-  it("a DEAD container is never 'reconnecting': its death is reported at once, grace or no grace", async () => {
-    // The grace is for a live supervisor dialling back in. A container that
-    // exited has no supervisor; waiting out the grace for it would leave an
-    // in-flight turn hanging for the whole budget (found live: the
-    // key-dropped scenario's recreate never came).
-    queued.push(startItem("sb-1"));
-    await drive();
-    expectedSandboxIds = ["sb-1"];
-    posted.length = 0;
-    sessionDroppedAt.set("sb-1", Date.now() - 1_000);
-    backend.sandboxes.get("sb-1")!.running = false;
-
-    await runner.reconcile();
-
-    expect(posted).toEqual([
-      { kind: "sandbox.status", sandboxId: "sb-1", status: "stopped" },
-    ]);
-  });
-
-  it("a held turn for a container that DIES during the gap fails at once instead of waiting out the grace", async () => {
-    sessionDroppedAt.set("sb-1", Date.now() - 1_000);
-    queued.push(startItem("sb-1"));
-    await drive();
-    expectedSandboxIds = ["sb-1"];
-    posted.length = 0;
-    queued.push(turnItem());
-    await runner.tick(0);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(posted).toEqual([]);
-
-    backend.sandboxes.get("sb-1")!.running = false;
-    await runner.reconcile();
-    await runner.settle();
-
-    expect(posted[0]).toEqual({
-      kind: "sandbox.status",
-      sandboxId: "sb-1",
-      status: "stopped",
-    });
-    expect(posted.some((e) => e.kind === "turn.finished")).toBe(true);
-  });
-
-  it("the boot anchor yields to the ws server's own drop time once the sandbox has dialled in", async () => {
-    // Precedence, pinned: a drop the server SAW outranks the boot anchor.
-    // An inherited sandbox that connected and then dropped past the grace
-    // is reported stopped even though its boot anchor would still be young.
-    queued.push(startItem("sb-1"));
-    await drive();
-    expectedSandboxIds = ["sb-1"];
-    runner = createRunner({
-      config,
-      backend,
-      controlPlane,
-      wsServer,
-      inheritedResumeGraceMs: 10 * 60_000,
-    });
-    await runner.start();
-    sessionDroppedAt.set("sb-1", Date.now() - SESSION_RESUME_GRACE_MS - 1);
-    posted.length = 0;
-
-    await runner.reconcile();
-
-    expect(posted).toEqual([
-      { kind: "sandbox.status", sandboxId: "sb-1", status: "stopped" },
-    ]);
-  });
-
-  it("does NOT seed a container that is not running — a corpse must not verify a session", async () => {
-    queued.push(startItem("sb-dead"));
-    await drive();
-    expectedSandboxIds = ["sb-dead"];
-    backend.sandboxes.get("sb-dead")!.running = false;
-    runner = createRunner({ config, backend, controlPlane, wsServer });
-
-    await runner.start();
-
-    expect(runner.containerRefOf("sb-dead")).toBeUndefined();
+    await runner.stop();
+    expect(drained).toBe(1);
+    expect(retired).toBe(1);
+    expect(backend.sandboxes.get("sb-1")?.running).toBe(true);
   });
 });
 
@@ -1127,30 +1752,50 @@ describe("the vanished-pod arm (expected running, no snapshot)", () => {
   // once absence has held for two consecutive passes, and the ordinary wake
   // path recovers.
 
+  /** The container the control plane believes sb-1 has. */
+  let believedRef = "";
+  const vanishedReport = (): RunnerEvent => ({
+    kind: "sandbox.status",
+    sandboxId: "sb-1",
+    status: "stopped",
+    observedContainerRef: believedRef,
+  });
+
   /** Start sb-1, let it settle running, then vanish it out-of-band. */
   const vanish = async (): Promise<void> => {
     queued.push(startItem("sb-1"));
     await drive();
+    believedRef = backend.sandboxes.get("sb-1")!.containerRef;
     backend.sandboxes.delete("sb-1");
     expectedSandboxIds = ["sb-1"];
     expectedStatuses = { "sb-1": "running" };
+    channelFacts = { "sb-1": facts("dropped", Date.now(), believedRef) };
     posted.length = 0;
   };
 
-  it("reports stopped only after absence holds for two passes", async () => {
-    // MUTATION-PROOF: delete the arm and the second expect fails; make it
-    // single-pass and the first one does.
+  it("reports stopped only after absence holds for two passes, naming the container found missing", async () => {
+    // Named, so the report applies whichever copy owns the sandbox (the
+    // reconciler often does not), yet never knocks down a container a start
+    // put there meanwhile. MUTATION-PROOF: delete the arm and the second
+    // expect fails; make it single-pass and the first one does; drop the
+    // stamp and the second one does too.
     await vanish();
 
     await runner.reconcile();
     expect(posted).toEqual([]);
 
     await runner.reconcile();
+    expect(posted).toEqual([vanishedReport()]);
+  });
+
+  it("reports unstamped (the owner's word) only when the control plane knows no container for it", async () => {
+    await vanish();
+    channelFacts = { "sb-1": facts("none", null, null) };
+    await runner.reconcile();
+    await runner.reconcile();
     expect(posted).toEqual([
       { kind: "sandbox.status", sandboxId: "sb-1", status: "stopped" },
     ]);
-    // The spawn memory is dropped, so the recovery start is a clean create.
-    expect(runner.containerRefOf("sb-1")).toBeUndefined();
   });
 
   it("a reappearing pod clears the candidacy; a re-vanish starts over", async () => {
@@ -1158,27 +1803,25 @@ describe("the vanished-pod arm (expected running, no snapshot)", () => {
     await drive();
     const record = backend.sandboxes.get("sb-1");
     if (!record) throw new Error("sb-1 never started");
+    believedRef = record.containerRef;
     backend.sandboxes.delete("sb-1");
     expectedSandboxIds = ["sb-1"];
     expectedStatuses = { "sb-1": "running" };
     posted.length = 0;
 
     await runner.reconcile();
-    // The sandbox is back (a transient list blind spot healed), and healthy —
-    // give it a live channel so the snapshot arms stay quiet too.
+    // The sandbox is back (a transient list blind spot healed), and healthy:
+    // its socket is held, so the snapshot arms stay quiet too.
     backend.sandboxes.set("sb-1", record);
-    connected.add("sb-1");
+    channelFacts = { "sb-1": facts("held", Date.now(), believedRef) };
     await runner.reconcile();
     expect(posted).toEqual([]);
 
     backend.sandboxes.delete("sb-1");
-    connected.delete("sb-1");
     await runner.reconcile();
     expect(posted).toEqual([]);
     await runner.reconcile();
-    expect(posted).toEqual([
-      { kind: "sandbox.status", sandboxId: "sb-1", status: "stopped" },
-    ]);
+    expect(posted).toEqual([vanishedReport()]);
   });
 
   it("never fires for a sandbox the control plane does not read as running", async () => {
@@ -1218,9 +1861,7 @@ describe("the vanished-pod arm (expected running, no snapshot)", () => {
     expect(posted).toEqual([]);
 
     await runner.reconcile();
-    expect(posted).toEqual([
-      { kind: "sandbox.status", sandboxId: "sb-1", status: "stopped" },
-    ]);
+    expect(posted).toEqual([vanishedReport()]);
   });
 
   it("never fires while the sandbox's start is EXECUTING", async () => {
@@ -1364,7 +2005,10 @@ describe("the vanished-pod arm (expected running, no snapshot)", () => {
 
 describe("registration", () => {
   it("declares the backend's real capabilities", async () => {
-    const register = vi.fn(async () => ({ runnerId: "r-1" }));
+    const register = vi.fn(async () => ({
+      runnerId: "r-1",
+      replicaId: "copy-1",
+    }));
     const spy = createRunner({
       config,
       backend,
@@ -1374,23 +2018,33 @@ describe("registration", () => {
 
     await spy.start();
 
-    expect(register).toHaveBeenCalledWith("test runner", {
-      maxSandboxes: 2,
-      backend: "fake",
-      homeDurability: "resident",
-      // The steer-dispatch gate: the control plane only hands `turn.message`
-      // to runners that said they can parse it (an unknown kind poisons a
-      // whole poll batch on an older build).
-      steerMessages: true,
-      // And for SEND NOW: `turn.send_now` only reaches a
-      // runner that can forward it.
-      sendNow: true,
-      // Same gate for attachment manifests: only an advertising runner is
-      // told about files, because only it can pull the bytes.
-      attachments: true,
-      // And for the reverse direction: the supervisor is offered send_file
-      // only when its runner can relay the bytes.
-      outboundAttachments: true,
+    expect(register).toHaveBeenCalledWith({
+      name: "test runner",
+      replicaName: "pod-test",
+      capabilities: {
+        maxSandboxes: 2,
+        backend: "fake",
+        homeDurability: "resident",
+        // The steer-dispatch gate: the control plane only hands `turn.message`
+        // to runners that said they can parse it (an unknown kind poisons a
+        // whole poll batch on an older build).
+        steerMessages: true,
+        // And for SEND NOW: `turn.send_now` only reaches a
+        // runner that can forward it.
+        sendNow: true,
+        // Same gate for attachment manifests: only an advertising runner is
+        // told about files, because only it can pull the bytes.
+        attachments: true,
+        // And ahead of a mid-run follow-up: only such a runner is handed a
+        // follow-up WITH files to steer into a live run.
+        steerAttachments: true,
+        // And for `desktop.control`: the claim arm hands a controller change
+        // only to a runner that forwards it.
+        desktopControl: true,
+        // And for the reverse direction: the supervisor is offered send_file
+        // only when its runner can relay the bytes.
+        outboundAttachments: true,
+      },
     });
     await spy.stop();
   });
@@ -1414,7 +2068,7 @@ describe("registration", () => {
         if (status !== undefined) {
           throw new ControlPlaneError(status, `register failed: ${status}`);
         }
-        return { runnerId: "r-1" };
+        return { runnerId: "r-1", replicaId: "copy-1" };
       });
       const spy = createRunner({
         config,
@@ -1456,8 +2110,10 @@ describe("the control channel must not be proxied", () => {
     await drive();
 
     const env = backend.sandboxes.get("sb-1")?.spec.env ?? {};
-    expect(env.NO_PROXY).toBe("runner");
-    expect(env.no_proxy).toBe("runner");
+    // The runner, plus loopback: an agent checking its own service on
+    // localhost must not be sent to the gateway.
+    expect(env.NO_PROXY).toBe("runner,localhost,127.0.0.1,::1");
+    expect(env.no_proxy).toBe("runner,localhost,127.0.0.1,::1");
     // The gateway proxy itself is untouched — all agent egress still goes there.
     expect(env.HTTPS_PROXY).toContain("gateway:10255");
   });
@@ -1474,7 +2130,7 @@ describe("the control channel must not be proxied", () => {
     await drive();
 
     expect(backend.sandboxes.get("sb-1")?.spec.env.NO_PROXY).toBe(
-      "localhost,127.0.0.1,runner",
+      "localhost,127.0.0.1,runner,::1",
     );
   });
 
@@ -1486,7 +2142,18 @@ describe("the control channel must not be proxied", () => {
     );
     await drive();
 
-    expect(backend.sandboxes.get("sb-1")?.spec.env.NO_PROXY).toBe("runner");
+    expect(backend.sandboxes.get("sb-1")?.spec.env.NO_PROXY).toBe(
+      "runner,localhost,127.0.0.1,::1",
+    );
+  });
+});
+
+describe("noProxyForRunner loopback switch", () => {
+  it("exempts loopback by default and keeps it proxied when switched off", () => {
+    expect(noProxyForRunner("runner", {}).NO_PROXY).toBe(
+      "runner,localhost,127.0.0.1,::1",
+    );
+    expect(noProxyForRunner("runner", {}, false).NO_PROXY).toBe("runner");
   });
 });
 
@@ -1527,6 +2194,39 @@ describe("turn delivery", () => {
     });
   });
 
+  it("gives a turn back once when its socket closes while its files are pulled", async () => {
+    // With several copies, the supervisor may come back on another copy,
+    // which is handed the turn from then on. MUTATION-PROOF: drop the
+    // give-back and the turn is lost silently; wait for a reconnect here and
+    // the delivery chain never settles.
+    const bytes = Buffer.from("file-bytes");
+    const entry = {
+      id: "att-1",
+      path: "attachments/t-1/notes.txt",
+      name: "notes.txt",
+      mimeType: "text/plain",
+      sizeBytes: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    };
+    connected.add("sb-1");
+    controlPlane.fetchAttachment = async () => {
+      connected.delete("sb-1");
+      return bytes;
+    };
+    queued.push(turnItem({ attachments: [entry] }));
+    await runner.tick(0);
+    await runner.settle();
+
+    expect(delivered.has("sb-1")).toBe(false);
+    expect(posted.filter((event) => event.kind === "turn.finished")).toEqual([
+      expect.objectContaining({
+        turnId: "t-1",
+        status: "failed",
+        errorCode: TURN_FAILURE_CODES.agentRestarted,
+      }),
+    ]);
+  });
+
   it("forwards the memory context verbatim — and omits the key when absent", async () => {
     connected.add("sb-1");
     queued.push(turnItem({ context: "[Your memory — index]" }), turnItem());
@@ -1557,142 +2257,36 @@ describe("turn delivery", () => {
     expect(backend.sandboxes.get("sb-2")?.running).toBe(true);
   });
 
-  it("HOLDS the turn while the sandbox is reconnecting inside the grace, and delivers it when the channel returns", async () => {
-    sessionDroppedAt.set("sb-1", Date.now() - 1_000);
-    queued.push(turnItem());
-    // `tick` enqueues; `settle` would wait out the hold, so the gap is
-    // observed in between.
-    await runner.tick(0);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-
-    // Nothing failed, nothing reported: the turn waits on the chain.
-    expect(posted).toEqual([]);
-    expect(delivered.has("sb-1")).toBe(false);
-
-    connected.add("sb-1");
-    sessionDroppedAt.delete("sb-1");
-    await runner.settle();
-
-    expect(delivered.get("sb-1")?.[0]).toMatchObject({
-      kind: "turn.deliver",
-      turnId: "t-1",
-    });
-    expect(posted).toEqual([]);
-  });
-
-  it("FAILS a held turn when the grace runs out before the channel returns", async () => {
-    sessionDroppedAt.set("sb-1", Date.now() - SESSION_RESUME_GRACE_MS + 300);
-    queued.push(turnItem());
-    await runner.tick(0);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(posted).toEqual([]);
-
-    // The grace expires with the channel still down: settle drains the
-    // held delivery into its failure. `stopped` FIRST (see channelLoss).
-    await runner.settle();
-
-    expect(posted[0]).toEqual({
-      kind: "sandbox.status",
-      sandboxId: "sb-1",
-      status: "stopped",
-    });
-    expect(posted[1]).toMatchObject({
-      kind: "turn.finished",
-      turnId: "t-1",
-      status: "failed",
-      errorCode: "agent_restarted",
-    });
-  });
-
-  it("a RE-DISPATCH of a turn already held is absorbed: one delivery when the channel returns, never two", async () => {
-    // While a turn is held the control plane still reads the sandbox as
-    // `running` (by design: the runner withholds `stopped` for the grace),
-    // so its stale-dispatch window re-hands the SAME turn to this runner
-    // every 90 s, and copies queue up behind one hold. Each copy must be
-    // recognised as the turn already in hand: a live supervisor runs a
-    // turn.deliver it receives, twice if sent twice.
-    sessionDroppedAt.set("sb-1", Date.now() - 1_000);
-    queued.push(turnItem());
-    await runner.tick(0);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    queued.push(turnItem()); // the 90 s re-claim
-    await runner.tick(0);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(posted).toEqual([]);
-
-    connected.add("sb-1");
-    sessionDroppedAt.delete("sb-1");
-    await runner.settle();
-
-    expect(
-      delivered.get("sb-1")?.filter((f) => f.kind === "turn.deliver"),
-    ).toHaveLength(1);
-    expect(posted).toEqual([]);
-  });
-
-  it("a RE-DISPATCH of a held turn that never comes back fails it ONCE: one channel-loss batch, not one per copy", async () => {
-    sessionDroppedAt.set("sb-1", Date.now() - SESSION_RESUME_GRACE_MS + 300);
-    queued.push(turnItem());
-    await runner.tick(0);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    queued.push(turnItem());
-    await runner.tick(0);
-    await runner.settle();
-
-    expect(posted.filter((e) => e.kind === "turn.finished")).toHaveLength(1);
-    expect(posted.filter((e) => e.kind === "sandbox.status")).toHaveLength(1);
-  });
-
-  it("the hold is per TURN: a different turn for the same reconnecting sandbox is held too, and the id is released once the hold resolves", async () => {
-    sessionDroppedAt.set("sb-1", Date.now() - 1_000);
-    queued.push(turnItem(), turnItem({ turnId: "t-2" }));
-    await runner.tick(0);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    connected.add("sb-1");
-    sessionDroppedAt.delete("sb-1");
-    await runner.settle();
-    expect(
-      delivered.get("sb-1")?.map((f) => (f as { turnId?: string }).turnId),
-    ).toEqual(["t-1", "t-2"]);
-
-    // Released: the same turn id delivered again later (a genuine new
-    // dispatch, the stale window after a real loss) is not absorbed.
-    queued.push(turnItem());
-    await drive();
-    expect(
-      delivered.get("sb-1")?.filter((f) => f.kind === "turn.deliver"),
-    ).toHaveLength(3);
-  });
-
-  it("FAILS the turn when the sandbox has no live channel", async () => {
-    // Silence would leave it dispatched until the control plane's stale sweep;
-    // the user would watch a spinner for fifteen minutes.
+  it("GIVES BACK a turn when this copy holds no socket for the sandbox, and says nothing about the sandbox itself", async () => {
+    // The control plane routes a turn to the copy holding the socket; one
+    // that lands here with none means the socket just moved (or closed).
+    // Holding it here would wait on a socket that may be reconnecting to a
+    // DIFFERENT copy; a `stopped` would knock down a sandbox another copy is
+    // serving. Coded `agent_restarted`, the never-started turn is revived
+    // and re-routed to wherever the socket is now.
+    // MUTATION-PROOF: report the sandbox stopped again and the length check
+    // fails; drop the code and the toMatchObject does.
     queued.push(turnItem());
     await drive();
 
-    // The sandbox is corrected to `stopped` FIRST, in the same batch: the
-    // control plane's strand door then revives the never-started turn and
-    // wakes a fresh boot; the turn report that follows finds it `queued`
-    // and is inert. The other order lets this process's own poll re-claim
-    // the revived turn against a box that still reads `running`, and the
-    // `stopped` then strands it (see channelLoss).
-    expect(posted[0]).toEqual({
-      kind: "sandbox.status",
-      sandboxId: "sb-1",
-      status: "stopped",
-    });
-    expect(posted[1]).toMatchObject({
-      kind: "turn.finished",
-      sandboxId: "sb-1",
-      turnId: "t-1",
-      status: "failed",
-      // Coded so a NEW control plane can revive a never-started turn
-      // invisibly (and write canonical copy otherwise); the raw prose stays
-      // for old ones.
-      errorCode: "agent_restarted",
-    });
-    expect(posted).toHaveLength(2);
+    expect(posted).toEqual([
+      expect.objectContaining({
+        kind: "turn.finished",
+        sandboxId: "sb-1",
+        conversationId: "cv-1",
+        turnId: "t-1",
+        status: "failed",
+        errorCode: "agent_restarted",
+      }),
+    ]);
     expect(delivered.has("sb-1")).toBe(false);
+  });
+
+  it("never waits for a socket: the give-back is immediate, so the chain behind it moves", async () => {
+    queued.push(turnItem(), startItem("sb-2"));
+    await drive();
+    expect(posted.some((e) => e.kind === "turn.finished")).toBe(true);
+    expect(backend.sandboxes.get("sb-2")?.running).toBe(true);
   });
 
   it("forwards an abort to the running sandbox", async () => {
@@ -1790,6 +2384,31 @@ describe("turn delivery", () => {
     expect(posted).toEqual([]);
   });
 
+  it("forwards a desktop control flip down the channel, and drops it silently with no channel", async () => {
+    connected.add("sb-1");
+    const take = {
+      kind: "desktop.control",
+      sandboxId: "sb-1",
+      controlled: true,
+      controllerName: "Alex Kim",
+    } as const;
+    queued.push(
+      take,
+      { kind: "desktop.control", sandboxId: "sb-1", controlled: false },
+      { ...take, sandboxId: "sb-gone" },
+    );
+    await drive();
+
+    expect(delivered.get("sb-1")).toEqual([
+      { kind: "desktop.control", controlled: true, controllerName: "Alex Kim" },
+      { kind: "desktop.control", controlled: false },
+    ]);
+    // The control plane re-sends the current state on its next change and
+    // the supervisor's handler is idempotent: nothing to invent here.
+    expect(delivered.has("sb-gone")).toBe(false);
+    expect(posted).toEqual([]);
+  });
+
   it("delivers to the right sandbox when several are connected", async () => {
     connected.add("sb-1");
     connected.add("sb-2");
@@ -1798,6 +2417,188 @@ describe("turn delivery", () => {
 
     expect(delivered.has("sb-1")).toBe(false);
     expect(delivered.get("sb-2")?.[0]).toMatchObject({ turnId: "t-2" });
+  });
+
+  describe("a mid-run follow-up WITH files", () => {
+    const bytes = Buffer.from("png-bytes");
+    const entry = {
+      id: "att-1",
+      path: "attachments/f-1/photo.png",
+      name: "photo.png",
+      mimeType: "image/png",
+      sizeBytes: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    };
+    const steerWithFile: Extract<RunnerWorkItem, { kind: "turn.message" }> = {
+      kind: "turn.message",
+      sandboxId: "sb-1",
+      conversationId: "cv-1",
+      turnId: "f-1",
+      targetTurnId: "t-1",
+      message: "what is this?",
+      context: "[new message]",
+      attachments: [entry],
+    };
+    const kinds = () => (delivered.get("sb-1") ?? []).map((f) => f.kind);
+
+    it("pulls each file and streams it AHEAD of the steer frame, which carries the manifest", async () => {
+      connected.add("sb-1");
+      controlPlane.fetchAttachment = async () => bytes;
+      queued.push(steerWithFile);
+      await drive();
+
+      expect(kinds()).toEqual(["attachment.part", "turn.message"]);
+      expect(delivered.get("sb-1")?.[0]).toMatchObject({
+        kind: "attachment.part",
+        turnId: "f-1",
+        attachmentId: "att-1",
+      });
+      expect(delivered.get("sb-1")?.[1]).toEqual({
+        kind: "turn.message",
+        turnId: "f-1",
+        targetTurnId: "t-1",
+        conversationId: "cv-1",
+        message: "what is this?",
+        context: "[new message]",
+        attachments: [entry],
+      });
+      expect(posted).toEqual([]);
+    });
+
+    it("a text steer and a Send now sent after it never overtake its file pull", async () => {
+      // MUTATION-TESTED: forward a text steer straight to the socket and it
+      // reaches the supervisor before the message it was sent after.
+      connected.add("sb-1");
+      let release!: () => void;
+      let pullStarted = false;
+      const pulled = new Promise<void>((resolve) => (release = resolve));
+      controlPlane.fetchAttachment = async () => {
+        pullStarted = true;
+        await pulled;
+        return bytes;
+      };
+      queued.push(
+        steerWithFile,
+        {
+          kind: "turn.message",
+          sandboxId: "sb-1",
+          conversationId: "cv-1",
+          turnId: "f-2",
+          targetTurnId: "t-1",
+          message: "and also this",
+        },
+        {
+          kind: "turn.send_now",
+          sandboxId: "sb-1",
+          conversationId: "cv-1",
+          turnId: "f-1",
+          targetTurnId: "t-1",
+        },
+      );
+      await runner.tick(0);
+      // The pull is in flight; give everything queued behind it every
+      // chance to run, then prove nothing jumped it.
+      await vi.waitFor(() => expect(pullStarted).toBe(true));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(kinds()).toEqual([]);
+      release();
+      await runner.settle();
+
+      expect(
+        (delivered.get("sb-1") ?? []).map((f) =>
+          "turnId" in f ? `${f.kind}:${f.turnId}` : f.kind,
+        ),
+      ).toEqual([
+        "attachment.part:f-1",
+        "turn.message:f-1",
+        "turn.message:f-2",
+        "turn.send_now:f-1",
+      ]);
+    });
+
+    it("an abort is NEVER held behind a file pull", async () => {
+      connected.add("sb-1");
+      // A pull that never finishes: the abort must reach the socket anyway.
+      controlPlane.fetchAttachment = () => new Promise<Buffer>(() => {});
+      queued.push(steerWithFile, {
+        kind: "turn.abort",
+        sandboxId: "sb-1",
+        conversationId: "cv-1",
+        turnId: "t-1",
+      });
+      await runner.tick(0);
+
+      await vi.waitFor(() => expect(kinds()).toEqual(["turn.abort"]));
+    });
+
+    it("is skipped with no live channel (promotion covers it), pulling nothing and reporting nothing", async () => {
+      let pulls = 0;
+      controlPlane.fetchAttachment = async () => {
+        pulls += 1;
+        return bytes;
+      };
+      queued.push(steerWithFile);
+      await drive();
+
+      expect(pulls).toBe(0);
+      expect(delivered.has("sb-1")).toBe(false);
+      expect(posted).toEqual([]);
+    });
+
+    it("is skipped at once when the socket closes mid-pull, never held waiting on this copy", async () => {
+      // With several copies the supervisor may come back on another one,
+      // which is handed the sandbox's work from then on; promotion runs the
+      // message as a turn. MUTATION-PROOF: wait for a reconnect here and the
+      // pull's chain never settles, holding every later frame behind it.
+      connected.add("sb-1");
+      controlPlane.fetchAttachment = async () => {
+        connected.delete("sb-1");
+        return bytes;
+      };
+      queued.push(steerWithFile);
+      await runner.tick(0);
+      await runner.settle();
+
+      expect(delivered.has("sb-1")).toBe(false);
+      expect(posted).toEqual([]);
+    });
+
+    it("is skipped at once when the socket closes after its files land, before the steer frame", async () => {
+      // The files went down the old socket; the words have no socket to
+      // ride. MUTATION-PROOF: wait for a reconnect before the steer frame
+      // and the chain never settles.
+      connected.add("sb-1");
+      controlPlane.fetchAttachment = async () => bytes;
+      const send = wsServer.connection;
+      wsServer.connection = (sandboxId) => {
+        const live = send(sandboxId);
+        if (!live) return undefined;
+        return {
+          ...live,
+          send: (item: WorkItem) => {
+            live.send(item);
+            if (item.kind === "attachment.part") connected.delete("sb-1");
+          },
+        };
+      };
+      queued.push(steerWithFile);
+      await runner.tick(0);
+      await runner.settle();
+
+      expect(kinds()).toEqual(["attachment.part"]);
+      expect(posted).toEqual([]);
+    });
+
+    it("a file that fails to pull is skipped; the words still go", async () => {
+      connected.add("sb-1");
+      controlPlane.fetchAttachment = async () => {
+        throw new Error("store blip");
+      };
+      queued.push(steerWithFile);
+      await drive();
+
+      expect(kinds()).toEqual(["turn.message"]);
+    });
   });
 });
 
@@ -2117,27 +2918,29 @@ describe("the lifecycle executor (step 4)", () => {
 });
 
 describe("post-start boot-crash classification (step 4)", () => {
-  const sleep = (ms: number) =>
-    new Promise((resolve) => setTimeout(resolve, ms));
-
-  it("classifies a dead, never-connected container as start_failed and removes the corpse", async () => {
-    runner = createRunner({
-      config,
-      backend,
-      controlPlane,
-      wsServer,
-      bootDialInGraceMs: 0,
-    });
+  /** The runner's default dial-in grace (3 min since the spawn). */
+  const BOOT_GRACE_MS = 180_000;
+  /**
+   * sb-1 spawned and recorded (`awaiting`, since `spawnedAgo` ms) and its
+   * container already exited: the boot-script regression shape. Any copy
+   * may have spawned it; the reconciler judges it from the record alone.
+   */
+  const crashed = async (spawnedAgo: number): Promise<string> => {
     queued.push(startItem("sb-1"));
     await drive();
-    const ref = backend.sandboxes.get("sb-1")?.containerRef;
-    // The supervisor never dialled in (its token is still pending) and the
-    // container exited — the boot-script regression shape.
-    wsServer.awaitingConnection = () => true;
-    await backend.stopSandbox(ref!);
+    const ref = backend.sandboxes.get("sb-1")!.containerRef;
+    await backend.stopSandbox(ref);
     expectedSandboxIds = ["sb-1"];
+    channelFacts = { "sb-1": facts("awaiting", Date.now() - spawnedAgo, ref) };
     posted.length = 0;
-    await sleep(5);
+    return ref;
+  };
+
+  it("classifies a dead, never-connected container as start_failed, stamped with it, and removes the corpse", async () => {
+    // MUTATION-PROOF: drop the arm and nothing is reported; drop the stamp
+    // and the toEqual fails (an unstamped report is the owner's alone, and
+    // the reconciler need not own the sandbox).
+    const ref = await crashed(BOOT_GRACE_MS + 1);
 
     await runner.reconcile();
 
@@ -2148,15 +2951,24 @@ describe("post-start boot-crash classification (step 4)", () => {
         status: "failed",
         error: "sandbox exited before the supervisor connected",
         reasonCode: "start_failed",
+        observedContainerRef: ref,
       },
     ]);
     // The corpse is removed: while it exists it still holds the home, so
     // the backend can neither park nor release it.
     expect(backend.sandboxes.has("sb-1")).toBe(false);
-    expect(runner.containerRefOf("sb-1")).toBeUndefined();
   });
 
-  it("does NOT classify while the start is still executing (mid-boot fence)", async () => {
+  it("does NOT classify before the dial-in grace since the SPAWN elapses", async () => {
+    await crashed(BOOT_GRACE_MS - 10_000);
+
+    await runner.reconcile();
+
+    expect(posted).toEqual([]);
+    expect(backend.sandboxes.has("sb-1")).toBe(true);
+  });
+
+  it("does NOT classify while the start is still executing on this copy (mid-boot fence)", async () => {
     runner = createRunner({
       config,
       backend,
@@ -2168,9 +2980,10 @@ describe("post-start boot-crash classification (step 4)", () => {
     queued.push(startItem("sb-1"));
     await runner.tick(0);
     // Created but its startSandbox call is held: dead-looking, never
-    // connected — exactly what a healthy slow boot looks like.
+    // connected, exactly what a healthy slow boot looks like.
     await vi.waitFor(() => expect(backend.sandboxes.has("sb-1")).toBe(true));
-    wsServer.awaitingConnection = () => true;
+    const ref = backend.sandboxes.get("sb-1")!.containerRef;
+    channelFacts = { "sb-1": facts("awaiting", Date.now() - 60_000, ref) };
     expectedSandboxIds = ["sb-1"];
     posted.length = 0;
 
@@ -2182,16 +2995,14 @@ describe("post-start boot-crash classification (step 4)", () => {
     expect(backend.sandboxes.get("sb-1")?.running).toBe(true);
   });
 
-  it("does NOT classify before the dial-in grace elapses", async () => {
-    // Default grace (minutes) — a just-settled start whose supervisor has
-    // not connected yet must be left alone.
-    queued.push(startItem("sb-1"));
-    await drive();
-    const ref = backend.sandboxes.get("sb-1")?.containerRef;
-    wsServer.awaitingConnection = () => true;
-    await backend.stopSandbox(ref!);
-    expectedSandboxIds = ["sb-1"];
-    posted.length = 0;
+  it("does NOT classify a Pending-phase snapshot (slow, not dead)", async () => {
+    // A remote create can return optimistically at its image-watch budget
+    // with the sandbox still Pending. Only a terminal phase (or a substrate
+    // with no phase concept) may classify.
+    await crashed(BOOT_GRACE_MS + 1);
+    const original = backend.listSandboxes.bind(backend);
+    backend.listSandboxes = async () =>
+      (await original()).map((snapshot) => ({ ...snapshot, phase: "Pending" }));
 
     await runner.reconcile();
 
@@ -2278,37 +3089,5 @@ describe("review fixes (step-4 whole-PR review)", () => {
         (event) => "reasonCode" in event && event.reasonCode === "at_capacity",
       ),
     ).toBe(false);
-  });
-
-  it("does NOT classify a Pending-phase snapshot as a boot crash", async () => {
-    // A remote create can return optimistically at its image-watch budget
-    // with the sandbox still Pending — slow, not dead. Only a terminal phase
-    // (or a substrate with no phase concept) may classify.
-    runner = createRunner({
-      config,
-      backend,
-      controlPlane,
-      wsServer,
-      bootDialInGraceMs: 0,
-    });
-    queued.push(startItem("sb-1"));
-    await drive();
-    const ref = backend.sandboxes.get("sb-1")?.containerRef;
-    wsServer.awaitingConnection = () => true;
-    await backend.stopSandbox(ref!);
-    const original = backend.listSandboxes.bind(backend);
-    backend.listSandboxes = async () =>
-      (await original()).map((snapshot) => ({
-        ...snapshot,
-        phase: "Pending",
-      }));
-    expectedSandboxIds = ["sb-1"];
-    posted.length = 0;
-    await sleep(5);
-
-    await runner.reconcile();
-
-    expect(posted).toEqual([]);
-    expect(backend.sandboxes.has("sb-1")).toBe(true);
   });
 });

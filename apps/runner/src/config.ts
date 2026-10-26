@@ -4,6 +4,7 @@
  * remote control plane by changing one env var, which is what keeps "deploy
  * elsewhere later" a config change rather than a re-architecture.
  */
+import { hostname } from "node:os";
 
 export interface SandboxLimits {
   memoryMb: number;
@@ -16,6 +17,10 @@ export interface RunnerConfig {
   token: string;
   controlPlaneUrl: string;
   name: string;
+  /** This process's name as one copy of the runner (its hostname by
+   * default): how the control plane tells the copies apart in its records
+   * and logs. */
+  replicaName: string;
   /** Backend id — CONFIG, never detection. The composition root maps it. */
   backend: string;
   agentImage: string;
@@ -26,6 +31,12 @@ export interface RunnerConfig {
   wsPort: number;
   /** How a sandbox addresses this runner — a container-network name. */
   advertisedHost: string;
+  /**
+   * The port sandboxes dial (`RUNNER_ADVERTISED_PORT`), defaulting to
+   * `wsPort`. Differs only when the copies sit behind a balancer whose
+   * front port is not their own (several copies on one host).
+   */
+  advertisedPort: number;
   maxSandboxes: number;
   limits: SandboxLimits;
   reconcileSeconds: number;
@@ -62,6 +73,27 @@ export interface RunnerConfig {
    * deploy ahead of (or be rolled back after) the runner that uses it.
    */
   sessionKey: string | null;
+  /**
+   * Sandbox ports (plans/sandbox-ports.md §11.3): the internal stream API the
+   * preview relay dials. Null = not served (any deployment that runs no
+   * relay). Enabled only when BOTH the port and a ≥32-char token are set,
+   * so a half-configured runner never opens an unauthenticated door.
+   * `advertisedUrl` is where the relay reaches this copy.
+   */
+  portApi: {
+    port: number;
+    token: string;
+    host: string;
+    advertisedUrl: string;
+  } | null;
+  /**
+   * Exempt loopback (`localhost,127.0.0.1,::1`) from the sandbox's proxy
+   * env, so an agent's `curl localhost` reaches its own service instead of
+   * the gateway. On by default; only a harness that deliberately routes
+   * loopback THROUGH the gateway (the hosted e2e's stub upstream lives on
+   * the host's 127.0.0.1) turns it off.
+   */
+  noProxyLoopback: boolean;
   /**
    * Ceiling on waiting for the backend to ACCEPT a park (never the archive
    * itself, which completes backend-side): bounds the predecessor
@@ -170,6 +202,61 @@ const list = (raw: string | undefined): string[] =>
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
 
+/** A bare host: an IPv4/IPv6 address or a DNS name, nothing URL-shaped. */
+const BARE_HOST = /^(?:[A-Za-z0-9.-]{1,253}|\[?[0-9A-Fa-f:]{2,45}\]?)$/;
+/** Bind addresses that mean "every interface": not an address to dial. */
+const WILDCARD_HOSTS = new Set(["0.0.0.0", "::", "[::]"]);
+
+/** RUNNER_PORT_API_PORT + RUNNER_PORT_API_TOKEN, both or neither. The bind
+ * address defaults to loopback: on a Docker host a sandbox can reach the
+ * host's interfaces, so listening everywhere must be an explicit choice
+ * (the cluster deployment sets it, fenced by a NetworkPolicy).
+ *
+ * `advertisedUrl` is where the preview relay reaches THIS copy (each copy
+ * registers it; the relay dials the copy holding a sandbox's socket). A
+ * specific bind address announces itself; a wildcard bind must name the
+ * address it is reachable at (`RUNNER_PORT_API_ADVERTISED_HOST`, the pod's
+ * own address in the cluster). */
+const portApiConfig = (
+  env: NodeJS.ProcessEnv,
+): {
+  port: number;
+  token: string;
+  host: string;
+  advertisedUrl: string;
+} | null => {
+  const rawPort = env.RUNNER_PORT_API_PORT?.trim();
+  const token = env.RUNNER_PORT_API_TOKEN?.trim() ?? "";
+  if (!rawPort && !token) return null;
+  const port = Number(rawPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new ConfigError(
+      "RUNNER_PORT_API_PORT must be a TCP port when the port API is enabled.",
+    );
+  }
+  if (token.length < 32) {
+    throw new ConfigError(
+      "RUNNER_PORT_API_TOKEN must be at least 32 characters.",
+    );
+  }
+  const host = env.RUNNER_PORT_API_HOST?.trim() || "127.0.0.1";
+  const announced =
+    env.RUNNER_PORT_API_ADVERTISED_HOST?.trim() ||
+    (WILDCARD_HOSTS.has(host) ? "" : host);
+  if (!announced) {
+    throw new ConfigError(
+      "RUNNER_PORT_API_ADVERTISED_HOST must name this runner's reachable " +
+        "address when the port API listens on every interface.",
+    );
+  }
+  if (!BARE_HOST.test(announced) || WILDCARD_HOSTS.has(announced)) {
+    throw new ConfigError(
+      "RUNNER_PORT_API_ADVERTISED_HOST must be a bare host or IP address.",
+    );
+  }
+  return { port, token, host, advertisedUrl: `http://${announced}:${port}` };
+};
+
 export const loadConfig = (
   env: NodeJS.ProcessEnv = process.env,
 ): RunnerConfig => {
@@ -210,12 +297,17 @@ export const loadConfig = (
     sessionKey: env.RUNNER_SESSION_KEY?.trim() || null,
     controlPlaneUrl: env.RUNNER_CONTROL_PLANE_URL ?? "http://localhost:10256",
     name: env.RUNNER_NAME ?? "runner",
+    replicaName: env.RUNNER_REPLICA_NAME?.trim() || hostname(),
     backend,
     agentImage: env.RUNNER_AGENT_IMAGE ?? "onecli-agent:dev",
     sandboxNetwork: env.RUNNER_SANDBOX_NETWORK ?? "onecli-sandboxes",
     networkInternal: bool(env.RUNNER_NETWORK_INTERNAL, true),
     wsPort: int(env.RUNNER_WS_PORT, 8484),
     advertisedHost: env.RUNNER_ADVERTISED_HOST ?? "runner",
+    advertisedPort: int(
+      env.RUNNER_ADVERTISED_PORT,
+      int(env.RUNNER_WS_PORT, 8484),
+    ),
     maxSandboxes: int(env.RUNNER_MAX_SANDBOXES, 4),
     limits: {
       memoryMb: int(env.RUNNER_SANDBOX_MEMORY_MB, 2048),
@@ -240,6 +332,8 @@ export const loadConfig = (
     orphanGraceSeconds: int(env.RUNNER_ORPHAN_GRACE_SECONDS, 3600),
     sandboxManagerUrl,
     sandboxManagerToken,
+    portApi: portApiConfig(env),
+    noProxyLoopback: bool(env.RUNNER_NO_PROXY_LOOPBACK, true),
     cloudParkWaitSeconds: int(env.RUNNER_CLOUD_PARK_WAIT_SECONDS, 120),
     cloudWakeWaitSeconds: int(env.RUNNER_CLOUD_WAKE_WAIT_SECONDS, 900),
     cloudImageWaitSeconds: int(env.RUNNER_CLOUD_IMAGE_WAIT_SECONDS, 240),

@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -39,25 +38,22 @@ export const ContactRow = ({
 }: ContactRowProps) => {
   const remove = useDeleteContact(agentId);
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const busy = remove.isPending && remove.variables === contact.id;
 
-  const confirmRemove = () =>
-    remove.mutate(contact.id, {
-      onSuccess: () => {
-        setConfirmOpen(false);
-        toast.success(`${contact.displayName} removed`);
-      },
-      onError: (err) => {
-        setConfirmOpen(false);
-        toast.error(err instanceof Error ? err.message : "Remove failed");
-      },
-    });
+  // Instant: the row leaves and the confirm closes on click. The hook puts
+  // the row back and says why if the server refuses; this confirms once it
+  // agrees (the row is gone, so the call-site callback still fires).
+  const confirmRemove = () => {
+    setConfirmOpen(false);
+    remove
+      .mutateAsync(contact.id)
+      .then(() => toast.success(`${contact.displayName} removed`))
+      .catch(() => undefined);
+  };
 
   return (
     <>
       <ContactRowFrame
         label={contact.displayName}
-        disabled={busy}
         onRemove={() => setConfirmOpen(true)}
         status={
           <OutboundControl
@@ -80,28 +76,12 @@ export const ContactRow = ({
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={remove.isPending}>
-              Cancel
-            </AlertDialogCancel>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              onClick={(event) => {
-                event.preventDefault();
-                confirmRemove();
-              }}
-              disabled={remove.isPending}
+              onClick={confirmRemove}
               className={buttonVariants({ variant: "destructive" })}
             >
-              {remove.isPending ? (
-                <>
-                  <Loader2
-                    className="size-3.5 animate-spin motion-reduce:hidden"
-                    aria-hidden
-                  />
-                  Removing…
-                </>
-              ) : (
-                "Remove"
-              )}
+              Remove
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

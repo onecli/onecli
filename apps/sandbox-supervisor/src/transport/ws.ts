@@ -22,8 +22,8 @@ import { log } from "../log";
 
 /**
  * Retry budget: generous enough to outlive any real runner outage (with the
- * backoff capped at 15s this is roughly a quarter of an hour), and finite on
- * purpose.
+ * backoff capped at 15s and jittered into its upper half, about ten minutes,
+ * a quarter of an hour at most), and finite on purpose.
  *
  * Infinite retry looks safer and is not. A sandbox whose runner is genuinely
  * gone — the control plane was torn down, the host was rebuilt — would sit
@@ -65,6 +65,8 @@ export interface WsTransportOptions {
   /** Reconnect backoff bounds. */
   minBackoffMs?: number;
   maxBackoffMs?: number;
+  /** Injectable for tests (the reconnect jitter); defaults to Math.random. */
+  random?: () => number;
   /**
    * How many consecutive failures before the sandbox gives up and exits.
    * Default is generous but FINITE — see the constant below.
@@ -92,6 +94,7 @@ export const createWsTransport = (
     minBackoffMs = SESSION_RESUME_BUDGET.minBackoffMs,
     maxBackoffMs = SESSION_RESUME_BUDGET.maxBackoffMs,
     maxAttempts = DEFAULT_MAX_ATTEMPTS,
+    random = Math.random,
   } = options;
 
   const separator = url.includes("?") ? "&" : "?";
@@ -104,16 +107,17 @@ export const createWsTransport = (
    * presents it instead of the (spent) bootstrap token, every outbound
    * frame is numbered, and the buffer below keeps frames until the runner
    * ACKS them rather than until they are merely sent.
+   *
+   * Once held it is NEVER dropped, refused reconnects included. A refusal
+   * is usually not about the session at all: it is a runner copy that is
+   * shutting down or just crashed while the load balancer still routes to
+   * it, and the next dial reaches a live copy that accepts it. When it IS
+   * about the session (its key was retired, the container was recreated),
+   * nothing else could work either: the bootstrap token was spent on the
+   * first connect, which is the only way a session is ever handed. Either
+   * way the ordinary finite budget decides.
    */
   let session: string | undefined;
-  /**
-   * A refused session (the key rotated away, the container was recreated
-   * under us) falls back to the bootstrap token exactly once: if the runner
-   * is the same process that minted it, the token is spent and the ordinary
-   * finite budget ends things; if a brand-new sandbox start is under way,
-   * the recreate makes this process irrelevant anyway.
-   */
-  let bootstrapFallbackUsed = false;
   /** Monotonic per process; a frame keeps its seq for life, replays included. */
   let nextSeq = 0;
 
@@ -220,11 +224,17 @@ export const createWsTransport = (
       return;
     }
     // `attempts` is 0 on the first retry after a successful open, and
-    // 2 ** -1 would make the first backoff half the stated minimum.
-    const delay = Math.min(
+    // 2 ** -1 would make the first step half the stated minimum.
+    const step = Math.min(
       Math.max(minBackoffMs, minBackoffMs * 2 ** (attempts - 1)),
       maxBackoffMs,
     );
+    // Equal jitter: a random point in the step's upper half. A runner copy
+    // that rolls or stops closes every socket it holds at once, and without
+    // this the whole fleet redials in the same instant and keeps retrying
+    // in lockstep through an outage. Never above the step, so the cap (and
+    // the runner's resume grace derived from it) still bounds every wait.
+    const delay = Math.floor(step / 2 + random() * (step / 2));
     log("warn", "runner channel down; reconnecting", { delay });
     // NOT unref'd, and that is the whole point. While the socket is down this
     // timer is the ONLY thing holding the event loop open: the reader is
@@ -257,10 +267,8 @@ export const createWsTransport = (
     // guard does not cover this — it is cleared before `connect()` runs.
     const isCurrent = () => socket === ws;
 
-    let opened = false;
     ws.addEventListener("open", () => {
       if (!isCurrent()) return;
-      opened = true;
       attempts = 0;
       warnedOutbound = false;
       log("info", "runner channel open", { resumed: session !== undefined });
@@ -291,7 +299,6 @@ export const createWsTransport = (
       if (item.data.kind === "session") {
         const resumed = session !== undefined;
         session = item.data.credential;
-        bootstrapFallbackUsed = false;
         // The runner's cursor is the truth about what it holds (a process
         // that restarted says 0): everything it acked is dropped, and the
         // write cursor for this socket starts there, so exactly the gap
@@ -331,17 +338,6 @@ export const createWsTransport = (
         deliver(null);
         return;
       }
-      // A session that was presented and never opened was refused. Try the
-      // bootstrap token once (see `bootstrapFallbackUsed`), then let the
-      // ordinary budget decide.
-      if (session !== undefined && !opened && !bootstrapFallbackUsed) {
-        log(
-          "warn",
-          "runner session refused; retrying with the bootstrap token",
-        );
-        session = undefined;
-        bootstrapFallbackUsed = true;
-      }
       scheduleReconnect();
     });
   };
@@ -373,8 +369,14 @@ export const createWsTransport = (
       // reconnect — racing the very `turn.result` frames the backlog exists
       // to preserve. Every other kind still buffers; the next timer tick
       // re-beats within a minute of the channel coming back.
+      //
+      // Port stream frames (sandbox ports) are the same: the runner tears
+      // every stream of a sandbox down the moment its channel drops, so a
+      // replayed `port.*` frame names a stream nobody holds any more, and
+      // a busy preview would fill the backlog with byte chunks that crowd
+      // out the turn results it exists for.
       if (
-        message.kind === "progress" &&
+        (message.kind === "progress" || message.kind.startsWith("port.")) &&
         (!socket || socket.readyState !== WebSocket.OPEN)
       ) {
         return;

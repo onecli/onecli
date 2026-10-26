@@ -27,6 +27,8 @@ export const runsQuerySchema = z
     // Cursor syntax (`<createdAt ISO>~<turn id>`) is validated in the service.
     before: z.string().min(1).max(200).optional(),
     source: z.string().min(1).max(40).optional(),
+    // One webhook's runs (its own conversation), for a webhook's "View runs".
+    webhookId: z.string().min(1).max(100).optional(),
     userId: z.string().min(1).max(100).optional(),
     app: z.string().min(1).max(100).optional(),
     failed: z
@@ -46,7 +48,10 @@ export interface RunToolCall {
   name: string;
   input: string | null;
   output: string | null;
+  /** The tool itself failed. */
   isError: boolean;
+  /** A shell command ran and exited with this non-zero status. */
+  exitCode: number | null;
 }
 
 export interface RunAppCall {

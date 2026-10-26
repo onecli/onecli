@@ -90,7 +90,7 @@ const seedTurn = async (
     start: string;
     end: string;
     answer?: string;
-    tool?: { name: string; input: string; output: string };
+    tool?: { name: string; input: string; output: string; exitCode?: number };
     ownerId?: string;
   },
 ) => {
@@ -127,6 +127,9 @@ const seedTurn = async (
         name: opts.tool.name,
         input: opts.tool.input,
         output: opts.tool.output,
+        ...(opts.tool.exitCode !== undefined && {
+          exitCode: opts.tool.exitCode,
+        }),
       },
     );
   }
@@ -231,6 +234,7 @@ beforeAll(async () => {
       name: "bash",
       input: '{"command":"curl https://api.notion.com/v1/search"}',
       output: "[[3200000]]",
+      exitCode: 22,
     },
   });
   await seedTurn("bDirect", {
@@ -455,6 +459,7 @@ describe.skipIf(!PROOF_URL)("agent runs (pg)", () => {
         input: '{"command":"curl https://api.notion.com/v1/search"}',
         output: "[[3200000]]",
         isError: false,
+        exitCode: 22,
       },
     ]);
     expect(run.answer).toBe("$3.2M");

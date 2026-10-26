@@ -36,6 +36,17 @@ vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn() },
 }));
 
+// The card lists every runtime zone (~430) into a Radix Select at module
+// load. A short fixed list keeps the renders cheap and makes the "stored zone
+// this browser lacks" premise independent of the runtime's ICU data. It must
+// be in place before the import below, which computes the list.
+const realSupportedValuesOf = Intl.supportedValuesOf.bind(Intl);
+vi.spyOn(Intl, "supportedValuesOf").mockImplementation((key) =>
+  key === "timeZone"
+    ? ["Asia/Calcutta", "Asia/Jerusalem", "Asia/Tokyo", "Europe/London", "UTC"]
+    : realSupportedValuesOf(key),
+);
+
 const { WorkspaceTimezoneCard } = await import("./workspace-timezone-card");
 
 beforeAll(() => {

@@ -8,6 +8,18 @@ vi.hoisted(() => {
   process.env.SECRET_ENCRYPTION_KEY = "test-oauth-state-secret";
 });
 
+// The edition decides what a missing OAuth client means (cloud refuses the
+// platform app, a self-host mints directly): flip it per test. Onprem unless
+// a test says otherwise, whatever the ambient lane.
+const edition = vi.hoisted(() => ({ isCloud: false }));
+
+vi.mock("../lib/env", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/env")>()),
+  get IS_CLOUD() {
+    return edition.isCloud;
+  },
+}));
+
 import { githubApp } from "./github-app";
 import { pkceChallenge, pkceVerifier } from "./oauth/pkce";
 import {
@@ -338,15 +350,18 @@ describe("github-app platform callback: ownership proof", () => {
 });
 
 describe("github-app callback without the platform OAuth client", () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-    vi.unstubAllEnvs();
-  });
-
-  it("is a direct mint while the client is not configured", async () => {
+  beforeEach(() => {
     vi.stubEnv("GITHUB_APP_ID", PLATFORM_APP_ID);
     vi.stubEnv("GITHUB_APP_CLIENT_ID", "");
     vi.stubEnv("GITHUB_APP_CLIENT_SECRET", "");
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    edition.isCloud = false;
+  });
+
+  it("a self-host mints directly: its platform app is the operator's own", async () => {
     stubGitHub({});
 
     expect(await continueCallback(setupRedirect("111"))).toBeNull();
@@ -354,21 +369,58 @@ describe("github-app callback without the platform OAuth client", () => {
     expect(result.credentials).toMatchObject({ installation_id: "111" });
   });
 
-  it("skips the proof for a customer's own (BYOC) GitHub App", async () => {
-    vi.stubEnv("GITHUB_APP_ID", PLATFORM_APP_ID);
+  it("cloud refuses the platform app at both legs, before any GitHub call", async () => {
+    // Fail closed: cloud deploys should make this unreachable, but one key
+    // mints for every customer, so an unproven installation_id is never
+    // minted.
+    edition.isCloud = true;
+    const calls = stubGitHub({});
+
+    await expect(continueCallback(setupRedirect("111"))).rejects.toThrow(
+      "Connecting the GitHub App isn't available right now. Please contact support.",
+    );
+    await expect(method.exchangeCode(setupRedirect("111"))).rejects.toThrow(
+      "isn't available right now",
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each([
+    ["a self-host without the platform client", false, false],
+    ["cloud without the platform client", true, false],
+    ["cloud with the platform client", true, true],
+  ])(
+    "%s connects a customer's own (BYOC) GitHub App without the proof",
+    async (_label, isCloud, withClient) => {
+      edition.isCloud = isCloud;
+      if (withClient) {
+        vi.stubEnv("GITHUB_APP_CLIENT_ID", "Iv1.client");
+        vi.stubEnv("GITHUB_APP_CLIENT_SECRET", "s3cret");
+      }
+      const calls = stubGitHub({});
+      const byoc = {
+        ...setupRedirect("111"),
+        appCredentials: { ...platformCreds, appId: "42" },
+      };
+
+      expect(await continueCallback(byoc)).toBeNull();
+      const result = await method.exchangeCode(byoc);
+      expect(result.credentials).toMatchObject({ installation_id: "111" });
+      expect(calls.some((c) => c.url.includes("/user/installations"))).toBe(
+        false,
+      );
+    },
+  );
+
+  it("cloud with the client configured still runs the proof (no refusal)", async () => {
+    edition.isCloud = true;
     vi.stubEnv("GITHUB_APP_CLIENT_ID", "Iv1.client");
     vi.stubEnv("GITHUB_APP_CLIENT_SECRET", "s3cret");
-    const calls = stubGitHub({});
-    const byoc = {
-      ...setupRedirect("111"),
-      appCredentials: { ...platformCreds, appId: "42" },
-    };
+    stubGitHub({});
 
-    expect(await continueCallback(byoc)).toBeNull();
-    const result = await method.exchangeCode(byoc);
-    expect(result.credentials).toMatchObject({ installation_id: "111" });
-    expect(calls.some((c) => c.url.includes("/user/installations"))).toBe(
-      false,
+    const continuation = await continueCallback(setupRedirect("111"));
+    expect(new URL(continuation!.continueAt).pathname).toBe(
+      "/login/oauth/authorize",
     );
   });
 

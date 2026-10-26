@@ -47,6 +47,24 @@
       opacity: 0;
     }
   }
+
+  /* The chat's "still writing" mark on the scroll-to-end button: each
+   * chevron of the OneCLI `>>` glides right and brightens in turn (stagger
+   * with animation-delay), a forward flow that reads as "more is coming".
+   * Tree-shaken while unused. */
+  --animate-chevron-flow: chevron-flow 1.2s ease-in-out infinite;
+
+  @keyframes chevron-flow {
+    0%,
+    100% {
+      transform: translateX(-1.5px);
+      opacity: 0.35;
+    }
+    50% {
+      transform: translateX(1.5px);
+      opacity: 1;
+    }
+  }
 }
 
 /* Light mode (exists for completeness, dark is default) */

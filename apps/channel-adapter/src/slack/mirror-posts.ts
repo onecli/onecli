@@ -137,14 +137,18 @@ const sectionChunks = (text: string): string[] => {
  * attribution formatting, emoji, mrkdwn conversion, and Block Kit.
  */
 
-/** The cross-surface attribution prefix — italic, so the metadata stays
- * quieter than the quoted person's own words, and by name when the control
- * plane resolved one: "_(from the web · Jonathan)_". The name is
- * user-controlled text: escaped. */
+/** The web's mark in the attribution: a globe, short, and the same in any
+ * language. A shortcode, like every other icon here. */
+const WEB_ICON = ":globe_with_meridians:";
+
+/** The cross-surface attribution prefix, in italics so the metadata stays
+ * quieter than the quoted person's own words: the web's globe, plus the
+ * name when the control plane resolved one ("(🌐 · Jonathan)" in Slack).
+ * The name is user-controlled text: escaped. */
 const webAttribution = (userName: string | null): string =>
   userName
-    ? `_(from the web · ${escapeSlackText(userName)})_`
-    : "_(from the web)_";
+    ? `_(${WEB_ICON} · ${escapeSlackText(userName)})_`
+    : `_(${WEB_ICON})_`;
 
 /** The converter's options for an ANSWER post — the one surface allowed to
  * emit real mentions. Everything else (captions, attributions, chrome)

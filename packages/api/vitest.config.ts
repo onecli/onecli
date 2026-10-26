@@ -1,7 +1,22 @@
 import { configDefaults, defineConfig } from "vitest/config";
+import {
+  API_LANE_ENV,
+  laneInvariantPgSuites,
+} from "./src/testing/lane-invariant";
 
 /** The `*.pg.test.ts` proof suites (see src/testing/pg-proof.ts). */
 const PG_PROOF_SUITES = ["src/**/*.pg.test.ts"];
+
+/**
+ * CI's onprem-default lane re-runs this package with the edition unset to
+ * prove module-load defaults. pg suites that pin their own edition before
+ * anything reads it run identical code in both lanes, so that lane skips
+ * them (see src/testing/lane-invariant.ts for the rule and its guard test).
+ */
+const ONPREM_LANE_SKIPS =
+  process.env[API_LANE_ENV] === "onprem"
+    ? laneInvariantPgSuites(import.meta.dirname)
+    : [];
 
 export default defineConfig({
   test: {
@@ -30,6 +45,7 @@ export default defineConfig({
         test: {
           name: "pg",
           include: PG_PROOF_SUITES,
+          exclude: [...configDefaults.exclude, ...ONPREM_LANE_SKIPS],
           poolOptions: { forks: { singleFork: true } },
         },
       },

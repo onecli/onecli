@@ -10,6 +10,7 @@ import { matchAgentPage, withWorkspacePrefix } from "@/lib/navigation";
 import {
   agentSectionBlocked,
   isFullHeightAgentSection,
+  isTheaterAgentSection,
 } from "@/lib/agents/agent-sections";
 import { useAgents } from "@/hooks/use-agents";
 import { AgentPageHeader } from "./agent-page-header";
@@ -19,8 +20,7 @@ import { SectionShell } from "./section-shell";
 
 /**
  * The agent row the list query actually yields — derived from the hook rather
- * than restated, so it cannot drift from it (the rows come from a server
- * action, so dates are `Date`s and `kind` is Prisma's `string`).
+ * than restated, so it cannot drift from it (`GET /v1/agents`'s `Agent`).
  */
 export type AgentPageAgent = NonNullable<
   ReturnType<typeof useAgents>["data"]
@@ -84,7 +84,15 @@ export const AgentPageFrame = ({
   const agent = agents.find((a) => a.id === agentId);
   const section = matchAgentPage(pathname)?.section ?? "";
 
-  if (isPending) return <FrameSkeleton />;
+  if (isPending)
+    return isTheaterAgentSection(section) ? (
+      <div className="flex flex-1 items-center justify-center" aria-busy="true">
+        <span className="sr-only">Loading agent</span>
+        <Skeleton className="h-8 w-40" />
+      </div>
+    ) : (
+      <FrameSkeleton />
+    );
 
   if (isError) {
     // A failed read is not a missing agent — saying "not found" here would
@@ -124,6 +132,21 @@ export const AgentPageFrame = ({
   // link after switching agents). The rail never offers it; this is the
   // backstop, in one place rather than in each section.
   const blocked = agentSectionBlocked(section, agent.kind);
+
+  if (isTheaterAgentSection(section)) {
+    return (
+      <AgentPageContext.Provider value={agent}>
+        {blocked ? (
+          <EmptyState
+            tone="quiet"
+            title="That section is only available for hosted agents."
+          />
+        ) : (
+          children
+        )}
+      </AgentPageContext.Provider>
+    );
+  }
 
   return (
     <AgentPageContext.Provider value={agent}>

@@ -74,6 +74,63 @@ export const MAX_WATCH_EXCERPT_CHARS = 1_000;
 export const MAX_WATCHES_PER_PROCESS_WIRE = 8;
 
 /**
+ * Sandbox ports (plans/sandbox-ports.md §7): byte streams to a TCP port
+ * listening inside the guest, multiplexed over THIS channel so the sandbox
+ * never accepts inbound (invariant #1: the runner asks, the supervisor dials
+ * loopback from the inside, bytes flow back up the socket it already owns).
+ *
+ * Bytes travel base64 in JSON frames. The chunk bound keeps every frame far
+ * under the runner WS's 256KB drop-whole ceiling (truncate-at-sender law):
+ * 48KiB raw → 64KiB base64. Flow control is credit-based per stream: the
+ * receiver grants bytes with `port.ack`; a sender never has more than the
+ * granted window in flight. The initial window is implicit on both sides.
+ */
+export const PORT_CHUNK_RAW_BYTES = 48 * 1024;
+export const PORT_CHUNK_BASE64_CHARS = Math.ceil(PORT_CHUNK_RAW_BYTES / 3) * 4;
+/** Bytes a sender may have unacknowledged per stream before it pauses. */
+export const PORT_STREAM_WINDOW_BYTES = 256 * 1024;
+/** Streams one sandbox may hold open at once — the supervisor's own belt
+ * behind the runner's per-sandbox cap. */
+export const MAX_PORT_STREAMS_PER_SANDBOX = 64;
+/** Ports reported in one `ports.state` (a wire brace, not a product cap). */
+export const MAX_LISTENING_PORTS_WIRE = 64;
+
+/**
+ * The guest ports of a hosted agent desktop's screen: a view-only server on
+ * the first, and an input-accepting one on the second only while a person
+ * holds control. Loopback-only, reachable solely through a platform share
+ * over the port streams above; never offered as a preview.
+ */
+export const DESKTOP_VIEW_PORT = 5900;
+export const DESKTOP_CONTROL_PORT = 5901;
+/** The person's name shown to the agent, bounded like every wire string. */
+export const MAX_DESKTOP_CONTROLLER_NAME_CHARS = 120;
+
+/** Valid TCP port a stream may target. Low ports are allowed because a
+ * process in the guest may bind them (the supervisor dials the guest port
+ * as-is); the platform's own denylist is enforced by the supervisor. */
+export const portNumberSchema = z.number().int().min(1).max(65_535);
+
+/** Opaque per-channel stream id, runner-chosen. */
+export const portStreamIdSchema = z.string().min(1).max(64);
+
+const portBytesSchema = z
+  .string()
+  .min(1)
+  .max(PORT_CHUNK_BASE64_CHARS)
+  .regex(/^[A-Za-z0-9+/]+={0,2}$/);
+
+/**
+ * The listening TCP ports of the guest, as port discovery reports them:
+ * sorted, unique, platform-reserved ports already dropped. Plain numbers,
+ * because every reported port is dialable by the supervisor (it only
+ * reports binds it can reach) and the share is keyed on the number alone.
+ */
+export const listeningPortsSchema = z
+  .array(portNumberSchema)
+  .max(MAX_LISTENING_PORTS_WIRE);
+
+/**
  * One process's whole reported state, including its watches — the unit of
  * the step-10 reliability design: re-sent unconditionally (~30s) because a
  * supervisor can never reconnect (single-use ws token), so "re-send on
@@ -94,6 +151,16 @@ export const processStateSchema = z.object({
   startedAt: z.string().max(40),
   endedAt: z.string().max(40).optional(),
   tail: z.string().max(MAX_PROCESS_TAIL_WIRE_CHARS).optional(),
+  /**
+   * The busy signal (keep-awake's engagement predicate): when the process
+   * last wrote output, and whether its CPU use was above the busy threshold
+   * in the last sample window. Both additive-optional: a control plane that
+   * predates them ignores them, and a supervisor that predates them leaves
+   * them absent — which the control plane reads as idle, the fail-safe
+   * direction (the box parks rather than holds).
+   */
+  lastOutputAt: z.string().max(40).optional(),
+  cpuBusy: z.boolean().optional(),
   /** Arm-time turn context — anchoring, not authority (the crons doctrine). */
   conversationId: z.string().min(1).optional(),
   turnId: z.string().min(1).optional(),
@@ -110,6 +177,14 @@ export const processStateSchema = z.object({
         excerpt: z.string().max(MAX_WATCH_EXCERPT_CHARS).optional(),
         triggeredAt: z.string().max(40).optional(),
         expiresAt: z.string().max(40),
+        /**
+         * Who armed it. `agent` = the agent asked to be woken (the
+         * process_watch tool, or its harness's own "wake me" mirrored), so
+         * the watch holds the box awake; `platform` = the turn-end safety
+         * net nobody asked for (report-only, never a hold). Absent reads as
+         * `agent`, today's behavior.
+         */
+        origin: z.enum(["agent", "platform"]).optional(),
         conversationId: z.string().min(1).optional(),
         turnId: z.string().min(1).optional(),
       }),
@@ -117,6 +192,9 @@ export const processStateSchema = z.object({
     .max(MAX_WATCHES_PER_PROCESS_WIRE),
 });
 export type ProcessState = z.infer<typeof processStateSchema>;
+export type WatchOrigin = NonNullable<
+  ProcessState["watches"][number]["origin"]
+>;
 
 /**
  * A home-relative path on the sync wire. Traversal is unrepresentable
@@ -176,6 +254,10 @@ export const agentChannelPresenceSchema = z.object({
   /** The provider tenant's display name (Slack: the workspace); null where
    * unknown. */
   workspaceName: z.string().max(120).nullable(),
+  /** How many conversations people granted this agent to read through
+   * "Connect your Slack" (a count only: no names, no ids). Drives whether
+   * the read tool is listed. Optional: older control planes omit it. */
+  readableConversations: z.number().int().min(0).max(10_000).optional(),
 });
 export type AgentChannelPresenceWire = z.infer<
   typeof agentChannelPresenceSchema
@@ -294,6 +376,22 @@ export type AgentConnectionWire = z.infer<typeof agentConnectionSchema>;
 export const MAX_AGENT_CONNECTIONS = 100;
 
 /**
+ * One preview share's relaunch instruction: the port a person opened a link
+ * for, and the command the agent registered to bring that app back. Carried
+ * on the start payload only for a wake a preview hit caused, so a chat wake
+ * never starts an app nobody asked for. The command runs through the
+ * supervisor's own process manager — the agent's user, the agent's sandbox,
+ * nothing a `process_start` could not already do.
+ */
+export const previewRelaunchSchema = z.object({
+  port: portNumberSchema,
+  command: z.string().min(1).max(MAX_PROCESS_COMMAND_CHARS),
+});
+export type PreviewRelaunchWire = z.infer<typeof previewRelaunchSchema>;
+/** One per shared port; the product cap on shares is far lower. */
+export const MAX_PREVIEW_RELAUNCHES = 20;
+
+/**
  * One user attachment's metadata as the wire speaks it — carried on
  * `turn.deliver` (the manifest: what THIS turn's message attached, where it
  * lands, how to verify it) and echoed field-for-field by every
@@ -403,6 +501,16 @@ export const workItemSchema = z.discriminatedUnion("kind", [
      * the run, bare, as before.
      */
     context: z.string().max(MAX_TURN_CONTEXT_CHARS).optional(),
+    /**
+     * The follow-up's own attachments, metadata only, under the same law as
+     * `turn.deliver`'s: the bytes arrived ahead of this frame as
+     * `attachment.part`s on the same ordered socket. The supervisor waits
+     * for them to land, then hands the inlineable images to the harness
+     * WITH the words; the rest sit on disk for the read tool, named by the
+     * context note. An OLD supervisor image strips the unknown field
+     * (non-strict parse): the words still join, and the files sit on disk.
+     */
+    attachments: z.array(attachmentManifestEntrySchema).optional(),
   }),
   /**
    * SEND NOW: read the waiting follow-up `turnId` now. It was
@@ -570,6 +678,62 @@ export const workItemSchema = z.discriminatedUnion("kind", [
    * rather than only on reconnect.
    */
   z.object({ kind: z.literal("ack"), seq: z.number().int().positive() }),
+  /**
+   * Sandbox ports (§7): open a byte stream to `127.0.0.1:port` inside the
+   * guest. The supervisor answers `port.opened` or `port.error` — exactly
+   * one. The runner chooses `streamId`; a duplicate id is refused. An OLD
+   * supervisor image drops the frame on validation and never answers; the
+   * runner's open timeout turns that into a clean relay error.
+   */
+  z.object({
+    kind: z.literal("port.open"),
+    streamId: portStreamIdSchema,
+    port: portNumberSchema,
+  }),
+  /** Bytes toward the guest service, within the granted window. */
+  z.object({
+    kind: z.literal("port.data"),
+    streamId: portStreamIdSchema,
+    dataBase64: portBytesSchema,
+  }),
+  /** Grant `bytes` more window for bytes flowing guest → runner. */
+  z.object({
+    kind: z.literal("port.ack"),
+    streamId: portStreamIdSchema,
+    bytes: z.number().int().positive().max(PORT_STREAM_WINDOW_BYTES),
+  }),
+  /** The runner side is done: half-close (`end`) or reset (`abort`). */
+  z.object({
+    kind: z.literal("port.close"),
+    streamId: portStreamIdSchema,
+    mode: z.enum(["end", "abort"]),
+  }),
+  /**
+   * The ports the platform may dial right now (the approved shares), pushed
+   * on every change. The supervisor refuses `port.open` for anything else:
+   * defense in depth against a relay or runner bug routing a stream to a
+   * port nobody approved. Absent/never-sent = nothing is dialable.
+   */
+  z.object({
+    kind: z.literal("ports.allow"),
+    ports: z.array(portNumberSchema).max(MAX_LISTENING_PORTS_WIRE),
+  }),
+  /**
+   * Desktop control: a person took or gave back control of the sandbox's
+   * screen. `controlled: true` opens the screen to their input and steers
+   * every live turn to stop acting on it; `false` closes it and steers them
+   * to continue. Idempotent: the control plane re-sends the current state
+   * on every change and the supervisor compares. A supervisor without the
+   * capability ignores it.
+   */
+  z.object({
+    kind: z.literal("desktop.control"),
+    controlled: z.boolean(),
+    controllerName: z
+      .string()
+      .max(MAX_DESKTOP_CONTROLLER_NAME_CHARS)
+      .optional(),
+  }),
 ]);
 export type WorkItem = z.infer<typeof workItemSchema>;
 /**
@@ -794,6 +958,63 @@ export const supervisorMessageSchema = z
        * a fresh container.
        */
       reason: z.string().max(MAX_UNHEALTHY_REASON_CHARS),
+    }),
+    /** The dial succeeded; bytes may flow both ways. */
+    z.object({
+      kind: z.literal("port.opened"),
+      streamId: portStreamIdSchema,
+    }),
+    /** Bytes from the guest service, within the runner's granted window. */
+    z.object({
+      kind: z.literal("port.data"),
+      streamId: portStreamIdSchema,
+      dataBase64: portBytesSchema,
+    }),
+    /** Grant `bytes` more window for bytes flowing runner → guest. */
+    z.object({
+      kind: z.literal("port.ack"),
+      streamId: portStreamIdSchema,
+      bytes: z.number().int().positive().max(PORT_STREAM_WINDOW_BYTES),
+    }),
+    /** The guest side ended (`end`) or failed/reset (`abort`). */
+    z.object({
+      kind: z.literal("port.close"),
+      streamId: portStreamIdSchema,
+      mode: z.enum(["end", "abort"]),
+    }),
+    /**
+     * The open was refused or failed. `code` is a closed vocabulary so the
+     * relay can pick an honest page: `not_allowed` (port not approved),
+     * `not_listening` (ECONNREFUSED — the service is down), `limit` (stream
+     * cap), `duplicate`, `failed` (anything else).
+     */
+    z.object({
+      kind: z.literal("port.error"),
+      streamId: portStreamIdSchema,
+      code: z.enum([
+        "not_allowed",
+        "not_listening",
+        "limit",
+        "duplicate",
+        "failed",
+      ]),
+    }),
+    /**
+     * Port discovery (§7): every TCP socket listening in the guest, sent on
+     * change and re-sent on a slow clock (the process.state re-send law —
+     * a supervisor cannot reconnect, so re-send is the only reliability).
+     */
+    z.object({
+      kind: z.literal("ports.state"),
+      ports: listeningPortsSchema,
+    }),
+    /**
+     * Whether the sandbox's screen can be watched. Sent at ready, and
+     * re-sent with `ports.state` on the slow clock (the same re-send law).
+     */
+    z.object({
+      kind: z.literal("desktop.state"),
+      viewable: z.boolean(),
     }),
   ])
   .superRefine((message, ctx) => {

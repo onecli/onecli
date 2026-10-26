@@ -113,7 +113,28 @@ describe("parseConnectLink: the github_org_access_required shape", () => {
 });
 
 describe("parseConnectLink — the access_restricted (attach) shape", () => {
-  it("parses the manage URL the gateway mints when the agent lacks a grant", () => {
+  it("parses the agent-scoped switch link the gateway mints for an inactive account", () => {
+    expect(
+      parseConnectLink(
+        "https://app.onecli.sh/w/abc/agents/agent-1/connections?attach=resend",
+      ),
+    ).toEqual({ provider: "resend", kind: "attach" });
+  });
+
+  it("refuses an agent-scoped attach link with no or a malformed provider", () => {
+    expect(
+      parseConnectLink(
+        "https://app.onecli.sh/w/abc/agents/agent-1/connections?attach=%3Cx%3E",
+      ),
+    ).toBeNull();
+    expect(
+      parseConnectLink(
+        "https://app.onecli.sh/w/abc/agents/agent-1/models?attach=resend",
+      ),
+    ).toBeNull();
+  });
+
+  it("parses the app-page link minted when the gateway knows no agent", () => {
     expect(
       parseConnectLink(
         "https://app.onecli.sh/w/abc/connections/apps/google-calendar",
@@ -187,5 +208,27 @@ describe("extractConnectSuggestions", () => {
         "https://app.onecli.sh/connections?connect=not-a-real-app-zzz",
       ),
     ).toHaveLength(0);
+  });
+
+  it("keeps one row per app, the attach row over the connect alternative", () => {
+    // The access_restricted answer offers the switch, then a connect link for
+    // the same app: the card must lead with Attach in either order, and keep
+    // the app's place in the list.
+    const attach =
+      "https://app.onecli.sh/w/a/agents/ag-1/connections?attach=resend";
+    const connect =
+      "https://app.onecli.sh/w/a/connections?connect=resend&source=agent&agent_name=Bot";
+    for (const text of [
+      `Turn it on: ${attach}\nOr connect another: ${connect}`,
+      `Connect: ${connect} or turn it on: ${attach}`,
+    ]) {
+      const rows = extractConnectSuggestions(
+        `${text}\nAlso ${GMAIL_CONNECT_URL}`,
+      );
+      expect(rows.map((r) => [r.app.id, r.kind])).toEqual([
+        ["resend", "attach"],
+        ["gmail", "connect"],
+      ]);
+    }
   });
 });

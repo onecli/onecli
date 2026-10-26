@@ -18,6 +18,7 @@ const state = vi.hoisted(() => ({
   isError: false,
   runNow: vi.fn(),
   update: vi.fn(),
+  setEnabled: vi.fn(),
   evalSchedule: null as unknown,
   evalsError: false,
 }));
@@ -30,6 +31,7 @@ vi.mock("@/hooks/use-crons", () => ({
   }),
   useCreateCron: () => ({ mutate: vi.fn(), isPending: false }),
   useUpdateCron: () => ({ mutate: state.update, isPending: false }),
+  useSetCronEnabled: () => ({ mutate: state.setEnabled, isPending: false }),
   useRunCronNow: () => ({ mutate: state.runNow, isPending: false }),
   useDeleteCron: () => ({ mutate: vi.fn(), isPending: false }),
 }));
@@ -83,6 +85,7 @@ beforeEach(() => {
   state.isError = false;
   state.runNow.mockReset();
   state.update.mockReset();
+  state.setEnabled.mockReset();
   state.evalSchedule = null;
   state.evalsError = false;
 });
@@ -188,16 +191,16 @@ describe("actions", () => {
     expect(state.runNow).toHaveBeenCalledWith("cr-1", expect.anything());
   });
 
-  it("the pause switch writes enabled:false", async () => {
+  it("the pause switch writes enabled:false through the instant toggle", async () => {
     state.crons = [cron()];
     renderSection();
     await userEvent.click(
       screen.getByRole("switch", { name: "Pause Daily inbox check" }),
     );
-    expect(state.update).toHaveBeenCalledWith(
-      { cronId: "cr-1", input: { enabled: false } },
-      expect.anything(),
-    );
+    expect(state.setEnabled).toHaveBeenCalledWith({
+      cronId: "cr-1",
+      enabled: false,
+    });
   });
 
   it("New schedule opens the dialog with the browser timezone pre-filled", async () => {

@@ -84,15 +84,29 @@ describe("supervisor message handler", () => {
         sandboxId: "sb-1",
         status: "stopped",
         error: "harness connection closed",
+        // Stamped with the container its socket authenticated as: the copy
+        // holding the socket need not own the sandbox's lifecycle, and the
+        // control plane applies an observed-container report only while that
+        // container is still the sandbox's (a late one never hits a new one).
+        observedContainerRef: "cont-default",
       },
     ]);
+  });
+
+  it("an unhealthy report with no known container is dropped, never sent unstamped", () => {
+    // Unstamped, it would be read as the reporting copy's own lifecycle
+    // report and fenced off unless this copy happens to own the sandbox.
+    const { reported } = drive([{ kind: "unhealthy", reason: "gone" }], {
+      containerRefOf: () => undefined,
+    });
+    expect(reported).toEqual([]);
   });
 
   it("relays a progress heartbeat as its own report, never through the collector", () => {
     // Its own single-event post on purpose: an old control plane rejecting
     // the unknown kind must lose one heartbeat, not a transcript batch. And
     // the sandboxId is the channel's, whatever the body claimed.
-    const { reported, added, flushed } = drive([
+    const { reported, added } = drive([
       { kind: "progress", turnId: "t1", conversationId: "cv1" },
     ]);
 
@@ -105,7 +119,30 @@ describe("supervisor message handler", () => {
       },
     ]);
     expect(added).toEqual([]);
-    expect(flushed).toEqual([]);
+  });
+
+  it("flushes the turn's buffered events ahead of its heartbeat", () => {
+    // The first beat follows `turn.started` on the wire, but that event is
+    // still buffered in the collector when the beat arrives. The control
+    // plane stamps only a RUNNING turn, so the beat must post behind it.
+    // MUTATION-PROOF: dropping the flush reports the beat first.
+    const order: string[] = [];
+    const handle = createSupervisorMessageHandler({
+      report: (event) => order.push(`report:${event.kind}`),
+      collector: {
+        add: () => {},
+        flush: (turnId) => order.push(`flush:${turnId}`),
+      },
+      toolCall: async () => ({ ok: true, result: null }),
+      memoryWrite: async () => ({ ok: true }),
+      uploadAttachment: async () => ({ ok: true, attachmentId: "att-1" }),
+      sendToSandbox: () => true,
+      containerRefOf: () => "cont-default",
+    });
+
+    handle("sb-1", { kind: "progress", turnId: "t1", conversationId: "cv1" });
+
+    expect(order).toEqual(["flush:t1", "report:turn.progress"]);
   });
 
   it("flushes the follow-ups' replies, then the turn, before reporting the close", () => {
@@ -439,6 +476,48 @@ describe("process.state forwarding (step 10)", () => {
   });
 
   it("DROPS a frame when the container is unknown — no unstamped fact ships", () => {
+    const { reported } = drive([frame], { containerRefOf: () => undefined });
+    expect(reported).toEqual([]);
+  });
+});
+
+describe("ports.state forwarding (sandbox ports)", () => {
+  const frame = { kind: "ports.state" as const, ports: [80, 8080] };
+
+  it("forwards the guest's listening ports as a stamped sandbox.ports event", () => {
+    const { reported } = drive([frame], { containerRefOf: () => "cont-xyz" });
+    expect(reported).toEqual([
+      {
+        kind: "sandbox.ports",
+        sandboxId: "sb-1",
+        containerRef: "cont-xyz",
+        ports: [80, 8080],
+      },
+    ]);
+  });
+
+  it("DROPS the frame when the container is unknown (the re-send heals it)", () => {
+    const { reported } = drive([frame], { containerRefOf: () => undefined });
+    expect(reported).toEqual([]);
+  });
+});
+
+describe("desktop.state forwarding (desktop takeover)", () => {
+  const frame = { kind: "desktop.state" as const, viewable: true };
+
+  it("forwards the screen's viewability as a stamped sandbox.desktop event", () => {
+    const { reported } = drive([frame], { containerRefOf: () => "cont-xyz" });
+    expect(reported).toEqual([
+      {
+        kind: "sandbox.desktop",
+        sandboxId: "sb-1",
+        containerRef: "cont-xyz",
+        viewable: true,
+      },
+    ]);
+  });
+
+  it("DROPS the frame when the container is unknown (the re-send heals it)", () => {
     const { reported } = drive([frame], { containerRefOf: () => undefined });
     expect(reported).toEqual([]);
   });

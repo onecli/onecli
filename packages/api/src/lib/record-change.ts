@@ -69,6 +69,12 @@ export const changeCounts = (
 export const shownValue = (v: string | null | undefined): string =>
   v === null || v === undefined || v === "" ? "empty" : v;
 
+/** A field this update leaves alone, as its cell says it: never a blank
+ *  cell, which reads as "set to empty" or as a value that failed to load. */
+export const UNTOUCHED_TEXT = "no change";
+/** The same, with the "no change" dot, where cells carry dots (Slack). */
+export const UNTOUCHED_CELL = `${CHANGE_WORDS.same.dot} ${UNTOUCHED_TEXT}`;
+
 /** "Contacts", "Opportunities", "Deposit batches", or the label itself for
  *  one. Same rule as the gateway's titles (`summary::salesforce::plural`). */
 export const pluralLabel = (label: string, n: number): string => {
@@ -77,3 +83,20 @@ export const pluralLabel = (label: string, n: number): string => {
   if (/(s|x|z|ch|sh)$/i.test(label)) return `${label}es`;
   return `${label}s`;
 };
+
+/** What a change does to its records, as a title's verb (the gateway's
+ *  titles use the same words). */
+export const BULK_VERBS = {
+  update: "Update",
+  create: "Create",
+  delete: "Delete",
+} as const;
+
+/** "Update 9 Accounts": a table of records as one title, worded as the
+ *  gateway titles one request's table. */
+export const bulkTitle = (bulk: {
+  kind?: keyof typeof BULK_VERBS;
+  objectLabel: string;
+  rows: readonly unknown[];
+}): string =>
+  `${BULK_VERBS[bulk.kind ?? "update"]} ${bulk.rows.length} ${pluralLabel(bulk.objectLabel, bulk.rows.length)}`;

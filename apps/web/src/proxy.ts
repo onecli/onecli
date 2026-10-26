@@ -103,6 +103,17 @@ const isProxiedApiPath = (pathname: string): boolean => {
 export const proxy = (request: NextRequest) => {
   const { pathname } = request.nextUrl;
 
+  // A local dashboard run against a remote deployment (`pnpm web:dev` sets
+  // this) holds that deployment's database login, and a few pages read the
+  // database before any session exists (an invitation looked up by token).
+  // A DNS-rebinding page names its own host while resolving to this
+  // machine, so refuse every Host but the one the developer browses to.
+  // Unset everywhere else: no effect on any deployed dashboard.
+  const pinnedHost = process.env.WEB_DEV_PINNED_HOST;
+  if (pinnedHost && request.headers.get("host") !== pinnedHost) {
+    return new NextResponse("Unexpected Host", { status: 421 });
+  }
+
   // First: a form submit on one of the dashboard's own page paths is api
   // surface, like `/v1` and the rest of `/auth`. It bypasses the setup gate
   // (the api reports its own configuration errors to a form client; a 307 to

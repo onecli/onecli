@@ -54,12 +54,22 @@ export interface AttachCardProps {
    * first-time setup again. Null unless `resuming`.
    */
   resumeAppId: string | null;
+  /**
+   * The resumable presence was installed by consent and waits only for its
+   * transport credential (the provider's own paste, e.g. Slack's app-level
+   * token). The server decides this from credentials the browser never sees.
+   */
+  awaitingTransportCredential: boolean;
 }
 
 export interface ChannelProviderUi extends ChannelProviderDisplay {
   id: string;
   PresenceCard: ComponentType<PresenceCardProps>;
   AttachCard: ComponentType<AttachCardProps>;
+  /** Optional, licensed (granular_access): the "connect your account and
+   * share conversations" card shown under a connected presence. Rendered
+   * only when the instance is entitled. */
+  ReadAccessCard?: ComponentType<{ agentId: string; agentName: string }>;
 }
 
 /**

@@ -7,6 +7,7 @@ import {
   seedTenant,
 } from "../src/fixtures.js";
 import { fakeDirective, sleep, text } from "../src/fake-dsl.js";
+import { reconcileUntilStopped } from "../src/runner.js";
 import { runTurn, waitFor } from "../src/v1.js";
 
 /**
@@ -52,6 +53,11 @@ scenario(
     // write must reach the platform: immediately, or via the next boot's
     // harvest off the durable volume. Either path is a pass; losing it is not.
     await dockerKill(container);
+    // Drive the death report rather than lean on the runner noticing the
+    // closed socket by itself in time: memory durability is the subject
+    // here, not detection latency (that has its own unit and multi-replica
+    // coverage).
+    await reconcileUntilStopped(stack.runner, cx.ids.sandbox);
 
     // The next message respawns the box; the boot harvest delivers the file.
     await runTurn(stack.v1, conversation.id, "and again");

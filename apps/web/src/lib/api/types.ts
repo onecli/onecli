@@ -9,9 +9,9 @@ export interface AgentChannelRef {
   /** The app's handle in the workspace (Slack: "donna"), where known. */
   identityName: string | null;
   externalId: string;
-  /** The provider's settings page for this presence (where manual-only
-   * things like Slack's app profile icon live), or null. Optional: an older
-   * API answers without it. */
+  /** The provider's settings page for this presence, opened where the app's
+   * profile icon is set, or null. Optional: an older API answers without
+   * it. */
   settingsUrl?: string | null;
   /** Presence lifecycle — `pending_setup` until the install completes.
    * Optional: an older API answers without it, and absent must read as
@@ -130,10 +130,17 @@ export interface CreatedSecret {
   pathPattern: string | null;
   createdAt: string;
   preview: string;
-  /** Agents the new workspace secret was auto-attached to: every agent for a
-   * custom secret, only the agents that could reach no LLM key at all for an
-   * LLM key. Always empty for an org-level secret. */
+  /** Agents the new workspace LLM key was auto-attached to: only the agents
+   * that could reach no LLM key at all. Always empty for a custom secret
+   * (the user picks its agents) and for an org-level secret. */
   attachedAgents: string[];
+}
+
+/** What a SecretDialog save produced: the secret it CREATED (the dialog's
+ * `onSaved` argument), so the caller can act on exactly it. */
+export interface SavedSecret {
+  id: string;
+  name: string;
 }
 
 export interface Connection {
@@ -543,6 +550,23 @@ export interface AgentGrants {
   secrets: AgentGrantSecret[];
 }
 
+/** One agent's standing on one secret: a row of the custom connection's
+ * "choose agents" window (`GET /v1/secrets/:id/agents`). Hand-mirrored from
+ * grants-service.ts. */
+export interface SecretAgentAccessEntry {
+  agentId: string;
+  name: string;
+  /** A workspace grant (the switch's own state): detachable. */
+  granted: boolean;
+  /** Injected by an ORG rule with no workspace grant: on, and locked. */
+  orgGranted: boolean;
+}
+
+export interface SecretAgentAccess {
+  secretId: string;
+  agents: SecretAgentAccessEntry[];
+}
+
 export interface ConnectionGrants {
   connectionId: string;
   agents: {
@@ -566,8 +590,8 @@ export type { UnlistedChoice };
 export type ConnectionGrantInput =
   | { access: "full"; resources?: GrantResources | null }
   /** The attach toggles: the server writes the product default for the
-   * provider (every tool allowed, requests outside the tool list needing
-   * approval; full access for an app with no tool list). */
+   * provider (reads allowed, writes and requests outside the tool list
+   * needing approval; full access for an app with no tool list). */
   | { access: "default"; resources?: GrantResources | null }
   | {
       access: "custom";
@@ -658,6 +682,14 @@ export interface InstanceInfo {
     /** Public SSH port. Optional: an older API answers without it (assume
      *  22). Default 22; self-host a high port. */
     port?: number;
+  };
+  /**
+   * Sandbox previews: present only when this deployment serves private
+   * preview links for ports on an agent's computer. Absent (an older API, or
+   * previews off) means the rail hides the agent's Ports section.
+   */
+  previews?: {
+    domain: string;
   };
 }
 

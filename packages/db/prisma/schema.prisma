@@ -68,6 +68,7 @@ model Organization {
   auditLogs                    AuditLog[]
   budgets                      Budget[] // cloud-only: per-secret spend budgets for this org (inert in OSS)
   skills                       Skill[]
+  skillSource                  SkillSource?
   domains                      OrganizationDomain[]
   ssoConnections               OrganizationSsoConnection[]
   scimTokens                   OrganizationScimToken[]
@@ -303,6 +304,8 @@ model Workspace {
   appConfigs       AppConfig[]
   budgets          Budget[] // cloud-only: per-secret spend budgets for this workspace (inert in OSS)
   accessBindings   WorkspaceAccess[]
+  // DEPRECATED back-relation of Skill.workspaceId (always NULL); removed
+  // with that column in the contract migration.
   skills           Skill[]
 
   @@unique([organizationId, slug])
@@ -367,6 +370,7 @@ model User {
   channelUserLinks              ChannelUserLink[]             @relation("ChannelUserLinkUser")
   decidedReachGrants            AgentReachGrant[]             @relation("ReachGrantDecider")
   decidedAgentContacts          AgentContact[]                @relation("AgentContactDecider")
+  channelUserTokens             AgentChannelUserToken[]       @relation("ChannelUserTokenOwner")
   decidedAgentLinksA            AgentLink[]                   @relation("AgentLinkDeciderA")
   decidedAgentLinksB            AgentLink[]                   @relation("AgentLinkDeciderB")
   createdChannelIntegrations    ChannelIntegration[]          @relation("ChannelIntegrationCreator")
@@ -377,6 +381,8 @@ model User {
   memoryRedactions              AgentMemoryRevision[]         @relation("MemoryRevisionRedactor")
   skillsCreated                 Skill[]                       @relation("SkillCreator")
   processesCreated              SandboxProcess[]              @relation("ProcessCreator")
+  sandboxPortsCreated           SandboxPort[]                 @relation("SandboxPortCreator")
+  desktopsControlled            DesktopSession[]              @relation("DesktopController")
   watchesCreated                ProcessWatch[]                @relation("WatchCreator")
   peerTasksCreated              PeerTask[]                    @relation("PeerTaskCreator")
   evalRunsCreated               AgentEvalRun[]                @relation("EvalRunCreator")
@@ -482,8 +488,11 @@ model Agent {
   webhooks             AgentWebhook[]
   memories             AgentMemory[]
   skills               Skill[]
+  librarySkills        AgentLibrarySkill[]
   reachGrants          AgentReachGrant[]
   actionApprovals      ActionApproval[]
+  sandboxPorts         SandboxPort[]
+  desktopSession       DesktopSession?
   contacts             AgentContact[]
   linksAsA             AgentLink[]          @relation("AgentLinkA")
   linksAsB             AgentLink[]          @relation("AgentLinkB")
@@ -510,8 +519,40 @@ model Runner {
   updatedAt    DateTime  @updatedAt @map("updated_at")
 
   sandboxes Sandbox[]
+  replicas  RunnerReplica[]
 
   @@map("runners")
+}
+
+// One running copy of a runner (several processes can share one runner
+// registration and token). Created at registration; every later runner call
+// names it in the replica header, which keeps `lastSeenAt` fresh (the poll is
+// the heartbeat, as for the runner row). A copy is live while `lastSeenAt` is
+// inside the runner online threshold; a copy shutting down cleanly retires
+// itself by ageing it out at once. The OLDEST live copy is the one that
+// reconciles. A sandbox records the copy holding its control channel
+// (Sandbox.channelReplicaId) and the copy that owns its lifecycle
+// (Sandbox.ownerReplicaId). Rows dead for a day are removed at the next
+// registration. `portApiUrl` is where the copy serves its internal port API
+// (sandbox previews), so a preview reaches the copy that holds the sandbox's
+// socket directly; null for a copy that serves none. `retiredAt` is set once,
+// when the copy shuts down cleanly: from then on it is never live again (its
+// own last calls still touch `lastSeenAt`) and it is handed no new work.
+model RunnerReplica {
+  id         String    @id @default(uuid())
+  runnerId   String    @map("runner_id")
+  name       String
+  portApiUrl String?   @map("port_api_url")
+  lastSeenAt DateTime  @default(now()) @map("last_seen_at")
+  retiredAt  DateTime? @map("retired_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  runner   Runner    @relation(fields: [runnerId], references: [id], onDelete: Cascade)
+  channels Sandbox[] @relation("SandboxChannelReplica")
+  owned    Sandbox[] @relation("SandboxOwnerReplica")
+
+  @@index([runnerId, lastSeenAt])
+  @@map("runner_replicas")
 }
 
 // A hosted agent's computer: the per-agent compute record. One sandbox per
@@ -525,6 +566,19 @@ model Sandbox {
   containerRef    String?   @map("container_ref")
   homeRef         String?   @map("home_ref") // opaque, backend-defined (§3.9)
   lastActiveAt    DateTime? @map("last_active_at")
+  // The guest's listening TCP ports as port discovery last reported them
+  // (plans/sandbox-ports.md §7): the runner forwards the supervisor's
+  // `ports.state` as a `sandbox.ports` event, stamped with the container it
+  // came from. Meaningful only while status = 'running' (a stopped box
+  // listens on nothing; the start claim resets it).
+  listeningPorts  Int[]     @default([]) @map("listening_ports")
+  // Whether the sandbox's screen can be watched (hosted agent desktop): the
+  // supervisor's `desktop.state` report, forwarded as the `sandbox.desktop`
+  // event under the same stamping rule as the ports. NULL = not reported
+  // (booting, or no hosted desktop); true = it can be watched; false = a
+  // desktop nobody can watch, so the dashboard says so instead of waiting.
+  // Meaningful only while status = 'running' (a stop resets it to NULL).
+  desktopViewable Boolean?  @map("desktop_viewable")
   // A person restarted the agent ("Restart agent"), and the sandbox has not
   // started a fresh boot since. While set: a running box is stopped at once
   // (ahead of the idle window and keep-awake), no turn is dispatched to it,
@@ -532,6 +586,26 @@ model Sandbox {
   // pre-restart boot can leak into the fresh one. The next start claim
   // clears it.
   stopRequestedAt DateTime? @map("stop_requested_at")
+  // The engagement clock (the 12h background-only cap, due-work): the last
+  // moment a PERSON or a TURN touched this sandbox — a message, a turn
+  // event, preview/desktop/SSH use. Deliberately NOT `lastActiveAt`, which
+  // every boot and ready report also stamps: the cap must measure time since
+  // somebody wanted the box, not since it last came up. Null until the first
+  // engagement, which the cap treats as "never" (no hold without it).
+  lastEngagedAt   DateTime? @map("last_engaged_at")
+  // Why the control plane is taking this sandbox down, stamped by the claim
+  // that moved it to `stopping` and cleared by the next start claim:
+  // "idle" | "cap" | "evict" | "restart". The lost sweep reads it to tell a
+  // PARKED process (the platform chose to sleep: a quiet notice) from a
+  // LOST one (the container died: a wake). Null = not a control-plane stop.
+  stopReason      String?   @map("stop_reason")
+  // Why the sandbox is being woken, set by the door that flips a parked row
+  // to `unprovisioned` and cleared by the supervisor's ready report (the
+  // start claim leaves it: the payload is composed after the claim and
+  // reads it): "preview" = a person opened a preview link, so the start
+  // payload carries the shares' relaunch commands. Null = any other wake
+  // (a message, a schedule, SSH): the apps stay down and the wake stays fast.
+  wakeReason      String?   @map("wake_reason")
 
   // The home projection's sync clock (step 9). `desired` is bumped by
   // any write that changes the materialized file set (skills, memory, brief,
@@ -547,14 +621,41 @@ model Sandbox {
   homeAppliedGeneration Int       @default(0) @map("home_applied_generation")
   homeSyncClaimedAt     DateTime? @map("home_sync_claimed_at")
 
-  createdAt   DateTime         @default(now()) @map("created_at")
-  updatedAt   DateTime         @updatedAt @map("updated_at")
-  agent       Agent            @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  runner      Runner           @relation(fields: [runnerId], references: [id])
-  processes   SandboxProcess[]
-  sshSessions SshSession[]
+  // The supervisor's control channel: where it is, so any runner copy can
+  // accept it and only the copy holding it is handed socket-bound work.
+  // `channelTokenHash` is the SHA-256 of the current spawn's unused
+  // bootstrap token (never the token itself), cleared the moment a copy uses
+  // it. `channelReplicaId` + `channelConnectionId` name the holder;
+  // `channelSince` is when the current state began (the claim, or the drop).
+  // Every start claim clears all four. Written with raw SQL only, so these
+  // writes never move `updatedAt` (the start/stop arms' stale clock).
+  channelReplicaId    String?   @map("channel_replica_id")
+  channelConnectionId String?   @unique @map("channel_connection_id")
+  channelTokenHash    String?   @unique @map("channel_token_hash")
+  channelSince        DateTime? @map("channel_since")
+
+  // The copy that owns this sandbox's lifecycle: set by every start, stop
+  // and eviction claim to the claiming copy. While that copy is live, only
+  // it may claim the sandbox's next lifecycle step, so one sandbox's steps
+  // run one at a time on one copy (the per-entity serialization every
+  // controller and actor system uses); when it dies, any copy takes over.
+  // Its own lifecycle reports are fenced on it, so a copy that lost
+  // ownership can never overwrite the new owner's work. Null: unowned (a
+  // fresh sandbox, or a single-process runner).
+  ownerReplicaId String? @map("owner_replica_id")
+
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+  agent          Agent            @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  runner         Runner           @relation(fields: [runnerId], references: [id])
+  channelReplica RunnerReplica?   @relation("SandboxChannelReplica", fields: [channelReplicaId], references: [id], onDelete: SetNull)
+  ownerReplica   RunnerReplica?   @relation("SandboxOwnerReplica", fields: [ownerReplicaId], references: [id], onDelete: SetNull)
+  processes      SandboxProcess[]
+  sshSessions    SshSession[]
 
   @@index([runnerId])
+  @@index([channelReplicaId])
+  @@index([ownerReplicaId])
   @@map("sandboxes")
 }
 
@@ -568,21 +669,31 @@ model Sandbox {
 // as live. Rows are keyed (sandboxId, ref) with a supervisor-chosen ref —
 // a forged ref cannot cross a tenant boundary by construction.
 model SandboxProcess {
-  id           String  @id @default(uuid())
-  sandboxId    String  @map("sandbox_id")
+  id           String    @id @default(uuid())
+  sandboxId    String    @map("sandbox_id")
   // Supervisor-chosen per-boot id (uuid); every write keys (sandboxId, ref).
   ref          String
   // Runner-stamped at report time — never taken from the supervisor payload.
-  containerRef String  @map("container_ref")
+  containerRef String    @map("container_ref")
   command      String
   name         String?
-  // "running" | "exited" | "stopped" | "lost". `lost` is control-plane-
-  // authored only (the poll-time sweep); it never arrives on the wire.
-  status       String  @default("running")
-  exitCode     Int?    @map("exit_code")
+  // "running" | "exited" | "stopped" | "lost" | "parked". `lost` and
+  // `parked` are control-plane-authored only (the poll-time sweep); neither
+  // arrives on the wire. `parked` = the platform slept the sandbox on
+  // purpose (idle or the cap) while this process was still running; `lost`
+  // = the container went away for any other reason.
+  status       String    @default("running")
+  exitCode     Int?      @map("exit_code")
   signal       String?
   // Last ~1k chars of interleaved stdout+stderr, refreshed by state frames.
   tail         String?
+  // The busy signal (due-work's engagement predicate): when the process last
+  // wrote to stdout/stderr, and whether its CPU use was above the busy
+  // threshold at the last report. Both mirrored from the supervisor's state
+  // frames; null/false under a supervisor that predates them, which reads
+  // as idle — the fail-safe direction (the box parks, never holds).
+  lastOutputAt DateTime? @map("last_output_at")
+  cpuBusy      Boolean   @default(false) @map("cpu_busy")
 
   // Arm-time turn context — anchoring, not authority (the crons doctrine):
   // verified at first insert, write-once, droppable when forged.
@@ -626,9 +737,15 @@ model ProcessWatch {
   // "armed" | "triggered" | "expired" | "canceled" | "fired". `fired` is
   // control-plane-authored (the fire pass); `trigger` says why it triggered.
   status         String  @default("armed")
-  // "exited" | "matched" | "silent" | "lost" (`lost` is CP-authored).
+  // "exited" | "matched" | "silent" | "lost" | "parked" (the last two are
+  // CP-authored: the lost sweep's two verdicts).
   trigger        String?
   excerpt        String?
+  // Who armed it: "agent" (the process_watch tool — the agent asked to be
+  // woken, so the watch holds the box awake) or "platform" (the turn-end
+  // safety net and the harness-wake mirror — report-only, never a hold).
+  // Keep-awake reads this; nothing else does.
+  origin         String  @default("agent")
 
   expiresAt     DateTime  @map("expires_at")
   triggeredAt   DateTime? @map("triggered_at")
@@ -651,6 +768,63 @@ model ProcessWatch {
   // The fire claim scan + the expiry sweep.
   @@index([status, expiresAt])
   @@map("process_watches")
+}
+
+// ── Runtime metering ──
+// One row per container run of a hosted agent's sandbox: the AWAKE time
+// ledger. Opened by the start report that names the container, closed by
+// whichever transition ends the run (a stop report, a park, a restart, a
+// failure, the agent's deletion) and by the reconcile sweep for the ones
+// nothing reported. Append-only truth; every usage number is a sum over it.
+//
+// Plain id columns, no relations, ON PURPOSE: a usage record must outlive
+// the agent, sandbox and workspace it describes (billing history is never
+// cascade-deleted). Timestamps are the control plane's clock, never the
+// runner's. `containerRef` is unique, so a duplicate start report cannot
+// open a second row; the partial unique index in the migration keeps at most
+// one OPEN row per sandbox.
+//
+// A row overlaps a window when it ended after the window began (or has not
+// ended) and started before the window ends, so reads range on `ended_at`:
+// `ended_at > from OR ended_at IS NULL` is two index ranges whatever the
+// row's length, and no row ever needs splitting.
+model SandboxRuntimeInterval {
+  id             String    @id @default(uuid())
+  organizationId String    @map("organization_id")
+  workspaceId    String    @map("workspace_id")
+  agentId        String    @map("agent_id")
+  sandboxId      String    @map("sandbox_id")
+  containerRef   String    @unique @map("container_ref")
+  startedAt      DateTime  @map("started_at")
+  // NULL while the container is up.
+  endedAt        DateTime? @map("ended_at")
+  // "idle" | "evict" | "restart" | "respawn" | "stopped" | "failed"
+  // | "deleted" | "lost" — why the row closed. Analytics only.
+  endReason      String?   @map("end_reason")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  // The per-agent and per-org window reads (closed rows by their end).
+  @@index([agentId, endedAt])
+  @@index([organizationId, endedAt])
+  // The rollup's cursor scan ("closed since the last pass").
+  @@index([endedAt])
+  @@map("sandbox_runtime_intervals")
+}
+
+// The per-(org, agent, UTC day) rollup of CLOSED intervals, maintained by
+// the ledger sweep and rebuildable from the ledger at any time. Reads of a
+// month or of all time come from here; only the window's open edges (today,
+// still-running rows) are read from the ledger itself.
+model RuntimeUsageDaily {
+  organizationId String   @map("organization_id")
+  agentId        String   @map("agent_id")
+  day            DateTime @db.Date
+  awakeSeconds   BigInt   @map("awake_seconds")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@id([organizationId, agentId, day])
+  @@index([agentId, day])
+  @@map("runtime_usage_daily")
 }
 
 // ── SSH front door ──
@@ -1231,16 +1405,20 @@ model AgentMemoryRevision {
 
 // ── Skills: user-authored capabilities as files (plans/hosted-agents-v2.md step 9, §3.7/§3.8) ──
 // Truth lives HERE; the sandbox copy is a regenerated read-only projection
-// (the memory-projection law). Three tiers — agent / workspace / organization —
-// with exactly one owner column set (CHECKs in the migration; Prisma cannot
-// express them). The same NAME may exist at different tiers: the composer
-// materializes the most specific one (agent > workspace > organization).
+// (the memory-projection law). Two tiers — agent / organization — with
+// exactly one owner column set (CHECKs in the migration; Prisma cannot
+// express them). The same NAME may exist at both tiers: the composer
+// materializes the agent's own (agent > organization).
 model Skill {
   id             String  @id @default(uuid())
-  // "agent" | "workspace" | "organization" — pinned to whichever owner column
-  // is set by the scope-coherence CHECK (migration).
+  // "agent" | "organization" — pinned to whichever owner column is set by
+  // the scope-coherence CHECK (migration).
   scope          String
   agentId        String? @map("agent_id")
+  // DEPRECATED (2026-10-18, workspace tier retired): pinned NULL by the
+  // skills_one_owner CHECK, never read or written by any code. Kept only so
+  // the release that stops reading it can deploy before the column goes
+  // (expand/contract); the follow-up contract migration drops it.
   workspaceId    String? @map("workspace_id")
   organizationId String? @map("organization_id")
 
@@ -1255,8 +1433,7 @@ model Skill {
   // MAX_SKILL_TOTAL_CHARS — the sync-frame budget governor.
   content     String
   // Pause without delete: a disabled row simply leaves the projection; it
-  // does NOT veto a same-named row at a broader tier (filtered before the
-  // shadow merge).
+  // does NOT veto a same-named org row (filtered before the shadow merge).
   enabled     Boolean @default(true)
 
   // Human authorship (skills are human-authored; no revision history —
@@ -1268,10 +1445,10 @@ model Skill {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  // Agent tier dies with its agent. Workspace/org tiers are Restrict ON
-  // PURPOSE: the hand-written service cascades own them
-  // (deleteWorkspaceContent / deleteOrganizationContent) — a forgotten entry
-  // fails the delete loudly instead of silently orphaning rows.
+  // Agent tier dies with its agent. The org tier is Restrict ON PURPOSE: the
+  // hand-written service cascade owns it (deleteOrganizationContent) — a
+  // forgotten entry fails the delete loudly instead of silently orphaning
+  // rows.
   agent        Agent?        @relation(fields: [agentId], references: [id], onDelete: Cascade)
   workspace    Workspace?    @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
@@ -1283,7 +1460,7 @@ model Skill {
   // rows out of contention, so no partial index is needed and everything
   // stays in PSL. Leading columns double as the tier lookup indexes.
   @@unique([agentId, name])
-  @@unique([workspaceId, name])
+  @@unique([workspaceId, name]) // DEPRECATED with workspaceId
   @@unique([organizationId, name])
   @@map("skills")
 }
@@ -1308,6 +1485,114 @@ model SkillFile {
 
   @@unique([skillId, path])
   @@map("skill_files")
+}
+
+// ── Skill library: a connected Git repo of skills ──
+// The repo is the source of truth; OneCLI only READS it. One source per org.
+// Only skills some agent added are stored; browsing the repo is live from
+// GitHub.
+model SkillSource {
+  id              String  @id @default(uuid())
+  organizationId  String  @unique @map("organization_id")
+  // The library's OWN GitHub App credential (encrypted JSON: app id,
+  // installation id, signing key), copied from an org connection at connect
+  // time. It never depends on that connection afterwards: removing it does
+  // not break the library. Never used by the gateway or agents.
+  credentials     String
+  installationId  String  @map("installation_id")
+  account         String?
+  // "Organization" or "User": which GitHub settings page manages the install.
+  accountType     String? @map("account_type")
+  // Where the credential was copied from (display only; SetNull on removal).
+  appConnectionId String? @map("app_connection_id")
+  repo            String // "owner/name"
+  branch          String  @default("main")
+
+  // The branch head as of the last successful check, and the refresh clock
+  // (the poll-sweep lease: claimed by stamping lastCheckedAt forward).
+  headSha       String?   @map("head_sha")
+  lastCheckedAt DateTime? @map("last_checked_at")
+  lastSyncedAt  DateTime? @map("last_synced_at")
+  lastError     String?   @map("last_error")
+  // GitHub refused the library's installation (the app was removed, or no
+  // longer reaches the repo): only a reconnect fixes it, not a retry.
+  accessLost    Boolean   @default(false) @map("access_lost")
+
+  createdByUserId String?  @map("created_by_user_id")
+  createdByEmail  String?  @map("created_by_email")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  appConnection AppConnection? @relation(fields: [appConnectionId], references: [id], onDelete: SetNull)
+  skills        LibrarySkill[]
+
+  @@index([lastCheckedAt])
+  @@map("skill_sources")
+}
+
+// One repo skill that is IN USE, stored with its files at `commitSha`. Rows
+// exist only while some agent holds it: removing the last holder deletes it,
+// and the refresh sweeps any left by a deleted agent.
+model LibrarySkill {
+  id            String  @id @default(uuid())
+  sourceId      String  @map("source_id")
+  // The skill's directory name (also its folder under .agents/skills/).
+  name          String
+  // The folder in the repo, e.g. "plugins/data-tools/skills/snowflake".
+  path          String
+  description   String
+  plugin        String?
+  commitSha     String  @map("commit_sha")
+  // Files the fetch could not carry (binary, too large), as
+  // [{ path, reason }] — shown in the dashboard, never silently dropped.
+  skipped       Json?
+  lastError     String? @map("last_error")
+  // What this skill costs an agent's home sync, measured when its files are
+  // written: its files' frame bytes and its paths' prune-manifest bytes.
+  // Each agent's library is held to a budget of both, at add and refresh.
+  syncBytes     Int     @map("sync_bytes")
+  manifestBytes Int     @map("manifest_bytes")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  source      SkillSource         @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  files       LibrarySkillFile[]
+  attachments AgentLibrarySkill[]
+
+  @@unique([sourceId, name])
+  @@map("library_skills")
+}
+
+model LibrarySkillFile {
+  id             String @id @default(uuid())
+  librarySkillId String @map("library_skill_id")
+  // Relative to the skill folder; validated (no traversal, bounded depth).
+  path           String
+  content        String
+
+  librarySkill LibrarySkill @relation(fields: [librarySkillId], references: [id], onDelete: Cascade)
+
+  @@unique([librarySkillId, path])
+  @@map("library_skill_files")
+}
+
+model AgentLibrarySkill {
+  agentId         String   @map("agent_id")
+  librarySkillId  String   @map("library_skill_id")
+  // The agent's own switch, like a regular skill's: off keeps the skill on
+  // the agent's page but out of its projection and tools.
+  enabled         Boolean  @default(true)
+  createdByUserId String?  @map("created_by_user_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  agent        Agent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  librarySkill LibrarySkill @relation(fields: [librarySkillId], references: [id], onDelete: Cascade)
+
+  @@id([agentId, librarySkillId])
+  @@index([librarySkillId])
+  @@map("agent_library_skills")
 }
 
 // ── Channels: external messaging surfaces (plans/hosted-agents-v2.md step 6) ──
@@ -1394,11 +1679,11 @@ model ChannelInstallation {
 // One presence per provider per agent; a second provider later is another row,
 // never a second meaning for this one.
 model AgentChannel {
-  id                  String    @id @default(uuid())
-  agentId             String    @map("agent_id")
-  integrationId       String    @map("integration_id")
-  provider            String // "slack"
-  externalId          String    @map("external_id") // the agent's own provider app id (Slack: app id)
+  id                    String    @id @default(uuid())
+  agentId               String    @map("agent_id")
+  integrationId         String    @map("integration_id")
+  provider              String // "slack"
+  externalId            String    @map("external_id") // the agent's own provider app id (Slack: app id)
   // Which app flavor THIS app was built as ("agent" | "regular") — stamped at
   // create, like `transport`: the provider-side config baked it in and (Slack)
   // the agent flavor is irreversible, so the presence must remember what it
@@ -1406,31 +1691,31 @@ model AgentChannel {
   // (default "regular": every app predating the column was a plain bot) and
   // the runtime honors the stamp — loader for agent apps, emoji receipt for
   // regular ones. Switching = detach/re-attach.
-  appMode             String    @default("regular") @map("app_mode")
-  identityRef         String?   @map("identity_ref") // the presence's own identity (Slack: bot user id)
+  appMode               String    @default("regular") @map("app_mode")
+  identityRef           String?   @map("identity_ref") // the presence's own identity (Slack: bot user id)
   /// The app's own display handle on the provider (Slack: the bot's `user`
   /// from `auth.test`, e.g. "donna"). Captured at completion from a call we
   /// already make. Nullable: the events arm completes via OAuth, and older
   /// presences predate this — surfaces fall back to the external id.
-  identityName        String?   @map("identity_name")
+  identityName          String?   @map("identity_name")
   // "events" = the provider calls our public HTTPS inbound routes (the
   // one-click posture) | "socket" = the adapter holds an outbound connection
   // (the no-ingress floor). Stamped at create from the deployment posture —
   // the provider manifest baked one or the other, so the presence must
   // remember which it is. Switching = detach/re-attach in v2.
-  transport           String
+  transport             String
   // Encrypted provider JSON. Slack: {clientId, clientSecret, signingSecret,
   // botToken?, appToken?} — client creds + signing secret arrive from
   // apps.manifest.create and are needed for the events arm's OAuth exchange
   // and inbound signature verification before any bot token exists.
-  credentials         String?
+  credentials           String?
   // "needs_attention" = the approvals service key is being refused (its owner
   // lost workspace access); everything else about the presence keeps working.
-  status              String    @default("pending_setup") // "pending_setup" | "active" | "disabled" | "needs_attention"
-  createdByUserId     String?   @map("created_by_user_id")
+  status                String    @default("pending_setup") // "pending_setup" | "active" | "disabled" | "needs_attention"
+  createdByUserId       String?   @map("created_by_user_id")
   // The service API key (ApiKey.kind "service") the adapter uses to list and
   // decide gateway approvals for this presence. Revoked at detach.
-  apiKeyId            String?   @map("api_key_id")
+  apiKeyId              String?   @map("api_key_id")
   // The presence-ownership claim (§3.17): which adapter instance serves this
   // presence, under a lease renewed by its config poll. ⚠️ These two columns
   // are written by RAW SQL ONLY (channel-adapter-service.ts) — a Prisma
@@ -1439,21 +1724,45 @@ model AgentChannel {
   // storm the ownership design exists to kill. `SetNull` on the owner FK
   // makes adapter-row reaping safe: the presence becomes unowned and is
   // claimed on a peer's next poll.
-  ownerAdapterId      String?   @map("owner_adapter_id")
-  ownerLeaseExpiresAt DateTime? @map("owner_lease_expires_at")
-  createdAt           DateTime  @default(now()) @map("created_at")
-  updatedAt           DateTime  @updatedAt @map("updated_at")
+  ownerAdapterId        String?   @map("owner_adapter_id")
+  ownerLeaseExpiresAt   DateTime? @map("owner_lease_expires_at")
+  // The event subscription this app is KNOWN to carry on the provider side
+  // (Slack: the manifest's `bot_events`), as the comma-joined list the event
+  // sync last applied. An app created before an event was added never
+  // receives it until its remote manifest is updated; the sync compares this
+  // to the current list and updates what differs.
+  // NULL = never synced. `eventsSyncAttemptedAt` is that sync's claim and
+  // retry clock. Both written by RAW SQL ONLY, like the lease columns above:
+  // `updatedAt` is a config-feed etag input.
+  syncedEvents          String?   @map("synced_events")
+  eventsSyncAttemptedAt DateTime? @map("events_sync_attempted_at")
+  /// The provider app's PROFILE icon (Slack: bots.info), as last read by the
+  /// card's Sync image. Null until read, or while the app still shows the
+  /// provider's stock mark. Drives the attached card's face.
+  iconUrl               String?   @map("icon_url")
+  /// The icon last copied onto the agent's own image. Compared with
+  /// `iconUrl` so a changed provider icon is copied exactly once, and an
+  /// agent image replaced in OneCLI afterwards is left alone until the
+  /// provider icon changes again.
+  iconSyncedUrl         String?   @map("icon_synced_url")
+  /// When Sync image last claimed this row (its double-click guard; raw SQL
+  /// so it never bumps `updatedAt`, a config-feed etag input).
+  iconCheckedAt         DateTime? @map("icon_checked_at")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
 
-  agent             Agent                  @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  integration       ChannelIntegration     @relation(fields: [integrationId], references: [id], onDelete: Cascade)
-  ownerAdapter      ChannelAdapter?        @relation("PresenceOwner", fields: [ownerAdapterId], references: [id], onDelete: SetNull)
-  createdBy         User?                  @relation("AgentChannelCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
-  apiKey            ApiKey?                @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
-  threadLinks       ChannelThreadLink[]
-  ingestedEvents    ChannelIngestedEvent[]
-  toolApprovalCards ToolApprovalCard[]
-  turnReceipts      ChannelTurnReceipt[]
-  sentMessages      ChannelSentMessage[]
+  agent               Agent                       @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  integration         ChannelIntegration          @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  ownerAdapter        ChannelAdapter?             @relation("PresenceOwner", fields: [ownerAdapterId], references: [id], onDelete: SetNull)
+  createdBy           User?                       @relation("AgentChannelCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  apiKey              ApiKey?                     @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
+  threadLinks         ChannelThreadLink[]
+  ingestedEvents      ChannelIngestedEvent[]
+  toolApprovalCards   ToolApprovalCard[]
+  turnReceipts        ChannelTurnReceipt[]
+  userTokens          AgentChannelUserToken[]
+  sentMessages        ChannelSentMessage[]
+  spaceReconciliation ChannelSpaceReconciliation?
 
   @@unique([agentId, provider])
   // Unique, not merely indexed: the inbound webhook arm resolves a presence by
@@ -1466,6 +1775,26 @@ model AgentChannel {
   @@index([integrationId])
   @@index([ownerAdapterId])
   @@map("agent_channels")
+}
+
+// Durable membership maintenance state, separate from configuration etags,
+// approval history and provider-event deduplication. Claims never hold a
+// transaction open while calling the provider.
+model ChannelSpaceReconciliation {
+  agentChannelId String    @id @map("agent_channel_id")
+  generation     String    @default(uuid())
+  grantCursor    String?   @map("grant_cursor")
+  linkCursor     String?   @map("link_cursor")
+  scanLinksNext  Boolean   @default(false) @map("scan_links_next")
+  lastAttemptAt  DateTime? @map("last_attempt_at")
+  nextAttemptAt  DateTime? @map("next_attempt_at")
+  leaseToken     String?   @map("lease_token")
+  leaseExpiresAt DateTime? @map("lease_expires_at")
+
+  agentChannel AgentChannel @relation(fields: [agentChannelId], references: [id], onDelete: Cascade)
+
+  @@index([nextAttemptAt, lastAttemptAt])
+  @@map("channel_space_reconciliations")
 }
 
 // Provider user ↔ platform user, per integration. Minted lazily on a
@@ -1580,6 +1909,8 @@ model ActionApproval {
 // Precedence law (reserved for person rows): a person-level denied/blocked
 // beats a space-level approved.
 model AgentReachGrant {
+  // Monotonic optimistic-concurrency fence, including same-state decisions.
+  revision      Int     @default(0)
   id            String  @id @default(uuid())
   agentId       String  @map("agent_id")
   integrationId String  @map("integration_id")
@@ -1593,6 +1924,10 @@ model AgentReachGrant {
   // used for matching - names rename, ids don't.
   subjectLabel  String? @map("subject_label")
   state         String  @default("pending") // "pending" | "approved" | "denied" | "revoked"
+  // Space grants only: what the agent HEARS in this channel. "mentions" =
+  // only @mentions and threads it joined (the default). "all" = every
+  // message (the channel's "point of contact"): it decides when to reply.
+  listen        String  @default("mentions")
 
   // The owner-DM approval cards posted for this grant, claim-before-post
   // (the ToolApprovalCard lesson): [{channel, ts, userId}]. Recorded so
@@ -1612,6 +1947,59 @@ model AgentReachGrant {
   @@unique([agentId, integrationId, subjectKind, externalRef])
   @@index([agentId, state])
   @@map("agent_reach_grants")
+}
+
+// A person's own provider token minted through an agent's app (Slack: the
+// `authed_user` xoxp from the agent app's OAuth with user scopes) - READ-ONLY
+// scopes, used only by the platform's read tool on the server. Never reaches
+// a sandbox, the gateway, or the model. One per (presence, user): one
+// person's Slack connected to one agent. Dies with the presence (Cascade) and
+// with the user (Cascade); revocation at the provider deletes the row.
+model AgentChannelUserToken {
+  id             String   @id @default(uuid())
+  agentChannelId String   @map("agent_channel_id")
+  userId         String   @map("user_id")
+  // The person's provider identity (Slack: U…) - the revocation key
+  // (`tokens_revoked.oauth` lists user ids, never tokens).
+  externalUserId String   @map("external_user_id")
+  // Encrypted (CryptoService) JSON: { accessToken }.
+  credentials    String
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  agentChannel AgentChannel     @relation(fields: [agentChannelId], references: [id], onDelete: Cascade)
+  user         User             @relation("ChannelUserTokenOwner", fields: [userId], references: [id], onDelete: Cascade)
+  grants       AgentReadGrant[]
+
+  @@unique([agentChannelId, userId])
+  @@index([agentChannelId, externalUserId])
+  @@map("agent_channel_user_tokens")
+}
+
+// One conversation a person let the agent read with THEIR token (a channel,
+// private channel, DM, or group DM they are in). NO row = no read. The
+// granter is the token owner by construction (the FK), so nobody can grant
+// what they cannot see, and disconnecting deletes every grant (Cascade).
+// `audience` is the leak fence: "granter_only" = readable only in the
+// granter's own direct thread or their schedules; "anyone" = in any turn.
+// Enforced server-side at read time, never in the prompt.
+model AgentReadGrant {
+  id           String   @id @default(uuid())
+  userTokenId  String   @map("user_token_id")
+  // "channel" | "private_channel" | "dm" | "group_dm" - display + audit.
+  subjectKind  String   @map("subject_kind")
+  // Provider conversation id (Slack: C…/G…/D…) - the identity key.
+  externalRef  String   @map("external_ref")
+  // Display-only label captured from the provider at grant time.
+  subjectLabel String?  @map("subject_label")
+  audience     String   @default("granter_only")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  userToken AgentChannelUserToken @relation(fields: [userTokenId], references: [id], onDelete: Cascade)
+
+  @@unique([userTokenId, externalRef])
+  @@map("agent_read_grants")
 }
 
 // The agent's OUTBOUND address book — who it may proactively message
@@ -1768,6 +2156,8 @@ model PeerTask {
 // provider-defined group thread (Slack: "<channelId>:<threadRootTs>") to its
 // own conversation.
 model ChannelThreadLink {
+  // Routing changes invalidate membership probes sampled before the change.
+  revision         Int       @default(0)
   id               String    @id @default(uuid())
   agentChannelId   String    @map("agent_channel_id")
   conversationId   String    @unique @map("conversation_id")
@@ -1785,6 +2175,7 @@ model ChannelThreadLink {
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
   @@unique([agentChannelId, externalThreadId])
+  @@index([agentChannelId, kind, id])
   @@map("channel_thread_links")
 }
 
@@ -1922,20 +2313,27 @@ model ChannelTurnReceipt {
   // it survives a process restart because it lives here rather than in
   // adapter memory.
   cardSteps      String[]  @map("card_steps")
-  // How many times the card has been written. The narration's compare-and-set
-  // key: two detached pushes for one turn read the same revision, and only
-  // the one whose update still matches it proceeds — an array cannot serve
-  // as that key (Prisma's list `equals` does not match an empty column, so
-  // the first claim of every turn would fail).
+  // How many times what the card shows has changed: a step recorded, or a
+  // change made while the first post was still in flight. The first post's
+  // key: only the step that found revision 0 posts (a rival would post a
+  // second card), a refused post rolls back only if nothing moved since, and
+  // a post that lands to a moved revision writes the card again. An array
+  // cannot serve as that key (Prisma's list `equals` does not match an empty
+  // column, so the first claim of every turn would fail).
   cardRev        Int       @default(0) @map("card_rev")
-  // When the card was last written, for the narration throttle. Slack's
-  // write is rate-limited per app, and tool boundaries alone do not bound
-  // it — a busy agent runs tools faster than the ceiling allows.
+  // When the card's current write window opened: every write to the card
+  // claims it, one per window, and a change inside it is deferred to the
+  // window's end. Slack's write is rate-limited per app, and tool boundaries
+  // alone do not bound it: a busy agent runs tools faster than the ceiling
+  // allows.
   cardAt         DateTime? @map("card_at")
   createdAt      DateTime  @default(now()) @map("created_at")
 
   agentChannel AgentChannel @relation(fields: [agentChannelId], references: [id], onDelete: Cascade)
 
+  // A thread's live loader, by its address: the native Stop arrives naming
+  // only the conversation and the thread root.
+  @@index([agentChannelId, channel, messageTs])
   @@map("channel_turn_receipts")
 }
 
@@ -2216,6 +2614,7 @@ model AppConnection {
   sourceConnection   AppConnection?     @relation("DerivedConnections", fields: [sourceConnectionId], references: [id], onDelete: Cascade)
   derivedConnections AppConnection[]    @relation("DerivedConnections")
   policyRuleTargets  PolicyRuleTarget[]
+  skillSources       SkillSource[]
 
   @@index([sourceConnectionId])
   @@index([workspaceId, provider])
@@ -2638,6 +3037,11 @@ model AgentEvalRun {
   // A partial fingerprint of the agent's configuration at run time
   // (instructions, model, effort, enabled skills, granted rule IDs).
   configVersion   String    @map("config_version")
+  // The model the agent answered with, resolved at admission. Custom checks
+  // are judged on it too, unless the provider cannot run it there (each
+  // verdict records its own judge model). Null on runs recorded before it
+  // was kept, or when the agent had no model key.
+  model           String?
   total           Int
   // EvalResult[] (validations/evals.ts), in question order. Bounded by the
   // active-question cap. Outcome counts are derived from it, never stored.
@@ -2689,4 +3093,91 @@ model AgentEvalSchedule {
 
   @@index([enabled, nextFireAt])
   @@map("agent_eval_schedules")
+}
+
+// A shared port of an agent's sandbox (plans/sandbox-ports.md §4): one stable
+// hostname per (agent, port), reached through the preview relay over the
+// supervisor channel — never inbound to the sandbox. Keyed on the AGENT, not
+// the sandbox row, so the hostname survives sandbox recreation (park/wake,
+// image rolls) and the app's configured base URL keeps working.
+model SandboxPort {
+  id              String    @id @default(uuid())
+  agentId         String    @map("agent_id")
+  port            Int
+  // Hostname label, globally unique: "p8080-my-agent-7f3k" → <slug>.<preview domain>.
+  slug            String    @unique
+  // "private" (workspace members, OneCLI login) | "link" | "public".
+  // Phase 1 serves "private" only; the others are refused by the relay lookup.
+  visibility      String    @default("private")
+  // "preview" (a person or an approval shared a guest port) | "desktop" (the
+  // platform's own share of a hosted agent desktop's screen: never listed
+  // with the previews, never counted against their cap, never shareable or
+  // revocable by hand).
+  kind            String    @default("preview")
+  // Required for link/public; null = until revoked (private).
+  expiresAt       DateTime? @map("expires_at")
+  // The human who shared it (toggle), or the approver of the agent's ask.
+  createdByUserId String?   @map("created_by_user_id")
+  // Set when the share came from an agent's preview_expose approval.
+  approvalId      String?   @map("approval_id")
+  revokedAt       DateTime? @map("revoked_at")
+  // The command that brings the app behind this share back after a sleep
+  // (the agent's `preview_expose` startCommand). Run by the supervisor on a
+  // wake that a preview hit caused, as the agent's own background process;
+  // null = nothing to relaunch, the viewer sees "nothing is listening".
+  startCommand    String?   @map("start_command")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  agent     Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  createdBy User? @relation("SandboxPortCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  // One live share per (agent, port); revoked rows stay for audit and a
+  // re-share revives the same row (same slug, same hostname).
+  @@unique([agentId, port])
+  @@map("sandbox_ports")
+}
+
+// The takeover state of a hosted agent desktop: who holds the mouse, and
+// the one pending ask the agent made for a person to take it. One row per
+// agent, upserted; keyed on the AGENT like the shares, so it survives the
+// sandbox being replaced. The controller is a LEASE, renewed while the
+// controller's stream is open; the sweep releases a lease nobody renewed
+// (a closed tab), so control never sticks to a person who left.
+model DesktopSession {
+  id          String @id @default(uuid())
+  agentId     String @unique @map("agent_id")
+  workspaceId String @map("workspace_id")
+
+  controllerUserId String?   @map("controller_user_id")
+  controlTakenAt   DateTime? @map("control_taken_at")
+  controlExpiresAt DateTime? @map("control_expires_at")
+  // The push clock (the home-sync pacing shape, due-work): NULL means the
+  // current controller state has not reached the sandbox yet, and the next
+  // runner poll claims it (stamping now()) and emits `desktop.control`.
+  // Every take and release resets it to NULL. A claim lost on a dead
+  // channel is re-armed by the next change; the supervisor is idempotent.
+  controlPushedAt  DateTime? @map("control_pushed_at")
+
+  // The pending `request_human_takeover`: an opaque id the dashboard link
+  // carries (never a capability), the agent's one-line reason, and the
+  // turn that asked (the notice anchor; the resume targets it when live).
+  requestId             String?   @map("request_id")
+  requestReason         String?   @map("request_reason")
+  requestedAt           DateTime? @map("requested_at")
+  requestConversationId String?   @map("request_conversation_id")
+  requestTurnId         String?   @map("request_turn_id")
+  // The channel cards posted for the pending request (`[{channel, ts,
+  // userId}]`, the action-approval shape), settled on hand-back or expiry.
+  requestCardRefs       Json      @default("[]") @map("request_card_refs")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  agent      Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  controller User? @relation("DesktopController", fields: [controllerUserId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId])
+  @@index([controlExpiresAt])
+  @@map("desktop_sessions")
 }

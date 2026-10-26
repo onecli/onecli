@@ -26,7 +26,13 @@ vi.mock("@/hooks/use-channels", () => ({
     mutate: mocks.mutate,
     isPending: mocks.isPending,
   }),
-  useForgetPeer: () => ({ mutate: mocks.forget, isPending: false }),
+  useForgetPeer: () => ({
+    mutateAsync: (id: string) => {
+      mocks.forget(id);
+      return Promise.resolve();
+    },
+    isPending: false,
+  }),
   useResumePeer: () => ({ mutate: mocks.resume, isPending: false }),
 }));
 
@@ -155,7 +161,7 @@ describe("PeerRow", () => {
     expect(mocks.forget).not.toHaveBeenCalled();
     expect(screen.getByText(/Clears your side/)).toBeDefined();
     await userEvent.click(screen.getByRole("button", { name: "Remove" }));
-    expect(mocks.forget).toHaveBeenCalledWith("ag-ray", expect.anything());
+    expect(mocks.forget).toHaveBeenCalledWith("ag-ray");
   });
 
   it("Remove also appears when only the OTHER side has decided (their policy is state about this pair too)", async () => {

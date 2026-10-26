@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isModelEndpointNotFound,
   isProviderRefusal,
   isTranscriptRejected,
   isTrialCreditExhausted,
@@ -15,28 +16,54 @@ const TRANSCRIPT_400 =
 const UNSUPPORTED_IMAGE_400 =
   'Anthropic API error (400 Bad Request): {"type":"error","error":{"type":"invalid_request_error","message":"messages.720.content.0.tool_result.content.1.image.source.base64.media_type: Input should be \'image/jpeg\', \'image/png\', \'image/gif\' or \'image/webp\'"},"request_id":"req_011CBBBBBBBBBBBBBBBBBBBB"}';
 
+/** A rejected encrypted search result in saved history. Request id is fake. */
+const SEARCH_RESULT_REPLAY_400 =
+  'Anthropic API error (400 Bad Request): {"type":"error","error":{"type":"invalid_request_error","message":"messages.67.content.0: Invalid `encrypted_content` in `search_result` block"},"request_id":"req_011CCCCCCCCCCCCCCCCCCCCC"}';
+
+/** A replayed thinking block whose signature no longer verifies. */
+const THINKING_SIGNATURE_400 =
+  'Anthropic API error (400 Bad Request): {"type":"error","error":{"type":"invalid_request_error","message":"messages.3.content.0: Invalid `signature` in `thinking` block"},"request_id":"req_011CDDDDDDDDDDDDDDDDDDDD"}';
+
 describe("isTranscriptRejected", () => {
   it.each([
     TRANSCRIPT_400,
     // The duplicate-result sibling: also the transcript, also forever.
     'Anthropic API error (400 Bad Request): {"type":"error","error":{"type":"invalid_request_error","message":"messages.12.content.0: unexpected `tool_use_id` found in `tool_result` blocks: toolu_01. Each `tool_result` block must have a corresponding `tool_use` block in the previous message."}}',
     UNSUPPORTED_IMAGE_400,
+    SEARCH_RESULT_REPLAY_400,
+    THINKING_SIGNATURE_400,
+    // The public content-block name and unquoted field spelling.
+    "Invalid encrypted_content in web_search_result block",
   ])("classifies the provider rejecting the stored conversation: %s", (m) => {
     expect(isTranscriptRejected(m)).toBe(true);
   });
 
-  it.each([TRANSCRIPT_400, UNSUPPORTED_IMAGE_400])(
-    "is never a key problem: %s",
-    (m) => {
-      expect(isProviderRefusal(m)).toBe(false);
-    },
-  );
+  it.each([
+    TRANSCRIPT_400,
+    UNSUPPORTED_IMAGE_400,
+    SEARCH_RESULT_REPLAY_400,
+    THINKING_SIGNATURE_400,
+  ])("is never a key problem: %s", (m) => {
+    expect(isProviderRefusal(m)).toBe(false);
+  });
 
   it.each([
     'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 214937 tokens > 200000 maximum"}}',
     "harness event stream ended unexpectedly",
     // A tool's own output that merely mentions the block names.
     "Error: the tool_use tool_result parser failed",
+    // Prose that names the field without the provider's rejection shape.
+    "the encrypted_content field was empty in the search_result",
+    // A signature error outside the provider's known history blocks is not
+    // evidence that restarting the conversation will help.
+    "Invalid signature in jwt block",
+    "Invalid encrypted_content in custom block",
+    "Invalid signature in search_result block",
+    "Invalid encrypted_content in thinking block",
+    "Invalid signature in thinking blockage",
+    // OpenAI's encrypted-reasoning size limit: a different failure (jcode
+    // compacts it away), not a signature that no longer verifies.
+    'OpenAI API error (400): {"error":{"message":"encrypted_content is too large","type":"invalid_request_error"}}',
   ])("does not claim unrelated failures: %s", (m) => {
     expect(isTranscriptRejected(m)).toBe(false);
   });
@@ -126,5 +153,42 @@ describe("isProviderRefusal", () => {
     '{"error":"access_restricted","message":"Credentials exist for this host but none are assigned to this agent."}',
   ])("never re-dresses a OneCLI policy refusal: %s", (message) => {
     expect(isProviderRefusal(message)).toBe(false);
+  });
+});
+
+/** A proxy in front of the provider forwarding to a path the backend does
+ * not serve, behind jcode's Anthropic wrapper. */
+const PROXY_WRONG_PATH_404 =
+  'Anthropic API error (404 Not Found): {"error":{"code":"404","message": "Resource not found"}}';
+
+describe("isModelEndpointNotFound", () => {
+  it.each([
+    PROXY_WRONG_PATH_404,
+    // The other wrapper spelling the harness uses.
+    'API Error: 404 {"type":"error","error":{"type":"not_found_error","message":"model: claude-nonexistent"}}',
+    // A proxy's HTML 404 page behind the wrapper.
+    "Anthropic API error (404 Not Found): <html><body><h1>404 Not Found</h1></body></html>",
+  ])("classifies a model-endpoint 404: %s", (message) => {
+    expect(isModelEndpointNotFound(message)).toBe(true);
+  });
+
+  it("is not a key problem and not a damaged transcript", () => {
+    expect(isProviderRefusal(PROXY_WRONG_PATH_404)).toBe(false);
+    expect(isTranscriptRejected(PROXY_WRONG_PATH_404)).toBe(false);
+  });
+
+  it.each([
+    // A tool's own output merely quoting a 404 is not the model endpoint.
+    "Error: GET https://example.com/data returned 404 Not Found",
+    "HTTP 404 from the docs site",
+    // Other model-endpoint statuses keep their own handling.
+    'API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"}}',
+    'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 214937 tokens > 200000 maximum"}}',
+    // A status that merely starts with 404 is not 404.
+    "API Error: 4040 something",
+    // The gateway's OWN 404 names its fix; it keeps the passthrough.
+    'API Error: 404 {"error":"credential_not_found","message":"No credentials configured for api.example.com in OneCLI."}',
+  ])("keeps the raw passthrough for: %s", (message) => {
+    expect(isModelEndpointNotFound(message)).toBe(false);
   });
 });

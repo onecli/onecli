@@ -1,6 +1,76 @@
 import { db } from "@onecli/db";
 import { actionSupportsAlwaysAllow } from "./action-approval-service";
 import { normalizeState } from "./agent-reach-service";
+import {
+  CUSTOM_CONNECTION_ACTION,
+  customConnectionProposalSchema,
+  registrableDomainOf,
+} from "../../validations/custom-connection";
+import {
+  WEBHOOK_UPDATE_ACTION,
+  updateWebhookArgsSchema,
+} from "../../validations/webhooks";
+
+/** An agent-proposed custom connection, as the approve card renders it.
+ * Every field is non-secret by construction (the proposal has no value). */
+export interface CustomConnectionProposalView {
+  name: string;
+  hostPattern: string;
+  /** The owner the key is sent to: the card highlights it. */
+  registrableDomain: string | null;
+  pathPattern: string | null;
+  headerName: string;
+  valueFormat: string;
+  docsUrl: string | null;
+  reason: string;
+}
+
+/** The structured view of a custom-connection payload, or null when the
+ * row is another action or its payload no longer validates (the bell then
+ * shows the generic row, where only decline goes through). */
+const customConnectionView = (
+  action: string,
+  payload: unknown,
+): CustomConnectionProposalView | null => {
+  if (action !== CUSTOM_CONNECTION_ACTION) return null;
+  const parsed = customConnectionProposalSchema.safeParse(payload);
+  if (!parsed.success) return null;
+  const p = parsed.data;
+  return {
+    name: p.name,
+    hostPattern: p.hostPattern,
+    registrableDomain: registrableDomainOf(p.hostPattern),
+    pathPattern: p.pathPattern ?? null,
+    headerName: p.headerName,
+    valueFormat: p.valueFormat,
+    docsUrl: p.docsUrl ?? null,
+    reason: p.reason,
+  };
+};
+
+/** An agent's held webhook change, as the approve card renders it: the full
+ * text, since the one-line summary is clamped. */
+export interface WebhookChangeView {
+  name: string | null;
+  instructions: string | null;
+  enabled: boolean | null;
+}
+
+/** The structured view of a webhook-change payload, or null for another
+ * action or a payload that no longer validates (the generic row then). */
+const webhookChangeView = (
+  action: string,
+  payload: unknown,
+): WebhookChangeView | null => {
+  if (action !== WEBHOOK_UPDATE_ACTION) return null;
+  const parsed = updateWebhookArgsSchema.safeParse(payload);
+  if (!parsed.success) return null;
+  return {
+    name: parsed.data.name ?? null,
+    instructions: parsed.data.instructions ?? null,
+    enabled: parsed.data.enabled ?? null,
+  };
+};
 
 /**
  * The approvals bell's CHANNEL arm (4d): every channel decision waiting on a
@@ -31,6 +101,11 @@ export interface PendingActionApprovalItem {
   /** ISO timestamps. */
   createdAt: string;
   expiresAt: string;
+  /** Set for an agent-proposed custom connection: the card renders it and
+   * asks for the key (approve goes through the dedicated route). */
+  customConnection: CustomConnectionProposalView | null;
+  /** Set for an agent's webhook change: the card shows the full change. */
+  webhookChange: WebhookChangeView | null;
 }
 
 export interface PendingReachAskItem {
@@ -70,6 +145,7 @@ export const listWorkspacePendingChannelApprovals = async (
         id: true,
         agentId: true,
         action: true,
+        payload: true,
         summary: true,
         conversationId: true,
         createdAt: true,
@@ -105,6 +181,8 @@ export const listWorkspacePendingChannelApprovals = async (
         conversationId: a.conversationId,
         createdAt: a.createdAt.toISOString(),
         expiresAt: a.expiresAt.toISOString(),
+        customConnection: customConnectionView(a.action, a.payload),
+        webhookChange: webhookChangeView(a.action, a.payload),
       }),
     ),
     ...asks

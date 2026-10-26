@@ -685,3 +685,37 @@ describe.skipIf(!PROOF_URL)(
     });
   },
 );
+
+describe.skipIf(!PROOF_URL)(
+  "the default-agent guard is gone (real PostgreSQL)",
+  () => {
+    it("deletes a legacy isDefault agent, the workspace's last one included", async () => {
+      // The "Cannot delete the default agent" guard was retired: every
+      // agent is deletable and a workspace with no agents is valid. A pre-v2
+      // row still carrying isDefault must not resurrect it.
+      const LONE_WS = `${P}proj-lone-default`;
+      const LEGACY_DEFAULT = `${P}agent-legacy-default`;
+      await db.workspace.create({
+        data: { id: LONE_WS, name: LONE_WS, organizationId: ORG },
+      });
+      await db.agent.create({
+        data: {
+          id: LEGACY_DEFAULT,
+          workspaceId: LONE_WS,
+          name: LEGACY_DEFAULT,
+          identifier: LEGACY_DEFAULT,
+          accessToken: `aoc_${LEGACY_DEFAULT}`,
+          isDefault: true,
+        },
+      });
+
+      await expect(
+        agents.deleteAgent(LONE_WS, LEGACY_DEFAULT),
+      ).resolves.not.toThrow();
+      expect(
+        await db.agent.findUnique({ where: { id: LEGACY_DEFAULT } }),
+      ).toBeNull();
+      expect(await db.agent.count({ where: { workspaceId: LONE_WS } })).toBe(0);
+    });
+  },
+);

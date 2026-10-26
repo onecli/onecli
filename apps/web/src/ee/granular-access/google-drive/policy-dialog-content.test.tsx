@@ -113,7 +113,7 @@ describe("GoogleDrivePolicyDialogContent", () => {
   });
 
   it("opens folder by folder until one has no subfolders, with counts at every level", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     setup({ driveFolders: [] });
     expect(screen.getByText("1 folder · 3 files")).toBeInTheDocument();
     expect(screen.getByText("Empty")).toBeInTheDocument();
@@ -137,7 +137,7 @@ describe("GoogleDrivePolicyDialogContent", () => {
   });
 
   it("stores the full chain of ids for a deeply nested folder", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onPolicyChange } = setup({ driveFolders: [] });
     await expand(user, "Clients");
     await expand(user, "Acme");
@@ -149,7 +149,7 @@ describe("GoogleDrivePolicyDialogContent", () => {
 
   it("names a picked chain from the browse, before the names lookup", async () => {
     namesKnown = false;
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     // Feed each change back in, as the real dialog does.
     const { onPolicyChange, rerender } = setup({ driveFolders: [] });
     onPolicyChange.mockImplementation((policy) => rerender(ui(policy)));
@@ -164,7 +164,7 @@ describe("GoogleDrivePolicyDialogContent", () => {
   });
 
   it("collapses an opened folder", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     setup({ driveFolders: [] });
     await expand(user, "Clients");
     expect(screen.getByText("Acme")).toBeInTheDocument();
@@ -173,14 +173,14 @@ describe("GoogleDrivePolicyDialogContent", () => {
   });
 
   it("selects a top-level shared drive by its id", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onPolicyChange } = setup({ driveFolders: [] });
     await user.click(screen.getByRole("checkbox", { name: "Team Drive" }));
     expect(onPolicyChange).toHaveBeenLastCalledWith({ driveFolders: ["SD"] });
   });
 
   it("labels saved chains with names and clears to all on last removal", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onPolicyChange } = setup({ driveFolders: ["F1/F2"] });
     await user.click(
       screen.getByRole("button", { name: "Remove Clients / Acme" }),
@@ -197,7 +197,7 @@ describe("GoogleDrivePolicyDialogContent", () => {
   });
 
   it("shows descendants of a selected folder as covered and locked", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     setup({ driveFolders: ["F1"] });
     await expand(user, "Clients");
     await expand(user, "Acme");
@@ -228,7 +228,7 @@ describe("GoogleDrivePolicyDialogContent", () => {
   });
 
   it("keeps a folder with a capped count expandable", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     setup({ driveFolders: [] });
     expect(screen.getByText("1000+ items")).toBeInTheDocument();
     await expand(user, "Archive");
@@ -236,7 +236,7 @@ describe("GoogleDrivePolicyDialogContent", () => {
   });
 
   it("warns and offers a reconnect instead of listing when 'Read files' wasn't granted", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onReconnect = vi.fn();
     render(
       <QueryClientProvider client={queryClient}>
@@ -296,16 +296,8 @@ describe("GoogleDrivePolicyDialogContent", () => {
     expect(fetched).toEqual([""]);
   });
 
-  it("groups the top level: Shared drives, then Shared with me, then My Drive", () => {
-    setup({ driveFolders: [] });
-    const headings = screen
-      .getAllByRole("heading", { level: 3 })
-      .map((h) => h.textContent);
-    expect(headings).toEqual(["Shared drives", "Shared with me", "My Drive"]);
-  });
-
   it("drills into a Shared-with-me folder and selects it as its own chain head", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     setup({ driveFolders: [] });
     await expand(user, "Inbox");
     expect(screen.getByText("Batch 1")).toBeInTheDocument();

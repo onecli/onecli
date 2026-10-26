@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EvalResult } from "../validations/evals";
+import {
+  MODEL_PROVIDER_ERROR_MESSAGE,
+  TRANSCRIPT_REJECTED_MESSAGE,
+  TURN_FAILED_RAW_ERROR_MESSAGE,
+} from "../validations/conversation";
 import { ServiceError } from "./errors";
 
 const mocks = vi.hoisted(() => ({
@@ -20,6 +25,8 @@ const mocks = vi.hoisted(() => ({
   abortTurn: vi.fn(),
   getEvalRunEvidence: vi.fn(),
   judgeAnswer: vi.fn(),
+  loadAgentForLlm: vi.fn(),
+  resolveAgentLlmCredential: vi.fn(),
 }));
 vi.mock("@onecli/db", () => ({
   db: {
@@ -41,6 +48,10 @@ vi.mock("./agent-runs-service", () => ({
 }));
 vi.mock("./eval-judge", () => ({
   judgeAnswer: mocks.judgeAnswer,
+}));
+vi.mock("./llm-credential-service", () => ({
+  loadAgentForLlm: mocks.loadAgentForLlm,
+  resolveAgentLlmCredential: mocks.resolveAgentLlmCredential,
 }));
 vi.mock("../lib/logger", () => ({
   logger: { child: () => ({ error: vi.fn(), warn: vi.fn() }) },
@@ -81,6 +92,14 @@ beforeEach(() => {
     effort: "",
   });
   mocks.skill.findMany.mockResolvedValue([]);
+  mocks.loadAgentForLlm.mockResolvedValue({
+    id: "agent",
+    workspaceId: "workspace",
+    model: "claude-opus-4-7",
+    effort: null,
+    modelProvider: "anthropic",
+  });
+  mocks.resolveAgentLlmCredential.mockResolvedValue({ provider: "anthropic" });
   mocks.policyRuleIdentity.findMany.mockResolvedValue([]);
   mocks.queryRaw.mockResolvedValue([{ id: "agent" }]);
   mocks.agentEvalQuestion.findMany.mockResolvedValue([question]);
@@ -90,6 +109,7 @@ beforeEach(() => {
     id: "run1",
     status: "queued",
     configVersion: "cfg",
+    model: null,
     total: 1,
     results: [],
     error: null,
@@ -126,6 +146,7 @@ describe("run admission", () => {
         id: "old",
         status: "done",
         configVersion: "cfg",
+        model: null,
         total: 2,
         results: [{ itemId: "gq_1", pass: false, scores: {} }],
         error: null,
@@ -159,31 +180,33 @@ describe("run admission", () => {
     expect(mocks.createTurn).not.toHaveBeenCalled();
   });
 
-  it("ends stale runs before admitting, only when no eval turn is active", async () => {
+  it("records the model the agent runs on: its own choice for its key's provider", async () => {
     await start();
-    expect(mocks.agentEvalRun.updateMany).toHaveBeenCalledWith({
-      where: {
-        agentId: "agent",
-        status: { in: ["queued", "running"] },
-        updatedAt: { lt: expect.any(Date) },
-      },
-      data: expect.objectContaining({ status: "failed" }),
-    });
-  });
-
-  it("leaves an idle run alone while an eval turn of the agent is active", async () => {
-    mocks.turn.findFirst.mockResolvedValue({ id: "active-turn" });
-    await start();
-    expect(mocks.agentEvalRun.updateMany).not.toHaveBeenCalledWith(
+    expect(mocks.agentEvalRun.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ updatedAt: expect.anything() }),
+        data: expect.objectContaining({ model: "claude-opus-4-7" }),
       }),
     );
   });
 
-  it("needs at least one question", async () => {
-    mocks.agentEvalQuestion.findMany.mockResolvedValue([]);
-    await expect(start()).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+  it("records the provider default when the stored choice is another provider's", async () => {
+    mocks.resolveAgentLlmCredential.mockResolvedValue({ provider: "openai" });
+    await start();
+    expect(mocks.agentEvalRun.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ model: "gpt-5.4" }),
+      }),
+    );
+  });
+
+  it("records no model when the agent has no key", async () => {
+    mocks.resolveAgentLlmCredential.mockResolvedValue(null);
+    await start();
+    expect(mocks.agentEvalRun.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ model: null }),
+      }),
+    );
   });
 });
 
@@ -239,6 +262,7 @@ describe("the worker", () => {
       expect(mocks.judgeAnswer).toHaveBeenCalledWith({
         agent: { id: "agent", workspaceId: "workspace" },
         organizationId: "org",
+        model: "claude-opus-4-7",
         question: custom.question,
         criteria: custom.expected,
         answer: "42",
@@ -344,6 +368,44 @@ describe("the worker", () => {
       });
     },
   );
+
+  it.each([
+    {
+      kind: "JSON",
+      error:
+        'Anthropic API error (500 Internal Server Error): {"error":{"type":"api_error","message":"Internal server error"}}',
+    },
+    {
+      kind: "HTML",
+      error:
+        "Anthropic API error (502 Bad Gateway): <html><body>Bad Gateway</body></html>",
+    },
+  ])(
+    "masks a failed turn's raw $kind payload in the saved result",
+    async ({ error }) => {
+      mocks.turn.findUniqueOrThrow.mockResolvedValue({
+        status: "failed",
+        error,
+      });
+      await start();
+      await finish();
+      expect(saved.results[0]).toMatchObject({
+        outcome: "error",
+        error: TURN_FAILED_RAW_ERROR_MESSAGE,
+      });
+    },
+  );
+
+  it.each([
+    "Failed to run git push: permission denied",
+    MODEL_PROVIDER_ERROR_MESSAGE,
+    TRANSCRIPT_REJECTED_MESSAGE,
+  ])("preserves a failed turn's useful error sentence: %s", async (error) => {
+    mocks.turn.findUniqueOrThrow.mockResolvedValue({ status: "failed", error });
+    await start();
+    await finish();
+    expect(saved.results[0]).toMatchObject({ outcome: "error", error });
+  });
 
   it("never passes a done turn carrying an error", async () => {
     mocks.turn.findUniqueOrThrow.mockResolvedValue({

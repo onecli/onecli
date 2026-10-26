@@ -9,6 +9,9 @@ export interface ConnectRequestBody {
   connectionId?: string;
   label?: string;
   method?: string;
+  /** The agent a workspace connect started from: a created or re-added
+   * connection is switched on for it (`agent-connect-grant-service`). */
+  agentId?: string;
 }
 
 /** What a rejected connect writes to the log: see `describeExchangeFailure`. */

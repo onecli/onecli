@@ -17,6 +17,12 @@ vi.mock("@/hooks/use-approvals", () => ({
 vi.mock("./approval-details-dialog", () => ({
   ApprovalDetailsDialog: () => null,
 }));
+// A spy on the shared merge, to prove the card doesn't rebuild the table on
+// every countdown tick. The real rule runs.
+vi.mock("@onecli/api/lib/batch-table", async (load) => {
+  const real = await load<typeof import("@onecli/api/lib/batch-table")>();
+  return { ...real, mergeBatchTables: vi.fn(real.mergeBatchTables) };
+});
 
 const { GroupedApprovalCard } = await import("./grouped-approval-card");
 
@@ -163,6 +169,39 @@ describe("GroupedApprovalCard", () => {
     expect(screen.getByText("Approve all 1")).toBeInTheDocument();
   });
 
+  it("a settled row whose approved request did nothing says so on its badge, the reason readable without a hover", () => {
+    const [ada, ben] = [contact("Ada"), contact("Ben")];
+    const [group] = groupApprovals([ben!]);
+    render(
+      <GroupedApprovalCard
+        group={group!}
+        settled={[
+          {
+            approval: ada!,
+            outcome: "approved",
+            via: "slack",
+            result: {
+              ok: false,
+              error: "Email: invalid email address",
+              action: "Create Contact",
+            },
+          },
+        ]}
+      />,
+    );
+    const badge = screen.getByRole("status");
+    // The count fits the badge; the whole line is its tooltip AND what a
+    // screen reader hears, so keyboard and touch users get the reason too.
+    expect(badge).toHaveTextContent("Approved in Slack · It failed");
+    expect(badge).toHaveAttribute(
+      "title",
+      "It failed · Email: invalid email address",
+    );
+    expect(badge.querySelector(".sr-only")?.textContent?.trim()).toBe(
+      "· It failed · Email: invalid email address",
+    );
+  });
+
   it("pins and flags an odd action so it can't hide in the batch", () => {
     const odd = contact("Old", {
       summary: {
@@ -275,7 +314,7 @@ describe("GroupedApprovalCard", () => {
     }
   });
 
-  it("stops waiting when the batch goes quiet, and says how many never came", () => {
+  it("stops waiting when the batch goes quiet, and says the rest may follow", () => {
     const batch = { id: "t5", label: "Set Title", total: 20 };
     const rows = Array.from({ length: 19 }, (_, i) =>
       contact(`M${i}`, { batch }),
@@ -283,7 +322,7 @@ describe("GroupedApprovalCard", () => {
     card(rows);
     expect(
       screen.getByText(
-        "1 of 20 never arrived. Approve all covers the 19 shown.",
+        "19 of 20 here. The other one may only be sent after you decide these. Approve all covers the 19 shown.",
       ),
     ).toHaveAttribute("role", "status");
     fireEvent.click(screen.getByRole("button", { name: "Approve all 19" }));
@@ -617,5 +656,150 @@ describe("GroupedApprovalCard: a shared record", () => {
     // Not merged into the title: each row names its own record, with its id.
     expect(screen.getByText("Upload file")).toBeInTheDocument();
     expect(screen.getAllByText(/Acme \(001fn/)).toHaveLength(2);
+  });
+});
+
+describe("GroupedApprovalCard: a batch of record lists", () => {
+  // One task split by field set (6 x industry, 1 x employees, 2 x both):
+  // three bulk calls whose titles differ, one change. It reads as ONE table,
+  // by the same rule Slack's card uses (`mergeBatchTables`, tested in
+  // @onecli/api); here, how the web shows it.
+  const IND = { api: "Industry", label: "Industry" };
+  const EMP = { api: "NumberOfEmployees", label: "Number of employees" };
+  const acct = (i: number, values: (string | null)[]) => ({
+    id: `001AA00000AbCd${String(i).padStart(4, "0")}`,
+    name: `Account ${i}`,
+    new: values,
+    old: values.map(() => null),
+    ops: values.map(() => "fill" as const),
+    op: "fill" as const,
+  });
+  const batch = { id: "b1", label: "Fill blank fields (9 accounts)", total: 3 };
+  const table = (
+    fields: (typeof IND)[],
+    rows: ReturnType<typeof acct>[],
+  ): PendingApproval =>
+    contact("x", {
+      method: "PATCH",
+      batch,
+      summary: {
+        action: `Update ${rows.length} Accounts`,
+        details: [],
+        bulk: {
+          object: "Account",
+          objectLabel: "Account",
+          fields,
+          rows,
+          oldValuesRead: true,
+        },
+      },
+    });
+  const fieldSplit = () => [
+    table(
+      [IND],
+      [1, 2, 3, 4, 5, 6].map((i) => acct(i, ["Retail"])),
+    ),
+    table([EMP], [acct(7, ["1200"])]),
+    table(
+      [IND, EMP],
+      [acct(8, ["Banking", "40"]), acct(9, ["Insurance", "75"])],
+    ),
+  ];
+
+  it("shows one table of every record, no odd-one-out warning, Approve all over the 3 requests", () => {
+    const approvals = fieldSplit();
+    card(approvals);
+    expect(screen.getByText("Update 9 Accounts")).toBeInTheDocument();
+    expect(screen.queryByText(/Also in this batch/)).not.toBeInTheDocument();
+    const region = screen.getByRole("region", { name: /9 accounts: changes/ });
+    for (const i of [1, 7, 9]) {
+      expect(region.textContent).toContain(`Account ${i}`);
+    }
+    expect(region.textContent).toContain("Number of employees");
+    fireEvent.click(screen.getByRole("button", { name: /Approve all 9/ }));
+    expect(state.mutate).toHaveBeenCalledWith({
+      ids: approvals.map((a) => a.id),
+      decision: "approve",
+    });
+  });
+
+  it("can still decide each request, and back", () => {
+    card(fieldSplit());
+    fireEvent.click(
+      screen.getByRole("button", { name: /Decide each request/ }),
+    );
+    expect(screen.queryByRole("region", { name: /changes/ })).toBeNull();
+    expect(
+      screen.getAllByRole("button", { name: /^Approve (?!all)/ }),
+    ).toHaveLength(3);
+    fireEvent.click(screen.getByRole("button", { name: "Show as one table" }));
+    expect(screen.getByRole("region", { name: /changes/ })).toBeInTheDocument();
+  });
+
+  it("goes back to rows once a request is decided, here or elsewhere", () => {
+    const [ind, emp, both] = fieldSplit();
+    const [group] = groupApprovals([ind!, both!]);
+    const { unmount } = render(
+      <GroupedApprovalCard
+        group={group!}
+        settled={[{ approval: emp!, outcome: "denied" }]}
+      />,
+    );
+    expect(screen.queryByText("Update 9 Accounts")).toBeNull();
+    unmount();
+
+    card(fieldSplit());
+    fireEvent.click(
+      screen.getByRole("button", { name: /Decide each request/ }),
+    );
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /^Approve (?!all)/ })[0]!,
+    );
+    expect(screen.queryByText("Update 9 Accounts")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Show as one table" }),
+    ).toBeNull();
+  });
+
+  it("keeps a batch of one-record writes as its rows", () => {
+    // `PATCH /sobjects/Account/{id}` per record: a one-row table AND a
+    // title naming its record, as the gateway sends it.
+    const one = (i: number) => {
+      const a = table([IND], [acct(i, ["Retail"])]);
+      a.summary = {
+        ...a.summary!,
+        action: `Update Account Account ${i}`,
+        subject: {
+          verb: "Update Account",
+          lead: "Update Account ",
+          record: `Account ${i}`,
+          row: 0,
+        },
+        details: [
+          { label: "Account", value: `Account ${i}` },
+          { label: "Industry", value: "Retail" },
+        ],
+      };
+      return a;
+    };
+    card([one(1), one(2), one(3)]);
+    expect(screen.queryByRole("region", { name: /changes/ })).toBeNull();
+    expect(screen.queryByText("Update 3 Accounts")).toBeNull();
+    expect(screen.getByText(/Industry/)).toBeInTheDocument();
+  });
+
+  it("builds the table once, not on every countdown tick", async () => {
+    const { mergeBatchTables } = await import("@onecli/api/lib/batch-table");
+    vi.useFakeTimers();
+    try {
+      card(fieldSplit());
+      const built = vi.mocked(mergeBatchTables).mock.calls.length;
+      act(() => {
+        vi.advanceTimersByTime(3_000);
+      });
+      expect(vi.mocked(mergeBatchTables).mock.calls).toHaveLength(built);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

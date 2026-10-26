@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { HarnessEvent } from "@onecli/agent-protocol";
+import type { HarnessEvent, SteerInput } from "@onecli/agent-protocol";
 
 /**
  * The jcode adapter against a MOCKED SDK — the layer between the pure
@@ -32,8 +32,9 @@ import type { HarnessEvent } from "@onecli/agent-protocol";
  *   (`harness_busy`); a user abort mid-heal is never answered by a resend.
  * - `applyPreferences` honesty: a daemon-coded refusal earns a notice; an
  *   SDK `timeout` (a DEFERRED op, not an answer) must not.
- * - The steer plumbing: turn-start interrupt cancel, non-urgent
- *   `softInterrupt`, refusal between turns, and the terminal reconcile.
+ * - The steer plumbing: turn-start interrupt cancel, the one
+ *   `soft_interrupt` request (tagged when the daemon echoes ids, its images
+ *   riding with it), refusal between turns, and the terminal reconcile.
  */
 
 interface FakeCall {
@@ -71,6 +72,9 @@ const state: {
   /** When > 0, a send's `message_accepted` (and everything after it) is
    * held back this long — the fence stays up, as under a foreign run. */
   acceptDelayMs: number;
+  /** When set, a send delivers nothing: the test pushes `message_accepted`
+   * itself, in stream order, instead of betting on timer ordering. */
+  manualAccept: boolean;
   softInterruptError: Error | null;
   setModelError: Error | null;
   setEffortError: Error | null;
@@ -99,6 +103,7 @@ const state: {
   historyErrorQueue: [],
   historyGate: null,
   acceptDelayMs: 0,
+  manualAccept: false,
   softInterruptError: null,
   setModelError: null,
   setEffortError: null,
@@ -183,6 +188,7 @@ vi.mock("@1jehuang/jcode-sdk", () => {
     }
     sendMessage(sessionId: string, content: string) {
       record("sendMessage", sessionId, content);
+      if (state.manualAccept) return Promise.resolve();
       // Delivery rides a macrotask, matching the wire: the real daemon
       // never streams a turn's frames inside the send call itself. FIFO
       // within the one timeout. The daemon ACKS the `message` request on
@@ -214,16 +220,10 @@ vi.mock("@1jehuang/jcode-sdk", () => {
       }, 0);
       return Promise.resolve();
     }
-    softInterrupt(sessionId: string, content: string, urgent?: boolean) {
-      record("softInterrupt", sessionId, content, urgent);
-      return state.softInterruptError
-        ? Promise.reject(state.softInterruptError)
-        : Promise.resolve();
-    }
     softInterruptWithId(
       sessionId: string,
       content: string,
-      options?: { clientId?: string },
+      options?: { clientId?: string; images?: [string, string][] },
     ) {
       record("softInterruptWithId", sessionId, content, options);
       return state.softInterruptError
@@ -317,7 +317,9 @@ vi.mock("@1jehuang/jcode-sdk", () => {
 import {
   ABORT_TERMINAL_GRACE_MS,
   BACKGROUND_TOOL_RESULT_CAPABILITY,
+  BUSY_DETECT_WINDOW_MS,
   BUSY_RESEND_DELAYS_MS,
+  ORPHAN_DRAIN_MIN_MS,
   POST_ACCEPT_IDLE_MS,
   SOFT_INTERRUPT_IDS_CAPABILITY,
   TOOL_INPUT_MAX_CHARS,
@@ -327,6 +329,8 @@ import {
 const ORIGINAL_DELAYS = [...BUSY_RESEND_DELAYS_MS];
 const ORIGINAL_POST_ACCEPT_IDLE_MS = POST_ACCEPT_IDLE_MS.value;
 const ORIGINAL_ABORT_GRACE_MS = ABORT_TERMINAL_GRACE_MS.value;
+const ORIGINAL_BUSY_DETECT_WINDOW_MS = BUSY_DETECT_WINDOW_MS.value;
+const ORIGINAL_ORPHAN_DRAIN_MIN_MS = ORPHAN_DRAIN_MIN_MS.value;
 
 const collect = async (
   iterable: AsyncIterable<HarnessEvent>,
@@ -373,12 +377,15 @@ beforeEach(() => {
   state.historyErrorQueue = [];
   state.historyGate = null;
   state.acceptDelayMs = 0;
+  state.manualAccept = false;
   state.softInterruptError = null;
   state.setModelError = null;
   state.setEffortError = null;
   state.capabilities = [SOFT_INTERRUPT_IDS_CAPABILITY];
   state.backgroundToolResult = { moved: false };
   state.bridges = [];
+  BUSY_DETECT_WINDOW_MS.value = 100;
+  ORPHAN_DRAIN_MIN_MS.value = 20;
   delete process.env.ONECLI_JCODE_BINARY;
   delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
   delete process.env.ANTHROPIC_API_KEY;
@@ -406,6 +413,8 @@ afterEach(() => {
   );
   POST_ACCEPT_IDLE_MS.value = ORIGINAL_POST_ACCEPT_IDLE_MS;
   ABORT_TERMINAL_GRACE_MS.value = ORIGINAL_ABORT_GRACE_MS;
+  BUSY_DETECT_WINDOW_MS.value = ORIGINAL_BUSY_DETECT_WINDOW_MS;
+  ORPHAN_DRAIN_MIN_MS.value = ORIGINAL_ORPHAN_DRAIN_MIN_MS;
 });
 
 describe("the connection model", () => {
@@ -674,7 +683,9 @@ describe("the connection model", () => {
     const { session } = await startSession();
     const collected = collect(session.runTurn({ message: "task" }));
     // Past the settle window, then the refusal lands.
-    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    await new Promise((resolve) =>
+      setTimeout(resolve, BUSY_DETECT_WINDOW_MS.value + 200),
+    );
     state.clients[0]?.push({
       ev: "error",
       message: "Already processing a message",
@@ -972,7 +983,7 @@ describe("the jcode steer plumbing", () => {
       state.capabilities = [];
     });
 
-    it("steer maps to a NON-URGENT softInterrupt while the turn runs", async () => {
+    it("steer maps to an UNTAGGED soft interrupt while the turn runs (the reconcile matches it by text)", async () => {
       state.events = [
         { ev: "text_delta", text: "working" },
         { ev: "turn_done" },
@@ -985,8 +996,8 @@ describe("the jcode steer plumbing", () => {
 
       await session.steer?.({ id: "f1", message: "fold this in" });
 
-      expect(callsOf("softInterrupt")).toEqual([
-        { method: "softInterrupt", args: ["s-1", "fold this in", false] },
+      expect(callsOf("softInterruptWithId")).toEqual([
+        { method: "softInterruptWithId", args: ["s-1", "fold this in", {}] },
       ]);
       // Drain to completion so the shared fake stays clean.
       let next = await iterator.next();
@@ -998,10 +1009,10 @@ describe("the jcode steer plumbing", () => {
       await expect(
         session.steer?.({ id: "f1", message: "too early" }),
       ).rejects.toThrow("no turn in flight");
-      expect(callsOf("softInterrupt")).toHaveLength(0);
+      expect(callsOf("softInterruptWithId")).toHaveLength(0);
     });
 
-    it("propagates a coded harness refusal from softInterrupt", async () => {
+    it("propagates a coded harness refusal from the soft interrupt", async () => {
       state.events = [
         { ev: "text_delta", text: "working" },
         { ev: "turn_done" },
@@ -1175,9 +1186,7 @@ describe("the jcode steer plumbing", () => {
      * answers on its request loop, so it precedes the run's frames. */
     const steerThen = async (
       frames: { ev: string; [key: string]: unknown }[],
-      steers: { id: string; message: string }[] = [
-        { id: "f1", message: "fold this in" },
-      ],
+      steers: SteerInput[] = [{ id: "f1", message: "fold this in" }],
     ) => {
       state.events = frames;
       const { session } = await startSession();
@@ -1217,7 +1226,32 @@ describe("the jcode steer plumbing", () => {
           args: ["s-1", "fold this in", { clientId: "f1" }],
         },
       ]);
-      expect(callsOf("softInterrupt")).toHaveLength(0);
+    });
+
+    it("a steer's images ride the SAME request, in jcode's own [mediaType, base64] shape", async () => {
+      // MUTATION-TESTED: drop the images from the request and the words
+      // join while the picture is silently lost (the original jcode#623 bug,
+      // reintroduced on our side of the wire).
+      await steerThen(
+        [{ ev: "turn_done" }],
+        [
+          {
+            id: "f1",
+            message: "what is this?",
+            images: [{ mediaType: "image/png", dataBase64: "iVBORw0K" }],
+          },
+        ],
+      );
+      expect(callsOf("softInterruptWithId")).toEqual([
+        {
+          method: "softInterruptWithId",
+          args: [
+            "s-1",
+            "what is this?",
+            { clientId: "f1", images: [["image/png", "iVBORw0K"]] },
+          ],
+        },
+      ]);
     });
 
     it("the injection confirms the join LIVE, then the next framed message is the reply, before the work goes on", async () => {
@@ -1492,7 +1526,7 @@ describe("the frame fence", () => {
     // the foreign run ends — and our own frames can only follow it. The
     // mock delays the ack; the foreign frames are pushed by hand under it.
     state.events = [];
-    state.acceptDelayMs = 40;
+    state.manualAccept = true;
     const { session } = await startSession();
     const iterator = session
       .runTurn({ message: "task" })
@@ -1513,8 +1547,8 @@ describe("the frame fence", () => {
     });
     client?.push({ ev: "error", message: "the wake run failed" });
 
-    // Our turn spawns: the ack lands (the mock's 40 ms), then our frames.
-    await tick(60);
+    // Our turn spawns: the ack lands, then our frames (stream order).
+    client?.push({ ev: "message_accepted", session_id: client.sessionId });
     client?.push({ ev: "text_delta", text: "ours" });
     client?.push({ ev: "turn_done" });
 
@@ -1944,6 +1978,15 @@ describe("issue #1124 — the fence outlives a slow get_history", () => {
 });
 
 describe("the external wake listener", () => {
+  // The bash source reads `$TMPDIR/jcode-bg-tasks`; point it at an empty dir
+  // so a host running jcode cannot leak its own tasks into these tests.
+  beforeEach(() => {
+    vi.stubEnv("TMPDIR", mkdtempSync(join(tmpdir(), "wake-listener-")));
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   /** The harness's merged feed, polled the way the observer does. Bash and
    * swarm sources fail harmlessly in this rig (no registry, no socket) —
    * the merge isolates per source, so only wake entries come back. */
@@ -2176,6 +2219,36 @@ describe("tool-call input capture", () => {
 
     expect(finished.map((e) => e.input)).toEqual(['{"cmd":"ls"}', undefined]);
   });
+
+  it("carries a command's exit status as exitCode, with the vendor trailer stripped", async () => {
+    state.events = [
+      { ev: "tool_start", call_id: "c1", name: "bash" },
+      {
+        ev: "tool_done",
+        call_id: "c1",
+        name: "bash",
+        output: "grep: no match\n\nExit code: 1",
+      },
+      { ev: "tool_start", call_id: "c2", name: "bash" },
+      { ev: "tool_done", call_id: "c2", name: "bash", output: "found it" },
+      { ev: "turn_done" },
+    ];
+    const { session } = await startSession();
+    const finished = finishedOf(
+      await collect(session.runTurn({ message: "x" })),
+    );
+
+    expect(finished).toEqual([
+      {
+        type: "tool.finished",
+        callId: "c1",
+        name: "bash",
+        output: "grep: no match",
+        exitCode: 1,
+      },
+      { type: "tool.finished", callId: "c2", name: "bash", output: "found it" },
+    ]);
+  });
 });
 
 /**
@@ -2233,7 +2306,7 @@ describe("message framing", () => {
     // Under a standing fence, another run's `text_replace` is that run's
     // business: it must not retract or rewrite anything in OUR answer.
     state.events = [];
-    state.acceptDelayMs = 40;
+    state.manualAccept = true;
     const { session } = await startSession();
     const iterator = session
       .runTurn({ message: "task" })
@@ -2242,7 +2315,7 @@ describe("message framing", () => {
     const client = state.clients[0];
     client?.push({ ev: "text_delta", text: "WAKE", message_id: "text-9" });
     client?.push({ ev: "text_replace", text: "", message_id: "text-9" });
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    client?.push({ ev: "message_accepted", session_id: client.sessionId });
     client?.push({ ev: "text_delta", text: "ours", message_id: "text-10" });
     client?.push({ ev: "turn_done" });
 
@@ -2267,7 +2340,7 @@ describe("message framing", () => {
     // Its text would have rewritten what the reader saw, so dropping it is
     // an exclusion like any other foreign text, never a silent one.
     state.events = [];
-    state.acceptDelayMs = 40;
+    state.manualAccept = true;
     const { session } = await startSession();
     const iterator = session
       .runTurn({ message: "task" })
@@ -2278,7 +2351,7 @@ describe("message framing", () => {
       text: "a wake run's corrected words",
       message_id: "text-9",
     });
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    state.clients[0]?.push({ ev: "message_accepted", session_id: "s-1" });
     state.clients[0]?.push({ ev: "turn_done" });
 
     const events: HarnessEvent[] = [];

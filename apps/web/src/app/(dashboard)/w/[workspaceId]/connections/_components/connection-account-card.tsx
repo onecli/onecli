@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import {
   Building2,
   ChevronRight,
+  FolderGit2,
   Globe,
   Loader2,
   MoreVertical,
@@ -34,27 +35,18 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@onecli/ui/components/alert-dialog";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@onecli/ui/components/dialog";
 import { Button } from "@onecli/ui/components/button";
 import { cn } from "@onecli/ui/lib/utils";
-import { Input } from "@onecli/ui/components/input";
-import { Label } from "@onecli/ui/components/label";
 import {
   useDisconnectConnection,
   usePromoteConnection,
-  useRenameConnection,
 } from "@/hooks/use-connections";
 import { GITHUB_APP_PROVIDER } from "@/hooks/use-github-app-share";
 import { useOrgMembership } from "@/hooks/use-org";
 import type { PageScope } from "@/lib/api";
 import { connectionAccessLevelLabel } from "@onecli/api/apps/access-level";
 import {
+  connectionTags,
   extractBoundHost,
   extractLabel,
 } from "@onecli/api/lib/connection-display";
@@ -65,7 +57,17 @@ import {
 import { GitHubOrgAccessNotice } from "./github-org-access-notice";
 import { MissingPermissionsNotice } from "@/lib/components/missing-permissions-notice";
 import { ConnectionAgentRows } from "./connection-agent-rows";
+import { RenameConnectionDialog } from "./rename-connection-dialog";
+import { EditRepositoriesDialog } from "./edit-repositories-dialog";
+import {
+  isGitHubUrl,
+  openGitHubSettingsPopup,
+} from "@/lib/github-settings-popup";
 import type { AccountCardConnection } from "./account-card-connection";
+import { accountTypeLabel } from "@/lib/connections/account-type-label";
+
+/** A refused login: nothing (including a repo edit) works until reconnect. */
+const needsReconnectFor = (c: AccountCardConnection) => !!c.reauthRequiredAt;
 
 interface ConnectionAccountCardProps {
   connection: AccountCardConnection;
@@ -88,10 +90,8 @@ export const ConnectionAccountCard = ({
 }: ConnectionAccountCardProps) => {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
-  const [renameValue, setRenameValue] = useState("");
   const [promoteOpen, setPromoteOpen] = useState(false);
   const disconnectMutation = useDisconnectConnection(pageScope);
-  const renameMutation = useRenameConnection(pageScope);
   const promoteMutation = usePromoteConnection();
   // Agents are workspace-scoped, so agent access (and moving an account up to
   // the org) only applies on the workspace page.
@@ -99,16 +99,20 @@ export const ConnectionAccountCard = ({
   // Org admins can move a workspace account up to Shared Connections. A
   // shared GitHub connection is already a narrowed copy of an installation
   // the org can share directly, so it is not offered there (the API refuses).
-  const { data: membership } = useOrgMembership(isWorkspacePage);
+  const { data: membership } = useOrgMembership(
+    isWorkspacePage || connection.provider === GITHUB_APP_PROVIDER,
+  );
   const canPromote =
     isWorkspacePage &&
     membership?.isAdmin === true &&
     !connection.sourceConnectionId;
-  // Removing an original installation removes the shared connections built
-  // on it, in any workspace.
-  const isGitHubAppSource =
+  // Which repos a GitHub connection reaches can change after connecting
+  // (org admins, the same rule as sharing; the API refuses anyone else).
+  const canEditRepos =
     connection.provider === GITHUB_APP_PROVIDER &&
-    !connection.sourceConnectionId;
+    membership?.isAdmin === true &&
+    !needsReconnectFor(connection);
+  const [reposOpen, setReposOpen] = useState(false);
 
   const displayName =
     connection.label ??
@@ -123,7 +127,7 @@ export const ConnectionAccountCard = ({
     connection.provider,
     connection.metadata,
   );
-  const tags = (connection.metadata?.tags as string[] | undefined) ?? [];
+  const tags = connectionTags(connection.metadata);
   const boundHost = extractBoundHost(connection.metadata);
   const needsReconnect = !!connection.reauthRequiredAt;
   const missing = connection.missingPermissions ?? [];
@@ -132,20 +136,6 @@ export const ConnectionAccountCard = ({
   // GitHub organizations that refused this account (recorded by the gateway).
   // Per-organization: the account stays connected for everything else.
   const orgAccessIssues = extractGitHubOrgAccess(connection.metadata);
-
-  const handleRename = () => {
-    const trimmed = renameValue.trim();
-    if (!trimmed) return;
-    renameMutation.mutate(
-      { id: connection.id, label: trimmed },
-      {
-        onSuccess: () => {
-          toast.success("Connection renamed");
-          setRenameOpen(false);
-        },
-      },
-    );
-  };
 
   const handleDisconnect = () => {
     disconnectMutation.mutate(connection.id, {
@@ -214,7 +204,7 @@ export const ConnectionAccountCard = ({
                     {githubOrgAccessSummary(orgAccessIssues.length)}
                   </span>
                 ) : (
-                  (accountType ?? "Connected")
+                  (accountTypeLabel(accountType) ?? "Connected")
                 )}{" "}
                 {accessLevel && (
                   <span className="text-muted-foreground/60 whitespace-nowrap">
@@ -250,6 +240,7 @@ export const ConnectionAccountCard = ({
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
+                  aria-label={`Actions for ${displayName}`}
                   variant="ghost"
                   size="icon"
                   className="size-8 shrink-0 text-muted-foreground"
@@ -258,16 +249,20 @@ export const ConnectionAccountCard = ({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
-                {!!connection.metadata?.manageUrl && (
-                  <DropdownMenuItem asChild>
-                    <a
-                      href={connection.metadata.manageUrl as string}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      <Settings className="size-4" />
-                      Settings
-                    </a>
+                {canEditRepos && (
+                  <DropdownMenuItem onClick={() => setReposOpen(true)}>
+                    <FolderGit2 className="size-4" />
+                    Edit repositories
+                  </DropdownMenuItem>
+                )}
+                {isGitHubUrl(connection.metadata?.manageUrl) && (
+                  <DropdownMenuItem
+                    onClick={() =>
+                      openGitHubSettingsPopup(connection.metadata?.manageUrl)
+                    }
+                  >
+                    <Settings className="size-4" />
+                    Settings
                   </DropdownMenuItem>
                 )}
                 {!connection.metadata?.manageUrl && (
@@ -276,14 +271,7 @@ export const ConnectionAccountCard = ({
                     Reconnect
                   </DropdownMenuItem>
                 )}
-                <DropdownMenuItem
-                  onClick={() => {
-                    setRenameValue(
-                      displayName === "Unknown account" ? "" : displayName,
-                    );
-                    setRenameOpen(true);
-                  }}
-                >
+                <DropdownMenuItem onClick={() => setRenameOpen(true)}>
                   <Pencil className="size-4" />
                   Rename
                 </DropdownMenuItem>
@@ -350,7 +338,7 @@ export const ConnectionAccountCard = ({
           >
             <span className="flex items-center gap-1.5">
               <Building2 className="size-3.5" aria-hidden="true" />
-              Share with more workspaces
+              Share with organization
             </span>
             <ChevronRight className="size-3.5 opacity-60" aria-hidden="true" />
           </button>
@@ -365,13 +353,6 @@ export const ConnectionAccountCard = ({
               This will revoke access and remove the stored credentials for this{" "}
               {appName} account. Agents using this connection will no longer be
               able to authenticate.
-              {isGitHubAppSource && (
-                <>
-                  {" "}
-                  Connections shared from this installation, in any workspace,
-                  are removed too.
-                </>
-              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -394,37 +375,28 @@ export const ConnectionAccountCard = ({
         </AlertDialogContent>
       </AlertDialog>
 
-      <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Rename connection</DialogTitle>
-          </DialogHeader>
-          <div className="grid gap-1.5 py-2">
-            <Label htmlFor="rename-label">Label</Label>
-            <Input
-              id="rename-label"
-              value={renameValue}
-              onChange={(e) => setRenameValue(e.target.value)}
-              placeholder="e.g. work, personal"
-              className="font-mono text-sm"
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleRename();
-              }}
-              autoFocus
-            />
-          </div>
-          <DialogFooter>
-            <Button
-              onClick={handleRename}
-              disabled={!renameValue.trim() || renameMutation.isPending}
-              loading={renameMutation.isPending}
-              size="sm"
-            >
-              {renameMutation.isPending ? "Saving..." : "Save"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <RenameConnectionDialog
+        connectionId={connection.id}
+        initialLabel={displayName === "Unknown account" ? "" : displayName}
+        scope={pageScope}
+        open={renameOpen}
+        onOpenChange={setRenameOpen}
+      />
+
+      {canEditRepos && (
+        <EditRepositoriesDialog
+          connectionId={connection.id}
+          account={displayName}
+          manageUrl={
+            typeof connection.metadata?.manageUrl === "string"
+              ? connection.metadata.manageUrl
+              : null
+          }
+          pageScope={pageScope}
+          open={reposOpen}
+          onOpenChange={setReposOpen}
+        />
+      )}
 
       <AlertDialog open={promoteOpen} onOpenChange={setPromoteOpen}>
         <AlertDialogContent>

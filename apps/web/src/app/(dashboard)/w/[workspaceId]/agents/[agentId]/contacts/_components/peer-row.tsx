@@ -120,17 +120,9 @@ export const PeerRow = ({ agentId, agentName, peer }: PeerRowProps) => {
 
   const choose = (policy: Policy) => {
     if (policy === peer.myPolicy) return;
-    setPolicy.mutate(
-      { peerAgentId: peer.agentId, policy },
-      {
-        onSuccess: () =>
-          toast.success(
-            `${peer.name}: ${POLICIES[policy].badge.toLowerCase()}`,
-          ),
-        onError: (err) =>
-          toast.error(err instanceof Error ? err.message : "Update failed"),
-      },
-    );
+    // Instant: the badge shows the new standing on click; a failure puts it
+    // back and says why. Never frozen while saving.
+    setPolicy.mutate({ peerAgentId: peer.agentId, policy });
   };
 
   const doResume = () =>
@@ -140,23 +132,23 @@ export const PeerRow = ({ agentId, agentName, peer }: PeerRowProps) => {
         toast.error(err instanceof Error ? err.message : "Resume failed"),
     });
 
-  const confirmRemove = () =>
-    forget.mutate(peer.agentId, {
-      onSuccess: () => {
-        setConfirmOpen(false);
-        toast.success(`${peer.name} removed`);
-      },
-      onError: (err) => {
-        setConfirmOpen(false);
-        toast.error(err instanceof Error ? err.message : "Remove failed");
-      },
-    });
+  // Instant: the pair reads cleared and the confirm closes on click. The
+  // hook puts it back and says why if the server refuses.
+  const confirmRemove = () => {
+    setConfirmOpen(false);
+    forget
+      .mutateAsync(peer.agentId)
+      .then(() => toast.success(`${peer.name} removed`))
+      .catch(() => undefined);
+  };
 
   return (
     <>
       <ContactRowFrame
         label={label}
-        disabled={setPolicy.isPending || forget.isPending || resume.isPending}
+        // The policy chooser never freezes the row (it is instant); a resume
+        // in flight still does.
+        disabled={resume.isPending}
         {...(removable && { onRemove: () => setConfirmOpen(true) })}
         actions={[
           // Offered only while paused: the one thing to do about a pause.
@@ -212,19 +204,13 @@ export const PeerRow = ({ agentId, agentName, peer }: PeerRowProps) => {
               </Badge>
             )}
             <DropdownMenu>
-              <DropdownMenuTrigger asChild disabled={setPolicy.isPending}>
+              <DropdownMenuTrigger asChild>
                 <Button
                   variant="ghost"
                   size="sm"
                   className="gap-1.5 px-2"
                   aria-label={`Whether ${agentName} and ${peer.name} may message each other: ${mine.badge.toLowerCase()}. Change`}
                 >
-                  {setPolicy.isPending ? (
-                    <Loader2
-                      className="size-3.5 animate-spin motion-reduce:hidden"
-                      aria-hidden
-                    />
-                  ) : null}
                   <Badge variant="secondary" className={mine.badgeClass}>
                     <mine.Icon className="size-3" aria-hidden />
                     {mine.badge}
@@ -289,28 +275,12 @@ export const PeerRow = ({ agentId, agentName, peer }: PeerRowProps) => {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={forget.isPending}>
-              Cancel
-            </AlertDialogCancel>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              onClick={(event) => {
-                event.preventDefault();
-                confirmRemove();
-              }}
-              disabled={forget.isPending}
+              onClick={confirmRemove}
               className={buttonVariants({ variant: "destructive" })}
             >
-              {forget.isPending ? (
-                <>
-                  <Loader2
-                    className="size-3.5 animate-spin motion-reduce:hidden"
-                    aria-hidden
-                  />
-                  Removing…
-                </>
-              ) : (
-                "Remove"
-              )}
+              Remove
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

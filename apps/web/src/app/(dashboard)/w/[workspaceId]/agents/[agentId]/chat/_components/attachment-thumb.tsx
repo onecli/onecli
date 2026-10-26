@@ -11,9 +11,9 @@ import { useAttachmentBlobUrl } from "@/hooks/use-attachments";
  * token, so the URL is always an object URL, never the API path.
  *
  * SECURITY: only RASTER types reach this component (the chips' allowlist),
- * and clicking opens the image in a NEW TAB via a download-typed blob rather
- * than navigating to the render-capable one — a same-origin blob document
- * would execute embedded script in this app's origin.
+ * and the bytes only ever render through `<img>`: clicking opens the in-app
+ * `ImagePreviewDialog` (another `<img>`), never a navigation to the blob. A
+ * same-origin blob document would execute embedded script in this origin.
  */
 export const AttachmentThumb = ({
   conversationId,

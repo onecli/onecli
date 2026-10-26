@@ -212,7 +212,7 @@ describe("the editor", () => {
       screen.getByRole("button", { name: "Edit deploy-notes" }),
     );
     await userEvent.click(screen.getByRole("button", { name: "Delete" }));
-    expect(state.remove).toHaveBeenCalledWith("mem-1", expect.anything());
+    expect(state.remove).toHaveBeenCalledWith("mem-1");
   });
 });
 

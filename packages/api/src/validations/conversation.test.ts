@@ -3,6 +3,36 @@ import { describe, expect, it } from "vitest";
 import * as conversation from "./conversation";
 import { isRawErrorPayload } from "./conversation";
 
+describe("transcript-rejection recovery", () => {
+  it("asks for a fresh restart without promising signed-history repair", () => {
+    const message = conversation.TURN_FAILURE_COPY.transcript_rejected?.message;
+    expect(message).toBe(conversation.TRANSCRIPT_REJECTED_MESSAGE);
+    expect(message).toContain(
+      "restart the agent from its menu in the dashboard",
+    );
+    expect(message).toContain("start it fresh");
+    expect(message).not.toMatch(/in a little while|repair the history/);
+  });
+});
+
+describe("model-endpoint 404 copy", () => {
+  it("names the endpoint and the operator, never the key", () => {
+    const entry = conversation.TURN_FAILURE_COPY.model_endpoint_not_found;
+    expect(entry?.code).toBe("model_endpoint_not_found");
+    expect(entry?.message).toBe(conversation.MODEL_ENDPOINT_NOT_FOUND_MESSAGE);
+    expect(entry?.message).toContain("model endpoint");
+    expect(entry?.message).toContain("model name");
+    expect(entry?.message).toContain("contact whoever operates this agent");
+    expect(entry?.message).not.toMatch(/\bkey\b/i);
+  });
+
+  it("renders as a quiet lifecycle notice, not a red failure", () => {
+    expect(conversation.LIFECYCLE_TURN_ERROR_CODES).toContain(
+      "model_endpoint_not_found",
+    );
+  });
+});
+
 describe("isRawErrorPayload", () => {
   it.each([
     // The agent runtime's wrapper around a provider's error body: a 5xx no

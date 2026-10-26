@@ -371,17 +371,6 @@ describe.skipIf(!PROOF_URL)("caps and pacing", () => {
     expect(result.error).toContain("already holds");
   });
 
-  it("pacing: the burst spends, then refusals are RETRYABLE", async () => {
-    const { sandboxId } = await seedSandboxedAgent("pace");
-    for (let i = 0; i < 20; i += 1) {
-      const result = await write(sandboxId, `k-${i}`, "body");
-      expect(result.ok).toBe(true);
-    }
-    const paced = await write(sandboxId, "k-over", "body");
-    expect(paced.ok).toBe(false);
-    expect(paced.retryable).toBe(true);
-  });
-
   it("pacing is PER-SANDBOX — one sandbox draining its bucket never paces another", async () => {
     // MUTATION-PROOF (lens-1 catch): key the bucket globally/by runner and
     // this fails — a shared bucket is the cross-tenant DoS lever (one
@@ -392,7 +381,10 @@ describe.skipIf(!PROOF_URL)("caps and pacing", () => {
     for (let i = 0; i < 20; i += 1) {
       expect((await write(a.sandboxId, `k-${i}`, "body")).ok).toBe(true);
     }
-    expect((await write(a.sandboxId, "k-over", "body")).ok).toBe(false);
+    // The drained bucket refuses, and the refusal is RETRYABLE.
+    const paced = await write(a.sandboxId, "k-over", "body");
+    expect(paced.ok).toBe(false);
+    expect(paced.retryable).toBe(true);
     // B is untouched by A's exhaustion.
     expect((await write(b.sandboxId, "first", "body")).ok).toBe(true);
   });

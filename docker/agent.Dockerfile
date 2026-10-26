@@ -218,6 +218,16 @@ ENV NODE_OPTIONS=--enable-source-maps
 # supervisor only ever writes under /workspace and /tmp.
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=builder /app/apps/sandbox-supervisor/dist ./apps/sandbox-supervisor/dist
+# `onecli-browser`: the one way the agent drives the browser (the bundles
+# are in dist/browser-driver, built with the supervisor; the shim is the
+# name on PATH). Root-owned like the rest of /app. The desktop layer stacks
+# on this and does not replace it: the same driver, launching the desktop's
+# Chrome instead of headless Chromium when it sees a DISPLAY.
+COPY docker/onecli-browser /usr/local/bin/onecli-browser
+RUN chmod 0755 /usr/local/bin/onecli-browser \
+  && sh -n /usr/local/bin/onecli-browser \
+  && test -f /app/apps/sandbox-supervisor/dist/browser-driver/cli.mjs \
+  && test -f /app/apps/sandbox-supervisor/dist/browser-driver/daemon.mjs
 # The pinned runtime, and the ONLY jcode in this image (see header): the
 # supervisor resolves the binary from this env var and refuses to guess.
 # The whole DIRECTORY, not one file — on x86_64 `jcode` is a launcher script
@@ -299,6 +309,53 @@ RUN python3 --version \
        [ "$rc" -eq 2 ] || { echo "expected refusal (exit 2) without a /nix mount, got $rc: $out" >&2; exit 1; }; \
        echo "$out" | grep -q "self-hosted Docker" || { echo "refusal lacked the hosted-only note: $out" >&2; exit 1; }; \
        test ! -e /nix/store' \
+  # The browser gate: the driver REALLY drives a page here, as uid 1000 on
+  # a throwaway home, the way an agent's first call goes. No DISPLAY, so
+  # the headless shape; the build container has no user namespaces, so
+  # this also proves the launcher's sandbox probe (first launch dies on
+  # "No usable sandbox", the relaunch with the flag comes up). A local page
+  # over loopback: the build has no network and needs none. A
+  # button opens a native modal: its click must answer with the modal
+  # line, a click behind it must be refused, and its own button must close
+  # it, the one shape an agent cannot work without. Both ways of naming an
+  # element are driven: refs for the field, role and name for the buttons,
+  # and a ref from before a reload is refused with what it is now. The daemon is
+  # stopped and the browser killed by the profile path, then WAITED for,
+  # before the home is removed. Bounded at 5 minutes (normally under 10 s):
+  # a wait that never returns ends the build with the process table and
+  # the browser's log printed, not with a job that sits until cancelled.
+  && timeout --kill-after=10s 300s setpriv --reuid node --regid node --init-groups sh -c ' \
+       set -e; export HOME=/workspace/.home AGENT_HOME_DIR=/workspace/.home; mkdir -p "$HOME"; \
+       trap "rc=\$?; [ \$rc -eq 0 ] || { echo \"browser gate: failed (exit \$rc)\"; ps -o pid,etime,stat,wchan:20,args --sort=pid; cat \$HOME/.chrome/onecli-browser.log 2>/dev/null; }" EXIT; trap "exit 124" TERM; \
+       printf "<title>Gate</title><h1>Hello</h1><a href=\"/two\">Second page</a><input aria-label=\"Name\"><button onclick=d.showModal()>Open</button><dialog id=d><h2>Quota Exceeded</h2><p>Try tomorrow.</p><form method=dialog><button>Dismiss</button></form></dialog>" > "$HOME/index.html"; \
+       ( cd "$HOME" && python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 ) & srv=$!; \
+       i=0; until curl --noproxy "*" -fsS -o /dev/null http://127.0.0.1:8765/; do i=$((i+1)); [ "$i" -lt 50 ] || { echo "browser gate: http.server never came up" >&2; exit 1; }; sleep 0.1; done; \
+       out=$(onecli-browser open http://127.0.0.1:8765/); \
+       echo "$out" | grep -q "^title: Gate$" || { echo "browser gate: open did not print the page: $out" >&2; exit 1; }; \
+       echo "$out" | grep -q "link \"Second page\"" || { echo "browser gate: no link in the snapshot: $out" >&2; exit 1; }; \
+       echo "$out" | grep -q "textbox \"Name\"" || { echo "browser gate: no textbox in the snapshot: $out" >&2; exit 1; }; \
+       ref=$(echo "$out" | sed -n "s/^\(f\?[0-9]*e[0-9]*\) textbox .*/\1/p" | head -n 1); \
+       onecli-browser type "$ref" "Alex" >/dev/null; \
+       v=$(onecli-browser eval "document.querySelector(\"input\").value"); \
+       echo "$v" | grep -q "\"Alex\"" || { echo "browser gate: typed text did not land: $v" >&2; exit 1; }; \
+       onecli-browser screenshot "$HOME/shot.png" >/dev/null; test -s "$HOME/shot.png"; \
+       onecli-browser read | grep -q "Hello"; \
+       onecli-browser click e999 2>&1 | grep -q "not in the last snapshot" || { echo "browser gate: a stale ref was not refused" >&2; exit 1; }; \
+       out=$(onecli-browser click button "Open"); \
+       echo "$out" | grep -q "^modal \"Quota Exceeded\": Try tomorrow\. \[f\?[0-9]*e[0-9]* \"Dismiss\"\]$" || { echo "browser gate: the click did not print the modal: $out" >&2; exit 1; }; \
+       ref=$(echo "$out" | sed -n "s/^\(f\?[0-9]*e[0-9]*\) textbox .*/\1/p"); \
+       onecli-browser type "$ref" x 2>&1 | grep -q "is behind the open dialog \"Quota Exceeded\"" || { echo "browser gate: an action behind the modal was not refused" >&2; exit 1; }; \
+       out=$(onecli-browser click button "Dismiss"); \
+       echo "$out" | grep -q "^modal " && { echo "browser gate: Dismiss did not close the modal: $out" >&2; exit 1; }; \
+       ref=$(echo "$out" | sed -n "s/^\(f\?[0-9]*e[0-9]*\) button \"Open\".*/\1/p"); \
+       onecli-browser open http://127.0.0.1:8765/ >/dev/null; \
+       onecli-browser click "$ref" 2>&1 | grep -q "it was button \"Open\", now f[0-9]*e[0-9]*" || { echo "browser gate: a ref from before the reload was not named" >&2; exit 1; }; \
+       test -S "$HOME/.onecli/browser.sock"; \
+       test "$(stat -c %a "$HOME/.onecli/browser.sock")" = 600; \
+       onecli-browser stop | grep -qx ok; \
+       kill "$srv" 2>/dev/null || true; \
+       pkill -f "user-data-dir=$HOME/.chrome" || true; \
+       i=0; while pgrep -f "user-data-dir=$HOME/.chrome" >/dev/null; do i=$((i+1)); [ "$i" -lt 100 ] || { pkill -9 -f "user-data-dir=$HOME/.chrome" || true; break; }; sleep 0.1; done' \
   && rm -rf /workspace/.home
 VOLUME ["/workspace"]
 

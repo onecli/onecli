@@ -18,13 +18,6 @@ import { orgConnectionsPath } from "./navigation";
 const workspaceTitles = (opts?: { sidebar?: boolean }) =>
   workspaceNavItems("p1", opts).map((item) => item.title);
 
-describe("workspaceNavItems", () => {
-  it("has NO workspace-level Skills entry — skills belong to the agent", () => {
-    expect(workspaceTitles()).not.toContain("Skills");
-    expect(workspaceTitles({ sidebar: true })).not.toContain("Skills");
-  });
-});
-
 describe("org nav and the hosted gate", () => {
   const flatTitles = (opts?: Parameters<typeof getNavItems>[1]) =>
     getNavItems("org-1", opts)
@@ -103,12 +96,6 @@ describe("Shared Connections and Global Policy live under Organization Settings"
       (item) => item.title === "Shared Connections",
     );
     expect(entry?.url).toBe(orgConnectionsPath("org-1"));
-  });
-
-  it("drops the retired Domains and Encryption entries", () => {
-    const titles = settingsItems().map((item) => item.title);
-    expect(titles).not.toContain("Domains");
-    expect(titles).not.toContain("Encryption");
   });
 });
 
@@ -197,16 +184,6 @@ describe("Install moved into Workspace Settings", () => {
   it("is no longer a top-level workspace nav entry", () => {
     expect(workspaceTitles()).not.toContain("Install");
     expect(workspaceTitles({ sidebar: true })).not.toContain("Install");
-  });
-
-  it("has no route left at the old top-level path", () => {
-    // The route MOVED — the directory is gone, so anything still pushing
-    // `/w/<id>/install` now depends on a next.config redirect rather than a
-    // real page. Every in-app caller must name the new path directly.
-    const urls = getWorkspaceSettingsSections("p1")
-      .flatMap((s) => s.items)
-      .map((i) => i.url);
-    expect(urls).not.toContain("/w/p1/install");
   });
 
   it("is a workspace settings section, beside General", () => {

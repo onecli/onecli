@@ -9,6 +9,7 @@ import type {
   AgentAccessStatus,
   AgentCredentialStatus,
 } from "@/lib/api/policy-visibility";
+import { ApiError } from "@/lib/api/client";
 import { ConnectionAgentRows } from "./connection-agent-rows";
 
 const mocks = vi.hoisted(() => ({
@@ -18,7 +19,9 @@ const mocks = vi.hoisted(() => ({
   toast: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn() }),
 }));
 
-vi.mock("@/lib/api/client", () => ({
+vi.mock("@/lib/api/client", async (importOriginal) => ({
+  ApiError: (await importOriginal<typeof import("@/lib/api/client")>())
+    .ApiError,
   apiGet: mocks.apiGet,
   apiPost: vi.fn(),
   apiPut: mocks.apiPut,
@@ -250,5 +253,169 @@ describe("ConnectionAgentRows", () => {
     expect((await screen.findByTestId("permissions-sheet")).textContent).toBe(
       "a1",
     );
+  });
+});
+
+/** A promise the test settles by hand. */
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+};
+
+describe("ConnectionAgentRows: instant switches", () => {
+  it("the switch flips on click, before the server answers, and stays usable", async () => {
+    const user = userEvent.setup();
+    renderRows([{ id: "a1", name: "Donna" }], []);
+    const put = deferred<unknown>();
+    mocks.apiPut.mockReturnValueOnce(put.promise);
+
+    await user.click(
+      await screen.findByRole("switch", { name: "Turn on acme for Donna" }),
+    );
+    const toggle = screen.getByRole("switch", {
+      name: "Turn off acme for Donna",
+    });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    expect(toggle.hasAttribute("disabled")).toBe(false);
+    // The Permissions door is offered at once, with the switch.
+    expect(mocks.toast.success).toHaveBeenCalledWith(
+      "Donna can use acme",
+      expect.objectContaining({
+        action: expect.objectContaining({ label: "Permissions" }),
+      }),
+    );
+    put.resolve({
+      agentId: "a1",
+      mode: "grants",
+      connections: [],
+      secrets: [],
+    });
+  });
+
+  it("a failed write puts the switch back and says why", async () => {
+    const user = userEvent.setup();
+    renderRows([{ id: "a1", name: "Donna" }], []);
+    const put = deferred<unknown>();
+    mocks.apiPut.mockReturnValueOnce(put.promise);
+
+    await user.click(
+      await screen.findByRole("switch", { name: "Turn on acme for Donna" }),
+    );
+    expect(
+      screen
+        .getByRole("switch", { name: "Turn off acme for Donna" })
+        .getAttribute("aria-checked"),
+    ).toBe("true");
+
+    put.reject(new ApiError("Your plan doesn't allow this", 403));
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("switch", { name: "Turn on acme for Donna" })
+          .getAttribute("aria-checked"),
+      ).toBe("false"),
+    );
+    expect(mocks.toast.error).toHaveBeenCalledWith(
+      expect.stringMatching(/^Couldn't turn on .+ for Donna$/),
+      expect.objectContaining({
+        description: "Your plan doesn't allow this",
+        // Replaces the click's own toast for this pair (no stale Undo).
+        id: "grant:a1:connection:conn-1",
+      }),
+    );
+    // A 4xx refusal answers the same way again: no Retry.
+    const [, options] = mocks.toast.error.mock.calls[0] as [
+      string,
+      { action?: unknown },
+    ];
+    expect(options.action).toBeUndefined();
+  });
+
+  it("a network failure offers Retry", async () => {
+    const user = userEvent.setup();
+    renderRows([{ id: "a1", name: "Donna" }], []);
+    mocks.apiPut.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+
+    await user.click(
+      await screen.findByRole("switch", { name: "Turn on acme for Donna" }),
+    );
+    await waitFor(() => expect(mocks.toast.error).toHaveBeenCalled());
+    const [, options] = mocks.toast.error.mock.calls[0] as [
+      string,
+      { action: { label: string; onClick: () => void } },
+    ];
+    expect(options.action.label).toBe("Retry");
+    mocks.apiPut.mockResolvedValueOnce({});
+    options.action.onClick();
+    await waitFor(() => expect(mocks.apiPut).toHaveBeenCalledTimes(2));
+  });
+
+  it("on → off → on reaches the server as three writes, in click order", async () => {
+    const user = userEvent.setup();
+    renderRows([{ id: "a1", name: "Donna" }], []);
+    const first = deferred<unknown>();
+    const calls: string[] = [];
+    mocks.apiPut.mockImplementation(async () => {
+      calls.push("put");
+      if (calls.length === 1) await first.promise;
+      return {};
+    });
+    mocks.apiDelete.mockImplementation(async () => {
+      calls.push("delete");
+    });
+
+    await user.click(
+      await screen.findByRole("switch", { name: "Turn on acme for Donna" }),
+    );
+    await user.click(
+      screen.getByRole("switch", { name: "Turn off acme for Donna" }),
+    );
+    await user.click(
+      screen.getByRole("switch", { name: "Turn on acme for Donna" }),
+    );
+    // The screen already shows the last click.
+    expect(
+      screen
+        .getByRole("switch", { name: "Turn off acme for Donna" })
+        .getAttribute("aria-checked"),
+    ).toBe("true");
+    // The first write is slow; nothing behind it has overtaken it.
+    expect(calls).toEqual(["put"]);
+    first.resolve({});
+    await waitFor(() => expect(calls).toEqual(["put", "delete", "put"]));
+  });
+
+  it("a toggled row keeps its place instead of jumping to the top", async () => {
+    const user = userEvent.setup();
+    renderRows(
+      [
+        { id: "a1", name: "Alpha" },
+        { id: "a2", name: "Bravo" },
+      ],
+      [],
+    );
+    mocks.apiPut.mockReturnValueOnce(deferred<unknown>().promise);
+    const names = () =>
+      screen
+        .getAllByRole("switch")
+        .map((s) => s.getAttribute("aria-label") ?? "");
+    expect(await screen.findByText("Bravo")).toBeTruthy();
+    expect(names()).toEqual([
+      "Turn on acme for Alpha",
+      "Turn on acme for Bravo",
+    ]);
+    await user.click(
+      screen.getByRole("switch", { name: "Turn on acme for Bravo" }),
+    );
+    // On, but still second: "on first" applies on the next visit.
+    expect(names()).toEqual([
+      "Turn on acme for Alpha",
+      "Turn off acme for Bravo",
+    ]);
   });
 });

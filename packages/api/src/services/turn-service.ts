@@ -1,11 +1,13 @@
 import { db, Prisma } from "@onecli/db";
 import {
+  runnerAdvertises,
   TURN_FAILURE_CODES,
   type AgentEvent,
   type TurnUsage,
 } from "@onecli/agent-protocol";
 import { ServiceError } from "./errors";
 import {
+  markSandboxEngaged,
   releaseWatchFireClaimsForConversation,
   signalWork,
   type SweptTurn,
@@ -31,7 +33,6 @@ import {
   PEER_TASK_SOURCE,
   TURNS_PAGE_DEFAULT,
   TURNS_PAGE_MAX,
-  type ConversationSource,
   type TurnSource,
   type TurnStatus,
 } from "../validations/conversation";
@@ -117,30 +118,35 @@ const DURABILITY = {
  */
 const NUL = String.fromCharCode(0);
 
+/** Half of a UTF-16 surrogate pair standing alone: not valid Unicode. */
+const LONE_SURROGATE =
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
 /**
- * Strip U+0000 from every string an event carries, however deeply nested.
+ * Make every string a report carries storable, however deeply nested: strip
+ * U+0000 and replace a lone surrogate with U+FFFD.
  *
- * The runner already does this at the source, and this repeats it anyway for
- * the same reason every other runner-supplied value is re-checked here: the
- * control plane does not take a reporter's word for anything. Without it, one
- * NUL byte in a tool output raises inside the transaction, rolls back the
- * whole batch, and loses that stretch of transcript — a self-inflicted outage
- * for that conversation, triggerable by an agent reading a binary file.
+ * The runner already strips NUL from transcript events at the source, and
+ * this repeats it anyway for the same reason every other runner-supplied
+ * value is re-checked here: the control plane does not take a reporter's
+ * word for anything. Postgres refuses U+0000 in text and jsonb, and the
+ * database client refuses a lone surrogate outright, so without this one bad
+ * character in a tool output rolls back a whole event batch (that stretch of
+ * transcript is lost), and one in a turn's closing error fails the close on
+ * every delivery. An agent reading a binary file is enough to trigger either.
  *
  * Sanitized rather than rejected: nobody typed this, and dropping a few bytes
  * beats dropping a minute of the turn.
  */
-const withoutNulBytes = <T>(value: T): T => {
+const storable = <T>(value: T): T => {
   if (typeof value === "string") {
-    return (value.includes(NUL) ? value.split(NUL).join("") : value) as T;
+    const withoutNul = value.includes(NUL) ? value.split(NUL).join("") : value;
+    return withoutNul.replace(LONE_SURROGATE, "\uFFFD") as T;
   }
-  if (Array.isArray(value)) return value.map(withoutNulBytes) as T;
+  if (Array.isArray(value)) return value.map(storable) as T;
   if (value && typeof value === "object") {
     return Object.fromEntries(
-      Object.entries(value).map(([key, inner]) => [
-        key,
-        withoutNulBytes(inner),
-      ]),
+      Object.entries(value).map(([key, inner]) => [key, storable(inner)]),
     ) as T;
   }
   return value;
@@ -210,7 +216,10 @@ export const deriveTitle = (message: string): string | null => {
  * write into a direct thread they could not read.
  */
 export interface TurnOrigin {
-  source: ConversationSource;
+  /** A conversation source for a person's or a channel's door; a turn-only
+   * source (the desktop resume) for a platform door with `userId: null`.
+   * The greeting keeps its own raw insert; no client reaches this type. */
+  source: TurnSource;
   /**
    * The speaker — or `null` for a turn the PLATFORM creates (a cron fire,
    * step 7; watch fires). Null is not "anonymous": it routes through
@@ -279,7 +288,7 @@ const createTurnRowWithAttachments = async (
     conversationId: string;
     message: string;
     status: string;
-    source: ConversationSource;
+    source: TurnSource;
     userId: string | null;
     followUpOfTurnId?: string;
   },
@@ -331,8 +340,8 @@ export const createTurn = async (
   try {
     // The turn row and its attachment binds commit TOGETHER: `signalWork()`
     // below fires before this function returns, and both the dispatch
-    // composer and the steer arm's carve-out read the attachment table — a
-    // turn observable without its rows would ship bare, silently. A bind
+    // composer and the steer arm's attachment gate read the attachment
+    // table: a turn observable without its rows would ship bare, silently. A bind
     // that cannot complete aborts the transaction: no turn row, honest 422.
     const turn = await createTurnRowWithAttachments(
       {
@@ -402,6 +411,10 @@ export const createTurn = async (
     }
 
     await wakeSandboxFor(conversation.agentId);
+    // A message is engagement: a box already up has its clocks restarted
+    // now, not only once the turn's first event lands (a queued turn behind
+    // a long-running one could otherwise sit inside a closing cap window).
+    await markSandboxEngaged(db, { agentId: conversation.agentId });
     // Wake any held runner poll so a queued turn dispatches now rather than
     // after the next re-check.
     signalWork();
@@ -594,10 +607,10 @@ export const createFollowUp = async (
   origin: TurnOrigin,
   attachmentIds?: string[],
 ) => {
-  // Bind-in-transaction matters MOST here: the steer arm's carve-out ("an
-  // attachment-carrying follow-up never steers") reads the attachment table,
-  // and `signalWork()` races it — a follow-up observable before its rows
-  // would steer text-only and orphan the files on a `joined` row forever
+  // Bind-in-transaction matters MOST here: the steer arm reads the
+  // attachment table (its gate, and whether to compose the files), and
+  // `signalWork()` races it. A follow-up observable before its rows would
+  // steer words-only and orphan the files on a `joined` row forever
   // (steers are at-most-once).
   const followUp = await createTurnRowWithAttachments(
     {
@@ -842,11 +855,20 @@ export const buildOpenPromiseNote = async (
  * container that is already on its way. Exported for the SSH front door
  * (step 5): session-open and cert-mint ride the same flip; the corresponding
  * poll-time dueness arms in due-work.ts keep both honest if the flip races.
+ *
+ * `reason` says WHY, for the start payload: `preview` (a person opened a
+ * preview link) makes the boot relaunch the shares' apps; the default (a
+ * message, a schedule, SSH, the desktop) wakes a quiet box. The reason lands
+ * only where the flip does, so a box already up is never relabelled, and
+ * the ready report clears it.
  */
-export const wakeSandboxFor = async (agentId: string): Promise<void> => {
+export const wakeSandboxFor = async (
+  agentId: string,
+  reason: "preview" | null = null,
+): Promise<void> => {
   await db.sandbox.updateMany({
     where: { agentId, status: { in: ["stopped", "failed"] } },
-    data: { status: "unprovisioned" },
+    data: { status: "unprovisioned", wakeReason: reason },
   });
 };
 
@@ -1062,8 +1084,8 @@ export const abortTurn = async (
  * who can read the thread may act on it; a foreign direct thread's row
  * reads NOT_FOUND), and conditional on the two facts that make the request
  * meaningful: the row is still WAITING (`joining`) and the run it rides is
- * still live. A message with files never steers, nor one queued behind
- * it, so those are refused too.
+ * still live. A message with files whose runner cannot deliver files into a
+ * live run never steers, nor one queued behind it, so those are refused too.
  * Anything else is a CONFLICT the caller can say plainly
  * ("already read", "the agent finished"). Repeating it is harmless: the
  * flag is already set. A row that moves between the read and the write
@@ -1089,26 +1111,42 @@ export const requestSendNow = async (
       createdAt: true,
       followUpOfTurnId: true,
       _count: { select: { attachments: true } },
+      conversation: {
+        select: {
+          agent: {
+            select: {
+              sandbox: {
+                select: { runner: { select: { capabilities: true } } },
+              },
+            },
+          },
+        },
+      },
     },
   });
   if (!row) throw new ServiceError("NOT_FOUND", "Message not found");
   if (row.status !== "joining" || !row.followUpOfTurnId) {
     throw new ServiceError("CONFLICT", "The agent already has this message");
   }
-  // A message with files is never handed to a live run (the steer arm's
-  // attachment carve-out), and neither is one sent after it (the arm's
-  // FIFO guard keeps order): both run as their own turns once this one
-  // ends, so there is nothing to read now.
+  // A message with files joins a live run only through a runner that
+  // delivers files into one (the steer arm's attachment gate). Through an
+  // older runner it waits for the run to end, and so does every message
+  // sent after it (the arm's FIFO guard keeps order): all of them run as
+  // their own turns, so there is nothing to read now.
   const behindFiles =
-    row._count.attachments > 0 ||
-    (await db.turn.count({
-      where: {
-        conversationId: row.conversationId,
-        status: "joining",
-        createdAt: { lt: row.createdAt },
-        attachments: { some: {} },
-      },
-    })) > 0;
+    !runnerAdvertises(
+      row.conversation.agent.sandbox?.runner.capabilities,
+      "steerAttachments",
+    ) &&
+    (row._count.attachments > 0 ||
+      (await db.turn.count({
+        where: {
+          conversationId: row.conversationId,
+          status: "joining",
+          createdAt: { lt: row.createdAt },
+          attachments: { some: {} },
+        },
+      })) > 0);
   if (behindFiles) {
     throw new ServiceError(
       "CONFLICT",
@@ -1245,7 +1283,7 @@ export const applyTurnEvents = async (
   // it depends on nothing inside. Doing it under the conversation row lock
   // would serialize that CPU against the whole conversation, on the hottest
   // write path in the system.
-  const clean = events.map(withoutNulBytes);
+  const clean = events.map(storable);
 
   const published = await db.$transaction(async (tx) => {
     if (!(await turnBelongsToReporter(tx, reporter, conversationId, turnId))) {
@@ -1308,14 +1346,12 @@ export const applyTurnEvents = async (
     );
 
     // A turn producing events is a live conversation: keep the idle reaper
-    // away from a sandbox that is mid-answer.
+    // away from a sandbox that is mid-answer, and restart the background
+    // cap's clock (a turn IS engagement).
     // By primary key: the fence above already proved this sandbox hosts the
     // turn, so walking agent → conversations → some(id) would be a
     // three-level correlated subquery to reach a row we already have.
-    await tx.sandbox.updateMany({
-      where: { id: reporter.sandboxId },
-      data: { lastActiveAt: new Date() },
-    });
+    await markSandboxEngaged(tx, { id: reporter.sandboxId });
 
     return numbered;
   });
@@ -1361,10 +1397,7 @@ export const applyTurnProgress = async (
     data: { lastProgressAt: new Date() },
   });
   if (count === 0) return;
-  await db.sandbox.updateMany({
-    where: { id: reporter.sandboxId },
-    data: { lastActiveAt: new Date() },
-  });
+  await markSandboxEngaged(db, { id: reporter.sandboxId });
 };
 
 export interface FinishTurnInput {
@@ -1410,7 +1443,12 @@ const knownFailureCopy = (
  * from, so an unfenced write here would let one sandbox point another tenant's
  * conversation at a harness session it controls.
  */
-export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
+export const finishTurn = async (report: FinishTurnInput): Promise<void> => {
+  // Every string here is the sandbox's, and one the database cannot store
+  // (a NUL, a lone surrogate) fails it as a stored value and as a query
+  // parameter alike: this report would then 500 on every delivery, and the
+  // turn could never close.
+  const input = storable(report);
   const reporterFence = {
     conversation: {
       agent: {
@@ -1490,11 +1528,12 @@ export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
     });
 
     // Same transaction as the close, deliberately. Two statements would leave
-    // a window where the turn is finished but the session ref is not written
-    // — and the runner never retries a failed report — so the conversation
-    // would silently lose its resume handle and every later turn would start
-    // a fresh context. The same window also lets a fast follow-up message
-    // dispatch with `resumeSessionRef: null` and lose the thread.
+    // a window where the turn is finished but the session ref is not written,
+    // and the runner never repeats a report that may have landed, so the
+    // conversation would silently lose its resume handle and every later
+    // turn would start a fresh context. The same window also lets a fast
+    // follow-up message dispatch with `resumeSessionRef: null` and lose the
+    // thread.
     //
     // Never from a boot an agent restart discarded (`stopRequestedAt`, held
     // until the next fresh start): that ref is exactly what the restart
@@ -1693,6 +1732,22 @@ export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
         "watch fire-claim release failed after turn close",
       ),
   );
+
+  // A failed channel turn left a person with an error and no answer: tell
+  // the owners. Detached on purpose: a Slack call must never hold the
+  // runner's report (the service swallows its own failures too).
+  if (input.status === "failed") alertOwnersOfFailure(input.turnId);
+};
+
+/** The failed-turn owner alert, detached. Dynamic import: the channels
+ * provider registry reaches this module through the ingestion service, so
+ * a static import back would be a cycle (the settlePairTurn idiom). */
+const alertOwnersOfFailure = (turnId: string): void => {
+  void import("./channels/turn-failure-notice-service")
+    .then(({ notifyOwnersOfFailedTurn }) => notifyOwnersOfFailedTurn(turnId))
+    .catch((err: unknown) =>
+      log.warn({ err, turnId }, "failed-turn owner alert could not start"),
+    );
 };
 
 /** Delivery headers repeat the automation's operator/agent-named label —
@@ -1723,6 +1778,10 @@ type AutomationSettleInput = Pick<
  */
 export const settleSweptTurns = async (swept: SweptTurn[]): Promise<void> => {
   for (const turn of swept) {
+    // A swept turn failed too (a stall, the time limit): same owner alert
+    // as a reported failure. The service re-reads the row and skips
+    // anything that is not a person's channel turn.
+    alertOwnersOfFailure(turn.turnId);
     await settleAutomationRun({
       conversationId: turn.conversationId,
       turnId: turn.turnId,

@@ -145,8 +145,9 @@ export const orgChannelRoutes = () => {
   // POST /org/channels/:provider/agent-install: the stateless arm for an
   // AGENT's own app. An install begun in Slack (the admin-approval message,
   // the app directory, "Install to Workspace") carries no state naming the
-  // agent. Offer the code to this org's waiting agent apps and finish the one
-  // the provider accepts it for. Tried BEFORE the shared-app inspect below:
+  // agent. Offer the code to this org's waiting agent apps and land it on the
+  // one the provider accepts it for (a socket app then still awaits its
+  // app-level token). Tried BEFORE the shared-app inspect below:
   // a miss leaves the code spendable, while the inspect spends it.
   // `agent: null` means no agent app took it; the page then tries the
   // shared-app finish when `sharedAppConfigured`, and shows guidance
@@ -179,7 +180,8 @@ export const orgChannelRoutes = () => {
           provider,
           agentId: completed.agentId,
           presenceId: completed.presenceId,
-          completed: true,
+          // A socket app installed but still owes its app-level token.
+          completed: !completed.awaitingTransportCredential,
           finishedFromProvider: true,
         },
       });
@@ -188,6 +190,7 @@ export const orgChannelRoutes = () => {
       agent: completed && {
         id: completed.agentId,
         workspaceId: completed.workspaceId,
+        awaitingTransportCredential: completed.awaitingTransportCredential,
       },
       sharedAppConfigured:
         channelProvider(provider).sharedApp?.configured() ?? false,

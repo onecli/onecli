@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Loader2, X } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import type {
   ActivityFilter,
@@ -16,6 +16,7 @@ import { ActivityTable } from "./activity-table";
 import { ActivityFilterControl } from "./activity-filter";
 import { LiveToggle } from "./live-toggle";
 import { ActivityDetailDialog } from "./activity-detail-dialog";
+import { ClearFilterChip } from "./clear-filter-chip";
 
 const EMPTY_MESSAGES: Record<ActivityFilter, string> = {
   all: "No requests yet.",
@@ -54,15 +55,9 @@ export const NetworkTab = ({
         <div className="flex flex-wrap items-center gap-2">
           <ActivityFilterControl value={filter} onChange={setFilter} />
           {scope.from !== undefined && (
-            <button
-              type="button"
-              onClick={onClearWindow}
-              className="hover:bg-muted focus-visible:ring-ring flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs focus-visible:ring-2 focus-visible:outline-none"
-            >
+            <ClearFilterChip onClick={onClearWindow}>
               During one run
-              <X className="size-3" aria-hidden />
-              <span className="sr-only">(clear)</span>
-            </button>
+            </ClearFilterChip>
           )}
         </div>
         <LiveToggle

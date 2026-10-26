@@ -3,8 +3,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { invitations } from "@/lib/api";
-import type { CreateInvitationInput } from "@/lib/api";
+import type { CreateInvitationInput, PendingInvitation } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
+import { listItem, patchItem } from "@/lib/api/optimistic";
+import { useOptimisticMutation } from "@/hooks/use-optimistic-mutation";
 
 /**
  * Team invitations. Free on every edition — an unlicensed self-host invites
@@ -38,17 +40,30 @@ export const useCreateInvitation = () => {
   });
 };
 
-export const useCancelInvitation = () => {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (invitationId: string) => invitations.cancel(invitationId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.invitations.all() });
-      toast.success("Invitation cancelled");
+/** Cancel a pending invitation, instantly: the row leaves on click; the
+ * confirmation follows the server, and a failure puts the row back. */
+export const useCancelInvitation = () =>
+  useOptimisticMutation<void, string>({
+    family: "invitations",
+    itemKey: (invitationId) => `invitation:${invitationId}`,
+    write: (invitationId) => invitations.cancel(invitationId),
+    apply: (qc, invitationId) =>
+      patchItem(
+        qc,
+        queryKeys.invitations.list(),
+        listItem<PendingInvitation>((i) => i.id === invitationId),
+        () => undefined,
+      ),
+    succeeded: () => toast.success("Invitation cancelled"),
+    refresh: (qc) =>
+      qc.invalidateQueries({ queryKey: queryKeys.invitations.all() }),
+    failure: (qc, invitationId) => {
+      const email = qc
+        .getQueryData<PendingInvitation[]>(queryKeys.invitations.list())
+        ?.find((i) => i.id === invitationId)?.email;
+      return `Couldn't cancel the invitation${email ? ` for ${email}` : ""}`;
     },
-    onError: (err) => toast.error(err.message),
   });
-};
 
 /** Redeeming an invitation. Not org-scoped: the caller is not a member yet. */
 export const useAcceptInvitation = () =>

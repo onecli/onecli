@@ -20,19 +20,12 @@ const ASK_BOTH: OtherChoices = { otherReads: "ask", otherWrites: "ask" };
 const ALLOW_BOTH: OtherChoices = { otherReads: "allow", otherWrites: "allow" };
 
 describe("grantIntentFromChoices", () => {
-  it("every tool and both catch-alls on Allow saves as full access", () => {
-    expect(grantIntentFromChoices(TOOLS, ALLOW, ALLOW_BOTH)).toEqual({
-      access: "full",
-    });
-  });
-
   // The regression this file exists for. The previous rule also required the
   // grant to already BE full (`allAllow && wasFull`), which made the change
   // one-way: a customized grant could never return to full, so an all-Allow
-  // grid silently saved a per-tool grant instead — visually identical, and
-  // narrower in the engine. The rule takes no prior state, so switching every
-  // row back to Allow always lands on full access.
-  it("returns to full access from a customized grant (no one-way door)", () => {
+  // grid silently saved a per-tool grant instead. The rule takes no prior
+  // state, so switching every row back to Allow always lands on full access.
+  it("every tool and both catch-alls on Allow saves as full access (no one-way door)", () => {
     expect(grantIntentFromChoices(TOOLS, ALLOW, ALLOW_BOTH)).toEqual({
       access: "full",
     });

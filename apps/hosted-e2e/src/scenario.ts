@@ -5,10 +5,14 @@ import { newTestIds, type TestIds } from "./ids.js";
 import { createTestDatabase, type TestDatabase } from "./db.js";
 import { startGateway, type GatewayHandle } from "./gateway.js";
 import { startApiServer, type ApiServerHandle } from "./api-server.js";
-import { startTestRunner, type TestRunnerHandle } from "./runner.js";
+import {
+  startTestRunner,
+  type StartRunnerOptions,
+  type TestRunnerHandle,
+} from "./runner.js";
+import { startTestBalancer, type TestBalancer } from "./balancer.js";
 import { startStubUpstream, type StubUpstream } from "./upstream.js";
 import { dockerNetworkRm } from "./docker.js";
-import { freePort } from "./ports.js";
 import { v1Client, type V1Client } from "./v1.js";
 
 /**
@@ -49,20 +53,47 @@ export interface Cx {
   readonly prisma: PrismaClient;
   /** Boot the topology (gateway → api → runner unless `withRunner:false`). */
   startStack(options?: StartStackOptions): Promise<Stack>;
+  /**
+   * One more runner COPY on the scenario's token (same Runner row, its own
+   * replica), torn down with the scenario like the stack's own runner.
+   */
+  startCopy(
+    options: Omit<StartRunnerOptions, "ids" | "config">,
+  ): Promise<TestRunnerHandle>;
+  /** A test balancer in front of copies, closed with the scenario. */
+  startBalancer(): Promise<TestBalancer>;
   upstreamTls(): Promise<StubUpstream>;
   /** A second /v1 client for the second tenant. */
   v1For(apiOrigin: string, which: "first" | "second"): V1Client;
 }
 
+export interface ScenarioOptions {
+  /** Per-scenario ceiling; the suite default (vitest.config) otherwise. */
+  timeoutMs?: number;
+  /**
+   * An opt-in leg's precondition: when it returns a reason, the scenario
+   * registers as SKIPPED with that reason in its name, never as a pass that
+   * asserted nothing (the silent skip this package exists to replace).
+   */
+  skipUnless?: (config: HostedE2EConfig) => string | null;
+}
+
 export const scenario = (
   name: string,
   body: (cx: Cx) => Promise<void>,
-  /** Per-scenario ceiling; the suite default (vitest.config) otherwise. */
-  timeoutMs?: number,
+  /** A per-scenario ceiling, or the full options. */
+  options?: number | ScenarioOptions,
 ): void => {
+  const { timeoutMs, skipUnless }: ScenarioOptions =
+    typeof options === "number" ? { timeoutMs: options } : (options ?? {});
   const config = e2eConfig();
   if (config === null) {
     test.skip(name, () => undefined);
+    return;
+  }
+  const skipReason = skipUnless?.(config) ?? null;
+  if (skipReason !== null) {
+    test.skip(`${name} (${skipReason})`, () => undefined);
     return;
   }
 
@@ -75,6 +106,7 @@ export const scenario = (
       const apis: ApiServerHandle[] = [];
       const runners: TestRunnerHandle[] = [];
       const upstreams: StubUpstream[] = [];
+      const balancers: TestBalancer[] = [];
 
       const cx: Cx = {
         ids,
@@ -91,7 +123,6 @@ export const scenario = (
             databaseUrl: db.url,
             gateway,
             runnerToken: ids.runnerToken,
-            port: await freePort(),
             config,
             ...(options.apiEnv && { env: options.apiEnv }),
           });
@@ -120,6 +151,16 @@ export const scenario = (
             runner,
             v1: v1Client(api.origin, ids.apiKey, ids.workspace),
           };
+        },
+        startCopy: async (options) => {
+          const copy = await startTestRunner({ ...options, ids, config });
+          runners.push(copy);
+          return copy;
+        },
+        startBalancer: async () => {
+          const balancer = await startTestBalancer();
+          balancers.push(balancer);
+          return balancer;
         },
         upstreamTls: async () => {
           const stub = await startStubUpstream({ tls: true });
@@ -159,6 +200,7 @@ export const scenario = (
         // then the per-test network, then — unconditionally — the database.
         await Promise.allSettled(runners.map((r) => r.stop()));
         await Promise.allSettled(runners.map((r) => r.reap()));
+        await Promise.allSettled(balancers.map((b) => b.close()));
         await Promise.allSettled(apis.map((a) => a.stop()));
         await Promise.allSettled(gateways.map((g) => g.stop()));
         await Promise.allSettled(upstreams.map((u) => u.close()));

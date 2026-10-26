@@ -14,7 +14,7 @@ use hyper::header::HeaderName;
 use hyper::{Request, Response, StatusCode};
 use tracing::{info, warn};
 
-use crate::connect::PolicyEngineExt as _;
+use crate::connect::{inactive_app_for, PolicyEngineExt as _, RestrictedCredential};
 use approval::{
     ApprovalDecision, ApprovalGuard, ApprovalStore, PendingApproval, APPROVAL_TIMEOUT_SECS,
 };
@@ -725,6 +725,10 @@ pub async fn forward_request(
     // The deciding user (for the approved-path telemetry below) is captured
     // here because the approve arm returns the body tuple, not the identity.
     let mut approval_approved_by: Option<String> = None;
+    // What the approved request's result is read with (see
+    // `ApprovedResultTarget`): the app the request matched and its card
+    // title, both already resolved for the card.
+    let mut approval_result_shape: Option<(&'static str, String)> = None;
     let (forward_body, approval_log_id, approval_id_for_telemetry, approval_triggered_at) =
         if let PolicyDecision::ManualApproval { rule_id } = &decision {
             info!(method = %method, url = %url, rule_id = %rule_id, "MANUAL APPROVAL required");
@@ -852,6 +856,7 @@ pub async fn forward_request(
             // card instead of raw JSON/base64. The structured `summary` is sent
             // alongside for richer rendering.
             let body_preview = Some(approval_summary.render_text());
+            approval_result_shape = Some((app.unwrap_or(""), approval_summary.action.clone()));
 
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1014,6 +1019,7 @@ pub async fn forward_request(
             };
 
             let decision = outcome.as_ref().map(|o| o.decision);
+            let deny_reason = outcome.as_ref().and_then(|o| o.reason);
             let approved_by = outcome.and_then(|o| o.approved_by);
 
             match decision {
@@ -1031,8 +1037,11 @@ pub async fn forward_request(
                     )
                 }
                 other => {
-                    let (reason, rejection) = match other {
-                        Some(ApprovalDecision::Deny) => {
+                    let (reason, rejection) = match (other, deny_reason) {
+                        (Some(ApprovalDecision::Deny), Some(approval::DenyReason::Superseded)) => {
+                            ("superseded", response::ApprovalRejection::Superseded)
+                        }
+                        (Some(ApprovalDecision::Deny), _) => {
                             ("denied", response::ApprovalRejection::Declined)
                         }
                         _ => ("timed out", response::ApprovalRejection::Expired),
@@ -1291,6 +1300,17 @@ pub async fn forward_request(
                 .map(|choice| choice.provider.as_str()),
         );
 
+    // Where an approved request's real result is recorded (see
+    // `ApprovedResultTarget`).
+    let result_target = approval_log_id
+        .as_ref()
+        .zip(approval_result_shape.as_ref())
+        .map(|(log_id, (app, action))| ApprovedResultTarget {
+            pool: engine.pool.clone(),
+            log_id: log_id.clone(),
+            per_record: summary::outcome::answers_per_record(app, method.as_str(), &path),
+            action: summary::clamp(action, 120),
+        });
     // The request's manual-approval outcome, as the telemetry row records it
     // (`None` when no approval was involved). Built once per emission: both
     // the guidance answers below and the normal path at the end carry it.
@@ -1341,96 +1361,27 @@ pub async fn forward_request(
         && !is_real_oauth_exchange
         && (status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN || wrong_host_404)
     {
-        let hostname = common::util::strip_port(host);
-
-        // 0. Host-gated connection on the wrong host — the agent HAS the
-        //    credential; the URL is what is wrong. The most specific
-        //    explanation, checked before `access_restricted` (which is often
-        //    also true here, via the broad suffix match, and would send the
-        //    agent to the grant surface for a grant it already holds).
-        if let Some(connections) = rules.host_mismatch.as_deref() {
-            info!(method = %method, url = %url, status = %status.as_u16(), "connection host mismatch");
-            return guidance(
-                response::ERROR_CONNECTION_HOST_MISMATCH,
-                response::connection_host_mismatch(hostname, &path, connections),
-            );
+        // A Bearer challenge with a URL realm is a container registry /
+        // OAuth2 token exchange the client resolves ITSELF (the anonymous
+        // Docker Registry v2 token dance). Hijacking it with the
+        // credential_not_found nudge strips the `WWW-Authenticate` challenge
+        // and breaks every `podman pull` / `docker run` of a public image from
+        // inside a sandbox, so on an unknown host the real 401 is forwarded
+        // instead. (Basic, label-realm Bearer, and header-less 401s do not
+        // match: they keep the nudge, which is correct for them.)
+        let nudge_unknown_host = !upstream_offers_anonymous_token_challenge(&resp_headers);
+        if let Some((error, resp)) =
+            auth_failure_guidance(status, host, &path, rules, proxy_ctx, nudge_unknown_host)
+        {
+            info!(method = %method, url = %url, status = %status.as_u16(), error, "uncredentialed auth failure answered with guidance");
+            return guidance(error, resp);
         }
-
-        // 1. Access restricted — agent in selective mode, credentials exist but not assigned.
-        //    Applies to ANY host (known apps AND manual secrets).
-        if let Some(credential) = rules.access_restricted {
-            info!(method = %method, url = %url, status = %status.as_u16(), "access restricted");
-            return guidance(
-                response::ERROR_ACCESS_RESTRICTED,
-                response::access_restricted(
-                    status,
-                    credential,
-                    hostname,
-                    &path,
-                    proxy_ctx.workspace_id.as_deref(),
-                    proxy_ctx.agent_id.as_deref(),
-                ),
-            );
-        }
-
-        // 2. Known app host (or a provider's alias host) — not connected.
-        if let Some((provider, display_name)) = apps::guidance_provider_for(hostname, &path) {
-            info!(method = %method, url = %url, status = %status.as_u16(), provider = %provider, "app not connected");
-            return guidance(
-                response::ERROR_APP_NOT_CONNECTED,
-                response::app_not_connected(
-                    status,
-                    provider,
-                    display_name,
-                    proxy_ctx.agent_name.as_deref(),
-                    proxy_ctx.workspace_id.as_deref(),
-                ),
-            );
-        }
-
-        // 2b. Known host but unrecognized API path — pre-fill a custom connection form.
-        if apps::provider_for_host(hostname).is_some() {
-            info!(method = %method, url = %url, status = %status.as_u16(), host = %hostname, "app not connected — no matching provider, custom connection");
-            return guidance(
-                response::ERROR_APP_NOT_CONNECTED,
-                response::app_not_connected_unknown_provider(
-                    status,
-                    hostname,
-                    proxy_ctx.agent_name.as_deref(),
-                    proxy_ctx.workspace_id.as_deref(),
-                ),
-            );
-        }
-
-        // 3. Unknown host — no credentials at all, guide user to create a secret.
-        //
-        // EXCEPT when the upstream advertises a Bearer challenge with a
-        // URL realm: that is a container registry / OAuth2 token-exchange the
-        // client resolves ITSELF (the anonymous Docker Registry v2 token
-        // dance). Hijacking it with the nudge strips the `WWW-Authenticate`
-        // challenge and breaks every `podman pull` / `docker run` of a public
-        // image from inside a sandbox. Forward the real 401 so the client can
-        // mint its token. (Basic, label-realm Bearer, and header-less 401s do
-        // not match — they keep the nudge, which is correct for them.)
-        if upstream_offers_anonymous_token_challenge(&resp_headers) {
-            info!(
-                method = %method,
-                url = %url,
-                status = %status.as_u16(),
-                "forwarding registry/token-exchange auth challenge (no nudge)"
-            );
-        } else {
-            info!(method = %method, url = %url, status = %status.as_u16(), "credential not found");
-            return guidance(
-                response::ERROR_CREDENTIAL_NOT_FOUND,
-                response::credential_not_found(
-                    status,
-                    hostname,
-                    &path,
-                    proxy_ctx.workspace_id.as_deref(),
-                ),
-            );
-        }
+        info!(
+            method = %method,
+            url = %url,
+            status = %status.as_u16(),
+            "forwarding registry/token-exchange auth challenge (no nudge)"
+        );
     }
 
     // Some APIs (e.g. Google) return 400 instead of 401 for invalid/missing API keys.
@@ -1446,69 +1397,19 @@ pub async fn forward_request(
         let check_slice = &body_bytes[..body_bytes.len().min(AUTH_CHECK_BODY_LIMIT)];
 
         if body_indicates_auth_error(check_slice) {
-            let hostname = common::util::strip_port(host);
-
-            // Mirror the 401/403 logic: host_mismatch → access_restricted →
-            // app_not_connected → credential_not_found
-            if let Some(connections) = rules.host_mismatch.as_deref() {
-                info!(method = %method, url = %url, status = 400, "auth-related 400 — connection host mismatch");
-                return guidance(
-                    response::ERROR_CONNECTION_HOST_MISMATCH,
-                    response::connection_host_mismatch(hostname, &path, connections),
-                );
+            if let Some((error, resp)) =
+                auth_failure_guidance(status, host, &path, rules, proxy_ctx, true)
+            {
+                info!(method = %method, url = %url, status = 400, error, "auth-related 400 answered with guidance");
+                return guidance(error, resp);
             }
-            if let Some(credential) = rules.access_restricted {
-                info!(method = %method, url = %url, status = 400, "auth-related 400 — access restricted");
-                return guidance(
-                    response::ERROR_ACCESS_RESTRICTED,
-                    response::access_restricted(
-                        StatusCode::BAD_REQUEST,
-                        credential,
-                        hostname,
-                        &path,
-                        proxy_ctx.workspace_id.as_deref(),
-                        proxy_ctx.agent_id.as_deref(),
-                    ),
-                );
-            }
-            if let Some((provider, display_name)) = apps::guidance_provider_for(hostname, &path) {
-                info!(method = %method, url = %url, status = 400, provider = %provider, "auth-related 400 — app not connected");
-                return guidance(
-                    response::ERROR_APP_NOT_CONNECTED,
-                    response::app_not_connected(
-                        StatusCode::BAD_REQUEST,
-                        provider,
-                        display_name,
-                        proxy_ctx.agent_name.as_deref(),
-                        proxy_ctx.workspace_id.as_deref(),
-                    ),
-                );
-            }
-            if apps::provider_for_host(hostname).is_some() {
-                info!(method = %method, url = %url, status = 400, host = %hostname, "auth-related 400 — no matching provider, custom connection");
-                return guidance(
-                    response::ERROR_APP_NOT_CONNECTED,
-                    response::app_not_connected_unknown_provider(
-                        StatusCode::BAD_REQUEST,
-                        hostname,
-                        proxy_ctx.agent_name.as_deref(),
-                        proxy_ctx.workspace_id.as_deref(),
-                    ),
-                );
-            }
-            info!(method = %method, url = %url, status = 400, "auth-related 400 — credential not found");
-            return guidance(
-                response::ERROR_CREDENTIAL_NOT_FOUND,
-                response::credential_not_found(
-                    StatusCode::BAD_REQUEST,
-                    hostname,
-                    &path,
-                    proxy_ctx.workspace_id.as_deref(),
-                ),
-            );
         }
 
-        // Not auth-related: forward the buffered 400 as-is.
+        // Not auth-related: forward the buffered 400 as-is. An approved
+        // request records what the upstream refused (its log row only).
+        if let Some(target) = &result_target {
+            target.record(status, &resp_headers, Some(&body_bytes));
+        }
         let mut response = Response::new(Either::Left(Full::new(body_bytes)));
         *response.status_mut() = status;
         for (name, value) in resp_headers.iter() {
@@ -1589,6 +1490,38 @@ pub async fn forward_request(
         }
     } else {
         upstream_stream
+    };
+
+    // An APPROVED request: record what the upstream actually did on the
+    // approval's log row ("0 of 9 created: BillingCountry: …"), so the
+    // person who approved it sees what happened. Only an answer that needs
+    // its body read is peeked (a failure, or a per-record success), and the
+    // peeked bytes are replayed in front of the rest: the agent reads the
+    // response byte for byte. A plain success is judged by its status and
+    // streams at once. Never an event stream: it may hold the head open for
+    // minutes, and there is no one answer to read.
+    let result_target = result_target
+        .as_ref()
+        .filter(|_| !content_type.contains("text/event-stream"));
+    let upstream_stream: UpstreamStream = match result_target {
+        None => upstream_stream,
+        Some(target) if !target.reads_body(status) => {
+            target.record(status, &resp_headers, None);
+            upstream_stream
+        }
+        Some(target) => {
+            let mut stream = upstream_stream;
+            let head = super::body::read_head(&mut stream, summary::outcome::RESULT_BODY_PEEK)
+                .await
+                .context("reading an approved request's response")?;
+            target.record(
+                status,
+                &resp_headers,
+                head.complete.then_some(&head.bytes[..]),
+            );
+            let head = Bytes::from(head.bytes);
+            Box::pin(futures_util::stream::once(async move { Ok(head) }).chain(stream))
+        }
     };
 
     info!(
@@ -1679,6 +1612,54 @@ async fn github_org_access_check(
     })
 }
 
+/// Where an APPROVED request's real result is recorded: its approval's
+/// request-log row. `per_record` says the upstream answers record by record
+/// (a Salesforce Collections or Composite call), so even its 200 is read;
+/// `action` is the card's own title, whose verb the result line reads in.
+struct ApprovedResultTarget {
+    pool: sqlx::PgPool,
+    log_id: String,
+    per_record: bool,
+    action: String,
+}
+
+impl ApprovedResultTarget {
+    /// Whether this answer must be read to be judged: a failure (for its
+    /// message) or a per-record success (for its breakdown).
+    fn reads_body(&self, status: StatusCode) -> bool {
+        self.per_record || !status.is_success()
+    }
+
+    /// Record what the upstream answered (`extra_data.approval_result`), off
+    /// the request path. Best-effort: the response reaches the agent either
+    /// way, and a failed write only means the card keeps a plain "Approved".
+    /// `body` is the whole body as received, or `None` when it was not read
+    /// or was cut; a body that does not decode counts as unread. Nothing is
+    /// written when the answer can't be judged.
+    fn record(&self, status: StatusCode, headers: &hyper::HeaderMap, body: Option<&[u8]>) {
+        let decoded =
+            body.and_then(|b| super::body::decoded(headers, b, summary::outcome::RESULT_BODY_PEEK));
+        let Some(result) =
+            summary::outcome::request_result(self.per_record, status.as_u16(), decoded.as_deref())
+        else {
+            return;
+        };
+        let Ok(mut json) = serde_json::to_value(&result) else {
+            return;
+        };
+        json["action"] = serde_json::Value::String(self.action.clone());
+        let pool = self.pool.clone();
+        let log_id = self.log_id.clone();
+        let drain_guard = shutdown::task_guard();
+        tokio::spawn(async move {
+            let _drain_guard = drain_guard;
+            if let Err(error) = db::record_approval_result(&pool, &log_id, &json).await {
+                warn!(log_id = %log_id, %error, "recording an approved request's result failed");
+            }
+        });
+    }
+}
+
 /// Apply one change to a connection's GitHub organization record, off the
 /// request path: the agent's answer never waits on the write, and a failed
 /// write only delays the dashboard until the next refusal or success. Held by
@@ -1721,6 +1702,108 @@ fn spawn_github_org_access_write(
             ),
         }
     });
+}
+
+/// The guidance that replaces an uncredentialed upstream auth failure, most
+/// specific first, as (stable error code, response). `None` only for an
+/// unknown host when `nudge_unknown_host` is off (the upstream's own
+/// challenge must reach the client). Shared by the 401/403 path and the
+/// auth-shaped 400 path, so the two can never answer differently.
+fn auth_failure_guidance(
+    status: StatusCode,
+    host: &str,
+    path: &str,
+    rules: &ResolvedRules,
+    proxy_ctx: &ProxyContext,
+    nudge_unknown_host: bool,
+) -> Option<(&'static str, Response<hooks::ForwardResponseBody>)> {
+    let hostname = common::util::strip_port(host);
+    let workspace_id = proxy_ctx.workspace_id.as_deref();
+    let agent_name = proxy_ctx.agent_name.as_deref();
+    let connecting_agent = proxy_ctx.connecting_agent();
+
+    // 1. A granted host-gated connection on the wrong host: the agent HAS the
+    //    credential, the URL is what is wrong. Checked before
+    //    `access_restricted`, which is often also true here (the broad
+    //    suffix match) and would send the agent to switch on what it holds.
+    if let Some(connections) = rules.host_mismatch.as_deref() {
+        return Some((
+            response::ERROR_CONNECTION_HOST_MISMATCH,
+            response::connection_host_mismatch(hostname, path, connections),
+        ));
+    }
+
+    match &rules.access_restricted {
+        // 2. A secret exists for this host that the agent was not given.
+        Some(RestrictedCredential::Secret(kind)) => {
+            return Some((
+                response::ERROR_ACCESS_RESTRICTED,
+                response::secret_access_restricted(
+                    status,
+                    *kind,
+                    hostname,
+                    path,
+                    workspace_id,
+                    proxy_ctx.agent_id.as_deref(),
+                ),
+            ));
+        }
+        // 3. A connected account of THIS request's app is just off for the
+        //    agent: turning it on is the fix (connecting another stays the
+        //    alternative). Anything else (the accounts serve another app on
+        //    this shared host, or each one is waiting on a reconnect) falls
+        //    through to "connect it".
+        Some(RestrictedCredential::AppConnections(inactive)) => {
+            if let Some(app) = inactive_app_for(inactive, hostname, path) {
+                return Some((
+                    response::ERROR_ACCESS_RESTRICTED,
+                    response::app_access_restricted(
+                        status,
+                        app,
+                        proxy_ctx.agent_id.as_deref(),
+                        connecting_agent,
+                        workspace_id,
+                    ),
+                ));
+            }
+        }
+        None => {}
+    }
+
+    // 4. A known app host (or a provider's alias host): connect it.
+    if let Some((provider, display_name)) = apps::guidance_provider_for(hostname, path) {
+        return Some((
+            response::ERROR_APP_NOT_CONNECTED,
+            response::app_not_connected(
+                status,
+                provider,
+                display_name,
+                connecting_agent,
+                workspace_id,
+            ),
+        ));
+    }
+
+    // 5. A known host on a path no app serves: request the app.
+    if apps::provider_for_host(hostname).is_some() {
+        return Some((
+            response::ERROR_APP_NOT_CONNECTED,
+            response::app_not_connected_unknown_provider(
+                status,
+                hostname,
+                agent_name,
+                workspace_id,
+            ),
+        ));
+    }
+
+    // 6. An unknown host: add a custom credential.
+    nudge_unknown_host.then(|| {
+        (
+            response::ERROR_CREDENTIAL_NOT_FOUND,
+            response::credential_not_found(status, hostname, path, workspace_id),
+        )
+    })
 }
 
 /// Whether an uncredentialed upstream 404 means "wrong host" rather than "no
@@ -2570,6 +2653,181 @@ mod tests {
             .contains("https://acme.my.salesforce.com/services/data/v60.0/sobjects/"));
     }
 
+    /// The guidance an uncredentialed auth failure on `host` + `path` gets
+    /// under `access_restricted`, as (error code, `manage_url`).
+    async fn guidance_for(
+        access_restricted: Option<crate::connect::RestrictedCredential>,
+        host: &str,
+        path: &str,
+    ) -> (String, Option<String>) {
+        let rules = ResolvedRules {
+            access_restricted,
+            ..permissive_rules()
+        };
+        let ctx = ProxyContext {
+            workspace_id: Some("ws".into()),
+            organization_id: Some("org".into()),
+            agent_id: Some("ag".into()),
+            agent_name: Some("Bot".into()),
+            agent_identifier: None,
+            agent_token: "test-token".to_string(),
+        };
+        let (error, resp) =
+            auth_failure_guidance(StatusCode::UNAUTHORIZED, host, path, &rules, &ctx, true)
+                .expect("an uncredentialed auth failure always gets guidance here");
+        let body = resp.into_body().collect().await.expect("body").to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["error"], error);
+        let manage_url = json["manage_url"].as_str().map(|url| {
+            url.strip_prefix(response::dashboard_url())
+                .expect("dashboard link")
+                .to_string()
+        });
+        (error.to_string(), manage_url)
+    }
+
+    /// The decision order, shared by the 401/403 and auth-shaped 400 paths:
+    /// an ungranted secret first, then an inactive account of THIS request's
+    /// app, else "connect it". Accounts of another app on a shared host, or an
+    /// app with every account granted or waiting on a reconnect, never turn a
+    /// "connect" into a "switch it on".
+    #[tokio::test]
+    async fn auth_failure_guidance_offers_the_switch_only_for_the_requested_app() {
+        use crate::connect::{InactiveApp, RestrictedCredential, SecretKind};
+        let inactive = |provider: &str| {
+            Some(RestrictedCredential::AppConnections(vec![InactiveApp {
+                provider: provider.to_string(),
+                shared_by_organization: true,
+            }]))
+        };
+        let gmail = ("www.googleapis.com", "/gmail/v1/users/me/messages");
+
+        assert_eq!(
+            guidance_for(inactive("resend"), "api.resend.com", "/emails").await,
+            (
+                "access_restricted".into(),
+                Some("/w/ws/agents/ag/connections?attach=resend".into())
+            )
+        );
+        assert_eq!(
+            guidance_for(inactive("gmail"), gmail.0, gmail.1).await,
+            (
+                "access_restricted".into(),
+                Some("/w/ws/agents/ag/connections?attach=gmail".into())
+            )
+        );
+        // A Calendar account does not answer for a Gmail request.
+        assert_eq!(
+            guidance_for(inactive("google-calendar"), gmail.0, gmail.1).await,
+            ("app_not_connected".into(), None)
+        );
+        // Accounts exist, but none can simply be switched on.
+        assert_eq!(
+            guidance_for(
+                Some(RestrictedCredential::AppConnections(Vec::new())),
+                "api.resend.com",
+                "/emails"
+            )
+            .await,
+            ("app_not_connected".into(), None)
+        );
+        assert_eq!(
+            guidance_for(None, "api.resend.com", "/emails").await,
+            ("app_not_connected".into(), None)
+        );
+        // An ungranted secret keeps its own page, wherever the host belongs.
+        assert_eq!(
+            guidance_for(
+                Some(RestrictedCredential::Secret(SecretKind::Custom)),
+                "api.resend.com",
+                "/emails"
+            )
+            .await,
+            (
+                "access_restricted".into(),
+                Some("/w/ws/agents/ag/connections?tab=custom".into())
+            )
+        );
+        assert_eq!(
+            guidance_for(None, "api.unknown-service.test", "/v1").await,
+            ("credential_not_found".into(), None)
+        );
+    }
+
+    /// The "connect it" link names the session's agent, id included, so the
+    /// account the user connects through it lands on for that agent; a
+    /// session without an agent mints the plain workspace link.
+    #[tokio::test]
+    async fn auth_failure_guidance_connect_link_names_the_sessions_agent() {
+        let connect_url = |agent: Option<(&str, &str)>| {
+            let ctx = ProxyContext {
+                workspace_id: Some("ws".into()),
+                organization_id: Some("org".into()),
+                agent_id: agent.map(|(id, _)| id.to_string()),
+                agent_name: agent.map(|(_, name)| name.to_string()),
+                agent_identifier: None,
+                agent_token: "test-token".to_string(),
+            };
+            let (_, resp) = auth_failure_guidance(
+                StatusCode::UNAUTHORIZED,
+                "api.resend.com",
+                "/emails",
+                &permissive_rules(),
+                &ctx,
+                true,
+            )
+            .expect("a known app host always gets guidance");
+            async move {
+                let body = resp.into_body().collect().await.expect("body").to_bytes();
+                let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+                json["connect_url"]
+                    .as_str()
+                    .and_then(|url| url.strip_prefix(response::dashboard_url()))
+                    .expect("dashboard connect link")
+                    .to_string()
+            }
+        };
+
+        assert_eq!(
+            connect_url(Some(("ag-1", "Mail Bot"))).await,
+            "/w/ws/connections?connect=resend&source=agent&agent_name=Mail%20Bot&agent_id=ag%2D1"
+        );
+        assert_eq!(connect_url(None).await, "/w/ws/connections?connect=resend");
+    }
+
+    /// An unknown host whose upstream offers its own token challenge keeps
+    /// it: no guidance replaces the 401 (the anonymous registry token flow).
+    #[test]
+    fn auth_failure_guidance_leaves_an_unknown_host_alone_when_told_to() {
+        let ctx = ProxyContext {
+            workspace_id: None,
+            organization_id: None,
+            agent_id: None,
+            agent_name: None,
+            agent_identifier: None,
+            agent_token: "test-token".to_string(),
+        };
+        let rules = permissive_rules();
+        assert!(auth_failure_guidance(
+            StatusCode::UNAUTHORIZED,
+            "registry.example.test",
+            "/v2/",
+            &rules,
+            &ctx,
+            false
+        )
+        .is_none());
+        assert!(auth_failure_guidance(
+            StatusCode::UNAUTHORIZED,
+            "api.resend.com",
+            "/emails",
+            &rules,
+            &ctx,
+            false
+        )
+        .is_some());
+    }
+
     /// A 404 is "wrong host" on an alias ONLY on the bound host's API
     /// surface (the alias's own APIs keep their genuine 404s), and on a
     /// non-alias host only when a host-bound connection recorded a mismatch
@@ -2873,6 +3131,7 @@ mod tests {
                     name: "authorization".to_string(),
                     value: "Bearer test-token".to_string(),
                 }],
+                secret: None,
             }],
             winning_connection_id: Some("conn_gh".into()),
             winning_provider: Some("github".into()),

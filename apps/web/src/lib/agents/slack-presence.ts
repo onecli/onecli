@@ -15,3 +15,16 @@ export { SLACK_DISPLAY_NAME, SLACK_ICON_SRC } from "./channel-providers/slack";
  */
 export const slackAppRedirectUrl = (appId: string, teamId: string): string =>
   `https://slack.com/app_redirect?app=${encodeURIComponent(appId)}&team=${encodeURIComponent(teamId)}`;
+
+/**
+ * An app's Basic Information page on api.slack.com: where its app-level token
+ * is generated and "Install to Workspace" lives. The one href for a known
+ * app id, shared by the guided socket steps and the paste floor's reconnect.
+ */
+export const slackAppSettingsUrl = (appId: string): string =>
+  `https://api.slack.com/apps/${encodeURIComponent(appId)}/general`;
+
+/** The same page scrolled to its "Display Information" card (Slack's own
+ * `<a name="display">`), where the app's profile icon is set. */
+export const slackAppIconSettingsUrl = (appId: string): string =>
+  `${slackAppSettingsUrl(appId)}#display`;

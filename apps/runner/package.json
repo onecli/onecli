@@ -13,6 +13,7 @@
     "./supervisor-messages": "./src/supervisor-messages.ts",
     "./backend/docker": "./src/backend/docker/docker-backend.ts",
     "./ws/server": "./src/ws/server.ts",
+    "./ws/channel-plane": "./src/ws/channel-plane.ts",
     "./ws/session": "./src/ws/session.ts"
   },
   "scripts": {

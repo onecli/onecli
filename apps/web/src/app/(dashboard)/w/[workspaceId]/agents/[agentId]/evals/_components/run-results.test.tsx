@@ -36,6 +36,7 @@ const run = (patch: Partial<EvalRunDetail> = {}): EvalRunDetail => ({
   status: "done",
   trigger: "manual",
   configVersion: "cfg-2",
+  model: null,
   total: 2,
   counts: { pending: 0, passed: 1, mismatch: 1, error: 0, inconclusive: 0 },
   error: null,
@@ -142,6 +143,22 @@ describe("RunResults", () => {
       screen.getByRole("button", { name: "Inspect run: Who renewed?" }),
     );
     expect(onInspect).toHaveBeenCalledWith("turn-broke");
+  });
+
+  it("says which model answered the run", async () => {
+    api.getRun.mockResolvedValue(run({ model: "claude-opus-4-7" }));
+    mount();
+    expect(await screen.findByText("Run details")).toBeInTheDocument();
+    expect(screen.getByText(/Answered by/).parentElement).toHaveTextContent(
+      "Answered by claude-opus-4-7.",
+    );
+  });
+
+  it("names no model for a run recorded without one", async () => {
+    api.getRun.mockResolvedValue(run());
+    mount();
+    expect(await screen.findByText("Run details")).toBeInTheDocument();
+    expect(screen.queryByText(/Answered by/)).toBeNull();
   });
 
   it("shows a stopped run's reason", async () => {

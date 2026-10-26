@@ -74,8 +74,13 @@ export const SlackInstalledFinish = ({
       {
         onSuccess: ({ agent, sharedAppConfigured }) => {
           if (agent) {
+            // A socket app still owes its app-level token: land on the
+            // "one step left" marker, never "connected".
+            const landing = agent.awaitingTransportCredential
+              ? "installed"
+              : "connected";
             router.replace(
-              `/w/${encodeURIComponent(agent.workspaceId)}/agents/${encodeURIComponent(agent.id)}/channels?connected=slack`,
+              `/w/${encodeURIComponent(agent.workspaceId)}/agents/${encodeURIComponent(agent.id)}/channels?${landing}=slack`,
             );
           } else if (sharedAppConfigured) {
             inspectMutate({ provider: "slack", code, organizationId });

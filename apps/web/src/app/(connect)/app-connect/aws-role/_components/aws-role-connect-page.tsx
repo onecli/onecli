@@ -33,6 +33,8 @@ const AwsRoleConnectPage = () => {
     workspaceId: searchParams.get("workspaceId") ?? undefined,
     orgId: searchParams.get("orgId") ?? undefined,
   };
+  // The agent the connect started from: the new connection is on for it.
+  const agentId = searchParams.get("agent_id") ?? undefined;
   const { data: externalId, isPending, isError } = useAwsExternalId(scope);
 
   return (
@@ -52,6 +54,7 @@ const AwsRoleConnectPage = () => {
       hasDefaults={true}
       workspaceId={scope.workspaceId}
       orgId={scope.orgId}
+      agentId={agentId}
       preContent={
         <AwsTrustPolicyInfo
           externalId={externalId ?? null}

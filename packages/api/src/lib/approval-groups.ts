@@ -165,7 +165,8 @@ export interface BatchArrival {
   total: number | null;
   /** More are expected and the batch is still active. */
   arriving: boolean;
-  /** The total was given, the batch went quiet, and some never came. */
+  /** The total was given, the batch went quiet, and some haven't come:
+   *  maybe never, maybe only once this card is decided (`batchArrivalNote`). */
   missing: number;
   /** When `arriving` ends on its own (ms epoch), for a re-render timer. */
   settlesAt: number | null;
@@ -197,6 +198,28 @@ export const batchArrival = (
     missing: arriving ? 0 : total - arrived,
     settlesAt: arriving ? settlesAt : null,
   };
+};
+
+/**
+ * What a card says about a tagged batch that isn't all here, the same on
+ * every surface (plain text; a surface adds its own icon and how its
+ * Approve all waits). Null when there is nothing to say.
+ *
+ * Gone quiet with some missing does NOT mean they failed: an agent whose
+ * harness runs one call at a time is blocked on THIS approval, so the rest
+ * only leave after it is decided. The copy says that, and still says
+ * Approve all covers only what is shown.
+ */
+export const batchArrivalNote = (arrival: BatchArrival): string | null => {
+  if (arrival.arriving) {
+    return `${arrival.arrived} of ${arrival.total} here, waiting for the rest…`;
+  }
+  if (!arrival.missing) return null;
+  const rest =
+    arrival.missing === 1 ? "The other one" : `The other ${arrival.missing}`;
+  return `${arrival.arrived} of ${arrival.total} here. ${rest} may only be sent after you decide ${
+    arrival.arrived === 1 ? "this one" : "these"
+  }. Approve all covers the ${arrival.arrived} shown.`;
 };
 
 /** Most changes a summary lists before the card says "show each request":

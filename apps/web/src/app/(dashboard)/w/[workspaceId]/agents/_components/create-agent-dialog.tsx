@@ -27,6 +27,8 @@ import { SecretDialog } from "@/app/(dashboard)/w/[workspaceId]/connections/_com
 import { validateDisplayName } from "@onecli/api/validations/display-name";
 import { IDENTIFIER_REGEX } from "@onecli/api/validations/agent";
 import { nameToIdentifier } from "@/lib/agents/agent-identifier";
+import { useCounts, useHasConnectionsToChoose } from "@/hooks/use-counts";
+import { ChooseConnectionsDialog } from "./choose-connections-dialog";
 
 interface CreateAgentDialogProps {
   open: boolean;
@@ -41,9 +43,20 @@ export const CreateAgentDialog = ({
   const [nameTouched, setNameTouched] = useState(false);
   const [identifier, setIdentifier] = useState("");
   const [identifierTouched, setIdentifierTouched] = useState(false);
-  const [createdIdentifier, setCreatedIdentifier] = useState<string | null>(
-    null,
-  );
+  const [created, setCreated] = useState<{
+    id: string;
+    name: string;
+    identifier: string;
+  } | null>(null);
+  // A new agent starts with no connection: the chooser pops right after
+  // create (after the key, if there was none), when the workspace has any
+  // to offer; the success step keeps a button to reopen it.
+  const [choosing, setChoosing] = useState(false);
+  // Rendered (the success step's button) from the live counts; the pop
+  // itself asks when it is reached, never from the render that scheduled it.
+  const { data: counts } = useCounts();
+  const hasConnections = (counts?.apps ?? 0) + (counts?.secrets ?? 0) > 0;
+  const hasConnectionsToChoose = useHasConnectionsToChoose();
   // Null until creation answers. False = the workspace has no LLM key, so the
   // agent cannot run yet — the one thing worth interrupting the success step
   // for, since everything else about a new agent is already usable.
@@ -76,13 +89,25 @@ export const CreateAgentDialog = ({
       { name, identifier },
       {
         onSuccess: (agent) => {
-          setCreatedIdentifier(agent.identifier);
+          setCreated({
+            id: agent.id,
+            name: agent.name,
+            identifier: agent.identifier,
+          });
           setHasLlmKey(agent.llmKeys.length > 0);
           toast.success(
             agent.llmKeys.length > 0
               ? "Agent created and connected to your LLM key"
               : "Agent created",
           );
+          // A new agent starts with no connection: the chooser pops straight
+          // away (after the LLM key when it has none). Closing it lands on
+          // the success step, where the identifier waits to be copied.
+          if (agent.llmKeys.length > 0) {
+            void hasConnectionsToChoose().then(
+              (has) => has && setChoosing(true),
+            );
+          }
         },
       },
     );
@@ -94,7 +119,7 @@ export const CreateAgentDialog = ({
       setNameTouched(false);
       setIdentifier("");
       setIdentifierTouched(false);
-      setCreatedIdentifier(null);
+      setCreated(null);
       setHasLlmKey(null);
     }
     onOpenChange(value);
@@ -102,9 +127,12 @@ export const CreateAgentDialog = ({
 
   return (
     <>
-      <Dialog open={open && !keyDialogOpen} onOpenChange={handleClose}>
+      <Dialog
+        open={open && !keyDialogOpen && !choosing}
+        onOpenChange={handleClose}
+      >
         <DialogContent>
-          {createdIdentifier ? (
+          {created ? (
             <>
               <div className="flex flex-col items-center pt-2 text-center">
                 <div className="bg-brand/10 mb-3 flex size-10 items-center justify-center rounded-full">
@@ -120,13 +148,13 @@ export const CreateAgentDialog = ({
               <div className="py-2">
                 <div className="bg-muted flex items-center justify-between gap-3 rounded-lg border px-4 py-3">
                   <code className="min-w-0 truncate font-mono text-sm font-medium">
-                    {createdIdentifier}
+                    {created.identifier}
                   </code>
                   <Button
                     variant="ghost"
                     size="icon"
                     className="size-7 shrink-0"
-                    onClick={() => copy(createdIdentifier)}
+                    onClick={() => copy(created.identifier)}
                   >
                     {copied ? (
                       <Check className="size-3.5 text-brand" />
@@ -164,6 +192,15 @@ export const CreateAgentDialog = ({
                     <Button onClick={() => setKeyDialogOpen(true)}>
                       <KeyRound className="size-3.5" />
                       Add LLM key
+                    </Button>
+                  </>
+                ) : hasConnections ? (
+                  <>
+                    <Button variant="ghost" onClick={() => handleClose(false)}>
+                      Done
+                    </Button>
+                    <Button onClick={() => setChoosing(true)}>
+                      Choose connections
                     </Button>
                   </>
                 ) : (
@@ -263,8 +300,18 @@ export const CreateAgentDialog = ({
         onSaved={() => {
           setHasLlmKey(true);
           toast.success("LLM key added and attached to your agent");
-          handleClose(false);
+          // With connections to choose, the chooser pops next; otherwise the
+          // key was the last step.
+          void hasConnectionsToChoose().then((has) =>
+            has ? setChoosing(true) : handleClose(false),
+          );
         }}
+      />
+      {/* Closing returns to the success step: its identifier may still need
+          copying, and its Done closes the flow. */}
+      <ChooseConnectionsDialog
+        agent={choosing ? created : null}
+        onClose={() => setChoosing(false)}
       />
     </>
   );

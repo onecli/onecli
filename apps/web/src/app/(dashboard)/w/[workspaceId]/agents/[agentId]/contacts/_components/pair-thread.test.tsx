@@ -35,6 +35,8 @@ const rendered = (over: Partial<RenderedTurn> & { turnId: string }) =>
     lead: "",
     liveText: "",
     notices: [],
+    supersededApprovalIds: [],
+    desktopRequests: new Map(),
     peerMessages: [],
     peerMessagesOpeningTask: new Set<number>(),
     tools: [],

@@ -41,6 +41,8 @@ let sharedInstall: SharedInstall;
 let oauthState: OAuthState;
 let initSelfUrl: Providers["initSelfUrl"];
 let app: ReturnType<typeof import("../app").createApiApp>;
+/** Drains the detached Slack replies (fireReply) so negatives are exact. */
+let settleDetachedReplies: () => Promise<void>;
 
 const P = "shw-";
 const ORG = `${P}org`;
@@ -164,6 +166,8 @@ beforeAll(async () => {
   initSelfUrl(SELF_URL);
 
   const { createApiApp } = await import("../app");
+  settleDetachedReplies = (await import("./channel-inbound-slack"))
+    .settleDetachedRepliesForTests;
   // Sessionless: every request in this suite rides Slack-signature trust,
   // never a session — exactly the production posture of the inbound arm.
   app = createApiApp(
@@ -959,7 +963,7 @@ describe.skipIf(!PROOF_URL)(
       expect((await postEvent(envelope)).status).toBe(200);
       expect((await postEvent(envelope)).status).toBe(200);
       await waitForSlackCall("chat.postMessage");
-      await new Promise((r) => setTimeout(r, 150));
+      await settleDetachedReplies();
       expect(
         slackCalls.filter((c) => c.method === "chat.postMessage"),
       ).toHaveLength(1);
@@ -1008,7 +1012,7 @@ describe.skipIf(!PROOF_URL)(
         ),
       );
       expect(res.status).toBe(200);
-      await new Promise((r) => setTimeout(r, 100));
+      await settleDetachedReplies();
       expect(slackCalls).toHaveLength(0);
     });
 
@@ -1032,7 +1036,7 @@ describe.skipIf(!PROOF_URL)(
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ ok: true });
       // Long enough for a stray detached reply to have surfaced.
-      await new Promise((r) => setTimeout(r, 100));
+      await settleDetachedReplies();
       expect(slackCalls).toHaveLength(0);
     });
 
@@ -1090,7 +1094,7 @@ describe.skipIf(!PROOF_URL)(
 
       // A second open (fresh event id, same user) sends NOTHING more.
       expect((await open(`wire-${Date.now()}-home2`)).status).toBe(200);
-      await new Promise((r) => setTimeout(r, 150));
+      await settleDetachedReplies();
       expect(
         slackCalls.filter((call) => call.method === "chat.postMessage").length,
       ).toBe(before + 1);
@@ -1103,7 +1107,7 @@ describe.skipIf(!PROOF_URL)(
         ),
       );
       expect(res.status).toBe(200);
-      await new Promise((r) => setTimeout(r, 100));
+      await settleDetachedReplies();
       expect(
         slackCalls.filter((call) => call.method === "chat.postMessage").length,
       ).toBe(before + 1);
@@ -1331,7 +1335,7 @@ describe.skipIf(!PROOF_URL)(
       expect(after).toBe(0);
       // And a follow-up DM is now ack-and-drop, not a reply.
       await postEvent(eventEnvelope(dm("hello?"), `wire-${Date.now()}-after`));
-      await new Promise((r) => setTimeout(r, 100));
+      await settleDetachedReplies();
       expect(slackCalls).toHaveLength(0);
     });
 

@@ -52,12 +52,16 @@ const openWithSpies = () => {
   const reaches: unknown[] = [];
   const actions: unknown[] = [];
   const groups: unknown[] = [];
+  const cardStops: unknown[] = [];
+  const rowActions: unknown[] = [];
   const handlers: ProviderTransportHandlers = {
     onEvent: () => {},
     onApprovalDecision: (d) => approvals.push(d),
     onGroupApprovalDecision: (d) => groups.push(d),
     onReachDecision: (d) => reaches.push(d),
     onActionDecision: (d) => actions.push(d),
+    onCardStop: (d) => cardStops.push(d),
+    onCardFollowUpAction: (d) => rowActions.push(d),
     onPermanentFailure: () => {},
     onLog: () => {},
   };
@@ -69,6 +73,8 @@ const openWithSpies = () => {
     reaches,
     actions,
     groups,
+    cardStops,
+    rowActions,
     deliver: socketMock.onInteractive,
   };
 };
@@ -272,6 +278,60 @@ describe("slack adapter-provider — interactivity classification", () => {
     });
     expect(approvals).toEqual([]);
     expect(reaches).toEqual([]);
+    expect(actions).toEqual([]);
+  });
+
+  it("routes the narration card's Stop to onCardStop with ONLY the card's address and the clicker", () => {
+    const { cardStops, actions, approvals, deliver } = openWithSpies();
+    deliver({
+      type: "block_actions",
+      user: { id: "U-CLICKER" },
+      container: { type: "message", channel_id: "D1", message_ts: "1700.42" },
+      // The value is meaningless by design: it must not travel anywhere.
+      actions: [{ action_id: "turn_stop", value: "turn-of-someone-else" }],
+    });
+    expect(cardStops).toEqual([
+      { channel: "D1", cardTs: "1700.42", clickerExternalUserId: "U-CLICKER" },
+    ]);
+    expect(actions).toEqual([]);
+    expect(approvals).toEqual([]);
+  });
+
+  it("drops a Stop click with no clicker or no card address", () => {
+    const { cardStops, deliver } = openWithSpies();
+    deliver({
+      type: "block_actions",
+      container: { type: "message", channel_id: "D1", message_ts: "1700.42" },
+      actions: [{ action_id: "turn_stop", value: "stop" }],
+    });
+    deliver({
+      type: "block_actions",
+      user: { id: "U-CLICKER" },
+      container: { type: "view", view_id: "V1" },
+      actions: [{ action_id: "turn_stop", value: "stop" }],
+    });
+    expect(cardStops).toEqual([]);
+  });
+
+  it("routes a waiting message's Send now to onCardFollowUpAction with the card's address, the row and the clicker", () => {
+    const { rowActions, cardStops, actions, deliver } = openWithSpies();
+    deliver({
+      type: "block_actions",
+      user: { id: "U-CLICKER" },
+      container: { type: "message", channel_id: "D1", message_ts: "1700.42" },
+      actions: [{ action_id: "follow_up_send_now", value: "fu-7" }],
+    });
+    expect(rowActions).toEqual([
+      {
+        channel: "D1",
+        cardTs: "1700.42",
+        clickerExternalUserId: "U-CLICKER",
+        action: "send_now",
+        followUpId: "fu-7",
+      },
+    ]);
+    // Never mistaken for Stop (the card's other control), nor an approval.
+    expect(cardStops).toEqual([]);
     expect(actions).toEqual([]);
   });
 });

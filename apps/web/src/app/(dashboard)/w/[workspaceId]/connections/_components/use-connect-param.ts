@@ -4,6 +4,10 @@ import { useEffect, useRef } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { getApps } from "@onecli/api/apps/registry";
 import type { AppDefinition } from "@onecli/api/apps/types";
+import {
+  readConnectLinkAgent,
+  type ConnectLinkAgent,
+} from "@/lib/connect-link-agent";
 import { safeDecode } from "./safe-decode";
 
 interface UseConnectParamOptions {
@@ -11,8 +15,8 @@ interface UseConnectParamOptions {
   connectedProviders: Set<string>;
   configuredProviders: Set<string>;
   envDefaultProviders: Set<string>;
-  onConnect: (app: AppDefinition, agentName?: string) => void;
-  onConfigure: (app: AppDefinition) => void;
+  onConnect: (app: AppDefinition, agent?: ConnectLinkAgent) => void;
+  onConfigure: (app: AppDefinition, agent?: ConnectLinkAgent) => void;
   onRequestApp: (hostname: string, appName?: string) => void;
 }
 
@@ -21,8 +25,12 @@ interface UseConnectParamOptions {
  * - Has credentials (env defaults available or BYOC configured): `onConnect`
  * - No credentials and not already connected: `onConfigure`
  *
- * When `?source=agent&agent_name=<name>` is also present, the agent name is
- * passed to `onConnect` so the dialog and popup can show agent-specific context.
+ * When `?source=agent&agent_name=<name>&agent_id=<id>` is also present (the
+ * gateway's link for an agent that hit an unconnected app), the agent is
+ * passed on: its name for the dialog and popup copy, its id so the account
+ * connected through the link is switched on for that agent. `onConfigure`
+ * gets it too, so the connect that follows setting up the app's credentials
+ * still names the agent.
  *
  * Mirrors the same logic as the manual Connect button click handler.
  * Removes the search param from the URL after handling.
@@ -74,10 +82,7 @@ export const useConnectParam = ({
       return;
     }
 
-    const agentName =
-      searchParams.get("source") === "agent"
-        ? (safeDecode(searchParams.get("agent_name")) ?? "your agent")
-        : undefined;
+    const agent = readConnectLinkAgent(searchParams);
 
     clearActionParams();
 
@@ -89,9 +94,9 @@ export const useConnectParam = ({
       !hasCredentials &&
       !connectedProviders.has(app.id)
     ) {
-      onConfigure(app);
+      onConfigure(app, agent);
     } else {
-      onConnect(app, agentName);
+      onConnect(app, agent);
     }
   }, [
     loading,

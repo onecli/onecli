@@ -3,6 +3,7 @@ import type {
   AdapterIngestResponse,
   AdapterPresence,
 } from "@onecli/agent-protocol";
+import type { FollowUpAction } from "@onecli/channels";
 import type { ApprovalCardUi } from "./approvals";
 import type { MirrorPosts } from "./mirror";
 import type { ThreadAddressDecoder } from "./targets";
@@ -73,6 +74,25 @@ export interface ProviderTransportHandlers {
     approvalId: string;
     decision: "approve" | "approve_always" | "reject";
     clickerExternalUserId: string;
+  }) => void;
+  /** A human pressed Stop on the agent's narration card (where no native
+   * loader stands). Only the card's address and the clicker ride the wire;
+   * the control plane resolves the turn and authorizes the clicker. */
+  onCardStop: (input: {
+    channel: string;
+    cardTs: string;
+    clickerExternalUserId: string;
+  }) => void;
+  /** A human pressed a control on a waiting message's row of the same card
+   * (Send now). Stop's trust shape plus which row: the control plane checks
+   * the row against the card's own turn and the clicker against its
+   * author. */
+  onCardFollowUpAction: (input: {
+    channel: string;
+    cardTs: string;
+    clickerExternalUserId: string;
+    action: FollowUpAction;
+    followUpId: string;
   }) => void;
   /** The connection can never come back on its own (bad credential, feature
    * disabled). The owner decides what happens next. */

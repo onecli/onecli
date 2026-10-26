@@ -1,13 +1,21 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { channels } from "@/lib/api";
-import type { ChannelProvider } from "@/lib/api";
+import type {
+  ChannelProvider,
+  ChannelUserLink,
+  OrgChannelsView,
+} from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
+import { listItem, patchItem, throughField } from "@/lib/api/optimistic";
+import { useOptimisticMutation } from "@/hooks/use-optimistic-mutation";
 
 // Headless mutations (the use-app-config convention) — the org settings cards
-// own the toasts. No gateway-cache involvement: the gateway reads none of the
-// channel tables, deliberately.
+// own the toasts (the instant user-link remove says its own outcome: its row
+// is gone by then). No gateway-cache involvement: the gateway reads none of
+// the channel tables, deliberately.
 
 /** Everything the org Channels settings page renders, in one call:
  * integrations, user links, adapter liveness. */
@@ -90,27 +98,34 @@ export const useAddChannelUserLink = () => {
       externalUserId: string;
       userId: string;
     }) => channels.addUserLink(provider, { externalUserId, userId }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
-    },
+    // Returned: the form closes onto a table that already lists the link.
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: queryKeys.channels.all() }),
   });
 };
 
-export const useRemoveChannelUserLink = () => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      provider,
-      linkId,
-    }: {
-      provider: ChannelProvider;
-      linkId: string;
-    }) => channels.removeUserLink(provider, linkId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
-    },
+/** Remove a Slack ↔ OneCLI user link, instantly: the row leaves on click;
+ * the confirmation follows the server, and a failure puts the row back. */
+export const useRemoveChannelUserLink = () =>
+  useOptimisticMutation<void, { provider: ChannelProvider; linkId: string }>({
+    family: "channel-user-links",
+    itemKey: ({ linkId }) => `channel-user-link:${linkId}`,
+    write: ({ provider, linkId }) => channels.removeUserLink(provider, linkId),
+    apply: (qc, { linkId }) =>
+      patchItem(
+        qc,
+        queryKeys.channels.org(),
+        throughField<OrgChannelsView, "userLinks", ChannelUserLink>(
+          "userLinks",
+          listItem((l) => l.id === linkId),
+        ),
+        () => undefined,
+      ),
+    succeeded: () => toast.success("Link removed"),
+    refresh: (qc) =>
+      qc.invalidateQueries({ queryKey: queryKeys.channels.all() }),
+    failure: () => "Couldn't remove the link",
   });
-};
 
 /** Mint the "Add to Slack" consent URL — the caller opens it. Side-effect
  * free server-side, so no invalidation is owed on success. */

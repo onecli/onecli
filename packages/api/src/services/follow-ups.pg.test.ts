@@ -41,6 +41,7 @@ let turns: Turns;
 let followUps: FollowUps;
 let dueWork: DueWork;
 let V: Validations;
+let attachments: typeof import("./attachment-service");
 
 const P = "fup-";
 const ORG = `${P}org`;
@@ -48,17 +49,20 @@ const WORKSPACE = `${P}proj`;
 const RUNNER_A = `${P}runner-a`;
 /** A runner that never advertised `steerMessages` — the version-skew gate. */
 const RUNNER_OLD = `${P}runner-old`;
+/** Steers words, but predates delivering a follow-up's files into a run. */
+const RUNNER_PRE_FILES = `${P}runner-pre-files`;
 const USER_A = `${P}user-a`;
 const USER_B = `${P}user-b`;
 
 const WEB_A = { source: "web", userId: USER_A } as const;
 
-const STEER_CAPABLE = {
+const PRE_FILES = {
   maxSandboxes: 8,
   backend: "docker",
   homeDurability: "resident",
   steerMessages: true,
 };
+const STEER_CAPABLE = { ...PRE_FILES, steerAttachments: true };
 const PRE_STEER = {
   maxSandboxes: 8,
   backend: "docker",
@@ -67,7 +71,7 @@ const PRE_STEER = {
 
 const reset = async () => {
   await db.sandbox.deleteMany({
-    where: { runnerId: { in: [RUNNER_A, RUNNER_OLD] } },
+    where: { runnerId: { in: [RUNNER_A, RUNNER_OLD, RUNNER_PRE_FILES] } },
   });
   await db.policyRuleTarget.deleteMany({
     where: { rule: { logicalId: { startsWith: P } } },
@@ -235,6 +239,11 @@ beforeAll(async () => {
   followUps = await import("./follow-up-service");
   dueWork = await import("./due-work");
   V = await import("../validations/conversation");
+  attachments = await import("./attachment-service");
+  // The attachment bytes live inline in Postgres for this suite.
+  (await import("../providers/attachment-store")).initAttachmentStore(
+    (await import("./attachments/pg-blob-store")).pgAttachmentBlobStore,
+  );
 
   await reset();
   await db.organization.create({ data: { id: ORG, name: ORG, slug: ORG } });
@@ -253,7 +262,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   if (!PROOF_URL) return;
   await db.sandbox.deleteMany({
-    where: { runnerId: { in: [RUNNER_A, RUNNER_OLD] } },
+    where: { runnerId: { in: [RUNNER_A, RUNNER_OLD, RUNNER_PRE_FILES] } },
   });
   await db.agent.deleteMany({ where: { identifier: { startsWith: P } } });
   await db.runner.deleteMany({ where: { id: { startsWith: P } } });
@@ -270,6 +279,12 @@ beforeEach(async () => {
         name: "pre-steer",
         token: `rnr_${P}old`,
         capabilities: PRE_STEER,
+      },
+      {
+        id: RUNNER_PRE_FILES,
+        name: "pre-steer-files",
+        token: `rnr_${P}pre-files`,
+        capabilities: PRE_FILES,
       },
     ],
   });
@@ -419,6 +434,7 @@ describe.skipIf(!PROOF_URL)("the steer claim arm", () => {
         sandboxId,
         message: "steer me",
         context: V.STEERED_FOLLOW_UP_CONTEXT,
+        hasAttachments: false,
       },
     ]);
     const row = await db.turn.findUnique({ where: { id: sent.turn.id } });
@@ -449,6 +465,7 @@ describe.skipIf(!PROOF_URL)("the steer claim arm", () => {
         conversationId,
         sandboxId,
         message: "[Platform wake: a watched task finished]",
+        hasAttachments: false,
       },
     ]);
   });
@@ -614,17 +631,9 @@ describe.skipIf(!PROOF_URL)("the steer claim arm", () => {
     expect(row?.steerDeliveredAt).toBeNull();
   });
 
-  it("an ATTACHMENT-carrying follow-up NEVER steers — it parks and promotes at close", async () => {
-    // The user decision, race-free by construction: the bind commits inside
-    // createFollowUp's own transaction, so this carve-out can never observe
-    // the row before its attachment. MUTATION-TESTED: delete the
-    // `NOT EXISTS (conversation_attachments)` predicate and this steers
-    // text-only, orphaning the file on a `joined` row (steers are
-    // at-most-once).
-    const { conversationId, sandboxId } = await seedTalkable("steer-attach");
-    const target = await seedActiveTurn(conversationId);
-    // A pending attachment for this conversation + user (bytes inline —
-    // the store is not needed; bindAttachmentsToTurn is pure DB).
+  /** A follow-up with one file: the door binds it inside the follow-up's own
+   * create transaction (bytes inline; the store is not needed). */
+  const sendWithFile = async (conversationId: string, message: string) => {
     const attachment = await db.conversationAttachment.create({
       data: {
         conversationId,
@@ -639,11 +648,10 @@ describe.skipIf(!PROOF_URL)("the steer claim arm", () => {
       },
       select: { id: true },
     });
-
     const sent = await followUps.sendConversationMessage(
       WORKSPACE,
       conversationId,
-      "what is this?",
+      message,
       WEB_A,
       [attachment.id],
     );
@@ -652,26 +660,124 @@ describe.skipIf(!PROOF_URL)("the steer claim arm", () => {
     const bound = await db.conversationAttachment.findUniqueOrThrow({
       where: { id: attachment.id },
     });
-    expect(bound.status).toBe("bound");
-    expect(bound.turnId).toBe(sent.turn.id);
+    expect(bound).toMatchObject({ status: "bound", turnId: sent.turn.id });
+    return sent.turn;
+  };
 
-    // The steer arm skips it despite a dispatched target and a capable runner.
+  it("an ATTACHMENT-carrying follow-up steers into the live run, flagged so dispatch composes its files", async () => {
+    const { conversationId } = await seedTalkable("steer-attach");
+    await seedActiveTurn(conversationId);
+    const withFile = await sendWithFile(conversationId, "what is this?");
+
     const claimed = await dueWork.claimDueWork(RUNNER_A, 10);
-    expect(claimed.filter((c) => c.kind === "turn.message")).toHaveLength(0);
-    const row = await db.turn.findUnique({ where: { id: sent.turn.id } });
-    expect(row?.steerDeliveredAt).toBeNull();
-    expect(row?.status).toBe("joining");
+    const steers = claimed.filter((c) => c.kind === "turn.message");
+    expect(steers).toEqual([
+      expect.objectContaining({ turnId: withFile.id, hasAttachments: true }),
+    ]);
+    const row = await db.turn.findUnique({ where: { id: withFile.id } });
+    expect(row?.steerDeliveredAt).not.toBeNull();
+  });
 
-    // Closing the target promotes it to a queued turn of its own.
+  it("a text-only steer is flagged as carrying nothing (no file read at dispatch)", async () => {
+    const { conversationId } = await seedTalkable("steer-text-flag");
+    await seedActiveTurn(conversationId);
+    await followUps.sendConversationMessage(
+      WORKSPACE,
+      conversationId,
+      "words only",
+      WEB_A,
+    );
+    const claimed = await dueWork.claimDueWork(RUNNER_A, 10);
+    expect(claimed.filter((c) => c.kind === "turn.message")).toEqual([
+      expect.objectContaining({ hasAttachments: false }),
+    ]);
+  });
+
+  it("a steered follow-up's file is pulled only by ITS sandbox's runner, never a foreign one", async () => {
+    // The one boundary this widens: a follow-up's files now cross to the
+    // runner mid-run. The byte route is fenced by the two-fact law (bound to
+    // a turn whose agent's sandbox sits on the asking runner); this is the
+    // planted negative control for a follow-up row. MUTATION-TESTED: drop
+    // the runner fence from getAttachmentBytesForRunner and the foreign
+    // runner gets the bytes.
+    const { conversationId } = await seedTalkable("steer-attach-fence");
+    await seedActiveTurn(conversationId);
+    await sendWithFile(conversationId, "what is this?");
+    const claimed = await dueWork.claimDueWork(RUNNER_A, 10);
+    const steer = claimed.find((c) => c.kind === "turn.message");
+    expect(steer).toMatchObject({ hasAttachments: true });
+    const file = await db.conversationAttachment.findFirstOrThrow({
+      where: { conversationId },
+      select: { id: true },
+    });
+
+    expect(
+      (await attachments.getAttachmentBytesForRunner(file.id, RUNNER_A))?.bytes,
+    ).toEqual(Buffer.from("abc"));
+    expect(
+      await attachments.getAttachmentBytesForRunner(file.id, RUNNER_OLD),
+    ).toBeNull();
+  });
+
+  it("through a runner that cannot deliver a follow-up's files, it parks (and so does the next message) and promotes at close", async () => {
+    // Race-free by construction: the bind commits inside createFollowUp's
+    // own transaction, so this gate can never observe the row before its
+    // attachment. MUTATION-TESTED: drop the attachment gate and this
+    // steers words-only through a runner that would drop the files,
+    // orphaning them on a `joined` row (steers are at-most-once).
+    const { conversationId, sandboxId } = await seedTalkable(
+      "steer-attach-old",
+      RUNNER_PRE_FILES,
+    );
+    const target = await seedActiveTurn(conversationId, RUNNER_PRE_FILES);
+    const withFile = await sendWithFile(conversationId, "what is this?");
+    const behind = await followUps.sendConversationMessage(
+      WORKSPACE,
+      conversationId,
+      "and also this",
+      WEB_A,
+    );
+
+    // Neither steers: the file-carrier is gated, and the FIFO guard keeps
+    // the later words behind it.
+    const claimed = await dueWork.claimDueWork(RUNNER_PRE_FILES, 10);
+    expect(claimed.filter((c) => c.kind === "turn.message")).toHaveLength(0);
+    for (const id of [withFile.id, behind.turn.id]) {
+      const row = await db.turn.findUnique({ where: { id } });
+      expect(row).toMatchObject({ status: "joining", steerDeliveredAt: null });
+    }
+
+    // Closing the target promotes the file-carrier to a queued turn of its
+    // own, where it runs with full delivery.
     await turns.finishTurn({
-      reporter: reporter(RUNNER_A, sandboxId),
+      reporter: reporter(RUNNER_PRE_FILES, sandboxId),
       conversationId,
       turnId: target.id,
       status: "done",
     });
-    const promoted = await db.turn.findUnique({ where: { id: sent.turn.id } });
+    const promoted = await db.turn.findUnique({ where: { id: withFile.id } });
     expect(promoted?.status).toBe("queued");
     expect(promoted?.promotedAt).not.toBeNull();
+  });
+
+  it("a text message after a file-carrier steers right behind it on a capable runner (order holds)", async () => {
+    const { conversationId } = await seedTalkable("steer-attach-fifo");
+    await seedActiveTurn(conversationId);
+    const withFile = await sendWithFile(conversationId, "look at this");
+    const behind = await followUps.sendConversationMessage(
+      WORKSPACE,
+      conversationId,
+      "and tell me what you think",
+      WEB_A,
+    );
+    const steered = async () =>
+      (await dueWork.claimDueWork(RUNNER_A, 10))
+        .filter((c) => c.kind === "turn.message")
+        .map((c) => c.turnId);
+    // The file-carrier first; the later words wait one poll for it to be
+    // delivered (the FIFO guard), then ride the same live run behind it.
+    expect(await steered()).toEqual([withFile.id]);
+    expect(await steered()).toEqual([behind.turn.id]);
   });
 
   it("never steers through a runner that did not advertise the capability", async () => {
@@ -1253,6 +1359,7 @@ describe.skipIf(!PROOF_URL)("the ceiling-warning arm", () => {
       message: V.TURN_CEILING_WARNING_MESSAGE,
       // The platform's own words carry their own header: never framed as
       // a new message that arrived.
+      hasAttachments: false,
     });
     const row = await db.turn.findUnique({ where: { id: target.id } });
     expect(row?.ceilingWarnedAt).not.toBeNull();

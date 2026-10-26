@@ -593,6 +593,7 @@ mod tests {
     fn secret_row(id: &str, type_: &str, scope: &str) -> db::SecretRow {
         db::SecretRow {
             id: id.to_string(),
+            name: id.to_string(),
             scope: scope.to_string(),
             type_: type_.to_string(),
             value_source: "inline".to_string(),

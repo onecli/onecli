@@ -14,6 +14,10 @@ export const PROCESS_STATUSES = [
   "exited",
   "stopped",
   "lost",
+  // The control plane parked the sandbox (idle, or past the background cap)
+  // while the process ran: terminal like `lost`, but a known, intended end
+  // that fires its watches as `parked` (a notice, never a wake turn).
+  "parked",
 ] as const;
 export type ProcessStatus = (typeof PROCESS_STATUSES)[number];
 
@@ -29,7 +33,13 @@ export const WATCH_STATUSES = [
 ] as const;
 export type WatchStatus = (typeof WATCH_STATUSES)[number];
 
-export const WATCH_TRIGGERS = ["exited", "matched", "silent", "lost"] as const;
+export const WATCH_TRIGGERS = [
+  "exited",
+  "matched",
+  "silent",
+  "lost",
+  "parked",
+] as const;
 export type WatchTrigger = (typeof WATCH_TRIGGERS)[number];
 
 /** Availability bounds (the MAX_CRONS_PER_AGENT reasoning). Enforced in the

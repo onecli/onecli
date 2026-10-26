@@ -4,9 +4,7 @@ import { useState } from "react";
 import {
   MoreHorizontal,
   RefreshCcw,
-  RotateCw,
   Trash2,
-  KeyRound,
   Pencil,
   Info,
   History,
@@ -41,11 +39,11 @@ import {
 } from "@onecli/ui/components/dialog";
 import {
   useDeleteAgent,
-  useRegenerateToken,
   useRenameAgent,
   useRestartAgent,
 } from "@/hooks/use-agents";
 import { providerLabel } from "@/lib/agents/channel-provider-ui";
+import type { AgentKind } from "@/lib/api/types";
 
 /**
  * "Slack app (@donna)" — the handle a human sees in the workspace, so the
@@ -68,8 +66,8 @@ interface AgentActionsMenuProps {
     id: string;
     name: string;
     /** "hosted" agents get "Restart agent": only they have a computer and
-     * conversations to restart. Prisma types the column as `string`. */
-    kind: string;
+     * conversations to restart. */
+    kind: AgentKind;
     /** Attached channel presences — deletion removes these from the
      * customer's workspace, so the confirmation names them. */
     channels?: {
@@ -78,9 +76,6 @@ interface AgentActionsMenuProps {
       externalId?: string;
     }[];
   };
-  /** The owner renders the credential-access reflection dialog (the card also
-   * opens it from an inline button, so the dialog cannot live in the menu). */
-  onCredentialAccess: () => void;
   /** The agent page's "Details" entry: the agent's facts as a dialog. Omitted
    * by the list card, whose row already shows them. */
   onDetails?: () => void;
@@ -94,16 +89,13 @@ interface AgentActionsMenuProps {
  * detail page header, so the action set can never drift between them. */
 export const AgentActionsMenu = ({
   agent,
-  onCredentialAccess,
   onDetails,
   onViewActivity,
   onDeleted,
 }: AgentActionsMenuProps) => {
   const deleteMutation = useDeleteAgent();
-  const regenerateMutation = useRegenerateToken();
   const renameMutation = useRenameAgent();
   const restartMutation = useRestartAgent();
-  const [rotateDialogOpen, setRotateDialogOpen] = useState(false);
   const [restartDialogOpen, setRestartDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
@@ -124,8 +116,6 @@ export const AgentActionsMenu = ({
       else next.add(provider);
       return next;
     });
-
-  const handleRegenerate = () => regenerateMutation.mutate(agent.id);
 
   const handleRestart = () =>
     restartMutation.mutate(agent.id, {
@@ -174,14 +164,6 @@ export const AgentActionsMenu = ({
             <Pencil className="size-4" />
             Rename
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={onCredentialAccess}>
-            <KeyRound className="size-4" />
-            Credential access
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => setRotateDialogOpen(true)}>
-            <RotateCw className="size-4" />
-            Rotate token
-          </DropdownMenuItem>
           {agent.kind === "hosted" && (
             <DropdownMenuItem onSelect={() => setRestartDialogOpen(true)}>
               <RefreshCcw className="size-4" />
@@ -198,28 +180,6 @@ export const AgentActionsMenu = ({
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
-
-      <AlertDialog open={rotateDialogOpen} onOpenChange={setRotateDialogOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Rotate token?</AlertDialogTitle>
-            <AlertDialogDescription>
-              The current token for <strong>{agent.name}</strong> will be
-              invalidated immediately. Any agents using the old token will lose
-              access.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={handleRegenerate}
-              disabled={regenerateMutation.isPending}
-            >
-              {regenerateMutation.isPending ? "Rotating..." : "Rotate"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
 
       <AlertDialog open={restartDialogOpen} onOpenChange={setRestartDialogOpen}>
         <AlertDialogContent>

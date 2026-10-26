@@ -150,8 +150,18 @@ const liveSection = (live: AgentChannelPresenceWire[]): string => {
     '- "sent" = delivered. "held" = the workspace owner was asked first; the decision arrives as a notice at the start of a later turn, so never promise to report the decision on your own. "not_sent" = an earlier message to that recipient is still waiting, so this one was dropped; send it again after the decision if it still matters.',
     "- A reply from the person you messaged reaches you with what you sent them and where it was asked from; pass the answer on yourself with send_message. Never ask anyone to check back later for it.",
   );
+  if (live.some(hasReadable)) {
+    lines.push(
+      "",
+      "read_conversation reads messages in Slack channels or direct messages that someone on your team let you read with their own Slack access, including messages that never mentioned you. Use it for summaries and reports. Call it with no arguments to see which conversations you may read here; call it with a conversation name (partial names work) to get the latest messages. Each result says whether it is complete: when it is partial it gives nextBefore, so call again with before set to it and keep going until reachedStart is true before you state totals, counts per day, or which message was first. Never present one page as the whole history. Shared conversations are not in find_recipient, so don't look them up there. Who may ask about each conversation is set by the person who shared it and enforced for you: if a read is refused, say you don't have access to that conversation here and never guess what was said in it. Never repeat what you read to people who could not have asked for it.",
+    );
+  }
   return lines.join("\n");
 };
+
+/** People granted at least one conversation through this presence. */
+const hasReadable = (presence: AgentChannelPresenceWire): boolean =>
+  (presence.readableConversations ?? 0) > 0;
 
 const removedSection = (removed: AgentChannelPresenceWire[]): string => {
   const lines: string[] = [];
@@ -278,5 +288,42 @@ export const channelsTools = (
         required: ["query"],
       },
     },
+    ...(live.some(hasReadable) ? [readConversationTool] : []),
   ];
+};
+
+const readConversationTool: PlatformToolDefinition = {
+  name: "read_conversation",
+  description:
+    "Read messages in a Slack channel or direct message you were given read access to (by someone who connected their Slack). With no conversation, lists the ones you may read. With a conversation, returns the latest messages oldest first (author, time, id). If the result has nextBefore, older messages exist: call again with before=nextBefore until reachedStart is true. Refused for conversations you may not read here.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      conversation: {
+        type: "string",
+        description:
+          "The conversation's name, e.g. '#weekly-reports' or '@alex' (a partial name works). Omit to list what you may read.",
+      },
+      sinceHours: {
+        type: "integer",
+        description:
+          "Only messages from the last N hours (up to a year). Omit to read the full history, page by page.",
+      },
+      thread: {
+        type: "string",
+        description:
+          "Optional: a message id from an earlier result, to read that message's replies.",
+      },
+      before: {
+        type: "string",
+        description:
+          "Page back: the nextBefore value from the previous result, to get the messages older than those.",
+      },
+      limit: {
+        type: "integer",
+        description: "Max messages per page (default 100, max 200).",
+      },
+    },
+    required: [],
+  },
 };

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { proofDatabaseUrl } from "../testing/pg-proof.js";
+import { proofDatabaseUrl, waitForLockWaiters } from "../testing/pg-proof.js";
 import { anthropic } from "../llm/anthropic.js";
 import {
   AGENT_NEVER_STARTED_MESSAGE,
@@ -222,13 +222,6 @@ beforeAll(async () => {
   // makes this suite onprem in both lanes.
   process.env.EDITION = "onprem";
   process.env.NEXT_PUBLIC_EDITION = "onprem";
-  // Door 2 embeds the gateway CA into the spawn payload; provide it here.
-  // Without the pin the suite depended on a dev-machine CA pem file (absent
-  // on CI) or a sibling file's GATEWAY_CA_CERT env leak — the same
-  // green-by-scheduling trap as the edition pin above. The content is never
-  // validated by these tests, only carried.
-  process.env.GATEWAY_CA_CERT =
-    "-----BEGIN CERTIFICATE-----\npg-proof-fake-ca\n-----END CERTIFICATE-----";
   process.env.SANDBOX_IDLE_STOP_SECONDS = "600";
   // Pin the turn clocks: the ageing literals below are written against
   // THESE values, not the production defaults — bumping a default must
@@ -239,7 +232,8 @@ beforeAll(async () => {
   // The start payload carries the gateway CA, and without one every compose
   // answers `unavailable` before it reaches the credential rule under test.
   // CI has no ca.pem on disk (a dev machine does), so state it explicitly
-  // rather than letting the outcome depend on the host.
+  // rather than letting the outcome depend on the host (or on a sibling
+  // file's env leak). The content is never validated, only carried.
   process.env.GATEWAY_CA_CERT =
     "-----BEGIN CERTIFICATE-----\ntest-ca\n-----END CERTIFICATE-----";
 
@@ -672,12 +666,12 @@ describe.skipIf(!PROOF_URL)("seq allocation", () => {
     expect(second?.seq).toBe(1);
   });
 
-  it("SURVIVES a NUL byte in model output instead of losing the batch", async () => {
-    // PostgreSQL rejects U+0000 in jsonb, so an unsanitized event raises
-    // inside the transaction and rolls back everything alongside it — a
-    // conversation losing a stretch of transcript because its agent ran `cat`
-    // on a binary file. The control plane strips it rather than trusting the
-    // runner to have done so.
+  it("SURVIVES a NUL byte or a lone surrogate in model output instead of losing the batch", async () => {
+    // PostgreSQL rejects U+0000 in jsonb, and the database client rejects a
+    // lone surrogate, so an unsanitized event raises inside the transaction
+    // and rolls back everything alongside it: a conversation losing a
+    // stretch of transcript because its agent ran `cat` on a binary file.
+    // The control plane repairs both rather than trusting the runner to.
     const { conversationId, sandboxId } = await seedTalkable("nul-bytes");
     const turn = await turns.createTurn(
       WORKSPACE,
@@ -696,7 +690,7 @@ describe.skipIf(!PROOF_URL)("seq allocation", () => {
           type: "tool.finished",
           callId: "c1",
           name: "cat",
-          output: `head${String.fromCharCode(0)}tail`,
+          output: `head${String.fromCharCode(0)}tail${"\u{1F600}".slice(0, 1)}`,
         },
         { type: "turn.done" },
       ],
@@ -714,7 +708,43 @@ describe.skipIf(!PROOF_URL)("seq allocation", () => {
       "turn.done",
     ]);
     const payload = rows[1]?.payload as { output?: string } | null;
-    expect(payload?.output).toBe("headtail");
+    expect(payload?.output).toBe("headtail\uFFFD");
+  });
+
+  it("CLOSES a turn whose terminal report carries a NUL byte or a lone surrogate", async () => {
+    // The close's strings (error, session ref) are the sandbox's too. The
+    // database refuses U+0000, and its client refuses a lone surrogate (the
+    // sender's own `.slice()` of an error can cut an emoji in half), as a
+    // query parameter even when no row matches: unsanitized, the report
+    // fails with a 500 on every delivery and the turn can never close.
+    // MUTATION-PROOF: drop the sanitize and finishTurn throws here.
+    const { conversationId, sandboxId } = await seedTalkable("nul-close");
+    const turn = await turns.createTurn(
+      WORKSPACE,
+      conversationId,
+      "read a file",
+      WEB_A,
+    );
+    await dueWork.claimDueWork(RUNNER_A, 5);
+    const nul = String.fromCharCode(0);
+    const halfEmoji = "\u{1F600}".slice(0, 1);
+
+    await turns.finishTurn({
+      reporter: reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turnId: turn.id,
+      status: "failed",
+      error: `bad${nul}bytes ${halfEmoji}`,
+      sessionRef: `sess${nul}-1`,
+    });
+
+    const row = await db.turn.findUnique({ where: { id: turn.id } });
+    expect(row?.status).toBe("failed");
+    expect(row?.error).toBe("badbytes \uFFFD");
+    const conversation = await db.conversation.findUnique({
+      where: { id: conversationId },
+    });
+    expect(conversation?.harnessSessionRef).toBe("sess-1");
   });
 
   it("persists only the BOUNDED event kinds (the delta law)", async () => {
@@ -1653,6 +1683,41 @@ describe.skipIf(!PROOF_URL)("finishTurn and the cold-death revival", () => {
     expect(row?.errorCode).toBe("transcript_rejected");
     expect(row?.error).not.toContain("tool_use");
   });
+
+  it("an uncoded failure that carries its raw error never closes with a NULL error", async () => {
+    // The supervisor now attaches the terminal error to every failed result.
+    // An unrecognized provider 400 arrives with no code: the row must keep
+    // that text, not the `error = NULL` the old no-error report produced.
+    const { conversationId, sandboxId } = await seedTalkable("fin-uncoded");
+    const turn = await turns.createTurn(
+      WORKSPACE,
+      conversationId,
+      "first",
+      WEB_A,
+    );
+    await dueWork.claimDueWork(RUNNER_A, 5);
+    await turns.applyTurnEvents(
+      reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turn.id,
+      [{ type: "turn.started" }],
+    );
+    const raw =
+      'Anthropic API error (400 Bad Request): {"type":"error","error":{"type":"invalid_request_error","message":"some 400 nobody has classified yet"}}';
+
+    await turns.finishTurn({
+      reporter: reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turnId: turn.id,
+      status: "failed",
+      error: raw,
+    });
+
+    const row = await db.turn.findUnique({ where: { id: turn.id } });
+    expect(row?.status).toBe("failed");
+    expect(row?.error).toBe(raw);
+    expect(row?.errorCode).toBeNull();
+  });
 });
 
 describe.skipIf(!PROOF_URL)(
@@ -2210,8 +2275,7 @@ describe.skipIf(!PROOF_URL)("waking a sleeping agent", () => {
   it("signals the held poll so the turn does not wait out a re-check", async () => {
     const { conversationId } = await seedTalkable("wake-signal");
     const waiting = dueWork.waitForWork(30_000);
-    // Give the waiter a tick to park.
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    // The waiter parks synchronously inside the call.
     expect(dueWork.pendingWaiterCount()).toBe(1);
 
     await turns.createTurn(WORKSPACE, conversationId, "now please", WEB_A);
@@ -2941,8 +3005,9 @@ describe.skipIf(!PROOF_URL)("the direct conversation door", () => {
       door.catch(() => {});
       started.push(door);
 
-      // Long enough for the door to read, miss, and park on the index.
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      // Commit only once the door has read, missed, and parked on the index:
+      // a checked precondition, so the recovery branch always runs.
+      await waitForLockWaiters(db);
     });
 
     const [door] = started;
@@ -3292,8 +3357,9 @@ describe.skipIf(!PROOF_URL)("the sourced conversation door", () => {
       door.catch(() => {});
       started.push(door);
 
-      // Long enough for the door to read, miss, and park on the index.
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      // Commit only once the door has read, missed, and parked on the index:
+      // a checked precondition, so the recovery branch always runs.
+      await waitForLockWaiters(db);
     });
 
     const [door] = started;

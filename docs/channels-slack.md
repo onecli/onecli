@@ -157,6 +157,13 @@ On the agent's page → **Channels**:
   (a TLS'd self-host or cloud): click **Add to Slack**, click **Allow** in
   the popup — done. No tokens, no pastes (this is Slack's Events mode; no
   app-level token even exists).
+- **With the org token, Socket Mode on a deployment with a public HTTPS
+  address** (a self-host that picks Socket Mode, e.g. because Slack cannot
+  reach it): click **Add to Slack**, click **Allow**, then paste the one
+  thing Slack has no API for: the **app-level token** (Basic Information →
+  App-Level Tokens, scope `connections:write`). OneCLI checks it with Slack
+  before saving it. The Allow redirect is a hop through your browser, not a
+  call from Slack to your server.
 - **With the org token, no public HTTPS** (a laptop, a homelab): OneCLI
   creates the app, then Slack requires two manual steps it has no API for —
   generate the **app-level token** (Basic Information → App-Level Tokens,
@@ -170,6 +177,10 @@ On the agent's page → **Channels**:
   manifest_ → paste the manifest the page shows you, then the same
   generate/install/paste steps (plus the **App ID**).
 
+Leave **Token rotation** off when you generate an app-level token. Slack
+cannot turn it off again on that app, and its rotating tokens (`xoxe.xapp-`)
+expire after 12 hours, so OneCLI refuses them.
+
 Then open Slack and DM the agent. Only workspace members who map to a OneCLI
 user **with access to the agent's workspace** get answers — everyone else gets
 a polite refusal before anything reaches the agent. Accounts are matched by
@@ -182,7 +193,9 @@ install from Slack's side (the approval message's install link, or **Install
 to Workspace** in the app's settings). An install from Slack's side lands on
 `/slack/installed`: sign in as an org admin and OneCLI offers the install to
 your organization's waiting agent apps and finishes the one Slack issued it
-for (falling back to the shared-app confirmation above when none match).
+for (falling back to the shared-app confirmation above when none match). A
+Socket Mode app installed this way lands on its Slack page with only the
+app-level token left to paste.
 
 When a message is accepted you'll see an emoji reaction land on it — the
 "seen" mark, picked to fit what you wrote. The full answer arrives as one

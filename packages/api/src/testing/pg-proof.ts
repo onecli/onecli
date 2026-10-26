@@ -30,3 +30,42 @@ export const proofDatabaseUrl = (): string | undefined => {
 
   return undefined;
 };
+
+/** The one query surface `waitForLockWaiters` needs (a PrismaClient fits). */
+export interface LockWaitQuerier {
+  $queryRawUnsafe: <T = unknown>(
+    query: string,
+    ...values: unknown[]
+  ) => Promise<T>;
+}
+
+/**
+ * Resolves once at least `count` backends of this database are parked on a
+ * lock (optionally only those whose current query matches `queryLike`, an
+ * ILIKE pattern). Race proofs use it instead of a sleep: "the loser is
+ * blocked" becomes a checked precondition, not a timing guess that turns
+ * vacuous on a slow runner. Run it on a connection outside the transaction
+ * holding the lock. The pg project runs files serially, so no other suite's
+ * backend competes.
+ */
+export const waitForLockWaiters = async (
+  db: LockWaitQuerier,
+  options: { count?: number; queryLike?: string; timeoutMs?: number } = {},
+): Promise<void> => {
+  const { count = 1, queryLike = "%", timeoutMs = 5_000 } = options;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const rows = await db.$queryRawUnsafe<Array<{ n: bigint | number }>>(
+      `SELECT count(*)::bigint AS n FROM pg_stat_activity
+       WHERE datname = current_database()
+         AND wait_event_type = 'Lock'
+         AND query ILIKE $1`,
+      queryLike,
+    );
+    if (Number(rows[0]?.n ?? 0) >= count) return;
+    if (Date.now() > deadline) {
+      throw new Error(`no ${count} backend(s) reached a lock wait in time`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+};

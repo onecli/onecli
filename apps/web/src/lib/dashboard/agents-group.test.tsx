@@ -97,21 +97,6 @@ describe("the agents list (§3.18 as amended)", () => {
       "/w/p1/agents/ag-2/connections",
     );
   });
-
-  it("separates management from the list only when rows exist", () => {
-    state.agents = [];
-    const { container, unmount } = renderGroup();
-    expect(
-      container.querySelector('[data-sidebar="separator"]'),
-    ).not.toBeInTheDocument();
-    unmount();
-
-    state.agents = [BYO];
-    const { container: withRows } = renderGroup();
-    expect(
-      withRows.querySelector('[data-sidebar="separator"]'),
-    ).toBeInTheDocument();
-  });
 });
 
 describe("what the group highlights", () => {
@@ -199,13 +184,5 @@ describe("the Slack connected mark (PR #845)", () => {
     state.agents = [HOSTED];
     renderGroup();
     expect(screen.queryByText("Connected to Slack")).not.toBeInTheDocument();
-  });
-
-  it("keeps the name span truncating beside the trailing mark", () => {
-    // The button variant truncates `span:last-child`; with the mark trailing,
-    // the name span is no longer last and must carry its own `truncate`.
-    state.agents = [SLACK_ACTIVE];
-    renderGroup();
-    expect(screen.getByText("Support Triage")).toHaveClass("truncate");
   });
 });

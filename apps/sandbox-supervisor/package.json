@@ -2,7 +2,7 @@
   "name": "@onecli/sandbox-supervisor",
   "version": "0.0.0",
   "private": true,
-  "license": "Apache-2.0",
+  "license": "Apache-2.0 AND LicenseRef-OneCLI-Enterprise",
   "type": "module",
   "scripts": {
     "dev:in-sandbox": "tsx src/index.ts",
@@ -17,6 +17,7 @@
     "@1jehuang/jcode-sdk": "1.2.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@onecli/agent-protocol": "workspace:*",
+    "patchright": "1.64.1",
     "zod": "^4.3.6"
   },
   "devDependencies": {

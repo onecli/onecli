@@ -16,6 +16,7 @@ import { connectedPresences } from "@/lib/agents/channel-providers";
 import { channelProviderUi } from "@/lib/agents/channel-providers/registry";
 import { AppIcon } from "@/lib/components/app-icon";
 import { useCounts } from "@/hooks/use-counts";
+import { useAgentActiveConnections } from "@/hooks/use-agent-active-connections";
 import { useInstance } from "@/hooks/use-instance";
 import type { AgentPageAgent } from "./agent-page-frame";
 
@@ -105,33 +106,35 @@ const ADVANCED_ENTRY = { title: "Advanced", icon: SlidersHorizontal } as const;
  * workspace. Deriving the view from the path keeps deep links and refreshes
  * honest: an advanced section's URL always opens the Advanced view.
  *
- * The badges are the workspace's totals (how much there is to grant), read from
- * the counts endpoint the overview already warms rather than from full list
- * fetches. Connections carries apps + custom secrets, because that is exactly
- * what its two tabs hold.
+ * Connections' badge counts what is ACTIVE for this agent (apps + custom
+ * secrets switched on, or granted by the organization), the same sum its two
+ * tabs show. Models stays the workspace's total from the counts endpoint.
  */
 export const AgentSectionRail = ({ agent }: { agent: AgentPageAgent }) => {
   const pathname = usePathname();
   const base = agentPath(pathname, agent.id);
   const { data: counts } = useCounts();
+  // Connections counts what is active for THIS agent (its tabs' badges sum).
+  const active = useAgentActiveConnections(agent.id);
   const instance = useInstance();
 
-  // Instance-gated entries (SSH) exist only where the deployment has the
-  // capability: hide once /v1/instance resolves WITHOUT it (auto-hide, never
-  // a teased dead door), show while still loading — loading must never render
-  // as unavailable (the availability.ts law).
+  // Instance-gated entries (SSH, Ports) exist only where the deployment has
+  // the capability: hide once /v1/instance resolves WITHOUT it (auto-hide,
+  // never a teased dead door), show while still loading — loading must never
+  // render as unavailable (the availability.ts law).
   const sections = agentSectionsFor(agent.kind).filter(
     (s) =>
-      s.instanceGated !== "ssh" ||
-      instance === null ||
-      instance.ssh !== undefined,
+      !s.theater &&
+      (s.instanceGated === undefined ||
+        instance === null ||
+        instance[s.instanceGated] !== undefined),
   );
 
   const countFor = (section: string) =>
     section === "connections"
-      ? counts === undefined
+      ? active.appCount === undefined || active.secretCount === undefined
         ? undefined
-        : (counts.apps ?? 0) + (counts.secrets ?? 0)
+        : active.appCount + active.secretCount
       : section === "models"
         ? counts?.llms
         : undefined;

@@ -33,8 +33,6 @@ const INSTALLATION = {
   account: "acme",
   accountType: "Organization",
   avatarUrl: null,
-  repositorySelection: "all",
-  origin: "another_workspace",
   connectedHere: 0,
 };
 
@@ -46,15 +44,13 @@ const wrap = (ui: ReactNode) => (
   </QueryClientProvider>
 );
 
-const renderDialog = () => {
+const renderDialog = (installation = INSTALLATION, agentId?: string) => {
   const onConnected = vi.fn();
   const onInstallNew = vi.fn();
   mocks.apiGet.mockImplementation(async (path: string) => {
     // Sharing is admin-only: the installations list waits on this answer.
     if (path === "/v1/org/membership") return { isAdmin: true };
-    if (path.endsWith("/installations")) return [INSTALLATION];
-    if (path.includes("/repositories"))
-      return { repos: ["acme/api", "acme/web"], truncated: false };
+    if (path.endsWith("/installations")) return [installation];
     throw new Error(`unexpected GET ${path}`);
   });
   mocks.apiPost.mockResolvedValue({
@@ -68,6 +64,7 @@ const renderDialog = () => {
         open
         onOpenChange={() => {}}
         pageScope="workspace"
+        agentId={agentId}
         onInstallNew={onInstallNew}
         onConnected={onConnected}
       />,
@@ -79,58 +76,65 @@ const renderDialog = () => {
 afterEach(() => vi.clearAllMocks());
 
 describe("GitHubAppConnectDialog", () => {
-  it("lists the org's installations and where each comes from", async () => {
+  it("lists the org's accounts and offers a new install", async () => {
     renderDialog();
     expect(await screen.findByText("acme")).toBeTruthy();
-    expect(screen.getByText(/Connected in another workspace/)).toBeTruthy();
-    expect(screen.getByText("Install on another GitHub account")).toBeTruthy();
+    expect(
+      screen.getByText(/Connected in another workspace · share it/),
+    ).toBeTruthy();
+    expect(screen.getByText("Install on a new GitHub account")).toBeTruthy();
   });
 
-  it("sends exactly the picked repositories", async () => {
+  it("shares an account with the organization: one request, no copy, no repo step", async () => {
     const user = userEvent.setup();
     const { onConnected } = renderDialog();
     await user.click(await screen.findByText("acme"));
-    await user.click(await screen.findByText("web"));
-    await user.click(screen.getByRole("button", { name: "Connect" }));
-
-    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalled());
-    expect(mocks.apiPost).toHaveBeenCalledWith(
-      "/v1/apps/github-app/connections",
-      { sourceConnectionId: "conn-src", repositories: ["acme/web"] },
+    expect(screen.getByText("Share acme with the organization?")).toBeTruthy();
+    expect(screen.queryByText(/Selected repositories/)).toBeNull();
+    await user.click(
+      screen.getByRole("button", { name: "Share with organization" }),
     );
-    await waitFor(() => expect(onConnected).toHaveBeenCalledWith("conn-new"));
-  });
-
-  it("can't connect a selected-repositories pick with nothing ticked", async () => {
-    const user = userEvent.setup();
-    renderDialog();
-    await user.click(await screen.findByText("acme"));
-    await screen.findByText("web");
-    expect(
-      (screen.getByRole("button", { name: "Connect" }) as HTMLButtonElement)
-        .disabled,
-    ).toBe(true);
-  });
-
-  it("All repositories sends no list (the whole installation grant)", async () => {
-    const user = userEvent.setup();
-    renderDialog();
-    await user.click(await screen.findByText("acme"));
-    await user.click(screen.getByRole("button", { name: "All repositories" }));
-    await user.click(screen.getByRole("button", { name: "Connect" }));
 
     await waitFor(() => expect(mocks.apiPost).toHaveBeenCalled());
     expect(mocks.apiPost).toHaveBeenCalledWith(
       "/v1/apps/github-app/connections",
       { sourceConnectionId: "conn-src" },
     );
+    await waitFor(() => expect(onConnected).toHaveBeenCalledWith("conn-new"));
+  });
+
+  it("names the agent it was opened from, so the share lands on for it", async () => {
+    const user = userEvent.setup();
+    renderDialog(INSTALLATION, "agent-7");
+    await user.click(await screen.findByText("acme"));
+    await user.click(
+      screen.getByRole("button", { name: "Share with organization" }),
+    );
+    await waitFor(() =>
+      expect(mocks.apiPost).toHaveBeenCalledWith(
+        "/v1/apps/github-app/connections",
+        { sourceConnectionId: "conn-src", agentId: "agent-7" },
+      ),
+    );
+  });
+
+  it("an account already available here can't be connected twice", async () => {
+    const user = userEvent.setup();
+    renderDialog({ ...INSTALLATION, connectedHere: 1 });
+    const row = (await screen.findByText("acme")).closest("button");
+    expect(row?.disabled).toBe(true);
+    expect(
+      screen.getByText("Already available here · turn it on per agent"),
+    ).toBeTruthy();
+    if (row) await user.click(row);
+    expect(screen.queryByText(/Share acme with the organization/)).toBeNull();
   });
 
   it("hands a new GitHub account to the install flow", async () => {
     const user = userEvent.setup();
     const { onInstallNew } = renderDialog();
     await user.click(
-      await screen.findByText("Install on another GitHub account"),
+      await screen.findByText("Install on a new GitHub account"),
     );
     expect(onInstallNew).toHaveBeenCalled();
     expect(mocks.apiPost).not.toHaveBeenCalled();

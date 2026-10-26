@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
@@ -8,11 +9,17 @@ import { AgentAvatarEditor } from "@/lib/agents/_components/agent-avatar-editor"
 import { Button } from "@onecli/ui/components/button";
 import { withWorkspacePrefix } from "@/lib/navigation";
 import { useHostedAvailability } from "@/hooks/use-hosted-availability";
+import { useHasDesktop } from "@/hooks/use-has-desktop";
 import { AgentStatusPill } from "@/lib/agents/_components/agent-status-pill";
-import { CredentialAccessReflection } from "@/lib/components/policy-reflect";
 import { AgentActionsMenu } from "../../_components/agent-actions-menu";
 import { AgentDetailsDialog } from "./agent-details-dialog";
 import type { AgentPageAgent } from "./agent-page-frame";
+
+// The hosted agent's Computer button. Lazy, so its code never enters a
+// self-host's static graph; rendered only where the deployment shows it.
+const DesktopHeaderChip = dynamic(() =>
+  import("@/ee/desktop/desktop-header-chip").then((m) => m.DesktopHeaderChip),
+);
 
 interface AgentPageHeaderProps {
   agent: AgentPageAgent;
@@ -26,11 +33,11 @@ interface AgentPageHeaderProps {
 export const AgentPageHeader = ({ agent }: AgentPageHeaderProps) => {
   const pathname = usePathname();
   const router = useRouter();
-  const [accessDialogOpen, setAccessDialogOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   // Read, not polled: the chat section owns the poll; the shared cache is
   // fresh enough for a header pill.
   const availability = useHostedAvailability();
+  const hasDesktop = useHasDesktop() && agent.kind === "hosted";
 
   return (
     <div className="flex h-14 shrink-0 items-center gap-3 border-b px-4 sm:px-6">
@@ -55,14 +62,18 @@ export const AgentPageHeader = ({ agent }: AgentPageHeaderProps) => {
             workingInBackground={agent.workingInBackground}
           />
         )}
-        <code className="bg-muted text-muted-foreground hidden rounded px-1.5 py-0.5 font-mono text-xs sm:inline">
-          {agent.identifier}
-        </code>
       </div>
-      <div className="ml-auto">
+      <div className="ml-auto flex items-center gap-2">
+        {hasDesktop && (
+          // Its own boundary: while the button's code loads, the header and
+          // the section below stay on screen rather than the route's
+          // loading state.
+          <Suspense fallback={null}>
+            <DesktopHeaderChip agentId={agent.id} agentName={agent.name} />
+          </Suspense>
+        )}
         <AgentActionsMenu
           agent={agent}
-          onCredentialAccess={() => setAccessDialogOpen(true)}
           onDetails={() => setDetailsOpen(true)}
           onViewActivity={() =>
             router.push(
@@ -82,12 +93,6 @@ export const AgentPageHeader = ({ agent }: AgentPageHeaderProps) => {
         agent={agent}
         open={detailsOpen}
         onOpenChange={setDetailsOpen}
-      />
-
-      <CredentialAccessReflection
-        agent={{ id: agent.id, name: agent.name }}
-        open={accessDialogOpen}
-        onOpenChange={setAccessDialogOpen}
       />
     </div>
   );

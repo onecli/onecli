@@ -20,6 +20,7 @@ const state = vi.hoisted(() => ({
 vi.mock("@/hooks/use-approvals", () => ({
   usePendingChannelApprovals: () => ({ data: state.items }),
   useDecideChannelAction: () => ({ mutate: state.mutate, isPending: false }),
+  useApproveCustomConnection: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 
 const { useActionApprovalCards } = await import("./use-action-approval-cards");
@@ -37,6 +38,8 @@ const action = (
   conversationId: "conv-home",
   createdAt: "2026-10-08T05:26:08Z",
   expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+  webhookChange: null,
+  customConnection: null,
   ...over,
 });
 
@@ -87,10 +90,31 @@ describe("inline action approvals in the chat", () => {
     state.items = [action({})];
     render(<Cards agentId="donna" conversationId="conv-home" />);
     await userEvent.click(screen.getByRole("button", { name: "Approve" }));
-    expect(state.mutate).toHaveBeenCalledWith(
-      { approvalId: "act-1", decision: "approve" },
-      expect.anything(),
+    expect(state.mutate).toHaveBeenCalledWith({
+      approvalId: "act-1",
+      decision: "approve",
+    });
+  });
+
+  it("a webhook change shows the full new instructions before Approve", async () => {
+    const instructions = `Save the notes to the Meetings folder.\n\n${"Then file each item. ".repeat(60)}`;
+    state.items = [
+      action({
+        summary: 'change webhook "Meeting notes": pause it, new instructions …',
+        webhookChange: { name: null, instructions, enabled: false },
+      }),
+    ];
+    render(<Cards agentId="donna" conversationId="conv-home" />);
+    // The summary line is clamped; the card carries every word.
+    expect(screen.getByLabelText("New instructions").textContent).toBe(
+      instructions,
     );
+    expect(screen.getByText("Pause")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Approve" }));
+    expect(state.mutate).toHaveBeenCalledWith({
+      approvalId: "act-1",
+      decision: "approve",
+    });
   });
 
   it("renders nothing when there is nothing to decide", () => {

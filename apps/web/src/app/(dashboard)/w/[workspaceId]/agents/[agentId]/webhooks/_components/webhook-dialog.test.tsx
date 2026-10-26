@@ -133,7 +133,7 @@ describe("edit", () => {
     );
 
     await userEvent.click(screen.getByRole("button", { name: "Delete" }));
-    expect(mutations.remove).toHaveBeenCalledWith("wh-1", expect.anything());
+    expect(mutations.remove).toHaveBeenCalledWith("wh-1");
   });
 });
 

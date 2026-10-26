@@ -30,13 +30,17 @@ import * as attachments from "./attachments";
 import * as channels from "./channels";
 import * as crons from "./crons";
 import * as webhooks from "./webhooks";
+import * as ports from "./ports";
 import * as memories from "./memories";
 import * as runs from "./runs";
+import * as approvalOutcomes from "./approval-outcomes";
+import * as usage from "./usage";
 import * as evals from "./evals";
 import * as skills from "./skills";
 import * as sshKeys from "./ssh-keys";
 import * as user from "./user";
 import * as githubAppShare from "./github-app-share";
+import * as skillLibrary from "./skill-library";
 
 export {
   agents,
@@ -71,10 +75,14 @@ export {
   channels,
   crons,
   webhooks,
+  ports,
   memories,
   runs,
+  approvalOutcomes,
+  usage,
   evals,
   skills,
+  skillLibrary,
   sshKeys,
   user,
   githubAppShare,
@@ -124,6 +132,9 @@ export type {
   AgentGrantSecret,
   ConnectionGrants,
   ConnectionGrantInput,
+  SecretAgentAccess,
+  SecretAgentAccessEntry,
+  SavedSecret,
   GrantResources,
   AgentGrantsSummary,
   AgentWithGrantsSummary,
@@ -156,6 +167,7 @@ export type {
   AgentPeer,
   ChannelPresenceStatus,
   ChannelProvider,
+  ChannelListenMode,
   ChannelSetupMaterial,
   ChannelPersonReach,
   ChannelReachState,
@@ -173,6 +185,7 @@ export type {
 } from "./channels";
 export type { AgentCron, CronInput, CronUpdate } from "./crons";
 export type { AgentWebhook, WebhookInput, WebhookUpdate } from "./webhooks";
+export type { SandboxPortShare, SandboxPortsResponse } from "./ports";
 export type {
   AgentMemory,
   AgentMemorySummary,
@@ -191,6 +204,12 @@ export type {
 } from "./skills";
 export { appsPath } from "./scope";
 export type { PageScope } from "./scope";
+export type {
+  LibrarySkill,
+  LibraryUsage,
+  RepoSkill,
+  SkillSource,
+} from "./skill-library";
 export type { AppConfigStatus } from "./app-config";
 export type { AvailableApps } from "./app-availability";
 export type { VaultConnection } from "./vaults";
@@ -210,6 +229,7 @@ export {
 } from "./client";
 export { queryKeys } from "./keys";
 export type { RunAppCall, RunDetail, RunListItem, RunToolCall } from "./runs";
+export type { AgentRuntimeUsage, OrgRuntimeUsage } from "./usage";
 export type {
   EvalQuestion,
   EvalRunDetail,

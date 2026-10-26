@@ -18,6 +18,7 @@ const state = vi.hoisted(() => ({
   isPending: false,
   isError: false,
   update: vi.fn(),
+  setEnabled: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-webhooks", () => ({
@@ -31,7 +32,12 @@ vi.mock("@/hooks/use-webhooks", () => ({
   }),
   useCreateWebhook: () => ({ mutate: vi.fn(), isPending: false }),
   useUpdateWebhook: () => ({ mutate: state.update, isPending: false }),
+  useSetWebhookEnabled: () => ({ mutate: state.setEnabled, isPending: false }),
   useDeleteWebhook: () => ({ mutate: vi.fn(), isPending: false }),
+}));
+
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/w/ws-1/agents/ag-1/webhooks",
 }));
 
 vi.mock("../../_components/agent-page-frame", () => ({
@@ -66,6 +72,7 @@ beforeEach(() => {
   state.isPending = false;
   state.isError = false;
   state.update.mockReset();
+  state.setEnabled.mockReset();
 });
 afterEach(cleanup);
 
@@ -155,28 +162,41 @@ describe("rows", () => {
 });
 
 describe("actions", () => {
-  it("the pause switch writes enabled:false", async () => {
+  it("the pause switch writes enabled:false through the instant toggle", async () => {
     state.webhooks = [webhook()];
     renderSection();
     await userEvent.click(
       screen.getByRole("switch", { name: "Pause Meeting notes" }),
     );
-    expect(state.update).toHaveBeenCalledWith(
-      { id: "wh-1", input: { enabled: false } },
-      expect.anything(),
-    );
+    expect(state.setEnabled).toHaveBeenCalledWith({
+      id: "wh-1",
+      enabled: false,
+    });
   });
 
-  it("Edit opens the dialog pre-filled, with the URL to copy", async () => {
+  it("Edit (in the row menu) opens the dialog pre-filled, with the URL to copy", async () => {
     state.webhooks = [webhook()];
     renderSection();
     await userEvent.click(
-      screen.getByRole("button", { name: "Edit Meeting notes" }),
+      screen.getByRole("button", { name: "Meeting notes actions" }),
     );
+    await userEvent.click(screen.getByRole("menuitem", { name: /Edit/ }));
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     expect(screen.getByLabelText("Name")).toHaveValue("Meeting notes");
     expect(screen.getByLabelText("Webhook URL")).toHaveValue(
       "https://api.example.test/v1/hooks/whk_abc",
+    );
+  });
+
+  it("View runs (in the row menu) opens Activity narrowed to this one webhook", async () => {
+    state.webhooks = [webhook()];
+    renderSection();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Meeting notes actions" }),
+    );
+    expect(screen.getByRole("menuitem", { name: /View runs/ })).toHaveAttribute(
+      "href",
+      "/w/ws-1/activity?tab=runs&agent=ag-1&view=webhook&webhook=wh-1",
     );
   });
 

@@ -308,6 +308,7 @@ pub async fn platform_credential(
     let rule = inject::InjectionRule {
         path_pattern: "*".to_string(),
         injections: inject::secret_inject::build_injections("anthropic", &key.api_key, None, None),
+        secret: None,
     };
     let binding = BudgetBinding {
         secret_id: PLATFORM_SECRET_ID.to_string(),
@@ -327,6 +328,7 @@ mod tests {
     fn secret(type_: &'static str, host_pattern: &'static str) -> db::SecretRow {
         db::SecretRow {
             id: "s1".into(),
+            name: "s1".into(),
             scope: "workspace".into(),
             type_: type_.into(),
             value_source: "inline".into(),

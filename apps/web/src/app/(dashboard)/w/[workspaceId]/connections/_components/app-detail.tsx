@@ -28,8 +28,11 @@ import { AppIcon } from "@/lib/components/app-icon";
 import { AppConfigForm, type AppConfigFormHandle } from "./app-config-form";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
 import { ConnectionAgentsReflection } from "@/lib/components/policy-reflect";
+import { readConnectLinkAgent } from "@/lib/connect-link-agent";
+import { useVerifiedConnectLinkAgent } from "@/hooks/use-verified-connect-link-agent";
 import { SetupGuideLink } from "@/lib/components/setup-guide-link";
 import { groupMembers, groupOf } from "@onecli/api/apps/oauth/groups";
+import { AppConnectEmpty } from "./app-connect-empty";
 import { ConnectionAccountCard } from "./connection-account-card";
 import { InheritedConnectionCard } from "./inherited-connection-card";
 import { AppBlocklist } from "./app-blocklist";
@@ -100,10 +103,9 @@ export const AppDetail = ({
   }, [allConnections, app.id, pageScope]);
 
   // A successful connect opens the account's agent-access dialog right here:
-  // the API has already attached a new account to every agent of the
-  // workspace, and this is where the user turns off the ones that shouldn't
-  // have it. The `open` flag outlives the id so closing keeps the exit
-  // animation.
+  // a new workspace account is on for no agent, and this is where the user
+  // turns it on for the ones that should have it. The `open` flag outlives
+  // the id so closing keeps the exit animation.
   const [justConnectedId, setJustConnectedId] = useState<string | null>(null);
   const [justConnectedOpen, setJustConnectedOpen] = useState(false);
   // Agents are workspace-scoped, so this only means anything on a workspace page.
@@ -116,8 +118,8 @@ export const AppDetail = ({
   const handleConnected = useCallback(
     ({ provider, connectionId }: AppConnectedEvent) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
-      // The connection list, plus every grant view: a created connection
-      // arrives already granted to every agent of the workspace.
+      // The connection list, plus every grant view the agent-access dialog
+      // and the account cards read.
       invalidateGrants();
       // Only a CREATED connection carries an id — a reconnect refreshed
       // credentials an agent already had, and needs no setup step. The
@@ -174,10 +176,19 @@ export const AppDetail = ({
 
   const hasCredentials = hasEnvDefaults || appConfigured;
 
+  // `?source=agent&agent_id=`: an agent's connect door sent the user here to
+  // set the app's credentials up first. A NEW account connected from this
+  // visit is still that agent's; a reconnect never names one.
+  const linkAgent = useVerifiedConnectLinkAgent(
+    canAttachAgents ? readConnectLinkAgent(searchParams) : undefined,
+  );
   const openPopup = (connectionId?: string, options?: { height?: number }) =>
     openConnectPopup(app.id, {
       ...options,
       connectionId,
+      ...(linkAgent && !connectionId
+        ? { agentId: linkAgent.id, agentName: linkAgent.name }
+        : {}),
       workspaceId: pathname.match(WORKSPACE_PATH_RE)?.[1],
       orgId:
         pageScope === "organization"
@@ -188,9 +199,8 @@ export const AppDetail = ({
   const popupOpts =
     app.connectionType === "credentials_import" ? { height: 820 } : undefined;
 
-  // GitHub App: an org admin can reuse an installation connected anywhere in
-  // the org (another workspace or the org level) with a repo subset, since
-  // GitHub won't offer a second install on the same account.
+  // GitHub App: GitHub won't offer a second install on the same account, so
+  // an org admin is offered the org's connected installations first.
   const isGitHubApp = app.id === GITHUB_APP_PROVIDER;
   const [githubDialogOpen, setGithubDialogOpen] = useState(false);
   const { data: sharedInstallations = [] } = useSharedGitHubInstallations(
@@ -306,64 +316,68 @@ export const AppDetail = ({
         <div className="flex items-center justify-center py-12">
           <Loader2 className="size-5 animate-spin text-muted-foreground" />
         </div>
+      ) : !isConnected ? (
+        <AppConnectEmpty
+          appName={app.name}
+          pageScope={pageScope}
+          onConnect={handleConnect}
+        />
       ) : (
-        isConnected && (
-          <div className="space-y-3">
-            <div className="flex items-start justify-between">
-              <h3 className="text-sm font-medium">Connected accounts</h3>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleConnect}
-                className="shrink-0"
-              >
-                Connect
-              </Button>
-            </div>
-            {connections.length > 0 && inheritedConnections.length > 0 && (
-              <p className="text-xs font-medium text-muted-foreground">
-                Workspace accounts
-              </p>
-            )}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-              {connections.map((conn) => (
-                <ConnectionAccountCard
-                  key={conn.id}
-                  connection={conn}
-                  appName={app.name}
-                  onReconnect={(id) => openPopup(id, popupOpts)}
-                  pageScope={pageScope}
-                  highlighted={
-                    conn.id === reconnectParam && !!conn.reauthRequiredAt
-                  }
-                  highlightedOrg={orgAccessParam}
-                />
-              ))}
-            </div>
-            {inheritedConnections.length > 0 && (
-              <>
-                <p
-                  className={cn(
-                    "text-xs font-medium text-muted-foreground",
-                    connections.length > 0 && "pt-3",
-                  )}
-                >
-                  Organization accounts
-                </p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                  {inheritedConnections.map((conn) => (
-                    <InheritedConnectionCard
-                      key={conn.id}
-                      connection={conn}
-                      pageScope={pageScope}
-                      highlightedOrg={orgAccessParam}
-                    />
-                  ))}
-                </div>
-              </>
-            )}
+        <div className="space-y-3">
+          <div className="flex items-start justify-between">
+            <h3 className="text-sm font-medium">Connected accounts</h3>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleConnect}
+              className="shrink-0"
+            >
+              Connect
+            </Button>
           </div>
-        )
+          {connections.length > 0 && inheritedConnections.length > 0 && (
+            <p className="text-xs font-medium text-muted-foreground">
+              Workspace accounts
+            </p>
+          )}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+            {connections.map((conn) => (
+              <ConnectionAccountCard
+                key={conn.id}
+                connection={conn}
+                appName={app.name}
+                onReconnect={(id) => openPopup(id, popupOpts)}
+                pageScope={pageScope}
+                highlighted={
+                  conn.id === reconnectParam && !!conn.reauthRequiredAt
+                }
+                highlightedOrg={orgAccessParam}
+              />
+            ))}
+          </div>
+          {inheritedConnections.length > 0 && (
+            <>
+              <p
+                className={cn(
+                  "text-xs font-medium text-muted-foreground",
+                  connections.length > 0 && "pt-3",
+                )}
+              >
+                Organization accounts
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                {inheritedConnections.map((conn) => (
+                  <InheritedConnectionCard
+                    key={conn.id}
+                    connection={conn}
+                    pageScope={pageScope}
+                    highlightedOrg={orgAccessParam}
+                  />
+                ))}
+              </div>
+            </>
+          )}
+        </div>
       )}
 
       {configurable && (
@@ -413,6 +427,7 @@ export const AppDetail = ({
           open={githubDialogOpen}
           onOpenChange={setGithubDialogOpen}
           pageScope={pageScope}
+          agentId={linkAgent?.id}
           onInstallNew={() => openPopup(undefined, popupOpts)}
           onConnected={(id) => {
             if (canAttachAgents) openJustConnected(id);

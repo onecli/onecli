@@ -40,8 +40,8 @@ export const AgentsGroup = ({ workspaceId }: { workspaceId: string }) => {
   const pathname = usePathname();
   // Explicit workspace scope, NOT the URL-scoped `useAgents()`: the sidebar is
   // chrome and its query can fire while the browser is mid-transition on a
-  // non-workspace URL, where a URL-scoped server action has no workspace
-  // header and answers 500 (the fresh-install first-open console error).
+  // non-workspace URL, where a URL-scoped read carries no workspace and is
+  // refused (the fresh-install first-open console error).
   const { data: agents = [], isPending } = useAgentsForWorkspace(
     workspaceId,
     true,

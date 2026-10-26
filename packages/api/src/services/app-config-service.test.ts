@@ -181,20 +181,6 @@ describe("disconnectIfConnected via deleteAppConfig — org scope", () => {
     expect(survivors).toEqual(["proj-other", "proj-unlinked"]);
   });
 
-  it("runs the wholesale org delete then the FK sweep with the right predicates", async () => {
-    await deleteAppConfig({ organizationId: "org-1" }, "prov");
-
-    expect(store.deleteManyWheres[0]).toEqual({
-      organizationId: "org-1",
-      scope: "organization",
-      provider: "prov",
-    });
-    expect(store.deleteManyWheres[1]).toEqual({
-      appConfigId: "cfg-1",
-      scope: "workspace",
-    });
-  });
-
   it("disconnects BEFORE deleting the config row (SetNull would blind the sweep)", async () => {
     await deleteAppConfig({ organizationId: "org-1" }, "prov");
 

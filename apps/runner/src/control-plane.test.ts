@@ -1,10 +1,20 @@
+import { createServer } from "node:http";
 import { describe, expect, it } from "vitest";
 import {
   MAX_RUNNER_EVENTS_PER_POST,
+  RUNNER_REPLICA_HEADER,
+  runnerChannelClaimRequestSchema,
   runnerEventsRequestSchema,
+  runnerRegisterRequestSchema,
+  runnerSpawnRequestSchema,
+  runnerStrayStopRequestSchema,
   type RunnerEvent,
 } from "@onecli/agent-protocol";
-import { ControlPlaneError, createControlPlaneClient } from "./control-plane";
+import {
+  ControlPlaneError,
+  createControlPlaneClient,
+  isProvablyUnapplied,
+} from "./control-plane";
 
 /**
  * The events POST must degrade to MORE requests when a batch outgrows the
@@ -185,6 +195,49 @@ describe("postEvents retry law", () => {
     expect(sleeps).toEqual([]);
   });
 
+  it("retries a REFUSED connection (nothing was sent) through a real restart window", async () => {
+    // Real sockets, not a scripted rejection: the control plane is down for
+    // the first attempts (connection refused), then comes back. MUTATION-
+    // PROOF: without the never-sent arm the first refusal is thrown and the
+    // batch (in production: a turn.finished) is lost.
+    let hits = 0;
+    const server = createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        hits += 1;
+        res.statusCode = 204;
+        res.end();
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("expected a TCP address");
+    }
+    const { port } = address;
+    await new Promise<void>((r) => server.close(() => r()));
+
+    const sleeps: number[] = [];
+    const client = createControlPlaneClient({
+      baseUrl: `http://127.0.0.1:${String(port)}`,
+      token: "rnr_test",
+      sleepImpl: async (ms) => {
+        sleeps.push(ms);
+        // The api-server comes back during the second backoff.
+        if (sleeps.length === 2) {
+          await new Promise<void>((r) => server.listen(port, "127.0.0.1", r));
+        }
+      },
+    });
+    try {
+      await client.postEvents([event(1)]);
+      expect(hits).toBe(1);
+      expect(sleeps).toEqual([1_000, 4_000]);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
   it("a mid-run retry re-posts the SAME chunk in place, then moves on", async () => {
     const { client, calls } = scriptedClient([204, 500]);
     const events = Array.from(
@@ -200,6 +253,95 @@ describe("postEvents retry law", () => {
     // The retried chunk is identical to its failed attempt — a re-post,
     // never a re-slice, so arrival order (which decides `seq`) holds.
     expect(calls[2]).toEqual(calls[1]);
+  });
+});
+
+/**
+ * The "provably unapplied" verdict, over the error shapes fetch really
+ * throws: a `TypeError("fetch failed")` whose `cause` is the socket error, or,
+ * when the host resolved to several addresses, an AggregateError over one
+ * error per attempt whose own `code` copies the FIRST attempt's.
+ */
+describe("isProvablyUnapplied", () => {
+  const socketError = (code: string): Error =>
+    Object.assign(new Error(code), { code });
+  const fetchFailed = (cause: unknown): TypeError =>
+    new TypeError("fetch failed", { cause });
+  /** Node's dual-stack shape: the aggregate carries the first attempt's code. */
+  const dualStack = (...codes: string[]): AggregateError =>
+    Object.assign(new AggregateError(codes.map(socketError)), {
+      code: codes[0],
+    });
+
+  it.each(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"])(
+    "a request that never left (%s) is unapplied",
+    (code) => {
+      expect(isProvablyUnapplied(fetchFailed(socketError(code)))).toBe(true);
+    },
+  );
+
+  it("every dual-stack attempt refused is unapplied", () => {
+    expect(
+      isProvablyUnapplied(
+        fetchFailed(dualStack("ECONNREFUSED", "ECONNREFUSED")),
+      ),
+    ).toBe(true);
+  });
+
+  it("one dual-stack attempt that may have connected makes the whole failure ambiguous", () => {
+    // MUTATION-PROOF: reading the aggregate's own code (the first attempt's)
+    // instead of every attempt answers true here, and a request that may
+    // have landed is re-sent.
+    expect(
+      isProvablyUnapplied(fetchFailed(dualStack("ECONNREFUSED", "ETIMEDOUT"))),
+    ).toBe(false);
+  });
+
+  it.each(["ECONNRESET", "ETIMEDOUT", "UND_ERR_SOCKET", "EPIPE"])(
+    "a failure that may have landed (%s) is not",
+    (code) => {
+      expect(isProvablyUnapplied(fetchFailed(socketError(code)))).toBe(false);
+    },
+  );
+
+  it("a timeout (no socket cause at all) is not", () => {
+    expect(
+      isProvablyUnapplied(new DOMException("aborted", "TimeoutError")),
+    ).toBe(false);
+    expect(isProvablyUnapplied(fetchFailed(undefined))).toBe(false);
+    expect(isProvablyUnapplied(null)).toBe(false);
+  });
+
+  it("follows the status law: 429/500/503 unapplied, everything else not", () => {
+    for (const status of [429, 500, 503]) {
+      expect(isProvablyUnapplied(new ControlPlaneError(status, "x"))).toBe(
+        true,
+      );
+    }
+    for (const status of [400, 401, 403, 404, 502, 504]) {
+      expect(isProvablyUnapplied(new ControlPlaneError(status, "x"))).toBe(
+        false,
+      );
+    }
+  });
+
+  it("agrees with what fetch really throws for a closed port", async () => {
+    // The shape check above is only as good as its fixtures: pin it to the
+    // runtime's own error once.
+    const server = createServer();
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("expected a TCP address");
+    }
+    await new Promise<void>((r) => server.close(() => r()));
+    const thrown = await fetch(`http://127.0.0.1:${String(address.port)}/`, {
+      method: "POST",
+    }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(isProvablyUnapplied(thrown)).toBe(true);
   });
 });
 
@@ -277,5 +419,239 @@ describe("uploadAttachment (the raw-body POST)", () => {
     } finally {
       await server.close();
     }
+  });
+});
+
+/**
+ * The copy surface: a runner built to run as several copies registers its
+ * copy, then names it on EVERY call (that is what keeps its liveness fresh and
+ * what the control plane fences channel-bound work by). Every body is parsed
+ * with the REAL wire schema, so a client drift fails here exactly as the
+ * control plane would refuse it.
+ */
+describe("the runner copy surface", () => {
+  const TOKEN_HASH = "b".repeat(64);
+
+  type Seen = {
+    method: string;
+    path: string;
+    replica: string | null;
+    body: unknown;
+  };
+
+  const copyClient = (
+    answer: (seen: Seen) => Response = () =>
+      new Response(null, { status: 204 }),
+  ) => {
+    const seen: Seen[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      const entry: Seen = {
+        method: init?.method ?? "GET",
+        path: url.pathname,
+        replica: new Headers(init?.headers).get(RUNNER_REPLICA_HEADER),
+        body:
+          init?.body === undefined ? undefined : JSON.parse(String(init.body)),
+      };
+      seen.push(entry);
+      if (entry.path === "/v1/runner/register") {
+        return Response.json({ runnerId: "r-1", replicaId: "copy-1" });
+      }
+      return answer(entry);
+    };
+    const client = createControlPlaneClient({
+      baseUrl: "http://control-plane",
+      token: "rnr_test",
+      fetchImpl,
+    });
+    return { client, seen };
+  };
+
+  const capabilities = {
+    maxSandboxes: 4,
+    backend: "fake",
+    homeDurability: "resident" as const,
+  };
+  const registration = {
+    name: "runner",
+    capabilities,
+    replicaName: "pod-a",
+    portApiUrl: "http://10.0.4.17:8485",
+  };
+
+  it("registers its copy and names it on every later call, binary ones included", async () => {
+    const { client, seen } = copyClient((entry) =>
+      entry.path.startsWith("/v1/runner/attachments/")
+        ? new Response(new Uint8Array([1]))
+        : new Response(null, { status: 204 }),
+    );
+
+    expect(await client.register(registration)).toEqual({
+      runnerId: "r-1",
+      replicaId: "copy-1",
+    });
+    expect(runnerRegisterRequestSchema.parse(seen[0]!.body)).toEqual({
+      name: "runner",
+      capabilities,
+      replicaName: "pod-a",
+      portApiUrl: "http://10.0.4.17:8485",
+    });
+    // Registration itself carries no copy: it is what mints one.
+    expect(seen[0]!.replica).toBeNull();
+
+    await client.heartbeat();
+    await client.fetchAttachment("att-1");
+    expect(seen.slice(1).map((entry) => entry.replica)).toEqual([
+      "copy-1",
+      "copy-1",
+    ]);
+  });
+
+  it("refuses a control plane too old to answer a copy id, loudly", async () => {
+    const fetchImpl: typeof fetch = async () =>
+      Response.json({ runnerId: "r-1" });
+    const client = createControlPlaneClient({
+      baseUrl: "http://control-plane",
+      token: "rnr_test",
+      fetchImpl,
+    });
+    await expect(client.register(registration)).rejects.toThrow(
+      /control plane is too old/,
+    );
+  });
+
+  it("records a spawn: true when applied, false when the start moved on", async () => {
+    let status = 204;
+    const { client, seen } = copyClient(() => new Response(null, { status }));
+    await client.register(registration);
+
+    expect(
+      await client.recordSpawn("sb/1", {
+        containerRef: "ctr-1",
+        tokenHash: TOKEN_HASH,
+      }),
+    ).toBe(true);
+    const put = seen.at(-1)!;
+    expect(put.method).toBe("PUT");
+    expect(put.path).toBe("/v1/runner/sandboxes/sb%2F1/spawn");
+    expect(runnerSpawnRequestSchema.parse(put.body)).toEqual({
+      containerRef: "ctr-1",
+      tokenHash: TOKEN_HASH,
+    });
+
+    status = 409;
+    expect(
+      await client.recordSpawn("sb-1", {
+        containerRef: "ctr-1",
+        tokenHash: TOKEN_HASH,
+      }),
+    ).toBe(false);
+
+    // Anything else is not an answer about the spawn: the caller decides.
+    status = 500;
+    await expect(
+      client.recordSpawn("sb-1", {
+        containerRef: "ctr-1",
+        tokenHash: TOKEN_HASH,
+      }),
+    ).rejects.toBeInstanceOf(ControlPlaneError);
+  });
+
+  it("claims a channel through either door; a refusal is null, a failure throws", async () => {
+    let answer: () => Response = () =>
+      Response.json({ sandboxId: "sb-1", containerRef: "ctr-1" });
+    const { client, seen } = copyClient(() => answer());
+    await client.register(registration);
+
+    const token = {
+      door: "token" as const,
+      connectionId: "conn-1",
+      connectedAt: 1_000,
+      tokenHash: TOKEN_HASH,
+    };
+    expect(await client.claimChannel(token)).toEqual({
+      sandboxId: "sb-1",
+      containerRef: "ctr-1",
+    });
+    expect(seen.at(-1)!.path).toBe("/v1/runner/channels");
+    expect(runnerChannelClaimRequestSchema.parse(seen.at(-1)!.body)).toEqual(
+      token,
+    );
+
+    answer = () => Response.json({ error: "Not found" }, { status: 404 });
+    expect(
+      await client.claimChannel({
+        door: "session",
+        connectionId: "conn-2",
+        connectedAt: 2_000,
+        sandboxId: "sb-1",
+        containerRef: "ctr-1",
+      }),
+    ).toBeNull();
+
+    answer = () => new Response(null, { status: 503 });
+    await expect(client.claimChannel(token)).rejects.toBeInstanceOf(
+      ControlPlaneError,
+    );
+
+    // A wrong-shaped 200 must never read as a claim.
+    answer = () => Response.json({ sandboxId: "sb-1" });
+    await expect(client.claimChannel(token)).rejects.toThrow();
+  });
+
+  it("releases a channel, claims a stray stop, and retires the copy", async () => {
+    let status = 204;
+    const { client, seen } = copyClient(() => new Response(null, { status }));
+    await client.register(registration);
+
+    await client.releaseChannel("conn/1");
+    expect(seen.at(-1)).toMatchObject({
+      method: "DELETE",
+      path: "/v1/runner/channels/conn%2F1",
+      replica: "copy-1",
+    });
+
+    expect(await client.claimStrayStop("sb-1", "ctr-1")).toBe(true);
+    expect(seen.at(-1)!.path).toBe("/v1/runner/sandboxes/sb-1/stray-stop");
+    expect(runnerStrayStopRequestSchema.parse(seen.at(-1)!.body)).toEqual({
+      containerRef: "ctr-1",
+    });
+    status = 409;
+    expect(await client.claimStrayStop("sb-1", "ctr-1")).toBe(false);
+
+    status = 204;
+    await client.retire();
+    expect(seen.at(-1)).toMatchObject({
+      method: "DELETE",
+      path: "/v1/runner/replicas/self",
+      replica: "copy-1",
+    });
+  });
+
+  it("reads its reconciler role alone, and tells an api too old to answer it from a failure", async () => {
+    // MUTATION-PROOF: read a 404 as `false` (an old api would leave no copy
+    // reconciling) or swallow a 5xx as `undefined` (an outage would quietly
+    // fall through to the full listing on every copy).
+    let answer = (): Response => Response.json({ reconciler: true });
+    const { client, seen } = copyClient(() => answer());
+    await client.register(registration);
+
+    expect(await client.isReconciler()).toBe(true);
+    expect(seen.at(-1)).toMatchObject({
+      method: "GET",
+      path: "/v1/runner/replicas/self",
+      replica: "copy-1",
+    });
+    answer = () => Response.json({ reconciler: false });
+    expect(await client.isReconciler()).toBe(false);
+
+    answer = () => Response.json({ error: "Not found" }, { status: 404 });
+    expect(await client.isReconciler()).toBeUndefined();
+
+    answer = () => new Response(null, { status: 503 });
+    await expect(client.isReconciler()).rejects.toThrow(/503/);
+
+    answer = () => Response.json({ reconciler: "yes" });
+    await expect(client.isReconciler()).rejects.toThrow();
   });
 });

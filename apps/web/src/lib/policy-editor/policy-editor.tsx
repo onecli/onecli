@@ -8,7 +8,7 @@ import {
   usePolicyDefault,
   usePolicyRules,
   useReorderPolicyRules,
-  useUpdatePolicyRule,
+  useSetPolicyRuleEnabled,
 } from "@/hooks/use-policy";
 import type { PageScope, PolicyRuleV2 } from "@/lib/api";
 import { buildReorderIds } from "@onecli/api/lib/build-reorder-ids";
@@ -48,7 +48,7 @@ export const PolicyEditor = ({ scope }: PolicyEditorProps) => {
   // already disabled at org scope, so this reads identically.
   const directoryName = useDirectoryNames();
 
-  const updateMutation = useUpdatePolicyRule(scope);
+  const setRuleEnabled = useSetPolicyRuleEnabled(scope);
   const deleteMutation = useDeletePolicyRule(scope);
   const reorderMutation = useReorderPolicyRules(scope);
 
@@ -119,8 +119,9 @@ export const PolicyEditor = ({ scope }: PolicyEditorProps) => {
     setEditing(rule);
     setFormOpen(true);
   };
+  // Instant: the row mutes / un-mutes on click; a failure puts it back.
   const toggleEnabled = (rule: PolicyRuleV2) =>
-    updateMutation.mutate({ id: rule.id, input: { enabled: !rule.enabled } });
+    setRuleEnabled.mutate({ id: rule.id, enabled: !rule.enabled });
   const confirmDelete = () => {
     if (!pendingDelete) return;
     deleteMutation.mutate(pendingDelete.id, {

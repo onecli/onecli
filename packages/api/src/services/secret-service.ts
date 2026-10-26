@@ -2,7 +2,6 @@ import { db, Prisma } from "@onecli/db";
 import { getCrypto } from "../providers";
 import { ServiceError } from "./errors";
 import { attachLlmKeyToKeylessAgents } from "./llm-autoattach-service";
-import { attachNewSecretToAllAgents } from "./workspace-autoattach-service";
 import { isLlmProviderId } from "../llm/registry";
 import type { ResourceScope } from "./resource-scope";
 import { scopeWhere, scopeCreate, scopeOwnership } from "./resource-scope";
@@ -44,7 +43,7 @@ const SECRET_TYPE_LABELS: Record<string, string> = {
   "opencode-go": "OpenCode Go",
   openrouter: "OpenRouter",
   local: "Local (OpenAI-compatible)",
-  generic: "Generic Secret",
+  generic: "Custom",
 };
 
 /** A `local` provider's host pattern: its base URL's hostname, always derived,
@@ -306,13 +305,14 @@ export const listSecrets = async (scope: ResourceScope) => {
 };
 
 /**
- * Hand a newly created WORKSPACE secret to the workspace's agents, applied to
- * BOTH creation arms (inline and 1Password):
- *  - a CUSTOM (generic) secret goes to every agent, so it works right away
- *    (`workspace-autoattach-service`);
- *  - an LLM key goes only to the agents that can reach no key at all
- *    (`llm-autoattach-service`). A second key would re-point an agent's
- *    provider, drop its chosen model, and respawn its sandbox.
+ * Hand a newly created WORKSPACE LLM key to the agents that can reach no key
+ * at all (`llm-autoattach-service`), applied to BOTH creation arms (inline
+ * and 1Password). A second key would re-point an agent's provider, drop its
+ * chosen model, and respawn its sandbox, so an agent that has one is skipped.
+ *
+ * A CUSTOM (generic) secret is granted to no agent: the user picks who gets
+ * it (the workspace's "choose agents" window, or the agent page that created
+ * it, which attaches it to that agent explicitly).
  *
  * Workspace scope only. An ORG-level secret is reachable by every workspace in
  * the org, and quietly granting it across all of them is a widening nobody
@@ -321,33 +321,24 @@ export const listSecrets = async (scope: ResourceScope) => {
  * Best-effort by contract: the secret is already created, and a convenience
  * grant must never turn that into a failed request.
  */
-const attachNewSecret = async (
+const attachNewLlmKey = async (
   scope: ResourceScope,
   secret: { id: string; type: string },
   userId: string | null,
 ): Promise<string[]> => {
-  if (!scope.workspaceId) return [];
-  if (isLlmProviderId(secret.type)) {
-    const { agentIds } = await attachLlmKeyToKeylessAgents(
-      scope.workspaceId,
-      secret.id,
-      userId,
-    ).catch(() => ({ agentIds: [] as string[] }));
-    return agentIds;
-  }
-  // Never throws (it logs and returns nothing instead).
-  const written = await attachNewSecretToAllAgents(
+  if (!scope.workspaceId || !isLlmProviderId(secret.type)) return [];
+  const { agentIds } = await attachLlmKeyToKeylessAgents(
     scope.workspaceId,
     secret.id,
     userId,
-  );
-  return written.secrets.map((s) => s.agentId);
+  ).catch(() => ({ agentIds: [] as string[] }));
+  return agentIds;
 };
 
 export const createSecret = async (
   scope: ResourceScope,
   input: CreateSecretInput,
-  /** Who to record as the grantor of any auto-attached grant. */
+  /** Who to record as the grantor of an auto-attached LLM key grant. */
   userId: string | null = null,
 ) => {
   const name = input.name.trim();
@@ -452,7 +443,7 @@ export const createSecret = async (
 
     return {
       ...opSecret,
-      attachedAgents: await attachNewSecret(scope, opSecret, userId),
+      attachedAgents: await attachNewLlmKey(scope, opSecret, userId),
     };
   }
 
@@ -504,7 +495,7 @@ export const createSecret = async (
   return {
     ...secret,
     ...(value ? { preview: buildPreview(value) } : {}),
-    attachedAgents: await attachNewSecret(scope, secret, userId),
+    attachedAgents: await attachNewLlmKey(scope, secret, userId),
   };
 };
 

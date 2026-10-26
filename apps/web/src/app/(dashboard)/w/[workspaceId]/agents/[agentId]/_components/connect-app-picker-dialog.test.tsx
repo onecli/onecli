@@ -107,7 +107,7 @@ describe("ConnectAppPickerDialog", () => {
     renderPicker();
     const dialog = screen.getByRole("dialog");
     expect(dialog).toHaveTextContent(
-      "A new account is on for every agent in this workspace. Its tools are allowed and anything else needs your approval (an app with no tool list gets full access).",
+      "Connecting turns the account on for this agent, not for your other agents. Reads are allowed. Writes and anything else need your approval (an app with no tool list gets full access).",
     );
   });
 
@@ -123,12 +123,31 @@ describe("ConnectAppPickerDialog", () => {
     expect(screen.getByText("GitHub")).toBeInTheDocument();
   });
 
-  it("never offers Slack — it is a channel (the agent's own app), not a gateway connection", () => {
+  it("never offers Slack as a gateway connection — it is a channel (the agent's own app)", () => {
     // plans/channel-aware-agents.md: the Slack gateway app was removed so
     // the agent stops reaching for slack.com through the proxy. The picker
-    // reads the real registry, so this pins the removal end to end.
+    // reads the real registry, so this pins the removal end to end. With no
+    // entitlement there is no Slack row at all.
     renderPicker();
     expect(screen.queryByText("Slack")).toBeNull();
+  });
+
+  it("entitled: Slack is a door to this agent's Slack page (read access), never a connect popup", async () => {
+    const { queryClient } = renderPicker();
+    act(() => {
+      queryClient.setQueryData(queryKeys.instance.all(), { entitled: true });
+      queryClient.setQueryData(queryKeys.agents.detail("agent-1"), {
+        id: "agent-1",
+        name: "Arik",
+        channels: [{ provider: "slack", status: "active" }],
+      });
+    });
+    await userEvent.type(screen.getByLabelText("Search apps"), "sla");
+    const row = await screen.findByRole("button", { name: /^Slack/ });
+    expect(row).toHaveTextContent(/Connect your Slack/);
+    await userEvent.click(row);
+    expect(openSpy).not.toHaveBeenCalled();
+    expect(pushMock).toHaveBeenCalledWith("/w/ws-1/agents/agent-1/channels");
   });
 
   it("opens the shared popup with agent name, workspace, and dedupe window name", async () => {
@@ -138,6 +157,8 @@ describe("ConnectAppPickerDialog", () => {
     const [url, windowName] = openSpy.mock.calls[0] ?? [];
     expect(url).toContain("/app-connect/gmail?");
     expect(url).toContain("agent_name=Arik");
+    // The connect carries THIS agent: the new account lands on for it alone.
+    expect(url).toContain("agent_id=agent-1");
     expect(url).toContain("workspaceId=ws-1");
     expect(windowName).toBe("connect-gmail-new");
   });
@@ -150,9 +171,9 @@ describe("ConnectAppPickerDialog", () => {
   });
 
   it("hands a connect this dialog initiated to onConnected, and writes no grant", async () => {
-    // The API's workspace auto-attach already granted the new account to every
-    // agent of the workspace, so a client grant would be a second, redundant
-    // write (and a second audit row).
+    // The API's connecting-agent grant already turned the new account on for
+    // this agent, so a client grant would be a second, redundant write (and a
+    // second audit row).
     const onConnected = vi.fn();
     const { queryClient } = renderPicker({ onConnected });
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
@@ -211,8 +232,9 @@ describe("ConnectAppPickerDialog", () => {
     await userEvent.click(screen.getByRole("button", { name: /^Gmail/ }));
     postAppMessage({ type: "app-configure", provider: "gmail" });
     await act(async () => {});
+    // The setup page gets this agent, so the connect after it is its own.
     expect(pushMock).toHaveBeenCalledWith(
-      expect.stringContaining("/connections/apps/gmail"),
+      "/w/ws-1/connections/apps/gmail?source=agent&agent_id=agent-1",
     );
 
     // The claim was consumed: a replay must not navigate again.

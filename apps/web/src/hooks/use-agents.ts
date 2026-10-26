@@ -11,16 +11,20 @@ import type {
 } from "@/lib/api/types";
 import { queryKeys } from "@/lib/api/keys";
 import { squareCrop } from "@/lib/agents/square-crop";
-import {
-  getAgents,
-  deleteAgent,
-  renameAgent,
-  regenerateAgentToken,
-} from "@/lib/actions/agents";
+import { deleteAgent, renameAgent } from "@/lib/actions/agents";
 import { invalidateGatewayCache } from "@/lib/api/cache";
 
+/** The URL-scoped agent list, read through `/v1/agents` (workspace scoped
+ * from the URL by `apiFetch`). Never a server action: those are addressed by
+ * a build-specific id, so a tab left open across a deploy would keep posting
+ * an id the new server no longer knows, and the agent page could not load
+ * again until a full reload. */
 export const useAgents = (enabled = true) =>
-  useQuery({ queryKey: queryKeys.agents.list(), queryFn: getAgents, enabled });
+  useQuery({
+    queryKey: queryKeys.agents.list(),
+    queryFn: () => agents.list(),
+    enabled,
+  });
 
 /** Detail read incl. `recentRequestAt`. With `poll`, refetches every 5s until
  * a request is seen — the Install page's "waiting for the first request"
@@ -43,10 +47,10 @@ export const useAgentDetail = (
 /** Agents of an explicitly-chosen workspace (the org-level Get Started picker,
  * the sidebar's Agents group) — for page content inside /w/<id>/ routes use
  * `useAgents()`, which follows the URL scope. Chrome that can outlive a
- * workspace URL (the sidebar) must use THIS hook: `useAgents`'s server-action
- * queryFn posts to the CURRENT route and loses its workspace header the moment
- * the browser sits on a non-workspace URL (bare /org mid-redirect), turning a
- * routine refetch into a 500. */
+ * workspace URL (the sidebar) must use THIS hook: `useAgents` scopes its read
+ * from the CURRENT URL and has no workspace the moment the browser sits on a
+ * non-workspace URL (bare /org mid-redirect), turning a routine refetch into
+ * a refusal. */
 export const useAgentsForWorkspace = (workspaceId: string, enabled = true) =>
   useQuery({
     queryKey: queryKeys.agents.forWorkspace(workspaceId),
@@ -64,10 +68,9 @@ export const useCreateAgent = () => {
       // A new agent appears in the connection→agents reverse view (app-page
       // connection cards, keyed under connections.*) — refresh it too.
       qc.invalidateQueries({ queryKey: queryKeys.connections.all() });
-      // Creation now WRITES GRANTS (the LLM auto-attach, plus every workspace
-      // connection and custom secret), so the grant and policy views are
-      // stale the moment it returns. Same sweep a manual attach does in
-      // use-grants.
+      // Creation WRITES GRANTS (the LLM auto-attach), so the grant and policy
+      // views are stale the moment it returns. Same sweep a manual attach
+      // does in use-grants.
       qc.invalidateQueries({ queryKey: queryKeys.grants.all() });
       qc.invalidateQueries({ queryKey: queryKeys.policy.all() });
       invalidateGatewayCache();
@@ -121,8 +124,10 @@ export const useDeleteAgent = () => {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
       qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
-      // Drop the deleted agent from the connection→agents reverse view too.
+      // Drop the deleted agent from the connection→agents and secret→agents
+      // reverse views too.
       qc.invalidateQueries({ queryKey: queryKeys.connections.all() });
+      qc.invalidateQueries({ queryKey: queryKeys.grants.secrets() });
       // The delete cascades to the agent's conversations — refresh the chat
       // rail rather than leaving rows that 404 on click.
       qc.invalidateQueries({ queryKey: queryKeys.conversations.all() });
@@ -138,10 +143,15 @@ export const useRenameAgent = () => {
   return useMutation({
     mutationFn: ({ agentId, name }: { agentId: string; name: string }) =>
       renameAgent(agentId, name),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
-      // The renamed agent is also shown in the connection→agents reverse view.
-      qc.invalidateQueries({ queryKey: queryKeys.connections.all() });
+    onSuccess: async () => {
+      // Awaited: the rename dialog closes onto the new name, not the old.
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: queryKeys.agents.root() }),
+        // The renamed agent is also shown in the connection→agents and
+        // secret→agents reverse views.
+        qc.invalidateQueries({ queryKey: queryKeys.connections.all() }),
+        qc.invalidateQueries({ queryKey: queryKeys.grants.secrets() }),
+      ]);
       toast.success("Agent renamed");
     },
     onError: () => toast.error("Failed to rename agent"),
@@ -248,19 +258,6 @@ export const useUpdateAgentImage = () => {
       toast.error(
         err instanceof Error ? err.message : "Failed to update the image",
       ),
-  });
-};
-
-export const useRegenerateToken = () => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: regenerateAgentToken,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
-      invalidateGatewayCache();
-      toast.success("Token regenerated");
-    },
-    onError: () => toast.error("Failed to regenerate token"),
   });
 };
 

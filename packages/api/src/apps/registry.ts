@@ -70,6 +70,8 @@ import { pylon } from "./pylon";
 import { pagerduty } from "./pagerduty";
 import { coralogix } from "./coralogix";
 import { onyx } from "./onyx";
+import { twilio } from "./twilio";
+import { dripify } from "./dripify";
 import { webflow } from "./webflow";
 
 const staticApps: AppDefinition[] = [
@@ -141,6 +143,8 @@ const staticApps: AppDefinition[] = [
   pagerduty,
   coralogix,
   onyx,
+  twilio,
+  dripify,
   webflow,
 ];
 

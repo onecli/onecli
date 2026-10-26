@@ -147,6 +147,9 @@ describe("finishedActivityForTool", () => {
     expect(finishedActivityForTool("mcp__onecli__send_file")).toBe(
       "Sent a file",
     );
+    expect(activityForTool("mcp__onecli__preview_expose")).toBe(
+      "Asking for a preview link",
+    );
   });
 
   it("NEVER echoes an unknown tool's raw name", () => {

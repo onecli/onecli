@@ -2,17 +2,26 @@ import { isDeadCredentialError } from "@onecli/channels";
 import { ServiceError } from "../../../errors";
 import { logger } from "../../../../lib/logger";
 import { DeadIntegrationCredentialError } from "../../errors";
-import type { ChannelProvider, PresenceIdentity } from "../../types";
+import type {
+  ChannelProvider,
+  PresenceIdentity,
+  WaitingMessage,
+} from "../../types";
 import { dispatchSlackEvent } from "./dispatch";
 import { invalidateInboundPresence } from "./inbound-cache";
 import { slackSharedApp } from "./shared-install-service";
 import { slackReach } from "./reach-card";
 import { slackActionApprovalCard } from "./action-approval-card";
+import { settleSlackGatewayApprovalCard } from "./gateway-approval-card";
 import {
+  BOT_EVENTS,
   botScopesFor,
   buildAgentManifest,
+  USER_READ_SCOPES,
+  withAgentBotEvents,
   withSyncedAppName,
   withTombstoneName,
+  withUserReadScopes,
 } from "./manifest";
 import {
   agentsSessionsSetStatus,
@@ -20,6 +29,9 @@ import {
   conversationsOpen,
   decodeSlackTokens,
   deleteMessage,
+  escapeSlackText,
+  clampLabel,
+  followUpSendNowButton,
   groupThreadId,
   markdownToMrkdwn,
   postBlocksMessage,
@@ -40,7 +52,12 @@ import {
   reactionsRemove,
   rotateConfigToken,
   SlackApiError,
+  turnStopButton,
   usersInfo,
+  botsInfo,
+  downloadSlackAppIcon,
+  isSlackAppIconUrl,
+  connectionsOpen,
 } from "@onecli/channels/slack";
 import {
   parseSlackIntegrationCredentials,
@@ -98,6 +115,57 @@ const SPENT_PASTED_TOKEN_CODES: ReadonlySet<string> = new Set([
   "internal_error",
 ]);
 
+/**
+ * `apps.connections.open` refusals that are Slack's own outage, not a verdict
+ * on the pasted app-level token (from the method's documented error table):
+ * the paste check reads these as "try again", never "wrong token".
+ */
+const TRANSIENT_CONNECTIONS_OPEN_CODES: ReadonlySet<string> = new Set([
+  "fatal_error",
+  "internal_error",
+  "ratelimited",
+  "request_timeout",
+  "service_unavailable",
+]);
+
+/** The prefix Slack gives app-level tokens of an app with app-level token
+ * rotation on: they expire after 12 hours, and nothing here refreshes them. */
+const ROTATING_APP_TOKEN_PREFIX = "xoxe.xapp-";
+
+/**
+ * Prove a pasted app-level token can hold a Socket Mode connection before it
+ * is stored: minting a socket URL takes a live token carrying
+ * `connections:write`, exactly what the adapter will need. The URL is
+ * single-use and discarded unopened. No raw provider text reaches the
+ * message: an upstream body may echo the token.
+ */
+const assertAppTokenConnects = async (appToken: string): Promise<void> => {
+  try {
+    await connectionsOpen(appToken);
+  } catch (error) {
+    const refused =
+      error instanceof SlackApiError &&
+      !TRANSIENT_CONNECTIONS_OPEN_CODES.has(error.code);
+    throw new ServiceError(
+      "UNPROCESSABLE",
+      refused
+        ? "Slack didn't accept that app-level token. Generate one for this app with the connections:write scope and paste it again."
+        : "Couldn't reach Slack to check the app-level token. Try again in a moment.",
+    );
+  }
+};
+
+/**
+ * A socket app a consent install left one step short: the OAuth exchange
+ * stored the bot token (which needs the app's own client pair) and no
+ * app-level token exists yet. A detached app still holds the app-level token
+ * of its earlier attachment, so it never matches.
+ */
+const awaitsAppToken = (creds: SlackPresenceCredentials): boolean =>
+  creds.clientId !== undefined &&
+  creds.botToken !== undefined &&
+  creds.appToken === undefined;
+
 /** The stored shape, minted from a rotate answer — both the paste path and
  * the rotation path persist exactly this. */
 const rotatedCredential = (
@@ -138,9 +206,8 @@ const UNINSTALL_CLIENT_CREDENTIAL_CODES: ReadonlySet<string> = new Set([
   "bad_client_secret",
 ]);
 
-/** Basic Information — where the app-level token is generated, where
- * "Install to Workspace" lives, and the only place the app's PROFILE icon
- * can be set (Slack has no API for it). */
+/** Basic Information — where the app-level token is generated and where
+ * "Install to Workspace" lives. */
 const appSettingsUrl = (appId: string): string =>
   `https://api.slack.com/apps/${encodeURIComponent(appId)}/general`;
 
@@ -152,6 +219,33 @@ const log = logger.child({ component: "slack-provider" });
  * specific step (the rows do that).
  */
 const NARRATION_PLAN_TITLE = "Working on your request";
+
+/**
+ * One waiting message as a card row: what the person wrote, on one line,
+ * with their Send now beside it when they are a linked person. The text is
+ * theirs and untrusted: flattened to one line, escaped (so `<!channel>` or
+ * a link stays text), then bounded. A message of files alone has no words
+ * to quote (a send must carry text or files), so it says so.
+ */
+const waitingRow = (message: WaitingMessage) => {
+  const words = message.text.replace(/\s+/gu, " ").trim();
+  const quote = words
+    ? `\u201c${clampLabel(escapeSlackText(words))}\u201d`
+    : "_a message with files_";
+  return {
+    type: "section",
+    text: {
+      type: "mrkdwn",
+      text: `:hourglass_flowing_sand: Waiting: ${quote}`,
+    },
+    ...(message.authorExternalUserId && {
+      accessory: followUpSendNowButton(
+        message.id,
+        message.authorExternalUserId,
+      ),
+    }),
+  };
+};
 
 export const slackProvider: ChannelProvider = {
   id: "slack",
@@ -173,6 +267,10 @@ export const slackProvider: ChannelProvider = {
   // The one-shot action-approval card (action-approval-card.ts): the
   // owner-DM prompt for a held privileged agent action.
   actionApprovalCard: slackActionApprovalCard,
+
+  // A gateway approval card rewritten from the control plane (a held
+  // request the person's newer message superseded).
+  settleGatewayApprovalCard: settleSlackGatewayApprovalCard,
 
   // The deployment-owned shared app (SLACK_SHARED_* env): onboarding +
   // config-token-free agent-app minting, reached only through this facet.
@@ -280,15 +378,18 @@ export const slackProvider: ChannelProvider = {
       clientId: created.credentials.client_id,
       clientSecret: created.credentials.client_secret,
       signingSecret: created.credentials.signing_secret,
+      // Mirrors buildAgentManifest's redirect rule exactly.
+      ...(publicApiUrl && { oauthRedirect: true }),
     } satisfies SlackPresenceCredentials);
 
-    // The prefilled consent URL is the events arm's whole install flow — one
-    // Allow click; our signed state rides along so the callback can prove the
+    // The prefilled consent URL is the one-click install flow for BOTH
+    // transports whenever a state was minted (events always; socket when
+    // this deployment has the public HTTPS origin the manifest baked as its
+    // redirect). Our signed state rides along so the callback can prove the
     // journey started here.
-    const installUrl =
-      transport === "events" && oauthState
-        ? `${created.oauth_authorize_url}&state=${encodeURIComponent(oauthState)}`
-        : null;
+    const installUrl = oauthState
+      ? `${created.oauth_authorize_url}&state=${encodeURIComponent(oauthState)}`
+      : null;
 
     return {
       externalId: created.app_id,
@@ -299,26 +400,49 @@ export const slackProvider: ChannelProvider = {
   },
 
   async completePresence({ pasted, existingCredentialsJson, transport }) {
-    const botToken = pasted.botToken?.trim() ?? "";
+    const existing = existingCredentialsJson
+      ? parseSlackPresenceCredentials(existingCredentialsJson)
+      : {};
+    const pastedBotToken = pasted.botToken?.trim() ?? "";
+    // An app-token-only paste is the socket arm's second step after a consent
+    // install: the bot token arrived through the OAuth exchange (minted by
+    // Slack for THIS app's client credentials and fenced to the org's
+    // workspace there). Anything else must paste the bot token too.
+    const appTokenOnly = !pastedBotToken && transport === "socket";
+    const botToken =
+      appTokenOnly && awaitsAppToken(existing)
+        ? (existing.botToken ?? "")
+        : pastedBotToken;
     const appToken = pasted.appToken?.trim() ?? "";
     const signingSecret = pasted.signingSecret?.trim() ?? "";
 
     if (!botToken.startsWith("xoxb-")) {
       throw new ServiceError(
         "UNPROCESSABLE",
-        'The Bot User OAuth Token should start with "xoxb-". Copy it from OAuth & Permissions after installing the app.',
+        appTokenOnly
+          ? "Install the app in Slack first, then paste the app-level token."
+          : 'The Bot User OAuth Token should start with "xoxb-". Copy it from OAuth & Permissions after installing the app.',
       );
     }
-    if (transport === "socket" && !appToken.startsWith("xapp-")) {
-      throw new ServiceError(
-        "UNPROCESSABLE",
-        'The app-level token should start with "xapp-". Generate it under Basic Information → App-Level Tokens with the connections:write scope.',
-      );
+    if (transport === "socket") {
+      if (appToken.startsWith(ROTATING_APP_TOKEN_PREFIX)) {
+        throw new ServiceError(
+          "UNPROCESSABLE",
+          "That app-level token rotates: Slack expires it after 12 hours, and OneCLI can't refresh it. Slack can't turn rotation off on an app, so use a new app with Token rotation left off.",
+        );
+      }
+      if (!appToken.startsWith("xapp-")) {
+        throw new ServiceError(
+          "UNPROCESSABLE",
+          'The app-level token should start with "xapp-". Generate it under Basic Information → App-Level Tokens with the connections:write scope.',
+        );
+      }
+      // A dead or under-scoped token would leave the agent deaf, and the
+      // adapter reads its refusal as the app being removed. Ask Slack now,
+      // before anything is stored.
+      await assertAppTokenConnects(appToken);
     }
 
-    const existing = existingCredentialsJson
-      ? parseSlackPresenceCredentials(existingCredentialsJson)
-      : {};
     // The events paste floor has no manifest-create response to remember the
     // signing secret from, and the inbound routes cannot verify a request
     // without it — so on that one path the paste form must carry it.
@@ -367,9 +491,14 @@ export const slackProvider: ChannelProvider = {
         identityRef: exchanged.bot_user_id,
         identityName: probe?.user ?? null,
       },
-      credentialsJson: mergedJson(existing, {
+      credentialsJson: JSON.stringify({
+        ...existing,
+        // A consent mints a NEW installation: an app-level token kept from an
+        // earlier attachment must not ride along, or a re-attached socket app
+        // would never read as awaiting its fresh one (`awaitsAppToken`).
+        appToken: undefined,
         botToken: exchanged.access_token,
-      }),
+      } satisfies SlackPresenceCredentials),
     };
   },
 
@@ -439,6 +568,14 @@ export const slackProvider: ChannelProvider = {
     }
   },
 
+  awaitsTransportCredential({ credentialsJson }) {
+    try {
+      return awaitsAppToken(parseSlackPresenceCredentials(credentialsJson));
+    } catch {
+      return false;
+    }
+  },
+
   async renameRemotePresence({ accessToken, externalId }) {
     // Before the uninstall: an uninstalled app answers `app_not_found` here.
     // Cosmetic best effort: Slack copies the name onto the bot user
@@ -467,7 +604,24 @@ export const slackProvider: ChannelProvider = {
   },
 
   presenceSettingsUrl({ externalId }) {
-    return appSettingsUrl(externalId);
+    // Scrolled to the "Display Information" card (Slack's own
+    // `<a name="display">`), where the app's profile icon is set.
+    return `${appSettingsUrl(externalId)}#display`;
+  },
+
+  presenceIcon: {
+    async read({ credentialsJson }) {
+      const { botToken } = parseSlackPresenceCredentials(credentialsJson);
+      if (!botToken) throw new Error("presence has no bot token");
+      // bots.info is keyed by the bot id, which auth.test answers for the
+      // app's own bot token.
+      const { bot_id: botId } = await authTest(botToken);
+      if (!botId) return null;
+      const icons = (await botsInfo(botToken, botId)).bot.icons;
+      const url = icons?.image_72 ?? icons?.image_48;
+      return url && isSlackAppIconUrl(url) ? url : null;
+    },
+    download: downloadSlackAppIcon,
   },
 
   async syncRemotePresenceName({ accessToken, externalId, name }) {
@@ -483,6 +637,27 @@ export const slackProvider: ChannelProvider = {
       externalId,
       withSyncedAppName(manifest, name),
     );
+  },
+
+  async enableUserReadAccess({ accessToken, externalId, redirectUrl }) {
+    const { manifest } = await manifestExport(accessToken, externalId);
+    const next = withUserReadScopes(manifest, redirectUrl);
+    if (next) await manifestUpdate(accessToken, externalId, next);
+  },
+
+  userReadScopes: USER_READ_SCOPES,
+
+  presenceEvents: {
+    current: BOT_EVENTS,
+    async sync({ accessToken, externalId }) {
+      // Export-then-edit, the rename's shape and for the same reason: a
+      // rebuilt manifest could rewrite scopes or URLs on an older app. No
+      // write when nothing is missing (an app made from the current
+      // template, or one someone already updated by hand).
+      const { manifest } = await manifestExport(accessToken, externalId);
+      const updated = withAgentBotEvents(manifest);
+      if (updated) await manifestUpdate(accessToken, externalId, updated);
+    },
   },
 
   async lookupUserEmail({ credentialsJson, externalUserId }) {
@@ -714,6 +889,8 @@ export const slackProvider: ChannelProvider = {
     threadTs,
     activities,
     cardTs,
+    stoppable,
+    waiting,
   }) {
     const botToken = credentialsJson
       ? parseSlackPresenceCredentials(credentialsJson).botToken
@@ -729,6 +906,14 @@ export const slackProvider: ChannelProvider = {
     //
     // Every step but the last is finished by definition: the agent moved on
     // from it. Only the newest is still running.
+    //
+    // A stoppable card (no native loader, so no native Stop) carries the
+    // Stop button under the steps. Re-rendered with the card each time, so
+    // it is there from the first step to the last and leaves with the card.
+    //
+    // Each message waiting to be read is one row between the steps and
+    // Stop, its author's Send now beside it (shown to them alone). The row
+    // leaves the card the moment the agent reads the message.
     const blocks = [
       {
         type: "plan",
@@ -739,6 +924,8 @@ export const slackProvider: ChannelProvider = {
           status: index === activities.length - 1 ? "in_progress" : "complete",
         })),
       },
+      ...waiting.map(waitingRow),
+      ...(stoppable ? [{ type: "actions", elements: [turnStopButton] }] : []),
     ];
 
     try {
@@ -805,16 +992,24 @@ export const slackProvider: ChannelProvider = {
     oauthState,
   }) {
     const settingsUrl = appSettingsUrl(externalId);
-    if (transport !== "events" || !credentialsJson || !oauthState) {
+    if (!credentialsJson || !oauthState) {
       return { installUrl: null, settingsUrl };
     }
-    let clientId: string | undefined;
+    let creds: SlackPresenceCredentials;
     try {
-      clientId = parseSlackPresenceCredentials(credentialsJson).clientId;
+      creds = parseSlackPresenceCredentials(credentialsJson);
     } catch {
       return { installUrl: null, settingsUrl };
     }
+    const clientId = creds.clientId;
     if (!clientId) return { installUrl: null, settingsUrl };
+    // A socket app installs by consent only when its manifest carries our
+    // redirect (created on a public HTTPS origin). Apps from before that
+    // keep the token paste. A re-consent on an installed app is harmless:
+    // Slack re-issues the bot token, which is how a removed app re-attaches.
+    if (transport === "socket" && !creds.oauthRedirect) {
+      return { installUrl: null, settingsUrl };
+    }
     const url = new URL("https://slack.com/oauth/v2/authorize");
     url.searchParams.set("client_id", clientId);
     // The FULL bot scope list, exactly as the manifest declares it FOR THIS

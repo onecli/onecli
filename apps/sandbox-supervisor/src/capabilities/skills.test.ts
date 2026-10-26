@@ -54,8 +54,10 @@ describe("the skills fragment", () => {
       expect(flat).toContain(tool);
     }
     expect(flat).toContain(
-      "Workspace and organization skills are managed by the people you work with in the dashboard",
+      "Organization skills are managed by the people you work with in the dashboard",
     );
+    // The retired workspace tier is never taught.
+    expect(flat).not.toMatch(/workspace skill/i);
   });
 });
 

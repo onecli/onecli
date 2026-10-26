@@ -2,6 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import type { InstanceInfo } from "@/lib/api/types";
+import type { ChannelPresenceStatus } from "@/lib/api/channels";
 import type { AgentPageAgent } from "./agent-page-frame";
 
 /**
@@ -21,6 +22,15 @@ vi.mock("@/hooks/use-counts", () => ({
   useCounts: () => ({ data: undefined }),
 }));
 
+// The Connections badge counts what is active for THIS agent.
+const activeState = {
+  appCount: undefined as number | undefined,
+  secretCount: undefined as number | undefined,
+};
+vi.mock("@/hooks/use-agent-active-connections", () => ({
+  useAgentActiveConnections: () => activeState,
+}));
+
 // The rail reads the instance for the SSH auto-hide gate. Mutable so the
 // gate tests below can flip it; the default is an
 // instance WITH ssh, so the gated entry renders like any other row.
@@ -30,10 +40,13 @@ const instanceWithSsh = (): InstanceInfo => ({
   entitled: true,
   version: "0.0.0-test",
   ssh: { host: "ssh.onecli.test" },
+  previews: { domain: "previews.test" },
 });
 beforeEach(() => {
   instanceState.value = instanceWithSsh();
   nav.pathname = "/w/p1/agents/ag-1/chat";
+  activeState.appCount = undefined;
+  activeState.secretCount = undefined;
 });
 
 vi.mock("@/hooks/use-instance", () => ({
@@ -56,14 +69,14 @@ const agentWith = (channels: AgentPageAgent["channels"]): AgentPageAgent => ({
   identifier: "donna",
   accessToken: "tok",
   kind: "hosted",
-  createdAt: new Date("2026-01-01T00:00:00Z"),
+  createdAt: "2026-01-01T00:00:00Z",
   channels,
   imageUrl: null,
   lastSeenAt: null,
   workingInBackground: false,
 });
 
-const slackChannel = (status: string) => ({
+const slackChannel = (status: ChannelPresenceStatus) => ({
   provider: "slack",
   identityName: "donna",
   externalId: "A123",
@@ -160,8 +173,29 @@ describe("the rail's Advanced drill-in", () => {
     instanceState.value = { ...instanceWithSsh(), ssh: undefined };
     render(<AgentSectionRail agent={agentWith([])} />);
     for (const row of screen.getAllByRole("link", { name: "Advanced" }))
-      expect(row).toHaveAttribute("href", "/w/p1/agents/ag-1/webhooks");
+      expect(row).toHaveAttribute("href", "/w/p1/agents/ag-1/ports");
     // The rest of the rail stays.
     expect(screen.getAllByText("Models").length).toBeGreaterThan(0);
+  });
+
+  it("hides Ports once the instance resolves without previews", () => {
+    instanceState.value = {
+      ...instanceWithSsh(),
+      ssh: undefined,
+      previews: undefined,
+    };
+    render(<AgentSectionRail agent={agentWith([])} />);
+    for (const row of screen.getAllByRole("link", { name: "Advanced" }))
+      expect(row).toHaveAttribute("href", "/w/p1/agents/ag-1/webhooks");
+  });
+});
+
+describe("the rail's Connections badge", () => {
+  it("counts only what is active for this agent (apps + custom secrets)", () => {
+    activeState.appCount = 4;
+    activeState.secretCount = 1;
+    render(<AgentSectionRail agent={agentWith([])} />);
+    const row = screen.getAllByRole("link", { name: /Connections/ })[0];
+    expect(row).toHaveTextContent("5");
   });
 });

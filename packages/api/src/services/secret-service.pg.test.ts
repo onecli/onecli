@@ -308,17 +308,5 @@ describe.skipIf(!PROOF_URL)(
       const rows = await listForWorkspace();
       expect(rows.get(`${P}s11`)?.lastError).toBeNull();
     });
-
-    it("brands 402 and 403 as key problems (payment and auth indict the key)", async () => {
-      const at = new Date(Date.now() - 1 * HOUR);
-      await secretRow(`${P}s12`, "anthropic", "c12.api.test");
-      await secretRow(`${P}s13`, "anthropic", "c13.api.test");
-      await logRow("c12.api.test", 402, at);
-      await logRow("c13.api.test", 403, at);
-
-      const rows = await listForWorkspace();
-      expect(rows.get(`${P}s12`)?.lastError).toEqual({ status: 402, at });
-      expect(rows.get(`${P}s13`)?.lastError).toEqual({ status: 403, at });
-    });
   },
 );

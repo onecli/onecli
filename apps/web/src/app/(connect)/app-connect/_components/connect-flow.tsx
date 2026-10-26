@@ -70,6 +70,9 @@ interface ConnectFlowProps {
    * connection". */
   connectedId?: string;
   agentName?: string;
+  /** The agent the connect started from: the created (or re-added) account
+   * is switched on for it. Rides /authorize (OAuth) or the connect body. */
+  agentId?: string;
   preContent?: ReactNode;
   workspaceId?: string;
   orgId?: string;
@@ -87,6 +90,7 @@ export const ConnectFlow = ({
   connectionId,
   connectedId,
   agentName,
+  agentId,
   preContent,
   workspaceId: explicitWorkspaceId,
   orgId,
@@ -128,6 +132,7 @@ export const ConnectFlow = ({
     const params = new URLSearchParams();
     if (connectionId) params.set("connectionId", connectionId);
     if (agentName) params.set("agent_name", agentName);
+    if (agentId) params.set("agent_id", agentId);
     if (accessLevel) params.set("access_level", accessLevel);
 
     const token = await getAuthToken();
@@ -143,6 +148,7 @@ export const ConnectFlow = ({
     app.id,
     connectionId,
     agentName,
+    agentId,
     accessLevel,
     explicitWorkspaceId,
     orgId,
@@ -203,6 +209,7 @@ export const ConnectFlow = ({
         preContent={preContent}
         workspaceId={explicitWorkspaceId}
         orgId={orgId}
+        agentId={agentId}
         onBack={() => setMode("oauth")}
         onSuccess={(connection) => {
           setCreatedConnectionId(connection?.id);
@@ -232,6 +239,7 @@ export const ConnectFlow = ({
         preContent={preContent}
         workspaceId={explicitWorkspaceId}
         orgId={orgId}
+        agentId={agentId}
         onSuccess={(connection) => {
           setCreatedConnectionId(connection?.id);
           setState("success");

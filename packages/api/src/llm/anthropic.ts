@@ -57,7 +57,7 @@ export const anthropic: LlmProvider = {
   // setup token, not a refreshable blob, so the gateway sends it as-is as a
   // bearer (`secret_inject.rs`) and so does this. `/v1/models` takes the plain
   // bearer: the `anthropic-beta: oauth-…` header the Messages call sends with
-  // it (`reaction-chooser.ts`) is deprecated on this endpoint.
+  // it (`services/llm-direct-call.ts`) is deprecated on this endpoint.
   // A token the endpoint refuses degrades to the pinned list like any failure.
   canList: () => true,
   catalogHeaders: (credential, authMode) => ({

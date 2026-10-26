@@ -22,13 +22,23 @@ export const RunFingerprint = ({ run }: { run: EvalRunDetail }) => {
             {run.configVersion}
           </code>
           {changed && ", changed since the previous run"}.
+          {run.model && (
+            <>
+              {" Answered by "}
+              <code translate="no" className="text-foreground">
+                {run.model}
+              </code>
+              .
+            </>
+          )}
         </p>
         <p>
           The configuration covers the instructions, model, effort, enabled
           skills and granted rules. It does not cover memory, rule details or
           the data the agent reads, so an answer can change while it stays the
           same. Look at the run&apos;s steps before editing the test or the
-          instructions.
+          instructions. To test another model, change the agent&apos;s model and
+          run the tests again.
         </p>
       </div>
     </details>

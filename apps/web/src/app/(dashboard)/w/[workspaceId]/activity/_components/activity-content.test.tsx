@@ -25,8 +25,10 @@ vi.mock("@dashboard/page-header", () => ({
 const tabs = vi.hoisted(() => ({
   runs: null as null | {
     agentId?: string;
+    webhookId?: string;
     view: string;
     onViewChange: (view: string) => void;
+    onClearWebhook?: () => void;
     onViewNetwork: (run: RunListItem) => void;
   },
   network: null as null | { scope: NetworkScope; onClearWindow: () => void },
@@ -176,6 +178,39 @@ describe("Activity tabs", () => {
     nav.search = "tab=runs&view=nonsense";
     render(<ActivityContent />);
     expect(tabs.runs?.view).toBe("all");
+  });
+
+  it("a webhook's View runs lands on that one webhook; clearing keeps the Webhooks filter", () => {
+    nav.search = "tab=runs&agent=ag-1&view=webhook&webhook=wh-1";
+    render(<ActivityContent />);
+    expect(tabs.runs).toMatchObject({
+      agentId: "ag-1",
+      view: "webhook",
+      webhookId: "wh-1",
+    });
+    tabs.runs?.onClearWebhook?.();
+    expect(lastUrl(replace).query).toEqual({
+      tab: "runs",
+      agent: "ag-1",
+      view: "webhook",
+    });
+  });
+
+  it("changing the filter drops the one-webhook narrowing", () => {
+    nav.search = "tab=runs&agent=ag-1&view=webhook&webhook=wh-1";
+    render(<ActivityContent />);
+    tabs.runs?.onViewChange("failed");
+    expect(lastUrl(replace).query).toEqual({
+      tab: "runs",
+      agent: "ag-1",
+      view: "failed",
+    });
+  });
+
+  it("a malformed webhook id never reaches the runs query", () => {
+    nav.search = "tab=runs&agent=ag-1&view=webhook&webhook=a%20b/c";
+    render(<ActivityContent />);
+    expect(tabs.runs?.webhookId).toBeUndefined();
   });
 
   it("changing the filter keeps it in the URL with the agent; All drops it", () => {

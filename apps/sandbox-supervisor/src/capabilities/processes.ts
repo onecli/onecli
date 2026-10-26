@@ -36,24 +36,38 @@ export const processesFragment: CapabilityFragment = {
   id: "processes",
   title: "Background processes",
   body: `You can run long work in the background. Your machine SLEEPS when
-your conversations go idle — but the platform tracks background tasks
-however you start them, keeps the machine awake while they run, and wakes
-you through watches.
+nobody is using it — but the platform tracks background tasks however you
+start them, keeps the machine awake while they are BUSY (producing output
+or using CPU), and wakes you through watches.
 
 - process_start runs a shell command in the background from your home.
-  It keeps running after your turn ends.
+  It keeps running after your turn ends. Start servers and other
+  long-running work this way, never with "&" or nohup inside a shell
+  command: the child can keep that command open until it times out.
 - process_status lists ALL tracked background tasks — including ones you
   started other ways — with their recent output.
 - process_watch wakes you ONCE when something happens to any listed task:
   "exit" (it ended), "pattern" (a literal text appears in its output), or
   "silence" (no output for N seconds). Your watch prompt runs automatically
-  and its report reaches this chat. Watches expire
-  (default 4 hours), and every watch also fires if the process ends first,
+  and its report reaches this chat. Watches expire (default
+  ${WATCH_EXPIRES_DEFAULT_SECONDS / 3_600}h; pass expiresInSeconds, up to
+  ${WATCH_EXPIRES_MAX_SECONDS / 3_600}h, when the work takes longer, like a
+  slow CI run), and every watch also fires if the process ends first,
   whatever its kind — so say in the prompt what to do in each case.
 - process_stop stops a process_start task; tasks started other ways are
   stopped the way they were started.
-- If the machine restarts, background tasks die and their watches fire with
-  "lost" so you can restart the work.`,
+- A task that is idle (no output, no CPU) does NOT keep the machine awake:
+  a server nobody visits sleeps with the machine, and so do you. A busy
+  task, or a watch you armed yourself, keeps it up for at most 12 hours
+  after the last message; after that the machine sleeps whatever is still
+  running.
+- When the machine is put to sleep on purpose (it was idle, or a person
+  restarted you), its background tasks end as "parked" and this chat gets
+  a short notice — you are NOT woken. Start them again when they are
+  needed (an app behind a preview link restarts by itself when you
+  registered its start command with the link). If the machine crashes
+  instead, background tasks die and their watches fire with "lost" so you
+  can restart the work.`,
 };
 
 const startSchema = z
@@ -224,7 +238,7 @@ export const createProcessTools = (
         },
         expiresInSeconds: {
           type: "integer",
-          description: `Give up after this many seconds (${WATCH_EXPIRES_MIN_SECONDS}-${WATCH_EXPIRES_MAX_SECONDS}, default ${WATCH_EXPIRES_DEFAULT_SECONDS}).`,
+          description: `Give up after this many seconds (${WATCH_EXPIRES_MIN_SECONDS}-${WATCH_EXPIRES_MAX_SECONDS}, default ${WATCH_EXPIRES_DEFAULT_SECONDS}, counted after silenceSeconds for a "silence" watch).`,
           minimum: WATCH_EXPIRES_MIN_SECONDS,
           maximum: WATCH_EXPIRES_MAX_SECONDS,
         },

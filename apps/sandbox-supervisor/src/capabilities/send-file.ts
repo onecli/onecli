@@ -364,7 +364,7 @@ export const createSendFileTools = (
     tools: [
       {
         name: "send_file",
-        description: `Attach a file from your home directory to your current reply so the person receives it (shown under your answer on the web; uploaded into the thread on Slack). Use it for anything you produced that they should have — a screenshot, a recording, a report, a CSV, a zip — instead of pasting its contents. Up to ${MAX_OUTBOUND_ATTACHMENTS_PER_TURN} files per reply, ${Math.floor(MAX_OUTBOUND_ATTACHMENT_BYTES / (1024 * 1024))}MB each. The result says sent (the file is with them) or why not.`,
+        description: `Attach a file from your home directory to your current reply so the person receives it (shown under your answer on the web; uploaded into the thread on Slack). Use it for anything you produced that they should have — a screenshot, a recording, a report, a CSV, a zip — instead of pasting its contents. It is the only way they see a file: viewing one yourself (with your read tool) shows it to you alone. Up to ${MAX_OUTBOUND_ATTACHMENTS_PER_TURN} files per reply, ${Math.floor(MAX_OUTBOUND_ATTACHMENT_BYTES / (1024 * 1024))}MB each. The result says sent (the file is with them) or why not.`,
         inputSchema: {
           type: "object",
           properties: {
@@ -415,5 +415,10 @@ thread on Slack. Up to ${MAX_OUTBOUND_ATTACHMENTS_PER_TURN} files per reply,
 ${Math.floor(MAX_OUTBOUND_ATTACHMENT_BYTES / (1024 * 1024))}MB each; a sent
 file stays downloadable for ${ATTACHMENT_RETENTION_DAYS} days, so say so if
 the person may need it later. The result says sent, or exactly why not —
-read it before telling the person the file is on its way.`,
+read it before telling the person the file is on its way.
+send_file is the only way a file reaches the person. Opening one with your
+read tool (say, to check a chart looks right) shows it to you alone. For a
+chart, graph or diagram, render it to an image (PNG) and send the file.
+Never point the person at a file, chart, card or panel you have not sent:
+no "here is the chart" until send_file has said sent.`,
 };

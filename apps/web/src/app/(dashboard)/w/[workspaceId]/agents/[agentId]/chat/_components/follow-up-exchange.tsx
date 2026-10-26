@@ -48,10 +48,10 @@ export const FollowUpExchange = ({
   /** Whether the turn this follow-up rides is still running: the only
    * time its live tail is current. */
   targetActive?: boolean;
-  /** SEND NOW is possible for this message (it waits on a live run and no
-   *  message with files is ahead of it); `toolRunning` says whether the
-   *  run is inside a tool right now, the only time it helps, and
-   *  `outcome` is the agent's answer once it lands. */
+  /** SEND NOW is possible for this message (it waits on a live run);
+   *  `toolRunning` says whether the run is inside a tool right now, the
+   *  only time it helps, and `outcome` is the agent's answer once it
+   *  lands. */
   sendNow?: { toolRunning: boolean; outcome?: SentNowOutcome };
 }) => {
   const liveReply =

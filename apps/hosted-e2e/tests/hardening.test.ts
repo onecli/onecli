@@ -1,3 +1,4 @@
+import type { RunnerEvent } from "@onecli/agent-protocol";
 import { expect } from "vitest";
 import { scenario } from "../src/scenario.js";
 import { containerNameFor, dockerKill, isRunning } from "../src/docker.js";
@@ -151,8 +152,9 @@ scenario(
 
     // The restart: stop the loop (sandboxes stay running — production
     // semantics), then a NEW runner process on the SAME token. The container
-    // is now running-but-channelless (its single-use ws token died with the
-    // old process); reconcile reports it stopped, the wake path recreates.
+    // is now running-but-channelless (a keyless runner hands no session, and
+    // its bootstrap token was spent on the first connect); reconcile reports
+    // it stopped, the wake path recreates.
     await stack.runner.stop();
     const revived = await startTestRunner({
       controlPlaneUrl: stack.api.origin,
@@ -212,22 +214,35 @@ scenario(
     );
     expect(await isRunning(container)).toBe(true);
 
-    // The next pass finds the same container, row parked: it stops it.
+    // The next pass finds the same container, row parked: it claims the
+    // stop (the row moves to `stopping` under this copy, so no start can
+    // race it) and stops it.
     await revived.reconcile();
     await waitFor(
       () => isRunning(container),
       (running) => !running,
       "the runner to stop the stray container",
     );
-    // No second report: the row was already where the stop leaves it.
-    expect(
-      revived.posted.filter(
-        (e) =>
-          e.kind === "sandbox.status" &&
-          e.sandboxId === cx.ids.sandbox &&
-          e.status === "stopped",
-      ),
-    ).toHaveLength(1);
+    // Two reports about that one container, each naming it: the
+    // channelless one that parked the row, then the stop's own, which lands
+    // the claimed `stopping` back on `stopped` (without it the row would sit
+    // in `stopping` until the stale-claim window).
+    const reports = revived.posted.filter(
+      (e): e is Extract<RunnerEvent, { kind: "sandbox.status" }> =>
+        e.kind === "sandbox.status" &&
+        e.sandboxId === cx.ids.sandbox &&
+        e.status === "stopped",
+    );
+    expect(reports).toHaveLength(2);
+    expect(reports[0]?.observedContainerRef).toBeDefined();
+    expect(reports[1]?.observedContainerRef).toBe(
+      reports[0]?.observedContainerRef,
+    );
+    await waitFor(
+      () => cx.prisma.sandbox.findUnique({ where: { id: cx.ids.sandbox } }),
+      (row) => row?.status === "stopped",
+      "the stop to land the row on stopped",
+    );
 
     // And the agent is fine: the next message wakes it as usual.
     revived.pump();

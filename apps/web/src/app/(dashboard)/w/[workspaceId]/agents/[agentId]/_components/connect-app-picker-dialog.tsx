@@ -6,7 +6,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { getApp, getApps } from "@onecli/api/apps/registry";
 import type { AppDefinition } from "@onecli/api/apps/types";
-import { Search } from "lucide-react";
+import { ChevronRight, Search } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -16,7 +16,14 @@ import {
 } from "@onecli/ui/components/dialog";
 import { Input } from "@onecli/ui/components/input";
 import { AppIcon } from "@/lib/components/app-icon";
-import { WORKSPACE_PATH_RE, connectionsPath } from "@/lib/navigation";
+import { RequestAppSlot } from "@/lib/components/request-app-slot";
+import {
+  WORKSPACE_PATH_RE,
+  agentSectionPath,
+  connectionsPath,
+} from "@/lib/navigation";
+import { withConnectLinkAgent } from "@/lib/connect-link-agent";
+import { useInstance } from "@/hooks/use-instance";
 import { connectPopupHeight, openConnectPopup } from "@/lib/connect-popup";
 import { queryKeys } from "@/lib/api/keys";
 import { useAppMessages } from "@/hooks/use-app-connected";
@@ -32,14 +39,13 @@ import { GitHubAppConnectDialog } from "@/app/(dashboard)/w/[workspaceId]/connec
 
 /**
  * The agent-scoped app picker: search the catalog, Connect opens the OAuth
- * popup in place (the shared `openConnectPopup`). A new account lands already
- * attached (every tool allowed, anything else needing approval) to every
- * agent of the workspace, this one included (the API's workspace
- * auto-attach), so there is no grant to write here; Manage is the scoping
- * door. The catalog honors the org
- * app-availability restriction exactly like the connections page's picker.
- * Shared by the agent Connections section's Add button and the chat's
- * connector card, so both doors keep one contract.
+ * popup in place (the shared `openConnectPopup`). The connect carries THIS
+ * agent, so a new account lands switched on (reads allowed, writes and
+ * anything else needing approval) for it alone (the API's connecting-agent
+ * grant): there is no grant to write here, and Manage is the scoping door.
+ * The catalog honors the org app-availability restriction exactly like the
+ * connections page's picker. Shared by the agent Connections section's Add
+ * button and the chat's connector card, so both doors keep one contract.
  */
 export const ConnectAppPickerDialog = ({
   agentId,
@@ -65,11 +71,12 @@ export const ConnectAppPickerDialog = ({
   // For the popup's success screen ("Go back to <agent>…") — cached from the
   // agent page's own detail read.
   const { data: agent } = useAgentDetail(agentId);
+  const instance = useInstance();
   // React only to what THIS dialog initiated: a global message listener
   // also hears popups opened elsewhere (another tab, another surface).
   const initiated = useRef(new Set<string>());
-  // GitHub App: an org admin reuses an installation already connected
-  // anywhere in the org through the repo picker instead of a GitHub install
+  // GitHub App: an org admin is offered the installations already connected
+  // in the org (shared with the org, never copied) before a GitHub install
   // popup. Members (no installations offered) get the popup.
   const [githubShareOpen, setGithubShareOpen] = useState(false);
   const { data: sharedInstallations = [] } = useSharedGitHubInstallations(
@@ -87,8 +94,8 @@ export const ConnectAppPickerDialog = ({
     onConnected: ({ provider, connectionId }) => {
       if (!provider || !initiated.current.has(provider)) return;
       initiated.current.delete(provider);
-      // The pool changed (a fresh account, or a reconnect the callback deduped
-      // onto an existing one), and a fresh account arrives with its grants:
+      // The pool changed (a fresh account, or a re-add the callback deduped
+      // onto an existing one), and either arrives switched on for this agent:
       // refresh the list, the grant views and the count badges.
       invalidateGrants();
       void queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
@@ -105,8 +112,15 @@ export const ConnectAppPickerDialog = ({
       if (!initiated.current.has(provider)) return;
       initiated.current.delete(provider);
       onOpenChange(false);
+      // The connect that follows the setup is still this agent's.
       router.push(
-        connectionsPath({ pathname }, `/apps/${encodeURIComponent(provider)}`),
+        withConnectLinkAgent(
+          connectionsPath(
+            { pathname },
+            `/apps/${encodeURIComponent(provider)}`,
+          ),
+          agentId,
+        ),
       );
     },
   });
@@ -134,10 +148,25 @@ export const ConnectAppPickerDialog = ({
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [query, availableApps]);
 
+  // Slack is not a catalog app (the gateway never injects Slack creds): its
+  // read access is a per-agent connection on this agent's Slack page, so the
+  // row is a door there, offered only where that feature is entitled.
+  const showSlack =
+    instance?.entitled === true &&
+    (!query.trim() || "slack".includes(query.trim().toLowerCase()));
+  const hasSlackApp = (agent?.channels ?? []).some(
+    (c) => c.provider === "slack" && c.status !== "pending_setup",
+  );
+  const openSlack = () => {
+    onOpenChange(false);
+    router.push(agentSectionPath(pathname, agentId, "channels"));
+  };
+
   const openPopupFor = (app: AppDefinition) => {
     initiated.current.add(app.id);
     const popup = openConnectPopup(app.id, {
       agentName: agent?.name,
+      agentId,
       workspaceId: pathname.match(WORKSPACE_PATH_RE)?.[1],
       height: connectPopupHeight(app),
     });
@@ -167,9 +196,10 @@ export const ConnectAppPickerDialog = ({
           <DialogHeader>
             <DialogTitle>Connect an app</DialogTitle>
             <DialogDescription>
-              A new account is on for every agent in this workspace. Its tools
-              are allowed and anything else needs your approval (an app with no
-              tool list gets full access). Adjust it anytime under Manage.
+              Connecting turns the account on for this agent, not for your other
+              agents. Reads are allowed. Writes and anything else need your
+              approval (an app with no tool list gets full access). Adjust it
+              anytime under Manage.
             </DialogDescription>
           </DialogHeader>
           <div className="relative">
@@ -187,6 +217,29 @@ export const ConnectAppPickerDialog = ({
             />
           </div>
           <div className="-mx-1 max-h-80 space-y-0.5 overflow-y-auto px-1">
+            {showSlack && (
+              <button
+                type="button"
+                onClick={openSlack}
+                className="hover:bg-muted flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left transition-colors"
+              >
+                <div className="bg-muted flex size-9 shrink-0 items-center justify-center rounded-lg border dark:bg-white/10 dark:border-white/10">
+                  <AppIcon icon="/icons/slack.svg" name="Slack" size={18} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium">Slack</p>
+                  <p className="text-muted-foreground truncate text-xs">
+                    {hasSlackApp
+                      ? "Connect your Slack so this agent can read channels you pick"
+                      : "Add this agent to Slack first, then share channels"}
+                  </p>
+                </div>
+                <ChevronRight
+                  className="text-muted-foreground size-4 shrink-0"
+                  aria-hidden
+                />
+              </button>
+            )}
             {apps.map((app) => {
               const connected = connectedCount.get(app.id) ?? 0;
               return (
@@ -223,11 +276,16 @@ export const ConnectAppPickerDialog = ({
                 </button>
               );
             })}
-            {apps.length === 0 && (
+            {apps.length === 0 && !showSlack && (
               <p className="text-muted-foreground py-6 text-center text-sm">
                 No apps found.
               </p>
             )}
+            {/* Always last, searching included: a search that finds nothing
+                is when someone wants to ask for the app. */}
+            <div className="mt-1 grid">
+              <RequestAppSlot initialName={query.trim() || undefined} />
+            </div>
           </div>
         </DialogContent>
       </Dialog>
@@ -235,6 +293,7 @@ export const ConnectAppPickerDialog = ({
         open={githubShareOpen}
         onOpenChange={setGithubShareOpen}
         pageScope="workspace"
+        agentId={agentId}
         onInstallNew={() => {
           if (githubApp) openPopupFor(githubApp);
         }}

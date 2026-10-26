@@ -3,6 +3,9 @@ import { getApp } from "@onecli/api/apps/registry";
 import { describeScopes } from "@onecli/api/apps/missing-permissions";
 import { checkAppConfigExists } from "@/lib/actions/app-config";
 import { ConnectFlow } from "../_components/connect-flow";
+import { ConnectLayout } from "../_components/connect-layout";
+import { ConnectUpdated } from "../_components/connect-updated";
+import { LibraryGranted } from "../_components/library-granted";
 
 interface Props {
   params: Promise<{ provider: string }>;
@@ -14,6 +17,9 @@ interface Props {
      * distinct from `connectionId`, which means "re-authenticate". */
     connected?: string;
     agent_name?: string;
+    /** The agent the connect started from (its page, its chat, its connect
+     * link): the API switches the new account on for it. */
+    agent_id?: string;
     workspaceId?: string;
     orgId?: string;
     /** Space-joined scopes the user didn't grant (the OAuth callback's
@@ -32,6 +38,7 @@ export default async function ConnectPage({ params, searchParams }: Props) {
     connectionId,
     connected,
     agent_name,
+    agent_id,
     workspaceId,
     orgId,
     missing,
@@ -39,6 +46,34 @@ export default async function ConnectPage({ params, searchParams }: Props) {
 
   const app = getApp(provider);
   if (!app) notFound();
+
+  if (status === "updated") {
+    return (
+      <ConnectLayout
+        appName={app.name}
+        appIcon={app.icon}
+        appDarkIcon={app.darkIcon}
+        variant="success"
+      >
+        <ConnectUpdated appName={app.name} />
+      </ConnectLayout>
+    );
+  }
+
+  // "Install GitHub for skills only": nothing was stored here; the popup
+  // hands the signed grant to the Skills page and closes.
+  if (provider === "github-app" && status === "library") {
+    return (
+      <ConnectLayout
+        appName={app.name}
+        appIcon={app.icon}
+        appDarkIcon={app.darkIcon}
+        variant="success"
+      >
+        <LibraryGranted />
+      </ConnectLayout>
+    );
+  }
 
   const missingScopes = new Set((missing ?? "").split(" "));
   const missingPermissions = describeScopes(provider, (scope) =>
@@ -101,6 +136,7 @@ export default async function ConnectPage({ params, searchParams }: Props) {
       connectionId={connectionId}
       connectedId={connected}
       agentName={agent_name}
+      agentId={agent_id}
       workspaceId={workspaceId}
       orgId={orgId}
       missingPermissions={missingPermissions}

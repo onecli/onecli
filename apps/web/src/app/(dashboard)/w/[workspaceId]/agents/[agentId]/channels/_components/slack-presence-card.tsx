@@ -12,14 +12,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@onecli/ui/components/card";
-import { AppIcon } from "@/lib/components/app-icon";
 import {
-  SLACK_DISPLAY_NAME,
-  SLACK_ICON_SRC,
+  slackAppIconSettingsUrl,
   slackAppRedirectUrl,
 } from "@/lib/agents/slack-presence";
 import type { AgentChannelPresence } from "@/lib/api";
 import { SlackDetachDialog } from "./slack-detach-dialog";
+import { SlackAppIcon } from "./slack-app-icon";
+import { SlackIconSyncButton } from "./slack-icon-sync-button";
 
 interface SlackPresenceCardProps {
   agentId: string;
@@ -50,29 +50,33 @@ export const SlackPresenceCard = ({
       <Card className="gap-4">
         <CardHeader>
           <div className="flex items-start justify-between gap-3">
-            <div className="flex min-w-0 items-center gap-3">
-              <span className="bg-card flex size-10 shrink-0 items-center justify-center rounded-xl border shadow-sm">
-                <AppIcon
-                  icon={SLACK_ICON_SRC}
-                  name={SLACK_DISPLAY_NAME}
-                  size={22}
+            {/* One left column: the face + name row, then "Sync image"
+                under the photo, aligned with "Open in Slack" below. */}
+            <div className="flex min-w-0 flex-col items-start gap-3">
+              <div className="flex min-w-0 items-center gap-3">
+                <SlackAppIcon
+                  iconUrl={presence.iconUrl}
+                  editUrl={slackAppIconSettingsUrl(presence.externalId)}
                 />
-              </span>
-              <div className="min-w-0 space-y-0.5">
-                <CardTitle className="truncate leading-tight">
-                  {presence.identityName
-                    ? `@${presence.identityName}`
-                    : `${agentName} @ ${workspace}`}
-                </CardTitle>
-                <CardDescription className="truncate">
-                  {presence.managedBy
-                    ? `Managed by ${
-                        presence.managedBy.name?.trim() ||
-                        presence.managedBy.email
-                      }`
-                    : workspace}
-                </CardDescription>
+                <div className="min-w-0 space-y-0.5">
+                  <CardTitle className="truncate leading-tight">
+                    {presence.identityName
+                      ? `@${presence.identityName}`
+                      : `${agentName} @ ${workspace}`}
+                  </CardTitle>
+                  <CardDescription className="truncate">
+                    {presence.managedBy
+                      ? `Managed by ${
+                          presence.managedBy.name?.trim() ||
+                          presence.managedBy.email
+                        }`
+                      : workspace}
+                  </CardDescription>
+                </div>
               </div>
+              {/* Pulls a changed Slack icon onto the agent (Slack sends no
+                  event for it). */}
+              <SlackIconSyncButton agentId={agentId} />
             </div>
             <div className="flex shrink-0 items-center gap-1.5">
               {attention ? (

@@ -33,7 +33,7 @@ import {
   AUDIT_SOURCE,
   recordAuditEvent,
 } from "./audit-service";
-import { signalWork } from "./due-work";
+import { signalWork, markSandboxEngaged } from "./due-work";
 import { ServiceError } from "./errors";
 import { activeMembershipWhere } from "./organization-service";
 import { resolveSshKeyForMint, touchSshKeyUsed } from "./ssh-key-service";
@@ -543,10 +543,7 @@ const closeSshSessionRow = async (
   // would let a user retrying ssh push their own agent's recovery out by the
   // idle window each time. Measured live.
   if (session.attachedAt) {
-    await db.sandbox.updateMany({
-      where: { id: session.sandboxId },
-      data: { lastActiveAt: now },
-    });
+    await markSandboxEngaged(db, { id: session.sandboxId });
   }
   return true;
 };

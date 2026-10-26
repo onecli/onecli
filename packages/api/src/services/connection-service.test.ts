@@ -14,6 +14,8 @@ const store = vi.hoisted(() => ({
   updateData: null as WriteData | null,
   updateManyArgs: null as { where: unknown; data: WriteData } | null,
   existingProvider: "prov",
+  existingLabel: "old" as string | null,
+  existingMetadata: null as Record<string, unknown> | null,
 }));
 
 vi.mock("@onecli/db", () => ({
@@ -26,8 +28,9 @@ vi.mock("@onecli/db", () => ({
       },
       findFirst: async () => ({
         id: "conn-1",
-        label: "old",
+        label: store.existingLabel,
         provider: store.existingProvider,
+        metadata: store.existingMetadata,
       }),
       update: async ({ data }: { data: WriteData }) => {
         store.updateData = data;
@@ -66,6 +69,40 @@ beforeEach(() => {
   store.updateData = null;
   store.updateManyArgs = null;
   store.existingProvider = "prov";
+  store.existingLabel = "old";
+  store.existingMetadata = null;
+});
+
+describe("reconnect label: renames survive, identities follow the account", () => {
+  it("signing into a DIFFERENT account replaces a provider-derived label", async () => {
+    store.existingLabel = "alice@corp.test";
+    store.existingMetadata = { email: "alice@corp.test" };
+    await reconnectConnection(
+      { workspaceId: "p-1" },
+      "conn-1",
+      { t: 1 },
+      { metadata: { email: "bob@corp.test" } },
+    );
+    expect(store.updateData).toHaveProperty("label", "bob@corp.test");
+  });
+
+  it("a name the user chose survives a reconnect", async () => {
+    store.existingLabel = "Work mail";
+    store.existingMetadata = { email: "alice@corp.test" };
+    await reconnectConnection(
+      { workspaceId: "p-1" },
+      "conn-1",
+      { t: 1 },
+      { metadata: { email: "alice@corp.test" } },
+    );
+    expect(store.updateData).toHaveProperty("label", "Work mail");
+  });
+
+  it("a bare token persist (no metadata) keeps the label", async () => {
+    store.existingLabel = "alice@corp.test";
+    await reconnectConnection({ workspaceId: "p-1" }, "conn-1", { t: 1 });
+    expect(store.updateData).toHaveProperty("label", "alice@corp.test");
+  });
 });
 
 describe("bound_host is recorded from the gated credential field", () => {

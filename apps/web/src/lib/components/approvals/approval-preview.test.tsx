@@ -19,8 +19,7 @@ describe("ApprovalPreview", () => {
     );
     expect(screen.getByText("To")).toBeTruthy();
     expect(screen.getByText("sam@example.com")).toBeTruthy();
-    const subject = screen.getByText("A little poem for you");
-    expect(subject.className).toContain("font-semibold");
+    expect(screen.getByText("A little poem for you")).toBeTruthy();
     // No "Subject:" / "Body:" field labels: it reads as an email.
     expect(screen.queryByText("Body")).toBeNull();
     expect(container.querySelector(".whitespace-pre-wrap")?.textContent).toBe(

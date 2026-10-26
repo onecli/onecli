@@ -53,7 +53,6 @@ export const DefaultRuleRow = ({
           >
             <DefaultOption
               selected={rule.action === "allow"}
-              disabled={setDefault.isPending}
               onClick={() => set("allow")}
               icon={
                 <ShieldCheck
@@ -66,7 +65,6 @@ export const DefaultRuleRow = ({
             />
             <DefaultOption
               selected={rule.action === "block"}
-              disabled={setDefault.isPending}
               onClick={() => set("block")}
               icon={
                 <ShieldBan className="size-3.5 text-destructive" aria-hidden />
@@ -94,7 +92,6 @@ export const DefaultRuleRow = ({
 
 interface DefaultOptionProps {
   selected: boolean;
-  disabled: boolean;
   onClick: () => void;
   icon: React.ReactNode;
   label: string;
@@ -103,7 +100,6 @@ interface DefaultOptionProps {
 
 const DefaultOption = ({
   selected,
-  disabled,
   onClick,
   icon,
   label,
@@ -112,10 +108,9 @@ const DefaultOption = ({
   <button
     type="button"
     aria-pressed={selected}
-    disabled={disabled}
     onClick={onClick}
     className={cn(
-      "focus-visible:ring-ring inline-flex items-center gap-1.5 rounded-[5px] px-2 py-1 text-xs font-medium transition-colors outline-none focus-visible:ring-2 disabled:opacity-60",
+      "focus-visible:ring-ring inline-flex items-center gap-1.5 rounded-[5px] px-2 py-1 text-xs font-medium transition-colors outline-none focus-visible:ring-2",
       selected
         ? tone === "emerald"
           ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"

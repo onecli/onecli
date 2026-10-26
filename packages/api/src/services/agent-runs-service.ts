@@ -196,17 +196,19 @@ const loadEvents = async (turnIds: string[]) => {
         input: null,
         output: null,
         isError: false,
+        exitCode: null,
       });
       continue;
     }
     const finished = toolFinishedEventSchema.safeParse(payload);
     if (!finished.success) continue;
-    const { callId, name, input, output, isError } = finished.data;
+    const { callId, name, input, output, isError, exitCode } = finished.data;
     const call = acc.tools.find((t) => t.callId === callId);
     const result = {
       input: input ?? null,
       output,
       isError: isError === true,
+      exitCode: exitCode ?? null,
     };
     if (call) Object.assign(call, result);
     else acc.tools.push({ callId, name, ...result });
@@ -363,6 +365,12 @@ export const listRuns = async (
         // another workspace's agent is never in this list.
         agent: { workspaceId, workspace: { organizationId } },
         ...visibleConversations(viewerUserId, isAdmin),
+        // A webhook's runs live in its own sourced conversation, keyed by
+        // the webhook id. Narrowing only: the fences above still apply.
+        ...(query.webhookId && {
+          source: "webhook",
+          externalRef: query.webhookId,
+        }),
       },
       status: query.failedOnly
         ? { in: ["failed", "aborted"] }

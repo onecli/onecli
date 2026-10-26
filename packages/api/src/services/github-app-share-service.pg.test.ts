@@ -27,15 +27,14 @@ const caller = (target: { workspaceId?: string; organizationId?: string }) => ({
 });
 
 /**
- * Shared GitHub App installations on REAL PostgreSQL.
+ * GitHub App installations on REAL PostgreSQL: one connection per org.
  *
- * Proves what makes sharing safe: only an org admin may share (a member is
- * refused at every level); candidates come only from the caller's own org
- * (never another tenant's installation, even with its id); a shared
- * connection is pinned to a subset of what the installation grants and holds
- * no signing key; removing the original removes every connection built on it,
- * in any workspace; and a shared connection is never promoted or reused as a
- * source. GitHub's HTTP API is the only stub.
+ * Proves the model: sharing moves the connection up to the org (same id and
+ * key, no copy); a GitHub account is never connected twice in one org;
+ * deleting any connection removes only that one (older copies get the key
+ * and stay); only org admins may share or edit repos; another tenant's
+ * installation is never offered, shared or found. GitHub's HTTP API is the
+ * only stub.
  *
  *   POLICY_PROOF_DATABASE_URL=postgresql://… pnpm --filter @onecli/api test -- \
  *     --run src/services/github-app-share-service.pg.test.ts
@@ -190,313 +189,659 @@ afterAll(async () => {
   await db.$disconnect();
 });
 
-describe.skipIf(!PROOF_URL)("shared GitHub App installations", () => {
-  it("a workspace-level install is offered to the other workspaces and the org level", async () => {
-    await seedOriginal({ workspaceId: WS_A }, "111", "acme");
-
-    const forB = await share.listSharedInstallations(
-      caller({
-        workspaceId: WS_B,
-      }),
-    );
-    expect(forB).toHaveLength(1);
-    expect(forB[0]).toMatchObject({
-      account: "acme",
-      origin: "another_workspace",
-      connectedHere: 0,
-    });
-
-    const forOrg = await share.listSharedInstallations(
-      caller({
-        organizationId: ORG,
-      }),
-    );
-    expect(forOrg[0]?.origin).toBe("another_workspace");
-
-    const forA = await share.listSharedInstallations(
-      caller({
-        workspaceId: WS_A,
-      }),
-    );
-    expect(forA[0]).toMatchObject({ origin: "this_scope", connectedHere: 1 });
-  });
-
-  it("never offers or accepts another tenant's installation", async () => {
-    const foreign = await seedOriginal(
-      { workspaceId: WS_OTHER },
-      "999",
-      "rival",
-    );
-    expect(
-      await share.listSharedInstallations(caller({ workspaceId: WS_B })),
-    ).toEqual([]);
-
-    mockGitHub();
-    await expect(
-      share.createSharedConnection({
-        caller: caller({ workspaceId: WS_B }),
-        sourceConnectionId: foreign.id,
-      }),
-    ).rejects.toMatchObject({ code: "NOT_FOUND" });
-    await expect(
-      share.listInstallationRepos(caller({ workspaceId: WS_B }), foreign.id),
-    ).rejects.toMatchObject({ code: "NOT_FOUND" });
-  });
-
-  it("pins the picked repos in the credentials and mints a token for exactly them", async () => {
-    const original = await seedOriginal({ workspaceId: WS_A }, "111", "acme");
-    const mintBodies = mockGitHub();
-
-    const created = await share.createSharedConnection({
-      caller: caller({ workspaceId: WS_B }),
-      sourceConnectionId: original.id,
-      repositories: ["ACME/web"],
-    });
-
-    expect(mintBodies.at(-1)).toEqual({ repositories: ["web"] });
-    const row = await db.appConnection.findUniqueOrThrow({
-      where: { id: created.id },
-    });
-    expect(row.workspaceId).toBe(WS_B);
-    expect(row.sourceConnectionId).toBe(original.id);
-    const { getCrypto } = await import("../providers");
-    const creds = JSON.parse(await getCrypto().decrypt(row.credentials ?? ""));
-    // Canonical casing from GitHub, so the gateway's pin matches exactly.
-    expect(creds.repositories).toEqual(["acme/web"]);
-    expect(creds.installation_id).toBe("111");
-    // The signing key stays only in the source row; the gateway borrows it.
-    expect(creds).not.toHaveProperty("private_key");
-    expect(row.metadata).toMatchObject({
-      repositorySelection: "selected",
-      tags: ["web"],
-    });
-  });
-
-  it("refuses repos outside the installation and an empty pick", async () => {
-    const original = await seedOriginal({ workspaceId: WS_A }, "111", "acme");
-    mockGitHub();
-    await expect(
-      share.createSharedConnection({
-        caller: caller({ workspaceId: WS_B }),
-        sourceConnectionId: original.id,
-        repositories: ["acme/web", "acme/secret"],
-      }),
-    ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
-    await expect(
-      share.createSharedConnection({
-        caller: caller({ workspaceId: WS_B }),
-        sourceConnectionId: original.id,
-        repositories: [" "],
-      }),
-    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
-    expect(await db.appConnection.count({ where: { workspaceId: WS_B } })).toBe(
-      0,
-    );
-  });
-
-  it("a shared connection can't itself be a source", async () => {
-    const original = await seedOriginal({ workspaceId: WS_A }, "111", "acme");
-    mockGitHub();
-    const derived = await share.createSharedConnection({
-      caller: caller({ workspaceId: WS_B }),
-      sourceConnectionId: original.id,
-      repositories: ["acme/web"],
-    });
-    await expect(
-      share.createSharedConnection({
-        caller: caller({ organizationId: ORG }),
-        sourceConnectionId: derived.id,
-      }),
-    ).rejects.toMatchObject({ code: "NOT_FOUND" });
-    // Still one installation on offer, represented by the original.
-    const list = await share.listSharedInstallations(
-      caller({
-        organizationId: ORG,
-      }),
-    );
-    expect(list.map((i) => i.sourceConnectionId)).toEqual([original.id]);
-  });
-
-  it("removing the original removes the connections built on it everywhere", async () => {
-    const original = await seedOriginal({ workspaceId: WS_A }, "111", "acme");
-    mockGitHub();
-    const inB = await share.createSharedConnection({
-      caller: caller({ workspaceId: WS_B }),
-      sourceConnectionId: original.id,
-      repositories: ["acme/web"],
-    });
-    const atOrg = await share.createSharedConnection({
-      caller: caller({ organizationId: ORG }),
-      sourceConnectionId: original.id,
-    });
-
-    await conns.deleteConnection({ workspaceId: WS_A }, original.id);
-
-    expect(
-      await db.appConnection.count({
-        where: { id: { in: [original.id, inB.id, atOrg.id] } },
-      }),
-    ).toBe(0);
-  });
-
-  it("a member can't list, read or share any installation, at any level", async () => {
-    role.admin = false;
-    const inA = await seedOriginal({ workspaceId: WS_A }, "1", "in-a");
-    const atOrg = await seedOriginal({ organizationId: ORG }, "2", "at-org");
-    mockGitHub();
-
-    // Not even their own workspace's or the org's: a shared copy gets its own
-    // id, so org rules bound to the original would not narrow it.
-    for (const target of [{ workspaceId: WS_A }, { workspaceId: WS_B }]) {
-      await expect(
-        share.listSharedInstallations(caller(target)),
-      ).rejects.toMatchObject({ code: "FORBIDDEN" });
-      for (const source of [inA.id, atOrg.id]) {
-        await expect(
-          share.listInstallationRepos(caller(target), source),
-        ).rejects.toMatchObject({ code: "FORBIDDEN" });
-        await expect(
-          share.createSharedConnection({
-            caller: caller(target),
-            sourceConnectionId: source,
-            repositories: ["acme/web"],
-          }),
-        ).rejects.toMatchObject({ code: "FORBIDDEN" });
-      }
-    }
-    expect(
-      await db.appConnection.count({
-        where: { sourceConnectionId: { in: [inA.id, atOrg.id] } },
-      }),
-    ).toBe(0);
-  });
-
-  it("an org admin may build on any workspace's installation", async () => {
-    role.admin = true;
-    const inA = await seedOriginal({ workspaceId: WS_A }, "1", "in-a");
-    mockGitHub();
-    const built = await share.createSharedConnection({
-      caller: caller({ workspaceId: WS_B }),
-      sourceConnectionId: inA.id,
-      repositories: ["acme/api"],
-    });
-    expect(built.sourceConnectionId).toBe(inA.id);
-  });
-
-  it("a re-auth gives a shared connection its own grant and unlinks it", async () => {
-    const original = await seedOriginal({ workspaceId: WS_A }, "111", "acme");
-    mockGitHub();
-    const inB = await share.createSharedConnection({
-      caller: caller({ workspaceId: WS_B }),
-      sourceConnectionId: original.id,
-      repositories: ["acme/web"],
-    });
-    // A bare token persist (the gateway's refresh shape) keeps the link.
-    await conns.reconnectConnection({ workspaceId: WS_B }, inB.id, {
+/** A copy made the old way (before sharing moved connections up): built on
+ * `source`'s installation, holding no signing key of its own. Existing data
+ * can still have these. */
+const seedLegacyCopy = async (
+  scope: { workspaceId?: string; organizationId?: string },
+  source: { id: string },
+  installationId: string,
+  account: string,
+  repositories?: string[],
+) => {
+  const connection = await conns.createConnection(
+    scope,
+    "github-app",
+    {
       type: "github_app",
-      installation_id: "111",
+      installation_id: installationId,
       app_id: "123",
-      access_token: "ghs_refreshed",
-    });
-    expect(
-      (await db.appConnection.findUniqueOrThrow({ where: { id: inB.id } }))
-        .sourceConnectionId,
-    ).toBe(original.id);
-
-    // A real re-auth (the OAuth callback sends metadata) stores its own key:
-    // it is no longer built on the source, so removing the source spares it.
-    await conns.reconnectConnection(
-      { workspaceId: WS_B },
-      inB.id,
-      {
-        type: "github_app",
-        installation_id: "111",
-        app_id: "123",
-        private_key: privateKey,
-        access_token: "ghs_own",
-      },
-      { metadata: { username: "acme", installationId: "111" } },
-    );
-    expect(
-      (await db.appConnection.findUniqueOrThrow({ where: { id: inB.id } }))
-        .sourceConnectionId,
-    ).toBeNull();
-    await conns.deleteConnection({ workspaceId: WS_A }, original.id);
-    expect(await db.appConnection.count({ where: { id: inB.id } })).toBe(1);
+      access_token: "ghs_copy",
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      ...(repositories ? { repositories } : {}),
+    },
+    {
+      metadata: { username: account, installationId, repos: GRANTED },
+    },
+  );
+  await db.appConnection.update({
+    where: { id: connection.id },
+    data: { sourceConnectionId: source.id },
   });
+  return connection;
+};
 
-  it("removing a shared connection leaves the original alone", async () => {
-    const original = await seedOriginal({ organizationId: ORG }, "111", "acme");
-    mockGitHub();
-    const inB = await share.createSharedConnection({
-      caller: caller({ workspaceId: WS_B }),
-      sourceConnectionId: original.id,
-      repositories: ["acme/web"],
-    });
-    await conns.deleteConnection({ workspaceId: WS_B }, inB.id);
-    expect(await db.appConnection.count({ where: { id: original.id } })).toBe(
-      1,
-    );
-  });
+const credsOf = async (id: string) => {
+  const { getCrypto } = await import("../providers");
+  const row = await db.appConnection.findUniqueOrThrow({ where: { id } });
+  return {
+    row,
+    creds: JSON.parse(await getCrypto().decrypt(row.credentials ?? "")),
+  };
+};
 
-  it("promote moves a workspace connection to the org in place", async () => {
-    const original = await seedOriginal({ workspaceId: WS_A }, "111", "acme");
-    const moved = await conns.promoteConnectionToOrganization(
-      WS_A,
-      ORG,
-      original.id,
-    );
-    expect(moved.id).toBe(original.id);
-    const row = await db.appConnection.findUniqueOrThrow({
-      where: { id: original.id },
+describe.skipIf(!PROOF_URL)(
+  "GitHub App installations: one connection per org",
+  () => {
+    it("lists the org's installations and whether each already reaches the caller", async () => {
+      await seedOriginal({ workspaceId: WS_A }, "111", "acme");
+      const forB = await share.listSharedInstallations(
+        caller({ workspaceId: WS_B }),
+      );
+      expect(forB).toHaveLength(1);
+      expect(forB[0]).toMatchObject({
+        account: "acme",
+        connectedHere: 0,
+      });
+      const forA = await share.listSharedInstallations(
+        caller({ workspaceId: WS_A }),
+      );
+      expect(forA[0]).toMatchObject({ connectedHere: 1 });
     });
-    expect(row).toMatchObject({
-      scope: "organization",
-      organizationId: ORG,
-      workspaceId: null,
-    });
-    // Now offered to every workspace as an org-level installation.
-    const forB = await share.listSharedInstallations(
-      caller({
-        workspaceId: WS_B,
-      }),
-    );
-    expect(forB[0]?.origin).toBe("organization");
-  });
 
-  it("promote refuses another tenant's, another workspace's, or an org row", async () => {
-    const foreign = await seedOriginal({ workspaceId: WS_OTHER }, "9", "r");
-    const inA = await seedOriginal({ workspaceId: WS_A }, "1", "a");
-    const atOrg = await seedOriginal({ organizationId: ORG }, "2", "b");
-    for (const [ws, id] of [
-      [WS_A, foreign.id],
-      [WS_B, inA.id],
-      [WS_A, atOrg.id],
-    ] as const) {
+    it("the same installation connected here too is represented by the caller's own original", async () => {
+      await seedOriginal({ workspaceId: WS_A }, "111", "acme");
+      const orgRow = await seedOriginal({ organizationId: ORG }, "111", "acme");
+
+      const forOrg = await share.listSharedInstallations(
+        caller({ organizationId: ORG }),
+      );
+      expect(forOrg).toHaveLength(1);
+      expect(forOrg[0]).toMatchObject({
+        sourceConnectionId: orgRow.id,
+        connectedHere: 1,
+      });
+    });
+
+    it("sharing moves the connection up to the org: same id, key and repos, no copy", async () => {
+      const original = await seedOriginal({ workspaceId: WS_A }, "111", "acme");
+      const shared = await share.shareInstallationWithOrganization({
+        caller: caller({ workspaceId: WS_B }),
+        sourceConnectionId: original.id,
+      });
+      expect(shared.id).toBe(original.id);
+      const { row, creds } = await credsOf(original.id);
+      expect(row).toMatchObject({
+        scope: "organization",
+        organizationId: ORG,
+        workspaceId: null,
+        sourceConnectionId: null,
+      });
+      expect(creds.private_key).toBe(privateKey);
+      expect(
+        await db.appConnection.count({
+          where: {
+            provider: "github-app",
+            OR: [
+              { organizationId: ORG },
+              { workspaceId: { in: [WS_A, WS_B] } },
+            ],
+          },
+        }),
+      ).toBe(1);
+      // Now every workspace inherits it: nothing left to share.
+      const forB = await share.listSharedInstallations(
+        caller({ workspaceId: WS_B }),
+      );
+      expect(forB[0]).toMatchObject({
+        connectedHere: 1,
+      });
+    });
+
+    it("an installation already at the org level can't be shared again", async () => {
+      const atOrg = await seedOriginal({ organizationId: ORG }, "222", "corp");
       await expect(
-        conns.promoteConnectionToOrganization(ws, ORG, id),
-      ).rejects.toMatchObject({ code: "NOT_FOUND" });
-    }
-    expect(
-      (await db.appConnection.findUniqueOrThrow({ where: { id: foreign.id } }))
-        .scope,
-    ).toBe("workspace");
-  });
-
-  it("promote refuses a shared connection", async () => {
-    const original = await seedOriginal({ workspaceId: WS_A }, "111", "acme");
-    mockGitHub();
-    const inB = await share.createSharedConnection({
-      caller: caller({ workspaceId: WS_B }),
-      sourceConnectionId: original.id,
-      repositories: ["acme/web"],
+        share.shareInstallationWithOrganization({
+          caller: caller({ workspaceId: WS_B }),
+          sourceConnectionId: atOrg.id,
+        }),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
     });
-    await expect(
-      conns.promoteConnectionToOrganization(WS_B, ORG, inB.id),
-    ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
-    expect(
-      (await db.appConnection.findUniqueOrThrow({ where: { id: inB.id } }))
-        .scope,
-    ).toBe("workspace");
-  });
-});
+
+    it("never offers or shares another tenant's installation", async () => {
+      const foreign = await seedOriginal(
+        { workspaceId: WS_OTHER },
+        "999",
+        "rival",
+      );
+      expect(
+        await share.listSharedInstallations(caller({ workspaceId: WS_B })),
+      ).toEqual([]);
+      await expect(
+        share.shareInstallationWithOrganization({
+          caller: caller({ workspaceId: WS_B }),
+          sourceConnectionId: foreign.id,
+        }),
+      ).rejects.toMatchObject({
+        code: "NOT_FOUND",
+        // The share fence itself refuses (promote's own fence is a second
+        // line, with its own message).
+        message: "Installation not found",
+      });
+      expect((await credsOf(foreign.id)).row.scope).toBe("workspace");
+    });
+
+    it("a member can't list or share any installation", async () => {
+      const inA = await seedOriginal({ workspaceId: WS_A }, "1", "in-a");
+      role.admin = false;
+      await expect(
+        share.listSharedInstallations(caller({ workspaceId: WS_A })),
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+      await expect(
+        share.shareInstallationWithOrganization({
+          caller: caller({ workspaceId: WS_A }),
+          sourceConnectionId: inA.id,
+        }),
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+      expect((await credsOf(inA.id)).row.scope).toBe("workspace");
+    });
+
+    it("deleting a workspace connection never removes the org-level one built on it", async () => {
+      // The mess this fixes: an org-level copy of a workspace's installation.
+      const original = await seedOriginal({ workspaceId: WS_A }, "111", "acme");
+      const atOrg = await seedLegacyCopy(
+        { organizationId: ORG },
+        original,
+        "111",
+        "acme",
+      );
+      const inB = await seedLegacyCopy(
+        { workspaceId: WS_B },
+        original,
+        "111",
+        "acme",
+        ["acme/web"],
+      );
+
+      await conns.deleteConnection({ workspaceId: WS_A }, original.id);
+
+      expect(await db.appConnection.count({ where: { id: original.id } })).toBe(
+        0,
+      );
+      for (const copy of [atOrg, inB]) {
+        const { row, creds } = await credsOf(copy.id);
+        // Kept, unlinked, and now holding the key, so it keeps working.
+        expect(row.sourceConnectionId).toBeNull();
+        expect(creds.private_key).toBe(privateKey);
+      }
+      // Its own repo pin and token are untouched.
+      expect((await credsOf(inB.id)).creds).toMatchObject({
+        repositories: ["acme/web"],
+        access_token: "ghs_copy",
+      });
+    });
+
+    it("deleting a copy leaves the original alone", async () => {
+      const original = await seedOriginal({ workspaceId: WS_A }, "111", "acme");
+      const inB = await seedLegacyCopy(
+        { workspaceId: WS_B },
+        original,
+        "111",
+        "acme",
+      );
+      await conns.deleteConnection({ workspaceId: WS_B }, inB.id);
+      expect(await db.appConnection.count({ where: { id: original.id } })).toBe(
+        1,
+      );
+    });
+
+    it("deleting the org-level connection removes only it", async () => {
+      const atOrg = await seedOriginal({ organizationId: ORG }, "222", "corp");
+      const inA = await seedOriginal({ workspaceId: WS_A }, "111", "acme");
+      await conns.deleteConnection({ organizationId: ORG }, atOrg.id);
+      expect(await db.appConnection.count({ where: { id: atOrg.id } })).toBe(0);
+      expect(await db.appConnection.count({ where: { id: inA.id } })).toBe(1);
+    });
+
+    it("finds an installation wherever it lives in the org, and never in another", async () => {
+      await seedOriginal({ workspaceId: WS_OTHER }, "111", "rival");
+      expect(await conns.findInstallationConnection(ORG, "111")).toBeNull();
+      const inA = await seedOriginal({ workspaceId: WS_A }, "111", "acme");
+      expect(await conns.findInstallationConnection(ORG, "111")).toMatchObject({
+        id: inA.id,
+        scope: "workspace",
+        workspaceId: WS_A,
+      });
+      expect(await conns.findInstallationConnection(ORG, undefined)).toBeNull();
+    });
+
+    it("connecting at the org level what a workspace has moves it up, then re-auths it in place", async () => {
+      // The org callback's steps on real rows: find, move up, reconnect.
+      const inA = await seedOriginal({ workspaceId: WS_A }, "111", "acme");
+      const found = await conns.findInstallationConnection(ORG, "111");
+      expect(found).toMatchObject({ id: inA.id, workspaceId: WS_A });
+      await conns.promoteConnectionToOrganization(WS_A, ORG, inA.id);
+      await conns.reconnectConnection(
+        { organizationId: ORG },
+        inA.id,
+        {
+          type: "github_app",
+          installation_id: "111",
+          app_id: "123",
+          private_key: privateKey,
+          access_token: "ghs_fresh",
+        },
+        { metadata: { username: "acme", installationId: "111" } },
+      );
+      expect(
+        await db.appConnection.count({
+          where: {
+            provider: "github-app",
+            OR: [
+              { organizationId: ORG },
+              { workspaceId: { in: [WS_A, WS_B] } },
+            ],
+          },
+        }),
+      ).toBe(1);
+      const { row, creds } = await credsOf(inA.id);
+      expect(row).toMatchObject({ scope: "organization", organizationId: ORG });
+      expect(creds.access_token).toBe("ghs_fresh");
+    });
+
+    it("malformed credential JSON refuses without writes or plaintext in warning logs", async () => {
+      const original = await seedOriginal(
+        { organizationId: ORG },
+        "111",
+        "acme",
+      );
+      const { getCrypto } = await import("../providers");
+      const { logger } = await import("../lib/logger");
+      const sentinel = "CREDENTIAL_PLAINTEXT_SENTINEL_DO_NOT_LOG";
+      const before = await db.appConnection.update({
+        where: { id: original.id },
+        data: {
+          credentials: await getCrypto().encrypt(
+            `{"access_token":"${sentinel}",INVALID}`,
+          ),
+        },
+      });
+      const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+      try {
+        for (const operation of [
+          () =>
+            share.getConnectionRepositories(
+              caller({ organizationId: ORG }),
+              original.id,
+            ),
+          () =>
+            share.refreshConnectionRepositories(
+              caller({ organizationId: ORG }),
+              original.id,
+            ),
+          () =>
+            share.setConnectionRepositories({
+              caller: caller({ organizationId: ORG }),
+              connectionId: original.id,
+              repositories: ["acme/api"],
+            }),
+        ]) {
+          await expect(operation()).rejects.toMatchObject({
+            code: "UNPROCESSABLE",
+          });
+        }
+        expect(
+          await db.appConnection.findUniqueOrThrow({
+            where: { id: original.id },
+          }),
+        ).toEqual(before);
+        expect(warn).toHaveBeenCalled();
+        expect(JSON.stringify(warn.mock.calls)).not.toContain(sentinel);
+        expect(
+          warn.mock.calls.every(
+            (args) => args.length === 1 && typeof args[0] === "string",
+          ),
+        ).toBe(true);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it("a credential decrypt failure says so", async () => {
+      const original = await seedOriginal(
+        { organizationId: ORG },
+        "111",
+        "acme",
+      );
+      const providers = await import("../providers");
+      const spy = vi
+        .spyOn(providers.getCrypto(), "decrypt")
+        .mockRejectedValueOnce(new Error("key service unavailable"));
+      await expect(
+        share.getConnectionRepositories(
+          caller({ organizationId: ORG }),
+          original.id,
+        ),
+      ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+      spy.mockRestore();
+    });
+
+    it("promote moves a workspace connection to the org in place", async () => {
+      const original = await seedOriginal({ workspaceId: WS_A }, "111", "acme");
+      const moved = await conns.promoteConnectionToOrganization(
+        WS_A,
+        ORG,
+        original.id,
+      );
+      expect(moved.id).toBe(original.id);
+      expect((await credsOf(original.id)).row).toMatchObject({
+        scope: "organization",
+        organizationId: ORG,
+        workspaceId: null,
+      });
+    });
+
+    it("promote refuses another tenant's, another workspace's, or an org row", async () => {
+      const foreign = await seedOriginal({ workspaceId: WS_OTHER }, "9", "r");
+      const inA = await seedOriginal({ workspaceId: WS_A }, "1", "a");
+      const atOrg = await seedOriginal({ organizationId: ORG }, "2", "b");
+      for (const [ws, id] of [
+        [WS_A, foreign.id],
+        [WS_B, inA.id],
+        [WS_A, atOrg.id],
+      ] as const) {
+        await expect(
+          conns.promoteConnectionToOrganization(ws, ORG, id),
+        ).rejects.toMatchObject({ code: "NOT_FOUND" });
+      }
+    });
+
+    it("promote refuses a second org-level connection of the same installation", async () => {
+      await seedOriginal({ organizationId: ORG }, "111", "acme");
+      const inA = await seedOriginal({ workspaceId: WS_A }, "111", "acme");
+      await expect(
+        conns.promoteConnectionToOrganization(WS_A, ORG, inA.id),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
+      expect((await credsOf(inA.id)).row.scope).toBe("workspace");
+    });
+
+    it("serializes two original shares of the same installation so only one is promoted", async () => {
+      const first = await seedOriginal({ workspaceId: WS_A }, "111", "acme");
+      const second = await seedOriginal({ workspaceId: WS_B }, "111", "acme");
+      mockGitHub();
+      const results = await Promise.allSettled(
+        [first, second].map((source) =>
+          share.shareInstallationWithOrganization({
+            caller: caller({ organizationId: ORG }),
+            sourceConnectionId: source.id,
+          }),
+        ),
+      );
+      expect(
+        results.filter((result) => result.status === "fulfilled"),
+      ).toHaveLength(1);
+      expect(
+        results.filter((result) => result.status === "rejected"),
+      ).toHaveLength(1);
+      expect(
+        await db.appConnection.count({
+          where: {
+            scope: "organization",
+            organizationId: ORG,
+            provider: "github-app",
+          },
+        }),
+      ).toBe(1);
+      expect(
+        await db.appConnection.count({
+          where: { id: { in: [first.id, second.id] } },
+        }),
+      ).toBe(2);
+    });
+
+    it("promote refuses a legacy copy", async () => {
+      const original = await seedOriginal({ workspaceId: WS_A }, "111", "acme");
+      const inB = await seedLegacyCopy(
+        { workspaceId: WS_B },
+        original,
+        "111",
+        "acme",
+      );
+      await expect(
+        conns.promoteConnectionToOrganization(WS_B, ORG, inB.id),
+      ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+    });
+
+    // ── A connection's own repositories: see, refresh, change ────────────────
+
+    it("an original connection can be narrowed to some repos and widened back to all", async () => {
+      const original = await seedOriginal(
+        { organizationId: ORG },
+        "111",
+        "acme",
+      );
+      const mintBodies = mockGitHub();
+      const org = caller({ organizationId: ORG });
+
+      const narrowed = await share.setConnectionRepositories({
+        caller: org,
+        connectionId: original.id,
+        repositories: ["ACME/api"],
+      });
+      expect(narrowed).toEqual({ id: original.id, repositories: ["acme/api"] });
+      // GitHub minted for exactly the pick; the gateway refreshes with the pin.
+      expect(mintBodies.at(-1)).toEqual({ repositories: ["api"] });
+      let { row, creds } = await credsOf(original.id);
+      expect(creds.repositories).toEqual(["acme/api"]);
+      // An original keeps its own signing key and everything else.
+      expect(creds.private_key).toBe(privateKey);
+      expect(creds.installation_id).toBe("111");
+      expect(row.metadata).toMatchObject({
+        repositorySelection: "selected",
+        repos: ["acme/api"],
+        username: "acme",
+      });
+
+      await share.setConnectionRepositories({
+        caller: org,
+        connectionId: original.id,
+      });
+      ({ row, creds } = await credsOf(original.id));
+      expect(creds).not.toHaveProperty("repositories");
+      expect(row.metadata).toMatchObject({
+        repositorySelection: "all",
+        repos: GRANTED,
+      });
+    });
+
+    it("a legacy copy is re-pinned with its source's key and still holds none", async () => {
+      const original = await seedOriginal({ workspaceId: WS_A }, "111", "acme");
+      const mintBodies = mockGitHub();
+      const shared = await seedLegacyCopy(
+        { workspaceId: WS_B },
+        original,
+        "111",
+        "acme",
+        ["acme/web"],
+      );
+      await share.setConnectionRepositories({
+        caller: caller({ workspaceId: WS_B }),
+        connectionId: shared.id,
+        repositories: ["acme/web", "acme/docs"],
+      });
+      expect(mintBodies.at(-1)).toEqual({ repositories: ["web", "docs"] });
+      const { row, creds } = await credsOf(shared.id);
+      expect(creds.repositories).toEqual(["acme/web", "acme/docs"]);
+      expect(creds).not.toHaveProperty("private_key");
+      expect(row.sourceConnectionId).toBe(original.id);
+    });
+
+    it("refresh reads the live list into the connection, so pickers aren't stale", async () => {
+      const original = await seedOriginal(
+        { organizationId: ORG },
+        "111",
+        "acme",
+      );
+      await db.appConnection.update({
+        where: { id: original.id },
+        data: { metadata: { username: "acme", repos: ["acme/old"] } },
+      });
+      mockGitHub();
+      const before = await db.appConnection.findUniqueOrThrow({
+        where: { id: original.id },
+      });
+      const readOnly = await share.getConnectionRepositories(
+        caller({ organizationId: ORG }),
+        original.id,
+      );
+      expect(readOnly.available).toEqual(GRANTED);
+      expect(
+        await db.appConnection.findUniqueOrThrow({
+          where: { id: original.id },
+        }),
+      ).toEqual(before);
+      const result = await share.refreshConnectionRepositories(
+        caller({ organizationId: ORG }),
+        original.id,
+      );
+      expect(result).toEqual({
+        available: GRANTED,
+        truncated: false,
+        selected: null,
+      });
+      const { row } = await credsOf(original.id);
+      expect(row.metadata).toMatchObject({ username: "acme", repos: GRANTED });
+    });
+
+    it.each(["refresh", "set"])(
+      "%s refuses a concurrent credential edit instead of overwriting it",
+      async (operation) => {
+        const original = await seedOriginal(
+          { organizationId: ORG },
+          "111",
+          "acme",
+        );
+        mockGitHub();
+        const upstream = globalThis.fetch;
+        const { getCrypto } = await import("../providers");
+        const { creds } = await credsOf(original.id);
+        const changed = await getCrypto().encrypt(
+          JSON.stringify({
+            ...creds,
+            repositories: ["acme/web"],
+            access_token: "concurrent-token",
+          }),
+        );
+        let edited = false;
+        vi.stubGlobal(
+          "fetch",
+          vi.fn(async (input: string | URL, init?: RequestInit) => {
+            if (
+              !edited &&
+              String(input).includes("/installation/repositories")
+            ) {
+              edited = true;
+              await db.appConnection.update({
+                where: { id: original.id },
+                data: {
+                  credentials: changed,
+                  metadata: {
+                    repositorySelection: "selected",
+                    repos: ["acme/web"],
+                  },
+                },
+              });
+            }
+            return upstream(input, init);
+          }),
+        );
+        const org = caller({ organizationId: ORG });
+        const pending =
+          operation === "refresh"
+            ? share.refreshConnectionRepositories(org, original.id)
+            : share.setConnectionRepositories({
+                caller: org,
+                connectionId: original.id,
+                repositories: ["acme/api"],
+              });
+        await expect(pending).rejects.toMatchObject({ code: "CONFLICT" });
+        const after = await db.appConnection.findUniqueOrThrow({
+          where: { id: original.id },
+        });
+        expect(after.credentials).toBe(changed);
+        expect(after.metadata).toEqual({
+          repositorySelection: "selected",
+          repos: ["acme/web"],
+        });
+      },
+    );
+
+    it("edit and refresh are fenced: another scope's or tenant's connection is not found", async () => {
+      const inA = await seedOriginal({ workspaceId: WS_A }, "111", "acme");
+      const foreign = await seedOriginal(
+        { workspaceId: WS_OTHER },
+        "999",
+        "evil",
+      );
+      const atOrg = await seedOriginal({ organizationId: ORG }, "222", "acme2");
+      mockGitHub();
+      const cases: [ReturnType<typeof caller>, string][] = [
+        [caller({ workspaceId: WS_B }), inA.id], // another workspace's row
+        [caller({ workspaceId: WS_A }), foreign.id], // another tenant's row
+        [caller({ workspaceId: WS_A }), atOrg.id], // an org row via a workspace
+        [caller({ organizationId: ORG }), inA.id], // a workspace row via the org
+      ];
+      for (const [who, id] of cases) {
+        await expect(
+          share.setConnectionRepositories({
+            caller: who,
+            connectionId: id,
+            repositories: ["acme/api"],
+          }),
+        ).rejects.toMatchObject({ code: "NOT_FOUND" });
+        await expect(
+          share.getConnectionRepositories(who, id),
+        ).rejects.toMatchObject({ code: "NOT_FOUND" });
+        await expect(
+          share.refreshConnectionRepositories(who, id),
+        ).rejects.toMatchObject({ code: "NOT_FOUND" });
+      }
+      const { creds } = await credsOf(foreign.id);
+      expect(creds).not.toHaveProperty("repositories");
+    });
+
+    it("refuses an empty pick, a repo outside the installation, and a member", async () => {
+      const original = await seedOriginal(
+        { organizationId: ORG },
+        "111",
+        "acme",
+      );
+      mockGitHub();
+      const org = caller({ organizationId: ORG });
+      await expect(
+        share.setConnectionRepositories({
+          caller: org,
+          connectionId: original.id,
+          repositories: [],
+        }),
+      ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+      await expect(
+        share.setConnectionRepositories({
+          caller: org,
+          connectionId: original.id,
+          repositories: ["acme/secret"],
+        }),
+      ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+      role.admin = false;
+      await expect(
+        share.setConnectionRepositories({
+          caller: org,
+          connectionId: original.id,
+          repositories: ["acme/api"],
+        }),
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+      const { creds } = await credsOf(original.id);
+      expect(creds).not.toHaveProperty("repositories");
+    });
+  },
+);

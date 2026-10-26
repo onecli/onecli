@@ -72,6 +72,10 @@ import { orgGroupRoutes } from "../ee/routes/org-groups";
 import { orgRoleMappingRoutes } from "../ee/routes/org-role-mappings";
 import { dropboxFolderRoutes } from "../ee/routes/dropbox-folders";
 import { googleDriveFolderRoutes } from "../ee/routes/google-drive-folders";
+import {
+  slackReadOverviewRoutes,
+  slackReadRoutes,
+} from "../ee/slack-read/routes";
 import { teamRoutes } from "../ee/routes/team";
 import { provisionClaimRoutes } from "../ee/routes/provision-claim";
 import { workspaceAccessRoutes } from "../ee/routes/workspace-access";
@@ -213,6 +217,16 @@ const PROBES: Probe[] = [
     feature: "granular_access",
     name: "google drive folders router",
     run: probeRoute(googleDriveFolderRoutes, "/folders"),
+  },
+  {
+    feature: "granular_access",
+    name: "connect-your-Slack read grants router",
+    run: probeRoute(slackReadRoutes, "/a-1/slack-read/grants"),
+  },
+  {
+    feature: "granular_access",
+    name: "connect-your-Slack agent finder router",
+    run: probeRoute(slackReadOverviewRoutes, "/agents"),
   },
   {
     feature: "provisioning",

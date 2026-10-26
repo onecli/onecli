@@ -158,6 +158,10 @@ beforeAll(async () => {
   process.env.SANDBOX_IDLE_STOP_SECONDS = "3600";
 
   ({ db } = await import("@onecli/db"));
+  // Boot like the server: the runner poll reads edition seams (the hosted
+  // desktop's push claim on cloud), which fail loudly when never injected.
+  const { ensureEditionDefaults } = await import("../edition-defaults");
+  ensureEditionDefaults();
   dueWork = await import("./due-work");
   agents = await import("./agent-service");
   sandboxes = await import("./sandbox-service");

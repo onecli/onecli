@@ -64,7 +64,7 @@ const main = async (): Promise<void> => {
     // Bounded drain: in-flight Slack posts get a moment, then we go — the
     // control-plane ledgers (dedupe, cursors, prompts) make a hard exit
     // safe. Deliberately NOT unref'd: this timer is what guarantees exit.
-    setTimeout(() => process.exit(0), 3_000);
+    setTimeout(() => process.exit(0), config.drainMs);
   };
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));

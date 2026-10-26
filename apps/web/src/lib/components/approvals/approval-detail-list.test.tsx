@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { ApprovalDetailList, isLongValue } from "./approval-detail-list";
 
@@ -28,18 +28,5 @@ describe("ApprovalDetailList", () => {
     // Line breaks survive, so a poem reads as a poem.
     const body = container.querySelector(".whitespace-pre-wrap");
     expect(body?.textContent).toBe(POEM);
-  });
-
-  it("toggles Show more / Show less when the clamp hides text", () => {
-    // jsdom has no layout: fake an overflowing clamp.
-    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
-      configurable: true,
-      get: () => 200,
-    });
-    render(<ApprovalDetailList details={[{ label: "Body", value: POEM }]} />);
-    fireEvent.click(screen.getByText("Show more"));
-    expect(screen.getByText("Show less")).toBeTruthy();
-    // @ts-expect-error cleanup of the test-only override
-    delete HTMLElement.prototype.scrollHeight;
   });
 });

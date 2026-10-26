@@ -94,9 +94,8 @@ const main = async () => {
   // Tool definitions come from the supervisor at startup — the bridge never
   // hardcodes a capability.
   const advertised = await ask({ op: "tools" });
-  const tools = advertised?.ok && Array.isArray(advertised.tools)
-    ? advertised.tools
-    : [];
+  const tools =
+    advertised?.ok && Array.isArray(advertised.tools) ? advertised.tools : [];
 
   const server = new Server(
     { name: "onecli", version: "1.0.0" },

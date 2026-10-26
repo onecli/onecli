@@ -40,7 +40,6 @@ const {
   cleanJcodeKnowledgeStores,
   cleanJcodeUpdaterState,
   createJcodeHarness,
-  JCODE_DISABLED_TOOLS_VALUE,
   resolveAnthropicCredential,
   resolveJcodeBinary,
   resolveLocalProvider,
@@ -436,24 +435,6 @@ describe("cleanJcodeKnowledgeStores", () => {
 
     expect(existsSync(join(home, "memory"))).toBe(false);
     expect(readFileSync(join(outside, "precious.txt"), "utf8")).toBe("keep me");
-  });
-});
-
-describe("the disabled native tools", () => {
-  it("memory is in the exact constant the launch env reads", () => {
-    // The write-back amendment's lockdown: [features] memory=false alone
-    // leaves the native tool callable (v0.71.1, still true in v0.78.1) —
-    // only this list removes it from the model's definitions.
-    expect(JCODE_DISABLED_TOOLS_VALUE.split(",")).toContain("memory");
-  });
-
-  it("browser is in the list — the Firefox-bridge trap is removed", () => {
-    // The native browser tool needs a Firefox extension plus a native-
-    // messaging host, neither of which can exist in a headless guest, and
-    // its own description sends the model into setup attempts (observed
-    // live). Chromium is baked into the agent image instead; disabling the
-    // tool removes it from the model's definitions entirely.
-    expect(JCODE_DISABLED_TOOLS_VALUE.split(",")).toContain("browser");
   });
 });
 

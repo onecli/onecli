@@ -44,9 +44,12 @@ export const DISPLAY = `:${String(DISPLAY_NUMBER)}`;
  */
 export const SCREEN = "1280x800x24";
 const DPI = "96";
+/** The root window's colour when nothing paints it: a plain dark field. */
+const ROOT_COLOR = "#1e2330";
 
-/** How long each piece gets to come up before the desktop is given up on. */
-const READY_TIMEOUT_MS = 10_000;
+/** How long each piece gets to come up before the desktop is given up on.
+ * Exported mutable so tests can shorten it. */
+export const READY_TIMEOUT_MS = { value: 10_000 };
 const POLL_MS = 100;
 
 /**
@@ -77,6 +80,51 @@ export interface Desktop {
   close(): void;
 }
 
+/**
+ * What a {@link DesktopLayer} gets to work with: the desktop's display and
+ * environment, and the same process discipline the desktop's own pieces
+ * follow (own process group, unref'd, output discarded).
+ */
+export interface DesktopHost {
+  readonly display: string;
+  /** `DISPLAY`, and the session bus once it is up. */
+  readonly env: NodeJS.ProcessEnv;
+  /** Whether `name` resolves on the desktop's PATH. */
+  onPath(name: string): boolean;
+  /** Start a long-lived piece that goes down with the desktop. */
+  start(command: string, args: string[], env?: NodeJS.ProcessEnv): ChildProcess;
+  /** Start a piece the caller owns, and stops with {@link stop}. */
+  spawn(command: string, args: string[], env?: NodeJS.ProcessEnv): ChildProcess;
+  /** Stop a piece (its whole process group). Idempotent. */
+  stop(child: ChildProcess | undefined): void;
+  /** Run a short command to completion: its stdout, or undefined on failure. */
+  run(
+    command: string,
+    args: string[],
+    env?: NodeJS.ProcessEnv,
+  ): Promise<string | undefined>;
+  /** Poll `ready` until it holds; rejects once the piece timeout passes. */
+  waitFor(ready: () => boolean | Promise<boolean>, what: string): Promise<void>;
+}
+
+/**
+ * Extra pieces a deployment layers onto the desktop as it comes up. The
+ * desktop never needs one; each hook is best-effort, and a hook that fails
+ * leaves the desktop exactly as it would be without the layer.
+ */
+export interface DesktopLayer {
+  /**
+   * Paint the root window on the bare X server, before the window manager
+   * takes the screen. Resolves true when it painted, and the plain colour
+   * is then skipped.
+   */
+  paintRoot?(host: DesktopHost): Promise<boolean>;
+  /** Once the window manager has the screen. */
+  ready?(host: DesktopHost): Promise<void>;
+  /** First thing when the desktop closes: stop what the layer owns. */
+  close?(): void;
+}
+
 /** Whether `name` resolves on `path`. Synchronous: it runs once at boot. */
 const onPath = (name: string, path: string | undefined): boolean =>
   (path ?? "")
@@ -96,7 +144,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const waitFor = async (
   ready: () => boolean | Promise<boolean>,
   what: string,
-  timeoutMs = READY_TIMEOUT_MS,
+  timeoutMs = READY_TIMEOUT_MS.value,
 ): Promise<void> => {
   const deadline = Date.now() + timeoutMs;
   while (!(await ready())) {
@@ -195,12 +243,28 @@ const wmRunning = async (env: NodeJS.ProcessEnv): Promise<boolean> => {
  */
 export const startDesktop = async (
   baseEnv: NodeJS.ProcessEnv,
+  layer?: DesktopLayer,
 ): Promise<Desktop> => {
   const display = DISPLAY;
   const env: NodeJS.ProcessEnv = { ...baseEnv, DISPLAY: display };
   const pieces: ChildProcess[] = [];
   const close = () => {
+    layer?.close?.();
     for (const piece of pieces.splice(0).reverse()) stop(piece);
+  };
+  const host: DesktopHost = {
+    display,
+    env,
+    onPath: (name) => onPath(name, env.PATH),
+    start: (command, args, pieceEnv = env) => {
+      const child = start(command, args, pieceEnv);
+      pieces.push(child);
+      return child;
+    },
+    spawn: (command, args, pieceEnv = env) => start(command, args, pieceEnv),
+    stop,
+    run: (command, args, runEnv = env) => capture(command, args, runEnv),
+    waitFor: (ready, what) => waitFor(ready, what),
   };
 
   try {
@@ -242,6 +306,23 @@ export const startDesktop = async (
       "the X server",
     );
 
+    // The background, instead of X's root weave: what a screenshot shows
+    // behind the browser. A layer may paint it; otherwise a plain dark
+    // colour. Either has to land BEFORE the window manager: xfwm4's
+    // compositor draws the screen from the root it finds when it takes
+    // over, and a later change never shows.
+    const painted = await (
+      layer?.paintRoot?.(host) ?? Promise.resolve(false)
+    ).catch((error: unknown) => {
+      log("warn", "desktop: the layer could not paint the root", {
+        error: String(error),
+      });
+      return false;
+    });
+    if (!painted && onPath("xsetroot", env.PATH)) {
+      await capture("xsetroot", ["-solid", ROOT_COLOR], env);
+    }
+
     // A private session bus: GTK (the window manager, the browser's file
     // dialogs) looks one up and logs a wall of warnings without it, and a
     // browser blocks on a secret-service lookup at startup when the bus is
@@ -272,10 +353,14 @@ export const startDesktop = async (
     pieces.push(start("xfwm4", ["--replace", "--compositor=on"], env));
     await waitFor(() => wmRunning(env), "the window manager");
 
-    // A plain dark background instead of X's root weave: what a screenshot
-    // shows behind the browser.
-    if (onPath("xsetroot", env.PATH)) {
-      await capture("xsetroot", ["-solid", "#1e2330"], env);
+    // What a layer adds once the manager has the screen. Its own failure
+    // is never the desktop's: the screen, bus and manager stay up.
+    try {
+      await layer?.ready?.(host);
+    } catch (error) {
+      log("warn", "desktop: a layer piece did not start", {
+        error: String(error),
+      });
     }
 
     return { display, dbusAddress, close };

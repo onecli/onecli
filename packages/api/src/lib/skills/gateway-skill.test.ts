@@ -33,6 +33,10 @@ describe("gateway approval guidance", () => {
         "`github_org_access_required` (403)",
         "never paste GitHub's own SSO or authorization links",
         "give them the `connect_url`",
+        "`access_restricted` means OneCLI already has a credential",
+        "do not ask the user to connect the service again",
+        "Show the user the `manage_url`",
+        "only for a user who wants a different account",
       ])
         expect(text).toContain(guidance);
       expect(text).not.toContain("policy error (403 with a JSON body)");
@@ -75,6 +79,7 @@ describe("gateway approval guidance", () => {
         "Wait until that group is decided before sending the next",
         "Updating a list of Salesforce records: send ONE bulk update** of up to 200 records",
         "PATCH /services/data/v62.0/composite/sobjects",
+        "One record type per call. Each record sets only its own fields.",
         "so ONE approval for the whole list",
         "stop if they all failed",
         "the number started must equal the group's size",
@@ -166,6 +171,26 @@ describe("gateway approval guidance", () => {
       expect(text).toContain(
         "**Never** ask the user for API keys or tokens directly",
       );
+    },
+  );
+});
+
+describe("custom connection proposals", () => {
+  it.each([undefined, "claude", "hermes"])(
+    "teaches propose_custom_connection and never pasting keys in chat (%s)",
+    (agent) => {
+      const text = getGatewaySkill(agent).replace(/\s+/g, " ");
+      for (const guidance of [
+        "## Connecting a Service With No Built-in App",
+        "`propose_custom_connection`",
+        "Never guess them",
+        "You never see the key",
+        "**Never** ask them to paste a key into the chat",
+        "one read-only GET",
+        'version: "0.9.0"',
+      ]) {
+        expect(text).toContain(guidance);
+      }
     },
   );
 });

@@ -17,6 +17,33 @@ export interface PendingActionApprovalItem {
   /** ISO timestamps. */
   createdAt: string;
   expiresAt: string;
+  /** Set for an agent-proposed custom connection: the card reviews it and
+   * takes the key (approve goes through the dedicated route). */
+  customConnection: CustomConnectionProposalView | null;
+  /** Set for an agent's webhook change: the card shows the full change. */
+  webhookChange: WebhookChangeView | null;
+}
+
+/** An agent's held webhook change: each field it sets, null when unchanged. */
+export interface WebhookChangeView {
+  name: string | null;
+  instructions: string | null;
+  enabled: boolean | null;
+}
+
+/** An agent-proposed custom connection as the approve card renders it.
+ * Non-secret by construction: the proposal has no value field. */
+export interface CustomConnectionProposalView {
+  name: string;
+  hostPattern: string;
+  /** The owner the key is sent to: highlighted on the card. */
+  registrableDomain: string | null;
+  pathPattern: string | null;
+  headerName: string;
+  /** Contains "{value}" exactly once. */
+  valueFormat: string;
+  docsUrl: string | null;
+  reason: string;
 }
 
 export interface PendingReachAskItem {

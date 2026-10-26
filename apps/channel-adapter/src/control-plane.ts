@@ -2,6 +2,8 @@ import { z } from "zod";
 import { readCappedBinaryBody } from "@onecli/channels";
 import {
   adapterActionDecisionResponseSchema,
+  adapterCardFollowUpActionResponseSchema,
+  adapterCardStopResponseSchema,
   adapterConfigResponseSchema,
   adapterCursorResponseSchema,
   adapterDecisionResponseSchema,
@@ -19,6 +21,10 @@ import {
   adapterWorkResponseSchema,
   type AdapterActionDecisionRequest,
   type AdapterActionDecisionResponse,
+  type AdapterCardFollowUpActionRequest,
+  type AdapterCardFollowUpActionResponse,
+  type AdapterCardStopRequest,
+  type AdapterCardStopResponse,
   type AdapterConfigResponse,
   type AdapterDecisionRequest,
   type AdapterDecisionResponse,
@@ -81,6 +87,17 @@ export interface ControlPlaneClient {
   decideAction(
     request: AdapterActionDecisionRequest,
   ): Promise<AdapterActionDecisionResponse>;
+  /** Forward a Stop pressed on the narration card; the turn is resolved from
+   * the presence's live card and the clicker authorized control-plane-side. */
+  stopFromCard(
+    request: AdapterCardStopRequest,
+  ): Promise<AdapterCardStopResponse>;
+  /** Forward a control pressed on a waiting message's row of the card; the
+   * row is checked against the card's own turn and the clicker against its
+   * author control-plane-side. */
+  actOnCardFollowUp(
+    request: AdapterCardFollowUpActionRequest,
+  ): Promise<AdapterCardFollowUpActionResponse>;
   claimPrompt(input: {
     approvalId: string;
     presenceId: string;
@@ -312,6 +329,22 @@ export const createControlPlane = (options: {
         "POST",
         "/channel-adapter/action-decision",
         adapterActionDecisionResponseSchema,
+        { body: request },
+      ),
+
+    stopFromCard: (request) =>
+      call(
+        "POST",
+        "/channel-adapter/card-stop",
+        adapterCardStopResponseSchema,
+        { body: request },
+      ),
+
+    actOnCardFollowUp: (request) =>
+      call(
+        "POST",
+        "/channel-adapter/card-follow-up-action",
+        adapterCardFollowUpActionResponseSchema,
         { body: request },
       ),
 

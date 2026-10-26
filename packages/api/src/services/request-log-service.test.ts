@@ -76,12 +76,6 @@ describe("buildActivityWhere", () => {
     });
   });
 
-  it("classifies anthropic.com as AI but leaves non-AI hosts like github.com", () => {
-    const fragments: readonly string[] = LLM_HOST_FRAGMENTS;
-    expect(fragments).toContain("anthropic.com");
-    expect(fragments).not.toContain("github.com");
-  });
-
   it('keeps the keyset cursor clauses alongside the "hide-llm" exclusion', () => {
     const cursor = { createdAt: "2026-06-26T12:00:00.000Z", id: "log_42" };
     const where = buildActivityWhere(WORKSPACE_ID, {

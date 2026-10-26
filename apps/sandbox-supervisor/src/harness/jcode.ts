@@ -7,6 +7,7 @@ import {
   launchInstance,
   type ApiEvent,
   type HistoryMessage,
+  type ImageAttachment,
 } from "@1jehuang/jcode-sdk";
 import {
   TURN_FAILURE_CODES,
@@ -18,6 +19,7 @@ import {
   type HarnessSession,
   type StartSessionOptions,
   type SteerInput,
+  type TurnImage,
   type TurnInput,
   type TurnUsage,
 } from "@onecli/agent-protocol";
@@ -34,6 +36,7 @@ import {
   type SteerEvent,
   type SteerFrame,
 } from "./jcode-steer";
+import { readJcodeToolOutput } from "./jcode-tool-output";
 import { healJcodeTranscripts } from "./jcode-transcript-heal";
 import { createJcodeWakeFeed } from "./jcode-wake";
 
@@ -75,9 +78,23 @@ import { createJcodeWakeFeed } from "./jcode-wake";
  *   native-messaging host) that can never work in a headless guest, and
  *   its own description tells the model to "check status first, run setup
  *   if not ready" — observed live burning a whole turn on setup attempts
- *   before declaring browsing impossible. The agent image bakes chromium
- *   instead (docker/agent-base.Dockerfile); Playwright/Puppeteer from npm or pip
- *   drive it, and the machine fragment says so.
+ *   before declaring browsing impossible. The agent image bakes a browser
+ *   instead (docker/agent-base.Dockerfile) and the `onecli-browser` driver
+ *   that drives it (src/browser-driver), and the machine fragment says so.
+ *   `applet,panel,side_panel` joined 2026-10-19: all three draw into the
+ *   vendor's own desktop app (applet cards, Markdown/PDF side-panel pages),
+ *   which no platform surface shows, yet each reports success. Observed
+ *   live: after an applet call an agent told a person on Slack "the card is
+ *   right above your message" when nothing was there. Charts go out as
+ *   image files instead (the send-file fragment says so). Upstream v0.99
+ *   registers `applet` only for its desktop app but still registers both
+ *   panel tools for every session.
+ *   `calendar,compile_remote` joined 2026-10-19 under the same two laws as
+ *   `gmail` and `jcode_docs`: unconfigured, `calendar` answers with the
+ *   vendor's own Google login and points the model at `jcode_docs` (a call
+ *   to a disabled tool ends the turn), and `compile_remote` uploads source
+ *   to the vendor's build service under a vendor account, pitching its
+ *   subscription. Calendars, like email, go through the gateway.
  *   ⛔ Never add the literal name `mcp` to this list: since v0.75 it is a
  *   meta-entry covering every dynamic `mcp__*` tool, so it would silently
  *   kill the platform-tools bridge.
@@ -686,7 +703,7 @@ export const SWARM_PROMPT_OVERRIDE = `Guidance for spawning helper agents.
  * would pin nothing). Rationale per entry lives in the adapter header above.
  */
 export const JCODE_DISABLED_TOOLS_VALUE =
-  "schedule,skill_manage,gmail,integration_tools,memory,maintainer_feedback,jcode_docs,browser";
+  "schedule,skill_manage,gmail,integration_tools,memory,maintainer_feedback,jcode_docs,browser,applet,panel,side_panel,calendar,compile_remote";
 
 /**
  * THE PLATFORM'S BASE SYSTEM PROMPT — it REPLACES the harness's built-in one.
@@ -713,6 +730,11 @@ export const JCODE_DISABLED_TOOLS_VALUE =
  * there: the whole text is paid for on every turn and every helper, and a
  * second copy teaches nothing the first did not. The budget was audited at
  * ~5.6k always-loaded tokens (2026-10), with the duplicates removed then.
+ *
+ * The batching rule (Execution): the harness default says nothing about
+ * issuing independent tool calls together, and without it agents spend one
+ * model round trip per call. Those round trips, not the tools, dominate a
+ * long turn, so fewer, wider steps are the lever.
  *
  * The login exception: "never ask anyone for a key or token" is the rule,
  * and a website login a person volunteers for a browser task is its one
@@ -757,6 +779,12 @@ You cannot drive interactive commands; use non-interactive alternatives.
 When a closed feedback loop exists (build, test, check), keep iterating until
 it passes.
 Use the todo tool to plan and track multi-step work.
+Every step costs a full model round trip, so take as few as the work allows.
+When you need several things that do not depend on each other (files, logs,
+metrics, queries, API calls), make all of those tool calls in the same
+response. Combine related shell commands into one script when that is
+clearer. Go one call at a time only when a call needs an earlier call's
+result.
 The platform tracks background tasks however you start them and delivers
 watch wake-ups to the chat. To be woken when a background task completes,
 arm process_watch; a wake requested through your runtime's own options is
@@ -1058,6 +1086,24 @@ const usageFromEvent = (
 });
 
 /**
+ * Inline vision: our `TurnImage` translates to jcode's `[mediaType, base64]`
+ * tuple HERE and nowhere else (invariant 9: the vendor shape never crosses
+ * the adapter boundary), for a turn's message and a steer alike. The daemon
+ * prepends the images as content blocks in the same user message, on
+ * `send_message` and on `soft_interrupt` (both read in the v0.94.0 source:
+ * the injection groups a queued message's images ahead of its text).
+ * Undefined for none, so the request omits the key.
+ */
+const jcodeImages = (
+  images: readonly TurnImage[] | undefined,
+): ImageAttachment[] | undefined =>
+  images?.length
+    ? images.map(
+        (image): ImageAttachment => [image.mediaType, image.dataBase64],
+      )
+    : undefined;
+
+/**
  * OUR model id → jcode's.
  *
  * The control plane speaks the PROVIDER's vocabulary (`claude-sonnet-4-6`) and
@@ -1341,7 +1387,7 @@ const ORPHAN_CANCEL_SHAPE = /cancelled by user/i;
  * genuine model delta takes longer than this window in practice, so in the
  * common no-orphan case the hold delays nothing observable.
  */
-const BUSY_DETECT_WINDOW_MS = 1_000;
+export const BUSY_DETECT_WINDOW_MS = { value: 1_000 };
 
 /**
  * Backoff between self-heal resends, exported for the adapter tests. Bounded
@@ -1353,7 +1399,7 @@ const BUSY_DETECT_WINDOW_MS = 1_000;
 export const BUSY_RESEND_DELAYS_MS = [2_000, 5_000, 10_000, 30_000, 60_000];
 
 /** How long a heal round drains orphan residue before resending. */
-const ORPHAN_DRAIN_MIN_MS = 250;
+export const ORPHAN_DRAIN_MIN_MS = { value: 250 };
 
 /** While the fence is pending the live loop wakes on this tick to honor an
  * abort (a foreign run may be holding the daemon's request loop, so no
@@ -1644,16 +1690,7 @@ class JcodeSession implements HarnessSession {
       // against an old-era window.
       this.turnHistoryBaseline = null;
 
-      // Inline vision: our TurnImage translates to jcode's [mediaType,
-      // base64] tuple HERE and nowhere else (invariant 9 — the vendor shape
-      // never crosses the adapter boundary). The daemon prepends the images
-      // as content blocks in the same user message (verified v0.71.1,
-      // unchanged through v0.81.1).
-      const images = (input.images ?? []).map((image): [string, string] => [
-        image.mediaType,
-        image.dataBase64,
-      ]);
-      const imagesArg = images.length > 0 ? images : undefined;
+      const imagesArg = jcodeImages(input.images);
 
       // The reconcile FLOOR: a `get_history` issued right after each send,
       // captured by INDEX at our spawn — everything a wake turn appended
@@ -1735,7 +1772,7 @@ class JcodeSession implements HarnessSession {
           terminal = { type: "turn.done" };
           break settle;
         }
-        const windowEnd = Date.now() + BUSY_DETECT_WINDOW_MS;
+        const windowEnd = Date.now() + BUSY_DETECT_WINDOW_MS.value;
         for (;;) {
           const entry = await nextEntry(windowEnd);
           // Window elapsed or stream gone: the held frames are ours; the
@@ -1786,7 +1823,7 @@ class JcodeSession implements HarnessSession {
               Date.now() +
               Math.max(
                 BUSY_RESEND_DELAYS_MS[healRound] ?? 0,
-                ORPHAN_DRAIN_MIN_MS,
+                ORPHAN_DRAIN_MIN_MS.value,
               );
             for (;;) {
               const drained = await nextEntry(drainEnd);
@@ -2032,13 +2069,18 @@ class JcodeSession implements HarnessSession {
                 ? `${acc.text}\n… [truncated ${acc.dropped} characters]`
                 : acc.text
               : undefined;
+            const { output, exitCode } = readJcodeToolOutput(
+              event.name,
+              event.output,
+            );
             yield {
               type: "tool.finished",
               callId: event.call_id,
               name: event.name,
               ...(input ? { input } : {}),
-              output: event.output,
+              output,
               ...(event.error ? { isError: true } : {}),
+              ...(exitCode !== undefined && { exitCode }),
             };
             break;
           }
@@ -2139,22 +2181,23 @@ class JcodeSession implements HarnessSession {
    * which is exactly this session, because every conversation owns its own
    * connection (concurrent conversations steer first-class now; the old
    * shared-connection degrade to promotion is gone).
+   *
+   * The follow-up's images ride the same request (jcode injects them with
+   * the words as one user message). It is tagged with the follow-up's own
+   * id when the daemon echoes ids back (the live pickup signal), and sent
+   * untagged otherwise, for the turn-end history reconcile.
    */
   async steer(input: SteerInput): Promise<void> {
     if (!this.turnActive) {
       throw new Error("no turn in flight");
     }
-    if (this.liveSteers) {
-      // Tagged with the follow-up's own id: the daemon echoes it the moment
-      // the message is injected, which is the live pickup signal.
-      await this.client.softInterruptWithId(this.sessionRef, input.message, {
-        clientId: input.id,
-      });
-      this.liveSteers.sent(input);
-      return;
-    }
-    await this.client.softInterrupt(this.sessionRef, input.message, false);
-    this.pendingSteers.push(input);
+    const images = jcodeImages(input.images);
+    await this.client.softInterruptWithId(this.sessionRef, input.message, {
+      ...(this.liveSteers && { clientId: input.id }),
+      ...(images && { images }),
+    });
+    if (this.liveSteers) this.liveSteers.sent(input);
+    else this.pendingSteers.push(input);
   }
 
   /**
@@ -2661,8 +2704,8 @@ export const createJcodeHarness = (): Harness => {
       resume: true,
       thinking: true,
       toolEvents: true,
-      // softInterrupt: a mid-run message joins the live turn at jcode's own
-      // safe points — the same primitive its interactive composer uses.
+      // soft_interrupt: a mid-run message (and its images) joins the live
+      // turn at jcode's own safe points, the primitive its composer uses.
       steer: true,
       // background_tool: SEND NOW moves the running tool aside so a queued
       // steer is read now (asked only of a daemon that reports the move).

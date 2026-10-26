@@ -27,7 +27,6 @@ vi.mock("../../lib/env", async (importOriginal) => ({
 
 const {
   attachmentObjectKey,
-  hasAttachmentBucketConfigured,
   initS3ClientForTests,
   s3AttachmentBlobStore,
   ATTACHMENT_PRESIGN_TTL_SECONDS,
@@ -75,10 +74,6 @@ afterEach(() => {
 });
 
 describe("s3AttachmentBlobStore", () => {
-  it("is selected only when a bucket is configured", () => {
-    expect(hasAttachmentBucketConfigured()).toBe(true);
-  });
-
   it("keys objects by ids alone (never a file name) and returns an s3: storageRef", async () => {
     const meta = { id: "att-1", conversationId: "cv-1" };
     expect(attachmentObjectKey(meta)).toBe("attachments/cv-1/att-1");

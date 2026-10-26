@@ -386,6 +386,14 @@ pub(super) fn is_bulk_write(method: &str, path: &str) -> bool {
     }
 }
 
+/// A request Salesforce answers with one outcome per record, as a 200 even
+/// when every record failed: any sObject Collections write (a delete too)
+/// or a Composite call. See `outcome::answers_per_record`.
+pub(super) fn answers_per_record(method: &str, path: &str) -> bool {
+    is_bulk_write(method, path)
+        || (method.eq_ignore_ascii_case("DELETE") && is_collections_path(path))
+}
+
 /// Most subrequests one Composite call may carry (Salesforce's own cap):
 /// a longer list is refused by Salesforce, so it never gets a table.
 const MAX_COMPOSITE_SUBREQUESTS: usize = 25;

@@ -91,10 +91,10 @@ const toolOption = (tool: string, label: string) => {
 describe("ManagePermissionsDialog: a catalog that blocks unlisted requests", () => {
   beforeEach(() => mutate.mockClear());
 
-  // The default attach on AWS: every tool allowed, requests outside the list
+  // A custom AWS grant with every tool allowed and requests outside the list
   // needing approval. The rows must show that, not full access (the previous
   // dialog read every all-Allowed AWS grid as full access).
-  it("shows the default attach as it is, not as full access", () => {
+  it("shows an all-allowed custom grant as it is, not as full access", () => {
     renderDialog({
       ...customGrant,
       allow: ["s3_put", "s3_read"],

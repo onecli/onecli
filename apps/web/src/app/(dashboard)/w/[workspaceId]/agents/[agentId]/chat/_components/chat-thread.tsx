@@ -2,7 +2,6 @@
 
 import {
   MessageScroller,
-  MessageScrollerButton,
   MessageScrollerContent,
   MessageScrollerItem,
   MessageScrollerProvider,
@@ -10,7 +9,8 @@ import {
 import type { Turn } from "@/lib/api/types";
 import type { OutgoingMessage } from "@/hooks/use-conversations";
 import type { RenderedTurn } from "@/lib/chat/transcript";
-import { isFollowUpRow } from "@/lib/chat/turns";
+import { cn } from "@onecli/ui/lib/utils";
+import { isActiveTurn, isFollowUpRow } from "@/lib/chat/turns";
 import { ApprovalTimelineSlot } from "./approval-timeline-slot";
 import { useApprovalTimeline } from "./approval-timeline";
 import { useApprovalCards } from "./use-approval-cards";
@@ -20,6 +20,9 @@ import { slotAfterTurns } from "./slot-after-turns";
 import { EmptyThreadWelcome } from "./empty-thread-welcome";
 import { FollowingViewport } from "./following-viewport";
 import { LoadOlderSentinel } from "./load-older-sentinel";
+import { ScrollOnSend } from "./scroll-on-send";
+import { ScrollToEndButton } from "./scroll-to-end-button";
+import { PINNED_ROW, TRANSCRIPT_PADDING } from "./transcript-layout";
 import { TurnBlock } from "./turn-block";
 import { UserBubble } from "./user-bubble";
 
@@ -44,6 +47,10 @@ interface ChatThreadProps {
   conversationId: string;
   /** Where a "connect a model key" notice points. */
   modelsHref?: string;
+  /** Open the agent's screen in place for a desktop ask (TurnBlock). */
+  onOpenComputer?: (requestId: string) => void;
+  /** Deep link fallback for hosts without an in-place desktop. */
+  computerHref?: (requestId: string) => string;
   /** The agent's display name, for the empty-thread welcome. */
   agentName?: string;
   /** The agent whose thread this is — the welcome reads its model state. */
@@ -56,6 +63,16 @@ interface ChatThreadProps {
   loadingOlder?: boolean;
   /** Ask for the next older window (the top sentinel's trigger). */
   onLoadOlder?: () => void;
+  /**
+   * The newest exchange is a fresh send from this tab, in flight or saved.
+   * It is scrolled near the top once, and the newest row keeps a
+   * viewport-tall minimum height, so the reply writes into the room below
+   * it and a short reply never snaps the view back down. The room stays on
+   * the newest row until the next send, so a turn from another door lands
+   * right under the reply. Unset for history, follow-ups, other tabs and
+   * channels.
+   */
+  pinnedSend?: boolean;
 }
 
 export const ChatThread = ({
@@ -64,13 +81,19 @@ export const ChatThread = ({
   pending,
   conversationId,
   modelsHref,
+  onOpenComputer,
+  computerHref,
   agentName,
   agentId,
   onConnectModelKey,
   hasOlder = false,
   loadingOlder = false,
   onLoadOlder,
+  pinnedSend = false,
 }: ChatThreadProps) => {
+  // The agent is still writing, or about to: a send in flight, or any live
+  // run.
+  const generating = pending !== undefined || turns.some(isActiveTurn);
   const targetIds = new Set(turns.map((turn) => turn.id));
   const followUpsByTarget = new Map<string, Turn[]>();
   for (const turn of turns) {
@@ -92,12 +115,31 @@ export const ChatThread = ({
   // Approval cards ride the timeline like messages: each is slotted after
   // the last turn that PRECEDES its creation, so the card sits where it
   // fired and stays there as the conversation moves on — exactly the Slack
-  // reading. Cards newer than every turn land at the end.
+  // reading. Cards newer than every turn land at the end, except in a pinned
+  // row: there they stay inside it, right under the reply, not below its
+  // room.
   const rows = turns.filter((turn) => !grouped.has(turn.id));
-  const cards = slotAfterTurns(rows, useApprovalTimeline(useApprovalCards()));
+  // The row that carries a pinned send's room: the outgoing bubble until
+  // the server answers, then the newest row.
+  const pinnedRowId = !pinnedSend
+    ? undefined
+    : pending !== undefined
+      ? "pending"
+      : rows.at(-1)?.id;
+  // Held requests the person's own newer message withdrew: their cards
+  // settle as "Replaced by your message", not a generic "Decided".
+  const replaced = new Set(
+    [...folded.values()].flatMap((t) => t.supersededApprovalIds),
+  );
+  const cards = slotAfterTurns(
+    rows,
+    useApprovalTimeline(useApprovalCards(replaced)),
+    pinnedRowId,
+  );
   const actions = slotAfterTurns(
     rows,
     useActionApprovalCards(agentId, conversationId),
+    pinnedRowId,
   );
 
   return (
@@ -105,9 +147,15 @@ export const ChatThread = ({
       <MessageScroller className="min-h-0 flex-1">
         {/* The follow-preserving viewport, not the stock one: upstream releases
             auto-follow on any gesture at the clamped bottom (shadcn-ui/ui#11224).
-            Swap back once that fix ships. */}
-        <FollowingViewport>
-          <MessageScrollerContent className="mx-auto w-full max-w-3xl gap-6 px-4 py-6">
+            Swap back once that fix ships. A size container, so a pinned
+            row's room is one viewport tall in pure CSS (`cqh`). */}
+        <FollowingViewport className="@container-[size]">
+          <MessageScrollerContent
+            className={cn(
+              "mx-auto w-full max-w-3xl gap-6 px-4",
+              TRANSCRIPT_PADDING,
+            )}
+          >
             {/* The scroll-up loader. Prepended pages hold the reading
                 position via the viewport's own preserveScrollOnPrepend
                 (default on) — the reader never feels the seam. */}
@@ -139,7 +187,10 @@ export const ChatThread = ({
                 // The thread's gap-6 only separates ITEMS; inside one item
                 // the user bubble, its follow-ups, the agent block and any
                 // approval cards are siblings and would touch without this.
-                className="flex flex-col gap-3"
+                className={cn(
+                  "flex flex-col gap-3",
+                  turn.id === pinnedRowId && PINNED_ROW,
+                )}
               >
                 <TurnBlock
                   turn={turn}
@@ -147,6 +198,8 @@ export const ChatThread = ({
                   followUps={followUpsByTarget.get(turn.id)}
                   followUpRendered={followUpRendered}
                   modelsHref={modelsHref}
+                  onOpenComputer={onOpenComputer}
+                  computerHref={computerHref}
                   onConnectModelKey={onConnectModelKey}
                 />
                 <ApprovalTimelineSlot
@@ -158,7 +211,10 @@ export const ChatThread = ({
               </MessageScrollerItem>
             ))}
             {pending !== undefined && (
-              <MessageScrollerItem messageId="pending">
+              <MessageScrollerItem
+                messageId="pending"
+                className={cn(pinnedRowId === "pending" && PINNED_ROW)}
+              >
                 <UserBubble
                   text={pending.message}
                   conversationId={conversationId}
@@ -180,7 +236,8 @@ export const ChatThread = ({
             )}
           </MessageScrollerContent>
         </FollowingViewport>
-        <MessageScrollerButton />
+        <ScrollOnSend sent={pending} pin={pinnedSend} />
+        <ScrollToEndButton generating={generating} />
       </MessageScroller>
     </MessageScrollerProvider>
   );

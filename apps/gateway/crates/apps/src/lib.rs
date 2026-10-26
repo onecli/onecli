@@ -22,6 +22,9 @@ pub enum AuthStrategy {
     ZohoOauthtoken,
     /// `Authorization: Token token={token}` — PagerDuty's REST API key scheme.
     PagerDutyToken,
+    /// `Authorization: Basic base64({token})`, where the stored token is
+    /// already the `username:password` pair (Twilio's `KeySid:KeySecret`).
+    BasicCredentials,
     /// No `Authorization` header — auth injected via `credential_headers` only.
     None,
 }
@@ -545,6 +548,90 @@ const fn bearer_host(host: &'static str) -> HostRule {
         intercept: false,
         credential_host_field: None,
     }
+}
+
+/// A `Basic user:pass` rule on one dedicated API host (every path).
+const fn basic_host(host: &'static str) -> HostRule {
+    HostRule {
+        pattern: HostPattern::Exact(host),
+        path_prefix: None,
+        strategy: AuthStrategy::BasicCredentials,
+        intercept: false,
+        credential_host_field: None,
+    }
+}
+
+/// Twilio's REST API products, each served on `<product>.twilio.com` (US1)
+/// and on `<product>.<edge>.<region>.twilio.com` in the IE1 and AU1
+/// processing regions. Exact hosts only, never a `.twilio.com` suffix: the
+/// console, the marketing site, and customers' `*.twil.io` Functions share
+/// the zone. The one list: it defines both `TWILIO_PRODUCTS` (which the
+/// region rewrite accepts) and `TWILIO_HOST_RULES` (where the key goes), so
+/// the two can never disagree.
+macro_rules! twilio_products {
+    ($($product:literal),* $(,)?) => {
+        const TWILIO_PRODUCTS: &[&str] = &[$($product),*];
+        const TWILIO_HOST_RULES: &[HostRule] = &[$(
+            basic_host(concat!($product, ".twilio.com")),
+            basic_host(concat!($product, ".dublin.ie1.twilio.com")),
+            basic_host(concat!($product, ".sydney.au1.twilio.com")),
+        )*];
+    };
+}
+
+twilio_products!(
+    "api",
+    "messaging",
+    "verify",
+    "lookups",
+    "conversations",
+    "voice",
+    "studio",
+    "serverless",
+    "taskrouter",
+    "sync",
+    "notify",
+    "video",
+    "numbers",
+    "pricing",
+    "insights",
+    "trunking",
+    "events",
+    "intelligence",
+    "content",
+    "accounts",
+    "monitor",
+    "trusthub",
+    "bulkexports",
+    "chat",
+    "proxy",
+    "routes",
+);
+
+/// The Twilio product a known Twilio API host serves (`messaging` for
+/// `messaging.dublin.ie1.twilio.com`), or `None` for any other host.
+fn twilio_product_of(host: &str) -> Option<&'static str> {
+    let host = host.to_ascii_lowercase();
+    let product = host
+        .strip_suffix(".dublin.ie1.twilio.com")
+        .or_else(|| host.strip_suffix(".sydney.au1.twilio.com"))
+        .or_else(|| host.strip_suffix(".twilio.com"))?;
+    TWILIO_PRODUCTS.iter().copied().find(|p| *p == product)
+}
+
+/// Maps a Twilio connection's stored `region` to the same product's host in
+/// that region. Twilio keeps API keys per region (a US1 key is refused in
+/// IE1 and the reverse), so whichever regional host the agent called, the
+/// request goes to the connection's own region. `us1` and anything unknown
+/// map to the US1 host (Twilio's default) rather than building a hostname
+/// out of a stored string; a host that is not a known product is left alone.
+fn twilio_host_for_region(region: &str, original_host: &str) -> Option<String> {
+    let product = twilio_product_of(original_host)?;
+    Some(match region.trim().to_ascii_lowercase().as_str() {
+        "ie1" => format!("{product}.dublin.ie1.twilio.com"),
+        "au1" => format!("{product}.sydney.au1.twilio.com"),
+        _ => format!("{product}.twilio.com"),
+    })
 }
 
 // ── Provider registry ──────────────────────────────────────────────────
@@ -2293,6 +2380,45 @@ static APP_PROVIDERS: &[AppProvider] = &[
         finalizer: None,
         body_transform: None,
     },
+    // Dripify: the key rides an `X-Api-Key` header, not Authorization, so the
+    // strategy is None and the key is a credential header (as Apollo.io and
+    // Clay). The Open API has its own host, api.dripify.com, so that rule
+    // needs no path prefix. The hosted MCP server takes the same key but lives
+    // on the web app's host (app.dripify.com/api/v1/mcp), so that rule is
+    // scoped to the MCP path: a browser page load never carries the key.
+    AppProvider {
+        provider: "dripify",
+        display_name: "Dripify",
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("api.dripify.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::None,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("app.dripify.com"),
+                path_prefix: Some("/api/v1/mcp/"),
+                strategy: AuthStrategy::None,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[CredentialHeader {
+            // The trimmed copy the connect handler stores, not the raw form
+            // field: a key pasted with a trailing newline would otherwise be
+            // sent verbatim and rejected.
+            credential_field: "access_token",
+            header_name: "X-Api-Key",
+        }],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
     // Onyx Cloud with an API key or Personal Access Token as a Bearer
     // (docs.onyx.app, Overview & Auth). cloud.onyx.app serves the web app as
     // well, so injection is scoped to the REST API (`/api/`) and the hosted
@@ -2322,6 +2448,26 @@ static APP_PROVIDERS: &[AppProvider] = &[
         credential_headers: &[],
         credential_params: &[],
         host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    // Twilio REST APIs with an API key (or the Account SID and Auth Token),
+    // sent as `Basic base64(KeySid:KeySecret)`. The connect step stores the
+    // pair, already joined, as `access_token`. Credentials are per region, so
+    // the stored `region` rewrites any product host to the connection's own
+    // region (see `twilio_host_for_region`).
+    AppProvider {
+        provider: "twilio",
+        display_name: "Twilio",
+        host_rules: TWILIO_HOST_RULES,
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: Some(&HostRewrite {
+            credential_field: "region",
+            template: twilio_host_for_region,
+        }),
         finalizer: None,
         body_transform: None,
     },
@@ -2639,6 +2785,18 @@ pub fn guidance_provider_for(hostname: &str, path: &str) -> Option<(&'static str
     })
 }
 
+/// Whether a connection of `provider` is the one an auth failure on
+/// `hostname` + `path` is about: a host rule of the provider covers the
+/// request, or the host is the provider's non-injecting alias. The
+/// per-provider form of [`guidance_provider_for`], for a host several apps
+/// share (`www.googleapis.com` carries Gmail, Calendar and Drive, each on its
+/// own path). Used only to pick guidance, never to inject.
+#[must_use]
+pub fn provider_explains(provider: &str, hostname: &str, path: &str) -> bool {
+    provider_matches_host_and_path(provider, hostname, path)
+        || alias_host(hostname).is_some_and(|alias| alias.provider == provider)
+}
+
 /// The path prefix a host-gated provider injects on (e.g. Salesforce's
 /// `/services/data/`), so a wrong-host answer can also correct a wrong path.
 #[must_use]
@@ -2714,7 +2872,17 @@ pub fn build_app_injections(provider: &str, hostname: &str, token: &str) -> Vec<
             name: "authorization".to_string(),
             value: format!("Token token={token}"),
         }],
+        AuthStrategy::BasicCredentials => vec![basic_credentials_header(token)],
         AuthStrategy::None => vec![],
+    }
+}
+
+/// `Authorization: Basic base64("user:pass")` from a stored `user:pass` pair.
+fn basic_credentials_header(pair: &str) -> Injection {
+    let b64 = base64::engine::general_purpose::STANDARD;
+    Injection::SetHeader {
+        name: "authorization".to_string(),
+        value: format!("Basic {}", b64.encode(pair)),
     }
 }
 
@@ -2759,6 +2927,7 @@ pub fn build_app_injection_rules(
                     name: "authorization".to_string(),
                     value: format!("Token token={token}"),
                 }],
+                AuthStrategy::BasicCredentials => vec![basic_credentials_header(token)],
                 AuthStrategy::None => vec![],
             };
             (pattern, injections)
@@ -5003,6 +5172,26 @@ mod tests {
         }
     }
 
+    /// A shared host is explained per path, so a Calendar account never
+    /// answers for a Gmail request; a host two apps fully share (GitHub and
+    /// the GitHub App) is explained by either; an alias by its owner alone.
+    #[test]
+    fn provider_explains_follows_the_path_on_a_shared_host() {
+        let gmail = ("www.googleapis.com", "/gmail/v1/users/me/messages");
+        assert!(provider_explains("gmail", gmail.0, gmail.1));
+        assert!(!provider_explains("google-calendar", gmail.0, gmail.1));
+        assert!(!provider_explains("gmail", gmail.0, "/calendar/v3/x"));
+
+        for provider in ["github", "github-app"] {
+            assert!(provider_explains(provider, "api.github.com", "/user"));
+        }
+
+        let alias = ("login.salesforce.com", "/services/oauth2/userinfo");
+        assert!(provider_explains("salesforce", alias.0, alias.1));
+        assert!(!provider_explains("snowflake", alias.0, alias.1));
+        assert!(!provider_explains("resend", "api.github.com", "/user"));
+    }
+
     /// Every alias names a real host-bound provider: an alias exists only to
     /// point an agent at a bound host, so one without a gate is a typo.
     #[test]
@@ -6207,6 +6396,57 @@ mod tests {
         }
     }
 
+    // ── Dripify ────────────────────────────────────────────────────────
+    #[test]
+    fn dripify_injects_x_api_key_on_the_api_host_and_the_mcp_path() {
+        assert_eq!(providers_for_host("api.dripify.com"), vec!["dripify"]);
+        assert_eq!(providers_for_host("app.dripify.com"), vec!["dripify"]);
+        // The key rides a credential header, never Authorization.
+        assert!(!needs_access_token("dripify"));
+        let headers = credential_headers("dripify");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].credential_field, "access_token");
+        assert_eq!(headers[0].header_name, "X-Api-Key");
+        assert!(refresh_config("dripify").is_none());
+        // Every path of the Open API host, only the MCP path of the web app's.
+        // Neither rule injects an Authorization header of its own.
+        for (host, pattern) in [
+            ("api.dripify.com", "*"),
+            ("app.dripify.com", "/api/v1/mcp/*"),
+        ] {
+            assert_eq!(
+                build_app_injection_rules("dripify", host, "tok"),
+                vec![(pattern.to_string(), vec![])],
+                "{host}"
+            );
+        }
+        for path in ["/api/v1/mcp", "/api/v1/mcp/"] {
+            assert!(
+                provider_matches_host_and_path("dripify", "app.dripify.com", path),
+                "{path}"
+            );
+        }
+        // The web app on the same host never carries the key.
+        for path in ["/", "/login", "/api/v1/campaigns", "/api/v1/mcpx"] {
+            assert!(
+                !provider_matches_host_and_path("dripify", "app.dripify.com", path),
+                "{path}"
+            );
+        }
+        // The legacy web-app host, the marketing site, and lookalikes get nothing.
+        for host in [
+            "app.dripify.io",
+            "dripify.com",
+            "www.dripify.com",
+            "help.dripify.com",
+            "api.dripify.io",
+            "api.dripify.com.evil.example",
+            "evilapi.dripify.com",
+        ] {
+            assert!(providers_for_host(host).is_empty(), "{host}");
+        }
+    }
+
     // ── Onyx ───────────────────────────────────────────────────────────
     #[test]
     fn onyx_injects_only_on_the_api_and_mcp_paths() {
@@ -6258,6 +6498,91 @@ mod tests {
             assert!(providers_for_host(host).is_empty(), "{host}");
         }
         assert!(refresh_config("onyx").is_none());
+    }
+
+    // ── Twilio ─────────────────────────────────────────────────────────
+    #[test]
+    fn twilio_covers_every_product_in_every_region() {
+        let rules = provider_by_id("twilio").unwrap().host_rules;
+        assert_eq!(rules.len(), TWILIO_PRODUCTS.len() * 3);
+        for product in TWILIO_PRODUCTS {
+            for host in [
+                format!("{product}.twilio.com"),
+                format!("{product}.dublin.ie1.twilio.com"),
+                format!("{product}.sydney.au1.twilio.com"),
+            ] {
+                assert_eq!(providers_for_host(&host), vec!["twilio"], "{host}");
+                assert_eq!(twilio_product_of(&host), Some(*product), "{host}");
+            }
+        }
+    }
+
+    #[test]
+    fn twilio_sends_the_stored_pair_as_basic() {
+        let rules = build_app_injection_rules("twilio", "api.twilio.com", "SKabc:s3cret");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].0, "*");
+        assert_eq!(
+            rules[0].1,
+            vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                // base64("SKabc:s3cret")
+                value: "Basic U0thYmM6czNjcmV0".to_string(),
+            }]
+        );
+        assert!(needs_access_token("twilio"));
+        assert!(refresh_config("twilio").is_none());
+    }
+
+    #[test]
+    fn twilio_never_matches_non_api_hosts() {
+        for host in [
+            "twilio.com",
+            "www.twilio.com",
+            "console.twilio.com",
+            "status.twilio.com",
+            "acme-1234.twil.io",
+            "media.twiliocdn.com",
+            "api.twilio.com.evil.example",
+            "evil.api.twilio.com",
+            "api.ashburn.us1.twilio.com",
+            "api.tokyo.jp1.twilio.com",
+        ] {
+            assert!(providers_for_host(host).is_empty(), "{host}");
+            assert_eq!(twilio_product_of(host), None, "{host}");
+        }
+    }
+
+    #[test]
+    fn twilio_rewrites_to_the_connections_region() {
+        let rw = |region: &str, host: &str| {
+            rewrite_host("twilio", &serde_json::json!({ "region": region }), host)
+        };
+        assert_eq!(
+            rw("ie1", "api.twilio.com").as_deref(),
+            Some("api.dublin.ie1.twilio.com")
+        );
+        assert_eq!(
+            rw(" AU1 ", "messaging.twilio.com").as_deref(),
+            Some("messaging.sydney.au1.twilio.com")
+        );
+        // A US connection pulls an agent's regional call back to US1.
+        assert_eq!(
+            rw("us1", "verify.dublin.ie1.twilio.com").as_deref(),
+            Some("verify.twilio.com")
+        );
+        // Unknown region: US1, never a host built from the stored value.
+        assert_eq!(
+            rw("evil.example", "api.twilio.com").as_deref(),
+            Some("api.twilio.com")
+        );
+        // Not a known product host: no rewrite.
+        assert_eq!(rw("ie1", "console.twilio.com"), None);
+        // No region stored: no rewrite.
+        assert_eq!(
+            rewrite_host("twilio", &serde_json::json!({}), "api.twilio.com"),
+            None
+        );
     }
 
     #[test]

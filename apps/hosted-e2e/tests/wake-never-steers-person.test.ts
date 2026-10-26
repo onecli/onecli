@@ -78,11 +78,11 @@ scenario(
     );
     expect(arm.status).toBe("done");
 
-    // Turn 3: the PERSON asks something long-running; the job exits while
-    // this turn is still running.
+    // Turn 3: the PERSON asks something long-running (10 s, twice the
+    // watched job's 5 s); the job exits while this turn is still running.
     const asked = await stack.v1.json<{ id: string }>(
       await stack.v1.post(`/v1/conversations/${lead.id}/turns`, {
-        message: fakeDirective([sleep(20_000), text("DISK ANSWER")]),
+        message: fakeDirective([sleep(10_000), text("DISK ANSWER")]),
       }),
     );
     await waitFor(

@@ -10,6 +10,7 @@ import { RUNS_VIEWS, type RunsView } from "@/lib/agents/runs/runs-view";
 import { SegmentedFilter, type SegmentOption } from "./segmented-filter";
 import { LiveToggle } from "./live-toggle";
 import { RunsTable } from "./runs-table";
+import { WebhookFilterChip } from "./webhook-filter-chip";
 
 /**
  * Activity's Runs tab: every question an agent in this workspace answered,
@@ -49,24 +50,35 @@ const EMPTY: Record<RunsView, string> = {
 
 export const RunsTab = ({
   agentId,
+  webhookId,
   view,
   onViewChange,
+  onClearWebhook,
   onViewNetwork,
 }: {
   /** Narrow to one agent (from the URL). */
   agentId?: string;
+  /** Narrow to one of that agent's webhooks (its "View runs"). Only honored
+   * with an agent and the Webhooks filter, so the URL cannot combine it with
+   * a filter it contradicts. */
+  webhookId?: string;
   /** The segmented filter, kept in the URL so a link can open a view. */
   view: RunsView;
   onViewChange: (view: RunsView) => void;
+  /** Widen back from one webhook to all of the agent's webhook runs. */
+  onClearWebhook?: () => void;
   /** Show Network narrowed to this run's agent and time window. */
   onViewNetwork: (run: RunListItem) => void;
 }) => {
   const [open, setOpen] = useState<RunListItem | null>(null);
+  const oneWebhook =
+    agentId && webhookId && view === "webhook" ? webhookId : undefined;
   const list = useRunsList({
     ...(agentId && { agentId }),
     ...(view === "failed"
       ? { failed: true }
       : view !== "all" && { source: view }),
+    ...(oneWebhook && { webhookId: oneWebhook }),
   });
 
   const rows = list.pages.flatMap((page) => page.runs);
@@ -75,12 +87,21 @@ export const RunsTab = ({
   return (
     <div className="flex min-w-0 flex-1 flex-col gap-6">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <SegmentedFilter
-          options={VIEWS}
-          value={view}
-          onChange={onViewChange}
-          label="Filter runs"
-        />
+        <div className="flex flex-wrap items-center gap-2">
+          <SegmentedFilter
+            options={VIEWS}
+            value={view}
+            onChange={onViewChange}
+            label="Filter runs"
+          />
+          {agentId && oneWebhook && onClearWebhook && (
+            <WebhookFilterChip
+              agentId={agentId}
+              webhookId={oneWebhook}
+              onClear={onClearWebhook}
+            />
+          )}
+        </div>
         <LiveToggle
           live={list.live}
           onToggle={() => list.setLive(!list.live)}
@@ -105,7 +126,9 @@ export const RunsTab = ({
             runs={rows}
             showApps={showApps}
             onOpen={setOpen}
-            emptyMessage={EMPTY[view]}
+            emptyMessage={
+              oneWebhook ? "No runs from this webhook yet." : EMPTY[view]
+            }
           />
           {list.hasMore && (
             <div className="flex justify-center">

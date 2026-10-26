@@ -3,6 +3,7 @@ import {
   approvalGroupKey,
   BATCH_SETTLE_MS,
   batchArrival,
+  batchArrivalNote,
   groupApprovals,
   isOddOneOut,
   orderGroupRows,
@@ -196,6 +197,37 @@ describe("batchArrival", () => {
   it("never waits without a tagged total", () => {
     expect(batchArrival(null, [iso(t0)], t0).arriving).toBe(false);
     expect(batchArrival(0, [iso(t0)], t0).arriving).toBe(false);
+  });
+});
+
+describe("batchArrivalNote", () => {
+  const at = (ms: number) => new Date(ms).toISOString();
+  // Well past the settle window of every arrival below (the window runs
+  // from the NEWEST arrival).
+  const quiet = BATCH_SETTLE_MS + 1_000;
+
+  it("an agent blocked on this approval: the rest come after, never 'never arrived'", () => {
+    // Tagged total 2, one call at a time: request 2 only leaves after
+    // request 1 is decided.
+    expect(batchArrivalNote(batchArrival(2, [at(0)], quiet))).toBe(
+      "1 of 2 here. The other one may only be sent after you decide this one. Approve all covers the 1 shown.",
+    );
+  });
+
+  it("counts the rest, and says 'these' for several shown", () => {
+    expect(
+      batchArrivalNote(batchArrival(5, [at(0), at(1), at(2)], quiet)),
+    ).toBe(
+      "3 of 5 here. The other 2 may only be sent after you decide these. Approve all covers the 3 shown.",
+    );
+  });
+
+  it("while arriving it waits; when complete or untagged it says nothing", () => {
+    expect(batchArrivalNote(batchArrival(3, [at(0)], 1))).toBe(
+      "1 of 3 here, waiting for the rest…",
+    );
+    expect(batchArrivalNote(batchArrival(2, [at(0), at(1)], quiet))).toBeNull();
+    expect(batchArrivalNote(batchArrival(null, [at(0)], quiet))).toBeNull();
   });
 });
 

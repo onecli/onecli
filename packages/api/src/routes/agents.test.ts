@@ -437,21 +437,46 @@ describe("POST /v1/agents/:agentId/restart", () => {
   });
 });
 
-describe("GET /v1/agents", () => {
-  it("passes the service list through, kind included", async () => {
-    const row = {
-      id: "a1",
-      name: "A",
-      identifier: "a",
-      accessToken: "aoc_x",
-      kind: "hosted",
-      createdAt: "2026-01-01T00:00:00.000Z",
-      lastSeenAt: null,
-    };
-    services.listAgents.mockResolvedValue([row]);
-    const res = await app.request("/v1/agents", { headers: AUTH });
+describe("POST /v1/agents/:agentId/regenerate-token", () => {
+  // The dashboard no longer offers rotation; the CLI/API is its only door,
+  // so the route itself must leave the audit trail.
+  it("rotates workspace-fenced and audits ids only, never the token", async () => {
+    auditCreate.mockClear();
+    services.regenerateAgentToken.mockResolvedValue({
+      accessToken: "aoc_rotated_value",
+    });
+    const res = await app.request("/v1/agents/a1/regenerate-token", {
+      method: "POST",
+      headers: AUTH,
+    });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual([row]);
+    expect(services.regenerateAgentToken).toHaveBeenCalledWith("p1", "a1");
+    expect(auditCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          action: "regenerate",
+          service: "agent",
+          source: "api",
+          metadata: { agentId: "a1" },
+        }),
+      }),
+    );
+    expect(JSON.stringify(auditCreate.mock.calls)).not.toContain(
+      "aoc_rotated_value",
+    );
+  });
+
+  it("audits nothing when the agent is not found", async () => {
+    auditCreate.mockClear();
+    services.regenerateAgentToken.mockRejectedValue(
+      new ServiceError("NOT_FOUND", "Agent not found"),
+    );
+    const res = await app.request("/v1/agents/a1/regenerate-token", {
+      method: "POST",
+      headers: AUTH,
+    });
+    expect(res.status).toBe(404);
+    expect(auditCreate).not.toHaveBeenCalled();
   });
 });
 
@@ -475,15 +500,5 @@ describe("the default-agent surface is gone", () => {
     services.getAgentDetail.mockResolvedValue({ id: "a1", name: "A" });
     const res = await app.request("/v1/agents/a1", { headers: AUTH });
     expect(res.status).toBe(200);
-  });
-
-  it("deletes the last agent — no default guard left", async () => {
-    services.deleteAgent.mockResolvedValue(undefined);
-    const res = await app.request("/v1/agents/a1", {
-      method: "DELETE",
-      headers: AUTH,
-    });
-    expect(res.status).toBe(204);
-    expect(services.deleteAgent).toHaveBeenCalledWith("p1", "a1");
   });
 });

@@ -50,6 +50,20 @@ beforeEach(() => {
   resetRunnerAvailabilityCache();
 });
 
+describe("GET /v1/instance/egress (mount + posture)", () => {
+  it("is mounted under /v1/instance on the shared app and needs no session", async () => {
+    // EGRESS is unset here, so the egress handler's OWN 404 proves the mount
+    // (not the router's "Unrecognized request URL") and the no-auth posture
+    // (not a 401).
+    const res = await app.request("/v1/instance/egress");
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toBe(
+      "This deployment does not publish egress addresses.",
+    );
+  });
+});
+
 describe("GET /v1/instance (the auto-hide fact)", () => {
   it("answers unauthenticated — posture, never data", async () => {
     const res = await app.request("/v1/instance");

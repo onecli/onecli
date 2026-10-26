@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { proofDatabaseUrl } from "../testing/pg-proof.js";
+import { proofDatabaseUrl, waitForLockWaiters } from "../testing/pg-proof.js";
 
 /**
  * Agent memory on REAL PostgreSQL (step 8). What only pg can prove: the
@@ -444,10 +444,11 @@ describe.skipIf(!PROOF_URL)("the revision machinery", () => {
 
     // The loser: find-misses (uncommitted row invisible), tries to create,
     // BLOCKS on the unique conflict until the winner commits, gets P2002,
-    // re-reads, and lands as an update. Release the winner once the loser is
-    // definitely in flight — its create cannot complete before the commit.
+    // re-reads, and lands as an update. Release the winner only once the
+    // loser is provably parked on the conflict, so the P2002 arm always runs.
     const loserPromise = save(a, "contested", "loser");
-    setTimeout(() => releaseWinner?.(), 150);
+    await waitForLockWaiters(db);
+    releaseWinner?.();
     const [loser] = await Promise.all([loserPromise, winner]);
 
     expect(loser.created).toBe(false);

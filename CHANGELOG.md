@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.16.0](https://github.com/onecli/onecli/compare/v2.15.0...v2.16.0) (2026-10-22)
+
+
+### Features
+
+* agents manage their webhooks, failed channel replies alert the owner, image previews in chat ([#622](https://github.com/onecli/onecli/issues/622)) ([903f2cf](https://github.com/onecli/onecli/commit/903f2cfad35000d92a470f8aa8b52d468f750b3e))
+
+## [2.15.0](https://github.com/onecli/onecli/compare/v2.14.0...v2.15.0) (2026-10-21)
+
+
+### Features
+
+* GitHub skill library, browser steps, private preview links, custom connections, multi-replica runner ([#620](https://github.com/onecli/onecli/issues/620)) ([bb78529](https://github.com/onecli/onecli/commit/bb78529a2cacbe96b22c64fc0c01a4b7de8a1b92))
+
 ## [2.14.0](https://github.com/onecli/onecli/compare/v2.13.0...v2.14.0) (2026-10-14)
 
 

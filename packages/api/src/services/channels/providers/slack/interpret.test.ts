@@ -240,10 +240,17 @@ describe("group surfaces", () => {
     });
   });
 
-  it("ignores a plain channel message with no thread — channel chatter", () => {
-    expect(interpretSlackEvent(channelMessage(), CTX)).toEqual({
-      door: "ignore",
-      reason: "channel-chatter",
+  it("hands a plain top-level channel message over as OVERHEARD, threaded under itself", () => {
+    // Whether it is heard at all is the dispatcher's call (only a channel
+    // promoted to listen = "all" admits it); classification just marks it
+    // and points any answer at a thread rooted on the message itself.
+    expect(interpretSlackEvent(channelMessage(), CTX)).toMatchObject({
+      door: "group",
+      overheard: true,
+      isMention: false,
+      externalThreadId: "C9999:2222.0001",
+      replyThreadTs: "2222.0001",
+      messageTs: "2222.0001",
     });
   });
 
@@ -452,6 +459,93 @@ describe("invites (member_joined_channel)", () => {
   });
 });
 
+describe("the bot's own removal (channel_left / group_left)", () => {
+  it.each(["channel_left", "group_left"])(
+    "%s is a leave for that channel",
+    (type) => {
+      expect(interpretSlackEvent({ type, channel: "C7777" }, CTX)).toEqual({
+        door: "leave",
+        channel: "C7777",
+      });
+    },
+  );
+
+  it("works even while our own identity is unknown (addressed to us by construction)", () => {
+    expect(
+      interpretSlackEvent(
+        { type: "group_left", channel: "G7777" },
+        { botUserId: null },
+      ),
+    ).toEqual({ door: "leave", channel: "G7777" });
+  });
+
+  it("drops one with no channel instead of leaving an empty space", () => {
+    expect(interpretSlackEvent({ type: "channel_left" }, CTX)).toEqual({
+      door: "ignore",
+      reason: "unparseable",
+    });
+  });
+});
+
+describe("Slack's own system users (USLACK / USLACKBOT)", () => {
+  it.each(["USLACK", "USLACKBOT"])(
+    "a DM from %s is a system notice, never a direct speaker",
+    (user) => {
+      expect(
+        interpretSlackEvent(
+          dm({
+            user,
+            channel: "D_FICTIONAL_NOTICE",
+            text: "You have been removed from #fictional-observatory by <@U_FICTIONAL_ADMIN>",
+          }),
+          CTX,
+        ),
+      ).toEqual({ door: "system_notice" });
+    },
+  );
+
+  it.each(["USLACK", "USLACKBOT"])(
+    "a channel message from %s is dropped, never a group speaker",
+    (user) => {
+      expect(interpretSlackEvent(channelMessage({ user }), CTX)).toEqual({
+        door: "ignore",
+        reason: "slack-system-user",
+      });
+    },
+  );
+
+  it("an app_mention claiming a system author is dropped", () => {
+    expect(
+      interpretSlackEvent(
+        {
+          type: "app_mention",
+          channel: "C9999",
+          user: "USLACK",
+          text: `<@${BOT}> hi`,
+          ts: "3333.0001",
+        },
+        CTX,
+      ),
+    ).toEqual({ door: "ignore", reason: "slack-system-user" });
+  });
+
+  it("a non-plain subtype from a system user still drops on the subtype first", () => {
+    expect(
+      interpretSlackEvent(
+        dm({ user: "USLACK", subtype: "message_changed" }),
+        CTX,
+      ),
+    ).toEqual({ door: "ignore", reason: "subtype:message_changed" });
+  });
+
+  it("an ordinary person whose id merely starts with USLACK is unaffected", () => {
+    expect(interpretSlackEvent(dm({ user: "USLACKER1" }), CTX)).toMatchObject({
+      door: "direct",
+      externalUserId: "USLACKER1",
+    });
+  });
+});
+
 describe("junk resilience", () => {
   it.each([
     ["a number", 42],
@@ -647,19 +741,68 @@ describe("the app's own removal (app_uninstalled / tokens_revoked)", () => {
     ).toEqual({ door: "removed", reason: "tokens_revoked" });
   });
 
-  it("tokens_revoked naming only USER tokens is ignored — a per-agent app never held one", () => {
+  it("tokens_revoked naming only USER tokens drops those people's read tokens, never the presence", () => {
     expect(
       interpretSlackEvent(
         { type: "tokens_revoked", tokens: { oauth: ["U1"] } },
         CTX,
       ),
-    ).toEqual({ door: "ignore", reason: "tokens_revoked:user-only" });
+    ).toEqual({ door: "user-tokens-revoked", externalUserIds: ["U1"] });
     expect(
       interpretSlackEvent({ type: "tokens_revoked", tokens: { bot: [] } }, CTX),
-    ).toEqual({ door: "ignore", reason: "tokens_revoked:user-only" });
+    ).toEqual({ door: "ignore", reason: "tokens_revoked:empty" });
     expect(interpretSlackEvent({ type: "tokens_revoked" }, CTX)).toEqual({
       door: "ignore",
-      reason: "tokens_revoked:user-only",
+      reason: "tokens_revoked:empty",
+    });
+  });
+});
+
+describe("the native Stop (agent_session_stopped)", () => {
+  const stopped = (overrides: Record<string, unknown> = {}) => ({
+    type: "agent_session_stopped",
+    channel: "C9999",
+    thread_ts: "2222.0001",
+    user: "U1111",
+    event_ts: "2222.0009",
+    streaming_message_ts: [],
+    ...overrides,
+  });
+
+  it("routes a click to the stop door, naming the session and the clicker", () => {
+    expect(interpretSlackEvent(stopped(), CTX)).toEqual({
+      door: "stop",
+      externalUserId: "U1111",
+      channel: "C9999",
+      threadTs: "2222.0001",
+    });
+  });
+
+  it("routes a DM session's click the same way (the DM is the channel)", () => {
+    expect(
+      interpretSlackEvent(stopped({ channel: "D0001" }), CTX),
+    ).toMatchObject({ door: "stop", channel: "D0001" });
+  });
+
+  it("ignores half a stop: no thread, no clicker, or no channel names no session", () => {
+    for (const field of ["thread_ts", "user", "channel"]) {
+      const event: Record<string, unknown> = stopped();
+      delete event[field];
+      expect(interpretSlackEvent(event, CTX), field).toEqual({
+        door: "ignore",
+        reason: "stop:malformed",
+      });
+    }
+    expect(interpretSlackEvent(stopped({ user: "" }), CTX)).toEqual({
+      door: "ignore",
+      reason: "stop:malformed",
+    });
+  });
+
+  it("ignores a stop naming the bot itself: only a person clicks Stop", () => {
+    expect(interpretSlackEvent(stopped({ user: BOT }), CTX)).toEqual({
+      door: "ignore",
+      reason: "stop:self",
     });
   });
 });

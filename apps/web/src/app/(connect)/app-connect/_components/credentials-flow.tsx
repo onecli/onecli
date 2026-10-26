@@ -79,6 +79,9 @@ export interface CredentialsFlowProps {
   onError: (message: string) => void;
   workspaceId?: string;
   orgId?: string;
+  /** The agent this connect started from: the created (or re-added) account
+   * is switched on for it. */
+  agentId?: string;
   /** Connection method to connect with, when the app offers more than one. */
   method?: string;
   /** When set, shows a link to return to the app's primary (OAuth) flow. */
@@ -95,6 +98,7 @@ export const CredentialsFlow = ({
   onError,
   workspaceId,
   orgId,
+  agentId,
   method,
   onBack,
 }: CredentialsFlowProps) => {
@@ -173,6 +177,7 @@ export const CredentialsFlow = ({
           connectionId,
           ...(connectionLabel.trim() ? { label: connectionLabel.trim() } : {}),
           ...(method ? { method } : {}),
+          ...(agentId ? { agentId } : {}),
         }),
         headers: {
           ...(workspaceId ? { "X-Workspace-Id": workspaceId } : {}),

@@ -158,3 +158,68 @@ describe("useDecideApprovals", () => {
     expect(cached?.map((a) => a.id)).toEqual(["bad"]);
   });
 });
+
+describe("useApproveCustomConnection", () => {
+  it("does not keep the pasted key in the mutation cache after success", async () => {
+    vi.doMock("@/lib/api/channels", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("@/lib/api/channels")>()),
+      approveCustomConnection: vi.fn(async () => ({
+        kind: "decided",
+        status: "executed",
+      })),
+    }));
+    vi.doMock("@/lib/api/cache", () => ({
+      invalidateGatewayCache: vi.fn(async () => {}),
+    }));
+    const { useApproveCustomConnection } = await load();
+    const { client, wrapper } = setup();
+    const { result } = renderHook(() => useApproveCustomConnection("ag-1"), {
+      wrapper,
+    });
+    const cached = () =>
+      JSON.stringify(
+        client
+          .getMutationCache()
+          .getAll()
+          .map((m) => m.state),
+      );
+
+    await act(async () => {
+      await result.current.mutateAsync({
+        approvalId: "aa-1",
+        value: "sk-live-secret",
+      });
+    });
+    // The card resets the observer on settle; gcTime 0 then drops it.
+    act(() => result.current.reset());
+    await vi.waitFor(() => expect(cached()).not.toContain("sk-live-secret"));
+    expect(client.getMutationCache().getAll()).toHaveLength(0);
+    vi.doUnmock("@/lib/api/channels");
+    vi.doUnmock("@/lib/api/cache");
+  });
+
+  it("does not keep the pasted key after a refused approve either", async () => {
+    vi.doMock("@/lib/api/channels", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("@/lib/api/channels")>()),
+      approveCustomConnection: vi.fn(async () => {
+        throw new Error("This request was already decided.");
+      }),
+    }));
+    const { useApproveCustomConnection } = await load();
+    const { client, wrapper } = setup();
+    const { result } = renderHook(() => useApproveCustomConnection("ag-1"), {
+      wrapper,
+    });
+
+    await act(async () => {
+      await result.current
+        .mutateAsync({ approvalId: "aa-1", value: "sk-live-secret" })
+        .catch(() => undefined);
+    });
+    act(() => result.current.reset());
+    await vi.waitFor(() =>
+      expect(client.getMutationCache().getAll()).toHaveLength(0),
+    );
+    vi.doUnmock("@/lib/api/channels");
+  });
+});

@@ -580,9 +580,12 @@ describe.skipIf(!sshAvailable)("terminator e2e (real OpenSSH client)", () => {
       "-p",
       String(h.port),
       "agent-1@127.0.0.1",
-      "sleep 3.5 && echo rode-it-out",
+      // Outlives the second 403 beat (t ~1s) and the clean third (t ~2s).
+      "sleep 2.2 && echo rode-it-out",
     ]);
     expect(answer.code).toBe(0);
+    // Both scripted 403s were consumed, so the session truly rode them out.
+    expect(h.controlPlane.heartbeats.length).toBeGreaterThanOrEqual(2);
     expect(answer.stdout).toContain("rode-it-out");
     expect(answer.stdout).not.toContain("your access was revoked");
     await vi.waitFor(() => {

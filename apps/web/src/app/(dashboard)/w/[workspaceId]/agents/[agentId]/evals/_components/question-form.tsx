@@ -14,7 +14,7 @@ import {
 import type { useSaveEvalQuestion } from "@/hooks/use-evals";
 import type { EvalQuestion } from "@/lib/api";
 import { CheckKindPicker } from "./check-kind-picker";
-import { CRITERIA_TEMPLATE } from "./eval-copy";
+import { CRITERIA_TEMPLATE, EXAMPLE_QUESTION } from "./eval-copy";
 import { ExpectedAppsField } from "./expected-apps-field";
 import { fieldDescribedBy, FormField } from "./form-field";
 import {
@@ -64,6 +64,11 @@ const draftFrom = (question: EvalQuestion | null): QuestionDraft => ({
   expectedApps: question?.expectedApps ?? [],
 });
 
+/** Whether the draft still holds its check's example, untouched. */
+const isExample = (draft: QuestionDraft) =>
+  draft.question === EXAMPLE_QUESTION[draft.kind].question &&
+  draft.expected === EXAMPLE_QUESTION[draft.kind].expected;
+
 /**
  * The add/edit form for one test question. The dialog keys it per open, so
  * its state always starts from the question being edited, with no reset
@@ -88,6 +93,24 @@ export const QuestionForm = ({
     setDraft((current) => ({ ...current, ...patch }));
     setErrors((current) => ({ ...current, [clears]: undefined }));
   };
+
+  /** Fill the selected check's example; offered only on an empty draft. */
+  const fillExample = () => {
+    update(EXAMPLE_QUESTION[draft.kind], "question");
+    setErrors((current) => ({ ...current, expected: undefined }));
+    document.getElementById(FIELD_ID.question)?.focus();
+  };
+  const blank = !draft.question.trim() && !draft.expected.trim();
+
+  /** Switching checks swaps an untouched example for the new check's one.
+   * Never in edit: a saved question is the author's, even when it matches. */
+  const changeKind = (kind: EvalCheckKind) =>
+    update(
+      !editing && isExample(draft)
+        ? { kind, ...EXAMPLE_QUESTION[kind] }
+        : { kind },
+      "expected",
+    );
 
   const submit = () => {
     const checked = validateQuestion(draft);
@@ -134,7 +157,24 @@ export const QuestionForm = ({
           <FormField
             id={FIELD_ID.question}
             label="Question"
-            help="Asked to the agent exactly as written."
+            help={
+              <>
+                Asked to the agent exactly as written.
+                {!editing && blank && (
+                  <>
+                    {" Or "}
+                    <button
+                      type="button"
+                      onClick={fillExample}
+                      className="text-foreground focus-visible:ring-ring/50 rounded-sm underline underline-offset-2 outline-none hover:no-underline focus-visible:ring-[3px]"
+                    >
+                      try an example
+                    </button>
+                    .
+                  </>
+                )}
+              </>
+            }
             error={errors.question}
           >
             <Textarea
@@ -156,7 +196,7 @@ export const QuestionForm = ({
             <CheckKindPicker
               labelledBy={CHECK_LABEL_ID}
               value={draft.kind}
-              onValueChange={(kind) => update({ kind }, "expected")}
+              onValueChange={changeKind}
             />
           </div>
 

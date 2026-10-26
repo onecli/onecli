@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The runner API's HTTP contract (hosted-agents step 3): token-family
 // separation in BOTH directions, registration's accept/reject arms, the work
@@ -30,11 +30,20 @@ const services = vi.hoisted(() => ({
   failStalledTurns: vi.fn(),
   releaseClaim: vi.fn(),
   waitForWork: vi.fn(),
+  takeWatchFirePending: vi.fn(),
   buildSandboxStartPayload: vi.fn(),
   applyRunnerEvent: vi.fn(),
   listRunnerSandboxes: vi.fn(),
+  isReconcilerReplica: vi.fn(),
   listMissingSandboxIds: vi.fn(),
   runnerUpdate: vi.fn(),
+  replicaUpdateMany: vi.fn(),
+  recordSpawn: vi.fn(),
+  claimChannel: vi.fn(),
+  releaseChannel: vi.fn(),
+  claimStrayStop: vi.fn(),
+  retireReplica: vi.fn(),
+  isReplicaRetired: vi.fn(),
   buildTurnContext: vi.fn(),
   fireDueCrons: vi.fn(),
   fireDueEvalSchedules: vi.fn(),
@@ -52,6 +61,7 @@ vi.mock("@onecli/db", () => ({
         where.token === RUNNER_TOKEN ? { id: "r-1", name: "laptop" } : null,
       update: services.runnerUpdate,
     },
+    runnerReplica: { updateMany: services.replicaUpdateMany },
     apiKey: {
       findUnique: async ({ where }: { where: { key: string } }) =>
         where.key === ORG_KEY
@@ -107,6 +117,8 @@ vi.mock("../services/due-work", () => ({
   expireWedgedFollowUps: services.expireWedgedFollowUps,
   releaseClaim: services.releaseClaim,
   waitForWork: services.waitForWork,
+  takeWatchFirePending: services.takeWatchFirePending,
+  heldIdleSummary: vi.fn(async () => ({ held: 0, oldestHeldSeconds: 0 })),
 }));
 
 vi.mock("../services/follow-up-service", () => ({
@@ -116,9 +128,19 @@ vi.mock("../services/follow-up-service", () => ({
 vi.mock("../services/sandbox-service", () => ({
   buildSandboxStartPayload: services.buildSandboxStartPayload,
   applyRunnerEvent: services.applyRunnerEvent,
-  listRunnerSandboxes: services.listRunnerSandboxes,
   listMissingSandboxIds: services.listMissingSandboxIds,
   requestSandboxRespawn: vi.fn(),
+}));
+
+vi.mock("../services/runner-channel-service", () => ({
+  listRunnerSandboxes: services.listRunnerSandboxes,
+  isReconcilerReplica: services.isReconcilerReplica,
+  recordSpawn: services.recordSpawn,
+  claimChannel: services.claimChannel,
+  releaseChannel: services.releaseChannel,
+  claimStrayStop: services.claimStrayStop,
+  retireReplica: services.retireReplica,
+  isReplicaRetired: services.isReplicaRetired,
 }));
 
 vi.mock("../services/turn-context-service", () => ({
@@ -141,6 +163,15 @@ vi.mock("../services/ssh-service", () => ({
   sshAvailable: () => false,
 }));
 
+// The awake-time ledger's sweep rides the same tick; non-fatal like the rest.
+vi.mock("../services/runtime-ledger", () => ({
+  sweepRuntimeLedger: vi.fn(async () => ({
+    orphansClosed: 0,
+    unrecordedOpened: 0,
+    daysRolledUp: 0,
+  })),
+}));
+
 vi.mock("../services/watch-fire-service", () => ({
   fireDueWatches: services.fireDueWatches,
 }));
@@ -150,6 +181,7 @@ vi.mock("../services/sandbox-process-service", () => ({
 }));
 
 const { createApiApp } = await import("../app");
+const { resetPollSweepThrottle } = await import("./runner");
 
 const app = createApiApp({ getSession: async () => null });
 
@@ -173,7 +205,10 @@ const PAYLOAD = {
 beforeEach(() => {
   roleHolder.role = "owner";
   for (const fn of Object.values(services)) fn.mockReset();
+  // Every test's first poll sweeps, whatever the previous test's poll did.
+  resetPollSweepThrottle();
   services.runnerUpdate.mockResolvedValue({});
+  services.replicaUpdateMany.mockResolvedValue({ count: 0 });
   services.claimDueWork.mockResolvedValue([]);
   services.buildTurnContext.mockResolvedValue(null);
   // The sweeps return what they killed so the poll can settle it.
@@ -191,7 +226,13 @@ beforeEach(() => {
   services.planTurnAttachments.mockResolvedValue({ manifest: [], note: null });
   services.sweepStalePendingAttachments.mockResolvedValue(0);
   services.waitForWork.mockResolvedValue(undefined);
-  services.listRunnerSandboxes.mockResolvedValue([]);
+  services.takeWatchFirePending.mockReturnValue(false);
+  services.isReplicaRetired.mockResolvedValue(false);
+  services.listRunnerSandboxes.mockResolvedValue({
+    rows: [],
+    channels: {},
+    reconciler: true,
+  });
   services.getRunnerAvailability.mockResolvedValue({
     registered: false,
     online: false,
@@ -264,6 +305,30 @@ describe("token-family separation", () => {
 });
 
 describe("POST /v1/runner/register", () => {
+  it("registers a copy when the runner names one, and answers its id", async () => {
+    services.registerRunner.mockResolvedValue({
+      ok: true,
+      runnerId: "r-1",
+      replicaId: "copy-1",
+    });
+    const res = await app.request("/v1/runner/register", {
+      method: "POST",
+      headers: RUNNER_AUTH,
+      body: JSON.stringify({
+        name: "laptop",
+        capabilities: CAPABILITIES,
+        replicaName: "pod-1",
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ runnerId: "r-1", replicaId: "copy-1" });
+    expect(services.registerRunner).toHaveBeenCalledWith({
+      token: RUNNER_TOKEN,
+      name: "laptop",
+      capabilities: CAPABILITIES,
+      replicaName: "pod-1",
+    });
+  });
   it("registers with a valid token and capabilities", async () => {
     services.registerRunner.mockResolvedValue({ ok: true, runnerId: "r-1" });
     const res = await app.request("/v1/runner/register", {
@@ -353,7 +418,7 @@ describe("POST /v1/runner/work", () => {
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ items: [] });
-    expect(services.claimDueWork).toHaveBeenCalledWith("r-1", 5);
+    expect(services.claimDueWork).toHaveBeenCalledWith("r-1", 5, undefined);
   });
 
   it("composes a start payload for a claimed start", async () => {
@@ -487,6 +552,7 @@ describe("POST /v1/runner/work", () => {
       conversationId: "conv-1",
       sandboxId: "sb-1",
       message: "also check the linter",
+      hasAttachments: false,
     } as const;
     services.claimDueWork.mockResolvedValueOnce([
       { ...claimed, context: "[new message]" },
@@ -522,6 +588,92 @@ describe("POST /v1/runner/work", () => {
       ],
     });
     expect(services.buildTurnContext).not.toHaveBeenCalled();
+    // A text-only steer reads no attachment table at all.
+    expect(services.planTurnAttachments).not.toHaveBeenCalled();
+  });
+
+  it("a steer WITH files carries their manifest, and the files note after the claim's frame", async () => {
+    // The frame says a message arrived; the note then says what came with
+    // it. The memory context never rides a steer, files or not.
+    services.claimDueWork.mockResolvedValueOnce([
+      {
+        kind: "turn.message",
+        turnId: "f-1",
+        targetTurnId: "t-1",
+        conversationId: "conv-1",
+        sandboxId: "sb-1",
+        message: "what is this?",
+        context: "[new message]",
+        hasAttachments: true,
+      },
+    ]);
+    const manifest = [
+      {
+        id: "att-1",
+        path: "attachments/f-1/photo.png",
+        name: "photo.png",
+        mimeType: "image/png",
+        sizeBytes: 3,
+        sha256: "a".repeat(64),
+      },
+    ];
+    services.planTurnAttachments.mockResolvedValue({
+      manifest,
+      note: "The user attached files…",
+    });
+
+    const res = await app.request("/v1/runner/work", {
+      method: "POST",
+      headers: RUNNER_AUTH,
+      body: JSON.stringify({}),
+    });
+
+    const body = (await res.json()) as { items: Record<string, unknown>[] };
+    expect(body.items[0]).toEqual({
+      kind: "turn.message",
+      sandboxId: "sb-1",
+      conversationId: "conv-1",
+      turnId: "f-1",
+      targetTurnId: "t-1",
+      message: "what is this?",
+      context: "[new message]\n\nThe user attached files…",
+      attachments: manifest,
+    });
+    expect(services.planTurnAttachments).toHaveBeenCalledWith("f-1");
+    expect(services.buildTurnContext).not.toHaveBeenCalled();
+  });
+
+  it("a steer whose file plan FAILS still delivers its words, framed, without files", async () => {
+    services.claimDueWork.mockResolvedValueOnce([
+      {
+        kind: "turn.message",
+        turnId: "f-1",
+        targetTurnId: "t-1",
+        conversationId: "conv-1",
+        sandboxId: "sb-1",
+        message: "what is this?",
+        context: "[new message]",
+        hasAttachments: true,
+      },
+    ]);
+    services.planTurnAttachments.mockRejectedValue(new Error("db blip"));
+
+    const res = await app.request("/v1/runner/work", {
+      method: "POST",
+      headers: RUNNER_AUTH,
+      body: JSON.stringify({}),
+    });
+
+    const body = (await res.json()) as { items: Record<string, unknown>[] };
+    expect(body.items[0]).toEqual({
+      kind: "turn.message",
+      sandboxId: "sb-1",
+      conversationId: "conv-1",
+      turnId: "f-1",
+      targetTurnId: "t-1",
+      message: "what is this?",
+      context: "[new message]",
+    });
   });
 
   it("a SEND NOW crosses the poll as the claim composed it, after its delivery", async () => {
@@ -533,6 +685,7 @@ describe("POST /v1/runner/work", () => {
         conversationId: "conv-1",
         sandboxId: "sb-1",
         message: "stop and check prod",
+        hasAttachments: false,
       },
       {
         kind: "turn.send_now",
@@ -720,15 +873,18 @@ describe("POST /v1/runner/events", () => {
       }),
     });
     expect(res.status).toBe(204);
-    expect(services.applyRunnerEvent).toHaveBeenNthCalledWith(1, "r-1", {
-      kind: "sandbox.status",
-      sandboxId: "sb-1",
-      status: "starting",
-    });
-    expect(services.applyRunnerEvent).toHaveBeenNthCalledWith(2, "r-1", {
-      kind: "supervisor.ready",
-      sandboxId: "sb-1",
-    });
+    expect(services.applyRunnerEvent).toHaveBeenNthCalledWith(
+      1,
+      "r-1",
+      { kind: "sandbox.status", sandboxId: "sb-1", status: "starting" },
+      undefined,
+    );
+    expect(services.applyRunnerEvent).toHaveBeenNthCalledWith(
+      2,
+      "r-1",
+      { kind: "supervisor.ready", sandboxId: "sb-1" },
+      undefined,
+    );
   });
 
   it("400s on an unknown status rather than writing it", async () => {
@@ -805,18 +961,314 @@ describe("heartbeat + sandboxes", () => {
   });
 
   it("lists only the authenticated runner's sandboxes, with statuses", async () => {
-    services.listRunnerSandboxes.mockResolvedValue([
-      { id: "sb-1", status: "running" },
-      { id: "sb-2", status: "stopped" },
-    ]);
+    services.listRunnerSandboxes.mockResolvedValue({
+      rows: [
+        { id: "sb-1", status: "running" },
+        { id: "sb-2", status: "stopped" },
+      ],
+      channels: {},
+      reconciler: true,
+    });
     const res = await app.request("/v1/runner/sandboxes", {
       headers: { authorization: `Bearer ${RUNNER_TOKEN}` },
     });
+    // A single-process runner (no copy header) gets exactly today's shape.
     expect(await res.json()).toEqual({
       sandboxIds: ["sb-1", "sb-2"],
       statuses: { "sb-1": "running", "sb-2": "stopped" },
     });
-    expect(services.listRunnerSandboxes).toHaveBeenCalledWith("r-1");
+    expect(services.listRunnerSandboxes).toHaveBeenCalledWith("r-1", undefined);
+  });
+});
+
+describe("the runner copy surface", () => {
+  const COPY_AUTH = { ...RUNNER_AUTH, "x-onecli-runner-replica": "copy-1" };
+  const HASH = "a".repeat(64);
+
+  beforeEach(() => {
+    services.replicaUpdateMany.mockResolvedValue({ count: 1 });
+  });
+
+  it("a retired copy's held poll answers as soon as the retire wakes it", async () => {
+    // A copy's shutdown waits for its poll in flight, and with a single copy
+    // its replacement starts only after it exits: a poll left parked
+    // to its deadline would add that wait to every roll. MUTATION-PROOF:
+    // drop the check (the poll keeps re-claiming until the deadline).
+    services.claimDueWork.mockResolvedValue([]);
+    services.waitForWork.mockResolvedValue(true);
+    services.isReplicaRetired.mockResolvedValue(true);
+    const res = await app.request("/v1/runner/work", {
+      method: "POST",
+      headers: COPY_AUTH,
+      body: JSON.stringify({ wait: 1 }),
+    });
+    expect(await res.json()).toEqual({ items: [] });
+    expect(services.isReplicaRetired).toHaveBeenCalledWith("r-1", "copy-1");
+    expect(services.claimDueWork).toHaveBeenCalledTimes(1);
+  });
+
+  // The long poll holds until a real 1s deadline. Faking only `Date` and
+  // letting each timed-out wait jump the clock keeps these deterministic and
+  // instant instead of spending the wall-clock window.
+  const timedOutWait = async () => {
+    vi.setSystemTime(Date.now() + 600);
+    return false;
+  };
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("a live copy's poll keeps holding after a wake, and a timeout re-check never asks", async () => {
+    // Control for the case above: the check runs only on a SIGNAL wake (the
+    // retire signals), never on the steady once-a-second re-check.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    services.claimDueWork.mockResolvedValue([]);
+    services.waitForWork
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+      .mockImplementation(timedOutWait);
+    await app.request("/v1/runner/work", {
+      method: "POST",
+      headers: COPY_AUTH,
+      body: JSON.stringify({ wait: 1 }),
+    });
+    expect(services.isReplicaRetired).toHaveBeenCalledTimes(1);
+    expect(services.claimDueWork.mock.calls.length).toBeGreaterThan(2);
+  });
+
+  it("a runner that names no copy is never asked about retirement", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    services.claimDueWork.mockResolvedValue([]);
+    services.waitForWork
+      .mockResolvedValueOnce(true)
+      .mockImplementation(timedOutWait);
+    await app.request("/v1/runner/work", {
+      method: "POST",
+      headers: RUNNER_AUTH,
+      body: JSON.stringify({ wait: 1 }),
+    });
+    expect(services.isReplicaRetired).not.toHaveBeenCalled();
+  });
+
+  it("refreshes the copy's liveness on every call, and 401s an unknown copy", async () => {
+    const ok = await app.request("/v1/runner/sandboxes", {
+      headers: COPY_AUTH,
+    });
+    expect(ok.status).toBe(200);
+    expect(services.replicaUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "copy-1", runnerId: "r-1" } }),
+    );
+
+    services.replicaUpdateMany.mockResolvedValue({ count: 0 });
+    const unknown = await app.request("/v1/runner/sandboxes", {
+      headers: COPY_AUTH,
+    });
+    expect(unknown.status).toBe(401);
+    expect(services.listRunnerSandboxes).toHaveBeenCalledTimes(1);
+  });
+
+  it("lists channels and the reconciler role for a copy", async () => {
+    services.listRunnerSandboxes.mockResolvedValue({
+      rows: [{ id: "sb-1", status: "running" }],
+      channels: {
+        "sb-1": { containerRef: "ctr-1", channel: "held", since: 1 },
+      },
+      reconciler: false,
+    });
+    const res = await app.request("/v1/runner/sandboxes", {
+      headers: COPY_AUTH,
+    });
+    expect(await res.json()).toEqual({
+      sandboxIds: ["sb-1"],
+      statuses: { "sb-1": "running" },
+      channels: {
+        "sb-1": { containerRef: "ctr-1", channel: "held", since: 1 },
+      },
+      reconciler: false,
+    });
+    expect(services.listRunnerSandboxes).toHaveBeenCalledWith("r-1", "copy-1");
+  });
+
+  it("answers a copy's reconciler role alone, without the sandbox listing", async () => {
+    // Every copy asks once a minute; only the reconciler then lists every
+    // sandbox. MUTATION-PROOF: answer from the full listing and a copy that
+    // never reconciles still pays for it each pass.
+    services.isReconcilerReplica.mockResolvedValue(false);
+    const res = await app.request("/v1/runner/replicas/self", {
+      headers: COPY_AUTH,
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ reconciler: false });
+    expect(services.isReconcilerReplica).toHaveBeenCalledWith("r-1", "copy-1");
+    expect(services.listRunnerSandboxes).not.toHaveBeenCalled();
+
+    services.isReconcilerReplica.mockResolvedValue(true);
+    const oldest = await app.request("/v1/runner/replicas/self", {
+      headers: COPY_AUTH,
+    });
+    expect(await oldest.json()).toEqual({ reconciler: true });
+  });
+
+  it("404s the role read for a runner that names no copy (it always reconciles)", async () => {
+    const res = await app.request("/v1/runner/replicas/self", {
+      headers: RUNNER_AUTH,
+    });
+    expect(res.status).toBe(404);
+    expect(services.isReconcilerReplica).not.toHaveBeenCalled();
+  });
+
+  it("polls and reports as the copy", async () => {
+    await app.request("/v1/runner/work", {
+      method: "POST",
+      headers: COPY_AUTH,
+      body: JSON.stringify({ wait: 0 }),
+    });
+    expect(services.claimDueWork).toHaveBeenCalledWith("r-1", 5, "copy-1");
+
+    await app.request("/v1/runner/events", {
+      method: "POST",
+      headers: COPY_AUTH,
+      body: JSON.stringify({
+        events: [{ kind: "supervisor.ready", sandboxId: "sb-1" }],
+      }),
+    });
+    expect(services.applyRunnerEvent).toHaveBeenCalledWith(
+      "r-1",
+      { kind: "supervisor.ready", sandboxId: "sb-1" },
+      "copy-1",
+    );
+  });
+
+  it("records a spawn as the copy, and 409s when the start no longer applies", async () => {
+    services.recordSpawn.mockResolvedValue(true);
+    const body = JSON.stringify({ containerRef: "ctr-1", tokenHash: HASH });
+    const ok = await app.request("/v1/runner/sandboxes/sb-1/spawn", {
+      method: "PUT",
+      headers: COPY_AUTH,
+      body,
+    });
+    expect(ok.status).toBe(204);
+    expect(services.recordSpawn).toHaveBeenCalledWith("r-1", "copy-1", "sb-1", {
+      containerRef: "ctr-1",
+      tokenHash: HASH,
+    });
+
+    services.recordSpawn.mockResolvedValue(false);
+    const refused = await app.request("/v1/runner/sandboxes/sb-1/spawn", {
+      method: "PUT",
+      headers: COPY_AUTH,
+      body,
+    });
+    expect(refused.status).toBe(409);
+
+    const badHash = await app.request("/v1/runner/sandboxes/sb-1/spawn", {
+      method: "PUT",
+      headers: COPY_AUTH,
+      body: JSON.stringify({ containerRef: "ctr-1", tokenHash: "nope" }),
+    });
+    expect(badHash.status).toBe(400);
+  });
+
+  it("claims a stray stop as the copy, and 409s when a start got there first", async () => {
+    services.claimStrayStop.mockResolvedValue(true);
+    const body = JSON.stringify({ containerRef: "ctr-1" });
+    const ok = await app.request("/v1/runner/sandboxes/sb-1/stray-stop", {
+      method: "POST",
+      headers: COPY_AUTH,
+      body,
+    });
+    expect(ok.status).toBe(204);
+    expect(services.claimStrayStop).toHaveBeenCalledWith(
+      "r-1",
+      "copy-1",
+      "sb-1",
+      "ctr-1",
+    );
+
+    services.claimStrayStop.mockResolvedValue(false);
+    const refused = await app.request("/v1/runner/sandboxes/sb-1/stray-stop", {
+      method: "POST",
+      headers: COPY_AUTH,
+      body,
+    });
+    expect(refused.status).toBe(409);
+  });
+
+  it("claims a channel and answers its sandbox; a refusal is a hint-free 404", async () => {
+    services.claimChannel.mockResolvedValue({
+      sandboxId: "sb-1",
+      containerRef: "ctr-1",
+    });
+    const claim = {
+      door: "token",
+      connectionId: "conn-1",
+      connectedAt: 1,
+      tokenHash: HASH,
+    };
+    const ok = await app.request("/v1/runner/channels", {
+      method: "POST",
+      headers: COPY_AUTH,
+      body: JSON.stringify(claim),
+    });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({
+      sandboxId: "sb-1",
+      containerRef: "ctr-1",
+    });
+    expect(services.claimChannel).toHaveBeenCalledWith("r-1", "copy-1", claim);
+
+    services.claimChannel.mockResolvedValue(null);
+    const refused = await app.request("/v1/runner/channels", {
+      method: "POST",
+      headers: COPY_AUTH,
+      body: JSON.stringify(claim),
+    });
+    expect(refused.status).toBe(404);
+    expect(await refused.json()).toEqual({ error: "Not found" });
+  });
+
+  it("releases a channel and retires the copy", async () => {
+    const released = await app.request("/v1/runner/channels/conn-1", {
+      method: "DELETE",
+      headers: COPY_AUTH,
+    });
+    expect(released.status).toBe(204);
+    expect(services.releaseChannel).toHaveBeenCalledWith(
+      "r-1",
+      "copy-1",
+      "conn-1",
+    );
+
+    const retired = await app.request("/v1/runner/replicas/self", {
+      method: "DELETE",
+      headers: COPY_AUTH,
+    });
+    expect(retired.status).toBe(204);
+    expect(services.retireReplica).toHaveBeenCalledWith("r-1", "copy-1");
+  });
+
+  it("404s every copy-only route for a runner that named no copy", async () => {
+    const calls: [string, string][] = [
+      ["PUT", "/v1/runner/sandboxes/sb-1/spawn"],
+      ["POST", "/v1/runner/sandboxes/sb-1/stray-stop"],
+      ["POST", "/v1/runner/channels"],
+      ["DELETE", "/v1/runner/channels/conn-1"],
+      ["DELETE", "/v1/runner/replicas/self"],
+    ];
+    for (const [method, path] of calls) {
+      const res = await app.request(path, {
+        method,
+        headers: RUNNER_AUTH,
+        body: method === "DELETE" ? undefined : JSON.stringify({}),
+      });
+      expect(res.status, `${method} ${path}`).toBe(404);
+    }
+    expect(services.recordSpawn).not.toHaveBeenCalled();
+    expect(services.claimStrayStop).not.toHaveBeenCalled();
+    expect(services.claimChannel).not.toHaveBeenCalled();
+    expect(services.releaseChannel).not.toHaveBeenCalled();
+    expect(services.retireReplica).not.toHaveBeenCalled();
   });
 });
 
@@ -891,26 +1343,5 @@ describe("GET /v1/runners (the human view)", () => {
     const body = (await res.json()) as { runners: Array<{ id: string }> };
     expect(body.runners).toHaveLength(1);
     expect(body.runners[0]?.id).toBe("r-1");
-  });
-});
-
-describe("GET /v1/instance", () => {
-  it("carries the runner availability bit (§3.13)", async () => {
-    services.getRunnerAvailability.mockResolvedValue({
-      registered: true,
-      online: false,
-    });
-    const res = await app.request("/v1/instance");
-    expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({
-      runners: { registered: true, online: false },
-    });
-  });
-
-  it("reports nothing registered on a deployment that never had a runner", async () => {
-    const res = await app.request("/v1/instance");
-    expect(await res.json()).toMatchObject({
-      runners: { registered: false, online: false },
-    });
   });
 });

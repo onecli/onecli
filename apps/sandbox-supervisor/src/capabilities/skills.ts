@@ -49,9 +49,9 @@ skills with skill_update and skill_delete; skill_list shows every skill
 that reaches you and which are yours. Never write a skill as loose files —
 a skill outside ${skillsDir}/ is invisible to the platform and does not
 survive this machine — unless the person explicitly asks for a file at some
-other location. Workspace and organization skills are managed by the people
-you work with in the dashboard; creating your own skill with the same name
-overrides one for you.`,
+other location. Organization skills are managed by the people you work with
+in the dashboard; creating your own skill with the same name overrides one
+for you.`,
 });
 
 export const skillsTools: PlatformToolDefinition[] = [
@@ -89,7 +89,7 @@ export const skillsTools: PlatformToolDefinition[] = [
   {
     name: "skill_list",
     description:
-      "List every skill that reaches you — your own agent skills (editable) plus workspace and organization skills (managed in the dashboard) — with name, scope, description, and enabled state. Bodies are not included; read a skill's SKILL.md in your skills directory.",
+      "List every skill that reaches you — your own agent skills (editable) plus organization skills (managed in the dashboard) — with name, scope, description, and enabled state. Bodies are not included; read a skill's SKILL.md in your skills directory.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -99,7 +99,7 @@ export const skillsTools: PlatformToolDefinition[] = [
   {
     name: "skill_update",
     description:
-      "Update one of your own agent skills by name: description, content, or enabled (false pauses it — its files leave your skills directory until re-enabled). Workspace and organization skills are managed in the dashboard by the people you work with.",
+      "Update one of your own agent skills by name: description, content, or enabled (false pauses it — its files leave your skills directory until re-enabled). Organization skills are managed in the dashboard by the people you work with.",
     inputSchema: {
       type: "object",
       properties: {

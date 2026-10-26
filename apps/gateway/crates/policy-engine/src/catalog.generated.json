@@ -2728,6 +2728,159 @@
       ]
     }
   },
+  "dripify": {
+    "add_leads_to_campaign": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/campaigns/*/leads",
+        "/v1/open-api/lead-lists/*/leads"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_tag": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/tags"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_lead": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/leads/*/",
+        "/v1/open-api/leads/*/activity"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_campaigns": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/campaigns",
+        "/v1/open-api/campaigns/*/lead-lists",
+        "/v1/open-api/campaigns/*/statistics"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_fields_and_tags": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/custom-lead-fields",
+        "/v1/open-api/tags"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_leads": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/leads"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_teams": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/teams",
+        "/v1/open-api/teams/*/members"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "mcp_access": {
+      "hosts": [
+        "app.dripify.com"
+      ],
+      "paths": [
+        "/api/v1/mcp",
+        "/api/v1/mcp/*"
+      ],
+      "methods": []
+    },
+    "read_conversations": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/leads/*/conversation",
+        "/v1/open-api/conversations/*/messages"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search_leads": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/leads/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "send_message": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/leads/*/messages"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "set_custom_field": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/leads/*/custom-fields/*/"
+      ],
+      "methods": [
+        "PUT",
+        "DELETE"
+      ]
+    },
+    "tag_leads": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/leads/tags"
+      ],
+      "methods": [
+        "PUT",
+        "DELETE"
+      ]
+    }
+  },
   "dropbox": {
     "create_folder": {
       "hosts": [
@@ -10872,6 +11025,268 @@
       ],
       "methods": [
         "PUT"
+      ]
+    }
+  },
+  "twilio": {
+    "lookup_phone_number": {
+      "hosts": [
+        "lookups.twilio.com",
+        "lookups.dublin.ie1.twilio.com",
+        "lookups.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/v2/PhoneNumbers/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "manage_calls": {
+      "hosts": [
+        "api.twilio.com",
+        "api.dublin.ie1.twilio.com",
+        "api.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/2010-04-01/Accounts/*/Calls/*",
+        "/2010-04-01/Accounts/*/Recordings/*"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "manage_conversations": {
+      "hosts": [
+        "conversations.twilio.com",
+        "conversations.dublin.ie1.twilio.com",
+        "conversations.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/v1/Conversations",
+        "/v1/Conversations/*",
+        "/v1/Services/*"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "manage_messages": {
+      "hosts": [
+        "api.twilio.com",
+        "api.dublin.ie1.twilio.com",
+        "api.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/2010-04-01/Accounts/*/Messages/*"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "manage_messaging_services": {
+      "hosts": [
+        "messaging.twilio.com",
+        "messaging.dublin.ie1.twilio.com",
+        "messaging.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/v1/Services",
+        "/v1/Services/*"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "manage_phone_numbers": {
+      "hosts": [
+        "api.twilio.com",
+        "api.dublin.ie1.twilio.com",
+        "api.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/2010-04-01/Accounts/*/IncomingPhoneNumbers.json",
+        "/2010-04-01/Accounts/*/IncomingPhoneNumbers/*"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "manage_verify_services": {
+      "hosts": [
+        "verify.twilio.com",
+        "verify.dublin.ie1.twilio.com",
+        "verify.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/v2/Services",
+        "/v2/Services/*/"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "place_call": {
+      "hosts": [
+        "api.twilio.com",
+        "api.dublin.ie1.twilio.com",
+        "api.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/2010-04-01/Accounts/*/Calls.json"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "read_calls": {
+      "hosts": [
+        "api.twilio.com",
+        "api.dublin.ie1.twilio.com",
+        "api.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/2010-04-01/Accounts/*/Calls.json",
+        "/2010-04-01/Accounts/*/Calls/*",
+        "/2010-04-01/Accounts/*/Recordings.json",
+        "/2010-04-01/Accounts/*/Recordings/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "read_conversations": {
+      "hosts": [
+        "conversations.twilio.com",
+        "conversations.dublin.ie1.twilio.com",
+        "conversations.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/v1/Conversations",
+        "/v1/Conversations/*",
+        "/v1/Services/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "read_messages": {
+      "hosts": [
+        "api.twilio.com",
+        "api.dublin.ie1.twilio.com",
+        "api.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/2010-04-01/Accounts/*/Messages.json",
+        "/2010-04-01/Accounts/*/Messages/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "read_messaging_services": {
+      "hosts": [
+        "messaging.twilio.com",
+        "messaging.dublin.ie1.twilio.com",
+        "messaging.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/v1/Services",
+        "/v1/Services/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "read_phone_numbers": {
+      "hosts": [
+        "api.twilio.com",
+        "api.dublin.ie1.twilio.com",
+        "api.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/2010-04-01/Accounts/*/IncomingPhoneNumbers.json",
+        "/2010-04-01/Accounts/*/IncomingPhoneNumbers/*",
+        "/2010-04-01/Accounts/*/OutgoingCallerIds.json",
+        "/2010-04-01/Accounts/*/AvailablePhoneNumbers.json",
+        "/2010-04-01/Accounts/*/AvailablePhoneNumbers/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "read_usage": {
+      "hosts": [
+        "api.twilio.com",
+        "api.dublin.ie1.twilio.com",
+        "api.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/2010-04-01/Accounts/*/Balance.json",
+        "/2010-04-01/Accounts/*/Usage/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "read_verify_services": {
+      "hosts": [
+        "verify.twilio.com",
+        "verify.dublin.ie1.twilio.com",
+        "verify.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/v2/Services",
+        "/v2/Services/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "send_message": {
+      "hosts": [
+        "api.twilio.com",
+        "api.dublin.ie1.twilio.com",
+        "api.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/2010-04-01/Accounts/*/Messages.json"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "send_verification": {
+      "hosts": [
+        "verify.twilio.com",
+        "verify.dublin.ie1.twilio.com",
+        "verify.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/v2/Services/*/Verifications",
+        "/v2/Services/*/VerificationCheck"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_verification": {
+      "hosts": [
+        "verify.twilio.com",
+        "verify.dublin.ie1.twilio.com",
+        "verify.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/v2/Services/*/Verifications/*"
+      ],
+      "methods": [
+        "POST"
       ]
     }
   },

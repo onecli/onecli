@@ -21,6 +21,7 @@ vi.mock("@/hooks/use-approvals", () => ({
   usePendingChannelApprovals: () => ({ data: mocks.channel }),
   useDecideApproval: () => ({ mutate: vi.fn(), isPending: false }),
   useDecideChannelAction: () => ({ mutate: vi.fn(), isPending: false }),
+  useApproveCustomConnection: () => ({ mutate: vi.fn(), isPending: false }),
   useDecideChannelReach: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 
@@ -66,6 +67,8 @@ describe("ApprovalsPopover (4d, the one inbox)", () => {
         conversationId: null,
         createdAt: "2026-09-07T10:01:00Z",
         expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        webhookChange: null,
+        customConnection: null,
       },
       {
         kind: "reach",

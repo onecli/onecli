@@ -39,11 +39,13 @@ import {
   processChannelCleanups,
   withChannelLifecycle,
 } from "./channel-cleanup-service";
+import { rotateSpaceMembershipGeneration } from "./space-membership-state";
 import { withFreshIntegrationCredentials } from "./channel-integration-service";
 import type {
   ChannelAppMode,
   ChannelProviderId,
   ChannelTransport,
+  ListenMode,
   PresenceIdentity,
 } from "./types";
 import { CAPS, RUNNER_ONLINE_THRESHOLD_SECONDS } from "../../lib/env";
@@ -54,13 +56,14 @@ const log = logger.child({ component: "agent-channel-service" });
 /**
  * The per-agent channel presence lifecycle (attach → active → detach).
  *
- * Two completion doors, one activation core: the socket arm and the paste
- * floor complete with pasted tokens (`completePresence`); the events arm
- * completes when the OAuth callback lands (`completePresenceFromOAuth`), or,
- * for an install begun on the provider's side, once someone signs in
- * (`completeAgentInstallFromCode`). All converge on `activatePresence`,
- * which resolves the integration row, stores credentials, and mints the
- * approvals service key.
+ * Two completion doors, one activation core: the paste door completes with
+ * pasted tokens (`completePresence`); the consent door completes when the
+ * OAuth callback lands (`completePresenceFromOAuth`), or, for an install
+ * begun on the provider's side, once someone signs in
+ * (`completeAgentInstallFromCode`). A socket install by consent still owes
+ * its transport credential, so the paste door finishes it. All converge on
+ * `activatePresence`, which resolves the integration row, stores
+ * credentials, and mints the approvals service key.
  */
 
 /** How long an install link (the signed OAuth state) stays valid. */
@@ -105,6 +108,7 @@ export const channelPresencesForRender = async (
       status: true,
       identityName: true,
       integration: { select: { name: true } },
+      userTokens: { select: { _count: { select: { grants: true } } } },
     },
     orderBy: { provider: "asc" },
     // One presence per (agent, provider) by constraint, so this cap is
@@ -123,11 +127,15 @@ export const channelPresencesForRender = async (
     ) {
       continue;
     }
+    const readable = row.userTokens.reduce((n, t) => n + t._count.grants, 0);
     presences.push({
       provider: row.provider,
       status: row.status,
       handle: renderText(row.identityName, HANDLE_MAX),
       workspaceName: renderText(row.integration.name, WORKSPACE_NAME_MAX),
+      // Omitted at zero: an agent nobody shared with renders exactly as
+      // before (same payload, same render hash, no needless home bump).
+      ...(readable > 0 && { readableConversations: readable }),
     });
   }
   return presences;
@@ -157,6 +165,9 @@ const presenceSelect = {
   status: true,
   apiKeyId: true,
   createdAt: true,
+  // The app's profile icon as last read by the icon sync (a provider CDN
+  // URL, public by nature); null = still the provider's stock mark.
+  iconUrl: true,
   // Deliberately NOT the integration's `credentials`: this select backs the
   // create/update RETURN value, which the complete route hands to the browser.
   // Even as ciphertext, an org automation credential must never leave the
@@ -204,6 +215,16 @@ const hydrateSpaceLabels = async (input: {
 
   await Promise.all(
     missing.map(async (space) => {
+      const grant = await db.agentReachGrant.findFirst({
+        where: {
+          agentId: input.agentId,
+          integrationId: input.integrationId,
+          subjectKind: "space",
+          externalRef: space.externalRef,
+          subjectLabel: null,
+        },
+        select: { id: true, revision: true },
+      });
       const label = await input.reach
         .spaceLabel({ credentialsJson, externalRef: space.externalRef })
         .catch(() => null);
@@ -212,16 +233,19 @@ const hydrateSpaceLabels = async (input: {
       // Write back so this costs one lookup per space, not one per view.
       // `updateMany` (not `update`): the row may not exist yet for a
       // thread-derived space, and a no-op update is the correct outcome.
+      if (!grant) return;
       await db.agentReachGrant
         .updateMany({
           where: {
+            id: grant.id,
+            revision: grant.revision,
             agentId: input.agentId,
             integrationId: input.integrationId,
             subjectKind: "space",
             externalRef: space.externalRef,
             subjectLabel: null,
           },
-          data: { subjectLabel: label },
+          data: { subjectLabel: label, revision: { increment: 1 } },
         })
         .catch(() => undefined);
     }),
@@ -257,6 +281,13 @@ export interface AgentChannelStatus {
   identityRef: string | null;
   /** The app's handle in the workspace (Slack: "donna"), where we know it. */
   identityName: string | null;
+  /** The app's PROFILE icon (Slack CDN URL) as last read, or null while the
+   * app still shows Slack's stock mark / before the first read. */
+  iconUrl: string | null;
+  /** A pending socket presence a consent install left one step short: only
+   * its transport credential (Slack: the app-level token) is left to paste.
+   * Decided here, from the stored credentials the browser never sees. */
+  awaitingTransportCredential: boolean;
   tenant: { externalId: string; name: string | null };
   /** The member who attached this presence, for the "Managed by" line. */
   managedBy: { name: string | null; email: string } | null;
@@ -271,6 +302,8 @@ export interface AgentChannelStatus {
     label: string | null;
     state: ReachState | "members_only";
     decidedAt: Date | null;
+    /** What the agent hears here: "all" = the channel's point of contact. */
+    listen: ListenMode;
   }[];
   /** Per-PERSON reach: everyone who knocked by direct message, with their
    * standing. Only ever grant rows - unlike spaces there is nothing to
@@ -370,6 +403,9 @@ export const getAgentChannels = async (
       where: { agentId: agent.id },
       select: {
         ...presenceSelect,
+        // Read server-side only, for `awaitingTransportCredential`; never
+        // part of the response.
+        credentials: true,
         threadLinks: {
           where: { kind: "group" },
           select: { externalThreadId: true, createdAt: true },
@@ -411,6 +447,7 @@ export const getAgentChannels = async (
           label: g.subjectLabel,
           state: g.state as ReachState,
           decidedAt: g.decidedAt,
+          listen: g.listen,
         }));
         if (reach) {
           const known = new Set(spaces.map((s) => s.externalRef));
@@ -426,6 +463,7 @@ export const getAgentChannels = async (
               // model - never silently "members_only".
               state: "pending",
               decidedAt: null,
+              listen: "mentions",
             });
           }
           // Fill the labels the grant rows lack. A row created before the
@@ -448,6 +486,11 @@ export const getAgentChannels = async (
           externalId: p.externalId,
           identityRef: p.identityRef,
           identityName: p.identityName,
+          iconUrl: p.iconUrl,
+          awaitingTransportCredential: await awaitsTransportCredential(
+            provider,
+            p,
+          ),
           tenant: {
             externalId: p.integration.externalId,
             name: p.integration.name,
@@ -498,6 +541,29 @@ export const getAgentChannels = async (
 const isAdapterOnline = (lastSeenAt: Date): boolean =>
   Date.now() - lastSeenAt.getTime() < RUNNER_ONLINE_THRESHOLD_SECONDS * 1000;
 
+/**
+ * Whether a presence waits only for its transport credential: a pending
+ * socket row the provider confirms from its stored credentials. Every other
+ * row answers without a decrypt, so cloud (no socket) never pays one here.
+ */
+const awaitsTransportCredential = async (
+  provider: ChannelProviderId,
+  presence: { status: string; transport: string; credentials: string | null },
+): Promise<boolean> => {
+  const check = channelProvider(provider).awaitsTransportCredential;
+  if (
+    !check ||
+    presence.status !== "pending_setup" ||
+    presence.transport !== "socket" ||
+    !presence.credentials
+  ) {
+    return false;
+  }
+  return check({
+    credentialsJson: await getCrypto().decrypt(presence.credentials),
+  });
+};
+
 /** The paste floor's step 0: the provider's setup document. */
 export const getSetupMaterial = async (
   workspaceId: string,
@@ -520,7 +586,8 @@ export const getSetupMaterial = async (
 export interface CreatePresenceResult {
   presenceId: string;
   transport: ChannelTransport;
-  /** Events arm: the one-click consent URL. */
+  /** The one-click consent URL: always on events, and on socket when the app
+   * carries our OAuth redirect (created on a public HTTPS origin). */
   installUrl: string | null;
   /** Socket arm: where the app-level token is generated + Install lives. */
   settingsUrl: string;
@@ -585,9 +652,10 @@ const createPresenceUnlocked = async (
 
   // A resumed attach stays on the row's stamp (the provider-side app config
   // baked it in); only a fresh create consults the request and the posture.
-  // The OAuth state is minted per that transport — mint it off the current
-  // default and a socket resume would carry a useless state while an events
-  // resume under a changed posture would lose its install URL.
+  // The OAuth state follows: events always gets one, and socket gets one
+  // whenever this deployment has the public HTTPS origin a consent redirect
+  // needs (the provider still withholds the URL from a socket app whose
+  // manifest predates the redirect).
   const transport = existing
     ? (existing.transport as ChannelTransport)
     : resolveTransport(requestedTransport);
@@ -598,7 +666,7 @@ const createPresenceUnlocked = async (
     ? (existing.appMode as ChannelAppMode)
     : "agent";
   const oauthState =
-    transport === "events"
+    transport === "events" || publicApiUrl() !== null
       ? signOAuthState({
           provider,
           nonce: randomBytes(16).toString("hex"),
@@ -842,9 +910,9 @@ const activatePresence = async (input: {
         input.externalId,
         input.presenceId,
       );
-      return input.presenceId
+      const activated = input.presenceId
         ? await tx.agentChannel.update({
-            where: { id: input.presenceId },
+            where: { id: input.presenceId, agentId: input.agent.id },
             data,
             select: presenceSelect,
           })
@@ -857,6 +925,8 @@ const activatePresence = async (input: {
             },
             select: presenceSelect,
           });
+      await rotateSpaceMembershipGeneration(tx, activated.id);
+      return activated;
     });
     // The agent's instruction doc now has a channel to describe.
     rerenderAgentHome(input.agent.id);
@@ -892,7 +962,9 @@ const completePresenceUnlocked = async (
   agentId: string,
   provider: ChannelProviderId,
   input: {
-    botToken: string;
+    /** Socket arm only: optional once a consent install stored the bot
+     * token (the provider enforces which pastes are complete). */
+    botToken?: string;
     appToken?: string;
     signingSecret?: string;
     appId?: string;
@@ -967,7 +1039,7 @@ const completePresenceUnlocked = async (
   await assertChannelLifecycleHeld();
   const completed = await channelProvider(provider).completePresence({
     pasted: {
-      botToken: input.botToken,
+      ...(input.botToken && { botToken: input.botToken }),
       ...(input.appToken && { appToken: input.appToken }),
       ...(input.signingSecret && { signingSecret: input.signingSecret }),
     },
@@ -990,11 +1062,12 @@ const completePresenceUnlocked = async (
 };
 
 /**
- * The events arm's completion door — invoked by the OAuth callback route
- * after it verified the signed state. Resolves the pending presence by
- * (agent, provider) from the state payload, never from anything the browser
- * chose. `payload` is the verified state the lifecycle wrapper already
- * checked; the TTL and agent checks that need no lock happen here.
+ * The consent door, invoked by the OAuth callback route after it verified the
+ * signed state. Resolves the pending presence by (agent, provider) from the
+ * state payload, never from anything the browser chose. `payload` is the
+ * verified state the lifecycle wrapper already checked; the TTL and agent
+ * checks that need no lock happen here. Events activates on the exchange;
+ * socket stores the grant and stays pending for its transport credential.
  */
 const completePresenceFromOAuthUnlocked = async (
   input: { code: string; redirectUri: string },
@@ -1033,7 +1106,7 @@ const completePresenceFromOAuthUnlocked = async (
     redirectUri: input.redirectUri,
     credentialsJson,
   });
-  const activated = await activateExchangedPresence({
+  const landed = await landExchangedGrant({
     agent: {
       id: agent.id,
       name: agent.name,
@@ -1049,11 +1122,7 @@ const completePresenceFromOAuthUnlocked = async (
   // The callback route sends the browser home — to THIS agent's Channels
   // section, resolved from the verified state, never from anything Slack (or
   // the browser) chose.
-  return {
-    presence: activated,
-    agentId: agent.id,
-    workspaceId: payload.workspaceId,
-  };
+  return { ...landed, agentId: agent.id, workspaceId: payload.workspaceId };
 };
 
 /** What both OAuth doors read about the presence a code would finish. */
@@ -1093,12 +1162,23 @@ type ResumablePresence = NonNullable<
 /** What a provider's code exchange yields. */
 type ExchangedGrant = { identity: PresenceIdentity; credentialsJson: string };
 
+/** Where an exchanged code left its presence. */
+interface LandedGrant {
+  presenceId: string;
+  /** Socket: installed, but its transport credential is still owed. */
+  awaitingTransportCredential: boolean;
+}
+
 /**
  * The half both OAuth doors share once a code is exchanged: refuse a
- * different workspace than the org's, persist the token before anything
- * else can fail, then activate.
+ * different workspace than the org's and persist the token before anything
+ * else can fail. Events then goes live. Socket cannot yet: its transport
+ * credential (Slack: the app-level token) is one only a human can mint, so
+ * the install is recorded and the row stays `pending_setup` (no service key,
+ * no adapter connection) until the paste door finishes it with that
+ * credential alone.
  */
-const activateExchangedPresence = async (input: {
+const landExchangedGrant = async (input: {
   agent: {
     id: string;
     name: string;
@@ -1109,7 +1189,7 @@ const activateExchangedPresence = async (input: {
   presence: ResumablePresence;
   exchanged: ExchangedGrant;
   actorUserId: string;
-}) => {
+}): Promise<LandedGrant> => {
   const { agent, provider, presence, exchanged } = input;
   if (
     exchanged.identity.tenant.externalId !== presence.integration.externalId
@@ -1138,15 +1218,28 @@ const activateExchangedPresence = async (input: {
     await preserveUnattachedChannelApp({ ...snapshot, retainAttached: true });
     throw error;
   }
+  const awaitingTransportCredential = presence.transport === "socket";
   const saved = await db.agentChannel.updateMany({
     where: { id: presence.id },
-    data: { credentials: encrypted },
+    data: {
+      credentials: encrypted,
+      // The socket arm's whole landing: the identity the install named, and
+      // pending_setup (a removed app re-installing arrives `disabled`).
+      ...(awaitingTransportCredential && {
+        identityRef: exchanged.identity.identityRef,
+        identityName: exchanged.identity.identityName ?? null,
+        status: "pending_setup",
+      }),
+    },
   });
   if (!saved.count) {
     await preserveUnattachedChannelApp(snapshot);
     throw new ServiceError("CONFLICT", "This install is no longer attached");
   }
-  return activatePresence({
+  if (awaitingTransportCredential) {
+    return { presenceId: presence.id, awaitingTransportCredential };
+  }
+  const activated = await activatePresence({
     presenceId: presence.id,
     agent: { id: agent.id, name: agent.name, workspaceId: agent.workspaceId },
     organizationId: agent.organizationId,
@@ -1158,6 +1251,7 @@ const activateExchangedPresence = async (input: {
     credentialsJson: exchanged.credentialsJson,
     actorUserId: input.actorUserId,
   });
+  return { presenceId: activated.id, awaitingTransportCredential };
 };
 
 /** How many waiting agent apps one stateless code is offered to. Each miss is
@@ -1165,9 +1259,9 @@ const activateExchangedPresence = async (input: {
  * finishes the rest from each agent's own Channels page. */
 const MAX_STATELESS_CANDIDATES = 25;
 
-/** One candidate's answer to a stateless code: finished, or why not. */
+/** One candidate's answer to a stateless code: landed, or why not. */
 type CandidateOutcome =
-  | { matched: true; presenceId: string }
+  | ({ matched: true } & LandedGrant)
   | { matched: false; reason: string };
 
 /**
@@ -1198,7 +1292,7 @@ const offerCodeToCandidateUnlocked = async (
   // Re-read under the lock: the candidate list was read outside it, and the
   // row may have finished, been detached, or been re-created since.
   const presence = await findResumablePresence(agent.id, provider);
-  if (!presence || presence.transport !== "events") {
+  if (!presence) {
     return { matched: false, reason: "no_longer_waiting" };
   }
   try {
@@ -1248,14 +1342,14 @@ const offerCodeToCandidateUnlocked = async (
   await db.$transaction((tx) =>
     beginChannelReattach(tx, provider, presence.externalId, presence.id),
   );
-  const activated = await activateExchangedPresence({
+  const landed = await landExchangedGrant({
     agent,
     provider,
     presence,
     exchanged,
     actorUserId: input.actorUserId,
   });
-  return { matched: true, presenceId: activated.id };
+  return { matched: true, ...landed };
 };
 
 /**
@@ -1263,8 +1357,9 @@ const offerCodeToCandidateUnlocked = async (
  * Slack (the admin-approval message's install link, the app directory, or
  * "Install to Workspace" in the app's settings) lands with a code and no
  * signed state. Once someone signs in, offer the code to each of THEIR org's
- * agent apps still waiting for an install, newest first, and finish the one
- * the provider accepts it for, as the signed-in caller.
+ * agent apps still waiting for an install, newest first, and land it on the
+ * one the provider accepts it for, as the signed-in caller (a socket app then
+ * still awaits its transport credential, exactly as from the signed door).
  *
  * TRUST: no confirmation step is owed here, unlike the shared-app finish.
  * A match can only ever be one of this org's own agent apps (only we hold its
@@ -1284,6 +1379,7 @@ export const completeAgentInstallFromCode = async (input: {
   agentId: string;
   workspaceId: string;
   presenceId: string;
+  awaitingTransportCredential: boolean;
 } | null> => {
   const apiUrl = publicApiUrl();
   if (!apiUrl) return null;
@@ -1293,7 +1389,8 @@ export const completeAgentInstallFromCode = async (input: {
   const candidates = await db.agentChannel.findMany({
     where: {
       provider: input.provider,
-      transport: "events",
+      // Both transports: a socket app created on a public HTTPS origin
+      // carries the same redirect, so Slack's side can install it too.
       status: { in: [...RESUMABLE_STATUSES] },
       credentials: { not: null },
       integration: { organizationId: input.organizationId },
@@ -1327,6 +1424,7 @@ export const completeAgentInstallFromCode = async (input: {
         agentId: agent.id,
         workspaceId: agent.workspaceId,
         presenceId: outcome.presenceId,
+        awaitingTransportCredential: outcome.awaitingTransportCredential,
       };
     }
     misses.push(outcome.reason);
@@ -1388,6 +1486,39 @@ export const syncAgentPresenceNames = async (
 };
 
 /**
+ * Make an agent's remote app ready for people to connect their own account
+ * (read-only user scopes + the OAuth redirect), using the org's integration
+ * credential - the same door the rename sync uses. Returns the scopes to
+ * request, or throws when the provider has no such flow. Idempotent.
+ */
+export const enablePresenceUserReadAccess = async (input: {
+  provider: ChannelProviderId;
+  organizationId: string;
+  externalId: string;
+  redirectUrl: string;
+}): Promise<readonly string[]> => {
+  const provider = channelProvider(input.provider);
+  const enable = provider.enableUserReadAccess;
+  if (!enable || !provider.userReadScopes) {
+    throw new ServiceError(
+      "UNPROCESSABLE",
+      `${provider.displayName} doesn't support connecting personal accounts.`,
+    );
+  }
+  await withFreshIntegrationCredentials(
+    input.organizationId,
+    input.provider,
+    (accessToken) =>
+      enable({
+        accessToken,
+        externalId: input.externalId,
+        redirectUrl: input.redirectUrl,
+      }),
+  );
+  return provider.userReadScopes;
+};
+
+/**
  * Detach: snapshot and enqueue the remote teardown, revoke the service key,
  * and delete or shelve the presence, all in ONE transaction, then run the
  * cleanup right away (any failure is retried by maintenance).
@@ -1433,12 +1564,43 @@ export const detachPresence = async (
       await tx.channelThreadLink.deleteMany({
         where: { agentChannelId: presence.id },
       });
+      // People's own read tokens die with the attachment: a later re-attach
+      // must not silently resume someone's personal Slack access.
+      await tx.agentChannelUserToken.deleteMany({
+        where: { agentChannelId: presence.id },
+      });
     }
     return ids;
   });
   // The agent's instruction doc loses the channel it described.
   rerenderAgentHome(agentId);
   await processChannelCleanups({ ids }).catch(() => undefined);
+};
+
+/**
+ * The provider revoked some PEOPLE's own tokens minted through this app
+ * (Slack: `tokens_revoked` naming only user ids - a member removed the app
+ * from their account, or was deactivated). Their read tokens go, and with
+ * them (cascade) every conversation they shared; the presence lives on. The
+ * agent re-renders when anything went, so its read tool and doc stop
+ * describing shares that no longer exist. Idempotent.
+ */
+export const revokePresenceUserTokens = async (
+  presenceId: string,
+  externalUserIds: readonly string[],
+): Promise<void> => {
+  const presence = await db.agentChannel.findUnique({
+    where: { id: presenceId },
+    select: { agentId: true },
+  });
+  if (!presence) return;
+  const { count } = await db.agentChannelUserToken.deleteMany({
+    where: {
+      agentChannelId: presenceId,
+      externalUserId: { in: [...externalUserIds] },
+    },
+  });
+  if (count > 0) rerenderAgentHome(presence.agentId);
 };
 
 /**
@@ -1502,6 +1664,11 @@ export const markPresenceRemoved = async (
   if (count === 0) return;
 
   await db.channelThreadLink.deleteMany({
+    where: { agentChannelId: presence.id },
+  });
+  // The app is gone at the provider, and with it every user token minted
+  // through it: drop them (and, by cascade, every read grant).
+  await db.agentChannelUserToken.deleteMany({
     where: { agentChannelId: presence.id },
   });
   // The column is a free string; a row from a build that knew a provider this

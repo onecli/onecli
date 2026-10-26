@@ -18,8 +18,9 @@ export const useCreateDomain = () => {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (domain: string) => domains.create(domain),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.domains.all() });
+    onSuccess: async () => {
+      // Awaited: the form clears onto a list that already shows the domain.
+      await qc.invalidateQueries({ queryKey: queryKeys.domains.all() });
       toast.success("Domain added. Publish the TXT record to verify it");
     },
     // Surface the server reason (blocklist, already claimed, invalid shape).

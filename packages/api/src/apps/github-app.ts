@@ -1,5 +1,6 @@
 import { createSign } from "crypto";
 import { pkceChallenge, pkceVerifier } from "./oauth/pkce";
+import { IS_CLOUD } from "../lib/env";
 import type { OAuthStatePayload } from "../lib/oauth-state";
 import type {
   AppDefinition,
@@ -55,7 +56,7 @@ export const signGitHubAppJwt = (appId: string, privateKey: string): string => {
   return `${unsigned}.${signature}`;
 };
 
-const GITHUB_API_HEADERS = {
+export const GITHUB_API_HEADERS = {
   Accept: "application/vnd.github+json",
   "X-GitHub-Api-Version": "2022-11-28",
 } as const;
@@ -77,13 +78,16 @@ export class GitHubInstallationError extends Error {
  * Mint an installation access token. With `repositories` (owner/name or bare
  * names, all on the installation's account) GitHub narrows the token to just
  * those repos — the same request the gateway makes. An EMPTY list is refused:
- * GitHub would read an absent field as "every repo".
+ * GitHub would read an absent field as "every repo". With `permissions` the
+ * token carries only those (never more than the app was granted); without,
+ * it carries every permission the app has.
  */
 export const mintGitHubInstallationToken = async (args: {
   appId: string;
   privateKey: string;
   installationId: string;
   repositories?: string[];
+  permissions?: Record<string, "read" | "write">;
 }): Promise<{
   token: string;
   expiresAt: number;
@@ -92,6 +96,12 @@ export const mintGitHubInstallationToken = async (args: {
   if (args.repositories && args.repositories.length === 0) {
     throw new Error("Refusing to mint a token for an empty repository list");
   }
+  const body = {
+    ...(args.repositories && {
+      repositories: args.repositories.map((r) => r.split("/").pop() ?? r),
+    }),
+    ...(args.permissions && { permissions: args.permissions }),
+  };
   const jwt = signGitHubAppJwt(args.appId, args.privateKey);
   const res = await fetch(
     `https://api.github.com/app/installations/${encodeURIComponent(args.installationId)}/access_tokens`,
@@ -102,11 +112,7 @@ export const mintGitHubInstallationToken = async (args: {
         Authorization: `Bearer ${jwt}`,
         "Content-Type": "application/json",
       },
-      body: args.repositories
-        ? JSON.stringify({
-            repositories: args.repositories.map((r) => r.split("/").pop() ?? r),
-          })
-        : undefined,
+      body: Object.keys(body).length > 0 ? JSON.stringify(body) : undefined,
     },
   );
   if (!res.ok) {
@@ -175,6 +181,9 @@ const PENDING_INSTALLATION = "githubInstallationId";
 const NOT_CONFIRMED =
   "GitHub did not confirm your access to this installation. Try connecting again.";
 
+const PLATFORM_APP_UNAVAILABLE =
+  "Connecting the GitHub App isn't available right now. Please contact support.";
+
 /**
  * One GitHub call of the ownership proof. A timeout or network failure
  * becomes the fixed refusal: the callback shows thrown messages to the user,
@@ -194,6 +203,11 @@ const githubFetch = (url: string, init: RequestInit): Promise<Response> =>
  * applies to the platform app (`GITHUB_APP_ID`) alone: one key there mints
  * tokens for every customer's installation. A customer's own (BYOC) app only
  * reaches that customer's installations, so it skips the proof.
+ *
+ * Cloud always carries the client. Should it ever be missing there, the
+ * platform app's callback refuses rather than mint from an unproven
+ * `installation_id` (see `resolveInstallation`). A self-host without it
+ * keeps the direct mint: its platform app is the operator's own.
  */
 const platformUserAuth = (appId: string) => {
   const clientId = process.env.GITHUB_APP_CLIENT_ID;
@@ -204,6 +218,18 @@ const platformUserAuth = (appId: string) => {
 };
 
 type PlatformUserAuth = NonNullable<ReturnType<typeof platformUserAuth>>;
+
+/**
+ * Whether connecting through app `appId` proves the user can access the
+ * installation it names. A customer's own (BYOC) app reaches only that
+ * customer's installations, so yes. The platform app (one key for every
+ * customer) proves it only through its OAuth client: without
+ * GITHUB_APP_CLIENT_ID/_SECRET a setup redirect's `installation_id` is
+ * unproven, and anything that hands out access by it must refuse.
+ */
+export const githubInstallsAreProven = (appId: string | undefined): boolean =>
+  !!appId &&
+  (appId !== process.env.GITHUB_APP_ID || platformUserAuth(appId) !== null);
 
 /**
  * Both legs complete only in the browser the state was issued to: it must
@@ -229,7 +255,9 @@ const sameBrowserState = ({
 /**
  * The installation a callback is about. On the second leg of the ownership
  * proof the id comes from the signed state, never the query again. Only a
- * numeric id is accepted: it is pasted into api.github.com paths.
+ * numeric id is accepted: it is pasted into api.github.com paths. On cloud,
+ * the platform app without its OAuth client is refused here, before either
+ * leg can mint (fail closed).
  */
 const resolveInstallation = ({
   appCredentials,
@@ -242,11 +270,12 @@ const resolveInstallation = ({
   if (!installationId || !INSTALLATION_ID.test(installationId)) {
     throw new Error("Invalid GitHub installation");
   }
-  return {
-    installationId,
-    secondLeg,
-    auth: platformUserAuth(appCredentials.appId!),
-  };
+  const appId = appCredentials.appId!;
+  const auth = platformUserAuth(appId);
+  if (!auth && IS_CLOUD && appId === process.env.GITHUB_APP_ID) {
+    throw new Error(PLATFORM_APP_UNAVAILABLE);
+  }
+  return { installationId, secondLeg, auth };
 };
 
 /**
@@ -454,6 +483,12 @@ export const githubApp: AppDefinition = {
       url.searchParams.set("state", state);
       return url.toString();
     },
+    // GitHub sends its setup redirect after "Configure" (an installation that
+    // already exists) with no `state`; the one callback that may fall back to
+    // this browser's `oauth_state` cookie.
+    acceptsCookieOnlyState: (params) =>
+      typeof params.installation_id === "string" &&
+      typeof params.setup_action === "string",
     // Leg 1 (platform app only): every setup redirect, install or update,
     // detours through GitHub's web flow before anything is minted.
     continueCallback: async (params) => {

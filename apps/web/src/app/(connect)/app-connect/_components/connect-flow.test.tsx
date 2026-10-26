@@ -99,6 +99,23 @@ describe("ConnectFlow ready screen", () => {
     expect(fakeLocation.href).toContain(
       "http://api.test/v1/apps/monday/authorize",
     );
+    // A workspace connect names no agent: the account lands on for none.
+    expect(new URL(fakeLocation.href).searchParams.has("agent_id")).toBe(false);
+  });
+
+  it("carries the connecting agent to authorize, so the account lands on for it", async () => {
+    render(
+      <ConnectFlow
+        app={baseApp}
+        hasDefaults
+        agentName="Arik"
+        agentId="agent-7"
+      />,
+    );
+    await advance(3500);
+    const params = new URL(fakeLocation.href).searchParams;
+    expect(params.get("agent_id")).toBe("agent-7");
+    expect(params.get("agent_name")).toBe("Arik");
   });
 
   const accessLevels = {

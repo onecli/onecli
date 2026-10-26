@@ -13,8 +13,8 @@ export const AgentLastSeen = ({
   lastSeenAt,
   createdAt,
 }: {
-  lastSeenAt: Date | null;
-  createdAt: Date;
+  lastSeenAt: string | null;
+  createdAt: string;
 }) => {
   const lastSeen = agentLastSeen(lastSeenAt, createdAt);
   return (

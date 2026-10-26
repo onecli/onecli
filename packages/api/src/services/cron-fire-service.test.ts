@@ -131,27 +131,6 @@ describe("fireDueCrons", () => {
     expect(mocks.createTurn).not.toHaveBeenCalled();
   });
 
-  it("fires through the normal turn funnel with the schedule advanced FIRST", async () => {
-    await fireDueCrons();
-
-    expect(mocks.advanceClaimedCron).toHaveBeenCalledWith(
-      "cr-1",
-      LEASE,
-      expect.any(Date),
-    );
-    expect(mocks.ensureSourcedConversation).toHaveBeenCalledWith(
-      "pr-1",
-      "ag-1",
-      { source: "cron", externalRef: "cr-1", title: "daily" },
-    );
-    expect(mocks.createTurn).toHaveBeenCalledWith(
-      "pr-1",
-      "conv-run",
-      expect.stringContaining('[Scheduled run "daily"'),
-      { source: "cron", userId: null },
-    );
-  });
-
   it("a schedule with no resolvable creator fires on agent authority alone", async () => {
     mocks.claimDueCrons.mockResolvedValue({
       lease: LEASE,

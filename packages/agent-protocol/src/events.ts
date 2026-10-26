@@ -81,6 +81,15 @@ export const toolStartedEventSchema = z.object({
  * explain a wrong answer ("it queried the wrong table"), so it is durable
  * alongside `output`, and it is just as UNTRUSTED: model-authored, rendered
  * as text only.
+ *
+ * Two outcomes, deliberately separate. `isError` means the TOOL failed: it
+ * could not do what was asked (bad arguments, an unknown id, a refusal).
+ * `exitCode` is a shell command's own status, present only when the harness
+ * reported a non-zero one: the command ran, and exiting 1 is often the
+ * answer (`grep` found nothing), not a failure. An adapter fills it from its
+ * vendor's output format and strips that format from `output`, so no reader
+ * ever parses vendor text, and the status survives any truncation of the
+ * output on the way.
  */
 export const toolFinishedEventSchema = z.object({
   type: z.literal("tool.finished"),
@@ -89,6 +98,7 @@ export const toolFinishedEventSchema = z.object({
   input: z.string().optional(),
   output: z.string(),
   isError: z.boolean().optional(),
+  exitCode: z.number().int().optional(),
 });
 
 /**
@@ -201,6 +211,59 @@ export const readPeerTaskStamp = (
 ): PeerTaskStamp | null => {
   const parsed = peerTaskStampSchema.safeParse(payload.peerTask);
   return parsed.success ? parsed.data : null;
+};
+
+/** How a `request_human_takeover` ask ended: still open, handed back (the
+ * person pressed Stop), the controller went quiet, or nobody came within a
+ * day. */
+export const DESKTOP_REQUEST_OUTCOMES = [
+  "pending",
+  "done",
+  "timeout",
+  "expired",
+] as const;
+export type DesktopRequestOutcome = (typeof DESKTOP_REQUEST_OUTCOMES)[number];
+
+/**
+ * The control plane's stamp on a notice about a desktop takeover ask: the
+ * ask's id and where it stands. The web renders the `pending` notice as
+ * the in-chat card (an Open computer action deep-linked to the ask); the
+ * settled ones read as plain notices. Same posture as `peerMessage`:
+ * platform-authored, read only off a `notice`, stripped at the wire when a
+ * sandbox forges it (the notice schema carries no such key).
+ */
+export const desktopRequestStampSchema = z.object({
+  id: z.string(),
+  outcome: z.enum(DESKTOP_REQUEST_OUTCOMES),
+});
+export type DesktopRequestStamp = z.infer<typeof desktopRequestStampSchema>;
+
+/** Read the stamp off a notice payload; `null` when absent or malformed. */
+export const readDesktopRequestStamp = (
+  payload: Record<string, unknown>,
+): DesktopRequestStamp | null => {
+  const parsed = desktopRequestStampSchema.safeParse(payload.desktopRequest);
+  return parsed.success ? parsed.data : null;
+};
+
+/**
+ * The control plane's stamp on the "Replaced by your message" notice: the
+ * held gateway approvals a person's newer message withdrew. The web settles
+ * those cards as replaced instead of "Decided elsewhere". Same posture as
+ * `peerMessage`: platform-authored, read only off a `notice`, stripped at
+ * the wire when a sandbox forges it (the notice schema carries no such key).
+ */
+export const supersededApprovalsStampSchema = z.array(z.string()).min(1);
+
+/** Read the withdrawn approval ids off a notice payload; `[]` when absent
+ * or malformed. */
+export const readSupersededApprovalsStamp = (
+  payload: Record<string, unknown>,
+): string[] => {
+  const parsed = supersededApprovalsStampSchema.safeParse(
+    payload.supersededApprovalIds,
+  );
+  return parsed.success ? parsed.data : [];
 };
 
 /**

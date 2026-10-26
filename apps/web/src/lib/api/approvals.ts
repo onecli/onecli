@@ -142,7 +142,18 @@ export type DecisionOutcome = "delivered" | "already_settled";
 /** How a held request ended, once it left the pending list: this browser's
  *  own click ("approved" / "denied"), another surface's decision
  *  ("decided"), or the gateway's auto-deny at the deadline ("expired"). */
-export type SettledOutcome = "approved" | "denied" | "decided" | "expired";
+export type SettledOutcome =
+  | "approved"
+  | "denied"
+  | "decided"
+  | "expired"
+  /** The person's newer message changed the request, so it was withdrawn. */
+  | "replaced";
+
+/** How a request on a GROUPED card (or its Done record) ended. A replaced
+ *  request is never grouped: it is history the person already acted on,
+ *  so it always stands as its own one-line record (`approvalTimeline`). */
+export type GroupedOutcome = Exclude<SettledOutcome, "replaced">;
 
 const base = () => `${getGatewayApiUrl()}/v1/approvals`;
 

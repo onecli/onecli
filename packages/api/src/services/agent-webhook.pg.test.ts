@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { proofDatabaseUrl } from "../testing/pg-proof";
 import { MAX_WEBHOOKS_PER_AGENT } from "../validations/webhooks";
+import { TURN_FAILED_RAW_ERROR_MESSAGE } from "../validations/conversation";
 
 /**
  * Agent webhook proofs (plans/agent-webhooks.md), against a real Postgres:
@@ -444,5 +445,245 @@ describe.skipIf(!PROOF_URL)("agent webhooks", () => {
     expect(text).toContain("The run failed: The agent ran into an error");
     expect(text).not.toContain("no detail was reported");
     expect(text).not.toContain("invalid_request_error");
+  });
+  it("webhook_runs and the runs list narrow to ONE webhook, fenced to its workspace", async () => {
+    const { agentId, originId } = await seedAgent();
+    const notes = await create(agentId, originId);
+    const other = await hooks.createWebhook(
+      WS,
+      agentId,
+      { name: "Invoices", instructions: "Log each invoice." },
+      { userId: OWNER, originConversationId: originId },
+    );
+    await hooks.receiveWebhook(
+      tokenOf(notes.url),
+      meetingEvent,
+      "application/json",
+    );
+    await hooks.receiveWebhook(
+      tokenOf(other.url),
+      '{"invoice":7}',
+      "application/json",
+    );
+
+    const recent = await hooks.listWebhookRuns(WS, agentId, notes.id, 5);
+    expect(recent).toHaveLength(1);
+    expect(recent[0]).toMatchObject({
+      status: "queued",
+      instructions: "File each action item as an issue.",
+      report: null,
+    });
+    expect(recent[0]?.event).toContain('"name": "Weekly sync"');
+    expect(recent[0]?.event).not.toContain("invoice");
+
+    await expect(
+      hooks.listWebhookRuns(OTHER_WS, agentId, notes.id, 5),
+    ).rejects.toThrow("Webhook not found");
+
+    // A raw provider payload never reaches the agent, and a clipped report
+    // never ends on half an emoji.
+    await db.turn.update({
+      where: { id: recent[0]!.turnId },
+      data: {
+        status: "failed",
+        error: '{"type":"error","error":{"type":"invalid_request_error"}}',
+      },
+    });
+    const conversationId = (
+      await db.turn.findUniqueOrThrow({
+        where: { id: recent[0]!.turnId },
+        select: { conversationId: true },
+      })
+    ).conversationId;
+    await db.turnEvent.create({
+      data: {
+        conversationId,
+        turnId: recent[0]!.turnId,
+        seq: 1,
+        type: "text",
+        payload: { type: "text", text: `${"a".repeat(999)}😀 tail` },
+      },
+    });
+    const [clipped] = await hooks.listWebhookRuns(WS, agentId, notes.id, 5);
+    expect(clipped?.error).toBe(TURN_FAILED_RAW_ERROR_MESSAGE);
+    expect(clipped?.error).not.toContain("invalid_request_error");
+    expect(clipped?.report?.startsWith("a".repeat(999))).toBe(true);
+    expect(clipped?.report).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+
+    const { listRuns } = await import("./agent-runs-service");
+    const page = await listRuns(WS, ORG, OWNER, agentId, {
+      source: "webhook",
+      webhookId: notes.id,
+    });
+    expect(page.runs).toHaveLength(1);
+    const everyWebhook = await listRuns(WS, ORG, OWNER, agentId, {
+      source: "webhook",
+    });
+    expect(everyWebhook.runs).toHaveLength(2);
+    // Another workspace naming this webhook sees nothing.
+    const foreign = await listRuns(OTHER_WS, ORG, OWNER, null, {
+      webhookId: notes.id,
+    });
+    expect(foreign.runs).toHaveLength(0);
+  });
+
+  it("the agent's change is only an ask: nothing moves until a person approves it", async () => {
+    const { agentId, originId } = await seedAgent();
+    const hook = await create(agentId, originId);
+    const { decideActionApproval } =
+      await import("./channels/action-approval-service");
+    const ask = (change: { instructions?: string; enabled?: boolean }) =>
+      hooks.requestWebhookUpdate({
+        workspaceId: WS,
+        agentId,
+        conversationId: originId,
+        originTurnId: null,
+        change: { webhookId: hook.id, ...change },
+      });
+
+    const held = await ask({ instructions: "Save to the Meetings folder." });
+    expect(held.kind).toBe("held");
+    // A second ask for the same webhook never stacks a competing card.
+    expect(await ask({ enabled: false })).toMatchObject({
+      kind: "busy",
+      approvalId: held.approvalId,
+    });
+    expect(
+      (await db.agentWebhook.findUniqueOrThrow({ where: { id: hook.id } }))
+        .instructions,
+    ).toBe("File each action item as an issue.");
+    // Another workspace cannot even ask about it.
+    await expect(
+      hooks.requestWebhookUpdate({
+        workspaceId: OTHER_WS,
+        agentId,
+        conversationId: originId,
+        originTurnId: null,
+        change: { webhookId: hook.id, enabled: false },
+      }),
+    ).rejects.toThrow("Webhook not found");
+
+    const decided = await decideActionApproval({
+      approvalId: held.approvalId,
+      decision: "approve",
+      deciderUserId: OWNER,
+    });
+    expect(decided).toMatchObject({ kind: "decided", status: "executed" });
+    expect(
+      (await db.agentWebhook.findUniqueOrThrow({ where: { id: hook.id } }))
+        .instructions,
+    ).toBe("Save to the Meetings folder.");
+    const audited = await db.auditLog.findFirstOrThrow({
+      where: { userId: OWNER, service: "webhook", action: "update" },
+      orderBy: { createdAt: "desc" },
+      select: { metadata: true },
+    });
+    expect(audited.metadata).toMatchObject({
+      webhookId: hook.id,
+      fields: ["instructions"],
+      approvalId: held.approvalId,
+    });
+
+    // A new ask, then the webhook is deleted: the ask settles as expired
+    // instead of waiting for an approve that could only fail.
+    const orphan = await ask({ enabled: false });
+    await hooks.deleteWebhook(WS, agentId, hook.id);
+    expect(
+      (
+        await db.actionApproval.findUniqueOrThrow({
+          where: { id: orphan.approvalId },
+          select: { status: true },
+        })
+      ).status,
+    ).toBe("expired");
+  });
+
+  it("the agent's webhook tools answer in the owner's private chat, never in a shared thread", async () => {
+    const { agentId, originId } = await seedAgent();
+    const hook = await create(agentId, originId);
+    const tools = await import("./platform-tool-service");
+    const runnerId = `${P}runner-gate`;
+    await db.runner.upsert({
+      where: { id: runnerId },
+      create: { id: runnerId, name: "gate", token: `rnr_${P}gate` },
+      update: {},
+    });
+    const sandbox = await db.sandbox.create({
+      data: { agentId, runnerId, status: "running" },
+      select: { id: true },
+    });
+    const turnIn = (conversationId: string) =>
+      db.turn.create({
+        data: { conversationId, message: "fix the webhook", userId: OWNER },
+        select: { id: true },
+      });
+    const ask = (conversationId: string, turnId: string) =>
+      tools.executePlatformTool(runnerId, {
+        sandboxId: sandbox.id,
+        tool: "update_webhook",
+        args: { webhookId: hook.id, enabled: false },
+        conversationId,
+        turnId,
+      });
+    try {
+      // The owner typed this turn, but in a shared thread a guest's message
+      // steers into the same run: refused, and no card is raised.
+      const shared = await db.conversation.create({
+        data: { agentId, source: "slack", externalRef: `${P}C1:1.2` },
+        select: { id: true },
+      });
+      const refused = await ask(shared.id, (await turnIn(shared.id)).id);
+      expect(refused.ok).toBe(false);
+      expect(refused.error).toMatch(/own private chat/);
+      expect(await db.actionApproval.count({ where: { agentId } })).toBe(0);
+
+      const allowed = await ask(originId, (await turnIn(originId)).id);
+      expect(allowed).toMatchObject({ ok: true, result: { status: "held" } });
+      // Held, not written.
+      expect(
+        (await db.agentWebhook.findUniqueOrThrow({ where: { id: hook.id } }))
+          .enabled,
+      ).toBe(true);
+
+      // The dashboard's public surface: the bell lists the full change, and
+      // the decision route applies it.
+      const listed = await app.request(
+        `/v1/workspaces/${WS}/channel-approvals`,
+        { headers: { "x-workspace-id": WS } },
+      );
+      expect(listed.status).toBe(200);
+      const { items } = (await listed.json()) as {
+        items: { id: string; webhookChange: unknown }[];
+      };
+      const card = items.find(
+        (item) =>
+          item.id === (allowed.result as { approvalId: string }).approvalId,
+      );
+      expect(card?.webhookChange).toEqual({
+        name: null,
+        instructions: null,
+        enabled: false,
+      });
+      const decided = await app.request(
+        `/v1/agents/${agentId}/approvals/${card?.id}/decision`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-workspace-id": WS,
+          },
+          body: JSON.stringify({ decision: "approve" }),
+        },
+      );
+      expect(decided.status).toBe(200);
+      expect(await decided.json()).toMatchObject({ status: "executed" });
+      expect(
+        (await db.agentWebhook.findUniqueOrThrow({ where: { id: hook.id } }))
+          .enabled,
+      ).toBe(false);
+    } finally {
+      await db.sandbox.delete({ where: { id: sandbox.id } });
+      await db.runner.delete({ where: { id: runnerId } });
+    }
   });
 });

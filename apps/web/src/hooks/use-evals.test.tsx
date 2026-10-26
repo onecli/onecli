@@ -18,6 +18,7 @@ const run = (status: EvalRunDetail["status"]): EvalRunDetail => ({
   status,
   trigger: "manual",
   configVersion: "cfg",
+  model: null,
   total: 1,
   counts: { pending: 0, passed: 1, mismatch: 0, error: 0, inconclusive: 0 },
   error: null,

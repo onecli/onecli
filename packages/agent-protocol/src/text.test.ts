@@ -1,6 +1,18 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { agentConnectionSchema } from "./transport";
-import { cleanLabel, isBareHostname } from "./text";
+import {
+  MAX_AGENT_CONNECTION_NAME_CHARS,
+  agentConnectionSchema,
+} from "./transport";
+import {
+  CUSTOM_CONNECTION_FALLBACK_LABEL,
+  MAX_CUSTOM_CONNECTION_LABEL_CHARS,
+  cleanLabel,
+  customConnectionLabel,
+  isBareHostname,
+  isNoReply,
+} from "./text";
 
 describe("cleanLabel", () => {
   it("drops control characters, folds every whitespace run (line separators included) to one space, clamps", () => {
@@ -14,6 +26,63 @@ describe("cleanLabel", () => {
     expect(cleanLabel("Ada\nBee")).toBe("AdaBee");
     expect(cleanLabel("N".repeat(500), 80)).toHaveLength(80);
     expect(cleanLabel("", 10)).toBe("");
+  });
+
+  it("drops invisible format characters (bidi overrides/isolates, zero-width, BOM)", () => {
+    expect(cleanLabel("\u202eProd\u200b key\u2066x\u2069\ufeff\u2060")).toBe(
+      "Prod keyx",
+    );
+    expect(cleanLabel("a\u200e\u200f\u202ab\u00ad")).toBe("ab");
+  });
+
+  it("drops C1 controls too, not just C0 and DEL", () => {
+    expect(cleanLabel("a\u0085b\u009bc\u007fd")).toBe("abcd");
+  });
+
+  it("clamps by UTF-16 code unit (a zod .max()'s unit), never splitting a surrogate pair", () => {
+    expect(cleanLabel("🔑".repeat(5), 3)).toBe("🔑");
+    expect(cleanLabel("🔑".repeat(5), 4)).toBe("🔑🔑");
+    // An emoji name used to clamp to 80 code points (160 units) and fail the
+    // wire schema, which boots a sandbox with NO connections at all.
+    const name = cleanLabel("🔑".repeat(50), MAX_AGENT_CONNECTION_NAME_CHARS);
+    expect(
+      agentConnectionSchema.safeParse({
+        provider: "x",
+        name,
+        label: null,
+        host: null,
+      }).success,
+    ).toBe(true);
+  });
+});
+
+// Shared corpus: the SAME cases are asserted by the gateway's `display_label`
+// (apps/gateway/crates/inject/src/secret_choice.rs, `include_str!`), so
+// list_apps and the x-onecli-connections header name a connection the same.
+const LABEL_CORPUS = JSON.parse(
+  readFileSync(
+    fileURLToPath(
+      new URL("./custom-connection-label-cases.json", import.meta.url),
+    ),
+    "utf8",
+  ),
+) as {
+  max: number;
+  fallback: string;
+  cases: { raw: string; want: string }[];
+};
+
+describe("customConnectionLabel parity corpus (mirrored in the gateway)", () => {
+  it("shares the gateway's cap and fallback", () => {
+    expect(LABEL_CORPUS.max).toBe(MAX_CUSTOM_CONNECTION_LABEL_CHARS);
+    expect(LABEL_CORPUS.fallback).toBe(CUSTOM_CONNECTION_FALLBACK_LABEL);
+    expect(LABEL_CORPUS.cases.length).toBeGreaterThan(10);
+  });
+
+  it.each(LABEL_CORPUS.cases)("$raw", ({ raw, want }) => {
+    const got = customConnectionLabel(raw);
+    expect(got).toBe(want);
+    expect(got.length).toBeLessThanOrEqual(MAX_CUSTOM_CONNECTION_LABEL_CHARS);
   });
 });
 
@@ -63,6 +132,30 @@ describe("agentConnectionSchema", () => {
         agentConnectionSchema.safeParse({ ...base, host }).success,
         host,
       ).toBe(false);
+    }
+  });
+});
+
+describe("isNoReply", () => {
+  it("is the exact token only (case, whitespace and emphasis tolerated)", () => {
+    for (const yes of [
+      "[no reply]",
+      "[NO REPLY]",
+      "  [no reply]\n",
+      "**[no reply]**",
+      "`[no reply]`",
+    ]) {
+      expect(isNoReply(yes)).toBe(true);
+    }
+    for (const no of [
+      null,
+      undefined,
+      "",
+      "no reply",
+      "[no reply] but here is why",
+      "Answer: [no reply]",
+    ]) {
+      expect(isNoReply(no)).toBe(false);
     }
   });
 });

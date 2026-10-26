@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -24,6 +23,7 @@ import { ContactRowFrame } from "./contact-row-frame";
 import { DirectionCell } from "./direction-cell";
 import { InboundPersonControl } from "./inbound-person-control";
 import { InboundSpaceControl } from "./inbound-space-control";
+import { ListenControl } from "./listen-control";
 import { namesOf, type MergedEntry } from "./merge-contacts";
 import { OutboundControl } from "./outbound-control";
 
@@ -61,17 +61,19 @@ const removeDescription = (
     : `Clears whether ${agentName} can post here on its own. Its next post will ask you first.`;
 };
 
-/** The two column questions, per kind. Shared with the group's header. */
+/** The column questions, per kind. Shared with the group's header. Channels
+ *  add a third: what the agent hears there (point of contact or not). */
 export const directionHeadings = (
   kind: "person" | "channel",
   agentName: string,
-): { inbound: string; outbound: string } =>
+): { inbound: string; outbound: string; listen?: string } =>
   kind === "person"
     ? {
         inbound: `Can message ${agentName}`,
         outbound: `${agentName} can message them`,
       }
     : {
+        listen: `${agentName} listens to`,
         inbound: `${agentName} answers`,
         outbound: `${agentName} can post`,
       };
@@ -91,7 +93,6 @@ export const TwoWayRow = (props: TwoWayRowProps) => {
   const dismissSpace = useDismissReachRow(agentId, provider);
   const deleteContact = useDeleteContact(agentId);
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [removing, setRemoving] = useState(false);
   const { title, subtitle } = namesOf(entry);
   const headings = directionHeadings(kind, agentName);
   // A PENDING reach row is an open ask in the bell, not a setting: Remove
@@ -103,32 +104,24 @@ export const TwoWayRow = (props: TwoWayRowProps) => {
       : null;
   const removable = reachRef !== null || entry.contact !== null;
 
-  const confirmRemove = async () => {
-    setRemoving(true);
-    // Two independent records: settle both, so one failing never hides
-    // that the other was cleared (each hook invalidates its own query).
-    const results = await Promise.allSettled([
+  // Instant: both halves leave on click and the confirm closes. Two
+  // independent records: each hook puts back (and names) its own half if
+  // the server refuses it, so one failing never hides that the other was
+  // cleared. The confirmation waits until both are in.
+  const confirmRemove = () => {
+    setConfirmOpen(false);
+    void Promise.allSettled([
       reachRef
         ? (kind === "person" ? dismissPerson : dismissSpace).mutateAsync({
             externalRef: reachRef,
           })
         : null,
       entry.contact ? deleteContact.mutateAsync(entry.contact.id) : null,
-    ]);
-    const failed = results.find(
-      (r): r is PromiseRejectedResult => r.status === "rejected",
-    );
-    if (failed) {
-      toast.error(
-        failed.reason instanceof Error
-          ? failed.reason.message
-          : "Remove failed",
-      );
-    } else {
-      toast.success(`${title} removed`);
-    }
-    setRemoving(false);
-    setConfirmOpen(false);
+    ]).then((results) => {
+      if (results.every((r) => r.status === "fulfilled")) {
+        toast.success(`${title} removed`);
+      }
+    });
   };
 
   return (
@@ -137,10 +130,19 @@ export const TwoWayRow = (props: TwoWayRowProps) => {
         label={title}
         subtitle={subtitle}
         mono={kind === "channel"}
-        disabled={removing}
         {...(removable && { onRemove: () => setConfirmOpen(true) })}
         status={
           <div className="flex items-center gap-1 sm:gap-2">
+            {props.kind === "channel" && headings.listen && (
+              <DirectionCell heading={headings.listen}>
+                <ListenControl
+                  agentId={agentId}
+                  agentName={agentName}
+                  subject={title}
+                  reach={props.entry.reach}
+                />
+              </DirectionCell>
+            )}
             <DirectionCell heading={headings.inbound}>
               {props.kind === "person" ? (
                 <InboundPersonControl
@@ -184,28 +186,12 @@ export const TwoWayRow = (props: TwoWayRowProps) => {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={removing}>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              onClick={(event) => {
-                // Keep the dialog open while the request runs; close on
-                // settle so the outcome toast is the next thing seen.
-                event.preventDefault();
-                void confirmRemove();
-              }}
-              disabled={removing}
+              onClick={confirmRemove}
               className={buttonVariants({ variant: "destructive" })}
             >
-              {removing ? (
-                <>
-                  <Loader2
-                    className="size-3.5 animate-spin motion-reduce:hidden"
-                    aria-hidden
-                  />
-                  Removing…
-                </>
-              ) : (
-                "Remove"
-              )}
+              Remove
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

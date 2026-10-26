@@ -1,6 +1,9 @@
 import {
+  readDesktopRequestStamp,
   readPeerMessageStamp,
   readPeerTaskStamp,
+  readSupersededApprovalsStamp,
+  type DesktopRequestOutcome,
   type PeerTaskOutcome,
 } from "@onecli/agent-protocol";
 import {
@@ -24,7 +27,10 @@ export interface ToolCall {
   input?: string;
   /** Absent until the tool reports back — that is what "running" looks like. */
   output?: string;
+  /** The TOOL failed (it could not do what was asked). */
   isError?: boolean;
+  /** A shell command ran and exited with this non-zero status. */
+  exitCode?: number;
 }
 
 /** One turn as the reader sees it: what was asked, what happened, what came back. */
@@ -83,11 +89,25 @@ export interface RenderedTurn {
   /** Set when the turn ended badly — rendered instead of a silent stop. */
   error?: string;
   /**
+   * Held approvals the person's newer message withdrew on this turn (the
+   * `supersededApprovalIds` stamp on the control plane's "Replaced by your
+   * message" notice). The chat's approval cards settle these as replaced.
+   */
+  supersededApprovalIds: string[];
+  /**
    * Non-fatal warnings about the run ("that model isn't available, so this is
    * running the default"). Distinct from `error` because they do NOT end the
    * turn — the agent goes on to answer, and both belong on screen.
    */
   notices: string[];
+  /**
+   * The desktop takeover asks this turn raised, by notice index: the
+   * `desktopRequest` stamp the control plane puts on the "Needs you"
+   * notice and on its settling line. The chat
+   * renders a `pending` one as the in-chat card (an Open computer action);
+   * a settled one reads as the plain notice it is.
+   */
+  desktopRequests: Map<number, { id: string; outcome: DesktopRequestOutcome }>;
   /**
    * What THIS agent said to a peer agent on this turn (PR 5b): the sender's
    * record of a `message_agent` delivery, the structured `peerMessage` the
@@ -126,6 +146,8 @@ export interface SentNowOutcome {
 const str = (payload: Record<string, unknown>, key: string): string =>
   typeof payload[key] === "string" ? (payload[key] as string) : "";
 
+const isInteger = (value: unknown): value is number => Number.isInteger(value);
+
 /**
  * Fold the transcript into per-turn views.
  *
@@ -148,6 +170,8 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
       lead: "",
       liveText: "",
       notices: [],
+      supersededApprovalIds: [],
+      desktopRequests: new Map(),
       peerMessages: [],
       peerMessagesOpeningTask: new Set(),
       tools: [],
@@ -198,10 +222,12 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
         const callId = str(event.payload, "callId");
         const started = turn.tools.find((t) => t.callId === callId);
         const input = str(event.payload, "input");
+        const exitCode = event.payload.exitCode;
         const finished = {
           ...(input !== "" && { input }),
           output: str(event.payload, "output"),
           ...(event.payload.isError === true && { isError: true }),
+          ...(isInteger(exitCode) && { exitCode }),
         };
         if (started) Object.assign(started, finished);
         // A finish with no start still happened — show it rather than drop it.
@@ -220,6 +246,11 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
         // that then succeeds, and `error` is terminal by definition here and
         // in `isTerminalEvent`.
         turn.notices.push(str(event.payload, "text"));
+        const desktop = readDesktopRequestStamp(event.payload);
+        if (desktop) turn.desktopRequests.set(turn.notices.length - 1, desktop);
+        turn.supersededApprovalIds.push(
+          ...readSupersededApprovalsStamp(event.payload),
+        );
         const stamp = readPeerMessageStamp(event.payload);
         if (stamp?.text) {
           if (stamp.opensTask) {
@@ -315,3 +346,29 @@ export const movesTurnStatus = (event: TurnEvent): boolean =>
   event.type === "turn.done" ||
   event.type === "error" ||
   event.type === "message.joined";
+
+/** Platform tools whose call can hold an approval card in the chat (every
+ * `requestActionApproval` caller). MCP names arrive prefixed
+ * (`mcp__onecli__<tool>`), so match the suffix. */
+const APPROVAL_TOOLS = [
+  "propose_custom_connection",
+  "send_message",
+  "message_agent",
+  "preview_expose",
+  "update_webhook",
+] as const;
+
+/**
+ * Whether a live event just finished a tool that may have raised an approval
+ * card, so the pending-approvals list should refetch now instead of on its
+ * slow poll: the agent's "review the card" text and the card then land
+ * together.
+ */
+export const raisesApproval = (event: TurnEvent): boolean => {
+  if (event.type !== "tool.finished") return false;
+  const name = event.payload.name;
+  return (
+    typeof name === "string" &&
+    APPROVAL_TOOLS.some((tool) => name === tool || name.endsWith(`__${tool}`))
+  );
+};

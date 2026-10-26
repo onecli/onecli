@@ -1,86 +1,31 @@
-import { spawnSync } from "node:child_process";
 import {
-  chmodSync,
   existsSync,
-  mkdirSync,
-  mkdtempSync,
   readFileSync,
   readlinkSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
+import {
+  fake,
+  fakeDesktopBin,
+  logLines,
+  notePid,
+  record,
+  startedPids,
+  survivors,
+  tmp,
+  withFakes,
+} from "./testing/desktop-fakes";
 
 /**
  * The desktop is brought up from binaries the image may or may not have.
- * These tests stand in for them with shell scripts on a private PATH: each
- * fake does exactly what the real piece's readiness signal needs (Xvfb
- * creates the socket, dbus prints an address, xprop reports the WM check)
- * and records that it ran, so the ORDER and the ENV the pieces get are
+ * These tests stand in for them with shell scripts on a private PATH
+ * (testing/desktop-fakes.ts), so the ORDER and the ENV the pieces get are
  * what is proven, without an X server on the test host.
  */
-
-const dirs: string[] = [];
-const tmp = () => {
-  const dir = mkdtempSync(join(tmpdir(), "desktop-test-"));
-  dirs.push(dir);
-  return dir;
-};
-afterEach(() => {
-  for (const dir of dirs.splice(0))
-    rmSync(dir, { recursive: true, force: true });
-});
-
-const fake = (bin: string, name: string, body: string) => {
-  const path = join(bin, name);
-  writeFileSync(path, `#!/bin/sh\n${body}\n`);
-  chmodSync(path, 0o755);
-};
-
-/**
- * A PATH holding every piece, each writing a line `<name> <DISPLAY> <bus>`
- * to `${log}` so the test can read back what ran and with what.
- */
-const fakeDesktopBin = (log: string, options: { wmReady?: boolean } = {}) => {
-  const bin = join(tmp(), "bin");
-  mkdirSync(bin);
-  const record = (name: string) =>
-    `echo "${name} $DISPLAY ${"$"}{DBUS_SESSION_BUS_ADDRESS:-none}" >> "${log}"`;
-  // Xvfb: the real one creates the socket once it accepts clients; the
-  // fake creates it and then sleeps as the server would.
-  fake(
-    bin,
-    "Xvfb",
-    `${record("Xvfb")}\nmkdir -p /tmp/.X11-unix\ntouch "/tmp/.X11-unix/X\${1#:}"\nexec sleep 30`,
-  );
-  fake(
-    bin,
-    "dbus-daemon",
-    `${record("dbus-daemon")}\necho "unix:path=/tmp/fake-bus,guid=abc"\nexec sleep 30`,
-  );
-  fake(bin, "xfwm4", `${record("xfwm4")}\nexec sleep 30`);
-  fake(
-    bin,
-    "xprop",
-    options.wmReady === false
-      ? "exit 1"
-      : 'echo "_NET_SUPPORTING_WM_CHECK(WINDOW): window id # 0x400003"',
-  );
-  fake(bin, "xsetroot", record("xsetroot"));
-  return bin;
-};
-
-/**
- * A PATH with the fakes first and the host's tools behind them: the fakes
- * are shell scripts that need `sh`, `mkdir`, `touch`, `sleep`. Reading the
- * host PATH is the point here, not a build input the task graph should
- * know about.
- */
-// eslint-disable-next-line turbo/no-undeclared-env-vars
-const withFakes = (bin: string) => `${bin}:${process.env.PATH ?? ""}`;
 
 describe("desktopAvailable", () => {
   it("is true only when every piece is on PATH", async () => {
@@ -105,12 +50,13 @@ describe("startDesktop", () => {
     try {
       expect(desktop.display).toBe(DISPLAY);
       expect(desktop.dbusAddress).toBe("unix:path=/tmp/fake-bus,guid=abc");
-      const lines = readFileSync(log, "utf8").trim().split("\n");
-      expect(lines).toEqual([
+      // The root colour lands before the window manager: its compositor
+      // keeps the root it finds, so a later paint never shows.
+      expect(logLines(log)).toEqual([
         "Xvfb :1 none",
+        "xsetroot :1 none",
         "dbus-daemon :1 none",
         "xfwm4 :1 unix:path=/tmp/fake-bus,guid=abc",
-        "xsetroot :1 unix:path=/tmp/fake-bus,guid=abc",
       ]);
       expect(existsSync("/tmp/.X1-lock")).toBe(false);
     } finally {
@@ -119,16 +65,106 @@ describe("startDesktop", () => {
   });
 
   it("gives up, and takes down what it started, when the window manager never reports in", async () => {
-    const { startDesktop } = await import("./desktop");
+    const { startDesktop, READY_TIMEOUT_MS } = await import("./desktop");
+    const original = READY_TIMEOUT_MS.value;
+    READY_TIMEOUT_MS.value = 2_000;
+    onTestFinished(() => {
+      READY_TIMEOUT_MS.value = original;
+    });
     const log = join(tmp(), "log");
     const bin = fakeDesktopBin(log, { wmReady: false });
     await expect(startDesktop({ PATH: withFakes(bin) })).rejects.toThrow(
       /window manager did not come up/,
     );
-    // The fakes are `sleep 30` once started; after close() none survive.
-    const alive = spawnSync("pgrep", ["-f", `${bin}/`], { encoding: "utf8" });
-    expect(alive.stdout.trim()).toBe("");
+    // Every long-lived piece that started is gone after close(): the three
+    // that ran (Xvfb, the bus, the window manager), each by its own pid.
+    const pids = startedPids(bin);
+    expect(pids).toHaveLength(3);
+    expect(await survivors(pids)).toEqual([]);
   }, 15_000);
+});
+
+describe("a desktop layer", () => {
+  it("paints the root in place of the plain colour, then adds its pieces once the manager is up, all going down with close()", async () => {
+    const { startDesktop } = await import("./desktop");
+    const log = join(tmp(), "log");
+    const bin = fakeDesktopBin(log);
+    fake(bin, "painter", record(log, "painter"));
+    fake(
+      bin,
+      "extra",
+      `${record(log, "extra")}\n${notePid(bin)}\nexec sleep 30`,
+    );
+    const closed: string[] = [];
+    const desktop = await startDesktop(
+      { PATH: withFakes(bin) },
+      {
+        paintRoot: async (host) =>
+          (await host.run("painter", [])) !== undefined,
+        ready: async (host) => {
+          host.start("extra", []);
+          await host.waitFor(
+            () => startedPids(bin).length === 4,
+            "the extra piece",
+          );
+        },
+        close: () => closed.push("layer"),
+      },
+    );
+    try {
+      expect(logLines(log)).toEqual([
+        "Xvfb :1 none",
+        "painter :1 none",
+        "dbus-daemon :1 none",
+        "xfwm4 :1 unix:path=/tmp/fake-bus,guid=abc",
+        "extra :1 unix:path=/tmp/fake-bus,guid=abc",
+      ]);
+    } finally {
+      desktop.close();
+    }
+    expect(closed).toEqual(["layer"]);
+    expect(await survivors(startedPids(bin))).toEqual([]);
+  }, 20_000);
+
+  it("falls back to the plain colour when the paint fails or throws", async () => {
+    const { startDesktop } = await import("./desktop");
+    for (const paintRoot of [
+      async () => false,
+      async () => {
+        throw new Error("no painter");
+      },
+    ]) {
+      const log = join(tmp(), "log");
+      const desktop = await startDesktop(
+        { PATH: withFakes(fakeDesktopBin(log)) },
+        { paintRoot },
+      );
+      desktop.close();
+      expect(logLines(log).slice(0, 2)).toEqual([
+        "Xvfb :1 none",
+        "xsetroot :1 none",
+      ]);
+    }
+  }, 20_000);
+
+  it("never costs the desktop: a layer whose pieces fail leaves the screen, bus and manager up", async () => {
+    const { startDesktop } = await import("./desktop");
+    const bin = fakeDesktopBin(join(tmp(), "log"));
+    const desktop = await startDesktop(
+      { PATH: withFakes(bin) },
+      {
+        ready: async () => {
+          throw new Error("a piece did not start");
+        },
+      },
+    );
+    try {
+      expect(desktop.display).toBe(":1");
+      expect(await survivors(startedPids(bin))).toHaveLength(3);
+    } finally {
+      desktop.close();
+    }
+  }, 20_000);
 });
 
 describe("publishDisplay", () => {

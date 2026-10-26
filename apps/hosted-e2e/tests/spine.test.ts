@@ -1,4 +1,4 @@
-import { expect } from "vitest";
+import { expect, test } from "vitest";
 import { scenario } from "../src/scenario.js";
 import {
   seedAnthropicGrant,
@@ -37,6 +37,18 @@ scenario(
 
     const first = await runTurn(stack.v1, conversation.id, "hello sandbox");
     expect(first.status).toBe("done");
+
+    // The turn armed the stall sweep: a turn far shorter than one heartbeat
+    // interval still stamped its liveness clock, so had its close been lost
+    // it would fail as stalled in minutes rather than wait out the ceiling.
+    // The whole path is real here: the supervisor's first beat rides behind
+    // `turn.started`, the runner posts that buffered event ahead of the
+    // beat, and the control plane stamps only a running turn.
+    const firstRow = await cx.prisma.turn.findUniqueOrThrow({
+      where: { id: first.id },
+      select: { lastProgressAt: true },
+    });
+    expect(firstRow.lastProgressAt).not.toBeNull();
 
     // The sandbox genuinely ran: the row reached `running` and holds a
     // container ref the daemon knows.
@@ -112,10 +124,11 @@ scenario(
   },
 );
 
-scenario("waitFor exposes the last observed value on timeout", async (cx) => {
+// Plain `test`, not `scenario`: a meta-guard on the suite's own helper
+// needs no database clone, gateway or api-server.
+test("waitFor exposes the last observed value on timeout", async () => {
   // A meta-guard for the suite's own honesty: a timed-out wait must carry
   // the final observation, or every flake is undiagnosable.
-  void cx;
   await expect(
     waitFor(
       async () => ({ status: "queued" }),

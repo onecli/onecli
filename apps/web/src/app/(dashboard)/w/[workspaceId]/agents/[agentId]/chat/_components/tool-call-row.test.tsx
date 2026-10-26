@@ -46,35 +46,57 @@ describe("ToolCallRow", () => {
     expect(container.querySelector(".bg-red-50")).not.toBeNull();
   });
 
-  it("a command that exits non-zero is Failed too (Claude-style)", () => {
-    // The runtime's own trailer for a non-zero exit, while it still
-    // reports the step as having run (no isError).
+  it("a command that exits non-zero shows its status muted, never Failed", () => {
+    // `grep` exits 1 when it finds nothing: the command ran, the answer is
+    // "no match". The status is a fact on the row, not an alarm.
     render(
       <ToolCallRow
         tool={{
           callId: "c4",
           name: "bash",
-          output:
-            "ls: cannot open directory '/root': Permission denied\n\nExit code: 2",
-        }}
-        turnEnded
-      />,
-    );
-    expect(screen.getByText("Failed")).toHaveClass("text-red-700");
-  });
-
-  it("an exit code quoted mid-output is not this command's", () => {
-    render(
-      <ToolCallRow
-        tool={{
-          callId: "c6",
-          name: "read",
-          output: "## Troubleshooting\nIf you see exit code: 1, retry.\nDone.",
+          output: "",
+          exitCode: 1,
         }}
         turnEnded
       />,
     );
     expect(screen.queryByText("Failed")).toBeNull();
+    const status = screen.getByText("exit 1");
+    expect(status).toHaveClass("text-muted-foreground");
+    expect(status.className).not.toMatch(/red/);
+  });
+
+  it("a tool error that also carries a status shows both", () => {
+    render(
+      <ToolCallRow
+        tool={{
+          callId: "c5",
+          name: "bash",
+          output: "boom",
+          isError: true,
+          exitCode: 2,
+        }}
+        turnEnded
+      />,
+    );
+    expect(screen.getByText("exit 2")).toBeInTheDocument();
+    expect(screen.getByText("Failed")).toHaveClass("text-red-700");
+  });
+
+  it("an exit code written in the output is just text, never this row's status", () => {
+    // Rows stored before the status became its own field still carry the
+    // runtime's trailer as text: they read as plain output, not Failed.
+    for (const [callId, output] of [
+      ["c6", "## Troubleshooting\nIf you see exit code: 1, retry.\nDone."],
+      ["c8", "ls: denied\n\nExit code: 2"],
+    ] as const) {
+      const { unmount } = render(
+        <ToolCallRow tool={{ callId, name: "bash", output }} turnEnded />,
+      );
+      expect(screen.queryByText("Failed")).toBeNull();
+      expect(screen.queryByText(/^exit \d/)).toBeNull();
+      unmount();
+    }
   });
 
   it("a successful step has no status word and no color on the row", () => {
@@ -85,6 +107,7 @@ describe("ToolCallRow", () => {
       />,
     );
     expect(screen.queryByText("Failed")).toBeNull();
+    expect(screen.queryByText(/^exit \d/)).toBeNull();
     const trigger = container.querySelector("button");
     expect(trigger?.className).not.toMatch(/text-(red|green|yellow)-/);
   });

@@ -44,7 +44,22 @@ import {
 import { AppIcon } from "@/lib/components/app-icon";
 import { ConnectAppDialog } from "./connect-app-dialog";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
+import { GitHubAppConnectDialog } from "./github-app-connect-dialog";
+import {
+  GITHUB_APP_PROVIDER,
+  useSharedGitHubInstallations,
+} from "@/hooks/use-github-app-share";
+import type { ConnectLinkAgent } from "@/lib/connect-link-agent";
+import { useVerifiedConnectLinkAgent } from "@/hooks/use-verified-connect-link-agent";
 import { useConnectParam } from "./use-connect-param";
+import dynamic from "next/dynamic";
+import { useInstance } from "@/hooks/use-instance";
+
+// Licensed (granular_access): the Slack read-access finder. Lazy so the free
+// build never evaluates it; rendered only when the instance is entitled.
+const SlackReadTile = dynamic(() =>
+  import("@/ee/slack-read/slack-read-tile").then((m) => m.SlackReadTile),
+);
 
 interface AppsTabProps {
   pageScope?: PageScope;
@@ -87,10 +102,24 @@ export const AppsTab = ({
   const activeCategory =
     (searchParams.get("category") as AppCategory | null) ?? "all";
   const [configApp, setConfigApp] = useState<AppDefinition | null>(null);
-  const [connectApp, setConnectApp] = useState<AppDefinition | null>(null);
-  const [connectAgentName, setConnectAgentName] = useState<
-    string | undefined
+  // The agent a connect link named, held across the credentials setup a
+  // not-yet-configured app needs first, so the connect after it is the
+  // agent's too.
+  const [linkConfigAgent, setLinkConfigAgent] = useState<
+    ConnectLinkAgent | undefined
   >();
+  const configAgent = useVerifiedConnectLinkAgent(linkConfigAgent);
+  const [connectApp, setConnectApp] = useState<AppDefinition | null>(null);
+  // The agent a connect link named: shown in the dialog, and the connect it
+  // starts switches the new account on for it.
+  const [linkAgent, setLinkAgent] = useState<ConnectLinkAgent | undefined>();
+  // Shown and granted as the workspace's own record for the link's id.
+  const connectAgent = useVerifiedConnectLinkAgent(linkAgent);
+  // GitHub App: same as the app's own page, an installation already
+  // connected elsewhere in the org is offered before a GitHub install.
+  const [githubDialogOpen, setGithubDialogOpen] = useState(false);
+  const { data: sharedInstallations = [] } =
+    useSharedGitHubInstallations(pageScope);
   const [requestOpen, setRequestOpen] = useState(false);
   const [requestHostname, setRequestHostname] = useState("");
   const [requestAppName, setRequestAppName] = useState<string | undefined>();
@@ -170,7 +199,7 @@ export const AppsTab = ({
 
   const openPopup = (
     provider: string,
-    options?: { agentName?: string; height?: number },
+    options?: { agentName?: string; agentId?: string; height?: number },
   ) =>
     openConnectPopup(provider, {
       ...options,
@@ -198,11 +227,14 @@ export const AppsTab = ({
     connectedProviders,
     configuredProviders,
     envDefaultProviders,
-    onConnect: useCallback((app: AppDefinition, agentName?: string) => {
+    onConnect: useCallback((app: AppDefinition, agent?: ConnectLinkAgent) => {
       setConnectApp(app);
-      setConnectAgentName(agentName);
+      setLinkAgent(agent);
     }, []),
-    onConfigure: setConfigApp,
+    onConfigure: useCallback((app: AppDefinition, agent?: ConnectLinkAgent) => {
+      setConfigApp(app);
+      setLinkConfigAgent(agent);
+    }, []),
     onRequestApp: useCallback((hostname: string, appName?: string) => {
       setRequestHostname(hostname);
       setRequestAppName(appName);
@@ -238,7 +270,15 @@ export const AppsTab = ({
     return apps;
   }, [connectionCounts, activeCategory, localSearch, availableApps]);
 
-  const hasActiveFilter = localSearch.trim() !== "" || activeCategory !== "all";
+  const instance = useInstance();
+  // Slack is not a registry app (the gateway never injects Slack creds), so
+  // its tile is composed here: workspace scope, entitled, and only when the
+  // current filter would show a Communication app named like it.
+  const showSlackRead =
+    pageScope === "workspace" &&
+    instance?.entitled === true &&
+    (activeCategory === "all" || activeCategory === "communication") &&
+    (!localSearch.trim() || "slack".includes(localSearch.trim().toLowerCase()));
 
   const handleConnect = (
     e: React.MouseEvent | undefined,
@@ -260,6 +300,10 @@ export const AppsTab = ({
       (connectionCounts.get(app.id) ?? 0) === 0
     ) {
       setConfigApp(app);
+      return;
+    }
+    if (app.id === GITHUB_APP_PROVIDER && sharedInstallations.length > 0) {
+      setGithubDialogOpen(true);
       return;
     }
     const popupHeight =
@@ -315,14 +359,14 @@ export const AppsTab = ({
       </div>
 
       <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {!hasActiveFilter && (
-          <RequestAppSlot
-            requestOpen={requestOpen}
-            onRequestOpenChange={setRequestOpen}
-            initialName={requestAppName}
-            initialUrl={requestHostname}
-          />
-        )}
+        {/* Always present, searching included: a search that finds nothing
+            is exactly when someone wants to ask for the app. */}
+        <RequestAppSlot
+          requestOpen={requestOpen}
+          onRequestOpenChange={setRequestOpen}
+          initialName={requestAppName ?? (localSearch.trim() || undefined)}
+          initialUrl={requestHostname}
+        />
         {loading ? (
           Array.from({ length: 12 }, (_, i) => (
             <div
@@ -336,7 +380,7 @@ export const AppsTab = ({
               <Skeleton className="h-7 w-16 rounded-md" />
             </div>
           ))
-        ) : filteredApps.length === 0 ? (
+        ) : filteredApps.length === 0 && !showSlackRead ? (
           <div className="col-span-full flex flex-col items-center justify-center py-12 text-center">
             <p className="text-muted-foreground text-sm">
               No apps match your search.
@@ -361,24 +405,30 @@ export const AppsTab = ({
             </button>
           </div>
         ) : (
-          filteredApps.map((app) => {
-            const count = connectionCounts.get(app.id) ?? 0;
-            return (
-              <AppRow
-                key={app.id}
-                name={app.name}
-                icon={app.icon}
-                darkIcon={app.darkIcon}
-                connectionCount={count}
-                onConnect={(e) => handleConnect(e, app)}
-                onClick={() =>
-                  router.push(
-                    connectionsPath({ pathname, basePath }, `/apps/${app.id}`),
-                  )
-                }
-              />
-            );
-          })
+          <>
+            {showSlackRead && <SlackReadTile />}
+            {filteredApps.map((app) => {
+              const count = connectionCounts.get(app.id) ?? 0;
+              return (
+                <AppRow
+                  key={app.id}
+                  name={app.name}
+                  icon={app.icon}
+                  darkIcon={app.darkIcon}
+                  connectionCount={count}
+                  onConnect={(e) => handleConnect(e, app)}
+                  onClick={() =>
+                    router.push(
+                      connectionsPath(
+                        { pathname, basePath },
+                        `/apps/${app.id}`,
+                      ),
+                    )
+                  }
+                />
+              );
+            })}
+          </>
         )}
       </div>
 
@@ -387,23 +437,44 @@ export const AppsTab = ({
           appName={connectApp.name}
           appIcon={connectApp.icon}
           appDarkIcon={connectApp.darkIcon}
-          agentName={connectAgentName}
+          agentName={connectAgent?.name}
           open={!!connectApp}
           onOpenChange={(open) => {
             if (!open) {
               setConnectApp(null);
-              setConnectAgentName(undefined);
+              setLinkAgent(undefined);
             }
           }}
           onConnect={() => {
             const provider = connectApp.id;
-            const agent = connectAgentName;
+            const agent = connectAgent;
             setConnectApp(null);
-            setConnectAgentName(undefined);
-            openPopup(provider, { agentName: agent });
+            setLinkAgent(undefined);
+            openPopup(provider, { agentName: agent?.name, agentId: agent?.id });
           }}
         />
       )}
+
+      <GitHubAppConnectDialog
+        open={githubDialogOpen}
+        onOpenChange={setGithubDialogOpen}
+        agentId={connectAgent?.id}
+        pageScope={pageScope}
+        onInstallNew={() =>
+          openPopup(GITHUB_APP_PROVIDER, {
+            agentId: connectAgent?.id,
+            agentName: connectAgent?.name,
+          })
+        }
+        onConnected={() =>
+          router.push(
+            connectionsPath(
+              { pathname, basePath },
+              `/apps/${GITHUB_APP_PROVIDER}`,
+            ),
+          )
+        }
+      />
 
       {configApp?.configurable && (
         <ConfigureCredentialsDialog
@@ -416,13 +487,18 @@ export const AppsTab = ({
           setupGuideUrl={configApp.setupGuideUrl}
           open={!!configApp}
           onOpenChange={(open) => {
-            if (!open) setConfigApp(null);
+            if (!open) {
+              setConfigApp(null);
+              setLinkConfigAgent(undefined);
+            }
           }}
           pageScope={pageScope}
           onConfigured={() => {
             const provider = configApp.id;
+            const agent = configAgent;
             setConfigApp(null);
-            openPopup(provider);
+            setLinkConfigAgent(undefined);
+            openPopup(provider, { agentName: agent?.name, agentId: agent?.id });
           }}
         />
       )}

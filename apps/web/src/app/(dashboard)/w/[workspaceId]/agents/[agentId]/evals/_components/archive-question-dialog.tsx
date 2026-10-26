@@ -1,7 +1,5 @@
 "use client";
 
-import { Loader2 } from "lucide-react";
-import { toast } from "sonner";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -30,7 +28,8 @@ export const ArchiveQuestionDialog = ({
     <AlertDialog
       open={question !== null}
       onOpenChange={(open) => {
-        if (!open && !archive.isPending) onClose();
+        // Never held by an in-flight archive: archiving is instant.
+        if (!open) onClose();
       }}
     >
       <AlertDialogContent>
@@ -42,30 +41,18 @@ export const ArchiveQuestionDialog = ({
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogCancel disabled={archive.isPending}>
-            Cancel
-          </AlertDialogCancel>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
           <AlertDialogAction
             variant="destructive"
-            disabled={archive.isPending}
-            // Keep the dialog open across the request (Radix would close it
-            // on click) and close it once the archive resolves.
-            onClick={(event) => {
-              event.preventDefault();
+            // Instant: the question leaves the list and the confirm closes
+            // on click; the hook confirms, or puts it back and says why.
+            onClick={() => {
               if (!question) return;
-              archive.mutate(question.id, {
-                onSuccess: () => {
-                  toast.success("Test question archived");
-                  onClose();
-                },
-                onError: (error) => toast.error(error.message),
-              });
+              archive.mutate(question.id);
+              onClose();
             }}
           >
-            {archive.isPending && (
-              <Loader2 className="animate-spin" aria-hidden />
-            )}
-            {archive.isPending ? "Archiving…" : "Archive"}
+            Archive
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

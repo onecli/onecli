@@ -11,7 +11,8 @@ import { useAuth } from "@/providers/auth-provider";
 import { checkDashboardRedirect } from "@/lib/user-plan";
 import { getDashboardRedirect } from "@/lib/dashboard/session-redirect";
 import { apiFetch } from "@/lib/api-fetch";
-import { isAgentPagePath } from "@/lib/navigation";
+import { isAgentPagePath, matchAgentPage } from "@/lib/navigation";
+import { isTheaterAgentSection } from "@/lib/agents/agent-sections";
 import { PlanGateProvider } from "@/lib/plan-gate";
 
 export default function DashboardLayout({
@@ -118,6 +119,16 @@ export default function DashboardLayout({
 
   if (!isAuthenticated) {
     return null;
+  }
+
+  if (isTheaterAgentSection(matchAgentPage(pathname)?.section ?? "")) {
+    return (
+      <PlanGateProvider>
+        <main className="dark flex h-svh min-w-0 flex-col overflow-hidden bg-black text-white">
+          {children}
+        </main>
+      </PlanGateProvider>
+    );
   }
 
   return (

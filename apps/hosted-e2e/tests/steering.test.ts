@@ -138,7 +138,9 @@ scenario("a follow-up joins the live turn mid-run", async (cx) => {
   // then says its own closing words. The tool is one no platform serves: a
   // real call round-trip with no side effect (it reports an error). The
   // trailing sleep is the window in which the join must be visible while
-  // the turn still runs.
+  // the turn still runs. Both sleeps are about 3x the measured steer
+  // delivery latency (1-2 s, the pump's 1 s long-poll): the fake injects
+  // only at step boundaries, so a sleep stands in for "until delivered".
   const {
     events,
     streamed,
@@ -147,10 +149,10 @@ scenario("a follow-up joins the live turn mid-run", async (cx) => {
     followUpRow,
     joinedWhileRunning,
   } = await steerIntoTurn(cx, [
-    sleep(20_000),
+    sleep(6_000),
     text("still working"),
     tool("e2e_no_such_tool"),
-    sleep(15_000),
+    sleep(5_000),
     text("after the pause"),
   ]);
 
@@ -208,10 +210,108 @@ scenario(
     // exactly its closing words.
     const { events, turnId, followUpId } = await steerIntoTurn(cx, [
       text("the closing words"),
-      sleep(20_000),
+      sleep(6_000),
     ]);
 
     expect(answerOf(events, followUpId)).toEqual([FRAMED_ECHO]);
     expect(answerOf(events, turnId)).toEqual(["the closing words"]);
+  },
+);
+
+/** A real (tiny) PNG: the 1x1 pixel every image pipeline accepts. */
+const PIXEL_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+  "base64",
+);
+
+scenario(
+  "a follow-up WITH an image joins the live turn, the image reaching the model with the words",
+  async (cx) => {
+    // The whole path: upload through `/v1`, the message door binds it to a
+    // mid-run follow-up, the steer arm hands it to this (capable) runner,
+    // the runner pulls the bytes ahead of the steer, the supervisor waits
+    // for them to land and hands the image to the harness WITH the words.
+    // The fake echoes each image it was handed, so its reply is the proof.
+    // A text message sent right after it joins behind it, in order.
+    const stack = await cx.startStack();
+    if (stack.runner === null) throw new Error("runner expected");
+    await seedTenant(cx.prisma, cx.ids);
+    await seedHostedAgent(cx.prisma, cx.ids, {
+      runnerId: stack.runner.runnerId,
+    });
+    await seedAnthropicGrant(cx.prisma, cx.ids);
+    stack.runner.pump();
+
+    const conversation = await stack.v1.json<{ id: string }>(
+      await stack.v1.put(`/v1/agents/${cx.ids.agent}/conversations/direct`),
+    );
+    const created = await stack.v1.json<{ id: string }>(
+      await stack.v1.post(`/v1/conversations/${conversation.id}/turns`, {
+        message: fakeDirective([
+          // Runway for the upload and both deliveries (about 3x latency).
+          sleep(9_000),
+          text("still working"),
+          sleep(6_000),
+          text("done with the task"),
+        ]),
+      }),
+    );
+    await waitFor(
+      () => readTurn(stack.v1, conversation.id, created.id),
+      (turn) => turn?.status === "running",
+      "the long turn to start",
+    );
+
+    const uploaded = await stack.v1.json<{ id: string }>(
+      await stack.v1.upload(
+        `/v1/conversations/${conversation.id}/attachments?name=pixel.png`,
+        PIXEL_PNG,
+        "image/png",
+      ),
+    );
+    const withImage = await stack.v1.json<{ turn: { id: string } }>(
+      await stack.v1.post(`/v1/conversations/${conversation.id}/messages`, {
+        message: "what is in this picture?",
+        attachmentIds: [uploaded.id],
+      }),
+    );
+    const after = await stack.v1.json<{ turn: { id: string } }>(
+      await stack.v1.post(`/v1/conversations/${conversation.id}/messages`, {
+        message: "and then carry on",
+      }),
+    );
+
+    // Both join the LIVE run (not promoted to turns of their own).
+    for (const id of [withImage.turn.id, after.turn.id]) {
+      await waitFor(
+        () => readTurn(stack.v1, conversation.id, id),
+        (turn) => turn?.status === "joined",
+        "the follow-up to join the running turn",
+        120_000,
+      );
+    }
+    await waitFor(
+      () => readTurn(stack.v1, conversation.id, created.id),
+      (turn) => turn !== null && ["done", "failed"].includes(turn.status),
+      "the turn to settle",
+      120_000,
+    );
+
+    const events = await fetchTranscript(stack.v1, conversation.id);
+    await stack.runner.pausePump();
+    // The image reached the harness with the words: the fake's reply
+    // echoes its media type and its base64 size.
+    const imageEcho = `[image image/png ${PIXEL_PNG.toString("base64").length}]`;
+    expect(answerOf(events, withImage.turn.id).join("")).toContain(
+      `what is in this picture? ${imageEcho}]`,
+    );
+    // The words sent after it joined behind it, carrying no image.
+    const afterReply = answerOf(events, after.turn.id).join("");
+    expect(afterReply).toContain("and then carry on]");
+    expect(afterReply).not.toContain("[image");
+    // The run went on to finish its own task; the turn kept its words.
+    expect(answerOf(events, created.id).join("")).toContain(
+      "done with the task",
+    );
   },
 );

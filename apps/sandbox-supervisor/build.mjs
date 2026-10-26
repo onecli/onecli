@@ -4,9 +4,7 @@ import { build } from "esbuild";
 // Production bundle: inline the app plus its @onecli/* workspace deps (which
 // export raw .ts), keep every npm package external so it resolves from
 // node_modules at runtime.
-await build({
-  entryPoints: ["src/index.ts"],
-  outfile: "dist/index.mjs",
+const shared = {
   bundle: true,
   platform: "node",
   format: "esm",
@@ -24,6 +22,27 @@ await build({
       },
     },
   ],
+};
+
+await build({
+  ...shared,
+  entryPoints: ["src/index.ts"],
+  outfile: "dist/index.mjs",
+});
+
+// The browser driver is two processes of its own, started by the agent's
+// shell and not by the supervisor: the `onecli-browser` command (every
+// call) and the daemon it spawns (once, then shared). Each gets its own
+// bundle so neither loads the supervisor, and the command's stays small
+// enough to be the per-call cost.
+await build({
+  ...shared,
+  entryPoints: {
+    "browser-driver/cli": "src/browser-driver/cli-main.ts",
+    "browser-driver/daemon": "src/browser-driver/daemon-main.ts",
+  },
+  outdir: "dist",
+  outExtension: { ".js": ".mjs" },
 });
 
 // The MCP bridge is spawned as a separate process (harness/jcode.ts), so no

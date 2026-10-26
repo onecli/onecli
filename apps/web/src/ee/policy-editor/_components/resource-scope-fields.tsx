@@ -156,6 +156,11 @@ export const ResourceScopeFields = ({
             </DialogHeader>
             <Content
               connectionId={connection.id}
+              connectionScope={
+                connection.scope === "organization"
+                  ? "organization"
+                  : "workspace"
+              }
               metadata={meta}
               policy={draft}
               orgBoundary={orgPolicy}

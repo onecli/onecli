@@ -12,8 +12,10 @@
 //! **Redis decision delivery uses `BLPOP`** (not pub/sub) to avoid the
 //! subscribe-before-publish race condition that would lose decisions
 //! submitted between `store()` and `SUBSCRIBE`. New-approval notifications
-//! use pub/sub — the race there is benign (the SDK just polls again in 30s
-//! if a notification is missed).
+//! use pub/sub, so a poll subscribes ([`ApprovalStore::subscribe_new`])
+//! BEFORE its decisive list: an approval stored in between is then either in
+//! the list or delivered to the subscription, never lost (a missed
+//! notification would hold the poll for its whole 30s window).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -228,6 +230,20 @@ pub struct DecisionOutcome {
     pub decision: ApprovalDecision,
     #[serde(default)]
     pub approved_by: Option<String>,
+    /// Why a deny happened, when it was not a reviewer's plain no. Omitted
+    /// from the wire when absent, so instances on either side of a rolling
+    /// deploy read each other's decisions (serde ignores the unknown field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<DenyReason>,
+}
+
+/// The cause of a deny that the agent must read differently from a plain no.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DenyReason {
+    /// The person sent a message that changes this request while it was
+    /// held: the agent must read that message and send a revised request.
+    Superseded,
 }
 
 // ── DecisionReceiver ───────────────────────────────────────────────────
@@ -271,6 +287,24 @@ pub trait DecisionWait: Send {
 
 /// Opaque receiver returned by [`ApprovalStore::prepare_wait`].
 pub type DecisionReceiver = Box<dyn DecisionWait>;
+
+/// A subscription to new-approval notifications, opened by
+/// [`ApprovalStore::subscribe_new`] / [`ApprovalStore::subscribe_new_for_org`].
+///
+/// Open it **before** listing pending approvals, then wait on it only if the
+/// list is empty. An approval stored after the subscription opened wakes the
+/// wait even if it landed before `wait` was called; one stored before it is
+/// in the list. Subscribing only after an empty list leaves a gap where a
+/// store notifies nobody and the poll sleeps its whole window.
+#[async_trait]
+pub trait NewApprovalWait: Send {
+    /// `true` once an approval was stored after the subscription opened,
+    /// `false` on timeout (or when the subscription could not be opened).
+    async fn wait(self: Box<Self>, timeout: Duration) -> bool;
+}
+
+/// Opaque subscription returned by [`ApprovalStore::subscribe_new`].
+pub type NewApprovalReceiver = Box<dyn NewApprovalWait>;
 
 /// In-memory waiter: a watch channel completed by `submit_decision`.
 struct InMemoryDecisionWait {
@@ -428,26 +462,25 @@ pub trait ApprovalStore: Send + Sync {
     /// Remove a pending approval (after decision or expiry).
     async fn remove(&self, org_id: &str, workspace_id: &str, id: &str);
 
-    /// Block until a new approval arrives for this workspace, or timeout.
-    /// Returns `true` if notified, `false` on timeout.
-    async fn wait_for_new(&self, org_id: &str, workspace_id: &str, timeout: Duration) -> bool;
+    /// Subscribe to approvals stored for this workspace from now on.
+    ///
+    /// **Must be called before the list it guards** (see [`NewApprovalWait`]).
+    async fn subscribe_new(&self, org_id: &str, workspace_id: &str) -> NewApprovalReceiver;
 
-    /// Block until a new approval arrives in any of the org's workspaces, or
-    /// timeout. Org-scoped counterpart of [`ApprovalStore::wait_for_new`];
-    /// backs the org long-poll (`ee`'s `org_routes`).
-    async fn wait_for_new_for_org(&self, org_id: &str, timeout: Duration) -> bool;
+    /// Subscribe to approvals stored in any of the org's workspaces from now
+    /// on. Org-scoped counterpart of [`ApprovalStore::subscribe_new`]; backs
+    /// the org long-poll (`ee`'s `org_routes`).
+    async fn subscribe_new_for_org(&self, org_id: &str) -> NewApprovalReceiver;
 
-    /// Submit a decision for a pending approval. Wakes the held request.
-    /// `approved_by` is the deciding user, or `None` when the decision
-    /// carries no attribution (legacy callers).
+    /// Deliver a decision (with its attribution and any deny reason) to a
+    /// pending approval. Wakes the held request.
     /// Returns `true` if the approval was found and decision delivered.
-    async fn submit_decision(
+    async fn submit_outcome(
         &self,
         org_id: &str,
         workspace_id: &str,
         id: &str,
-        decision: ApprovalDecision,
-        approved_by: Option<String>,
+        outcome: DecisionOutcome,
     ) -> bool;
 }
 
@@ -471,6 +504,31 @@ impl InMemoryApprovalStore {
             new_notify: DashMap::new(),
             decisions: DashMap::new(),
         }
+    }
+
+    /// Subscribe to a notify key. The receiver buffers a send that lands
+    /// before `wait` is called, which is what closes the list/wait gap.
+    fn subscribe_key(&self, notify_key: String) -> NewApprovalReceiver {
+        // Subscribe under the DashMap guard and drop it at once: the guard is
+        // never held across an await.
+        let rx = self
+            .new_notify
+            .entry(notify_key)
+            .or_insert_with(|| broadcast::channel(BROADCAST_CAPACITY).0)
+            .subscribe();
+        Box::new(InMemoryNewApprovalWait { rx })
+    }
+}
+
+/// In-memory new-approval subscription: a broadcast receiver.
+struct InMemoryNewApprovalWait {
+    rx: broadcast::Receiver<()>,
+}
+
+#[async_trait]
+impl NewApprovalWait for InMemoryNewApprovalWait {
+    async fn wait(mut self: Box<Self>, timeout: Duration) -> bool {
+        tokio::time::timeout(timeout, self.rx.recv()).await.is_ok()
     }
 }
 
@@ -539,48 +597,24 @@ impl ApprovalStore for InMemoryApprovalStore {
         self.decisions.remove(id);
     }
 
-    async fn wait_for_new(&self, org_id: &str, workspace_id: &str, timeout: Duration) -> bool {
-        let notify_key = format!("{org_id}:{workspace_id}");
-        // Get or create broadcast sender, subscribe, then drop the guard
-        // before awaiting (critical: never hold DashMap guard across .await).
-        let mut rx = {
-            let sender = self
-                .new_notify
-                .entry(notify_key)
-                .or_insert_with(|| broadcast::channel(BROADCAST_CAPACITY).0);
-            sender.subscribe()
-        }; // guard dropped here — safe to await
-
-        tokio::time::timeout(timeout, rx.recv()).await.is_ok()
+    async fn subscribe_new(&self, org_id: &str, workspace_id: &str) -> NewApprovalReceiver {
+        self.subscribe_key(format!("{org_id}:{workspace_id}"))
     }
 
-    async fn wait_for_new_for_org(&self, org_id: &str, timeout: Duration) -> bool {
-        // Org-scoped notify keyed by the bare org id (see `store`). Never held
-        // across an await: subscribe under the guard, drop it, then wait.
-        let mut rx = {
-            let sender = self
-                .new_notify
-                .entry(org_id.to_string())
-                .or_insert_with(|| broadcast::channel(BROADCAST_CAPACITY).0);
-            sender.subscribe()
-        };
-
-        tokio::time::timeout(timeout, rx.recv()).await.is_ok()
+    async fn subscribe_new_for_org(&self, org_id: &str) -> NewApprovalReceiver {
+        // Org-scoped notify keyed by the bare org id (see `store`).
+        self.subscribe_key(org_id.to_string())
     }
 
-    async fn submit_decision(
+    async fn submit_outcome(
         &self,
         _org_id: &str,
         _workspace_id: &str,
         id: &str,
-        decision: ApprovalDecision,
-        approved_by: Option<String>,
+        outcome: DecisionOutcome,
     ) -> bool {
         if let Some((_, tx)) = self.decisions.remove(id) {
-            let _ = tx.send(Some(DecisionOutcome {
-                decision,
-                approved_by,
-            }));
+            let _ = tx.send(Some(outcome));
             self.pending.remove(id);
             true
         } else {
@@ -661,6 +695,18 @@ pub struct PendingParams {
     /// Allows the server to enter long-poll when all pending approvals are in-flight.
     #[serde(default)]
     pub exclude: String,
+    /// `wait=0` answers the current pending set at once instead of
+    /// long-polling while it is empty: a one-shot read for a server-side
+    /// check that must not sit in a 30s hold. Absent = long-poll (default).
+    #[serde(default)]
+    pub wait: Option<u8>,
+}
+
+impl PendingParams {
+    /// Whether an empty pending set should be long-polled.
+    pub fn long_poll(&self) -> bool {
+        self.wait != Some(0)
+    }
 }
 
 /// How long a woken approval long-poll waits before answering, so a burst of
@@ -858,6 +904,27 @@ mod tests {
         Arc::new(InMemoryApprovalStore::new())
     }
 
+    /// A plain decision (no deny reason), as every reviewer click sends it.
+    async fn submit_decision(
+        store: &dyn ApprovalStore,
+        id: &str,
+        decision: ApprovalDecision,
+        approved_by: Option<String>,
+    ) -> bool {
+        store
+            .submit_outcome(
+                TEST_ORG,
+                "acc-1",
+                id,
+                DecisionOutcome {
+                    decision,
+                    approved_by,
+                    reason: None,
+                },
+            )
+            .await
+    }
+
     const TEST_ORG: &str = "org-1";
 
     fn make_approval(id: &str, workspace_id: &str) -> PendingApproval {
@@ -974,9 +1041,7 @@ mod tests {
         let store2 = Arc::clone(&store);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            store2
-                .submit_decision(TEST_ORG, "acc-1", "a1", ApprovalDecision::Approve, None)
-                .await;
+            submit_decision(&*store2, "a1", ApprovalDecision::Approve, None).await;
         });
 
         let decision = rx.wait(Duration::from_secs(5)).await.unwrap();
@@ -993,15 +1058,13 @@ mod tests {
 
         let rx = store.prepare_wait(TEST_ORG, "acc-1", "a1").await;
         store.store(&approval).await.unwrap();
-        store
-            .submit_decision(
-                TEST_ORG,
-                "acc-1",
-                "a1",
-                ApprovalDecision::Approve,
-                Some("user-7".to_string()),
-            )
-            .await;
+        submit_decision(
+            &*store,
+            "a1",
+            ApprovalDecision::Approve,
+            Some("user-7".to_string()),
+        )
+        .await;
 
         let outcome = rx.wait(Duration::from_secs(5)).await.unwrap();
         assert_eq!(
@@ -1009,8 +1072,53 @@ mod tests {
             Some(DecisionOutcome {
                 decision: ApprovalDecision::Approve,
                 approved_by: Some("user-7".to_string()),
+                reason: None,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn submit_outcome_delivers_deny_reason() {
+        let store = new_store().await;
+        let approval = make_approval("a1", "acc-1");
+
+        let rx = store.prepare_wait(TEST_ORG, "acc-1", "a1").await;
+        store.store(&approval).await.unwrap();
+        let superseded = DecisionOutcome {
+            decision: ApprovalDecision::Deny,
+            approved_by: Some("user-7".to_string()),
+            reason: Some(DenyReason::Superseded),
+        };
+        assert!(
+            store
+                .submit_outcome(TEST_ORG, "acc-1", "a1", superseded.clone())
+                .await
+        );
+
+        assert_eq!(
+            rx.wait(Duration::from_secs(5)).await.unwrap(),
+            Some(superseded)
+        );
+        assert!(store.get_pending(TEST_ORG, "acc-1", "a1").await.is_none());
+    }
+
+    #[test]
+    fn decision_outcome_wire_is_backward_compatible() {
+        // A plain decision serializes exactly as before (no `reason` key), so
+        // an older instance on a rolling deploy reads it unchanged...
+        let plain = DecisionOutcome {
+            decision: ApprovalDecision::Deny,
+            approved_by: None,
+            reason: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&plain).unwrap(),
+            r#"{"decision":"deny","approved_by":null}"#
+        );
+        // ...and a superseded one carries it as a snake_case string.
+        let superseded: DecisionOutcome =
+            serde_json::from_str(r#"{"decision":"deny","reason":"superseded"}"#).unwrap();
+        assert_eq!(superseded.reason, Some(DenyReason::Superseded));
     }
 
     #[tokio::test]
@@ -1024,9 +1132,7 @@ mod tests {
         let store2 = Arc::clone(&store);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            store2
-                .submit_decision(TEST_ORG, "acc-1", "a1", ApprovalDecision::Deny, None)
-                .await;
+            submit_decision(&*store2, "a1", ApprovalDecision::Deny, None).await;
         });
 
         let decision = rx.wait(Duration::from_secs(5)).await.unwrap();
@@ -1068,28 +1174,15 @@ mod tests {
         assert_eq!(outcome, Ok(None));
         assert!(!store.pending.contains_key("expired"));
         assert!(!store.decisions.contains_key("expired"));
-        assert!(
-            !store
-                .submit_decision(
-                    TEST_ORG,
-                    "acc-1",
-                    "expired",
-                    ApprovalDecision::Approve,
-                    None
-                )
-                .await
-        );
+        assert!(!submit_decision(&store, "expired", ApprovalDecision::Approve, None).await);
         assert!(store.pending.contains_key("valid"));
-        assert!(
-            store
-                .submit_decision(TEST_ORG, "acc-1", "valid", ApprovalDecision::Deny, None)
-                .await
-        );
+        assert!(submit_decision(&store, "valid", ApprovalDecision::Deny, None).await);
         assert_eq!(
             valid_rx.wait(Duration::from_secs(1)).await,
             Ok(Some(DecisionOutcome {
                 decision: ApprovalDecision::Deny,
                 approved_by: None,
+                reason: None,
             }))
         );
     }
@@ -1136,9 +1229,7 @@ mod tests {
         let _ = store.prepare_wait(TEST_ORG, "acc-1", "a1").await;
         store.store(&approval).await.unwrap();
 
-        store
-            .submit_decision(TEST_ORG, "acc-1", "a1", ApprovalDecision::Approve, None)
-            .await;
+        submit_decision(&*store, "a1", ApprovalDecision::Approve, None).await;
 
         assert!(store.get_pending(TEST_ORG, "acc-1", "a1").await.is_none());
     }
@@ -1146,21 +1237,14 @@ mod tests {
     #[tokio::test]
     async fn submit_decision_nonexistent_returns_false() {
         let store = new_store().await;
-        let result = store
-            .submit_decision(
-                TEST_ORG,
-                "acc-1",
-                "nonexistent",
-                ApprovalDecision::Approve,
-                None,
-            )
-            .await;
+        let result = submit_decision(&*store, "nonexistent", ApprovalDecision::Approve, None).await;
         assert!(!result);
     }
 
     #[tokio::test]
-    async fn wait_for_new_notified_on_store() {
+    async fn subscription_wakes_when_an_approval_is_stored_later() {
         let store = new_store().await;
+        let new_approval = store.subscribe_new(TEST_ORG, "acc-1").await;
 
         let store2 = Arc::clone(&store);
         tokio::spawn(async move {
@@ -1170,19 +1254,56 @@ mod tests {
             store2.store(&approval).await.unwrap();
         });
 
-        let got_new = store
-            .wait_for_new(TEST_ORG, "acc-1", Duration::from_secs(5))
-            .await;
-        assert!(got_new);
+        assert!(new_approval.wait(Duration::from_secs(5)).await);
+    }
+
+    /// The lost-wakeup race of the approval long-poll, pinned without timing:
+    /// a store that lands after the subscription opened but BEFORE anyone
+    /// waits on it (the poll's list/wait gap) must still wake the wait. A
+    /// subscribe that only happens after the empty list misses it and the
+    /// poll sleeps its whole 30s window.
+    #[tokio::test]
+    async fn a_store_between_subscribe_and_wait_is_not_lost() {
+        let store = new_store().await;
+        let new_approval = store.subscribe_new(TEST_ORG, "acc-1").await;
+        let new_for_org = store.subscribe_new_for_org(TEST_ORG).await;
+        assert!(store.list_pending(TEST_ORG, "acc-1").await.is_empty());
+
+        let approval = make_approval("a1", "acc-1");
+        let _ = store.prepare_wait(TEST_ORG, "acc-1", "a1").await;
+        store.store(&approval).await.unwrap();
+
+        // A zero timeout: the notification must already be buffered.
+        assert!(new_approval.wait(Duration::ZERO).await);
+        assert!(new_for_org.wait(Duration::ZERO).await);
     }
 
     #[tokio::test]
-    async fn wait_for_new_timeout() {
+    async fn subscription_times_out_without_a_store() {
         let store = new_store().await;
-        let got_new = store
-            .wait_for_new(TEST_ORG, "acc-1", Duration::from_millis(100))
-            .await;
-        assert!(!got_new);
+        let new_approval = store.subscribe_new(TEST_ORG, "acc-1").await;
+        assert!(!new_approval.wait(Duration::from_millis(100)).await);
+    }
+
+    #[tokio::test]
+    async fn subscription_ignores_other_workspaces_and_orgs() {
+        let store = new_store().await;
+        let new_approval = store.subscribe_new(TEST_ORG, "acc-1").await;
+        let new_for_org = store.subscribe_new_for_org(TEST_ORG).await;
+
+        let elsewhere = make_approval("a1", "acc-2");
+        let _ = store.prepare_wait(TEST_ORG, "acc-2", "a1").await;
+        store.store(&elsewhere).await.unwrap();
+        let other_org = make_approval_in_org("a2", "org-2", "acc-1");
+        let _ = store.prepare_wait("org-2", "acc-1", "a2").await;
+        store.store(&other_org).await.unwrap();
+
+        assert!(!new_approval.wait(Duration::ZERO).await);
+        // The org subscription hears its own org's other workspace only.
+        assert!(new_for_org.wait(Duration::ZERO).await);
+        let new_for_other_org = store.subscribe_new_for_org("org-3").await;
+        store.store(&other_org).await.unwrap();
+        assert!(!new_for_other_org.wait(Duration::ZERO).await);
     }
 
     // ── Org-scoped listing / long-poll ──────────────────────────────────────
@@ -1245,8 +1366,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_for_new_for_org_notified_on_store_in_any_workspace() {
+    async fn org_subscription_wakes_on_a_store_in_any_workspace() {
         let store = new_store().await;
+        let new_for_org = store.subscribe_new_for_org(TEST_ORG).await;
 
         let store2 = Arc::clone(&store);
         tokio::spawn(async move {
@@ -1256,9 +1378,6 @@ mod tests {
             store2.store(&approval).await.unwrap();
         });
 
-        let got_new = store
-            .wait_for_new_for_org(TEST_ORG, Duration::from_secs(5))
-            .await;
-        assert!(got_new);
+        assert!(new_for_org.wait(Duration::from_secs(5)).await);
     }
 }

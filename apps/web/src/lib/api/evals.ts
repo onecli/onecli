@@ -31,6 +31,8 @@ export interface EvalRunSummary {
   status: EvalRunStatus;
   trigger: EvalRunTrigger;
   configVersion: string;
+  /** The model the agent answered with; null on older runs. */
+  model: string | null;
   total: number;
   counts: EvalOutcomeCounts;
   error: string | null;

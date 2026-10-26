@@ -88,6 +88,7 @@ describe("daemon process liveness", () => {
         GATEWAY_API_URL: stub.url,
         CHANNEL_ADAPTER_CONFIG_POLL_MS: String(POLL_MS),
         CHANNEL_ADAPTER_WORK_POLL_MS: String(POLL_MS),
+        CHANNEL_ADAPTER_DRAIN_MS: "100",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -107,7 +108,7 @@ describe("daemon process liveness", () => {
     expect(stub.polls()).toBeGreaterThanOrEqual(3);
     expect(child.exitCode).toBe(null);
 
-    // And the drain path still exits promptly (bounded by the 3s drain timer).
+    // And the drain path still exits promptly (bounded by the drain timer).
     child.kill("SIGTERM");
     expect(await exited).toBe(0);
   }, 20_000);

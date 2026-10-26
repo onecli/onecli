@@ -82,6 +82,8 @@ import { pylonPermissions } from "./pylon";
 import { pagerdutyPermissions } from "./pagerduty";
 import { coralogixPermissions } from "./coralogix";
 import { onyxPermissions } from "./onyx";
+import { twilioPermissions } from "./twilio";
+import { dripifyPermissions } from "./dripify";
 import { webflowPermissions } from "./webflow";
 
 const permissionRegistry = new Map<string, AppPermissionDefinition>();
@@ -167,4 +169,6 @@ register(pylonPermissions);
 register(pagerdutyPermissions);
 register(coralogixPermissions);
 register(onyxPermissions);
+register(twilioPermissions);
+register(dripifyPermissions);
 register(webflowPermissions);

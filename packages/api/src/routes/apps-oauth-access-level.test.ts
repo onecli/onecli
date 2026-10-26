@@ -103,10 +103,12 @@ vi.mock("../services/connection-service", () => ({
   createConnection: async () => ({ id: "conn-new" }),
   reconnectConnection: async () => ({ id: "conn-old" }),
   linkConnectionToAppConfig: async () => undefined,
+  findInstallationConnection: async () => null,
 }));
 
-vi.mock("../services/workspace-autoattach-service", () => ({
-  attachNewConnectionToAllAgents: async () => undefined,
+vi.mock("../services/agent-connect-grant-service", () => ({
+  resolveConnectingAgent: async () => undefined,
+  grantConnectingAgent: async () => undefined,
 }));
 
 vi.mock("../lib/gateway-invalidate", () => ({

@@ -20,6 +20,8 @@ export interface RunsFilter {
   /** One agent's runs; omitted, the whole workspace's. */
   agentId?: string;
   source?: string;
+  /** One webhook's runs. */
+  webhookId?: string;
   failed?: boolean;
   before?: string;
 }
@@ -28,9 +30,16 @@ const agentRuns = (agentId: string) =>
   `/v1/agents/${encodeURIComponent(agentId)}/runs`;
 
 /** A page of runs, newest first. */
-export const list = ({ agentId, source, failed, before }: RunsFilter = {}) => {
+export const list = ({
+  agentId,
+  source,
+  webhookId,
+  failed,
+  before,
+}: RunsFilter = {}) => {
   const q = new URLSearchParams();
   if (source) q.set("source", source);
+  if (webhookId) q.set("webhookId", webhookId);
   if (failed) q.set("failed", "true");
   if (before) q.set("before", before);
   const qs = q.toString();

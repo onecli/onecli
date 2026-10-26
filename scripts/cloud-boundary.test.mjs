@@ -21,6 +21,7 @@ const CLOUD_ONLY_PACKAGES = [
   "apps/sandbox-home-device",
   "apps/sandbox-home-daemon",
   "apps/sandbox-log-shipper",
+  "apps/preview-relay",
   "packages/sandbox-home-device-proto",
   "packages/sandbox-shared",
 ];
@@ -96,10 +97,13 @@ test(
  * words. What stays cloud-only is the cloud's own machinery (the sandbox
  * platform, its stacks, its AWS services).
  *
- * The NLB, its IP-target registration, "on dev" notes and the private
- * tracker's issue numbers ARE listed: no synced file needs them (the chart
- * fronts its Gateway with an ALB), so a hit is always a hosted deployment's
- * own detail, its dev environment, or an issue the public mirror cannot open.
+ * The NLB (spelled out too), its IP-target registration, "on dev" notes and
+ * the private tracker's issue numbers ARE listed: no synced file needs them
+ * (the chart fronts its Gateway with an ALB), so a hit is always a hosted
+ * deployment's own detail, its dev environment, or an issue the public mirror
+ * cannot open. Issue numbers are listed one by one as they are scrubbed. A
+ * `jcode#623`-style qualified reference names a public upstream issue and is
+ * never matched.
  */
 const CLOUD_IMPLEMENTATION_TERMS = [
   /\bmicro-?vms?\b/i,
@@ -130,9 +134,15 @@ const CLOUD_IMPLEMENTATION_TERMS = [
   /\bdev live gate\b/i,
   /\bobserved on dev\b/i,
   /\bnlb\b/i,
+  /\bnetwork load balancer\b/i,
   /\bip-target registration\b/i,
   /\b(found|seen) (live )?on dev\b|\b(after boot|ran) on dev\b|\bdev ran on\b|\bon dev:/i,
   /#1300\b/,
+  /(^|[^\w#&])#(803|1335|1401)\b/,
+  // The hosted agent desktop is licensed hosted-platform code: its plan and
+  // the screen server it runs are named only inside ee/ and cloud-only dirs.
+  /\bplans\/desktop-takeover\b/,
+  /\bx0?tigervnc\b/i,
 ];
 
 /** Synced files whose prose may name these terms by design. */
@@ -286,6 +296,12 @@ test(
       } catch {
         continue;
       }
+      // Raw-text prefilter, identical in result: every comment row is a
+      // substring of the source whose edges sit next to a non-word character
+      // there (a comment marker, a newline, `*/`), so a term that matches a
+      // row matches the source too. Only the few files that name a term
+      // anywhere pay for the TypeScript parse.
+      if (!CLOUD_IMPLEMENTATION_TERMS.some((re) => re.test(source))) continue;
       for (const { line, text } of await commentsOf(file, source)) {
         const hit = CLOUD_IMPLEMENTATION_TERMS.find((re) => re.test(text));
         if (hit)

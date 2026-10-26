@@ -110,6 +110,7 @@ vi.mock("../services/connection-service", () => ({
   createConnection: async () => ({ id: "conn-new" }),
   reconnectConnection: async () => ({ id: "conn-old" }),
   linkConnectionToAppConfig: async () => undefined,
+  findInstallationConnection: async () => null,
 }));
 
 vi.mock("../lib/gateway-invalidate", () => ({

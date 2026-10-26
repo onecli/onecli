@@ -89,5 +89,7 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   pagerduty: "development",
   coralogix: "cloud-data",
   onyx: "communication",
+  twilio: "communication",
+  dripify: "communication",
   x: "communication",
 };

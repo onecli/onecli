@@ -30,5 +30,32 @@ export const CRITERIA_TEMPLATE = `The answer should state these facts:
 Pass when at least 70% of the facts are present.
 Fail if the answer states anything that contradicts these facts.`;
 
+/** A filled-in question per check, so the form shows how each one works.
+ * Each asks about a closed period, so its expected answer does not drift
+ * from day to day, and the custom one states facts the judge can check. */
+export const EXAMPLE_QUESTION: Record<
+  EvalCheckKind,
+  { question: string; expected: string }
+> = {
+  numeric: {
+    question: "How many deals did we close in Q3?",
+    expected: "42",
+  },
+  text: {
+    question: "Who is the account owner for Acme Corp?",
+    expected: "Dana Levi",
+  },
+  custom: {
+    question: "Summarize the support tickets from September.",
+    expected: `The answer should state these facts:
+- 120 tickets were opened in September
+- The most common issue was failed logins
+- Most tickets were resolved within a day
+
+Pass when at least 2 of the 3 facts are present.
+Fail if the answer gives a different number of tickets.`,
+  },
+};
+
 export const plural = (count: number, one: string, many: string) =>
   `${count} ${count === 1 ? one : many}`;

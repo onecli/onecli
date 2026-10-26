@@ -98,6 +98,24 @@ export const agentSectionPath = (
   return section === "" ? base : `${base}/${section}`;
 };
 
+/**
+ * The agent's Computer page. With `requestId`, a deep link to that ask: the
+ * page focuses Take control (a focus hint only, never the lease itself) and
+ * then drops the param, so a refresh doesn't replay it. The API's own link
+ * (the Slack card) builds the same shape.
+ */
+export const DESKTOP_TAKEOVER_PARAM = "takeover";
+export const agentComputerPath = (
+  currentPathname: string,
+  agentId: string,
+  requestId?: string,
+): string => {
+  const path = agentSectionPath(currentPathname, agentId, "computer");
+  return requestId === undefined
+    ? path
+    : `${path}?${new URLSearchParams({ [DESKTOP_TAKEOVER_PARAM]: requestId }).toString()}`;
+};
+
 /** Activity's Runs tab for one agent, opened on one of its filters. */
 export const agentRunsPath = (
   currentPathname: string,
@@ -107,6 +125,17 @@ export const agentRunsPath = (
   withWorkspacePrefix(
     currentPathname,
     `/activity?${new URLSearchParams({ tab: "runs", agent: agentId, view }).toString()}`,
+  );
+
+/** Activity's Runs tab narrowed to ONE webhook's runs (its "View runs"). */
+export const agentWebhookRunsPath = (
+  currentPathname: string,
+  agentId: string,
+  webhookId: string,
+): string =>
+  withWorkspacePrefix(
+    currentPathname,
+    `/activity?${new URLSearchParams({ tab: "runs", agent: agentId, view: "webhook", webhook: webhookId }).toString()}`,
   );
 
 /**

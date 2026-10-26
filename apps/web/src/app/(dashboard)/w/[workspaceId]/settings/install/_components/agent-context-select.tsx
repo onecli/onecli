@@ -13,8 +13,7 @@ import { withWorkspacePrefix } from "@/lib/navigation";
 
 const NEW_AGENT = "__new";
 
-// Structural on purpose: agent lists arrive from both the /v1 client (string
-// dates) and the server-action seed (Date) — this select needs neither.
+// Structural on purpose: this select needs only the id and the label.
 interface AgentOption {
   id: string;
   name: string;

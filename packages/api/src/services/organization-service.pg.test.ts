@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
-import { proofDatabaseUrl } from "../testing/pg-proof.js";
+import { proofDatabaseUrl, waitForLockWaiters } from "../testing/pg-proof.js";
 
 /**
  * `ensureUserOrganization` on REAL PostgreSQL — the first-registration
@@ -32,8 +32,6 @@ let db: Db;
 let svc: OrgService;
 
 const P = "orgboot-";
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 let userSeq = 0;
 /** A P-keyed user row; everything else this suite creates hangs off one. */
@@ -219,13 +217,15 @@ describe.skipIf(!PROOF_URL)(
       );
 
       const winnerWorkspaceId = await winnerReady;
+      let settledEarly = false;
       const loser = svc.ensureUserOrganization(user.id, user.email);
+      void loser.then(
+        () => (settledEarly = true),
+        () => (settledEarly = true),
+      );
       // The loser must be WAITING on the advisory lock, not running ahead on
       // the pre-commit snapshot (which would re-create the P2002 race).
-      const settledEarly = await Promise.race([
-        loser.then(() => true),
-        sleep(400).then(() => false),
-      ]);
+      await waitForLockWaiters(db, { queryLike: "%pg_advisory_xact_lock%" });
       expect(settledEarly).toBe(false);
 
       release();

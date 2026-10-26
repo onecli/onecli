@@ -7,8 +7,8 @@ import {
 } from "@onecli/api/lib/approval-groups";
 import type {
   ApprovalSummary,
+  GroupedOutcome,
   PendingApproval,
-  SettledOutcome,
 } from "@/lib/api/approvals";
 import { shareOneRecord } from "@/lib/components/approvals/approval-rows";
 import type { SettledMember } from "@/lib/components/approvals/grouped-approval-card";
@@ -37,17 +37,23 @@ export type ApprovalTimelineEntry =
       action: string;
       /** Set when every request acted on one record, so it stays a link. */
       summary?: ApprovalSummary;
-      counts: Record<SettledOutcome, number>;
+      counts: Record<GroupedOutcome, number>;
     };
+
+/** A card a grouped card or Done record may hold: never a replaced one. */
+type GroupableCard = ApprovalCard & { settled?: GroupedOutcome };
+
+const isGroupable = (card: ApprovalCard): card is GroupableCard =>
+  card.settled !== "replaced";
 
 /**
  * Split one task's cards (creation order) into RUNS: a request made after
  * every earlier one had been decided is a new attempt ("do it again"), never
  * more rows on the finished card. Both times are the gateway's clock.
  */
-const runsOf = (cards: ApprovalCard[]): ApprovalCard[][] => {
-  const runs: ApprovalCard[][] = [];
-  let run: ApprovalCard[] = [];
+const runsOf = (cards: GroupableCard[]): GroupableCard[][] => {
+  const runs: GroupableCard[][] = [];
+  let run: GroupableCard[] = [];
   let lastSettled = -Infinity;
   for (const c of cards) {
     if (run.length > 0 && run.every((m) => m.settled) && c.at > lastSettled) {
@@ -79,9 +85,16 @@ const runsOf = (cards: ApprovalCard[]): ApprovalCard[][] => {
 export const approvalTimeline = (
   cards: readonly ApprovalCard[],
 ): ApprovalTimelineEntry[] => {
-  const cardById = new Map(cards.map((c) => [c.approval.id, c]));
-  const entries: ApprovalTimelineEntry[] = [];
-  for (const task of groupApprovals(cards.map((c) => c.approval))) {
+  // A REPLACED request is history the person already acted on: always its
+  // own one-line record, never a row on (or the anchor of) a grouped card.
+  // Its revision then stands alone as a full card with its table, the way
+  // Slack shows it, whatever order the poll and the notice arrived in.
+  const rest = cards.filter(isGroupable);
+  const cardById = new Map(rest.map((c) => [c.approval.id, c]));
+  const entries: ApprovalTimelineEntry[] = cards
+    .filter((c) => !isGroupable(c))
+    .map((card) => ({ kind: "single", at: card.at, card }));
+  for (const task of groupApprovals(rest.map((c) => c.approval))) {
     const taskCards = task.approvals.flatMap((a) => cardById.get(a.id) ?? []);
     runsOf(taskCards).forEach((run, i) => {
       const [first] = run;
@@ -96,7 +109,16 @@ export const approvalTimeline = (
         return;
       }
       const settled = run.flatMap((c) =>
-        c.settled ? [{ approval: c.approval, outcome: c.settled }] : [],
+        c.settled
+          ? [
+              {
+                approval: c.approval,
+                outcome: c.settled,
+                via: c.via,
+                result: c.result,
+              },
+            ]
+          : [],
       );
       const [liveGroup] = groupApprovals(live.map((c) => c.approval));
       if (liveGroup) {
@@ -110,7 +132,12 @@ export const approvalTimeline = (
         return;
       }
       const approvals = run.map((c) => c.approval);
-      const counts = { approved: 0, denied: 0, decided: 0, expired: 0 };
+      const counts: Record<GroupedOutcome, number> = {
+        approved: 0,
+        denied: 0,
+        decided: 0,
+        expired: 0,
+      };
       for (const s of settled) counts[s.outcome] += 1;
       entries.push({
         kind: "done",

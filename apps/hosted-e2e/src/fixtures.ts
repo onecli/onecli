@@ -273,3 +273,19 @@ export const seedOpenaiOauthGrant = async (
   });
   return { secretId };
 };
+
+/**
+ * The container the control plane records for a sandbox (what every runner
+ * copy reports and fences on), or null when it has none. Read from the row,
+ * not from a runner copy: with several copies no single one knows it.
+ */
+export const containerOf = async (
+  prisma: PrismaClient,
+  sandboxId: string,
+): Promise<string | null> =>
+  (
+    await prisma.sandbox.findUnique({
+      where: { id: sandboxId },
+      select: { containerRef: true },
+    })
+  )?.containerRef ?? null;

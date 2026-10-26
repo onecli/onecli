@@ -230,6 +230,14 @@ export interface SteerInput {
    * rewrites it, and confirms the join by finding it in the run.
    */
   message: string;
+  /**
+   * Inline-vision images sent with the follow-up, budget-packed by the
+   * supervisor exactly like a turn's (`TurnInput.images`), injected with the
+   * words as one user message. Optional and additive, like the turn's: an
+   * adapter that cannot carry them ignores it, and the files are on disk
+   * regardless.
+   */
+  images?: TurnImage[];
 }
 
 export interface HarnessSession {

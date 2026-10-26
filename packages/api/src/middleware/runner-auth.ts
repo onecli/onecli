@@ -1,5 +1,6 @@
 import { createMiddleware } from "hono/factory";
 import { db } from "@onecli/db";
+import { RUNNER_REPLICA_HEADER } from "@onecli/agent-protocol";
 import { logger } from "../lib/logger";
 
 const log = logger.child({ component: "runner-auth" });
@@ -15,11 +16,20 @@ const log = logger.child({ component: "runner-auth" });
  * hint-free 401 that never distinguishes missing vs unknown tokens, and a
  * fire-and-forget liveness touch — every authenticated runner call refreshes
  * `lastSeenAt`, so the poll loop itself is the heartbeat.
+ *
+ * A runner that runs as several copies names the calling copy in
+ * `RUNNER_REPLICA_HEADER`. That copy's own liveness is refreshed BEFORE the
+ * request runs (awaited, not fire-and-forget: which copy is live decides
+ * which one reconciles and where channel-bound work may go), and a copy id
+ * this runner does not own is the same hint-free 401 as a bad token. A call
+ * without the header is a single-process runner, served exactly as before.
  */
 
 export interface RunnerAuthContext {
   runnerId: string;
   name: string;
+  /** The calling copy; absent for a single-process runner. */
+  replicaId?: string;
 }
 
 export type RunnerEnv = { Variables: { runner: RunnerAuthContext } };
@@ -39,7 +49,20 @@ export const runnerAuth = createMiddleware<RunnerEnv>(async (c, next) => {
   });
   if (!runner) return c.json(unauthorized, 401);
 
-  c.set("runner", { runnerId: runner.id, name: runner.name });
+  const replicaId = c.req.header(RUNNER_REPLICA_HEADER);
+  if (replicaId !== undefined) {
+    const { count } = await db.runnerReplica.updateMany({
+      where: { id: replicaId, runnerId: runner.id },
+      data: { lastSeenAt: new Date() },
+    });
+    if (count === 0) return c.json(unauthorized, 401);
+  }
+
+  c.set("runner", {
+    runnerId: runner.id,
+    name: runner.name,
+    ...(replicaId !== undefined && { replicaId }),
+  });
 
   // Liveness rides every call; a failed touch must never fail the request.
   db.runner

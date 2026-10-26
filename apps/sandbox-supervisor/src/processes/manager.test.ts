@@ -10,6 +10,7 @@ import {
   TURN_END_SAFETY_NET_PROMPT,
   type ProcessManager,
 } from "./manager";
+import type { CpuProbe } from "./cpu-probe";
 
 /**
  * The process manager against REAL children (the platform-tools.test.ts
@@ -25,10 +26,28 @@ afterEach(() => {
   managers = [];
 });
 
+/** A CPU probe with scripted verdicts: the manager's seam, so the busy
+ * signal is proven without a real /proc walk (cpu-probe.test.ts has those). */
+const scriptedProbe = (verdict: {
+  group?: (pgid: number) => boolean;
+  sandbox?: () => boolean;
+}): CpuProbe & { forgotten: number[] } => {
+  const forgotten: number[] = [];
+  return {
+    forgotten,
+    groupBusy: async (pgid) => verdict.group?.(pgid) ?? false,
+    sandboxBusy: async () => verdict.sandbox?.() ?? false,
+    forget: (pgid) => {
+      forgotten.push(pgid);
+    },
+  };
+};
+
 const rig = (opts?: {
   sweepIntervalMs?: number;
   stopGraceMs?: number;
   now?: () => number;
+  cpuProbe?: CpuProbe;
 }) => {
   const sent: ProcessFrame[] = [];
   const manager = createProcessManager({
@@ -39,6 +58,8 @@ const rig = (opts?: {
     sweepIntervalMs: opts?.sweepIntervalMs ?? 20,
     resendEveryTicks: 5,
     stopGraceMs: opts?.stopGraceMs ?? 300,
+    // Quiet by default: the real probe would read this host's /proc.
+    cpuProbe: opts?.cpuProbe ?? scriptedProbe({}),
     ...(opts?.now && { now: opts.now }),
   });
   managers.push(manager);
@@ -271,36 +292,57 @@ describe("watches", () => {
   });
 
   it("silence watch fires after a quiet gap, and output RESETS the clock", async () => {
-    const { manager, sent } = rig({ sweepIntervalMs: 20 });
-    // Ticks every ~0.3s for ~1.2s — a chatty phase LONGER than the 1s silence
-    // window (the point: a broken reset fires DURING it). Then goes quiet.
-    const id = startId(
-      manager.start(
-        {
-          command:
-            "for i in 1 2 3 4 5; do echo tick; sleep 0.3; done; sleep 10",
-        },
-        null,
-      ),
-    );
-    manager.watch(
-      { processId: id, kind: "silence", silenceSeconds: 1, prompt: "quiet" },
+    // The injectable clock + an observed entry's output delta drive the SAME
+    // onOutput/sweep path a real child's stdout does (real pipes reaching
+    // onOutput are covered by the spawn + tail tests).
+    let clock = 1_000_000;
+    const { manager, sent } = rig({ sweepIntervalMs: 5, now: () => clock });
+    manager.observeUpsert(
+      {
+        ref: "obs-s",
+        command: "chatty",
+        status: "running",
+        startedAt: new Date().toISOString(),
+        wantsWake: false,
+      },
       null,
     );
-    // At 1.4s we are past the 1s window, but every ~0.3s tick reset the clock,
-    // so a WORKING reset is still armed. A BROKEN reset measures from start and
-    // has already fired at ~1.0s. MUTATION-PROOF: drop `lastOutputAt = now()`
+    manager.watch(
+      {
+        processId: "obs-s",
+        kind: "silence",
+        silenceSeconds: 1,
+        prompt: "quiet",
+      },
+      null,
+    );
+    const tick = () => new Promise((r) => setTimeout(r, 30));
+    for (let i = 0; i < 4; i += 1) {
+      clock += 900;
+      manager.observeUpsert(
+        {
+          ref: "obs-s",
+          command: "chatty",
+          status: "running",
+          startedAt: new Date().toISOString(),
+          wantsWake: false,
+          outputDelta: "tick\n",
+        },
+        null,
+      );
+      await tick();
+    }
+    // 3.6s of clock past arm, but every 0.9s of it reset the window, so a
+    // WORKING reset is still armed. MUTATION-PROOF: drop `lastOutputAt = now()`
     // in onOutput and this reads `triggered`.
-    await new Promise((r) => setTimeout(r, 1400));
-    expect(latest(sent, id).watches[0]?.status).toBe("armed");
-    // After the chatty phase ends, the quiet gap finally fires it.
+    expect(latest(sent, "obs-s").watches[0]?.status).toBe("armed");
+    clock += 1_100;
     const p = await waitFor(
       sent,
-      id,
+      "obs-s",
       (x) => x.watches[0]?.status === "triggered",
     );
     expect(p.watches[0]?.trigger).toBe("silent");
-    manager.stop({ processId: id });
   });
 
   it("expires an armed watch past its deadline to `expired`, never triggered", async () => {
@@ -328,6 +370,51 @@ describe("watches", () => {
     );
     // Expiry is terminal for the watch and never becomes a trigger.
     expect(p.watches[0]?.trigger).toBeUndefined();
+    manager.stop({ processId: id });
+  });
+
+  it("a watch armed without expiresInSeconds expires in one hour; an explicit one wins", () => {
+    // The default is what an un-tuned watch on an idle process holds the box
+    // awake for, so it is pinned in wall-clock terms, not by the constant.
+    const clock = 1_000_000;
+    const { manager, sent } = rig({ now: () => clock });
+    const id = startId(manager.start({ command: "sleep 30" }, null));
+    manager.watch({ processId: id, kind: "exit", prompt: "report" }, null);
+    manager.watch(
+      {
+        processId: id,
+        kind: "exit",
+        prompt: "slow CI",
+        expiresInSeconds: 86_400,
+      },
+      null,
+    );
+    const expiries = latest(sent, id).watches.map((w) =>
+      Date.parse(w.expiresAt),
+    );
+    expect(expiries).toEqual([clock + 3_600_000, clock + 86_400_000]);
+    manager.stop({ processId: id });
+  });
+
+  it("a silence watch's default lifetime starts after its silence window", () => {
+    // Without the offset a 2h silence watch would expire before it could
+    // ever fire (expiry is swept first).
+    const clock = 1_000_000;
+    const { manager, sent } = rig({ now: () => clock });
+    const id = startId(manager.start({ command: "sleep 30" }, null));
+    manager.watch(
+      {
+        processId: id,
+        kind: "silence",
+        silenceSeconds: 7_200,
+        prompt: "it went quiet",
+      },
+      null,
+    );
+    const expiries = latest(sent, id).watches.map((w) =>
+      Date.parse(w.expiresAt),
+    );
+    expect(expiries).toEqual([clock + (7_200 + 3_600) * 1000]);
     manager.stop({ processId: id });
   });
 
@@ -599,5 +686,85 @@ describe("the turn-end safety net", () => {
     expect(
       manager.armTurnEndSafetyNet({ conversationId: "cv", turnId: "t" }),
     ).toBe(0);
+  });
+});
+
+describe("the busy signal (keep-awake's engagement read)", () => {
+  it("every frame carries lastOutputAt (refreshed by output) and cpuBusy", async () => {
+    const { manager, sent } = rig();
+    const id = startId(
+      manager.start({ command: "echo a; sleep 0.2; echo b; sleep 5" }, null),
+    );
+    const first = latest(sent, id);
+    expect(first.cpuBusy).toBe(false);
+    expect(typeof first.lastOutputAt).toBe("string");
+    const after = await waitFor(
+      sent,
+      id,
+      (p) => p.tail?.includes("b") === true,
+    );
+    expect(Date.parse(after.lastOutputAt!)).toBeGreaterThanOrEqual(
+      Date.parse(first.lastOutputAt!),
+    );
+    manager.stop({ processId: id });
+  });
+
+  it("a CPU verdict that CHANGES sends a frame at once; a spawned child is judged by its own group", async () => {
+    let busy = false;
+    const probe = scriptedProbe({ group: () => busy });
+    const { manager, sent } = rig({ cpuProbe: probe });
+    const id = startId(manager.start({ command: "sleep 5" }, null));
+    expect(latest(sent, id).cpuBusy).toBe(false);
+
+    busy = true;
+    const up = await waitFor(sent, id, (p) => p.cpuBusy === true);
+    expect(up.status).toBe("running");
+    busy = false;
+    await waitFor(sent, id, (p) => p.cpuBusy === false);
+    manager.stop({ processId: id });
+  });
+
+  it("an observed task (no pid) takes the sandbox-wide verdict", async () => {
+    let sandbox = false;
+    const { manager, sent } = rig({
+      cpuProbe: scriptedProbe({ sandbox: () => sandbox }),
+    });
+    manager.observeUpsert(
+      {
+        ref: "native-1",
+        command: "native build",
+        status: "running",
+        startedAt: new Date().toISOString(),
+        wantsWake: false,
+      },
+      null,
+    );
+    sandbox = true;
+    await waitFor(sent, "native-1", (p) => p.cpuBusy === true);
+  });
+
+  it("a process that ends is forgotten by the probe and reads idle", async () => {
+    const probe = scriptedProbe({ group: () => true });
+    const { manager, sent } = rig({ cpuProbe: probe });
+    const id = startId(manager.start({ command: "sleep 0.1" }, null));
+    const done = await waitFor(sent, id, (p) => p.status === "exited");
+    expect(done.cpuBusy).toBe(false);
+    expect(probe.forgotten.length).toBeGreaterThan(0);
+  });
+});
+
+describe("watch origin", () => {
+  it("an agent's own watch is origin 'agent'; the safety net and the implicit wake are 'platform'", async () => {
+    const { manager, sent } = rig();
+    const mine = startId(manager.start({ command: "sleep 5" }, null));
+    manager.watch({ processId: mine, kind: "exit", prompt: "mine" }, null);
+    expect(latest(sent, mine).watches[0]?.origin).toBe("agent");
+
+    const quiet = startId(manager.start({ command: "sleep 5" }, null));
+    manager.armTurnEndSafetyNet({ conversationId: "cv", turnId: "t" });
+    expect(latest(sent, quiet).watches[0]?.origin).toBe("platform");
+
+    manager.stop({ processId: mine });
+    manager.stop({ processId: quiet });
   });
 });

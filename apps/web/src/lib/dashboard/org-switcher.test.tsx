@@ -125,12 +125,6 @@ describe("footer account menu", () => {
     const orgRow = screen.getByRole("menuitem", { name: /Organization/ });
     expect(orgRow).toHaveTextContent("First org");
     expect(within(orgRow).getByText("owner")).toBeInTheDocument();
-    // Organization block sits above the account block.
-    const menu = screen.getByRole("menu");
-    expect(
-      orgRow.compareDocumentPosition(within(menu).getByText("Test User")) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
     expect(
       screen.getByRole("menuitem", { name: /Account preferences/ }),
     ).toHaveAttribute("href", "/account/preferences");
@@ -155,24 +149,21 @@ describe("footer account menu", () => {
     expect(state.push).toHaveBeenCalledWith("/org/o2/workspaces");
   });
 
-  it.each([false, true])(
-    "switches organizations from the submenu (mobile=%s)",
-    async (isMobile) => {
-      state.isMobile = isMobile;
-      const user = userEvent.setup({ skipHover: true });
-      renderNavUser();
-      await user.click(screen.getByRole("button", { name: /Test User/ }));
-      await user.click(screen.getByRole("menuitem", { name: /Organization/ }));
-      expect(
-        await screen.findByRole("menuitem", { name: /Second org/ }),
-      ).toBeInTheDocument();
-      expect(
-        screen.getByRole("menuitem", { name: /Create organization/ }),
-      ).toHaveAttribute("href", "/create-org");
-      await user.click(screen.getByRole("menuitem", { name: /Second org/ }));
-      expect(state.push).toHaveBeenCalledWith("/org/o2/workspaces");
-    },
-  );
+  // `isMobile` only flips the popover side, so one arm proves the switch.
+  it("switches organizations from the submenu", async () => {
+    const user = userEvent.setup({ skipHover: true });
+    renderNavUser();
+    await user.click(screen.getByRole("button", { name: /Test User/ }));
+    await user.click(screen.getByRole("menuitem", { name: /Organization/ }));
+    expect(
+      await screen.findByRole("menuitem", { name: /Second org/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: /Create organization/ }),
+    ).toHaveAttribute("href", "/create-org");
+    await user.click(screen.getByRole("menuitem", { name: /Second org/ }));
+    expect(state.push).toHaveBeenCalledWith("/org/o2/workspaces");
+  });
 
   it("omits the organization block and keeps sign-out without an active organization", async () => {
     state.activeOrgId = null;

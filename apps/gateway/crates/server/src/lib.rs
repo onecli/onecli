@@ -33,7 +33,10 @@ use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 use tracing::{debug, info, info_span, warn, Instrument};
 
-use approval::{ApprovalDecision, ApprovalStore, PendingApproval, APPROVAL_TIMEOUT_SECS};
+use approval::{
+    ApprovalDecision, ApprovalStore, DecisionOutcome, DenyReason, PendingApproval,
+    APPROVAL_TIMEOUT_SECS,
+};
 use ca::CertificateAuthority;
 use cache::CacheStore;
 use context::auth::AuthUser;
@@ -556,38 +559,42 @@ async fn get_pending_approvals(
 
         info!(exclude_count = exclude.len(), "approval poll started");
 
-        let mut pending = state
-            .approval_store
-            .list_pending(&org_id, &auth.workspace_id)
-            .await;
-        pending.retain(|a| !exclude.contains(a.id.as_str()));
+        let store = &state.approval_store;
+        let (org, workspace, exclude) = (org_id.as_str(), auth.workspace_id.as_str(), &exclude);
+        let list = move || async move {
+            let mut pending = store.list_pending(org, workspace).await;
+            pending.retain(|a| !exclude.contains(a.id.as_str()));
+            pending
+        };
+
+        let mut pending = list().await;
 
         let mut long_polled = false;
-        if pending.is_empty() {
-            long_polled = true;
-            let mut shutdown_signal = shutdown::subscribe();
-            // A poller holding a connection open for 30 seconds would pin the
-            // drain for its whole window. Answer "nothing pending" at once and
-            // let the SDK re-poll against the replacement instance.
-            let got_new = tokio::select! {
-                got_new = state.approval_store.wait_for_new(
-                    &org_id,
-                    &auth.workspace_id,
-                    std::time::Duration::from_secs(30),
-                ) => got_new,
-                _ = shutdown_signal.wait() => false,
-            };
-            if got_new {
-                // Parallel requests land a beat apart. Answer with the whole
-                // burst, not its first request, so every surface sees one
-                // task at once instead of a card that grows after it shows.
-                tokio::time::sleep(approval::BURST_COALESCE).await;
-                let mut fresh = state
-                    .approval_store
-                    .list_pending(&org_id, &auth.workspace_id)
-                    .await;
-                fresh.retain(|a| !exclude.contains(a.id.as_str()));
-                pending = fresh;
+        if pending.is_empty() && params.long_poll() {
+            // Subscribe BEFORE the list that decides to wait: an approval
+            // stored between an empty list and a later subscribe notifies
+            // nobody and would hold this poll for its whole window. Listing
+            // again after subscribing catches one stored before the
+            // subscription; the subscription catches one stored after it.
+            let new_approval = store.subscribe_new(org, workspace).await;
+            pending = list().await;
+            if pending.is_empty() {
+                long_polled = true;
+                let mut shutdown_signal = shutdown::subscribe();
+                // A poller holding a connection open for 30 seconds would pin the
+                // drain for its whole window. Answer "nothing pending" at once and
+                // let the SDK re-poll against the replacement instance.
+                let got_new = tokio::select! {
+                    got_new = new_approval.wait(std::time::Duration::from_secs(30)) => got_new,
+                    _ = shutdown_signal.wait() => false,
+                };
+                if got_new {
+                    // Parallel requests land a beat apart. Answer with the whole
+                    // burst, not its first request, so every surface sees one
+                    // task at once instead of a card that grows after it shows.
+                    tokio::time::sleep(approval::BURST_COALESCE).await;
+                    pending = list().await;
+                }
             }
         }
 
@@ -676,6 +683,14 @@ async fn submit_approval_decision(
             ApprovalDecision::Approve => "approve",
             ApprovalDecision::Deny => "deny",
         };
+        // A reason qualifies a deny only: an approve carrying one is a
+        // malformed request, never silently accepted.
+        if body.reason.is_some() && body.decision != ApprovalDecision::Deny {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                axum::Json(serde_json::json!({ "error": "reason_requires_deny" })),
+            );
+        }
 
         // The org id is part of the Redis key. A lookup failure here would
         // otherwise degrade silently into an empty org and a guaranteed
@@ -742,17 +757,21 @@ async fn submit_approval_decision(
         info!(
             approval_id = %approval_id,
             decision = decision_str,
+            reason = ?body.reason,
             "approval decision submitted"
         );
 
         let delivered = state
             .approval_store
-            .submit_decision(
+            .submit_outcome(
                 &org_id,
                 &auth.workspace_id,
                 &approval_id,
-                body.decision,
-                Some(auth.user_id),
+                DecisionOutcome {
+                    decision: body.decision,
+                    approved_by: Some(auth.user_id),
+                    reason: body.reason,
+                },
             )
             .await;
 
@@ -785,6 +804,10 @@ async fn submit_approval_decision(
 #[derive(serde::Deserialize)]
 struct DecisionBody {
     decision: ApprovalDecision,
+    /// Why a deny happened (`superseded`), when it was not a reviewer's
+    /// plain no. Optional: every existing client omits it.
+    #[serde(default)]
+    reason: Option<DenyReason>,
 }
 
 /// Reject non-proxy, non-CONNECT requests to unknown routes with 400 Bad Request.
@@ -1138,6 +1161,35 @@ async fn handle_http_proxy(
         }
     };
 
+    // Custom secrets filling the same slot are disambiguated first (same law
+    // as the MITM path, `mitm::resolve_rules`).
+    let (connection_id, secret_choices) = match connect::select_secret_rules(
+        std::mem::take(&mut resolved.injection_rules),
+        &resolved.app_connections,
+        &hostname,
+        req_path.as_deref(),
+        connection_id.as_deref(),
+    ) {
+        connect::SecretSelection::Rules {
+            rules,
+            app_pin,
+            advertised,
+        } => {
+            resolved.injection_rules = rules;
+            (app_pin, advertised)
+        }
+        connect::SecretSelection::Ambiguous(connections) => {
+            return Ok(proxy::response::multiple_connections_axum(&connections));
+        }
+        connect::SecretSelection::NotFound(connections) => {
+            let cid = connection_id.as_deref().unwrap_or("");
+            return Ok(proxy::response::connection_not_found_axum(
+                cid,
+                &connections,
+            ));
+        }
+    };
+
     // Per-request app connection disambiguation — app rules MERGE with the
     // secret rules (see inject::merge_injection_rules; #428). When the secret
     // rules already serve this request's path, app-side escalations are
@@ -1364,7 +1416,7 @@ async fn handle_http_proxy(
         }
     };
 
-    connect::inject_connections_header(&mut resp, &resolved.app_connections);
+    connect::inject_connections_header(&mut resp, &resolved.app_connections, &secret_choices);
 
     Ok(resp.map(axum::body::Body::new))
 }

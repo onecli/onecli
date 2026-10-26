@@ -1,4 +1,5 @@
 import { db, Prisma } from "@onecli/db";
+import { cleanLabel, NO_REPLY_TOKEN } from "@onecli/agent-protocol/text";
 import { getCrypto } from "../../providers";
 import { ServiceError } from "../errors";
 import {
@@ -8,8 +9,9 @@ import {
   AUDIT_STATUS,
   recordAuditEvent,
 } from "../audit-service";
+import { lockAgentRow } from "./channel-cleanup-service";
 import { channelProvider } from "./registry";
-import type { ChannelProviderId } from "./types";
+import type { ChannelProviderId, ListenMode } from "./types";
 import { logger } from "../../lib/logger";
 
 const log = logger.child({ component: "agent-reach" });
@@ -81,6 +83,15 @@ export const normalizeState = (raw: string): ReachState =>
 /** Does this settlement let the agent speak to anyone at all here? */
 export const isSettled = (state: ReachState): boolean =>
   state === "approved" || state === "members_only";
+
+/** The STORED states `isSettled` accepts (legacy spellings included), for a
+ * guard that has to run inside the query. */
+const SETTLED_STATES = ["approved", "members_only", "denied", "revoked"];
+
+/** What the agent hears in a space (`LISTEN_MODES`); anything unknown reads
+ * as the default, `mentions`. */
+const normalizeListen = (raw: string | null | undefined): ListenMode =>
+  raw === "all" ? "all" : "mentions";
 
 /** One posted owner card - recorded claim-before-post so a retry never
  * double-posts and a decide can rewrite every owner's card. */
@@ -209,16 +220,17 @@ export const ensureGrant = async (input: {
   };
   const existing = await db.agentReachGrant.findUnique({
     where,
-    select: { id: true, state: true },
+    select: { id: true, state: true, revision: true },
   });
   if (existing) {
     if (existing.state === "left" || existing.state === "expired") {
       // Re-invite after a leave (or a fresh knock after expiry): re-knock.
-      // Atomic on the state so two concurrent doors re-arm once;
-      // cardRefs resets to "cards owed".
+      // Atomic on the exact revision so a park/re-arm ABA cannot revive
+      // stale context; cardRefs resets to "cards owed".
       const rearmed = await db.agentReachGrant.updateMany({
-        where: { id: existing.id, state: existing.state },
+        where: { id: existing.id, revision: existing.revision },
         data: {
+          revision: { increment: 1 },
           state: "pending",
           cardRefs: [],
           decidedByUserId: null,
@@ -228,9 +240,24 @@ export const ensureGrant = async (input: {
           // instantly re-expired by the sweep, and the card's age line
           // would date the new question by the dead one.
           createdAt: new Date(),
+          // So is what the agent hears: a fresh approval never silently
+          // brings back an old promotion (and skips its intro).
+          listen: "mentions",
           ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
         },
       });
+      if (rearmed.count === 0) {
+        const current = await db.agentReachGrant.findUnique({
+          where,
+          select: { id: true, state: true },
+        });
+        if (!current) return ensureGrant(input);
+        return {
+          id: current.id,
+          state: normalizeState(current.state),
+          created: false,
+        };
+      }
       return {
         id: existing.id,
         state: "pending",
@@ -258,7 +285,7 @@ export const ensureGrant = async (input: {
         // the empty array as "cards still owed".
         cardRefs: [],
       },
-      select: { id: true, state: true },
+      select: { id: true, state: true, revision: true },
     });
     return {
       id: created.id,
@@ -269,7 +296,7 @@ export const ensureGrant = async (input: {
     // Lost the race - re-read what won.
     const winner = await db.agentReachGrant.findUnique({
       where,
-      select: { id: true, state: true },
+      select: { id: true, state: true, revision: true },
     });
     if (winner) {
       return {
@@ -382,6 +409,7 @@ const postOwedReachCards = async (grantId: string): Promise<void> => {
     where: { id: grantId },
     select: {
       id: true,
+      revision: true,
       state: true,
       provider: true,
       integrationId: true,
@@ -427,7 +455,13 @@ const postOwedReachCards = async (grantId: string): Promise<void> => {
   );
   const firstAskedDaysAgo = ageDays > 3 ? ageDays : undefined;
 
+  let expectedRevision = grant.revision;
   for (const owner of owed) {
+    const current = await db.agentReachGrant.findFirst({
+      where: { id: grant.id, revision: expectedRevision, state: "pending" },
+      select: { id: true },
+    });
+    if (!current) return;
     try {
       const ref = await reach.card.post({
         credentialsJson,
@@ -441,12 +475,17 @@ const postOwedReachCards = async (grantId: string): Promise<void> => {
       posted.push({ channel: ref.channel, ts: ref.ts, userId: owner.userId });
       // Record after EACH post, not once at the end: a crash mid-loop must
       // not forget a card that is already on someone's screen.
-      await db.agentReachGrant.update({
-        where: { id: grant.id },
+      const recorded = await db.agentReachGrant.updateMany({
+        where: { id: grant.id, revision: expectedRevision, state: "pending" },
         // Plain JSON in, structurally: Prisma's InputJsonValue wants no class
         // instances - these are string-field literals already.
-        data: { cardRefs: posted.map((p) => ({ ...p })) },
+        data: {
+          cardRefs: posted.map((p) => ({ ...p })),
+          revision: { increment: 1 },
+        },
       });
+      if (recorded.count === 0) return;
+      expectedRevision += 1;
     } catch (err) {
       log.warn(
         { grantId: grant.id, err: String(err) },
@@ -537,6 +576,7 @@ export const expireStaleReachGrants = async (): Promise<{
     where: { state: "pending", createdAt: { lt: cutoff } },
     select: {
       id: true,
+      revision: true,
       provider: true,
       cardRefs: true,
       subjectLabel: true,
@@ -547,9 +587,11 @@ export const expireStaleReachGrants = async (): Promise<{
     orderBy: { createdAt: "asc" },
     take: 20,
   });
+  let expired = 0;
   for (const grant of stale) {
-    await parkReachGrant({
+    const parked = await parkReachGrant({
       grantId: grant.id,
+      expectedRevision: grant.revision,
       state: "expired",
       provider: grant.provider as ChannelProviderId,
       agentId: grant.agent.id,
@@ -559,14 +601,34 @@ export const expireStaleReachGrants = async (): Promise<{
       externalRef: grant.externalRef,
       rewriteCards: true,
     });
+    if (parked) expired += 1;
   }
-  return { expired: stale.length };
+  return { expired };
 };
 
 export type ReachDecisionResult =
   | { kind: "decided"; decidedByName: string; state: ReachState }
   | { kind: "already_settled" }
   | { kind: "refused"; message: string };
+
+const decisionAfterRevisionLoss = async (
+  grantId: string,
+): Promise<ReachDecisionResult> => {
+  const current = await db.agentReachGrant.findUnique({
+    where: { id: grantId },
+    select: { state: true },
+  });
+  if (!current) {
+    return { kind: "refused", message: "This request no longer exists." };
+  }
+  if (normalizeState(current.state) === "pending") {
+    return {
+      kind: "refused",
+      message: "This request changed while being checked. Please try again.",
+    };
+  }
+  return { kind: "already_settled" };
+};
 
 /**
  * The ONE decide door - the DM card click (via the channel-authorized
@@ -592,6 +654,7 @@ export const decideReachGrant = async (input: {
     where: { id: input.grantId },
     select: {
       id: true,
+      revision: true,
       state: true,
       provider: true,
       integrationId: true,
@@ -649,8 +712,9 @@ export const decideReachGrant = async (input: {
         tenantExternalId: grant.integration.externalId,
       });
       if (!verdict.ok) {
-        await parkReachGrant({
+        const parked = await parkReachGrant({
           grantId: grant.id,
+          expectedRevision: grant.revision,
           state: "expired",
           provider: grant.provider as ChannelProviderId,
           agentId: grant.agent.id,
@@ -660,6 +724,7 @@ export const decideReachGrant = async (input: {
           externalRef: grant.externalRef,
           rewriteCards: currentState === "pending",
         });
+        if (!parked) return decisionAfterRevisionLoss(grant.id);
         return {
           kind: "refused",
           message: `No longer valid - ${verdict.reason}. A new message or invite will ask again.`,
@@ -676,20 +741,25 @@ export const decideReachGrant = async (input: {
     return { kind: "refused", message: "Unknown decider." };
   }
 
-  // Atomic on the state we READ (the re-arm arm's own idiom): the recheck
-  // above is a network call, and a concurrent park (the expiry sweep, the
-  // leave hook) or a racing decide in that window must not be silently
-  // overwritten. A lost race answers already_settled — the honest outcome
-  // for a decision that landed second.
+  // Atomic on the revision we READ: the recheck above is a network call,
+  // and even a park/re-arm back to the same state is a different question.
+  // A concurrent park or racing decide must not be silently
+  // overwritten. Re-read a lost race: a still-pending ask needs an explicit
+  // retry refusal, not a settlement response that removes actionable cards.
+  // Never retry across revisions: pending may be a newly re-armed question.
   const flipped = await db.agentReachGrant.updateMany({
-    where: { id: grant.id, state: grant.state },
+    where: { id: grant.id, revision: grant.revision },
     data: {
+      revision: { increment: 1 },
       state: nextState,
       decidedByUserId: input.deciderUserId,
       decidedAt: new Date(),
+      // A channel that now answers no one hears nothing either: promoting
+      // it again is a fresh, announced decision.
+      ...(!isSettled(nextState) && { listen: "mentions" }),
     },
   });
-  if (flipped.count === 0) return { kind: "already_settled" };
+  if (flipped.count === 0) return decisionAfterRevisionLoss(grant.id);
 
   await recordAuditEvent({
     workspaceId: grant.agent.workspaceId,
@@ -725,6 +795,15 @@ export const decideReachGrant = async (input: {
       const reach = channelProvider(grant.provider as ChannelProviderId).reach;
       const decidedByName = decider.name || decider.email;
       for (const ref of refs) {
+        const current = await db.agentReachGrant.findFirst({
+          where: {
+            id: grant.id,
+            revision: grant.revision + 1,
+            state: nextState,
+          },
+          select: { id: true },
+        });
+        if (!current) break;
         try {
           await reach?.card.settle({
             credentialsJson,
@@ -933,8 +1012,10 @@ export const decideReachFromChannelWithUser = async (input: {
  * first, a dead credential just leaves stale cards whose buttons answer
  * already_settled.
  */
-export const parkReachGrant = async (input: {
+export interface ParkReachGrantInput {
   grantId: string;
+  /** Revision captured before parking, or the committed revision for settlement. */
+  expectedRevision: number;
   state: "left" | "expired";
   provider: ChannelProviderId;
   agentId: string;
@@ -945,12 +1026,38 @@ export const parkReachGrant = async (input: {
   /** Rewrite cards only when the grant was still pending — a settled
    * grant's cards already show the decision. */
   rewriteCards: boolean;
-}): Promise<void> => {
-  await db.agentReachGrant.update({
-    where: { id: input.grantId },
-    data: { state: input.state },
-  });
+}
 
+export const parkReachGrant = async (
+  input: ParkReachGrantInput,
+): Promise<boolean> => {
+  const parked = await db.agentReachGrant.updateMany({
+    where: {
+      id: input.grantId,
+      agentId: input.agentId,
+      integrationId: input.integrationId,
+      revision: input.expectedRevision,
+      state: { notIn: ["left", "expired"] },
+    },
+    data: {
+      state: input.state,
+      listen: "mentions",
+      revision: { increment: 1 },
+    },
+  });
+  if (parked.count === 0) return false;
+  await settleParkedReachCards({
+    ...input,
+    expectedRevision: input.expectedRevision + 1,
+  });
+  return true;
+};
+
+/** Settle captured old cards only after the parking transaction commits.
+ * expectedRevision is the committed POST-park revision. Never mutates a grant. */
+export const settleParkedReachCards = async (
+  input: ParkReachGrantInput,
+): Promise<void> => {
   const refs = cardRefsOf(input.cardRefs);
   if (
     input.rewriteCards &&
@@ -959,12 +1066,33 @@ export const parkReachGrant = async (input: {
   ) {
     const presence = await db.agentChannel.findFirst({
       where: { agentId: input.agentId, integrationId: input.integrationId },
-      select: { credentials: true },
+      select: { id: true, credentials: true, updatedAt: true },
     });
     if (presence?.credentials) {
       const credentialsJson = await getCrypto().decrypt(presence.credentials);
       const reach = channelProvider(input.provider).reach;
       for (const ref of refs) {
+        const current = await db.agentReachGrant.findFirst({
+          where: {
+            id: input.grantId,
+            agentId: input.agentId,
+            integrationId: input.integrationId,
+            revision: input.expectedRevision,
+            state: input.state,
+          },
+          select: { id: true },
+        });
+        const currentPresence = await db.agentChannel.findFirst({
+          where: {
+            id: presence.id,
+            agentId: input.agentId,
+            integrationId: input.integrationId,
+            credentials: presence.credentials,
+            updatedAt: presence.updatedAt,
+          },
+          select: { id: true },
+        });
+        if (!current || !currentPresence) return;
         try {
           await reach?.card.settle({
             credentialsJson,
@@ -983,50 +1111,6 @@ export const parkReachGrant = async (input: {
       }
     }
   }
-};
-
-/**
- * The leave hook (ingestGroupLeave): park the channel's grant as `left` -
- * hidden from the view, inert in the guest lane, decision history kept -
- * and settle any open owner cards so a pending question about a channel
- * the agent just left does not dangle as a live-looking card.
- */
-export const parkGrantOnLeave = async (input: {
-  agentId: string;
-  integrationId: string;
-  provider: ChannelProviderId;
-  externalRef: string;
-}): Promise<void> => {
-  const grant = await db.agentReachGrant.findUnique({
-    where: {
-      agentId_integrationId_subjectKind_externalRef: {
-        agentId: input.agentId,
-        integrationId: input.integrationId,
-        subjectKind: "space",
-        externalRef: input.externalRef,
-      },
-    },
-    select: {
-      id: true,
-      state: true,
-      cardRefs: true,
-      subjectLabel: true,
-      externalRef: true,
-    },
-  });
-  if (!grant || grant.state === "left" || grant.state === "expired") return;
-
-  await parkReachGrant({
-    grantId: grant.id,
-    state: "left",
-    provider: input.provider,
-    agentId: input.agentId,
-    integrationId: input.integrationId,
-    cardRefs: grant.cardRefs,
-    subjectLabel: grant.subjectLabel,
-    externalRef: grant.externalRef,
-    rewriteCards: grant.state === "pending",
-  });
 };
 
 /** The dashboard's per-SPACE settlement. */
@@ -1079,50 +1163,57 @@ export const dismissReachRow = async (input: {
   dismissedByUserId: string;
 }): Promise<{ removedGrant: boolean; removedLinks: number }> => {
   const subjectKind = input.subjectKind ?? "space";
-  const agent = await db.agent.findFirst({
-    where: { id: input.agentId, workspaceId: input.workspaceId },
-    select: { id: true },
-  });
-  if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
-
-  const presence = await db.agentChannel.findFirst({
-    where: { agentId: input.agentId, provider: input.provider },
-    select: { id: true, integrationId: true },
-  });
-  if (!presence) {
-    throw new ServiceError("NOT_FOUND", "No channel presence for this agent");
-  }
-
-  const removed = await db.agentReachGrant.deleteMany({
-    where: {
-      agentId: input.agentId,
-      integrationId: presence.integrationId,
-      subjectKind,
-      externalRef: input.externalRef,
-    },
-  });
-
-  // The channel's thread links go too - "forget" includes the routing rows.
-  // Provider-keyed matching, same as the leave door. SPACE only (see above).
-  const reach = channelProvider(input.provider).reach;
-  let removedLinks = 0;
-  if (reach && subjectKind === "space") {
-    const links = await db.channelThreadLink.findMany({
-      where: { agentChannelId: presence.id, kind: "group" },
-      select: { id: true, externalThreadId: true },
+  return db.$transaction(async (tx) => {
+    // Same ordering as activation and ingestion: no presence or routing
+    // snapshot may outlive a detach/reattach while dismissal is applied.
+    await lockAgentRow(tx, input.agentId, input.workspaceId);
+    const agent = await tx.agent.findFirst({
+      where: { id: input.agentId, workspaceId: input.workspaceId },
+      select: { id: true },
     });
-    const doomed = links
-      .filter((l) => reach.spaceOf(l.externalThreadId) === input.externalRef)
-      .map((l) => l.id);
-    if (doomed.length > 0) {
-      const gone = await db.channelThreadLink.deleteMany({
-        where: { id: { in: doomed } },
-      });
-      removedLinks = gone.count;
-    }
-  }
+    if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
 
-  return { removedGrant: removed.count > 0, removedLinks };
+    const presence = await tx.agentChannel.findFirst({
+      where: { agentId: agent.id, provider: input.provider },
+      select: { id: true, integrationId: true },
+    });
+    if (!presence) {
+      throw new ServiceError("NOT_FOUND", "No channel presence for this agent");
+    }
+
+    const removed = await tx.agentReachGrant.deleteMany({
+      where: {
+        agentId: agent.id,
+        integrationId: presence.integrationId,
+        subjectKind,
+        externalRef: input.externalRef,
+      },
+    });
+
+    // SPACE only: a person's own DM routing must survive their dismissal.
+    const reach = channelProvider(input.provider).reach;
+    let removedLinks = 0;
+    if (reach && subjectKind === "space") {
+      const links = await tx.channelThreadLink.findMany({
+        where: { agentChannelId: presence.id, kind: "group" },
+        select: { id: true, revision: true, externalThreadId: true },
+      });
+      const doomed = links.filter(
+        (link) => reach.spaceOf(link.externalThreadId) === input.externalRef,
+      );
+      if (doomed.length > 0) {
+        const gone = await tx.channelThreadLink.deleteMany({
+          where: {
+            agentChannelId: presence.id,
+            OR: doomed.map(({ id, revision }) => ({ id, revision })),
+          },
+        });
+        removedLinks = gone.count;
+      }
+    }
+
+    return { removedGrant: removed.count > 0, removedLinks };
+  });
 };
 
 export interface ReachGrantRow {
@@ -1130,6 +1221,8 @@ export interface ReachGrantRow {
   subjectLabel: string | null;
   state: ReachState;
   decidedAt: Date | null;
+  /** Space rows: what the agent hears there (person rows: always mentions). */
+  listen: ListenMode;
 }
 
 /** The dashboard projection: grants of one kind for one agent+provider. */
@@ -1154,10 +1247,15 @@ export const listGrants = async (
       subjectLabel: true,
       state: true,
       decidedAt: true,
+      listen: true,
     },
     orderBy: { createdAt: "asc" },
   });
-  return rows.map((r) => ({ ...r, state: normalizeState(r.state) }));
+  return rows.map((r) => ({
+    ...r,
+    state: normalizeState(r.state),
+    listen: normalizeListen(r.listen),
+  }));
 };
 
 /** Every SPACE grant (the Channels section). */
@@ -1171,3 +1269,216 @@ export const listPersonGrants = (
   agentId: string,
   provider: ChannelProviderId,
 ): Promise<ReachGrantRow[]> => listGrants(agentId, provider, "external_user");
+
+// ── Listen mode: the channel's "point of contact" ──────────────────────────
+// What the agent HEARS in a channel. `mentions` (the default): @mentions and
+// threads it already joined, exactly as before. `all`: every message in the
+// channel - the agent is the channel's point of contact and decides on its
+// own when to answer. Listening never widens WHO is answered: the space
+// settlement, the identity lane and person blocks all still apply.
+
+/**
+ * Answers one promoted channel may get per rolling hour without an
+ * @mention (the judge's picks and calls by name included). Past it the
+ * agent hears only @mentions there until the window clears - a busy channel
+ * can never become a runaway bill. Mentions are never counted or capped.
+ */
+export const OVERHEARD_TURNS_PER_HOUR = 120;
+
+/** The space read the overheard door needs: settlement AND listen mode. */
+export const resolveSpaceListen = async (input: {
+  agentId: string;
+  integrationId: string;
+  externalRef: string;
+}): Promise<{ state: ReachState; listen: ListenMode } | null> => {
+  const grant = await db.agentReachGrant.findUnique({
+    where: {
+      agentId_integrationId_subjectKind_externalRef: {
+        agentId: input.agentId,
+        integrationId: input.integrationId,
+        subjectKind: "space",
+        externalRef: input.externalRef,
+      },
+    },
+    select: { state: true, listen: true },
+  });
+  return grant
+    ? {
+        state: normalizeState(grant.state),
+        listen: normalizeListen(grant.listen),
+      }
+    : null;
+};
+
+/**
+ * Promote (or demote) the agent in one channel. Anyone with workspace access
+ * to the agent may (the same authority as the channel's answer setting).
+ * `all` needs a settlement that answers someone: promoting a channel that is
+ * pending or set to "No one" would hear everything and answer nobody.
+ * Fenced to the caller's workspace at the query; audited.
+ */
+export const setSpaceListen = async (input: {
+  workspaceId: string;
+  agentId: string;
+  provider: ChannelProviderId;
+  externalRef: string;
+  listen: ListenMode;
+  userId: string;
+  userEmail: string;
+}): Promise<{ listen: ListenMode }> => {
+  const grant = await db.agentReachGrant.findFirst({
+    where: {
+      agentId: input.agentId,
+      provider: input.provider,
+      subjectKind: "space",
+      externalRef: input.externalRef,
+      agent: { workspaceId: input.workspaceId },
+    },
+    select: { id: true, state: true, revision: true },
+  });
+  if (!grant) throw new ServiceError("NOT_FOUND", "Channel not found");
+  const promote = input.listen === "all";
+  // Atomic on the row we read: two racing promotes flip it once, so the
+  // room hears one intro; and a channel settled to "No one" in between is
+  // never promoted.
+  const flipped = await db.agentReachGrant.updateMany({
+    where: {
+      id: grant.id,
+      revision: grant.revision,
+      listen: { not: input.listen },
+      ...(promote && { state: { in: SETTLED_STATES } }),
+    },
+    data: { listen: input.listen, revision: { increment: 1 } },
+  });
+  if (flipped.count === 0) {
+    if (promote && !isSettled(normalizeState(grant.state))) {
+      throw new ServiceError(
+        "UNPROCESSABLE",
+        "Choose who the agent answers in this channel first.",
+      );
+    }
+    return { listen: input.listen };
+  }
+  await recordAuditEvent({
+    workspaceId: input.workspaceId,
+    userId: input.userId,
+    userEmail: input.userEmail,
+    action: AUDIT_ACTIONS.UPDATE,
+    service: AUDIT_SERVICES.CHANNEL,
+    status: AUDIT_STATUS.SUCCESS,
+    source: AUDIT_SOURCE.API,
+    metadata: {
+      reachGrantId: grant.id,
+      agentId: input.agentId,
+      externalRef: input.externalRef,
+      listen: input.listen,
+    },
+  });
+  // Promotion is announced IN the channel, once per mentions -> all flip:
+  // the room should know the agent now reads everything (no silent
+  // surveillance). Best-effort and detached - the setting is already saved,
+  // and a Slack hiccup must never fail the dashboard click.
+  if (promote) {
+    void announcePromotion({
+      agentId: input.agentId,
+      provider: input.provider,
+      externalRef: input.externalRef,
+    }).catch((err: unknown) =>
+      log.warn(
+        { err: String(err), agentId: input.agentId },
+        "point-of-contact intro post failed",
+      ),
+    );
+  }
+  return { listen: input.listen };
+};
+
+/** The intro the agent posts when it becomes a channel's point of contact.
+ *  Platform-composed: only the agent's own (clamped) name is interpolated. */
+const pointOfContactIntro = (agentName: string): string => {
+  const name = cleanLabel(agentName) || "I";
+  return [
+    `:wave: Hi everyone, I'm ${name}. I'm now the point of contact for this channel.`,
+    `I read every message here and jump in when I can help, so you don't need to tag me. If you want to be sure I answer, @mention me.`,
+  ].join("\n");
+};
+
+const announcePromotion = async (input: {
+  agentId: string;
+  provider: ChannelProviderId;
+  externalRef: string;
+}): Promise<void> => {
+  const presence = await db.agentChannel.findFirst({
+    where: {
+      agentId: input.agentId,
+      provider: input.provider,
+      status: "active",
+    },
+    select: { credentials: true, agent: { select: { name: true } } },
+  });
+  if (!presence?.credentials) return;
+  const credentialsJson = await getCrypto().decrypt(presence.credentials);
+  await channelProvider(input.provider).sendMessage({
+    credentialsJson,
+    to: { kind: "channel", ref: input.externalRef },
+    text: pointOfContactIntro(presence.agent.name),
+  });
+};
+
+/**
+ * The per-turn note for a conversation that is a PROMOTED channel's room
+ * (the agent is its point of contact): tells the model what it is hearing
+ * and how to stay silent. Null everywhere else. The channel label is the
+ * stored, clamped display label - never raw provider text.
+ */
+export const buildPointOfContactNote = async (
+  conversationId: string,
+): Promise<string | null> => {
+  const link = await db.channelThreadLink.findUnique({
+    where: { conversationId },
+    select: {
+      kind: true,
+      externalThreadId: true,
+      agentChannel: {
+        select: {
+          agentId: true,
+          integrationId: true,
+          provider: true,
+          agent: { select: { name: true } },
+        },
+      },
+    },
+  });
+  if (!link || link.kind !== "group") return null;
+  const reach = channelProvider(
+    link.agentChannel.provider as ChannelProviderId,
+  ).reach;
+  // Only the ROOM conversation (a bare channel address) is the point of
+  // contact's; a mention thread in the same channel is an ordinary thread.
+  const space = reach?.spaceOf(link.externalThreadId);
+  if (!space || space !== link.externalThreadId) return null;
+  const grant = await db.agentReachGrant.findUnique({
+    where: {
+      agentId_integrationId_subjectKind_externalRef: {
+        agentId: link.agentChannel.agentId,
+        integrationId: link.agentChannel.integrationId,
+        subjectKind: "space",
+        externalRef: space,
+      },
+    },
+    select: { listen: true, subjectLabel: true },
+  });
+  if (!grant || normalizeListen(grant.listen) !== "all") return null;
+  // The label is provider text (a channel name anyone with rights can set):
+  // clamped to one printable line before it enters platform voice, so a
+  // crafted name can never open a new line of instructions.
+  const where = cleanLabel(grant.subjectLabel ?? "") || "this channel";
+  const self = cleanLabel(link.agentChannel.agent.name) || "you";
+  return [
+    `You are the point of contact in ${where}: you see every message posted there, not only the ones that mention you. Act like the teammate who owns this channel.`,
+    `Decide from the CONTEXT of the conversation who each message is for. Answer when: it is addressed to you (your name "${self}" in any language or spelling, an @mention, or a reply in a thread you are part of); or it is a question or request to the whole channel, addressed to no one in particular, that you can genuinely answer or do.`,
+    `Never answer a message addressed to someone else (it starts with or names another person, like "Dana, ..." or "Sam, did you ...?"), even if you know the answer: that conversation belongs to them. Also stay silent for greetings, thanks, small talk, jokes, things already handled, and anything you have nothing useful to add to. Never answer a question to the room just to say you don't know or to offer to ask the group (they already did): stay silent. When in doubt, stay silent.`,
+    `To stay silent, answer with exactly \`${NO_REPLY_TOKEN}\` and nothing else: nothing is posted in the channel. When you do reply, the platform posts it where it fits: in the channel, or in a thread under the message. It reads the channel to decide (how people here reply, the length of the answer), and if someone asks you to reply in threads or in the channel, it follows that from the next message on. You do not choose this yourself, so never apologize for where a reply landed or promise to change it. When someone asks for threads or the channel, just acknowledge it like a teammate would ("Sure 👍"). If asked why, explain it in one short line. Reply in the language the person wrote in.`,
+    `You can still act: message a person, a channel, or another agent when that is the right move (the usual approvals apply). An approval card is never posted in this channel: it goes privately to the person who approves your actions, in their direct messages with you. When an action needs one, say so in plain words ("I've sent the approval to your DMs with me"), never "you should get a card here".`,
+  ].join("\n");
+};

@@ -143,31 +143,16 @@ export type ConnectionMethod =
       continueCallback?: (
         params: OAuthExchangeCodeParams,
       ) => Promise<OAuthContinuation | null>;
+      /** Callbacks the provider sends WITHOUT the `state` it was given (a
+       *  GitHub App setup redirect after "Configure"). Only these may read
+       *  the state from this browser's `oauth_state` cookie instead; every
+       *  other callback must return its state, or a code from someone else's
+       *  sign-in could ride the cookie into this browser's org. */
+      acceptsCookieOnlyState?: (params: Record<string, string>) => boolean;
     }
   | {
       type: "api_key";
-      fields: {
-        name: string;
-        label: string;
-        description?: string;
-        placeholder: string;
-        /** When true, the field is not required. */
-        optional?: boolean;
-        /** When false, the field is shown as plain text instead of masked. */
-        secret?: boolean;
-        /** Optional clickable link shown under the field (e.g. where to create the key). */
-        helpUrl?: string;
-        /** Label for the help link; defaults to "Learn more". */
-        helpLabel?: string;
-        /** Fixed choices rendered as a dropdown instead of a text input, so
-         *  the stored value is always one of these `value`s (e.g. a region).
-         *  The server-side `resolveMetadata` must still validate it: a client
-         *  can submit anything. */
-        options?: OAuthConfigFieldOption[];
-        /** Pre-selected choice for an `options` field; must be one of its
-         *  values. Submitted even if the user never opens the dropdown. */
-        defaultValue?: string;
-      }[];
+      fields: DirectConnectField[];
       /** Resolve metadata for the connection (e.g., org name, dashboard URL). */
       resolveMetadata?: (
         fields: Record<string, string>,
@@ -175,17 +160,10 @@ export type ConnectionMethod =
     }
   | {
       type: "credentials_import";
-      fields: {
-        name: string;
-        label: string;
-        description?: string;
-        placeholder: string;
-        secret?: boolean;
-        /** When true, the field is not required. */
-        optional?: boolean;
+      fields: (DirectConnectField & {
         /** When set, field is only shown when this group is active (e.g., "service_account"). */
         group?: string;
-      }[];
+      })[];
       exchangeCredentials: (
         fields: Record<string, string>,
       ) => Promise<OAuthExchangeResult>;
@@ -203,6 +181,30 @@ export type ConnectionMethod =
         keyMap: Record<string, string>;
       };
     };
+
+/** A field of a direct-connect form (`api_key` or `credentials_import`). */
+export interface DirectConnectField {
+  name: string;
+  label: string;
+  description?: string;
+  placeholder: string;
+  /** When true, the field is not required. */
+  optional?: boolean;
+  /** Masked when true, plain text when false. Unset: masked for `api_key`,
+   *  plain text for `credentials_import`. */
+  secret?: boolean;
+  /** Optional clickable link shown under the field (e.g. where to create the key). */
+  helpUrl?: string;
+  /** Label for the help link; defaults to "Learn more". */
+  helpLabel?: string;
+  /** Fixed choices rendered as a dropdown instead of a text input (e.g. a
+   *  region). The server side (`resolveMetadata` / `exchangeCredentials`)
+   *  must still validate the value: a client can submit anything. */
+  options?: OAuthConfigFieldOption[];
+  /** Pre-selected choice for an `options` field; must be one of its
+   *  values. Submitted even if the user never opens the dropdown. */
+  defaultValue?: string;
+}
 
 export interface OAuthConfigFieldOption {
   /** The stored value, which is what the server-side code switches on. */

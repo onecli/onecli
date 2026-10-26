@@ -36,8 +36,12 @@ describe("the disabled harness-native tools", () => {
     // removal: the native tool is a Firefox-extension bridge that can never
     // work in a headless guest, and its self-description sent the model into
     // setup loops (observed live); chromium is baked into the image instead.
+    // `applet`/`panel`/`side_panel` draw into the vendor's desktop app, which
+    // no platform surface shows, yet report success, so the model pointed
+    // people at a card that was never shown (observed live).
+    // `calendar`/`compile_remote` answer with the vendor's own logins.
     expect(JCODE_DISABLED_TOOLS_VALUE).toBe(
-      "schedule,skill_manage,gmail,integration_tools,memory,maintainer_feedback,jcode_docs,browser",
+      "schedule,skill_manage,gmail,integration_tools,memory,maintainer_feedback,jcode_docs,browser,applet,panel,side_panel,calendar,compile_remote",
     );
   });
 });

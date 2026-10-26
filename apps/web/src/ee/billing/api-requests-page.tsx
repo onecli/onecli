@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { getApiRequests, getPlanUsage } from "@/ee/billing/api-request-actions";
 import { getSubscriptionStatus } from "@/ee/billing/actions";
 import { ApiRequestsContent } from "@/ee/billing/_components/api-requests-content";
+import { RuntimeUsageContent } from "@/lib/usage/_components/runtime-usage-content";
 import { PlanUsageContent } from "@/ee/billing/_components/plan-usage-content";
 import { CurrentPlanCard } from "@/ee/billing/_components/current-plan-card";
 import { CAPS } from "@/lib/env";
@@ -37,6 +38,12 @@ export default async function ApiRequestsPage() {
       <CurrentPlanCard subscription={subscription} />
       <PlanUsageContent data={usage} />
       <ApiRequestsContent data={data} />
+      <RuntimeUsageContent
+        periodStart={data.periodStart.slice(0, 10)}
+        agentNames={Object.fromEntries(
+          data.perAgent.map((a) => [a.agentId, a.agentName]),
+        )}
+      />
     </div>
   );
 }

@@ -64,11 +64,22 @@ import {
 } from "./routes/agent-webhooks";
 import { agentMemoryRoutes } from "./routes/agent-memories";
 import { agentRunRoutes, workspaceRunRoutes } from "./routes/agent-runs";
+import { agentApprovalOutcomeRoutes } from "./routes/agent-approval-outcomes";
+import { agentUsageRoutes, usageRoutes } from "./routes/usage";
 import { agentEvalRoutes } from "./routes/agent-evals";
 import { userSkillRoutes } from "./routes/skills";
 import { orgSkillRoutes } from "./routes/org-skills";
+import {
+  agentLibrarySkillRoutes,
+  orgSkillLibraryRoutes,
+} from "./routes/skill-library";
 import { channelAdapterRoutes } from "./routes/channel-adapter";
 import { sshTerminatorRoutes } from "./routes/ssh-terminator";
+import {
+  previewAuthRoutes,
+  previewRelayRoutes,
+  sandboxPortRoutes,
+} from "./routes/sandbox-ports";
 import { channelInboundRoutes } from "./routes/channel-inbound";
 import { runnersRoutes } from "./routes/runners";
 import {
@@ -164,9 +175,9 @@ export const createApiApp = (
   app.route("/apps", appRoutes());
   app.route("/connections", connectionRoutes());
   // Read-only policy reflections (step 9.7b) compose onto the same base paths.
-  // Since step 10 they are SHARED — onprem shows the credential-access dialog
-  // too — and each route redacts org-rule details via the roleResolver provider
-  // (null in onprem → fail-safe non-admin).
+  // Since step 10 they are SHARED: onprem shows effective access on the
+  // agent's Connections section too, and each route redacts org-rule details
+  // via the roleResolver provider (null in onprem → fail-safe non-admin).
   app.route("/policy", policyReflectRoutes());
   app.route("/agents", agentReflectRoutes());
   app.route("/connections", connectionReflectRoutes());
@@ -210,6 +221,8 @@ export const createApiApp = (
   app.route("/org/channels", orgChannelRoutes());
   // Org-tier skills (step 9) — free like channels, admin-gated writes.
   app.route("/org/skills", orgSkillRoutes());
+  // The org's connected Git repo of skills — free.
+  app.route("/org/skill-library", orgSkillLibraryRoutes());
   // Org credentials (secrets, connections, apps): free on every edition —
   // one org-level connection/secret serves every workspace. Admin-gated
   // writes like the other free /org routers.
@@ -240,6 +253,13 @@ export const createApiApp = (
   // terminator secret only — the narrow terminator↔control-plane channel.
   // Dark (blanket 401) until SSH_TERMINATOR_SECRET is configured.
   app.route("/ssh-terminator", sshTerminatorRoutes());
+  // Sandbox ports (plans/sandbox-ports.md): the relay's static-secret
+  // channel, and the browser login handoff (dark without PREVIEW_* config).
+  app.route("/preview-relay", previewRelayRoutes());
+  app.route("/preview-auth", previewAuthRoutes());
+  // The agent's shared ports (the dashboard Ports tab): 3-segment paths, so
+  // the agents router's single-segment routes never shadow them.
+  app.route("/agents", sandboxPortRoutes());
   // The agent's channel presences, composed onto /agents ahead of the 410
   // shims (every path here is 2+ segments, so the agents router's
   // single-segment `/:agentId` routes never shadow it).
@@ -252,11 +272,19 @@ export const createApiApp = (
   app.route("/hooks", webhookReceiveRoutes());
   // The agent's memory (step 8) — same composition rule as channels.
   app.route("/agents", agentMemoryRoutes());
+  // Library skills from the org's connected Git repo.
+  app.route("/agents", agentLibrarySkillRoutes());
   // The agent's runs (audit) and evals — same composition rule as channels.
   app.route("/agents", agentRunRoutes());
   app.route("/agents", agentEvalRoutes());
+  // How the agent's gateway approvals ended (the chat's settled cards).
+  app.route("/agents", agentApprovalOutcomeRoutes());
   // The workspace's runs across agents (Activity's Runs tab).
   app.route("/runs", workspaceRunRoutes());
+  // Runtime usage (awake time): the agent's, composed onto /agents like runs;
+  // the org's per-agent totals at /usage/runtime (org admin).
+  app.route("/agents", agentUsageRoutes());
+  app.route("/usage", usageRoutes());
   // 410 Gone for the old-model paths step 10 removed. LAST, so every live route
   // above wins the first-match — these only catch what no longer exists.
   app.route("/rules", removedRuleRoutes());

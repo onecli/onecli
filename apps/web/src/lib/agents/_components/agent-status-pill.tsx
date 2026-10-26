@@ -1,6 +1,6 @@
 "use client";
 
-import { Activity, CircleCheck, CircleMinus } from "lucide-react";
+import { Activity, CircleMinus } from "lucide-react";
 import { cn } from "@onecli/ui/lib/utils";
 import type { HostedAvailability } from "@/lib/agents/availability";
 
@@ -10,21 +10,16 @@ import type { HostedAvailability } from "@/lib/agents/availability";
  * disabled button, so it stays in the a11y tree with its label — same
  * rationale as the agents page's effective-access pill.
  *
- * `loading` and `absent` render nothing: loading must never read as
- * unavailable, and where no hosted surface exists there is no status to show.
- *
- * `workingInBackground` (step 13's held-awake signal) folds into the SAME
- * element — one status per row, never a second chip: an online agent whose
- * computer is staying up to watch background work reads "Working" instead of
- * "Online". Offline wins over it — a runner that isn't reporting is the
- * truth a user must see first.
+ * It shows only what a user must act on or know: `working` (step 13's
+ * held-awake signal: live background work is keeping the agent's computer
+ * up) and `offline` (the deployment's agents cannot run), offline winning —
+ * a runner that isn't reporting is the truth a user must see first.
+ * Everything else renders nothing: `loading` must never read as
+ * unavailable, `absent` has no hosted surface, and idle-and-online is the
+ * normal state (deployment-wide, not this agent's), so a green "Online"
+ * told the user nothing and kept reading "Online" through an agent restart.
  */
 const STATUS_META = {
-  ready: {
-    label: "Online",
-    icon: CircleCheck,
-    className: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-  },
   working: {
     label: "Working",
     icon: Activity,
@@ -37,6 +32,19 @@ const STATUS_META = {
   },
 } as const;
 
+type AgentStatus = keyof typeof STATUS_META;
+
+/** The status worth showing, or null when there is none — the one rule
+ * every status surface (the pill, the Details row) reads. */
+export const agentStatus = (
+  availability: HostedAvailability,
+  workingInBackground = false,
+): AgentStatus | null => {
+  if (availability === "offline") return "offline";
+  if (availability === "ready" && workingInBackground) return "working";
+  return null;
+};
+
 export const AgentStatusPill = ({
   availability,
   workingInBackground = false,
@@ -47,9 +55,8 @@ export const AgentStatusPill = ({
   workingInBackground?: boolean;
   className?: string;
 }) => {
-  if (availability !== "ready" && availability !== "offline") return null;
-  const state =
-    availability === "ready" && workingInBackground ? "working" : availability;
+  const state = agentStatus(availability, workingInBackground);
+  if (!state) return null;
   const meta = STATUS_META[state];
   const Icon = meta.icon;
   return (

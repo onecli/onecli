@@ -5,6 +5,8 @@ import {
   adapterMentionResolveRequestSchema,
   adapterRegisterRequestSchema,
   adapterReplyClaimSchema,
+  type AdapterCardFollowUpActionResponse,
+  type AdapterCardStopResponse,
   type AdapterConfigResponse,
   type AdapterGroupDecisionResponse,
   type AdapterIngestResponse,
@@ -43,7 +45,13 @@ import {
   expireStaleActionApprovals,
 } from "../services/channels/action-approval-service";
 import { rotateStaleIntegrations } from "../services/channels/channel-integration-service";
+import {
+  actOnCardFollowUp,
+  stopFromCard,
+} from "../services/channels/channel-ingestion-service";
+import { reconcileSpaceMemberships } from "../services/channels/space-membership-service";
 import { processChannelCleanups } from "../services/channels/channel-cleanup-service";
+import { syncPresenceEvents } from "../services/channels/presence-events-service";
 import {
   recordMentionFailures,
   resolveMentionNames,
@@ -58,6 +66,8 @@ import { getAttachmentBytesForAdapter } from "../services/attachment-service";
 import {
   adapterActionDecisionSchema,
   adapterApprovalHealthSchema,
+  adapterCardFollowUpActionSchema,
+  adapterCardStopSchema,
   adapterCursorSchema,
   adapterDecisionSchema,
   adapterGroupDecisionSchema,
@@ -280,6 +290,25 @@ export const channelAdapterRoutes = () => {
           result.outcome.kind === "refuse" ? result.outcome.message : null,
         channel: result.call.channel,
       };
+    } else if (result.kind === "stop") {
+      // Duplicates keep the shared kind; the shared work (abort, settle) is
+      // done, so the adapter only owes a refused clicker their private note.
+      const outcome = result.outcome;
+      response =
+        outcome.kind === "duplicate"
+          ? { kind: "duplicate" }
+          : {
+              kind: "stop",
+              notice:
+                outcome.kind === "refused"
+                  ? {
+                      channel: result.call.channel,
+                      threadTs: result.call.threadTs,
+                      user: result.call.externalUserId,
+                      message: outcome.message,
+                    }
+                  : null,
+            };
     } else {
       const reply = {
         channel: result.call.replyChannel,
@@ -360,6 +389,45 @@ export const channelAdapterRoutes = () => {
       "Invalid action decision body",
     );
     return c.json(await decideActionApprovalFromChannel(body));
+  });
+
+  // POST /channel-adapter/card-stop: a Stop pressed on the narration card
+  // (socket arm). Only the card's address and the clicker ride the wire; the
+  // turn is resolved from THIS presence's live card and the clicker is
+  // authorized here, exactly as on the HTTP arm.
+  app.post("/card-stop", async (c) => {
+    const body = parsed(
+      adapterCardStopSchema.safeParse(await parseBody(c.req.raw)),
+      "Invalid card stop body",
+    );
+    const outcome: AdapterCardStopResponse = await stopFromCard({
+      agentChannelId: body.presenceId,
+      externalUserId: body.clickerExternalUserId,
+      channel: body.channel,
+      cardTs: body.cardTs,
+    });
+    return c.json(outcome);
+  });
+
+  // POST /channel-adapter/card-follow-up-action: a control pressed on a
+  // waiting message's row of the narration card (socket arm). The same
+  // trust shape as card-stop: the card's address, the clicker, and the row
+  // id ride the wire; the row is checked against THIS presence's live card
+  // and the clicker authorized here, exactly as on the HTTP arm.
+  app.post("/card-follow-up-action", async (c) => {
+    const body = parsed(
+      adapterCardFollowUpActionSchema.safeParse(await parseBody(c.req.raw)),
+      "Invalid card follow-up action body",
+    );
+    const outcome: AdapterCardFollowUpActionResponse = await actOnCardFollowUp({
+      agentChannelId: body.presenceId,
+      externalUserId: body.clickerExternalUserId,
+      channel: body.channel,
+      cardTs: body.cardTs,
+      action: body.action,
+      followUpId: body.followUpId,
+    });
+    return c.json(outcome);
   });
 
   // ── Tool-approval cards: restart-safe dedupe + the update handle ──────────
@@ -471,15 +539,34 @@ export const channelAdapterRoutes = () => {
 
   // POST /channel-adapter/rotate-integrations — the proactive credential
   // sweep (~hourly from the adapter; staleness is decided server-side).
-  // The durable channel-cleanup pass rides the same trigger (independent of
-  // presence/config polling, including at adapter boot) but runs DETACHED:
-  // it can spend minutes on bounded provider calls, the adapter's client
-  // aborts at 15s, and its counts are maintenance detail the adapter never
-  // acted on. The answer stays the rotation's counts.
+  // The durable channel-cleanup pass and the presence event sync ride the
+  // same trigger (independent of presence/config polling, including at
+  // adapter boot, which is what makes a deploy's new event reach existing
+  // apps right away) but run DETACHED: they can spend minutes on bounded
+  // provider calls, the adapter's client aborts at 15s, and their counts
+  // are maintenance detail the adapter never acted on. The answer stays the
+  // rotation's counts.
   app.post("/rotate-integrations", async (c) => {
     void processChannelCleanups().catch((err: unknown) =>
       log.warn({ err }, "channel cleanup maintenance failed"),
     );
+    void syncPresenceEvents()
+      .then((result) => {
+        if (result.synced > 0 || result.deferred > 0) {
+          log.info(result, "presence event sync");
+        }
+      })
+      .catch((err: unknown) => log.warn({ err }, "presence event sync failed"));
+    // The leave safety net: re-verify a bounded batch of presences' channel
+    // memberships with the provider and clean up the ones the bot is
+    // definitely gone from (a removal can arrive as no event at all).
+    void reconcileSpaceMemberships()
+      .then((result) => {
+        if (result.cleaned > 0) log.info(result, "space membership reconcile");
+      })
+      .catch((err: unknown) =>
+        log.warn({ err }, "space membership reconcile failed"),
+      );
     return c.json(await rotateStaleIntegrations());
   });
 

@@ -22,6 +22,8 @@ pub mod egress;
 pub mod finalizers;
 pub mod forward;
 pub mod github_org_access;
+#[cfg(test)]
+mod guidance_connections_pg_test;
 pub mod hints;
 pub mod hooks;
 mod log_redact;

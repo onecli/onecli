@@ -9,6 +9,8 @@ import { queryKeys } from "@/lib/api/keys";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
+import type { SavedSecret } from "@/lib/api";
+import { SecretAgentsDialog } from "@/lib/components/policy-reflect";
 import { SecretCard } from "./secret-card";
 import { SecretDialog, type SecretPrefill } from "./secret-dialog";
 import type { SecretActions } from "./types";
@@ -54,6 +56,20 @@ export const SecretsContent = ({
   const [createOpen, setCreateOpen] = useState(false);
   const [prefill, setPrefill] = useState<SecretPrefill | undefined>();
   const paramHandled = useRef(false);
+  // A workspace's custom connection is on for no agent until the user picks
+  // them: the "choose agents" window opens straight after one is added, and
+  // from each card later. Agents live in workspaces, so this is a
+  // workspace-page door only (an org secret reaches agents through org
+  // policy). The `open` flag outlives the secret so closing animates.
+  const choosesAgents = typeFilter === "generic" && pageScope === "workspace";
+  const [agentsFor, setAgentsFor] = useState<
+    (SavedSecret & { justAdded: boolean }) | null
+  >(null);
+  const [agentsOpen, setAgentsOpen] = useState(false);
+  const openAgents = (secret: SavedSecret, justAdded: boolean) => {
+    setAgentsFor({ ...secret, justAdded });
+    setAgentsOpen(true);
+  };
 
   const allFiltered = secrets.filter((s: Secret) =>
     typeFilter === "generic" ? s.type === "generic" : s.type !== "generic",
@@ -175,7 +191,7 @@ export const SecretsContent = ({
         ) : (
           <Button size="sm" onClick={() => setCreateOpen(true)}>
             <Plus className="size-3.5" />
-            {typeFilter === "llm" ? "Add LLM Key" : "Add Secret"}
+            {typeFilter === "llm" ? "Add LLM Key" : "Add connection"}
           </Button>
         )}
       </div>
@@ -186,12 +202,14 @@ export const SecretsContent = ({
             <KeyRound className="text-muted-foreground size-6" />
           </div>
           <p className="text-sm font-medium">
-            {typeFilter === "llm" ? "No LLM keys yet" : "No custom secrets yet"}
+            {typeFilter === "llm"
+              ? "No LLM keys yet"
+              : "No custom connections yet"}
           </p>
           <p className="text-muted-foreground mt-1 max-w-xs text-xs">
             {typeFilter === "llm"
               ? "Add an LLM API key to route requests through the gateway."
-              : "Add a custom secret to inject encrypted credentials into gateway requests."}
+              : "Connect any API with a key. The key is stored encrypted and never shown to agents."}
           </p>
         </Card>
       ) : (
@@ -201,6 +219,9 @@ export const SecretsContent = ({
               key={secret.id}
               secret={secret}
               secretActions={secretActions}
+              onChooseAgents={
+                choosesAgents ? () => openAgents(secret, false) : undefined
+              }
             />
           ))}
           {inheritedSecrets.map((secret) => (
@@ -228,7 +249,23 @@ export const SecretsContent = ({
             : undefined
         }
         secretActions={secretActions}
+        onSaved={(created) => {
+          if (created && choosesAgents) openAgents(created, true);
+        }}
       />
+
+      {/* Re-keyed per secret so a second add can't inherit the first one's
+          rows. */}
+      {agentsFor && (
+        <SecretAgentsDialog
+          key={agentsFor.id}
+          secretId={agentsFor.id}
+          secretName={agentsFor.name}
+          justAdded={agentsFor.justAdded}
+          open={agentsOpen}
+          onOpenChange={setAgentsOpen}
+        />
+      )}
     </div>
   );
 };

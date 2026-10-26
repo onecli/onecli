@@ -8,6 +8,9 @@ export interface AppConnectedEvent {
    * listener can tell "there is a new account to set up" from "credentials
    * were refreshed". */
   connectionId?: string;
+  /** The install landed but setup has a step left (a socket Slack app still
+   * needs its app-level token). */
+  pending?: boolean;
 }
 
 interface UseAppMessagesOptions {
@@ -43,6 +46,7 @@ export const useAppMessages = ({
         onConnectedRef.current({
           provider: event.data.provider as string | undefined,
           connectionId: event.data.connectionId as string | undefined,
+          pending: event.data.pending === true,
         });
       }
       if (event.data?.type === "app-configure" && event.data?.provider) {

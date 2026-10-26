@@ -383,6 +383,34 @@ describe("the bulk approval card", () => {
     expect(bulkCsvName(bulkOf(rows))).toBe("46-contact-changes.csv");
   });
 
+  it("says 'no change' for a field an update leaves alone, never a blank cell", () => {
+    // A 10-record update set different fields per record,
+    // and the blank cells read as "set to empty".
+    const lines = bulkCsv({
+      objectLabel: "Account",
+      fields: [
+        { api: "Industry", label: "Industry" },
+        { api: "Phone", label: "Phone" },
+      ],
+      rows: [
+        {
+          id: "001AA00000AbCd0001",
+          name: "Pinecrest Labs",
+          new: ["Surfing", null],
+          old: ["Media", "555"],
+          ops: ["overwrite", "untouched"],
+          op: "overwrite",
+        },
+      ],
+      oldValuesRead: true,
+    })
+      .trimEnd()
+      .split("\n");
+    expect(lines[1]).toBe(
+      '"Pinecrest Labs","🔵 Media → Surfing","⚪ no change"',
+    );
+  });
+
   it("puts who each record is (account, title) right after its name in the CSV, values inert", () => {
     // MUTATION-TESTED: without the context columns the CSV has only the
     // name and the change, the reviewer can't tell which Dana it is.
@@ -764,6 +792,176 @@ describe("the bulk approval card", () => {
         }),
       ),
     ).toContain("Current values couldn't be read");
+  });
+});
+
+describe("a batch of record lists", () => {
+  // "Fill the blank industry and employee counts" on 9 accounts, split by
+  // the agent into one bulk call per field set: 6 x industry, 1 x
+  // employees, 2 x both. It reads as ONE table (the rule itself is
+  // `mergeBatchTables`, tested in @onecli/api); here, how Slack shows it.
+  type Bulk = NonNullable<NonNullable<PendingApproval["summary"]>["bulk"]>;
+  const IND = { api: "Industry", label: "Industry" };
+  const EMP = { api: "NumberOfEmployees", label: "Number of employees" };
+  const acct = (i: number, values: (string | null)[]) => ({
+    id: `001AA00000AbCd${String(i).padStart(4, "0")}`,
+    name: `Account ${i}`,
+    url: `https://acme.my.salesforce.com/001AA00000AbCd${String(i).padStart(4, "0")}`,
+    new: values,
+    old: values.map(() => null),
+    ops: values.map(() => "fill" as const),
+    op: "fill" as const,
+  });
+  const at = "2026-10-14T13:06:18.000Z";
+  const request = (
+    id: string,
+    fields: Bulk["fields"],
+    rows: ReturnType<typeof acct>[],
+    total = 3,
+  ): PendingApproval => ({
+    id,
+    method: "PATCH",
+    host: "acme.my.salesforce.com:443",
+    path: "/services/data/v62.0/composite/sobjects",
+    summary: {
+      action: `Update ${rows.length} Accounts`,
+      details: [],
+      bulk: { objectLabel: "Account", fields, rows, oldValuesRead: true },
+    },
+    agent: { id: "ag1", name: "Bot" },
+    app: "salesforce",
+    batch: { id: "b1", label: "Fill blank fields (9 accounts)", total },
+    createdAt: at,
+    expiresAt: "2026-10-14T13:09:18.000Z",
+  });
+  const fieldSplit = (): PendingApproval[] => [
+    request(
+      "req-ind",
+      [IND],
+      [1, 2, 3, 4, 5, 6].map((i) => acct(i, ["Retail"])),
+    ),
+    request("req-emp", [EMP], [acct(7, ["1200"])]),
+    request(
+      "req-both",
+      [IND, EMP],
+      [acct(8, ["Banking", "40"]), acct(9, ["Insurance", "75"])],
+    ),
+  ];
+  type Block = {
+    type: string;
+    elements?: { action_id?: string; value?: string }[];
+  };
+  const post = (live: PendingApproval[]) =>
+    slackApprovalCardUi.post({
+      credential: "xoxb-1",
+      channel: "D1",
+      approval: live[0]!,
+      batch: live,
+      reviewUrl: "https://app.example/a/1",
+    });
+
+  it("posts as the bulk card with its CSV in ONE message; Approve all decides exactly the 3 requests", async () => {
+    await post(fieldSplit());
+    expect(slack.callsTo("chat.postMessage")).toHaveLength(0);
+    const share = slack.callsTo("files.completeUploadExternal")[0]!.form;
+    const blocks = JSON.parse(share.blocks!) as Block[];
+    const text = JSON.stringify(blocks);
+    expect(text).toContain("Approval needed · Update 9 Accounts");
+    expect(text).toContain("🟢 Fills *9*");
+    expect(text).toContain("Fill blank fields (9 accounts)");
+    expect(text).toContain("One approval covers all 9 (3 requests)");
+    expect(text).not.toContain("Not all the same");
+    expect(text).not.toContain(":warning:");
+    const actions = blocks.find((b) => b.type === "actions")!.elements!;
+    expect(actions[0]).toMatchObject({ action_id: "channel_group_approve" });
+    expect(actions[0]!.value!.split(",").sort()).toEqual([
+      "req-both",
+      "req-emp",
+      "req-ind",
+    ]);
+    expect(actions[1]).toMatchObject({
+      action_id: "channel_group_deny",
+      value: actions[0]!.value,
+    });
+    const files = JSON.parse(share.files!) as { title: string }[];
+    expect(files[0]!.title).toBe("9 accounts: what each change does");
+    // The CSV is the merged table: a field a request doesn't set is left
+    // alone on its records, and says so (as on the web table).
+    const { mergeBatchBulk } = await import("./slack/approval-card");
+    const csv = bulkCsv(mergeBatchBulk(fieldSplit())!.bulk).split("\n");
+    expect(csv[0]).toBe('"Account","Industry","Number of employees"');
+    expect(csv).toContain('"Account 1","🟢 Retail","⚪ no change"');
+    expect(csv).toContain('"Account 7","⚪ no change","🟢 1200"');
+  });
+
+  it("a batch of one-record writes keeps its rows: no CSV, each row decidable", async () => {
+    // `PATCH /sobjects/Account/{id}` per record: each carries a one-row
+    // table AND names its record in its title, as the gateway sends it.
+    const one = (id: string, i: number): PendingApproval => {
+      const a = request(id, [IND], [acct(i, ["Retail"])]);
+      a.summary = {
+        ...a.summary!,
+        action: `Update Account Account ${i}`,
+        subject: { verb: "Update Account", record: `Account ${i}`, row: 0 },
+        details: [
+          { label: "Account", value: `Account ${i}` },
+          { label: "Industry", value: "Retail" },
+        ],
+      };
+      return a;
+    };
+    await post([one("a-1", 1), one("a-2", 2), one("a-3", 3)]);
+    expect(slack.callsTo("files.completeUploadExternal")).toHaveLength(0);
+    const text = slack.callsTo("chat.postMessage")[0]!.form.blocks!;
+    expect(text).toContain("Industry → Retail");
+    expect(text).not.toContain("Update 3 Accounts");
+  });
+
+  it("more requests than one group click carries: the rows, never a table it can't decide", async () => {
+    const { mergeBatchBulk } = await import("./slack/approval-card");
+    const batch = (n: number) =>
+      Array.from({ length: n }, (_, i) =>
+        request(`req-${i}`, [IND], [acct(i, ["Retail"])], n),
+      );
+    expect(mergeBatchBulk(batch(APPROVAL_GROUP_MAX_IDS))).not.toBeNull();
+    expect(mergeBatchBulk(batch(APPROVAL_GROUP_MAX_IDS + 1))).toBeNull();
+  });
+
+  it("drops back to rows (and the CSV) once a request is decided elsewhere", async () => {
+    const { groupCardBlocks } = await import("./slack/approval-card");
+    const [ind, emp, both] = fieldSplit();
+    const decided = [
+      {
+        id: "req-emp",
+        title: null,
+        outcome: "decided" as const,
+        createdAt: at,
+      },
+    ];
+    expect(
+      JSON.stringify(
+        groupCardBlocks({ live: [ind!, emp!, both!], settled: [] }),
+      ),
+    ).toContain("Update 9 Accounts");
+    const partial = JSON.stringify(
+      groupCardBlocks({ live: [ind!, both!], settled: decided }),
+    );
+    expect(partial).not.toContain("Update 9 Accounts");
+    expect(partial).toContain("Done: ☑️ 1 decided");
+
+    const render = (view: Parameters<typeof groupCardBlocks>[0]) =>
+      slackApprovalCardUi.renderGroup!({
+        credential: "xoxb-1",
+        channel: "D1",
+        ts: "1700.0001",
+        view,
+      });
+    await render({ live: [ind!, both!], settled: decided });
+    await render({ live: [ind!, emp!, both!], settled: [] });
+    const [rows, table] = slack.callsTo("chat.update");
+    expect(rows!.form.file_ids).toBe("[]");
+    // A still-merged re-render keeps the CSV it was posted with.
+    expect(table!.form.file_ids).toBeUndefined();
   });
 });
 
@@ -1908,6 +2106,19 @@ describe("grouped approval cards", () => {
     return JSON.stringify(JSON.parse(update.form.blocks!));
   };
 
+  /**
+   * Answer the loop's next poll with `body`. The fake gateway holds a poll
+   * once its script is empty, and the loop's next poll can go out before or
+   * after the test reaches this line (the pacing sleep races the card
+   * render). Queued on the script, an answer pushed after the poll went out
+   * is never read: the poll stays held and the test times out. So wait for
+   * the poll to be held, whenever that is, and answer it there.
+   */
+  const answerNextPoll = async (body: unknown): Promise<void> => {
+    await waitReal(() => gateway.heldCount() > 0, "the loop's next poll");
+    gateway.releaseHeld(200, body);
+  };
+
   it("a bulk request never joins a task card: each keeps its table and CSV", async () => {
     // Two "Update 2 Contacts" requests used to merge into one task card
     // (same agent, app and action), which flattened each to a line
@@ -2340,14 +2551,10 @@ describe("grouped approval cards", () => {
     expect(lastBlocks()).toContain('"value":"ap-1,ap-2"');
 
     ledger = ["ap-2"];
-    gateway.script.push({
-      status: 200,
-      body: { requests: [contact("ap-2", "Grace")] },
-    });
+    await answerNextPoll({ requests: [contact("ap-2", "Grace")] });
     // A new arrival on the same task forces the card to render again.
-    gateway.script.push({
-      status: 200,
-      body: { requests: [contact("ap-2", "Grace"), contact("ap-3", "Linus")] },
+    await answerNextPoll({
+      requests: [contact("ap-2", "Grace"), contact("ap-3", "Linus")],
     });
     await waitReal(
       () => lastBlocks().includes("Linus"),
@@ -2388,9 +2595,8 @@ describe("grouped approval cards", () => {
     );
 
     ledger = ["ap-2", "ap-3"];
-    gateway.script.push({
-      status: 200,
-      body: { requests: [contact("ap-2", "Grace"), contact("ap-3", "Linus")] },
+    await answerNextPoll({
+      requests: [contact("ap-2", "Grace"), contact("ap-3", "Linus")],
     });
     await waitReal(
       () => lastBlocks().includes('"value":"ap-2,ap-3"'),
@@ -2423,7 +2629,7 @@ describe("grouped approval cards", () => {
     const before = slack.callsTo("chat.update").length;
 
     ledger = [];
-    gateway.script.push({ status: 200, body: { requests: [] } });
+    await answerNextPoll({ requests: [] });
     await waitReal(() => gateway.calls.length >= 3, "two more polls");
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(slack.callsTo("chat.update")).toHaveLength(before);
@@ -2668,7 +2874,9 @@ describe("grouped Slack card: waits for the whole batch", () => {
       now: t0 + 1_000,
     });
     expect(buttons(blocks)).toEqual(["channel_group_deny"]);
-    expect(JSON.stringify(blocks)).toContain("12 of 20 here, waiting");
+    expect(JSON.stringify(blocks)).toContain(
+      "12 of 20 here, waiting for the rest… Approve all appears once they are in.",
+    );
   });
 
   it("offers Approve all once the whole batch is in", async () => {
@@ -2685,7 +2893,7 @@ describe("grouped Slack card: waits for the whole batch", () => {
     expect(JSON.stringify(blocks)).not.toContain("waiting for the rest");
   });
 
-  it("offers Approve all once the batch goes quiet, saying what never came", async () => {
+  it("offers Approve all once the batch goes quiet, saying the rest may follow", async () => {
     const { BATCH_SETTLE_MS } = await import("@onecli/api/lib/approval-groups");
     const { groupCardBlocks } = await import("./slack/approval-card");
     const blocks = groupCardBlocks({
@@ -2694,7 +2902,9 @@ describe("grouped Slack card: waits for the whole batch", () => {
       now: t0 + 190 + BATCH_SETTLE_MS,
     });
     expect(buttons(blocks)).toContain("channel_group_approve");
-    expect(JSON.stringify(blocks)).toContain("1 of 20 never arrived");
+    expect(JSON.stringify(blocks)).toContain(
+      "19 of 20 here. The other one may only be sent after you decide these. Approve all covers the 19 shown.",
+    );
   });
 });
 

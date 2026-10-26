@@ -9,11 +9,12 @@ import {
   changeCounts,
   pluralLabel,
   shownValue,
+  UNTOUCHED_TEXT,
   type ShownOp,
 } from "@onecli/api/lib/record-change";
+import type { BatchTable, BatchTableRow } from "@onecli/api/lib/batch-table";
 import { Button } from "@onecli/ui/components/button";
 import { cn } from "@onecli/ui/lib/utils";
-import type { ApprovalBulkChange, ApprovalBulkRow } from "@/lib/api/approvals";
 import { ApprovalLink } from "./approval-link";
 import { CHANGE_COLORS } from "./change-ops";
 
@@ -21,7 +22,24 @@ import { CHANGE_COLORS } from "./change-ops";
  *  preview); Expand makes the box taller, it still scrolls inside. */
 const COLLAPSED_ROWS = 6;
 
-const RecordName = ({ row }: { row: ApprovalBulkRow }) => (
+/**
+ * The `#` and record-name columns stay put while a wide table scrolls
+ * sideways, so every value still reads against the record it belongs to.
+ * Sticky cells need an opaque background (values scroll underneath them);
+ * the name column's right edge casts a hairline so the seam shows. The `#`
+ * column is pinned to one width (up to "200" with its padding) and the name
+ * column sits at that offset: a table sizes an unpinned column to fit, and
+ * the name would then overlap it.
+ */
+const PIN_INDEX = "sticky left-0 w-10 min-w-10 max-w-10";
+const PIN_NAME = "sticky left-10 shadow-[inset_-1px_0_0_var(--color-border)]";
+/** A created / deleted record's tinted name cell, opaque so it can pin. */
+const PINNED_TINT = {
+  create: "bg-emerald-50 dark:bg-emerald-950",
+  delete: "bg-red-50 dark:bg-red-950",
+} as const;
+
+const RecordName = ({ row }: { row: BatchTableRow }) => (
   <ApprovalLink href={row.url}>{row.name ?? row.id}</ApprovalLink>
 );
 
@@ -33,10 +51,12 @@ const RecordName = ({ row }: { row: ApprovalBulkRow }) => (
  *
  * Memoized: the card around it re-renders every second for its countdown,
  * and this table can hold 200 rows by 40 fields; `bulk` keeps its identity
- * between polls (React Query's structural sharing), so it renders once.
+ * between polls (React Query's structural sharing, or the caller's memo for
+ * a merged batch), so it renders once. Takes the shared table shape: one
+ * request's table, or a batch's merged into one (`mergeBatchTables`).
  */
 export const ApprovalBulkPreview = memo(
-  ({ bulk, className }: { bulk: ApprovalBulkChange; className?: string }) => {
+  ({ bulk, className }: { bulk: BatchTable; className?: string }) => {
     const [expanded, setExpanded] = useState(false);
     const tableId = useId();
     const total = bulk.rows.length;
@@ -46,7 +66,7 @@ export const ApprovalBulkPreview = memo(
     const context = bulk.context ?? [];
     // A create's values are all new (green); a delete's are all lost (red),
     // so neither depends on a read to color them.
-    const read = kind === "create" ? true : bulk.oldValuesRead;
+    const read = kind === "create" ? true : bulk.oldValuesRead === true;
     const noun = bulk.objectLabel.toLowerCase();
     const legend: { op: ShownOp; label: string; n: number }[] =
       kind === "delete"
@@ -123,10 +143,22 @@ export const ApprovalBulkPreview = memo(
           <table className="w-full border-collapse text-xs">
             <thead className="sticky top-0 z-10 bg-muted">
               <tr>
-                <th className="w-8 border-b px-2 py-1.5 text-right font-normal text-muted-foreground">
+                {/* Header corner cells sit above both the sticky header row
+                    and the sticky body column (z-20). */}
+                <th
+                  className={cn(
+                    PIN_INDEX,
+                    "z-20 border-b bg-muted px-2 py-1.5 text-right font-normal text-muted-foreground",
+                  )}
+                >
                   #
                 </th>
-                <th className="border-b px-2 py-1.5 text-left font-medium">
+                <th
+                  className={cn(
+                    PIN_NAME,
+                    "z-20 border-b bg-muted px-2 py-1.5 text-left font-medium",
+                  )}
+                >
                   {bulk.objectLabel}
                 </th>
                 {context.map((c) => (
@@ -154,7 +186,12 @@ export const ApprovalBulkPreview = memo(
                   data-op={row.op}
                   className="border-b last:border-0"
                 >
-                  <td className="px-2 py-1 text-right text-muted-foreground tabular-nums">
+                  <td
+                    className={cn(
+                      PIN_INDEX,
+                      "z-[1] bg-background px-2 py-1 text-right text-muted-foreground tabular-nums",
+                    )}
+                  >
                     {n + 1}
                   </td>
                   <td
@@ -166,9 +203,12 @@ export const ApprovalBulkPreview = memo(
                           : undefined
                     }
                     className={cn(
-                      "max-w-48 truncate px-2 py-1 font-semibold",
+                      PIN_NAME,
+                      "z-[1] max-w-48 truncate px-2 py-1 font-semibold",
+                      kind === "update" && "bg-background",
                       kind === "delete" && CHANGE_COLORS.clear.cell,
                       kind === "create" && CHANGE_COLORS.fill.cell,
+                      kind !== "update" && PINNED_TINT[kind],
                     )}
                     title={row.name ?? row.id}
                   >
@@ -211,9 +251,9 @@ export const ApprovalBulkPreview = memo(
                       return (
                         <td
                           key={f.api}
-                          className="border-l px-2 py-1 text-muted-foreground"
+                          className="border-l px-2 py-1 whitespace-nowrap text-muted-foreground/70 italic"
                         >
-                          not changed
+                          {UNTOUCHED_TEXT}
                         </td>
                       );
                     }

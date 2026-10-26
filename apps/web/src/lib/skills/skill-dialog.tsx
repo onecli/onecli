@@ -23,16 +23,8 @@ import {
 } from "@onecli/ui/components/dialog";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@onecli/ui/components/select";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { Textarea } from "@onecli/ui/components/textarea";
-import { useAgents } from "@/hooks/use-agents";
 import {
   useCreateOrgSkill,
   useCreateSkill,
@@ -84,15 +76,20 @@ const Required = () => (
   </span>
 );
 
-export interface SkillDialogProps {
-  tier: "agent" | "organization";
-  /** The agent door's subject: the default audience for a new skill. */
-  agentId?: string;
+interface SkillDialogBaseProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** Null = create. The list row is body-free; the dialog fetches content. */
   editing: SkillSummary | null;
 }
+
+export type SkillDialogProps = SkillDialogBaseProps &
+  (
+    | { tier: "organization"; agentId?: never }
+    /** The agent door: a new skill always belongs to THIS agent. Required,
+     *  so a missing id can never fall through to a broader tier. */
+    | { tier: "agent"; agentId: string }
+  );
 
 export const SkillDialog = ({
   tier,
@@ -108,7 +105,6 @@ export const SkillDialog = ({
   const orgCreate = useCreateOrgSkill();
   const orgUpdate = useUpdateOrgSkill();
   const orgRemove = useDeleteOrgSkill();
-  const agents = useAgents();
   const workspaceDetail = useSkill(
     !isOrg && open && editing ? editing.id : null,
   );
@@ -119,10 +115,6 @@ export const SkillDialog = ({
   const [description, setDescription] = useState("");
   const [content, setContent] = useState("");
   const [files, setFiles] = useState<SkillFileInput[]>([]);
-  // An agent id or "workspace" — the create-time scope picker. On the agent
-  // door it defaults to THIS agent: you are standing in its section, so the
-  // narrow, obvious choice is the default and widening is deliberate.
-  const [audience, setAudience] = useState(agentId ?? "workspace");
   const [bodySeeded, setBodySeeded] = useState(false);
   /** Set by a Create/Save click on an invalid form: validation shows up when
    *  the user asks for it, never while they are still typing. */
@@ -134,7 +126,6 @@ export const SkillDialog = ({
     if (!open) return;
     setAttempted(false);
     setBodySeeded(false);
-    setAudience(agentId ?? "workspace");
     if (editing) {
       setName(editing.name);
       setDescription(editing.description);
@@ -146,7 +137,7 @@ export const SkillDialog = ({
       setContent("");
       setFiles([]);
     }
-  }, [open, editing, agentId]);
+  }, [open, editing]);
 
   // Seeded ONCE per open (the memory-dialog lesson): the detail query
   // refetches on window focus, and a data-identity dependency would wipe
@@ -158,16 +149,13 @@ export const SkillDialog = ({
     setBodySeeded(true);
   }, [open, editing, bodySeeded, detail.data]);
 
-  const hostedAgents = (agents.data ?? []).filter(
-    (agent) => agent.kind === "hosted",
-  );
+  // A save holds the dialog (the server validates it); a delete never does:
+  // it is instant, and the dialog is closed by the time it settles.
   const busy =
     create.isPending ||
     update.isPending ||
-    remove.isPending ||
     orgCreate.isPending ||
-    orgUpdate.isPending ||
-    orgRemove.isPending;
+    orgUpdate.isPending;
   const bodyReady = !editing || bodySeeded;
   const totalChars =
     content.length + files.reduce((sum, file) => sum + file.content.length, 0);
@@ -250,28 +238,21 @@ export const SkillDialog = ({
       content,
       ...(cleanFiles.length > 0 && { files: cleanFiles }),
     };
-    if (isOrg) {
-      orgCreate.mutate(input, handlers);
-    } else {
-      create.mutate(
-        audience === "workspace" ? input : { ...input, agentId: audience },
-        handlers,
-      );
-    }
+    // The agent door creates for the agent you are standing in — never a
+    // picker: skills describe how ONE agent works (§3.18 as amended).
+    if (tier === "organization") orgCreate.mutate(input, handlers);
+    else create.mutate({ ...input, agentId }, handlers);
   };
 
   const removeSkill = () => {
     if (!editing) return;
-    const handlers = {
-      onSuccess: () => {
-        toast.success("Skill deleted");
-        setConfirmOpen(false);
-        onOpenChange(false);
-      },
-      onError: (error: Error) => toast.error(String(error.message)),
-    };
-    if (isOrg) orgRemove.mutate(editing.id, handlers);
-    else remove.mutate(editing.id, handlers);
+    // Instant: the row leaves the list and both dialogs close on click; the
+    // hook confirms once the server agrees, or puts the row back and says
+    // why. The confirm before this is what guards a delete, not a spinner.
+    if (isOrg) orgRemove.mutate(editing.id);
+    else remove.mutate(editing.id);
+    setConfirmOpen(false);
+    onOpenChange(false);
   };
 
   // Deleting is not undoable, and the prune carries it into every sandbox in
@@ -320,58 +301,30 @@ export const SkillDialog = ({
               ? "Changes reach every running agent within seconds."
               : isOrg
                 ? "Reaches every hosted agent in every workspace of the organization."
-                : "Reusable instructions your agents load while they work."}
+                : "Reusable instructions this agent loads while it works."}
           </DialogDescription>
         </DialogHeader>
 
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain pr-1">
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="space-y-1.5">
-              <Label htmlFor="skill-name">
-                Name
-                {/* Immutable once created: nothing left to fill in. */}
-                {!editing && <Required />}
-              </Label>
-              <Input
-                id="skill-name"
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                placeholder="release-checklist"
-                required={!editing}
-                aria-invalid={attempted && missingName}
-                className="font-mono"
-                maxLength={64}
-                spellCheck={false}
-                autoComplete="off"
-                disabled={editing !== null}
-              />
-            </div>
-            {!isOrg && !editing && (
-              <div className="space-y-1.5">
-                <Label htmlFor="skill-audience">Who gets it</Label>
-                <Select value={audience} onValueChange={setAudience}>
-                  <SelectTrigger id="skill-audience" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {/* This agent first: it is the door you came through. */}
-                    {agentId !== undefined && (
-                      <SelectItem value={agentId}>Only this agent</SelectItem>
-                    )}
-                    <SelectItem value="workspace">
-                      Everyone in this workspace
-                    </SelectItem>
-                    {hostedAgents
-                      .filter((agent) => agent.id !== agentId)
-                      .map((agent) => (
-                        <SelectItem key={agent.id} value={agent.id}>
-                          Only {agent.name}
-                        </SelectItem>
-                      ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
+          <div className="space-y-1.5">
+            <Label htmlFor="skill-name">
+              Name
+              {/* Immutable once created: nothing left to fill in. */}
+              {!editing && <Required />}
+            </Label>
+            <Input
+              id="skill-name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="release-checklist"
+              required={!editing}
+              aria-invalid={attempted && missingName}
+              className="font-mono"
+              maxLength={64}
+              spellCheck={false}
+              autoComplete="off"
+              disabled={editing !== null}
+            />
           </div>
 
           <div className="space-y-1.5">
@@ -442,7 +395,7 @@ export const SkillDialog = ({
               variant="ghost"
               className="text-destructive hover:text-destructive"
               disabled={busy}
-              loading={remove.isPending || orgRemove.isPending}
+              // No spinner: deleting is instant and closes this dialog.
               onClick={() => setConfirmOpen(true)}
             >
               Delete
