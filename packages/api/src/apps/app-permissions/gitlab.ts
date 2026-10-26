@@ -62,6 +62,15 @@ export const gitlabPermissions: AppPermissionDefinition = {
           pathPattern: "/api/v4/projects/*/repository/branches",
           method: "GET",
         },
+        {
+          id: "get_current_user",
+          name: "Get authenticated user",
+          description:
+            "Get the currently authenticated user; clients call this to validate the token",
+          hostPattern: "gitlab.com",
+          pathPattern: "/api/v4/user",
+          method: "GET",
+        },
       ],
     },
     {
