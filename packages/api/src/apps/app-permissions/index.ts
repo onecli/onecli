@@ -85,6 +85,7 @@ import { onyxPermissions } from "./onyx";
 import { twilioPermissions } from "./twilio";
 import { dripifyPermissions } from "./dripify";
 import { webflowPermissions } from "./webflow";
+import { serplyPermissions } from "./serply";
 
 const permissionRegistry = new Map<string, AppPermissionDefinition>();
 
@@ -172,3 +173,4 @@ register(onyxPermissions);
 register(twilioPermissions);
 register(dripifyPermissions);
 register(webflowPermissions);
+register(serplyPermissions);

@@ -73,6 +73,7 @@ import { onyx } from "./onyx";
 import { twilio } from "./twilio";
 import { dripify } from "./dripify";
 import { webflow } from "./webflow";
+import { serply } from "./serply";
 
 const staticApps: AppDefinition[] = [
   salesforce,
@@ -146,6 +147,7 @@ const staticApps: AppDefinition[] = [
   twilio,
   dripify,
   webflow,
+  serply,
 ];
 
 export const getApps = (): AppDefinition[] => [...staticApps];
