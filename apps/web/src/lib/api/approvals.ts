@@ -129,8 +129,9 @@ export interface PendingApproval {
   agent: PendingApprovalAgent;
   /** RFC 3339 timestamp. */
   createdAt: string;
-  /** RFC 3339 timestamp — the request is auto-denied at this time. */
-  expiresAt: string;
+  /** RFC 3339 timestamp: the request is auto-denied at this time. Omitted
+   *  when approvals never expire (the gateway sends no deadline). */
+  expiresAt?: string;
 }
 
 export type ApprovalDecisionInput = "approve" | "deny";

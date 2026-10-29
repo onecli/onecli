@@ -34,8 +34,7 @@ use tower_http::cors::CorsLayer;
 use tracing::{debug, info, info_span, warn, Instrument};
 
 use approval::{
-    ApprovalDecision, ApprovalStore, DecisionOutcome, DenyReason, PendingApproval,
-    APPROVAL_TIMEOUT_SECS,
+    approval_timeout, ApprovalDecision, ApprovalStore, DecisionOutcome, DenyReason, PendingApproval,
 };
 use ca::CertificateAuthority;
 use cache::CacheStore;
@@ -603,16 +602,11 @@ async fn get_pending_approvals(
             long_polled, "approval poll completed"
         );
 
-        axum::Json(serde_json::json!({
-            "requests": pending.iter().map(pending_approval_row).collect::<Vec<_>>(),
-            "timeoutSeconds": APPROVAL_TIMEOUT_SECS,
-        }))
+        axum::Json(approval::pending_list_body(&pending, approval_timeout()))
     }
     .instrument(span)
     .await
 }
-
-use approval::pending_approval_row;
 
 /// Why a decision could not be matched to a held approval — or that it was.
 ///

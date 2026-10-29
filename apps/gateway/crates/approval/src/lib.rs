@@ -18,7 +18,7 @@
 //! notification would hold the poll for its whole 30s window).
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -29,8 +29,83 @@ use tracing::{debug, warn};
 
 // ── Constants ──────────────────────────────────────────────────────────
 
-/// How long a pending approval lives before it expires (seconds).
-pub const APPROVAL_TIMEOUT_SECS: u64 = 180;
+/// Default time a pending approval lives before it expires (seconds).
+pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 180;
+
+/// Operator override for the approval window. A non-zero value is clamped to
+/// [`MIN_APPROVAL_TIMEOUT_SECS`, `MAX_APPROVAL_TIMEOUT_SECS`]; `0` means
+/// approvals never expire.
+pub const APPROVAL_TIMEOUT_ENV: &str = "GATEWAY_APPROVAL_TIMEOUT_SECS";
+const MIN_APPROVAL_TIMEOUT_SECS: u64 = 30;
+const MAX_APPROVAL_TIMEOUT_SECS: u64 = 3600;
+
+/// `expires_at` of an approval that never expires. A sentinel rather than an
+/// `Option` so the stored JSON stays a plain u64 (instances mid rolling deploy
+/// still read it) and every `expires_at > now` / `<= now` check stays correct:
+/// reads keep it, the cleanup task skips it.
+pub const NO_EXPIRY: u64 = u64::MAX;
+
+/// How long a held request waits for a decision when approvals never expire.
+/// Bounded (one year) so `Duration` math, tokio timers and Redis BLPOP can't
+/// overflow.
+const NO_EXPIRY_WAIT_SECS: u64 = 365 * 24 * 60 * 60;
+
+/// The effective approval window in seconds: `GATEWAY_APPROVAL_TIMEOUT_SECS`
+/// clamped to [30, 3600], else 180; `None` when it is `0` (never expires).
+/// Read once (`OnceLock`) so `expires_at`, the held request, the poll
+/// `timeoutSeconds` and the Redis TTL always agree.
+pub fn approval_timeout() -> Option<u64> {
+    static TIMEOUT: OnceLock<Option<u64>> = OnceLock::new();
+    *TIMEOUT.get_or_init(|| resolve_approval_timeout(std::env::var(APPROVAL_TIMEOUT_ENV).ok()))
+}
+
+/// JSON body of the pending-approvals poll (workspace and org routes).
+/// `timeoutSeconds` is omitted, not null, when approvals never expire: the
+/// channel-adapter schema is `optional()`, not nullable.
+pub fn pending_list_body(pending: &[PendingApproval], timeout: Option<u64>) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "requests": pending.iter().map(pending_approval_row).collect::<Vec<_>>(),
+    });
+    if let Some(secs) = timeout {
+        body["timeoutSeconds"] = serde_json::json!(secs);
+    }
+    body
+}
+
+/// `expires_at` for an approval created at `now`.
+pub fn approval_expires_at(now: u64) -> u64 {
+    expires_at_for(approval_timeout(), now)
+}
+
+/// How long a held request waits for a decision.
+pub fn approval_wait_duration() -> Duration {
+    Duration::from_secs(approval_timeout().unwrap_or(NO_EXPIRY_WAIT_SECS))
+}
+
+fn expires_at_for(timeout: Option<u64>, now: u64) -> u64 {
+    timeout.map_or(NO_EXPIRY, |secs| now + secs)
+}
+
+/// Pure resolver behind [`approval_timeout`], split out so it is unit-testable
+/// without touching process env. Unparsable or absent -> default; `0` -> no
+/// expiry; any other out-of-range value -> clamped with a warn.
+fn resolve_approval_timeout(raw: Option<String>) -> Option<u64> {
+    match raw.and_then(|v| v.trim().parse::<u64>().ok()) {
+        Some(0) => None,
+        Some(v) => {
+            let clamped = v.clamp(MIN_APPROVAL_TIMEOUT_SECS, MAX_APPROVAL_TIMEOUT_SECS);
+            if clamped != v {
+                warn!(
+                    requested = v,
+                    clamped,
+                    "{APPROVAL_TIMEOUT_ENV} outside [{MIN_APPROVAL_TIMEOUT_SECS}, {MAX_APPROVAL_TIMEOUT_SECS}]; clamped"
+                );
+            }
+            Some(clamped)
+        }
+        None => Some(DEFAULT_APPROVAL_TIMEOUT_SECS),
+    }
+}
 
 /// How often the background task cleans up expired approvals (seconds).
 const CLEANUP_INTERVAL_SECS: u64 = 30;
@@ -745,8 +820,12 @@ pub fn pending_approval_row(a: &PendingApproval) -> serde_json::Value {
         "batch": a.batch,
         "agent": { "id": a.agent_id, "name": a.agent_name, "externalId": a.agent_identifier },
         "createdAt": format_unix_ts(a.created_at),
-        "expiresAt": format_unix_ts(a.expires_at),
     });
+    // No-expiry approvals omit `expiresAt` (omitted, not null: the
+    // channel-adapter schema is `z.string().optional()`).
+    if a.expires_at != NO_EXPIRY {
+        row["expiresAt"] = serde_json::json!(format_unix_ts(a.expires_at));
+    }
     // Rename compat (temporary): dual-emit the legacy `projectId` field old
     // SDKs read and echo back as the decision's scope header.
     common::compat::dual_emit_legacy_workspace(&mut row, &a.workspace_id);
@@ -757,6 +836,46 @@ pub fn pending_approval_row(a: &PendingApproval) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn approval_timeout_defaults_when_unset_or_garbage() {
+        for raw in [None, Some("abc".to_string()), Some(String::new())] {
+            assert_eq!(
+                resolve_approval_timeout(raw),
+                Some(DEFAULT_APPROVAL_TIMEOUT_SECS)
+            );
+        }
+    }
+
+    #[test]
+    fn approval_timeout_accepts_in_range_value() {
+        assert_eq!(resolve_approval_timeout(Some("900".into())), Some(900));
+        assert_eq!(resolve_approval_timeout(Some(" 600 ".into())), Some(600));
+    }
+
+    #[test]
+    fn approval_timeout_clamps_non_zero_out_of_range() {
+        assert_eq!(
+            resolve_approval_timeout(Some("1".into())),
+            Some(MIN_APPROVAL_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            resolve_approval_timeout(Some("999999".into())),
+            Some(MAX_APPROVAL_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn approval_timeout_zero_means_no_expiry() {
+        assert_eq!(resolve_approval_timeout(Some("0".into())), None);
+        assert_eq!(resolve_approval_timeout(Some(" 0 ".into())), None);
+    }
+
+    #[test]
+    fn expires_at_is_never_when_timeout_is_none() {
+        assert_eq!(expires_at_for(None, 1_000), NO_EXPIRY);
+        assert_eq!(expires_at_for(Some(180), 1_000), 1_180);
+    }
+
     fn headers<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |name| {
             pairs
@@ -947,7 +1066,7 @@ mod tests {
             app: None,
             batch: None,
             created_at: now,
-            expires_at: now + APPROVAL_TIMEOUT_SECS,
+            expires_at: now + DEFAULT_APPROVAL_TIMEOUT_SECS,
         }
     }
 
@@ -1185,6 +1304,52 @@ mod tests {
                 reason: None,
             }))
         );
+    }
+
+    #[tokio::test]
+    async fn no_expiry_approval_survives_cleanup_and_stays_listed() {
+        let store = InMemoryApprovalStore::new();
+        let mut never = make_approval("never", "acc-1");
+        never.expires_at = NO_EXPIRY;
+        let _rx = store.prepare_wait(TEST_ORG, "acc-1", "never").await;
+        store.store(&never).await.unwrap();
+
+        // Even a far-future cleanup pass skips it.
+        cleanup_expired(&store, u64::MAX - 1);
+        assert!(store.pending.contains_key("never"));
+        assert!(store
+            .get_pending(TEST_ORG, "acc-1", "never")
+            .await
+            .is_some());
+        assert_eq!(store.list_pending(TEST_ORG, "acc-1").await.len(), 1);
+        assert_eq!(store.list_pending_for_org(TEST_ORG).await.len(), 1);
+        // Reviewers can still decide it.
+        assert!(submit_decision(&store, "never", ApprovalDecision::Deny, None).await);
+    }
+
+    #[test]
+    fn pending_row_omits_expires_at_when_approval_never_expires() {
+        let mut never = make_approval("never", "acc-1");
+        never.expires_at = NO_EXPIRY;
+        assert!(pending_approval_row(&never).get("expiresAt").is_none());
+
+        let timed = make_approval("timed", "acc-1");
+        assert!(pending_approval_row(&timed)["expiresAt"].is_string());
+    }
+
+    #[test]
+    fn pending_list_body_omits_timeout_seconds_when_there_is_no_limit() {
+        let pending = vec![make_approval("a", "acc-1")];
+        let body = pending_list_body(&pending, None);
+        assert!(body.get("timeoutSeconds").is_none());
+        assert_eq!(body["requests"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn pending_list_body_reports_timeout_seconds_when_limited() {
+        let body = pending_list_body(&[], Some(180));
+        assert_eq!(body["timeoutSeconds"], 180);
+        assert!(body["requests"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

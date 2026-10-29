@@ -93,7 +93,7 @@ export const useApprovalCards = (
           takeLocalDecision(id) ??
           (replaced.has(id)
             ? "replaced"
-            : new Date(approval.expiresAt).getTime() - 15_000 <= now
+            : Date.parse(approval.expiresAt ?? "") - 15_000 <= now
               ? "expired"
               : "decided"),
       });

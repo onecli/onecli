@@ -153,7 +153,9 @@ export const InlineApprovalItem = ({
                 urgent && "font-medium text-amber-600 dark:text-amber-500",
               )}
             >
-              expires in {formatCountdown(remaining)}
+              {Number.isFinite(remaining)
+                ? `expires in ${formatCountdown(remaining)}`
+                : "no expiry"}
             </span>
           </div>
 

@@ -103,12 +103,12 @@ export const usePendingApprovals = () => {
   // renders while nothing expires, so consumers keyed on the list (effects,
   // memos) don't churn every render.
   const live = useMemo(
-    () => all.filter((a) => !(Date.parse(a.expiresAt) + clockLag <= now)),
+    () => all.filter((a) => !(Date.parse(a.expiresAt ?? "") + clockLag <= now)),
     [all, now],
   );
   const nextDeadline = Math.min(
     ...live
-      .map((a) => Date.parse(a.expiresAt) + clockLag)
+      .map((a) => Date.parse(a.expiresAt ?? "") + clockLag)
       .filter(Number.isFinite),
   );
   const { refetch } = query;

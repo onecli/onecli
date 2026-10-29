@@ -11,8 +11,8 @@ use axum::Router;
 use hyper::StatusCode;
 use tracing::{info, info_span, warn, Instrument};
 
-use approval::APPROVAL_TIMEOUT_SECS;
-use approval::{pending_approval_row, PendingParams};
+use approval::approval_timeout;
+use approval::PendingParams;
 use context::auth::OrgAuthUser;
 use context::GatewayState;
 
@@ -105,11 +105,7 @@ async fn get_org_pending_approvals(
             long_polled, "org approval poll completed"
         );
 
-        axum::Json(serde_json::json!({
-            "requests": pending.iter().map(pending_approval_row).collect::<Vec<_>>(),
-            "timeoutSeconds": APPROVAL_TIMEOUT_SECS,
-        }))
-        .into_response()
+        axum::Json(approval::pending_list_body(&pending, approval_timeout())).into_response()
     }
     .instrument(span)
     .await

@@ -15,9 +15,7 @@ use hyper::{Request, Response, StatusCode};
 use tracing::{info, warn};
 
 use crate::connect::{inactive_app_for, PolicyEngineExt as _, RestrictedCredential};
-use approval::{
-    ApprovalDecision, ApprovalGuard, ApprovalStore, PendingApproval, APPROVAL_TIMEOUT_SECS,
-};
+use approval::{ApprovalDecision, ApprovalGuard, ApprovalStore, PendingApproval};
 use cache::CacheStore;
 use inject::default_interceptions;
 use policy::PolicyDecision;
@@ -889,7 +887,7 @@ pub async fn forward_request(
                         .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
                 }),
                 created_at: now,
-                expires_at: now + APPROVAL_TIMEOUT_SECS,
+                expires_at: approval::approval_expires_at(now),
             };
 
             let decision_rx = approval_store
@@ -950,7 +948,7 @@ pub async fn forward_request(
 
             let mut shutdown_signal = shutdown::subscribe();
             let outcome = tokio::select! {
-                outcome = decision_rx.wait(Duration::from_secs(APPROVAL_TIMEOUT_SECS)) => {
+                outcome = decision_rx.wait(approval::approval_wait_duration()) => {
                     Some(outcome)
                 }
                 // Shutting down with nobody having decided. Left alone this

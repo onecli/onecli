@@ -16,8 +16,67 @@ use approval::{
     DecisionWaitError, NewApprovalReceiver, NewApprovalWait, PendingApproval,
 };
 
-/// TTL for Redis keys — approval timeout + buffer.
-const REDIS_TTL_SECS: u64 = 190;
+/// Slack on top of the approval window before Redis drops the keys.
+const REDIS_TTL_BUFFER_SECS: u64 = 10;
+
+/// TTL for Redis keys — approval timeout + buffer; `None` when approvals never expire.
+fn redis_ttl_secs() -> Option<u64> {
+    approval::approval_timeout().map(|secs| secs + REDIS_TTL_BUFFER_SECS)
+}
+
+/// The decision key is consumed right after the push (or deleted by `remove`),
+/// so it keeps a bounded TTL even when approvals never expire.
+fn decision_ttl_secs() -> u64 {
+    redis_ttl_secs().unwrap_or(approval::DEFAULT_APPROVAL_TIMEOUT_SECS + REDIS_TTL_BUFFER_SECS)
+}
+
+/// Apply the approval TTL to an index set. When approvals never expire, PERSIST
+/// instead, so a TTL left on the set by an earlier approval can't drop the index
+/// while the approval itself lives on.
+async fn apply_index_ttl<C: redis::aio::ConnectionLike + Send>(
+    conn: &mut C,
+    key: &str,
+    ttl: Option<u64>,
+) {
+    let _ = match ttl {
+        Some(ttl) => {
+            redis::cmd("EXPIRE")
+                .arg(key)
+                .arg(ttl)
+                .query_async::<()>(conn)
+                .await
+        }
+        None => redis::cmd("PERSIST").arg(key).query_async::<()>(conn).await,
+    };
+}
+
+/// Write the approval record: SETEX with a TTL, or a plain SET (no TTL) when
+/// approvals never expire. Generic over the connection so tests can drive a
+/// private RESP peer and assert the exact command issued.
+async fn write_approval<C: redis::aio::ConnectionLike + Send>(
+    conn: &mut C,
+    key: &str,
+    json: &str,
+    ttl: Option<u64>,
+) -> redis::RedisResult<()> {
+    match ttl {
+        Some(ttl) => {
+            redis::cmd("SETEX")
+                .arg(key)
+                .arg(ttl)
+                .arg(json)
+                .query_async::<()>(conn)
+                .await
+        }
+        None => {
+            redis::cmd("SET")
+                .arg(key)
+                .arg(json)
+                .query_async::<()>(conn)
+                .await
+        }
+    }
+}
 
 /// BLPOP waiter on a **dedicated connection**, not the shared
 /// `ConnectionManager` — BLPOP blocks the Redis connection for up to the
@@ -196,13 +255,9 @@ impl ApprovalStore for RedisApprovalStore {
         let org_id = &approval.organization_id;
         let workspace_id = &approval.workspace_id;
 
-        if let Err(e) = redis::cmd("SETEX")
-            .arg(format!("approval:{org_id}:{workspace_id}:{}", approval.id))
-            .arg(REDIS_TTL_SECS)
-            .arg(&json)
-            .query_async::<()>(&mut conn)
-            .await
-        {
+        let approval_key = format!("approval:{org_id}:{workspace_id}:{}", approval.id);
+        let stored = write_approval(&mut conn, &approval_key, &json, redis_ttl_secs()).await;
+        if let Err(e) = stored {
             return Err(anyhow::anyhow!("redis SETEX failed: {e}"));
         }
 
@@ -212,11 +267,7 @@ impl ApprovalStore for RedisApprovalStore {
             .arg(&approval.id)
             .query_async::<()>(&mut conn)
             .await;
-        let _ = redis::cmd("EXPIRE")
-            .arg(&set_key)
-            .arg(REDIS_TTL_SECS)
-            .query_async::<()>(&mut conn)
-            .await;
+        apply_index_ttl(&mut conn, &set_key, redis_ttl_secs()).await;
 
         // Notify long-pollers via pub/sub
         let _ = redis::cmd("PUBLISH")
@@ -235,11 +286,7 @@ impl ApprovalStore for RedisApprovalStore {
             .arg(format!("{workspace_id}:{}", approval.id))
             .query_async::<()>(&mut conn)
             .await;
-        let _ = redis::cmd("EXPIRE")
-            .arg(&org_set_key)
-            .arg(REDIS_TTL_SECS)
-            .query_async::<()>(&mut conn)
-            .await;
+        apply_index_ttl(&mut conn, &org_set_key, redis_ttl_secs()).await;
         let _ = redis::cmd("PUBLISH")
             .arg(format!("approval:new:{org_id}"))
             .arg("1")
@@ -436,7 +483,7 @@ impl ApprovalStore for RedisApprovalStore {
         // Set TTL on the decision key (cleanup if BLPOP never reads it)
         let _ = redis::cmd("EXPIRE")
             .arg(format!("approval:decision:{org_id}:{workspace_id}:{id}"))
-            .arg(REDIS_TTL_SECS)
+            .arg(decision_ttl_secs())
             .query_async::<()>(&mut conn)
             .await;
 
@@ -582,5 +629,121 @@ mod tests {
     #[tokio::test]
     async fn blpop_disconnect_is_not_expiry() {
         assert_eq!(wait_with_reply(b"").await, Err(DecisionWaitError::Receive));
+    }
+
+    // Private RESP peer that answers +OK to everything and returns every
+    // command it received, so a test can assert which Redis commands a store
+    // path really issues. No real Redis involved.
+    async fn recorded_commands<F, Fut>(f: F) -> Vec<Vec<String>>
+    where
+        F: FnOnce(redis::aio::MultiplexedConnection) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client =
+            redis::Client::open(format!("redis://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            let mut seen = Vec::new();
+            loop {
+                let mut line = String::new();
+                if socket.read_line(&mut line).await.unwrap() == 0 {
+                    break;
+                }
+                let count: usize = line.strip_prefix('*').unwrap().trim().parse().unwrap();
+                let mut command = Vec::new();
+                for _ in 0..count {
+                    line.clear();
+                    socket.read_line(&mut line).await.unwrap();
+                    let len: usize = line.strip_prefix('$').unwrap().trim().parse().unwrap();
+                    let mut arg = vec![0; len + 2];
+                    socket.read_exact(&mut arg).await.unwrap();
+                    arg.truncate(len);
+                    command.push(String::from_utf8_lossy(&arg).into_owned());
+                }
+                seen.push(command);
+                socket.get_mut().write_all(b"+OK\r\n").await.unwrap();
+            }
+            seen
+        });
+        let conn = client.get_multiplexed_async_connection().await.unwrap();
+        f(conn).await;
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    // Only the commands that carry (or drop) a TTL; connection setup is ignored.
+    fn ttl_commands(seen: Vec<Vec<String>>) -> Vec<Vec<String>> {
+        seen.into_iter()
+            .filter(|c| {
+                matches!(
+                    c[0].to_ascii_uppercase().as_str(),
+                    "SET" | "SETEX" | "EXPIRE" | "PERSIST"
+                )
+            })
+            .collect()
+    }
+
+    fn cmd(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|p| p.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn never_expiring_approval_is_stored_with_plain_set() {
+        let seen = recorded_commands(|mut conn| async move {
+            write_approval(&mut conn, "approval:o:w:1", "{}", None)
+                .await
+                .unwrap();
+        })
+        .await;
+        assert_eq!(
+            ttl_commands(seen),
+            vec![cmd(&["SET", "approval:o:w:1", "{}"])]
+        );
+    }
+
+    #[tokio::test]
+    async fn timed_approval_is_stored_with_setex() {
+        let seen = recorded_commands(|mut conn| async move {
+            write_approval(&mut conn, "approval:o:w:1", "{}", Some(190))
+                .await
+                .unwrap();
+        })
+        .await;
+        assert_eq!(
+            ttl_commands(seen),
+            vec![cmd(&["SETEX", "approval:o:w:1", "190", "{}"])]
+        );
+    }
+
+    #[tokio::test]
+    async fn never_expiring_approval_persists_its_index_sets() {
+        let seen = recorded_commands(|mut conn| async move {
+            apply_index_ttl(&mut conn, "approvals:o:w", None).await;
+            apply_index_ttl(&mut conn, "approvals:o", None).await;
+        })
+        .await;
+        assert_eq!(
+            ttl_commands(seen),
+            vec![
+                cmd(&["PERSIST", "approvals:o:w"]),
+                cmd(&["PERSIST", "approvals:o"]),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn timed_approval_expires_its_index_sets() {
+        let seen = recorded_commands(|mut conn| async move {
+            apply_index_ttl(&mut conn, "approvals:o:w", Some(190)).await;
+        })
+        .await;
+        assert_eq!(
+            ttl_commands(seen),
+            vec![cmd(&["EXPIRE", "approvals:o:w", "190"])]
+        );
     }
 }

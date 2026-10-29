@@ -43,8 +43,10 @@ export const ApprovalDetailsContent = ({
           />
         </DialogTitle>
         <DialogDescription>
-          {approval.agent.name} · {approval.host} · expires in{" "}
-          {formatCountdown(remaining)}
+          {approval.agent.name} · {approval.host} ·{" "}
+          {Number.isFinite(remaining)
+            ? `expires in ${formatCountdown(remaining)}`
+            : "no expiry"}
         </DialogDescription>
       </DialogHeader>
       {showSummary && (details.length > 0 || approval.summary?.bulk) && (
