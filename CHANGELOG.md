@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.17.0](https://github.com/onecli/onecli/compare/v2.16.0...v2.17.0) (2026-10-31)
+
+
+### Features
+
+* PostgreSQL through the gateway, Zendesk and HeyReach, readable approval cards, Slack as you ([#631](https://github.com/onecli/onecli/issues/631)) ([4692e04](https://github.com/onecli/onecli/commit/4692e04a2068021d28c9073d68100b0bc96bfab8))
+
 ## [2.16.0](https://github.com/onecli/onecli/compare/v2.15.0...v2.16.0) (2026-10-22)
 
 
