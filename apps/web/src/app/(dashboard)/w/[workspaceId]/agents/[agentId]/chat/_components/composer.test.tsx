@@ -1,11 +1,40 @@
 // @vitest-environment jsdom
-import { StrictMode } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { createRef, StrictMode } from "react";
+import type { ReactElement } from "react";
+import {
+  act,
+  fireEvent,
+  render as renderComponent,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { toast } from "sonner";
+import { MAX_ATTACHMENTS_PER_MESSAGE } from "@onecli/api/validations/attachments";
 import { ApiError } from "@/lib/api/client";
 import type { AttachmentMeta } from "@/lib/api/types";
 import { Composer } from "./composer";
+import type { ComposerHandle } from "./composer";
+
+vi.mock("sonner", () => ({ toast: { error: vi.fn(), warning: vi.fn() } }));
+
+const render = (ui: ReactElement) => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return renderComponent(ui, {
+    wrapper: ({ children }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    ),
+  });
+};
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.clearAllMocks();
+});
 
 const meta = (over: Partial<AttachmentMeta> = {}): AttachmentMeta => ({
   id: "att-1",
@@ -24,6 +53,235 @@ const baseProps = {
 } as const;
 
 describe("Composer", () => {
+  it("keeps the remove face small inside a 44px target and honors reduced motion", () => {
+    const ref = createRef<ComposerHandle>();
+    render(
+      <Composer
+        {...baseProps}
+        ref={ref}
+        uploadFile={() => new Promise<AttachmentMeta>(() => {})}
+      />,
+    );
+    act(() =>
+      ref.current?.stageFiles([
+        new File(["a"], "target.txt", { type: "text/plain" }),
+      ]),
+    );
+    const remove = screen.getByRole("button", { name: "Remove target.txt" });
+    expect(remove).toHaveClass("size-11", "motion-reduce:transition-none");
+    expect(remove.querySelector("span")).toHaveClass("size-6");
+    expect(remove.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+    const spinner = screen
+      .getByRole("button", { name: "Preview target.txt" })
+      .querySelector("svg");
+    expect(spinner).toHaveClass("motion-safe:animate-spin");
+    expect(spinner).not.toHaveClass("animate-spin");
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "ignores upload %s after removal without resurrecting the file",
+    async (settlement) => {
+      const revokeObjectURL = vi.fn();
+      vi.stubGlobal("URL", {
+        createObjectURL: () => "blob:removed",
+        revokeObjectURL,
+      });
+      let resolveUpload: (value: AttachmentMeta) => void = () => {};
+      let rejectUpload: (error: Error) => void = () => {};
+      const uploadFile = () =>
+        new Promise<AttachmentMeta>((resolve, reject) => {
+          resolveUpload = resolve;
+          rejectUpload = reject;
+        });
+      const ref = createRef<ComposerHandle>();
+      const { unmount } = render(
+        <Composer {...baseProps} ref={ref} uploadFile={uploadFile} />,
+      );
+      await act(async () =>
+        ref.current?.stageFiles([
+          new File(["a"], "removed.png", { type: "image/png" }),
+        ]),
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: "Remove removed.png" }),
+      );
+      await act(async () => {
+        if (settlement === "resolve") resolveUpload(meta());
+        else rejectUpload(new Error("removed upload failed"));
+      });
+      expect(screen.queryByText("removed.png")).not.toBeInTheDocument();
+      expect(toast.error).not.toHaveBeenCalled();
+      unmount();
+      expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith("blob:removed");
+    },
+  );
+
+  it("releases an image URL when its upload fails", async () => {
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", {
+      createObjectURL: () => "blob:failed",
+      revokeObjectURL,
+    });
+    const ref = createRef<ComposerHandle>();
+    const { unmount } = render(
+      <Composer
+        {...baseProps}
+        ref={ref}
+        uploadFile={async () => {
+          throw new Error("unavailable");
+        }}
+      />,
+    );
+    await act(async () =>
+      ref.current?.stageFiles([
+        new File(["a"], "failed.png", { type: "image/png" }),
+      ]),
+    );
+    expect(screen.queryByText("failed.png")).not.toBeInTheDocument();
+    expect(toast.error).toHaveBeenCalledExactlyOnceWith(
+      'Couldn\'t attach "failed.png". unavailable',
+      { id: "unavailable" },
+    );
+    unmount();
+    expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith("blob:failed");
+  });
+
+  it("reserves capacity across imperative staging calls before React renders", async () => {
+    const ref = createRef<ComposerHandle>();
+    const uploadFile = vi.fn(async (file: File) => meta({ name: file.name }));
+    render(<Composer {...baseProps} ref={ref} uploadFile={uploadFile} />);
+    const file = (i: number) => new File(["abc"], `rapid-${i}.txt`);
+    act(() => {
+      ref.current?.stageFiles(
+        Array.from({ length: MAX_ATTACHMENTS_PER_MESSAGE - 1 }, (_, i) =>
+          file(i),
+        ),
+      );
+      ref.current?.stageFiles([file(100), file(101)]);
+    });
+    await waitFor(() =>
+      expect(uploadFile).toHaveBeenCalledTimes(MAX_ATTACHMENTS_PER_MESSAGE),
+    );
+    expect(screen.queryByText("rapid-101.txt")).not.toBeInTheDocument();
+  });
+
+  it("releases unsent image URLs once on removal and unmount under StrictMode", async () => {
+    const revokeObjectURL = vi.fn();
+    let serial = 0;
+    vi.stubGlobal("URL", {
+      createObjectURL: vi.fn(() => `blob:staged-${++serial}`),
+      revokeObjectURL,
+    });
+    const ref = createRef<ComposerHandle>();
+    const { unmount } = render(
+      <StrictMode>
+        <Composer {...baseProps} ref={ref} />
+      </StrictMode>,
+    );
+    act(() =>
+      ref.current?.stageFiles([
+        new File(["a"], "first.png", { type: "image/png" }),
+        new File(["b"], "second.png", { type: "image/png" }),
+      ]),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Send message" }),
+      ).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Remove first.png" }));
+    expect(revokeObjectURL.mock.calls).toEqual([["blob:staged-1"]]);
+    unmount();
+    expect(revokeObjectURL.mock.calls).toEqual([
+      ["blob:staged-1"],
+      ["blob:staged-2"],
+    ]);
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "ignores upload %s after unmount and releases its URL",
+    async (settlement) => {
+      const revokeObjectURL = vi.fn();
+      vi.stubGlobal("URL", {
+        createObjectURL: () => "blob:pending",
+        revokeObjectURL,
+      });
+      let resolveUpload: (value: AttachmentMeta) => void = () => {};
+      let rejectUpload: (error: Error) => void = () => {};
+      const uploadFile = vi.fn(
+        () =>
+          new Promise<AttachmentMeta>((resolve, reject) => {
+            resolveUpload = resolve;
+            rejectUpload = reject;
+          }),
+      );
+      const ref = createRef<ComposerHandle>();
+      const { unmount } = render(
+        <Composer {...baseProps} ref={ref} uploadFile={uploadFile} />,
+      );
+      act(() =>
+        ref.current?.stageFiles([
+          new File(["a"], "pending.png", { type: "image/png" }),
+        ]),
+      );
+      await waitFor(() => expect(uploadFile).toHaveBeenCalledOnce());
+      unmount();
+      await act(async () => {
+        if (settlement === "resolve") resolveUpload(meta());
+        else rejectUpload(new Error("late failure"));
+      });
+      expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith("blob:pending");
+      expect(toast.error).not.toHaveBeenCalled();
+    },
+  );
+
+  it("sends metadata only and releases its local URL exactly once at submit", async () => {
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", {
+      createObjectURL: () => "blob:sent",
+      revokeObjectURL,
+    });
+    const onSend = vi.fn();
+    const ref = createRef<ComposerHandle>();
+    const { unmount } = render(
+      <Composer {...baseProps} ref={ref} onSend={onSend} />,
+    );
+    act(() =>
+      ref.current?.stageFiles([
+        new File(["a"], "sent.png", { type: "image/png" }),
+      ]),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Send message" }),
+      ).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith("blob:sent");
+    unmount();
+    expect(onSend).toHaveBeenCalledExactlyOnceWith({
+      message: "",
+      attachments: [meta()],
+    });
+    expect(onSend.mock.calls[0]?.[0].attachments[0]).not.toHaveProperty(
+      "objectUrl",
+    );
+    expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith("blob:sent");
+  });
+
+  it("restores failed attachment metadata without creating a local URL", () => {
+    const revokeObjectURL = vi.fn();
+    const createObjectURL = vi.fn();
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+    const { unmount } = render(
+      <Composer {...baseProps} failedAttachments={[meta()]} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Remove photo.png" }));
+    unmount();
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+  });
+
   it("sends the trimmed message on Enter and clears the field", async () => {
     const user = userEvent.setup();
     const onSend = vi.fn();
@@ -299,6 +557,68 @@ describe("Composer", () => {
       message: "sans",
       attachments: [],
     });
+  });
+
+  it("takes the first files up to the cap and says the limit", async () => {
+    const cap = MAX_ATTACHMENTS_PER_MESSAGE;
+    const user = userEvent.setup();
+    const uploadFile = vi.fn(async (file: File) => meta({ name: file.name }));
+    const { container } = render(
+      <Composer {...baseProps} uploadFile={uploadFile} />,
+    );
+
+    await user.upload(
+      container.querySelector('input[type="file"]') as HTMLInputElement,
+      Array.from(
+        { length: cap + 2 },
+        (_, i) => new File(["abc"], `f${i + 1}.txt`, { type: "text/plain" }),
+      ),
+    );
+    await waitFor(() => expect(uploadFile).toHaveBeenCalledTimes(cap));
+    expect(screen.queryByText(`f${cap + 1}.txt`)).not.toBeInTheDocument();
+    expect(toast.warning).toHaveBeenCalledWith(
+      `You can add at most ${cap} attachments to a message. Please select fewer attachments.`,
+    );
+  });
+
+  it("a failed upload is one toast and no chip, never a red row to clean up", async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <Composer
+        {...baseProps}
+        uploadFile={async () => {
+          throw new Error("Server busy.");
+        }}
+      />,
+    );
+    await user.upload(
+      container.querySelector('input[type="file"]') as HTMLInputElement,
+      new File(["abc"], "a.pdf", { type: "application/pdf" }),
+    );
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(
+        'Couldn\'t attach "a.pdf". Server busy.',
+        { id: "Server busy." },
+      ),
+    );
+    expect(screen.queryByText("a.pdf")).not.toBeInTheDocument();
+  });
+
+  it("clicking a staged file opens its preview (a CSV shows its text)", async () => {
+    const user = userEvent.setup();
+    const { container } = render(<Composer {...baseProps} />);
+    await user.upload(
+      container.querySelector('input[type="file"]') as HTMLInputElement,
+      new File(["Account,ARR\nBluepine,120000"], "pipeline.csv", {
+        type: "text/csv",
+      }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "Preview pipeline.csv" }),
+    );
+    expect(await screen.findByRole("dialog")).toHaveTextContent(
+      "Bluepine,120000",
+    );
   });
 
   it("stages pasted files (a screenshot paste) like picked ones", async () => {

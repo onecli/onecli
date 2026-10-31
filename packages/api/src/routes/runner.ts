@@ -36,6 +36,7 @@ import { fireDueCrons } from "../services/cron-fire-service";
 import { fireDueEvalSchedules } from "../services/eval-schedule-fire-service";
 import { refreshDueSkillSources } from "../services/skill-library-service";
 import { fireDueWatches } from "../services/watch-fire-service";
+import { platformJobs } from "../services/platform-jobs";
 import { promoteParkedFollowUps } from "../services/follow-up-service";
 import {
   applyProcessState,
@@ -46,7 +47,8 @@ import { allowedPortsForRunner } from "../services/sandbox-port-service";
 import {
   heartbeatRunner,
   registerRunner,
-  runnerSupportsAttachments,
+  runnerAttachmentSupport,
+  type RunnerAttachmentSupport,
 } from "../services/runner-service";
 import {
   getAttachmentBytesForRunner,
@@ -58,6 +60,7 @@ import { sweepSshSessions } from "../services/ssh-service";
 import { sweepRuntimeLedger } from "../services/runtime-ledger";
 import { sweepPeerTasks } from "../services/channels/agent-link-service";
 import { getAgentDesktop } from "../providers/hooks/agent-desktop";
+import { getSandboxLifecycleHooks } from "../providers/hooks/sandbox-lifecycle-hooks";
 import {
   applyRunnerEvent,
   buildSandboxStartPayload,
@@ -191,9 +194,14 @@ let lastPollSweepAt = 0;
 /** The held_idle line is a gauge, not an event: once a minute is plenty. */
 const HELD_IDLE_LOG_INTERVAL_MS = 60_000;
 let lastHeldIdleLogAt = 0;
-/** Test seam: let the next poll run its sweeps whatever ran before. */
+/** When each platform job's pass last ran in this process, by job name
+ * (each job keeps its own interval, see platform-jobs). */
+const lastJobPassAt = new Map<string, number>();
+/** Test seam: let the next poll run its sweeps (every platform job's pass
+ * included) whatever ran before. */
 export const resetPollSweepThrottle = (): void => {
   lastPollSweepAt = 0;
+  lastJobPassAt.clear();
 };
 const DEFAULT_LIMIT = 5;
 /** Re-check cadence inside a held poll — the floor on wake latency when the
@@ -263,6 +271,23 @@ const runPollSweeps = async (): Promise<void> => {
   await fireDueWatches().catch((err: unknown) =>
     log.warn({ err }, "watch fire pass failed"),
   );
+
+  // Platform jobs ride the same tick (platform-jobs: memory review today),
+  // each throttled further on its own interval, per process. Sequential
+  // and isolated: one job's failure costs that job's pass only, never the
+  // next job's, the poll, or dispatch.
+  for (const job of platformJobs()) {
+    const now = Date.now();
+    if (now - (lastJobPassAt.get(job.name) ?? 0) <= job.passIntervalMs) {
+      continue;
+    }
+    lastJobPassAt.set(job.name, now);
+    try {
+      await job.pass();
+    } catch (err) {
+      log.warn({ err, job: job.name }, "platform job pass failed");
+    }
+  }
 
   // Parked follow-ups whose target closed without promoting them (a crash
   // in the close window, a settle frame that never arrived). The PRIMARY
@@ -334,8 +359,8 @@ const runPollSweeps = async (): Promise<void> => {
  * context: a failed plan ships the words without the files rather than
  * holding the message back (the agent's read fails honestly).
  */
-const planMessageAttachments = (turnId: string) =>
-  planTurnAttachments(turnId).catch((err: unknown) => {
+const planMessageAttachments = (turnId: string, maxFiles: number) =>
+  planTurnAttachments(turnId, maxFiles).catch((err: unknown) => {
     log.warn({ err, turnId }, "attachment plan failed; delivering without it");
     return null;
   });
@@ -412,8 +437,10 @@ export const runnerRoutes = () => {
     const deadline =
       Date.now() + Math.min(parsed.data.wait ?? 0, MAX_WAIT_SECONDS) * 1000;
 
-    // Resolved lazily, once per poll, only when a claimed turn needs it.
-    let attachmentsCapable: boolean | null = null;
+    // Resolved lazily, once per poll, only when a claimed message needs it.
+    let attachmentSupport: RunnerAttachmentSupport | null = null;
+    const attachmentSupportOnce = async () =>
+      (attachmentSupport ??= await runnerAttachmentSupport(runnerId));
 
     for (;;) {
       const claimed = await claimDueWork(runnerId, limit, replicaId);
@@ -442,9 +469,9 @@ export const runnerRoutes = () => {
             // Attachments (metadata + note only — the runner PULLS bytes).
             // Composed exclusively for capable runners: telling the agent
             // about files that cannot arrive would be worse than silence.
-            attachmentsCapable ??= await runnerSupportsAttachments(runnerId);
-            const plan = attachmentsCapable
-              ? await planMessageAttachments(due.turnId)
+            const support = await attachmentSupportOnce();
+            const plan = support.supported
+              ? await planMessageAttachments(due.turnId, support.maxFiles)
               : null;
             // The note leads (the files belong to THIS message); the memory
             // context follows; one slice holds the combined budget.
@@ -459,6 +486,7 @@ export const runnerRoutes = () => {
               ...(due.resumeSessionRef && {
                 resumeSessionRef: due.resumeSessionRef,
               }),
+              ...(due.ephemeralSession && { ephemeralSession: true }),
               ...(combinedContext && { context: combinedContext }),
               ...(plan && plan.manifest.length > 0
                 ? { attachments: plan.manifest }
@@ -483,9 +511,13 @@ export const runnerRoutes = () => {
             // turn does (the claim routed it here only because this runner
             // advertised `steerAttachments`): the manifest, and the note
             // after the frame, which says a message arrived before the note
-            // says what came with it.
+            // says what came with it. Bounded to what this runner's wire
+            // schema parses, like a turn's manifest.
             const plan = due.hasAttachments
-              ? await planMessageAttachments(due.turnId)
+              ? await planMessageAttachments(
+                  due.turnId,
+                  (await attachmentSupportOnce()).maxFiles,
+                )
               : null;
             const context = joinContext(due.context, plan?.note);
             items.push({
@@ -565,6 +597,13 @@ export const runnerRoutes = () => {
                 await parkUnstartableClaim(due.sandboxId, runnerId, {
                   message: NO_MODEL_KEY_MESSAGE,
                   code: "no_model_key",
+                });
+              } else if (spawn.reason === "unstartable") {
+                // The hosted extension refused the start for a reason that
+                // stays true until an operator acts: park it, same as above.
+                await parkUnstartableClaim(due.sandboxId, runnerId, {
+                  message: spawn.message,
+                  code: spawn.code,
                 });
               } else {
                 // The agent vanished, or the CA is not ready — put the claim
@@ -936,6 +975,28 @@ export const runnerRoutes = () => {
       parsed.data,
     );
     if (!recorded) return c.json({ error: "Not starting" }, 409);
+    const recordObservation =
+      getSandboxLifecycleHooks().recordResourceObservation;
+    if (parsed.data.resourceObservation && recordObservation) {
+      // The spawn is recorded; the observation is a fact about it, written
+      // outside that transaction. A failure here must not answer 5xx: the
+      // runner treats a failed record as "never recorded" and removes the
+      // container it just started.
+      try {
+        await recordObservation({
+          runnerId,
+          sandboxId: c.req.param("sandboxId"),
+          containerRef: parsed.data.containerRef,
+          observation: parsed.data.resourceObservation,
+          replicaId,
+        });
+      } catch (error) {
+        log.warn(
+          { err: error, sandboxId: c.req.param("sandboxId") },
+          "resource observation not recorded; spawn stands",
+        );
+      }
+    }
     return c.body(null, 204);
   });
 

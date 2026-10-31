@@ -44,7 +44,7 @@ export const agentRoutes = () => {
   app.use("*", authMiddleware);
 
   // GET /agents[?include=grants-summary] — the plain list, or (the first
-  // `?include=` projection) each agent with its attach-list chips summary.
+  // `?include=` projection) each agent with its attach summary.
   app.get("/", async (c) => {
     const auth = c.get("auth");
     const workspaceId = requireWorkspaceId(auth);

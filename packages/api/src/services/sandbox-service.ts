@@ -1,5 +1,6 @@
 import { db } from "@onecli/db";
 import type { RunnerEvent, SandboxStartPayload } from "@onecli/agent-protocol";
+import { getSandboxLifecycleHooks } from "../providers/hooks/sandbox-lifecycle-hooks";
 import { signalWork } from "./due-work";
 import { failStrandedTurns, reviveColdTurns } from "./turn-service";
 import {
@@ -40,6 +41,9 @@ export const SANDBOX_STATUSES = [
   "stopping",
   "stopped",
   "failed",
+  // Held exclusively by a hosted extension's maintenance operation (see
+  // `SandboxLifecycleHooks`): no start, stop or eviction arm claims it.
+  "maintenance",
 ] as const;
 export type SandboxStatus = (typeof SANDBOX_STATUSES)[number];
 
@@ -60,7 +64,9 @@ export type SandboxStatus = (typeof SANDBOX_STATUSES)[number];
  */
 export type SandboxStartDecision =
   | { ok: true; agentId: string; payload: SandboxStartPayload }
-  | { ok: false; reason: "unavailable" | "no_llm_credential" };
+  | { ok: false; reason: "unavailable" | "no_llm_credential" }
+  /** A hosted extension's refusal: lasting, so the claim is parked. */
+  | { ok: false; reason: "unstartable"; code: string; message: string };
 
 export const buildSandboxStartPayload = async (
   sandboxId: string,
@@ -89,6 +95,21 @@ export const buildSandboxStartPayload = async (
 
   const agent = sandbox?.agent;
   if (!agent) return { ok: false, reason: "unavailable" };
+
+  // A hosted extension resolves what the start carries as `resources`;
+  // without one the payload has no such field, as before the seam.
+  const resolveResources = getSandboxLifecycleHooks().resolveStartResources;
+  const resources = resolveResources
+    ? await resolveResources(sandboxId, runnerId)
+    : { ok: true as const };
+  if (!resources.ok) {
+    return {
+      ok: false,
+      reason: "unstartable",
+      code: resources.code,
+      message: resources.message,
+    };
+  }
 
   const result = await buildContainerConfig({
     agent: { id: agent.id, accessToken: agent.accessToken },
@@ -150,6 +171,7 @@ export const buildSandboxStartPayload = async (
     ok: true,
     agentId: agent.id,
     payload: {
+      ...(resources.resources && { resources: resources.resources }),
       // The workspace fence for namespaced backends: a namespaced backend
       // creates every sandbox inside its workspace. Composed at dispatch
       // from the same row as everything else.
@@ -275,11 +297,18 @@ export const applyRunnerEvent = async (
     return;
   }
 
+  // A hosted extension may hold a row exclusively (its `maintenance`
+  // operation); every ordinary lifecycle write below spreads its fence in,
+  // so a late report matches nothing there. Empty without a hook.
+  const hooks = getSandboxLifecycleHooks();
+  const heldFence = hooks.lifecycleWriteFence?.() ?? {};
+
   if (event.kind === "supervisor.ready") {
     const { count } = await db.sandbox.updateMany({
       where: {
         id: event.sandboxId,
         runnerId,
+        ...heldFence,
         ...(replicaId !== undefined && { channelReplicaId: replicaId }),
       },
       data: {
@@ -294,6 +323,21 @@ export const applyRunnerEvent = async (
     // now — wake the held poll rather than making it wait out a re-check.
     if (count > 0) signalWork();
     return;
+  }
+
+  // A resource observation is a fact about one CURRENT container, never a
+  // late status or a bare home ref; the extension that asked for it records it.
+  if (event.resourceObservation && hooks.recordResourceObservation) {
+    const observedRef = event.observedContainerRef ?? event.containerRef;
+    if (observedRef) {
+      await hooks.recordResourceObservation({
+        runnerId,
+        sandboxId: event.sandboxId,
+        containerRef: observedRef,
+        observation: event.resourceObservation,
+        replicaId,
+      });
+    }
   }
 
   // Which copy's report this is (see the function doc). Container-observed
@@ -315,7 +359,12 @@ export const applyRunnerEvent = async (
   if (event.containerRef !== undefined || event.homeRef !== undefined) {
     await db.$transaction(async (tx) => {
       const { count } = await tx.sandbox.updateMany({
-        where: { id: event.sandboxId, runnerId, ...reporterFence },
+        where: {
+          id: event.sandboxId,
+          runnerId,
+          ...heldFence,
+          ...reporterFence,
+        },
         data: {
           ...(event.containerRef !== undefined && {
             containerRef: event.containerRef,
@@ -340,6 +389,7 @@ export const applyRunnerEvent = async (
       where: {
         id: event.sandboxId,
         runnerId,
+        ...heldFence,
         ...reporterFence,
         // A report about ONE container (reconcile saw it dead, vanished or
         // channelless) applies only while it is still the sandbox's container.
@@ -414,6 +464,21 @@ export const applyRunnerEvent = async (
         event.sandboxId,
         await intervalEndReasonFor(tx, event.sandboxId, event.status),
       );
+    }
+    // A `starting` progress report that names why (a held wake) is a fact a
+    // hosted extension may want to record beside the row; the status itself
+    // stays `starting` and nothing here parks or fails anything.
+    if (
+      updated.count > 0 &&
+      event.status === "starting" &&
+      event.reasonCode !== undefined &&
+      hooks.onStartProgress
+    ) {
+      await hooks.onStartProgress(tx, {
+        sandboxId: event.sandboxId,
+        runnerId,
+        reasonCode: event.reasonCode,
+      });
     }
     return updated;
   });

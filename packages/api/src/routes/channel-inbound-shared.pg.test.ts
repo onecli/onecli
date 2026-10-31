@@ -525,6 +525,34 @@ describe.skipIf(!PROOF_URL)("the MARKETPLACE install path", () => {
   });
 });
 
+describe.skipIf(!PROOF_URL)("the 'Connect your Slack' return", () => {
+  it("lands on the agent's Contacts (where connecting starts), not the Slack page", async () => {
+    const hooks = await import("../providers/hooks/conversation-reader");
+    const previous = hooks.getUserReadConnectCompleter();
+    // The licensed completer verifies the state itself; this stand-in
+    // pins only where the shared route sends the person afterwards.
+    hooks.initUserReadConnectCompleter({
+      handles: (kind) => kind === "slack-user-read",
+      complete: async () => ({ workspaceId: "ws 1", agentId: "agent/1" }),
+    });
+    try {
+      const state = Buffer.from(
+        JSON.stringify({ data: { kind: "slack-user-read" } }),
+      ).toString("base64url");
+      const res = await app.request(
+        `/v1/channels/slack/oauth/callback?code=c1&state=${state}`,
+        { method: "GET", redirect: "manual" },
+      );
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe(
+        "https://app.sharedwire.test/w/ws%201/agents/agent%2F1/contacts?connected=slack-read",
+      );
+    } finally {
+      hooks.initUserReadConnectCompleter(previous);
+    }
+  });
+});
+
 describe.skipIf(!PROOF_URL)(
   "the shared app's inbound wire (onboarding bot)",
   () => {
@@ -1543,6 +1571,11 @@ describe.skipIf(!PROOF_URL)("the DEDICATED arm's lifecycle fence", () => {
       body: activeRaw,
     });
     expect(accepted.status).toBe(200);
+    // The accepted event is processed off the request: let it finish before
+    // the presence it belongs to is deleted out from under it.
+    await (
+      await import("../services/channels/inbound-event-service")
+    ).settleInboundEventsForTests();
 
     await db.agentChannel.delete({ where: { id: presence.id } });
     await db.agent.delete({ where: { id: agent.id } });

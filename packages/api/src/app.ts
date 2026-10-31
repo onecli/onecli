@@ -16,6 +16,12 @@ import {
   initRuleActionGate,
 } from "./providers";
 import { ensureEditionDefaults } from "./edition-defaults";
+import {
+  initSandboxLifecycleHooks,
+  type SandboxLifecycleHooks,
+} from "./providers/hooks/sandbox-lifecycle-hooks";
+import { registerPlatformJob } from "./services/platform-jobs";
+import { memoryReviewJob } from "./services/memory-review-service";
 import { registerEeRoutes } from "./ee";
 import { installLegacyProjectCompat } from "./lib/legacy-project-compat";
 import { errorHandler, notFoundHandler } from "./middleware/error-handler";
@@ -117,6 +123,18 @@ export interface CreateApiAppOptions {
    * it to mount a single router under test.
    */
   eeRoutes?: (app: Hono<ApiEnv>) => void;
+  /**
+   * A host's own routes, mounted on the `/v1` app after the shared surface
+   * (a hosted deployment's service channels). Absent: nothing extra is
+   * mounted and those paths do not exist.
+   */
+  hostRoutes?: (app: Hono<ApiEnv>) => void;
+  /**
+   * A host's sandbox-lifecycle extension (`SandboxLifecycleHooks`). Absent:
+   * every seam is a no-op and the lifecycle runs exactly as the shared code
+   * describes it.
+   */
+  sandboxLifecycleHooks?: SandboxLifecycleHooks;
   /** Override of the edition default (cloud: org-level app-config reads). */
   orgAppConfig?: OrgAppConfigProvider;
   /**
@@ -141,6 +159,9 @@ export const createApiApp = (
   options?: CreateApiAppOptions,
 ) => {
   ensureEditionDefaults();
+  // The platform's own jobs, on the poll (platform-jobs). Idempotent, so a
+  // second app in the same process registers nothing twice.
+  registerPlatformJob(memoryReviewJob);
   initSession(session);
   if (options?.orgAppConfig) initOrgAppConfig(options.orgAppConfig);
   if (options?.selfUrl) initSelfUrl(options.selfUrl);
@@ -148,6 +169,7 @@ export const createApiApp = (
   if (options?.policyValidator) initPolicyValidator(options.policyValidator);
   if (options?.ruleActionGate) initRuleActionGate(options.ruleActionGate);
   if (options?.sessionHooks) initSessionHooks(options.sessionHooks);
+  initSandboxLifecycleHooks(options?.sandboxLifecycleHooks ?? {});
 
   const app = new Hono<ApiEnv>().basePath("/v1");
   app.onError(errorHandler);
@@ -306,6 +328,7 @@ export const createApiApp = (
   } else {
     registerEeRoutes(app);
   }
+  options?.hostRoutes?.(app);
 
   return app;
 };

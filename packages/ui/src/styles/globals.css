@@ -65,6 +65,21 @@
       opacity: 1;
     }
   }
+
+  /* A seamless horizontal scroll (onboarding's app-logo rows): the track
+   * holds its items twice and slides by half its own width, so the loop has
+   * no seam. Duration/direction are set per row inline. Tree-shaken while
+   * unused. */
+  --animate-marquee: marquee 40s linear infinite;
+
+  @keyframes marquee {
+    from {
+      transform: translateX(0);
+    }
+    to {
+      transform: translateX(-50%);
+    }
+  }
 }
 
 /* Light mode (exists for completeness, dark is default) */

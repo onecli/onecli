@@ -6,8 +6,8 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MockInstance } from "vitest";
 import { toast } from "sonner";
-import { grants } from "@/lib/api";
-import type { Connection } from "@/lib/api";
+import { grants, instance } from "@/lib/api";
+import type { Connection, InstanceInfo } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import { ConnectAppPickerDialog } from "./connect-app-picker-dialog";
 
@@ -25,6 +25,14 @@ vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
   return {
     ...actual,
+    instance: {
+      ...actual.instance,
+      get: vi.fn().mockResolvedValue({
+        edition: "onprem",
+        entitled: false,
+        version: "test",
+      } satisfies InstanceInfo),
+    },
     grants: {
       ...actual.grants,
       setConnectionGrant: vi.fn().mockResolvedValue({}),
@@ -43,9 +51,8 @@ const connectedGmail: Connection = {
   connectedAt: "2026-08-01T00:00:00Z",
 };
 
-/** Seeded client so the dialog's data graph never hits the network:
- * connections pool, org app availability, and the agent's detail (the
- * popup's `agent_name`). */
+/** Seed the picker inputs before mount: connections, org app availability,
+ * runtime entitlement and the agent detail (the popup's `agent_name`). */
 const renderPicker = ({
   connections = [] as Connection[],
   availability = { restricted: false, providers: [] as string[] },
@@ -55,6 +62,11 @@ const renderPicker = ({
 } = {}) => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+  });
+  queryClient.setQueryData<InstanceInfo>(queryKeys.instance.all(), {
+    edition: "onprem",
+    entitled: false,
+    version: "test",
   });
   queryClient.setQueryData(
     queryKeys.connections.list("workspace"),
@@ -98,16 +110,20 @@ describe("ConnectAppPickerDialog", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.mocked(instance.get).mockClear();
     vi.mocked(grants.setConnectionGrant).mockClear();
     vi.mocked(toast.error).mockClear();
     pushMock.mockClear();
   });
 
-  it("states what a new account gets: the default attach, never full access for a catalogued app", () => {
+  it("shows only the headline and search: no consent paragraph", () => {
     renderPicker();
     const dialog = screen.getByRole("dialog");
-    expect(dialog).toHaveTextContent(
-      "Connecting turns the account on for this agent, not for your other agents. Reads are allowed. Writes and anything else need your approval (an app with no tool list gets full access).",
+    expect(dialog).toHaveTextContent("Connect an app");
+    expect(dialog).not.toHaveTextContent(/Only this agent gets access/);
+    expect(dialog).not.toHaveTextContent(/Connecting turns the account on/);
+    expect(screen.getByText("Search for an app to connect.")).toHaveClass(
+      "sr-only",
     );
   });
 
@@ -144,10 +160,13 @@ describe("ConnectAppPickerDialog", () => {
     });
     await userEvent.type(screen.getByLabelText("Search apps"), "sla");
     const row = await screen.findByRole("button", { name: /^Slack/ });
+    // Seed before mount so no in-flight instance read can overwrite this
+    // test's entitlement when it resolves. Keep the API mock as a tripwire.
+    expect(instance.get).not.toHaveBeenCalled();
     expect(row).toHaveTextContent(/Connect your Slack/);
     await userEvent.click(row);
     expect(openSpy).not.toHaveBeenCalled();
-    expect(pushMock).toHaveBeenCalledWith("/w/ws-1/agents/agent-1/channels");
+    expect(pushMock).toHaveBeenCalledWith("/w/ws-1/agents/agent-1/contacts");
   });
 
   it("opens the shared popup with agent name, workspace, and dedupe window name", async () => {

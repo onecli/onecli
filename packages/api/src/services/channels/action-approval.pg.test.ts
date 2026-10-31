@@ -914,3 +914,137 @@ describe.skipIf(!PROOF_URL)(
     });
   },
 );
+
+describe.skipIf(!PROOF_URL)(
+  "superseding stale asks and personal DM cards",
+  () => {
+    it("a newer ask with the same key quietly expires the older pending one; a different key is kept", async () => {
+      const stage = await seedStage("supersede-new");
+      approvals.registerActionHandler(
+        "test.supersede",
+        async () => "Sent to Sam.",
+        {
+          supersedeKey: (p) =>
+            p &&
+            typeof p === "object" &&
+            !Array.isArray(p) &&
+            typeof p.to === "string"
+              ? p.to
+              : null,
+        },
+      );
+      try {
+        const ask = (to: string) =>
+          approvals.requestActionApproval({
+            agentId: stage.agentId,
+            conversationId: stage.conversationId,
+            originTurnId: stage.turnId,
+            action: "test.supersede",
+            payload: { to },
+            summary: `message ${to}`,
+          });
+        const old = await ask("tomer");
+        const other = await ask("dana");
+        const fresh = await ask("tomer");
+        const status = async (id: string) =>
+          await db.actionApproval.findUniqueOrThrow({
+            where: { id },
+            select: { status: true, reason: true },
+          });
+        expect(await status(old.id)).toEqual({
+          status: "expired",
+          reason: "Replaced by a newer request.",
+        });
+        expect((await status(other.id)).status).toBe("pending");
+        expect((await status(fresh.id)).status).toBe("pending");
+        // Quiet: no outcome notice for the superseded one.
+        expect(
+          await db.turnEvent.count({
+            where: { turnId: stage.turnId, type: "notice" },
+          }),
+        ).toBe(0);
+      } finally {
+        approvals.unregisterActionHandler("test.supersede");
+      }
+    });
+
+    it("deciding an ask supersedes OLDER pending asks of the same key; the decide returns the handler's note", async () => {
+      const stage = await seedStage("supersede-decide");
+      approvals.registerActionHandler(
+        "test.supersede2",
+        async () => "Sent to Sam.",
+        {
+          supersedeKey: () => "same",
+        },
+      );
+      try {
+        const old = await approvals.requestActionApproval({
+          agentId: stage.agentId,
+          action: "test.supersede2",
+          payload: {},
+          summary: "one",
+        });
+        // Simulate an older ask that escaped the create-time pass (e.g. created
+        // concurrently): put it back to pending, then decide the newer one.
+        const fresh = await approvals.requestActionApproval({
+          agentId: stage.agentId,
+          action: "test.supersede2",
+          payload: {},
+          summary: "two",
+        });
+        await db.actionApproval.update({
+          where: { id: old.id },
+          data: { status: "pending", reason: null },
+        });
+        const out = await approvals.decideActionApproval({
+          approvalId: fresh.id,
+          decision: "approve",
+          deciderUserId: OWNER,
+        });
+        expect(out).toMatchObject({
+          kind: "decided",
+          status: "executed",
+          note: "Sent to Sam.",
+        });
+        const row = await db.actionApproval.findUniqueOrThrow({
+          where: { id: old.id },
+          select: { status: true },
+        });
+        expect(row.status).toBe("expired");
+      } finally {
+        approvals.unregisterActionHandler("test.supersede2");
+      }
+    });
+
+    it("a personal card goes to the decider's Slack DM, found from the link when the payload has no Slack id; a dmLink card is a URL button", async () => {
+      const stage = await seedStage("personal-dm");
+      approvals.registerActionHandler("test.personal", async () => {}, {
+        decidedBy: () => ({ userId: OWNER, externalUserId: "" }),
+        dmLink: (_p, ctx) => ({
+          url: `https://app.example/w/${ctx.workspaceId}/agents/${ctx.agentId}/contacts?connect=slack`,
+          label: "Connect your Slack",
+          note: "Connecting happens in OneCLI.",
+        }),
+      });
+      try {
+        await approvals.requestActionApproval({
+          agentId: stage.agentId,
+          action: "test.personal",
+          payload: {},
+          summary: "connect your Slack",
+        });
+        const posts = slackCallsFor("chat.postMessage");
+        expect(posts).toHaveLength(1);
+        expect(
+          slackCallsFor("conversations.open").at(-1)?.form.get("users"),
+        ).toBe("U-OWNER");
+        const blocks = posts[0]!.form.get("blocks") ?? "";
+        expect(blocks).toContain("?connect=slack");
+        expect(blocks).toContain("Connect your Slack");
+        expect(blocks).not.toContain("action_approve");
+      } finally {
+        approvals.unregisterActionHandler("test.personal");
+      }
+    });
+  },
+);

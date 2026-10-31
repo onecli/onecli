@@ -7,6 +7,9 @@ import { cn } from "@onecli/ui/lib/utils";
 
 export interface SecretInputProps {
   id?: string;
+  name?: string;
+  "aria-describedby"?: string;
+  "aria-required"?: React.AriaAttributes["aria-required"];
   value: string;
   onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
   placeholder?: string;
@@ -15,7 +18,20 @@ export interface SecretInputProps {
 }
 
 export const SecretInput = forwardRef<HTMLInputElement, SecretInputProps>(
-  ({ id, value, onChange, placeholder, autoFocus, className }, ref) => {
+  (
+    {
+      id,
+      name,
+      "aria-describedby": describedBy,
+      "aria-required": ariaRequired,
+      value,
+      onChange,
+      placeholder,
+      autoFocus,
+      className,
+    },
+    ref,
+  ) => {
     const [visible, setVisible] = useState(false);
 
     return (
@@ -23,11 +39,14 @@ export const SecretInput = forwardRef<HTMLInputElement, SecretInputProps>(
         <Input
           ref={ref}
           id={id}
+          name={name}
+          aria-describedby={describedBy}
+          aria-required={ariaRequired}
           type={visible ? "text" : "password"}
           value={value}
           onChange={onChange}
           placeholder={placeholder}
-          className={cn("pr-10 font-mono text-sm", className)}
+          className={cn("pr-12 font-mono text-sm", className)}
           autoFocus={autoFocus}
           // These are API credentials, not passwords: the browser's password
           // manager must not offer to save a rotating token.
@@ -37,11 +56,14 @@ export const SecretInput = forwardRef<HTMLInputElement, SecretInputProps>(
         <button
           type="button"
           onClick={() => setVisible((v) => !v)}
-          className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-          tabIndex={-1}
+          className="absolute right-0 top-1/2 grid size-11 -translate-y-1/2 place-items-center rounded-md text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
           aria-label={visible ? "Hide secret" : "Show secret"}
         >
-          {visible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+          {visible ? (
+            <EyeOff aria-hidden="true" className="size-4" />
+          ) : (
+            <Eye aria-hidden="true" className="size-4" />
+          )}
         </button>
       </div>
     );

@@ -14,11 +14,10 @@ import { proofDatabaseUrl } from "../../testing/pg-proof";
  *    as a different Slack person drops the old person's shares;
  *  - grants: only conversations in the caller's OWN list can be granted,
  *    with the label taken from Slack, never the client;
- *  - read: no grant = refused, Slack never called; `granter_only` reads in
- *    the granter's direct thread and schedule only - a teammate's thread
+ *  - read: no grant = refused, Slack never called; a grant reads ONLY in
+ *    the granter's direct thread and schedule - a teammate's own thread
  *    and a shared channel thread (even the granter speaking) are refused
- *    identically, so the conversation is not confirmed to exist; `anyone`
- *    reads anywhere; the read uses the GRANTER's token; people's messages
+ *    identically, so the conversation is not confirmed to exist; the read uses the GRANTER's token; people's messages
  *    with files are kept, channel bookkeeping is not; a thread with more
  *    replies says it is partial;
  *  - lifecycle: disconnect revokes at Slack and deletes every grant; Slack
@@ -57,6 +56,11 @@ let slackServer: Server;
 let calls: SlackCall[] = [];
 let handlers: Record<string, (call: SlackCall) => unknown> = {};
 const callsFor = (m: string) => calls.filter((c) => c.method === m);
+/** A fresh message ts per post, like Slack: the sent-as record is unique
+ * on (channel, ts), and tests share #weekly-reports. Random base, so rows a
+ * crashed earlier run left behind never collide either. */
+let fakeTs = Math.floor(Math.random() * 1_000_000);
+const nextTs = () => `${1700000000 + ++fakeTs}.000100`;
 
 const startSlackFake = (): Promise<string> =>
   new Promise((resolve) => {
@@ -363,6 +367,7 @@ const seedAgent = async (suffix: string) => {
   return {
     agentId: agent.id,
     presenceId: row.id,
+    suffix,
     read,
     readIn,
     conversation,
@@ -423,6 +428,7 @@ beforeAll(async () => {
   });
   await db.organizationMember.deleteMany({ where: { organizationId: ORG } });
   await db.organization.deleteMany({ where: { id: ORG } });
+  await db.auditLog.deleteMany({ where: { userId: { startsWith: P } } });
   await db.user.deleteMany({ where: { id: { startsWith: P } } });
 
   await db.organization.create({ data: { id: ORG, name: ORG, slug: ORG } });
@@ -463,22 +469,18 @@ afterAll(async () => {
     where: { id: { in: [WORKSPACE, OTHER_WORKSPACE] } },
   });
   await db.organization.deleteMany({ where: { id: ORG } });
+  await db.auditLog.deleteMany({ where: { userId: { startsWith: P } } });
   await db.user.deleteMany({ where: { id: { startsWith: P } } });
   slackServer?.close();
 });
 
-const grantAs = (
-  agentId: string,
-  userId: string,
-  ref: string,
-  audience: "anyone" | "granter_only",
-) =>
+const grantAs = (agentId: string, userId: string, ref: string) =>
   svc.upsertGrant({
     workspaceId: WORKSPACE,
     agentId,
     userId,
     externalRef: ref,
-    audience,
+    readMode: "allow",
   });
 
 describe.skipIf(!PROOF_URL)("connect your Slack: read grants", () => {
@@ -692,19 +694,21 @@ describe.skipIf(!PROOF_URL)("connect your Slack: read grants", () => {
     await connectAs(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
     await connectAs(stage.presenceId, JORDAN, "U0JORDAN", JORDAN_TOKEN);
 
-    const dm = await grantAs(stage.agentId, ALEX, "D0SAM", "granter_only");
+    const dm = await grantAs(stage.agentId, ALEX, "D0SAM");
     expect(dm.subjectLabel).toBe("@Sam");
     expect(dm.subjectKind).toBe("dm");
+    // The DM's other person, so Contacts can show it under Sam's row.
+    expect(dm.counterpartRef).toBe("U0SAM");
     // Jordan is not in Alex's DM with Sam: she cannot grant it.
-    await expect(
-      grantAs(stage.agentId, JORDAN, "D0SAM", "anyone"),
-    ).rejects.toMatchObject({
-      code: "NOT_FOUND",
-    });
+    await expect(grantAs(stage.agentId, JORDAN, "D0SAM")).rejects.toMatchObject(
+      {
+        code: "NOT_FOUND",
+      },
+    );
     // Not connected at all.
-    await expect(
-      grantAs(stage.agentId, OUTSIDER, "C0REPORTS", "anyone"),
-    ).rejects.toThrow(/Connect your Slack/);
+    await expect(grantAs(stage.agentId, OUTSIDER, "C0REPORTS")).rejects.toThrow(
+      /Connect your Slack/,
+    );
   });
 
   it("bulk share: all-or-nothing on ownership, one independent grant per pick", async () => {
@@ -717,7 +721,6 @@ describe.skipIf(!PROOF_URL)("connect your Slack: read grants", () => {
         agentId: stage.agentId,
         userId,
         externalRefs: refs,
-        audience: "granter_only",
       });
     // One foreign ref (Jordan's #general) refuses the WHOLE request.
     await expect(
@@ -733,10 +736,14 @@ describe.skipIf(!PROOF_URL)("connect your Slack: read grants", () => {
     });
 
     const grants = await bulk(ALEX, ["C0REPORTS", "D0SAM", "D0SAM"]);
-    expect(grants.map((g) => [g.subjectLabel, g.subjectKind]).sort()).toEqual(
+    expect(
+      grants
+        .map((g) => [g.subjectLabel, g.subjectKind, g.counterpartRef])
+        .sort(),
+    ).toEqual(
       [
-        ["#weekly-reports", "channel"],
-        ["@Sam", "dm"],
+        ["#weekly-reports", "channel", null],
+        ["@Sam", "dm", "U0SAM"],
       ].sort(),
     );
     // Each is its own grant: removing one leaves the other readable.
@@ -758,13 +765,17 @@ describe.skipIf(!PROOF_URL)("connect your Slack: read grants", () => {
     const stage = await seedAgent("read");
     await connectAs(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
 
+    // Not shared yet: the granter-to-be gets an access card, not a read.
     const none = await stage.read("direct", ALEX, {
       conversation: "#weekly-reports",
     });
-    expect(none.ok).toBe(false);
+    expect(none).toMatchObject({
+      ok: true,
+      result: { status: "needs_access", reason: "not_shared" },
+    });
     expect(callsFor("conversations.history")).toHaveLength(0);
 
-    await grantAs(stage.agentId, ALEX, "C0REPORTS", "granter_only");
+    await grantAs(stage.agentId, ALEX, "C0REPORTS");
     const res = await stage.read("direct", ALEX, {
       conversation: "#weekly-reports",
     });
@@ -787,7 +798,7 @@ describe.skipIf(!PROOF_URL)("connect your Slack: read grants", () => {
     script();
     const stage = await seedAgent("forgiving");
     await connectAs(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
-    await grantAs(stage.agentId, ALEX, "C0REPORTS", "granter_only");
+    await grantAs(stage.agentId, ALEX, "C0REPORTS");
     const texts = (r: unknown) =>
       (r as { result: { messages: { text: string }[] } }).result.messages.map(
         (m) => m.text,
@@ -798,8 +809,8 @@ describe.skipIf(!PROOF_URL)("connect your Slack: read grants", () => {
       ok: true,
       result: { readable: ["#weekly-reports"] },
     });
-    // The audience fence still applies to the list: a shared thread (no
-    // verified reader) learns nothing about an Only-me share.
+    // The granter fence applies to the list: a shared thread (no verified
+    // reader) learns nothing about any share.
     expect(await stage.read("channel", ALEX, {})).toMatchObject({
       ok: true,
       result: { readable: [] },
@@ -856,11 +867,11 @@ describe.skipIf(!PROOF_URL)("connect your Slack: read grants", () => {
     );
   });
 
-  it("Only me: the granter's DM and schedule read; Jordan's DM and a shared channel thread are refused identically", async () => {
+  it("granter only: the granter's DM and schedule read; Jordan's DM and a shared channel thread are refused identically", async () => {
     script();
     const stage = await seedAgent("audience");
     await connectAs(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
-    await grantAs(stage.agentId, ALEX, "D0SAM", "granter_only");
+    await grantAs(stage.agentId, ALEX, "D0SAM");
 
     expect(
       (await stage.read("direct", ALEX, { conversation: "@Sam" })).ok,
@@ -870,26 +881,34 @@ describe.skipIf(!PROOF_URL)("connect your Slack: read grants", () => {
     );
 
     const before = callsFor("conversations.history").length;
+    // Jordan (not connected) in his own thread: a connect card for HIM,
+    // nothing about Alex's share.
     const jordan = await stage.read("direct", JORDAN, {
       conversation: "@Sam",
     });
+    expect(jordan).toMatchObject({
+      ok: true,
+      result: { status: "needs_access", reason: "not_connected" },
+    });
+    // A shared channel thread: the private-chat refusal, no card.
     const shared = await stage.read("channel", ALEX, {
       conversation: "@Sam",
     });
-    for (const refused of [jordan, shared]) {
-      expect(refused.ok).toBe(false);
-      const err = String((refused as { error: string }).error);
-      expect(err).toMatch(/don't have read access/);
-      expect(err).toMatch(/no readable conversations/);
-      expect(err).not.toMatch(/Sam.*may read/);
-    }
+    expect(shared.ok).toBe(false);
+    expect(String((shared as { error: string }).error)).toBe(
+      "I can only act as Alex in their own private chat with me (the web chat or a DM with me). Ask there.",
+    );
     expect(callsFor("conversations.history").length).toBe(before);
-    // A schedule someone ELSE created does not carry Alex's access.
+    // A schedule someone ELSE created does not carry Alex's access (Jordan
+    // gets his own connect card, never Alex's messages).
     expect(
-      (await stage.read("cron", JORDAN, { conversation: "@Sam" })).ok,
-    ).toBe(false);
+      await stage.read("cron", JORDAN, { conversation: "@Sam" }),
+    ).toMatchObject({
+      ok: true,
+      result: { status: "needs_access", reason: "not_connected" },
+    });
     // Alex's OWN schedule that reports into a shared channel is a shared
-    // audience: her private DM must not be summarized into that channel.
+    // turn: her private DM must not be summarized into that channel.
     expect(
       (
         await stage.read("cron-in-channel", ALEX, {
@@ -899,12 +918,12 @@ describe.skipIf(!PROOF_URL)("connect your Slack: read grants", () => {
     ).toBe(false);
   });
 
-  it("Only me through a schedule: a teammate can neither re-aim and run the granter's schedule nor speak in its run as the granter", async () => {
+  it("granter only through a schedule: a teammate can neither re-aim and run the granter's schedule nor speak in its run as the granter", async () => {
     script();
     const stage = await seedAgent("schedule-takeover");
     await connectAs(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
-    await grantAs(stage.agentId, ALEX, "D0SAM", "granter_only");
-    // Alex's private schedule: its own fires read Alex's Only-me DM.
+    await grantAs(stage.agentId, ALEX, "D0SAM");
+    // Alex's private schedule: its own fires read Alex's DM.
     const { conversationId } = await stage.conversation("cron", ALEX);
     const { externalRef: cronId } = await db.conversation.findUniqueOrThrow({
       where: { id: conversationId },
@@ -958,17 +977,26 @@ describe.skipIf(!PROOF_URL)("connect your Slack: read grants", () => {
     }
   });
 
-  it("Anyone: reads in a shared thread and for a teammate", async () => {
+  it("no audience: a channel share reads for nobody but its granter", async () => {
     script();
-    const stage = await seedAgent("anyone");
+    const stage = await seedAgent("no-audience");
     await connectAs(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
-    await grantAs(stage.agentId, ALEX, "C0REPORTS", "anyone");
+    await grantAs(stage.agentId, ALEX, "C0REPORTS");
+    const before = callsFor("conversations.history").length;
+    // A different workspace member's OWN direct thread (a card for them,
+    // never Alex's read), and a shared thread (refused).
     expect(
-      (await stage.read("channel", JORDAN, { conversation: "#weekly-reports" }))
-        .ok,
-    ).toBe(true);
+      await stage.read("direct", JORDAN, { conversation: "#weekly-reports" }),
+    ).toMatchObject({ ok: true, result: { status: "needs_access" } });
+    for (const who of [JORDAN, ALEX]) {
+      expect(
+        (await stage.read("channel", who, { conversation: "#weekly-reports" }))
+          .ok,
+      ).toBe(false);
+    }
+    expect(callsFor("conversations.history").length).toBe(before);
     expect(
-      (await stage.read("direct", JORDAN, { conversation: "#weekly-reports" }))
+      (await stage.read("direct", ALEX, { conversation: "#weekly-reports" }))
         .ok,
     ).toBe(true);
   });
@@ -977,7 +1005,7 @@ describe.skipIf(!PROOF_URL)("connect your Slack: read grants", () => {
     script();
     const stage = await seedAgent("disconnect");
     await connectAs(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
-    await grantAs(stage.agentId, ALEX, "C0REPORTS", "anyone");
+    await grantAs(stage.agentId, ALEX, "C0REPORTS");
     expect(
       await svc.disconnect({
         workspaceId: WORKSPACE,
@@ -1002,7 +1030,7 @@ describe.skipIf(!PROOF_URL)("connect your Slack: read grants", () => {
     await connectAs(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
     await connectAs(stage.presenceId, JORDAN, "U0JORDAN", JORDAN_TOKEN);
     script();
-    await grantAs(stage.agentId, ALEX, "C0REPORTS", "anyone");
+    await grantAs(stage.agentId, ALEX, "C0REPORTS");
     // The read tool is listed only while shares exist, so losing them must
     // re-render the agent (its home generation moves) or the tool lingers.
     const generation = async () =>
@@ -1058,7 +1086,7 @@ describe.skipIf(!PROOF_URL)("connect your Slack: read grants", () => {
     script();
     const stage = await seedAgent("thread-partial");
     await connectAs(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
-    await grantAs(stage.agentId, ALEX, "C0REPORTS", "anyone");
+    await grantAs(stage.agentId, ALEX, "C0REPORTS");
     handlers["conversations.replies"] = () => ({
       messages: [
         { ts: "1700000100.000100", user: "U0SAM", text: "parent" },
@@ -1082,7 +1110,7 @@ describe.skipIf(!PROOF_URL)("connect your Slack: read grants", () => {
     script();
     const stage = await seedAgent("reconnect");
     await connectAs(stage.presenceId, ALEX, "U0OLD", ALEX_TOKEN);
-    await grantAs(stage.agentId, ALEX, "C0REPORTS", "granter_only");
+    await grantAs(stage.agentId, ALEX, "C0REPORTS");
     await svc.completeConnect({
       state: oauthState.verifyOAuthState(
         oauthState.signOAuthState({
@@ -1123,9 +1151,9 @@ describe.skipIf(!PROOF_URL)("connect your Slack: read grants", () => {
     const b = await seedAgent("finder-b");
     await connectAs(a.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
     await connectAs(b.presenceId, JORDAN, "U0JORDAN", JORDAN_TOKEN);
-    await grantAs(a.agentId, ALEX, "C0REPORTS", "granter_only");
-    await grantAs(a.agentId, ALEX, "D0SAM", "granter_only");
-    await grantAs(b.agentId, JORDAN, "C0GENERAL", "anyone");
+    await grantAs(a.agentId, ALEX, "C0REPORTS");
+    await grantAs(a.agentId, ALEX, "D0SAM");
+    await grantAs(b.agentId, JORDAN, "C0GENERAL");
 
     const list = (workspaceId: string, userId: string) =>
       svc.listSlackReadAgents({ workspaceId, organizationId: ORG, userId });
@@ -1162,7 +1190,7 @@ describe.skipIf(!PROOF_URL)("connect your Slack: read grants", () => {
     script();
     const stage = await seedAgent("tenancy");
     await connectAs(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
-    const g = await grantAs(stage.agentId, ALEX, "C0REPORTS", "anyone");
+    const g = await grantAs(stage.agentId, ALEX, "C0REPORTS");
     const foreign = { workspaceId: OTHER_WORKSPACE, agentId: stage.agentId };
     await expect(
       svc.listGrants({ ...foreign, userId: ALEX }),
@@ -1175,7 +1203,7 @@ describe.skipIf(!PROOF_URL)("connect your Slack: read grants", () => {
         ...foreign,
         userId: ALEX,
         externalRef: "C0REPORTS",
-        audience: "anyone",
+        readMode: "allow",
       }),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
     await expect(
@@ -1184,24 +1212,1586 @@ describe.skipIf(!PROOF_URL)("connect your Slack: read grants", () => {
     expect(await db.agentReadGrant.count({ where: { id: g.id } })).toBe(1);
   });
 
-  it("unlicensed: with no reader the tool refuses with the license message, and Slack is never called", async () => {
+  it("unlicensed: every act-as-you tool refuses with the Enterprise license message, and Slack is never called", async () => {
     script();
     const stage = await seedAgent("unlicensed");
     await connectAs(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
-    await grantAs(stage.agentId, ALEX, "C0REPORTS", "anyone");
-    const spy = vi
+    await grantAs(stage.agentId, ALEX, "C0REPORTS");
+    // Unlicensed = neither seam injected (the edition defaults leave both
+    // slots null): the tools stay listed, and each says why it can't act.
+    const readerSpy = vi
       .spyOn(readerHook, "getConversationReader")
       .mockReturnValue(null);
+    const senderSpy = vi
+      .spyOn(readerHook, "getConversationSender")
+      .mockReturnValue(null);
     try {
-      const before = callsFor("conversations.history").length;
-      const res = await stage.read("direct", ALEX, {
+      const before = calls.length;
+      const ctx = await stage.conversation("direct", ALEX);
+      const run = (tool: string, args: unknown) =>
+        platformTools.executePlatformTool(`${P}runner-${stage.suffix}`, {
+          sandboxId: `${P}sb-${stage.suffix}`,
+          tool,
+          args,
+          ...ctx,
+        });
+      const refusals = [
+        await stage.read("direct", ALEX, { conversation: "#weekly-reports" }),
+        await run("send_as_me", {
+          conversation: "#weekly-reports",
+          text: "hi",
+        }),
+        await run("edit_my_message", {
+          conversation: "#weekly-reports",
+          messageId: "1700000000.000100",
+          text: "hi",
+        }),
+        await run("delete_my_message", {
+          conversation: "#weekly-reports",
+          messageId: "1700000000.000100",
+        }),
+        await run("send_message", {
+          to: "#weekly-reports",
+          text: "hi",
+          sendAs: "you",
+        }),
+      ];
+      for (const res of refusals) {
+        expect(res).toMatchObject({
+          ok: false,
+          error: "Resource-level access requires a OneCLI Enterprise license.",
+        });
+      }
+      expect(calls.length).toBe(before);
+    } finally {
+      readerSpy.mockRestore();
+      senderSpy.mockRestore();
+    }
+  });
+});
+
+/** Store a token that carries chat:write (a post-scope connection). */
+const connectWritable = async (
+  presenceId: string,
+  userId: string,
+  slackUser: string,
+  token: string,
+) => {
+  const { getCrypto } = await import("../../providers");
+  return db.agentChannelUserToken.create({
+    data: {
+      agentChannelId: presenceId,
+      userId,
+      externalUserId: slackUser,
+      credentials: await getCrypto().encrypt(
+        JSON.stringify({
+          accessToken: token,
+          scopes: ["channels:history", "chat:write"],
+        }),
+      ),
+    },
+    select: { id: true },
+  });
+};
+
+describe.skipIf(!PROOF_URL)("act as you: read & write modes", () => {
+  const send = async (
+    stage: Awaited<ReturnType<typeof seedAgent>>,
+    where: "direct" | "channel",
+    asUser: string,
+    args: unknown,
+  ) => {
+    const ctx = await stage.conversation(where, asUser);
+    const res = await platformTools.executePlatformTool(
+      `${P}runner-${stage.suffix}`,
+      {
+        sandboxId: `${P}sb-${stage.suffix}`,
+        tool: "send_as_me",
+        args,
+        ...ctx,
+      },
+    );
+    return { res, ctx };
+  };
+  const setModes = (
+    agentId: string,
+    userId: string,
+    ref: string,
+    modes: {
+      readMode?: "allow" | "ask" | "never";
+      writeMode?: "allow" | "ask" | "never";
+    },
+  ) =>
+    svc.upsertGrant({
+      workspaceId: WORKSPACE,
+      agentId,
+      userId,
+      externalRef: ref,
+      ...modes,
+    });
+
+  it("new shares read (allow) and never send; the view carries both modes", async () => {
+    script();
+    const stage = await seedAgent("modes-default");
+    await connectAs(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
+    const g = await grantAs(stage.agentId, ALEX, "C0REPORTS");
+    expect(g).toMatchObject({ readMode: "allow", writeMode: "never" });
+  });
+
+  it("canWrite: false for a token without chat:write, true with it; writeMode needs it (422)", async () => {
+    script();
+    const stage = await seedAgent("modes-canwrite");
+    await connectAs(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
+    const conn = await svc.getMyConnection({
+      workspaceId: WORKSPACE,
+      agentId: stage.agentId,
+      userId: ALEX,
+    });
+    expect(conn.canWrite).toBe(false);
+    await grantAs(stage.agentId, ALEX, "C0REPORTS");
+    await expect(
+      setModes(stage.agentId, ALEX, "C0REPORTS", { writeMode: "allow" }),
+    ).rejects.toMatchObject({
+      code: "UNPROCESSABLE",
+      message: "Reconnect your Slack to let the agent send as you.",
+    });
+    // never is always allowed.
+    const g = await setModes(stage.agentId, ALEX, "C0REPORTS", {
+      readMode: "ask",
+      writeMode: "never",
+    });
+    expect(g).not.toHaveProperty("audience");
+    expect(g).toMatchObject({
+      readMode: "ask",
+      writeMode: "never",
+    });
+
+    const stage2 = await seedAgent("modes-canwrite2");
+    await connectWritable(stage2.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
+    expect(
+      (
+        await svc.getMyConnection({
+          workspaceId: WORKSPACE,
+          agentId: stage2.agentId,
+          userId: ALEX,
+        })
+      ).canWrite,
+    ).toBe(true);
+    await grantAs(stage2.agentId, ALEX, "C0REPORTS");
+    expect(
+      await setModes(stage2.agentId, ALEX, "C0REPORTS", { writeMode: "ask" }),
+    ).toMatchObject({ writeMode: "ask" });
+  });
+
+  it("the OAuth return records the granted scopes (chat:write → canWrite)", async () => {
+    script();
+    const stage = await seedAgent("modes-oauth");
+    const state = oauthState.verifyOAuthState(
+      oauthState.signOAuthState({
+        provider: "slack",
+        kind: "slack-user-read",
+        nonce: "n",
+        workspaceId: WORKSPACE,
+        agentId: stage.agentId,
+        presenceId: stage.presenceId,
+        userId: ALEX,
+        issuedAt: Date.now(),
+      }),
+    )!;
+    await svc.completeConnect({
+      state,
+      code: "code",
+      redirectUri: "https://x/cb",
+      exchange: async () => ({
+        team: { id: TEAM },
+        authed_user: {
+          id: "U0ALEX",
+          access_token: ALEX_TOKEN,
+          scope: "channels:history,chat:write",
+        },
+      }),
+      isActiveMember: async () => true,
+    });
+    const conn = await svc.getMyConnection({
+      workspaceId: WORKSPACE,
+      agentId: stage.agentId,
+      userId: ALEX,
+    });
+    expect(conn.canWrite).toBe(true);
+  });
+
+  it("readMode never: invisible (not listed, not readable), Slack never called", async () => {
+    script();
+    const stage = await seedAgent("modes-never");
+    await connectAs(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
+    await grantAs(stage.agentId, ALEX, "C0REPORTS");
+    await setModes(stage.agentId, ALEX, "C0REPORTS", { readMode: "never" });
+    const list = await stage.read("direct", ALEX, {});
+    expect(list).toMatchObject({ ok: true, result: { readable: [] } });
+    const res = await stage.read("direct", ALEX, {
+      conversation: "#weekly-reports",
+    });
+    expect(res.ok).toBe(false);
+    expect(callsFor("conversations.history")).toHaveLength(0);
+    const { channelPresencesForRender } =
+      await import("../../services/channels/agent-channel-service");
+    const [p] = await channelPresencesForRender(stage.agentId);
+    expect(p?.readableConversations).toBeUndefined();
+  });
+
+  it("readMode ask: held for the GRANTER only; approving reads and the result rides the outcome", async () => {
+    script();
+    const stage = await seedAgent("modes-ask");
+    await connectAs(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
+    await grantAs(stage.agentId, ALEX, "C0REPORTS");
+    await setModes(stage.agentId, ALEX, "C0REPORTS", { readMode: "ask" });
+    // Alex asks in her own thread; the read is still hers to approve.
+    const res = await stage.read("direct", ALEX, {
+      conversation: "#weekly-reports",
+    });
+    expect(res).toMatchObject({ ok: true, result: { status: "held" } });
+    expect(callsFor("conversations.history")).toHaveLength(0);
+    const approval = await db.actionApproval.findFirstOrThrow({
+      where: { agentId: stage.agentId, action: "slack_read_as_user" },
+      select: { id: true, summary: true, conversationId: true },
+    });
+    expect(approval.summary).toBe("Read #weekly-reports as Alex");
+    expect(approval.conversationId).not.toBeNull();
+
+    const approvals =
+      await import("../../services/channels/action-approval-service");
+    // Nobody but the granter decides (not even an admin).
+    expect(
+      await approvals.decideActionApproval({
+        approvalId: approval.id,
+        decision: "approve",
+        deciderUserId: ADMIN,
+      }),
+    ).toMatchObject({ kind: "refused" });
+    // The bell shows it to Alex only.
+    const bell =
+      await import("../../services/channels/workspace-approvals-service");
+    const ids = async (viewer: string) =>
+      (await bell.listWorkspacePendingChannelApprovals(WORKSPACE, viewer)).map(
+        (i) => i.id,
+      );
+    expect(await ids(ALEX)).toContain(approval.id);
+    expect(await ids(JORDAN)).not.toContain(approval.id);
+
+    const decided = await approvals.decideActionApproval({
+      approvalId: approval.id,
+      decision: "approve",
+      deciderUserId: ALEX,
+    });
+    expect(decided).toMatchObject({ kind: "decided", status: "executed" });
+    expect(callsFor("conversations.history")).toHaveLength(1);
+    expect(callsFor("conversations.history")[0]!.auth).toBe(
+      `Bearer ${ALEX_TOKEN}`,
+    );
+    const row = await db.actionApproval.findUniqueOrThrow({
+      where: { id: approval.id },
+      select: { reason: true },
+    });
+    expect(row.reason).toContain("second");
+    // The result is Alex's Slack: the agent's approvals list (any member's
+    // dashboard read) shows the row to Alex only, never to a teammate.
+    const listed = async (viewer: string) =>
+      (
+        await approvals.listActionApprovals({
+          workspaceId: WORKSPACE,
+          agentId: stage.agentId,
+          viewerUserId: viewer,
+        })
+      ).map((a) => a.id);
+    expect(await listed(ALEX)).toContain(approval.id);
+    expect(await listed(JORDAN)).not.toContain(approval.id);
+    expect(await listed(ADMIN)).not.toContain(approval.id);
+  });
+
+  it("ask still applies the granter fence: a shared thread = invisible, nothing held", async () => {
+    script();
+    const stage = await seedAgent("modes-ask-fence");
+    await connectAs(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
+    await grantAs(stage.agentId, ALEX, "C0REPORTS");
+    await setModes(stage.agentId, ALEX, "C0REPORTS", { readMode: "ask" });
+    const res = await stage.read("channel", ALEX, {
+      conversation: "#weekly-reports",
+    });
+    expect(res.ok).toBe(false);
+    expect(
+      await db.actionApproval.count({ where: { agentId: stage.agentId } }),
+    ).toBe(0);
+  });
+
+  it("send_as_me: allow posts with the granter's token; ask holds; never and a shared thread refuse", async () => {
+    script();
+    const stage = await seedAgent("send");
+    await connectWritable(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
+    await grantAs(stage.agentId, ALEX, "C0REPORTS");
+    handlers["chat.postMessage"] = () => ({
+      channel: "C0REPORTS",
+      ts: nextTs(),
+    });
+
+    // never (the default): an access card (write_off), nothing posted.
+    let out = await send(stage, "direct", ALEX, {
+      conversation: "#weekly-reports",
+      text: "hello",
+    });
+    expect(out.res).toMatchObject({
+      ok: true,
+      result: { status: "needs_access", reason: "write_off" },
+    });
+    expect(callsFor("chat.postMessage")).toHaveLength(0);
+
+    await setModes(stage.agentId, ALEX, "C0REPORTS", { writeMode: "allow" });
+    const { channelPresencesForRender } =
+      await import("../../services/channels/agent-channel-service");
+    expect((await channelPresencesForRender(stage.agentId))[0]).toMatchObject({
+      readableConversations: 1,
+    });
+    // A shared thread resolves to nobody: refused even for the granter.
+    out = await send(stage, "channel", ALEX, {
+      conversation: "#weekly-reports",
+      text: "hello",
+    });
+    expect(out.res.ok).toBe(false);
+    expect(String((out.res as { error: string }).error)).toMatch(
+      /only act as Alex in their own private chat/,
+    );
+    // Someone else's private thread: a card for THEM (not connected).
+    out = await send(stage, "direct", JORDAN, {
+      conversation: "#weekly-reports",
+      text: "hello",
+    });
+    expect(out.res).toMatchObject({
+      ok: true,
+      result: { status: "needs_access", reason: "not_connected" },
+    });
+    expect(callsFor("chat.postMessage")).toHaveLength(0);
+
+    out = await send(stage, "direct", ALEX, {
+      conversation: "#weekly-reports",
+      text: "hello <team>",
+    });
+    expect(out.res).toMatchObject({ ok: true, result: { status: "sent" } });
+    const [post] = callsFor("chat.postMessage");
+    expect(post!.auth).toBe(`Bearer ${ALEX_TOKEN}`);
+    expect(post!.form.get("channel")).toBe("C0REPORTS");
+    expect(post!.form.get("text")).toBe("hello &lt;team&gt;");
+    expect(
+      await db.auditLog.count({
+        where: {
+          workspaceId: WORKSPACE,
+          metadata: { path: ["sendAsUser"], equals: "sent" },
+        },
+      }),
+    ).toBeGreaterThan(0);
+
+    // ask: held for Alex; approving posts.
+    await setModes(stage.agentId, ALEX, "C0REPORTS", { writeMode: "ask" });
+    out = await send(stage, "direct", ALEX, {
+      conversation: "#weekly-reports",
+      text: "second",
+    });
+    expect(out.res).toMatchObject({ ok: true, result: { status: "held" } });
+    expect(callsFor("chat.postMessage")).toHaveLength(1);
+    const approval = await db.actionApproval.findFirstOrThrow({
+      where: { agentId: stage.agentId, action: "slack_send_as_user" },
+      select: { id: true },
+    });
+    const approvals =
+      await import("../../services/channels/action-approval-service");
+    expect(
+      await approvals.decideActionApproval({
+        approvalId: approval.id,
+        decision: "approve",
+        deciderUserId: ALEX,
+      }),
+    ).toMatchObject({ status: "executed" });
+    expect(callsFor("chat.postMessage")).toHaveLength(2);
+  });
+
+  it("send_as_me never guesses: a partial name posts nothing (reads still forgive one)", async () => {
+    script();
+    const stage = await seedAgent("send-exact");
+    await connectWritable(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
+    await grantAs(stage.agentId, ALEX, "C0REPORTS");
+    await setModes(stage.agentId, ALEX, "C0REPORTS", { writeMode: "allow" });
+    handlers["chat.postMessage"] = () => ({
+      channel: "C0REPORTS",
+      ts: nextTs(),
+    });
+
+    // "weekly" is a unique partial of #weekly-reports: fine to READ...
+    expect(
+      await stage.read("direct", ALEX, { conversation: "weekly" }),
+    ).toMatchObject({ ok: true, result: { conversation: "#weekly-reports" } });
+    // ...but a write as Alex must name it exactly: no post, no guess.
+    const out = await send(stage, "direct", ALEX, {
+      conversation: "weekly",
+      text: "hello",
+    });
+    expect(out.res.ok).toBe(false);
+    expect(String((out.res as { error: string }).error)).toMatch(
+      /aren't in a Slack conversation matching weekly\. Nothing was sent\./,
+    );
+    expect(callsFor("chat.postMessage")).toHaveLength(0);
+  });
+
+  describe("edit_my_message / delete_my_message: only its own sends as you", () => {
+    const tool = async (
+      stage: Awaited<ReturnType<typeof seedAgent>>,
+      name: "edit_my_message" | "delete_my_message",
+      asUser: string,
+      args: unknown,
+      where: "direct" | "channel" = "direct",
+    ) => {
+      const ctx = await stage.conversation(where, asUser);
+      return platformTools.executePlatformTool(`${P}runner-${stage.suffix}`, {
+        sandboxId: `${P}sb-${stage.suffix}`,
+        tool: name,
+        args,
+        ...ctx,
+      });
+    };
+    const approvalsMod = () =>
+      import("../../services/channels/action-approval-service");
+    const sentOne = async (suffix: string) => {
+      script();
+      const stage = await seedAgent(suffix);
+      await connectWritable(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
+      await grantAs(stage.agentId, ALEX, "C0REPORTS");
+      await setModes(stage.agentId, ALEX, "C0REPORTS", { writeMode: "allow" });
+      handlers["chat.postMessage"] = () => ({
+        channel: "C0REPORTS",
+        ts: nextTs(),
+      });
+      const out = await send(stage, "direct", ALEX, {
         conversation: "#weekly-reports",
+        text: "original",
+      });
+      const messageId = (out.res as { result: { messageId: string } }).result
+        .messageId;
+      expect(messageId).toMatch(/^\d+\.\d+$/);
+      return { stage, messageId };
+    };
+
+    it("send_as_me records the post and returns its messageId; edit (allow) updates with the granter's token and audits", async () => {
+      const { stage, messageId } = await sentOne("edit-allow");
+      expect(
+        await db.agentSentAsUser.count({
+          where: { agentId: stage.agentId, messageTs: messageId },
+        }),
+      ).toBe(1);
+      const res = await tool(stage, "edit_my_message", ALEX, {
+        conversation: "#weekly-reports",
+        messageId,
+        text: "fixed <x>",
+      });
+      expect(res).toMatchObject({ ok: true, result: { status: "edited" } });
+      const [upd] = callsFor("chat.update");
+      expect(upd!.auth).toBe(`Bearer ${ALEX_TOKEN}`);
+      expect(upd!.form.get("channel")).toBe("C0REPORTS");
+      expect(upd!.form.get("ts")).toBe(messageId);
+      expect(upd!.form.get("text")).toBe("fixed &lt;x&gt;");
+      const audits = await db.auditLog.findMany({
+        where: {
+          workspaceId: WORKSPACE,
+          metadata: { path: ["editAsUser"], equals: "done" },
+        },
+        select: { metadata: true },
+      });
+      expect(audits.length).toBeGreaterThan(0);
+      expect(JSON.stringify(audits)).not.toContain("fixed");
+    });
+
+    it("refuses a message it never recorded, one older than 24h, another person's, and a shared turn", async () => {
+      const { stage, messageId } = await sentOne("edit-refuse");
+      const refusal = /only change messages I sent as you in the last 24 hours/;
+      // Never recorded.
+      let res = await tool(stage, "edit_my_message", ALEX, {
+        conversation: "#weekly-reports",
+        messageId: "1600000000.000001",
+        text: "x",
+      });
+      expect(String((res as { error: string }).error)).toMatch(refusal);
+      // Another person's token (Jordan, own writable grant) can't touch it.
+      await connectWritable(stage.presenceId, JORDAN, "U0JORDAN", JORDAN_TOKEN);
+      res = await tool(stage, "edit_my_message", JORDAN, {
+        conversation: "#weekly-reports",
+        messageId,
+        text: "x",
       });
       expect(res.ok).toBe(false);
-      expect(String((res as { error: string }).error)).toMatch(/licen[cs]e/i);
-      expect(callsFor("conversations.history").length).toBe(before);
-    } finally {
-      spy.mockRestore();
-    }
+      // A shared turn: the private-chat refusal.
+      res = await tool(
+        stage,
+        "delete_my_message",
+        ALEX,
+        { conversation: "#weekly-reports", messageId },
+        "channel",
+      );
+      expect(String((res as { error: string }).error)).toMatch(
+        /only act as Alex in their own private chat/,
+      );
+      // Older than 24h.
+      await db.agentSentAsUser.updateMany({
+        where: { messageTs: messageId },
+        data: { createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000) },
+      });
+      res = await tool(stage, "edit_my_message", ALEX, {
+        conversation: "#weekly-reports",
+        messageId,
+        text: "x",
+      });
+      expect(String((res as { error: string }).error)).toMatch(refusal);
+      expect(callsFor("chat.update")).toHaveLength(0);
+      expect(callsFor("chat.delete")).toHaveLength(0);
+    });
+
+    it("writeMode never: needs_access (write_off), nothing changed", async () => {
+      const { stage, messageId } = await sentOne("edit-never");
+      await setModes(stage.agentId, ALEX, "C0REPORTS", { writeMode: "never" });
+      const res = await tool(stage, "edit_my_message", ALEX, {
+        conversation: "#weekly-reports",
+        messageId,
+        text: "x",
+      });
+      expect(res).toMatchObject({
+        ok: true,
+        result: { status: "needs_access", reason: "write_off" },
+      });
+      expect(callsFor("chat.update")).toHaveLength(0);
+    });
+
+    it("edit on ask holds for the granter; approving edits", async () => {
+      const { stage, messageId } = await sentOne("edit-ask");
+      await setModes(stage.agentId, ALEX, "C0REPORTS", { writeMode: "ask" });
+      const res = await tool(stage, "edit_my_message", ALEX, {
+        conversation: "#weekly-reports",
+        messageId,
+        text: "later",
+      });
+      expect(res).toMatchObject({ ok: true, result: { status: "held" } });
+      const approval = await db.actionApproval.findFirstOrThrow({
+        where: { agentId: stage.agentId, action: "slack_edit_as_user" },
+        select: { id: true, summary: true },
+      });
+      expect(approval.summary).toContain("later");
+      expect(
+        await (
+          await approvalsMod()
+        ).decideActionApproval({
+          approvalId: approval.id,
+          decision: "approve",
+          deciderUserId: ALEX,
+        }),
+      ).toMatchObject({ status: "executed" });
+      expect(callsFor("chat.update")).toHaveLength(1);
+    });
+
+    it("delete is always held (even on allow), shows the text, only the granter decides, approve deletes", async () => {
+      const { stage, messageId } = await sentOne("delete");
+      handlers["conversations.history"] = () => ({
+        messages: [{ ts: messageId, user: "U0ALEX", text: "original" }],
+      });
+      const res = await tool(stage, "delete_my_message", ALEX, {
+        conversation: "#weekly-reports",
+        messageId,
+      });
+      expect(res).toMatchObject({ ok: true, result: { status: "held" } });
+      expect(callsFor("chat.delete")).toHaveLength(0);
+      const hist = callsFor("conversations.history").at(-1)!;
+      expect(hist.auth).toBe(`Bearer ${ALEX_TOKEN}`);
+      expect(hist.form.get("latest")).toBe(messageId);
+      expect(hist.form.get("inclusive")).toBe("true");
+      const approval = await db.actionApproval.findFirstOrThrow({
+        where: { agentId: stage.agentId, action: "slack_delete_as_user" },
+        select: { id: true, summary: true },
+      });
+      expect(approval.summary).toContain("original");
+      const approvals = await approvalsMod();
+      expect(
+        await approvals.decideActionApproval({
+          approvalId: approval.id,
+          decision: "approve",
+          deciderUserId: ADMIN,
+        }),
+      ).toMatchObject({ kind: "refused" });
+      expect(callsFor("chat.delete")).toHaveLength(0);
+      expect(
+        await approvals.decideActionApproval({
+          approvalId: approval.id,
+          decision: "approve",
+          deciderUserId: ALEX,
+        }),
+      ).toMatchObject({ status: "executed" });
+      const [del] = callsFor("chat.delete");
+      expect(del!.auth).toBe(`Bearer ${ALEX_TOKEN}`);
+      expect(del!.form.get("ts")).toBe(messageId);
+      expect(
+        await db.agentSentAsUser.count({ where: { messageTs: messageId } }),
+      ).toBe(0);
+      expect(
+        await db.auditLog.count({
+          where: {
+            workspaceId: WORKSPACE,
+            metadata: { path: ["deleteAsUser"], equals: "done" },
+          },
+        }),
+      ).toBeGreaterThan(0);
+    });
+  });
+
+  it("send_as_me: a held send dies if the mode turns to never before approval", async () => {
+    script();
+    const stage = await seedAgent("send-revoked");
+    await connectWritable(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
+    await grantAs(stage.agentId, ALEX, "C0REPORTS");
+    await setModes(stage.agentId, ALEX, "C0REPORTS", { writeMode: "ask" });
+    await send(stage, "direct", ALEX, {
+      conversation: "#weekly-reports",
+      text: "x",
+    });
+    await setModes(stage.agentId, ALEX, "C0REPORTS", { writeMode: "never" });
+    const approval = await db.actionApproval.findFirstOrThrow({
+      where: { agentId: stage.agentId, action: "slack_send_as_user" },
+      select: { id: true },
+    });
+    const approvals =
+      await import("../../services/channels/action-approval-service");
+    expect(
+      await approvals.decideActionApproval({
+        approvalId: approval.id,
+        decision: "approve",
+        deciderUserId: ALEX,
+      }),
+    ).toMatchObject({ status: "failed" });
+    expect(callsFor("chat.postMessage")).toHaveLength(0);
+  });
+
+  describe("needs_access: a card instead of a dead end", () => {
+    const approvalsMod = () =>
+      import("../../services/channels/action-approval-service");
+    const accessRows = (agentId: string) =>
+      db.actionApproval.findMany({
+        where: { agentId, action: "slack_access_request" },
+        select: {
+          id: true,
+          status: true,
+          summary: true,
+          payload: true,
+          cardRefs: true,
+          reason: true,
+        },
+      });
+
+    it("not connected: needs_access + ONE deduped request, no Slack DM card; Connect settles it", async () => {
+      script();
+      const stage = await seedAgent("na-connect");
+      const ask = () =>
+        stage.read("direct", ALEX, { conversation: "#weekly-reports" });
+      const first = await ask();
+      expect(first).toMatchObject({
+        ok: true,
+        result: {
+          status: "needs_access",
+          reason: "not_connected",
+          conversation: "#weekly-reports",
+        },
+      });
+      const second = await ask();
+      const rows = await accessRows(stage.agentId);
+      expect(rows).toHaveLength(1);
+      expect(
+        (second as { result: { accessRequestId: string } }).result
+          .accessRequestId,
+      ).toBe(rows[0]!.id);
+      expect(rows[0]!.summary).toBe(
+        "Connect your Slack so Helper na-connect can read as you",
+      );
+      expect(rows[0]!.cardRefs).toEqual([]);
+      expect(callsFor("chat.postMessage")).toHaveLength(0);
+
+      const approvals = await approvalsMod();
+      // Not approvable by click, even by its own person.
+      expect(
+        await approvals.decideActionApproval({
+          approvalId: rows[0]!.id,
+          decision: "approve",
+          deciderUserId: ALEX,
+        }),
+      ).toMatchObject({ kind: "refused" });
+      // The bell shows it to Alex only, with the structured view.
+      const bell =
+        await import("../../services/channels/workspace-approvals-service");
+      const mine = await bell.listWorkspacePendingChannelApprovals(
+        WORKSPACE,
+        ALEX,
+      );
+      expect(mine.find((i) => i.id === rows[0]!.id)).toMatchObject({
+        slackAccess: { kind: "read", reason: "not_connected" },
+      });
+      expect(
+        (
+          await bell.listWorkspacePendingChannelApprovals(WORKSPACE, JORDAN)
+        ).map((i) => i.id),
+      ).not.toContain(rows[0]!.id);
+
+      // Completing Connect settles it.
+      handlers["oauth.v2.access"] = () => ({
+        team: { id: TEAM },
+        authed_user: {
+          id: "U0ALEX",
+          access_token: ALEX_TOKEN,
+          scope: "channels:history",
+        },
+      });
+      await svc.completeConnect({
+        state: {
+          kind: "slack-user-read",
+          workspaceId: WORKSPACE,
+          agentId: stage.agentId,
+          presenceId: stage.presenceId,
+          userId: ALEX,
+          issuedAt: Date.now(),
+          nonce: "n",
+        } as never,
+        code: "c",
+        redirectUri: "http://x",
+        exchange: async () => ({
+          team: { id: TEAM },
+          authed_user: {
+            id: "U0ALEX",
+            access_token: ALEX_TOKEN,
+            scope: "channels:history",
+          },
+        }),
+        isActiveMember: async () => true,
+      });
+      const [settled] = await accessRows(stage.agentId);
+      expect(settled).toMatchObject({
+        status: "executed",
+        reason: "Slack connected; ask again",
+      });
+    });
+
+    it("not connected: the note addresses the asker as you (by name), the bell hides nothing server-side, and Not now rejects it", async () => {
+      script();
+      const stage = await seedAgent("na-dismiss");
+      const res = (await stage.read("direct", ALEX, {
+        conversation: "#weekly-reports",
+      })) as { result: { note: string; accessRequestId: string } };
+      const alex = await db.user.findUniqueOrThrow({
+        where: { id: ALEX },
+        select: { name: true, email: true },
+      });
+      expect(res.result.note).toContain(
+        `A card in this chat asks you (${alex.name || alex.email}) to connect your Slack.`,
+      );
+      expect(res.result.note).not.toMatch(/asks them/);
+      const approvals = await approvalsMod();
+      // Someone else can't dismiss it; the asker can (reject is allowed
+      // on a connect request even though approve is not).
+      expect(
+        await approvals.decideActionApproval({
+          approvalId: res.result.accessRequestId,
+          decision: "reject",
+          deciderUserId: JORDAN,
+        }),
+      ).toMatchObject({ kind: "refused" });
+      expect(
+        await approvals.decideActionApproval({
+          approvalId: res.result.accessRequestId,
+          decision: "reject",
+          deciderUserId: ALEX,
+        }),
+      ).toMatchObject({ kind: "decided", status: "rejected" });
+      // A rejection never wakes the chat.
+      expect(
+        await db.turn.count({
+          where: {
+            conversation: { agentId: stage.agentId },
+            source: "approval",
+          },
+        }),
+      ).toBe(0);
+    });
+
+    it("not shared: needs_access + request; only the reader decides; approve creates the grant (read allow, write never) and returns the read", async () => {
+      script();
+      const stage = await seedAgent("na-share");
+      await connectAs(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
+      const res = await stage.read("direct", ALEX, { conversation: "weekly" });
+      expect(res).toMatchObject({
+        ok: true,
+        result: {
+          status: "needs_access",
+          reason: "not_shared",
+          conversation: "#weekly-reports",
+        },
+      });
+      await stage.read("direct", ALEX, { conversation: "weekly" });
+      const rows = await accessRows(stage.agentId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.summary).toBe(
+        "Let Helper na-share read #weekly-reports as you",
+      );
+      expect(callsFor("conversations.history")).toHaveLength(0);
+
+      const approvals = await approvalsMod();
+      for (const other of [ADMIN, JORDAN]) {
+        expect(
+          await approvals.decideActionApproval({
+            approvalId: rows[0]!.id,
+            decision: "approve",
+            deciderUserId: other,
+          }),
+        ).toMatchObject({ kind: "refused" });
+      }
+      expect(
+        await approvals.decideActionApproval({
+          approvalId: rows[0]!.id,
+          decision: "approve",
+          deciderUserId: ALEX,
+        }),
+      ).toMatchObject({ kind: "decided", status: "executed" });
+      const grant = await db.agentReadGrant.findFirstOrThrow({
+        where: { userToken: { agentChannelId: stage.presenceId } },
+        select: { externalRef: true, readMode: true, writeMode: true },
+      });
+      expect(grant).toEqual({
+        externalRef: "C0REPORTS",
+        readMode: "allow",
+        writeMode: "never",
+      });
+      const [done] = await accessRows(stage.agentId);
+      expect(done!.reason).toContain("second");
+      expect(callsFor("conversations.history")[0]!.auth).toBe(
+        `Bearer ${ALEX_TOKEN}`,
+      );
+      // The approve woke Alex's own chat (the origin) with a platform turn.
+      const resumed = await db.turn.findMany({
+        where: { conversation: { agentId: stage.agentId }, source: "approval" },
+        select: {
+          userId: true,
+          message: true,
+          conversation: { select: { direct: true, userId: true } },
+        },
+      });
+      expect(resumed).toHaveLength(1);
+      expect(resumed[0]).toMatchObject({
+        userId: null,
+        conversation: { direct: true, userId: ALEX },
+      });
+      expect(resumed[0]!.message).toMatch(
+        /^The person approved: .*Continue the original request\.$/,
+      );
+    });
+
+    it("a name matching none of the reader's conversations is answered now, no request", async () => {
+      script();
+      const stage = await seedAgent("na-none");
+      await connectAs(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
+      const res = await stage.read("direct", ALEX, { conversation: "#nope" });
+      expect(res.ok).toBe(false);
+      expect(await accessRows(stage.agentId)).toHaveLength(0);
+    });
+
+    it("null reader (shared thread): refused with the private-chat line, no request", async () => {
+      script();
+      const stage = await seedAgent("na-null");
+      const res = await stage.read("channel", ALEX, {
+        conversation: "#weekly-reports",
+      });
+      expect(res).toEqual({
+        ok: false,
+        error:
+          "I can only act as Alex in their own private chat with me (the web chat or a DM with me). Ask there.",
+      });
+      const out = await send(stage, "channel", ALEX, {
+        conversation: "#weekly-reports",
+        text: "hi",
+      });
+      expect(out.res.ok).toBe(false);
+      expect(await accessRows(stage.agentId)).toHaveLength(0);
+    });
+
+    it("send_as_me write_off: approve sets writeMode allow and sends; not_shared write creates a write-only grant", async () => {
+      script();
+      handlers["chat.postMessage"] = () => ({
+        channel: "C0REPORTS",
+        ts: nextTs(),
+      });
+      const stage = await seedAgent("na-write");
+      await connectWritable(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
+      // not shared at all → not_shared (write)
+      const out = await send(stage, "direct", ALEX, {
+        conversation: "#weekly-reports",
+        text: "hello all",
+      });
+      expect(out.res).toMatchObject({
+        ok: true,
+        result: { status: "needs_access", reason: "not_shared" },
+      });
+      const [row] = await accessRows(stage.agentId);
+      expect(row!.summary).toBe(
+        "Let Helper na-write write in #weekly-reports as you?",
+      );
+      const approvals = await approvalsMod();
+      expect(
+        await approvals.decideActionApproval({
+          approvalId: row!.id,
+          decision: "approve",
+          deciderUserId: ALEX,
+        }),
+      ).toMatchObject({ status: "executed" });
+      // Allowing a write is not allowing the history to be read.
+      expect(
+        await db.agentReadGrant.findFirstOrThrow({
+          where: { userToken: { agentChannelId: stage.presenceId } },
+          select: { readMode: true, writeMode: true },
+        }),
+      ).toEqual({ readMode: "never", writeMode: "allow" });
+      expect(callsFor("chat.postMessage")).toHaveLength(1);
+      expect(callsFor("chat.postMessage")[0]!.form.get("text")).toBe(
+        "hello all",
+      );
+
+      // write_off on an existing grant: approve flips it to allow.
+      await setModes(stage.agentId, ALEX, "C0REPORTS", { writeMode: "never" });
+      const off = await send(stage, "direct", ALEX, {
+        conversation: "#weekly-reports",
+        text: "again",
+      });
+      expect(off.res).toMatchObject({
+        result: { status: "needs_access", reason: "write_off" },
+      });
+      const pending = (await accessRows(stage.agentId)).find(
+        (r) => r.status === "pending",
+      )!;
+      await approvals.decideActionApproval({
+        approvalId: pending.id,
+        decision: "approve",
+        deciderUserId: ALEX,
+      });
+      expect(callsFor("chat.postMessage")).toHaveLength(2);
+    });
+
+    it("send_as_me renders @[Name] as a real mention, even for someone the agent's contacts block", async () => {
+      script();
+      handlers["chat.postMessage"] = () => ({
+        channel: "C0REPORTS",
+        ts: nextTs(),
+      });
+      const stage = await seedAgent("na-mention");
+      await connectWritable(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
+      await grantAs(stage.agentId, ALEX, "C0REPORTS");
+      await setModes(stage.agentId, ALEX, "C0REPORTS", { writeMode: "allow" });
+      // Alex is a linked teammate; block her on the agent's contacts.
+      const { integrationId } = await db.agentChannel.findUniqueOrThrow({
+        where: { id: stage.presenceId },
+        select: { integrationId: true },
+      });
+      await db.agentReachGrant.create({
+        data: {
+          agentId: stage.agentId,
+          integrationId,
+          provider: "slack",
+          subjectKind: "external_user",
+          externalRef: "U0ALEX",
+          state: "blocked",
+          cardRefs: [],
+        },
+      });
+      const out = await send(stage, "direct", ALEX, {
+        conversation: "#weekly-reports",
+        text: "@[Alex] **how's** life? <!channel> @[Nobody]",
+      });
+      expect(out.res).toMatchObject({ result: { status: "sent" } });
+      // The same markdown renderer as the agent's own posts: **bold**
+      // becomes Slack bold, never literal asterisks.
+      expect(callsFor("chat.postMessage")[0]!.form.get("text")).toBe(
+        "<@U0ALEX> *how's* life? &lt;!channel&gt; @Nobody",
+      );
+    });
+
+    it("send_as_me without chat:write: reconnect_for_write (not approvable; Connect with write settles it)", async () => {
+      script();
+      const stage = await seedAgent("na-reconnect");
+      await connectAs(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
+      await grantAs(stage.agentId, ALEX, "C0REPORTS");
+      const out = await send(stage, "direct", ALEX, {
+        conversation: "#weekly-reports",
+        text: "hi",
+      });
+      expect(out.res).toMatchObject({
+        result: { status: "needs_access", reason: "reconnect_for_write" },
+      });
+      const [row] = await accessRows(stage.agentId);
+      expect(row!.summary).toBe(
+        "Reconnect your Slack so Helper na-reconnect can write as you",
+      );
+      const approvals = await approvalsMod();
+      expect(
+        await approvals.decideActionApproval({
+          approvalId: row!.id,
+          decision: "approve",
+          deciderUserId: ALEX,
+        }),
+      ).toMatchObject({ kind: "refused" });
+    });
+  });
+});
+
+describe.skipIf(!PROOF_URL)("send_message: choose who sends", () => {
+  const CHOOSE = "channel.choose_sender";
+  const tool = async (
+    stage: Awaited<ReturnType<typeof seedAgent>>,
+    where: "direct" | "channel",
+    asUser: string,
+    args: Record<string, unknown>,
+  ) => {
+    const ctx = await stage.conversation(where, asUser);
+    return platformTools.executePlatformTool(`${P}runner-${stage.suffix}`, {
+      sandboxId: `${P}sb-${stage.suffix}`,
+      tool: "send_message",
+      args: { to: "#weekly-reports", text: "ship it", ...args },
+      ...ctx,
+    });
+  };
+  const approvals = () =>
+    import("../../services/channels/action-approval-service");
+  /** The bot sees #weekly-reports, and the agent may post there. */
+  const stageWithChannel = async (suffix: string) => {
+    script();
+    handlers["conversations.list"] = () => ({
+      channels: [{ id: "C0REPORTS", name: "weekly-reports", is_member: true }],
+      response_metadata: { next_cursor: "" },
+    });
+    handlers["chat.postMessage"] = (c) => ({
+      channel: c.form.get("channel"),
+      ts: nextTs(),
+    });
+    const stage = await seedAgent(suffix);
+    const { integrationId } = await db.agentChannel.findUniqueOrThrow({
+      where: { id: stage.presenceId },
+      select: { integrationId: true },
+    });
+    await db.agentReachGrant.create({
+      data: {
+        agentId: stage.agentId,
+        integrationId,
+        provider: "slack",
+        subjectKind: "space",
+        externalRef: "C0REPORTS",
+        subjectLabel: "#weekly-reports",
+        state: "approved",
+        cardRefs: [],
+      },
+    });
+    return stage;
+  };
+  const writable = async (stage: Awaited<ReturnType<typeof seedAgent>>) => {
+    const { getCrypto } = await import("../../providers");
+    await db.agentChannelUserToken.create({
+      data: {
+        agentChannelId: stage.presenceId,
+        userId: ALEX,
+        externalUserId: "U0ALEX",
+        credentials: await getCrypto().encrypt(
+          JSON.stringify({
+            accessToken: ALEX_TOKEN,
+            scopes: ["channels:history", "chat:write"],
+          }),
+        ),
+      },
+    });
+    await grantAs(stage.agentId, ALEX, "C0REPORTS");
+    await svc.upsertGrant({
+      workspaceId: WORKSPACE,
+      agentId: stage.agentId,
+      userId: ALEX,
+      externalRef: "C0REPORTS",
+      writeMode: "allow",
+    });
+  };
+  const posts = () => callsFor("chat.postMessage");
+  const chooseRows = (agentId: string) =>
+    db.actionApproval.findMany({
+      where: { agentId, action: CHOOSE },
+      select: { id: true, status: true, reason: true, summary: true },
+    });
+  const pref = (agentId: string) =>
+    db.agentSendAsPreference.findFirst({
+      where: { agentId, userId: ALEX, recipientRef: "C0REPORTS" },
+      select: { sendAs: true },
+    });
+
+  it("a shared place (no verified reader): sends as the agent, no card", async () => {
+    const stage = await stageWithChannel("cs-shared");
+    const res = await tool(stage, "channel", ALEX, {});
+    expect(res).toMatchObject({ ok: true, result: { status: "sent" } });
+    expect(posts()[0]!.auth).toBe("Bearer xoxb-bot");
+    expect(await chooseRows(stage.agentId)).toHaveLength(0);
+  });
+
+  it("ask: a card for the reader even when NOT connected; only the reader decides", async () => {
+    const stage = await stageWithChannel("cs-card");
+    const res = await tool(stage, "direct", ALEX, {});
+    expect(res).toMatchObject({
+      ok: true,
+      result: { status: "needs_choice", to: "#weekly-reports" },
+    });
+    expect(String((res as { result: { note: string } }).result.note)).toMatch(
+      /asks you \(Alex\) how Helper cs-card should message #weekly-reports/,
+    );
+    expect(posts()).toHaveLength(0);
+    // Asking again reuses the same card.
+    await tool(stage, "direct", ALEX, {});
+    const rows = await chooseRows(stage.agentId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.summary).toBe(
+      `How should Helper cs-card message #weekly-reports? "ship it"`,
+    );
+    const a = await approvals();
+    expect(
+      await a.decideActionApproval({
+        approvalId: rows[0]!.id,
+        decision: "approve",
+        choice: "agent",
+        deciderUserId: JORDAN,
+      }),
+    ).toMatchObject({ kind: "refused" });
+    // A plain approve without a choice is refused too.
+    expect(
+      await a.decideActionApproval({
+        approvalId: rows[0]!.id,
+        decision: "approve",
+        deciderUserId: ALEX,
+      }),
+    ).toMatchObject({ kind: "refused" });
+  });
+
+  it("Don't send: nothing sent, nothing remembered", async () => {
+    const stage = await stageWithChannel("cs-cancel");
+    await tool(stage, "direct", ALEX, {});
+    const [row] = await chooseRows(stage.agentId);
+    expect(
+      await (
+        await approvals()
+      ).decideActionApproval({
+        approvalId: row!.id,
+        decision: "reject",
+        deciderUserId: ALEX,
+      }),
+    ).toMatchObject({ kind: "decided", status: "rejected" });
+    expect(posts()).toHaveLength(0);
+    expect(await pref(stage.agentId)).toBeNull();
+  });
+
+  it("pick agent: sends as the agent, remembers it; the next send skips the card (remembered)", async () => {
+    const stage = await stageWithChannel("cs-agent");
+    await tool(stage, "direct", ALEX, {});
+    const [row] = await chooseRows(stage.agentId);
+    const out = await (
+      await approvals()
+    ).decideActionApproval({
+      approvalId: row!.id,
+      decision: "approve",
+      choice: "agent",
+      deciderUserId: ALEX,
+    });
+    expect(out).toMatchObject({ kind: "decided", status: "executed" });
+    expect(posts()).toHaveLength(1);
+    expect(posts()[0]!.auth).toBe("Bearer xoxb-bot");
+    expect((await chooseRows(stage.agentId))[0]!.reason).toMatch(
+      /^Sent as Helper cs-agent to #weekly-reports: "/,
+    );
+    expect(await pref(stage.agentId)).toEqual({ sendAs: "agent" });
+
+    const next = await tool(stage, "direct", ALEX, { text: "again" });
+    expect(next).toMatchObject({
+      ok: true,
+      result: { status: "sent", sendAs: "agent", remembered: true },
+    });
+    expect(await chooseRows(stage.agentId)).toHaveLength(1);
+  });
+
+  it("pick you (connected, writing allowed): sent with the person's token; an explicit opposite overrides AND updates", async () => {
+    const stage = await stageWithChannel("cs-you");
+    await writable(stage);
+    await tool(stage, "direct", ALEX, {});
+    const [row] = await chooseRows(stage.agentId);
+    await (
+      await approvals()
+    ).decideActionApproval({
+      approvalId: row!.id,
+      decision: "approve",
+      choice: "you",
+      deciderUserId: ALEX,
+    });
+    expect(posts()).toHaveLength(1);
+    expect(posts()[0]!.auth).toBe(`Bearer ${ALEX_TOKEN}`);
+    expect(await pref(stage.agentId)).toEqual({ sendAs: "you" });
+
+    const remembered = await tool(stage, "direct", ALEX, { text: "two" });
+    expect(remembered).toMatchObject({
+      result: { status: "sent", sendAs: "you", remembered: true },
+    });
+    expect(posts()[1]!.auth).toBe(`Bearer ${ALEX_TOKEN}`);
+
+    const switched = await tool(stage, "direct", ALEX, {
+      text: "three",
+      sendAs: "agent",
+    });
+    expect(switched).toMatchObject({
+      result: { status: "sent", sendAs: "agent", preferenceUpdated: true },
+    });
+    expect(posts()[2]!.auth).toBe("Bearer xoxb-bot");
+    expect(await pref(stage.agentId)).toEqual({ sendAs: "agent" });
+  });
+
+  it("pick you, connected, writing off: the pick allows writing (persisted) and sends, no write card", async () => {
+    const stage = await stageWithChannel("cs-you-never");
+    await writable(stage);
+    await svc.upsertGrant({
+      workspaceId: WORKSPACE,
+      agentId: stage.agentId,
+      userId: ALEX,
+      externalRef: "C0REPORTS",
+      writeMode: "never",
+    });
+    await tool(stage, "direct", ALEX, {});
+    const [row] = await chooseRows(stage.agentId);
+    expect(
+      await (
+        await approvals()
+      ).decideActionApproval({
+        approvalId: row!.id,
+        decision: "approve",
+        choice: "you",
+        deciderUserId: ALEX,
+      }),
+    ).toMatchObject({ kind: "decided", status: "executed" });
+    expect(posts()).toHaveLength(1);
+    expect(posts()[0]!.auth).toBe(`Bearer ${ALEX_TOKEN}`);
+    expect(
+      await db.actionApproval.count({
+        where: { agentId: stage.agentId, action: "slack_access_request" },
+      }),
+    ).toBe(0);
+    const grant = await db.agentReadGrant.findFirstOrThrow({
+      where: {
+        externalRef: "C0REPORTS",
+        userToken: { userId: ALEX, agentChannelId: stage.presenceId },
+      },
+      select: { writeMode: true, readMode: true },
+    });
+    expect(grant).toEqual({ writeMode: "allow", readMode: "allow" });
+  });
+
+  it("pick you, connected, never shared: shared with writing allowed by the pick, and sent", async () => {
+    const stage = await stageWithChannel("cs-you-unshared");
+    const { getCrypto } = await import("../../providers");
+    await db.agentChannelUserToken.create({
+      data: {
+        agentChannelId: stage.presenceId,
+        userId: ALEX,
+        externalUserId: "U0ALEX",
+        credentials: await getCrypto().encrypt(
+          JSON.stringify({
+            accessToken: ALEX_TOKEN,
+            scopes: ["channels:history", "chat:write"],
+          }),
+        ),
+      },
+    });
+    await tool(stage, "direct", ALEX, {});
+    const [row] = await chooseRows(stage.agentId);
+    await (
+      await approvals()
+    ).decideActionApproval({
+      approvalId: row!.id,
+      decision: "approve",
+      choice: "you",
+      deciderUserId: ALEX,
+    });
+    expect(posts()).toHaveLength(1);
+    expect(posts()[0]!.auth).toBe(`Bearer ${ALEX_TOKEN}`);
+    expect(
+      await db.actionApproval.count({
+        where: { agentId: stage.agentId, action: "slack_access_request" },
+      }),
+    ).toBe(0);
+    // Consent to send there is not consent to read its history: the share
+    // the pick made writes, and reads nothing until Alex turns reading on.
+    const made = await db.agentReadGrant.findFirstOrThrow({
+      where: { userToken: { userId: ALEX, agentChannelId: stage.presenceId } },
+      select: { writeMode: true, readMode: true },
+    });
+    expect(made).toEqual({ writeMode: "allow", readMode: "never" });
+  });
+
+  it("not connected → card → pick you → Connect card (chained) → connect completes → sent as the person", async () => {
+    const stage = await stageWithChannel("cs-connect");
+    await tool(stage, "direct", ALEX, {});
+    const [row] = await chooseRows(stage.agentId);
+    const out = await (
+      await approvals()
+    ).decideActionApproval({
+      approvalId: row!.id,
+      decision: "approve",
+      choice: "you",
+      deciderUserId: ALEX,
+    });
+    expect(out).toMatchObject({ kind: "decided", status: "executed" });
+    expect(posts()).toHaveLength(0);
+    expect((await chooseRows(stage.agentId))[0]!.reason).toMatch(
+      /^One more step: connect your Slack so the message can go as you\./,
+    );
+    const connect = await db.actionApproval.findFirstOrThrow({
+      where: { agentId: stage.agentId, action: "slack_access_request" },
+      select: { id: true, payload: true, status: true },
+    });
+    expect(connect).toMatchObject({
+      status: "pending",
+      payload: { reason: "not_connected", kind: "write", text: "ship it" },
+    });
+
+    const exchange = async () => ({
+      team: { id: TEAM },
+      authed_user: {
+        id: "U0ALEX",
+        access_token: ALEX_TOKEN,
+        scope: "channels:history,chat:write",
+      },
+    });
+    await svc.completeConnect({
+      state: {
+        kind: "slack-user-read",
+        workspaceId: WORKSPACE,
+        agentId: stage.agentId,
+        presenceId: stage.presenceId,
+        userId: ALEX,
+        issuedAt: Date.now(),
+        nonce: "n",
+      } as never,
+      code: "c",
+      redirectUri: "http://x",
+      exchange,
+      isActiveMember: async () => true,
+    });
+    const settled = await db.actionApproval.findUniqueOrThrow({
+      where: { id: connect.id },
+      select: { status: true, reason: true },
+    });
+    expect(settled.status).toBe("executed");
+    // The pick was the consent: connect was the only extra step, and the
+    // message goes out as the person with no share / write card.
+    expect(settled.reason).toMatch(/^Sent as you to /);
+    expect(posts()).toHaveLength(1);
+    expect(posts()[0]!.auth).toBe(`Bearer ${ALEX_TOKEN}`);
+    expect(
+      await db.actionApproval.count({
+        where: {
+          agentId: stage.agentId,
+          action: "slack_access_request",
+          status: "pending",
+        },
+      }),
+    ).toBe(0);
+    expect(connect.payload).toMatchObject({ consented: true });
+  });
+
+  /** Sam is anchored in Alex's chat and blocked (Can talk with = Never). */
+  const blockedSam = async (suffix: string) => {
+    const stage = await stageWithChannel(suffix);
+    handlers["conversations.open"] = () => ({ channel: { id: "D0BOTSAM" } });
+    const { integrationId } = await db.agentChannel.findUniqueOrThrow({
+      where: { id: stage.presenceId },
+      select: { integrationId: true },
+    });
+    await db.agentReachGrant.create({
+      data: {
+        agentId: stage.agentId,
+        integrationId,
+        provider: "slack",
+        subjectKind: "external_user",
+        externalRef: "U0SAM",
+        subjectLabel: "Sam",
+        state: "blocked",
+        cardRefs: [],
+      },
+    });
+    const { conversationId } = await stage.conversation("direct", ALEX);
+    const search =
+      await import("../../services/channels/recipient-search-service");
+    await search.anchorRecipient({
+      conversationId,
+      name: "Sam",
+      externalUserId: "U0SAM",
+    });
+    const send = (text: string) =>
+      tool(stage, "direct", ALEX, { to: "Sam", text });
+    const pick = async () => {
+      const rows = await db.actionApproval.findMany({
+        where: { agentId: stage.agentId, action: CHOOSE, status: "pending" },
+        select: { id: true },
+      });
+      expect(rows).toHaveLength(1);
+      return (await approvals()).decideActionApproval({
+        approvalId: rows[0]!.id,
+        decision: "approve",
+        choice: "agent",
+        deciderUserId: ALEX,
+      });
+    };
+    const blockedCards = () =>
+      db.actionApproval.count({
+        where: {
+          agentId: stage.agentId,
+          action: "channel.contact_blocked_send",
+        },
+      });
+    const reach = async () =>
+      (
+        await db.agentReachGrant.findFirstOrThrow({
+          where: { agentId: stage.agentId, externalRef: "U0SAM" },
+          select: { state: true },
+        })
+      ).state;
+    const samPref = () =>
+      db.agentSendAsPreference.findFirst({
+        where: { agentId: stage.agentId, userId: ALEX, recipientRef: "U0SAM" },
+        select: { sendAs: true },
+      });
+    const resumes = () =>
+      db.turn.findMany({
+        where: { conversationId, source: "approval" },
+        select: { message: true },
+      });
+    return {
+      stage,
+      send,
+      pick,
+      blockedCards,
+      reach,
+      samPref,
+      resumes,
+    };
+  };
+  const sentTo = (text: string) =>
+    posts().filter(
+      (c) => !c.form.get("blocks") && String(c.form.get("text")).includes(text),
+    );
+
+  it("pick agent on a blocked contact: Can talk with becomes Always allow (Contacts), pref stored, sent, no second card; next send skips the card", async () => {
+    const t = await blockedSam("cs-blk-allow");
+    expect(await t.send("enjoy the gym")).toMatchObject({
+      result: { status: "needs_choice" },
+    });
+    expect(await t.pick()).toMatchObject({
+      kind: "decided",
+      status: "executed",
+    });
+    expect(sentTo("enjoy the gym")).toHaveLength(1);
+    expect(await t.blockedCards()).toBe(0);
+    expect(await t.reach()).toBe("approved");
+    expect(await t.samPref()).toEqual({ sendAs: "agent" });
+    const resumes = await t.resumes();
+    expect(resumes).toHaveLength(1);
+    expect(resumes[0]!.message).toMatch(/^Sent as Helper cs-blk-allow to Sam/);
+
+    expect(await t.send("second")).toMatchObject({
+      result: { status: "sent", remembered: true },
+    });
+    expect(sentTo("second")).toHaveLength(1);
+  });
+
+  it("set to Never in Contacts after the pick: the pick is forgotten and the next send asks again", async () => {
+    const t = await blockedSam("cs-blk-never");
+    await t.send("first");
+    await t.pick();
+    await db.agentReachGrant.updateMany({
+      where: { agentId: t.stage.agentId, externalRef: "U0SAM" },
+      data: { state: "blocked" },
+    });
+    expect(await t.send("second")).toMatchObject({
+      result: { status: "needs_choice" },
+    });
+    expect(await t.samPref()).toBeNull();
+    expect(sentTo("second")).toHaveLength(0);
+  });
+
+  it("Don't send on the question: nothing sent, nothing stored, the agent hears Not sent", async () => {
+    const t = await blockedSam("cs-blk-dont");
+    await t.send("nope");
+    const [row] = await db.actionApproval.findMany({
+      where: { agentId: t.stage.agentId, action: CHOOSE, status: "pending" },
+      select: { id: true },
+    });
+    await (
+      await approvals()
+    ).decideActionApproval({
+      approvalId: row!.id,
+      decision: "reject",
+      deciderUserId: ALEX,
+    });
+    expect(sentTo("nope")).toHaveLength(0);
+    expect(await t.samPref()).toBeNull();
+    expect(await t.reach()).toBe("blocked");
+    const resumes = await t.resumes();
+    expect(resumes.at(-1)?.message).toMatch(/^Not sent to Sam.*Don't send/);
+  });
+
+  it("a newer request supersedes the stale connect card; one connect card per person", async () => {
+    const stage = await stageWithChannel("cs-stale");
+    handlers["conversations.list"] = () => ({
+      channels: [
+        { id: "C0REPORTS", name: "weekly-reports", is_member: true },
+        { id: "C0GENERAL", name: "general", is_member: true },
+      ],
+      response_metadata: { next_cursor: "" },
+    });
+    // An older "send as me" to #weekly-reports left a connect card.
+    await tool(stage, "direct", ALEX, { sendAs: "you" });
+    const pendingConnect = () =>
+      db.actionApproval.findMany({
+        where: {
+          agentId: stage.agentId,
+          action: "slack_access_request",
+          status: "pending",
+        },
+        select: { id: true },
+      });
+    const [stale] = await pendingConnect();
+    expect(stale).toBeDefined();
+    // A second connect ask (another conversation) replaces it: one at most.
+    await tool(stage, "direct", ALEX, {
+      sendAs: "you",
+      to: "#general",
+      text: "other",
+    });
+    const now = await pendingConnect();
+    expect(now).toHaveLength(1);
+    expect(now[0]!.id).not.toBe(stale!.id);
+    expect(
+      (
+        await db.actionApproval.findUniqueOrThrow({
+          where: { id: stale!.id },
+          select: { status: true },
+        })
+      ).status,
+    ).toBe("expired");
+
+    // Now a choose card for #general, picked as the agent: the stale
+    // connect card for #general is withdrawn.
+    await db.agentSendAsPreference.deleteMany({
+      where: { agentId: stage.agentId },
+    });
+    await tool(stage, "direct", ALEX, { to: "#general", text: "other" });
+    expect(await pendingConnect()).toHaveLength(0);
   });
 });

@@ -142,6 +142,26 @@ export interface AppPermissionDefinition {
    * become "and IAM too, one click away".
    */
   unlisted?: "block";
+  /**
+   * The tools above are every request this app can make (a database front
+   * door judges each statement as exactly one of them), so there is nothing
+   * "not listed" to decide and the dialog hides that section. Requires
+   * `unlisted: "block"`: whatever the rows store, the catalog is the boundary.
+   */
+  exhaustive?: true;
+  /**
+   * What a NEW attach's "Other reads" catch-all defaults to. Absent (the
+   * norm): Needs approval, because a GET is no safe read on every API: some
+   * answer with a credential (Twilio's Account resource, Cloudflare's tunnel
+   * token, Datadog's API keys) and some run code or change state (Salesforce's
+   * `executeAnonymous`). `"allow"`: Always allow, set only on a catalog whose
+   * provider API was checked against its docs and has no such GET the
+   * connection's credential reaches outside the read tools. Opt-in on
+   * purpose, so a new catalog starts held until someone checks it.
+   * `catalog-unlisted-reads.test.ts` pins the per-app evidence. A default
+   * only: the user can still change it in Manage permissions.
+   */
+  unlistedReads?: "allow";
 }
 
 // The public projection of the catalog: tool identity only. The endpoint
@@ -171,6 +191,12 @@ export interface AppPermissionDefinitionSummary {
    * mapping, so it is client-safe. Lets the dialog say what a customization
    * does with requests outside the list. */
   unlisted?: "block";
+  /** `AppPermissionDefinition.exhaustive`: client-safe, hides the
+   *  "Not listed above" rows. */
+  exhaustive?: true;
+  /** `AppPermissionDefinition.unlistedReads`: a default posture, client-safe,
+   * so the switch-on placeholder matches what the server writes. */
+  unlistedReads?: "allow";
 }
 
 const toToolSummary = ({ id, name, description }: AppTool): AppToolSummary => ({
@@ -194,4 +220,19 @@ export const toAppPermissionDefinitionSummary = (
       : {}),
   })),
   ...(def.unlisted ? { unlisted: def.unlisted } : {}),
+  ...(def.exhaustive ? { exhaustive: def.exhaustive } : {}),
+  ...(def.unlistedReads ? { unlistedReads: def.unlistedReads } : {}),
 });
+
+/**
+ * What a NEW attach's "Other reads" catch-all defaults to: Always allow only
+ * for a catalog checked safe (`unlistedReads: "allow"`), otherwise Needs
+ * approval. One rule for both sides: the server's `defaultConnectionGrant`
+ * reads it off the full definition and the web placeholder off the public
+ * summary, which carries the same field. (A catalog with `unlisted:
+ * "block"` must not opt in, since Always allow is invalid there;
+ * `catalog-unlisted-reads.test.ts` enforces it.)
+ */
+export const defaultOtherReads = (
+  catalog: Pick<AppPermissionDefinitionSummary, "unlistedReads"> | undefined,
+): "allow" | "ask" => (catalog?.unlistedReads === "allow" ? "allow" : "ask");

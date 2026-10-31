@@ -12,6 +12,7 @@ import {
   withSyncedAppName,
   withTombstoneName,
   USER_READ_SCOPES,
+  USER_SCOPES,
   withUserReadScopes,
 } from "./manifest";
 
@@ -364,7 +365,7 @@ describe("withUserReadScopes (Connect your Slack)", () => {
       redirect_urls: string[];
     };
     expect(oauth.scopes.bot).toEqual(["chat:write"]);
-    expect(oauth.scopes.user).toEqual([...USER_READ_SCOPES]);
+    expect(oauth.scopes.user).toEqual([...USER_SCOPES]);
     expect(oauth.redirect_urls).toEqual(["https://other.example/cb", REDIRECT]);
     expect(next.display_information).toEqual({ name: "Deploy Agent" });
   });
@@ -379,6 +380,12 @@ describe("withUserReadScopes (Connect your Slack)", () => {
       expect(scope).toMatch(/:(read|history)$/);
     }
     expect(USER_READ_SCOPES).not.toContain("search:read");
+  });
+
+  it("the only write user scope is chat:write (send as me)", () => {
+    expect(USER_SCOPES.filter((s) => !/:(read|history)$/.test(s))).toEqual([
+      "chat:write",
+    ]);
   });
 });
 

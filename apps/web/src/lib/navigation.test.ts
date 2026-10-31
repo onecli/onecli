@@ -68,7 +68,7 @@ describe("agentSectionPath", () => {
     expect(agentSectionPath("/w/abc/agents", "a1", "chat")).toBe(
       "/w/abc/agents/a1/chat",
     );
-    expect(agentSectionPath("/w/abc/overview", "a1", "apps")).toBe(
+    expect(agentSectionPath("/w/abc/activity", "a1", "apps")).toBe(
       "/w/abc/agents/a1/apps",
     );
   });

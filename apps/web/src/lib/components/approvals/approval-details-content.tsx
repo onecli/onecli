@@ -52,6 +52,7 @@ export const ApprovalDetailsContent = ({
           kind={approval.summary?.kind}
           details={details}
           bulk={approval.summary?.bulk}
+          titled={!!approval.summary?.subject}
         />
       )}
       <ApprovalRawRequest approval={approval} />

@@ -119,8 +119,8 @@ export const AgentPageFrame = ({
         description="It may have been deleted, or the link points at another workspace."
         action={
           <Button variant="outline" size="sm" asChild>
-            <Link href={withWorkspacePrefix(pathname, "/agents")}>
-              Back to Agents
+            <Link href={withWorkspacePrefix(pathname, "")}>
+              Back to workspace
             </Link>
           </Button>
         }

@@ -66,7 +66,7 @@ describe("SlackReadTile", () => {
     ).toBeTruthy();
 
     const helper = within(dialog).getByRole("link", { name: /Helper/ });
-    expect(helper.getAttribute("href")).toBe("/w/ws-1/agents/ag-1/channels");
+    expect(helper.getAttribute("href")).toBe("/w/ws-1/agents/ag-1/contacts");
     expect(within(helper).getByText("Connect")).toBeTruthy();
     expect(within(helper).getByText("@helper in Slack")).toBeTruthy();
 

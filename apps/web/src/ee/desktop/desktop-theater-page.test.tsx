@@ -83,7 +83,7 @@ describe("DesktopTheaterPage", () => {
     );
     expect(
       screen.getByRole("link", { name: "Open dashboard" }),
-    ).toHaveAttribute("href", "/w/ws-1/agents");
+    ).toHaveAttribute("href", "/w/ws-1/agents/ag-1");
     expect(screen.getAllByTestId("screen")).toHaveLength(1);
   });
   it("retains loading and retry without mounting a screen", async () => {

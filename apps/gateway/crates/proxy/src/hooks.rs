@@ -222,14 +222,14 @@ pub fn track_and_wrap(
 // ── Request telemetry ───────────────────────────────────────────────────
 
 /// Current UTC time as an ISO 8601 string, the format every telemetry
-/// timestamp on the forward path is recorded in.
-pub(crate) fn iso_now() -> String {
+/// timestamp is recorded in, on every lane.
+pub fn iso_now() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Iso8601::DEFAULT)
         .unwrap_or_default()
 }
 
-/// The telemetry fields every request-log event on the forward path shares:
+/// The telemetry fields every request-log event shares, on every lane:
 /// who (from the proxy context), where (host, the query-stripped path, the
 /// provider the request is attributed to), what came back (status, latency).
 /// `None` for an unauthenticated request, which is never logged.
@@ -241,7 +241,7 @@ pub(crate) fn iso_now() -> String {
 /// path, else the provider owning the host as a non-injecting alias, else
 /// the bare hostname.
 #[must_use]
-pub(crate) fn request_meta(
+pub fn request_meta(
     proxy_ctx: &ProxyContext,
     host: &str,
     method: &str,
@@ -280,6 +280,7 @@ pub(crate) fn request_meta(
         existing_log_id: None,
         decision: None,
         matched_rule: None,
+        statement: None,
     })
 }
 
@@ -368,15 +369,61 @@ pub fn record_host_mismatch_failure(
     path: &str,
     start: std::time::Instant,
 ) {
+    record_unforwarded_guidance(
+        proxy_ctx,
+        host,
+        method,
+        path,
+        start,
+        hyper::StatusCode::MISDIRECTED_REQUEST,
+        super::response::ERROR_CONNECTION_HOST_MISMATCH,
+    );
+}
+
+/// Records the `connection_needs_reconnect` answer to a request resolution
+/// refused before policy (its connection's provider refused the stored
+/// credential for good), shared by the CONNECT (MITM) and absolute-form HTTP
+/// proxy paths. Without it the request, which used to show as an injected
+/// 401, would vanish from the activity feed.
+pub fn record_needs_reconnect(
+    proxy_ctx: &ProxyContext,
+    host: &str,
+    method: &str,
+    path: &str,
+    start: std::time::Instant,
+) {
+    record_unforwarded_guidance(
+        proxy_ctx,
+        host,
+        method,
+        path,
+        start,
+        hyper::StatusCode::UNAUTHORIZED,
+        super::response::ERROR_CONNECTION_NEEDS_RECONNECT,
+    );
+}
+
+/// A guidance answer (`error`, sent with `status`) to a request the gateway
+/// never forwarded: recorded as `NeedsConnection`, like the guidance answers
+/// `forward.rs` gives after an upstream response.
+fn record_unforwarded_guidance(
+    proxy_ctx: &ProxyContext,
+    host: &str,
+    method: &str,
+    path: &str,
+    start: std::time::Instant,
+    status: hyper::StatusCode,
+    error: &str,
+) {
     if let Some(meta) = request_meta(
         proxy_ctx,
         host,
         method,
         path,
-        hyper::StatusCode::MISDIRECTED_REQUEST.as_u16(),
+        status.as_u16(),
         start.elapsed().as_millis() as u32,
     ) {
-        record_needs_connection(meta, super::response::ERROR_CONNECTION_HOST_MISMATCH);
+        record_needs_connection(meta, error);
     }
 }
 

@@ -70,6 +70,20 @@
  *   the copy points at whoever operates the agent. Classified by the
  *   supervisor from the harness's model-API error wrapper; the raw message
  *   rides beside it.
+ * - `model_key_not_attached`: the gateway answered the model call with its
+ *   `access_restricted` code: the workspace holds a model key this agent was
+ *   not given. The fix is attaching it on the agent's Models page.
+ * - `model_key_unreadable`: the gateway answered the model call with its
+ *   `credential_unavailable` code: this agent WAS given the key, but its
+ *   stored value could not be read, so the call went out without it. The fix
+ *   is re-entering the key on the agent's Models page, never attaching it.
+ * - `blocked_by_policy`: the gateway refused the model call under a OneCLI
+ *   policy or spending limit (`blocked_by_policy`, `rate_limited`,
+ *   `budget_exceeded`, ...). Nothing is broken; an admin's rule decided it.
+ * - `gateway_unavailable`: the gateway could not complete the model call
+ *   (restarting, upstream unreachable or timed out). Temporary.
+ *   All four are classified from the gateway's coded JSON body, never from
+ *   prose, and keep the raw message beside them like `harness_busy`.
  */
 export const TURN_FAILURE_CODES = {
   agentRestarted: "agent_restarted",
@@ -80,6 +94,10 @@ export const TURN_FAILURE_CODES = {
   harnessNoTerminal: "harness_no_terminal",
   transcriptRejected: "transcript_rejected",
   modelEndpointNotFound: "model_endpoint_not_found",
+  modelKeyNotAttached: "model_key_not_attached",
+  modelKeyUnreadable: "model_key_unreadable",
+  blockedByPolicy: "blocked_by_policy",
+  gatewayUnavailable: "gateway_unavailable",
 } as const;
 export type TurnFailureCode =
   (typeof TURN_FAILURE_CODES)[keyof typeof TURN_FAILURE_CODES];

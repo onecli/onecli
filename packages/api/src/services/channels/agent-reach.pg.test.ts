@@ -36,12 +36,14 @@ const PROOF_URL = proofDatabaseUrl();
 
 type Db = typeof import("@onecli/db").db;
 type Dispatch = typeof import("./providers/slack/dispatch");
+type RoomTranscript = typeof import("./providers/slack/room-transcript");
 type Reach = typeof import("./agent-reach-service");
 type AgentChannels = typeof import("./agent-channel-service");
 type Providers = typeof import("../../providers");
 
 let db: Db;
 let dispatch: Dispatch;
+let roomTranscript: RoomTranscript;
 let reach: Reach;
 let agentChannels: AgentChannels;
 let getCrypto: Providers["getCrypto"];
@@ -363,6 +365,7 @@ beforeAll(async () => {
 
   ({ db } = await import("@onecli/db"));
   dispatch = await import("./providers/slack/dispatch");
+  roomTranscript = await import("./providers/slack/room-transcript");
   reach = await import("./agent-reach-service");
   agentChannels = await import("./agent-channel-service");
   ({ getCrypto } = await import("../../providers"));
@@ -453,7 +456,7 @@ describe.skipIf(!PROOF_URL)("reach — the guest lane", () => {
     expect(result.outcome.kind).toBe("refused");
     if (result.outcome.kind !== "refused") throw new Error("unreachable");
     expect(result.outcome.message).toBe(
-      "I can't reply here yet. I've asked Olive Owner to approve me.",
+      "I can't reply in this channel yet. I've asked Olive Owner to let me answer here.",
     );
     // It NAMES the owner (so the room knows who to nudge)...
     expect(result.outcome.message).toContain("Olive Owner");
@@ -486,10 +489,10 @@ describe.skipIf(!PROOF_URL)("reach — the guest lane", () => {
     const blocks = slackCallsFor("chat.postMessage")[0]?.form.get("blocks");
     expect(blocks).toContain(grant.id);
     expect(blocks).toContain("reach_approve");
-    // All THREE settlements are offered - "not everyone" and "not at all"
-    // are different answers, and the card must be able to say both.
-    expect(blocks).toContain("reach_members");
+    // Exactly TWO settlements: everyone here, or silent here. The retired
+    // "OneCLI users only" button is gone.
     expect(blocks).toContain("reach_block");
+    expect(blocks).not.toContain("reach_members");
   });
 
   it("an APPROVED grant admits the stranger as a guest: userId null, framed cleaned prefix", async () => {
@@ -598,40 +601,37 @@ describe.skipIf(!PROOF_URL)("reach — the guest lane", () => {
     });
   });
 
-  it.each(["denied", "revoked"])(
-    "a legacy %s grant answers today's refusal and never re-knocks",
-    async (state) => {
-      const { agentId, integrationId, presenceId } =
-        await seedChannelAgent("denied");
-      await reach.ensureSpaceGrant({
-        agentId,
-        integrationId,
-        provider: "slack",
-        externalRef: "C-PROJ",
-      });
-      await db.agentReachGrant.updateMany({
-        where: { agentId },
-        data: { state },
-      });
+  it("a BLOCKED grant ignores the speaker silently and never re-knocks", async () => {
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("blocked-knock");
+    await reach.ensureSpaceGrant({
+      agentId,
+      integrationId,
+      provider: "slack",
+      externalRef: "C-PROJ",
+    });
+    await db.agentReachGrant.updateMany({
+      where: { agentId },
+      data: { state: "blocked" },
+    });
 
-      const result = await dispatch.dispatchSlackEvent({
-        presenceId,
-        identityRef: "UBOT",
-        event: mentionEvent("U-STRANGER", "C-PROJ", "5.1", "<@UBOT> hi"),
-        eventId: "Ev-denied-1",
-      });
-      await settleDetached();
+    const result = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: mentionEvent("U-STRANGER", "C-PROJ", "5.1", "<@UBOT> hi"),
+      eventId: "Ev-blocked-knock-1",
+    });
+    await settleDetached();
 
-      expect(result.kind).toBe("message");
-      if (result.kind !== "message") throw new Error("unreachable");
-      expect(result.outcome.kind).toBe("refused");
-      if (result.outcome.kind !== "refused") throw new Error("unreachable");
-      // The identity refusal, not the pending line.
-      expect(result.outcome.message).not.toContain("I've asked");
-      // No second card: the grant row is the once-fence.
-      expect(slackCallsFor("chat.postMessage")).toHaveLength(0);
-    },
-  );
+    expect(result.kind).toBe("message");
+    if (result.kind !== "message") throw new Error("unreachable");
+    expect(result.outcome).toEqual({
+      kind: "ignored",
+      reason: "reach-blocked",
+    });
+    // No refusal and no second card: the grant row is the once-fence.
+    expect(slackCallsFor("chat.postMessage")).toHaveLength(0);
+  });
 
   it("a SUSPENDED member in a granted channel speaks through the guest lane — documented, deliberate", async () => {
     // Suspension closes the identity lane (org membership check), so in an
@@ -728,6 +728,186 @@ describe.skipIf(!PROOF_URL)("reach — the guest lane", () => {
     expect(turn.message).toBe("Morgan Member: @[agent member] status");
     // The guest lane never ran: no users.info probe was needed.
     expect(slackCallsFor("users.info")).toHaveLength(0);
+  });
+
+  it("a long Direct messages list never bursts users.info: one view looks up a bounded batch, the next view fills the rest", async () => {
+    const { agentId, integrationId } = await seedChannelAgent("profile-cap");
+    const refs = Array.from({ length: 25 }, (_, i) => `U-CAP-${i}`);
+    await db.agentReachGrant.createMany({
+      data: refs.map((externalRef) => ({
+        agentId,
+        integrationId,
+        provider: "slack",
+        subjectKind: "external_user",
+        externalRef,
+        subjectLabel: externalRef,
+        state: "approved",
+      })),
+    });
+    slackHandlers["users.info"] = (call) => ({
+      user: {
+        id: call.form.get("user"),
+        team_id: TENANT,
+        name: "cap",
+        profile: {
+          display_name: "Cap",
+          image_72: `https://avatars.example.test/${call.form.get("user")}.png`,
+        },
+      },
+    });
+    const looked = () =>
+      slackCallsFor("users.info").filter((c) =>
+        c.form.get("user")?.startsWith("U-CAP-"),
+      ).length;
+
+    const first = await agentChannels.getAgentChannels(WORKSPACE, agentId);
+    expect(looked()).toBe(20);
+    expect(
+      first.presences[0]?.people.filter((p) => p.avatarUrl !== null),
+    ).toHaveLength(20);
+
+    // The next view asks only for the five it has not seen (the rest are
+    // cached), so every photo is there by the second load.
+    const second = await agentChannels.getAgentChannels(WORKSPACE, agentId);
+    expect(looked()).toBe(25);
+    expect(
+      second.presences[0]?.people.filter((p) => p.avatarUrl !== null),
+    ).toHaveLength(25);
+  });
+
+  it("EVERY workspace owner is fixed: can't be set or removed, a stale Never never silences them", async () => {
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("owner-fixed");
+    await linkUser(integrationId, "U-OWNER", OWNER);
+    await linkUser(integrationId, "U-MEMBER", MEMBER);
+    // A second owner: the lock is about the role, not the first owner found.
+    const secondOwner = await db.workspaceAccess.create({
+      data: { workspaceId: WORKSPACE, userId: MEMBER, role: "owner" },
+      select: { id: true },
+    });
+    try {
+      expect(
+        [...(await reach.workspaceOwnerRefs(WORKSPACE, integrationId))].sort(),
+      ).toEqual(["U-MEMBER", "U-OWNER"]);
+
+      for (const owner of ["U-OWNER", "U-MEMBER"]) {
+        await expect(
+          reach.setPersonReachState({
+            workspaceId: WORKSPACE,
+            agentId,
+            provider: "slack",
+            externalRef: owner,
+            state: "blocked",
+            deciderUserId: OWNER,
+          }),
+        ).rejects.toThrow("workspace owner");
+        await expect(
+          reach.dismissReachRow({
+            workspaceId: WORKSPACE,
+            agentId,
+            provider: "slack",
+            subjectKind: "external_user",
+            externalRef: owner,
+            dismissedByUserId: OWNER,
+          }),
+        ).rejects.toThrow("workspace owner");
+      }
+      expect(
+        await db.agentReachGrant.count({
+          where: { agentId, subjectKind: "external_user" },
+        }),
+      ).toBe(0);
+
+      // The view lists both owners first, locked on Always allow.
+      const view = await agentChannels.getAgentChannels(WORKSPACE, agentId);
+      expect(
+        view.presences[0]?.people.map((p) => [
+          p.externalRef,
+          p.isOwner,
+          p.state,
+        ]),
+      ).toEqual(
+        expect.arrayContaining([
+          ["U-OWNER", true, "approved"],
+          ["U-MEMBER", true, "approved"],
+        ]),
+      );
+
+      // A Never written before the lock existed is ignored for an owner.
+      await reach.ensurePersonGrant({
+        agentId,
+        integrationId,
+        provider: "slack",
+        externalRef: "U-MEMBER",
+      });
+      await db.agentReachGrant.updateMany({
+        where: { agentId, subjectKind: "external_user" },
+        data: { state: "blocked" },
+      });
+      const dm = await dispatch.dispatchSlackEvent({
+        presenceId,
+        identityRef: "UBOT",
+        event: dmEvent("U-MEMBER", "8.1", "hello"),
+        eventId: "Ev-owner-fixed-1",
+      });
+      if (dm.kind !== "message") throw new Error("unreachable");
+      expect(dm.outcome.kind).toBe("turn");
+    } finally {
+      await db.workspaceAccess.delete({ where: { id: secondOwner.id } });
+    }
+  });
+
+  it("a MEMBER's DM: answered with no row, silenced by Never on their row, answered again on Always allow", async () => {
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("member-dm-never");
+    await linkUser(integrationId, "U-MEMBER", MEMBER);
+    const dmAs = (ts: string, eventId: string) =>
+      dispatch.dispatchSlackEvent({
+        presenceId,
+        identityRef: "UBOT",
+        event: dmEvent("U-MEMBER", ts, "hello"),
+        eventId,
+      });
+    const turns = () => db.turn.count({ where: { conversation: { agentId } } });
+
+    // No row: identity alone admits a member.
+    const open = await dmAs("7.1", "Ev-member-dm-1");
+    if (open.kind !== "message") throw new Error("unreachable");
+    expect(open.outcome.kind).toBe("turn");
+    const afterOpen = await turns();
+
+    // Never on their row: silence, no turn, no refusal text.
+    await reach.ensurePersonGrant({
+      agentId,
+      integrationId,
+      provider: "slack",
+      externalRef: "U-MEMBER",
+    });
+    await db.agentReachGrant.updateMany({
+      where: { agentId, subjectKind: "external_user" },
+      data: { state: "blocked" },
+    });
+    const blocked = await dmAs("7.2", "Ev-member-dm-2");
+    if (blocked.kind !== "message") throw new Error("unreachable");
+    expect(blocked.outcome).toEqual({
+      kind: "ignored",
+      reason: "person-reach-denied",
+    });
+    expect(await turns()).toBe(afterOpen);
+
+    // Always allow: answered again, with their real identity.
+    await db.agentReachGrant.updateMany({
+      where: { agentId, subjectKind: "external_user" },
+      data: { state: "approved" },
+    });
+    const allowed = await dmAs("7.3", "Ev-member-dm-3");
+    if (allowed.kind !== "message") throw new Error("unreachable");
+    expect(["turn", "followUp"]).toContain(allowed.outcome.kind);
+    const last = await db.turn.findFirstOrThrow({
+      where: { conversation: { agentId } },
+      orderBy: { createdAt: "desc" },
+    });
+    expect(last.userId).toBe(MEMBER);
   });
 });
 
@@ -918,7 +1098,7 @@ describe.skipIf(!PROOF_URL)("reach — deciding", () => {
     ).toBe("pending");
   });
 
-  it("the dashboard door upserts idempotently: approve opens, members_only closes, both audit", async () => {
+  it("the dashboard door upserts idempotently: approve opens, blocked closes, both audit", async () => {
     const { agentId } = await seedChannelAgent("dash");
 
     const approved = await reach.setSpaceReachState({
@@ -936,10 +1116,10 @@ describe.skipIf(!PROOF_URL)("reach — deciding", () => {
       agentId,
       provider: "slack",
       externalRef: "C-DASH",
-      state: "members_only",
+      state: "blocked",
       deciderUserId: OWNER,
     });
-    expect(closed).toMatchObject({ kind: "decided", state: "members_only" });
+    expect(closed).toMatchObject({ kind: "decided", state: "blocked" });
 
     // Same outcome twice = already_settled, not an error.
     const again = await reach.setSpaceReachState({
@@ -947,7 +1127,7 @@ describe.skipIf(!PROOF_URL)("reach — deciding", () => {
       agentId,
       provider: "slack",
       externalRef: "C-DASH",
-      state: "members_only",
+      state: "blocked",
       deciderUserId: OWNER,
     });
     expect(again).toEqual({ kind: "already_settled" });
@@ -971,7 +1151,7 @@ describe.skipIf(!PROOF_URL)("reach — deciding", () => {
     await linkUser(integrationId, "U-OWNER", OWNER);
     await db.agentReachGrant.update({
       where: { id: grantId },
-      data: { state: "denied" },
+      data: { state: "blocked" },
     });
 
     const result = await reach.decideReachFromChannel({
@@ -988,7 +1168,7 @@ describe.skipIf(!PROOF_URL)("reach — deciding", () => {
           where: { id: grantId },
         })
       ).state,
-    ).toBe("denied");
+    ).toBe("blocked");
   });
 
   it("the dashboard door fences agent↔workspace coherence", async () => {
@@ -2310,9 +2490,8 @@ describe.skipIf(!PROOF_URL)("reach — durability and the view", () => {
           label: "#granted",
           state: "pending",
         }),
-        // An unsettled channel reads as `pending`, never as a silent
-        // "members_only": under the precondition model nobody has decided
-        // it yet, and the row must say so.
+        // An unsettled channel reads as `pending`: under the precondition
+        // model nobody has decided it yet, and the row must say so.
         expect.objectContaining({
           externalRef: "C-PLAIN",
           state: "pending",
@@ -2342,7 +2521,7 @@ describe.skipIf(!PROOF_URL)("reach — the person lane (DM knock)", () => {
     if (result.kind !== "message") throw new Error("unreachable");
     expect(result.outcome.kind).toBe("refused");
     if (result.outcome.kind !== "refused") throw new Error("unreachable");
-    expect(result.outcome.message).toContain("to approve me");
+    expect(result.outcome.message).toContain("to let us talk");
 
     // The row is a PERSON row, addressed by the provider's stable user id.
     const grant = await db.agentReachGrant.findUniqueOrThrow({
@@ -2356,10 +2535,10 @@ describe.skipIf(!PROOF_URL)("reach — the person lane (DM knock)", () => {
       },
     });
     expect(grant.state).toBe("pending");
-    expect(grant.subjectLabel).toBe("@Dana");
+    // A plain name: no "@", whichever path first saw the person.
+    expect(grant.subjectLabel).toBe("Dana");
 
-    // The card asks the PERSON question with exactly TWO answers: there is
-    // no "OneCLI users only" for a single human.
+    // The card asks the PERSON question with exactly TWO answers.
     const blocks = slackCallsFor("chat.postMessage")[0]?.form.get("blocks");
     expect(blocks).toContain(grant.id);
     expect(blocks).toContain("reach_approve");
@@ -2478,7 +2657,7 @@ describe.skipIf(!PROOF_URL)("reach — the person lane (DM knock)", () => {
     if (result.kind !== "message") throw new Error("unreachable");
     expect(result.outcome.kind).toBe("refused");
     if (result.outcome.kind !== "refused") throw new Error("unreachable");
-    expect(result.outcome.message).not.toContain("to approve me");
+    expect(result.outcome.message).not.toContain("I've asked");
     // No row, and no card: an outsider cannot make the owner's phone buzz.
     expect(await db.agentReachGrant.count({ where: { agentId } })).toBe(0);
     expect(slackCallsFor("chat.postMessage")).toHaveLength(0);
@@ -2508,7 +2687,7 @@ describe.skipIf(!PROOF_URL)("reach — the person lane (DM knock)", () => {
     expect(await db.agentReachGrant.count({ where: { agentId } })).toBe(0);
   });
 
-  it("THE PRECEDENCE LAW: a person-level block beats a space-level approval", async () => {
+  it("ONE SETTING PER SURFACE: a person set to 'Not allowed' is answered in an open channel, and still silent in their DM", async () => {
     const { agentId, integrationId, presenceId } =
       await seedChannelAgent("precedence");
     // The channel is open to everyone...
@@ -2522,7 +2701,7 @@ describe.skipIf(!PROOF_URL)("reach — the person lane (DM knock)", () => {
       where: { agentId, subjectKind: "space" },
       data: { state: "approved" },
     });
-    // ...but this individual is blocked.
+    // ...and this individual is set to "Not allowed" (a DM decision).
     await reach.ensurePersonGrant({
       agentId,
       integrationId,
@@ -2534,20 +2713,36 @@ describe.skipIf(!PROOF_URL)("reach — the person lane (DM knock)", () => {
       data: { state: "blocked" },
     });
 
-    const result = await dispatch.dispatchSlackEvent({
+    // In the channel, the channel's setting is the whole answer: admitted
+    // as a guest like anyone else in the room.
+    const inChannel = await dispatch.dispatchSlackEvent({
       presenceId,
       identityRef: "UBOT",
       event: mentionEvent("U-STRANGER", "C-PROJ", "6.1", "<@UBOT> hi"),
       eventId: "Ev-precedence",
     });
+    expect(inChannel.kind).toBe("message");
+    if (inChannel.kind !== "message") throw new Error("unreachable");
+    expect(["turn", "followUp"]).toContain(inChannel.outcome.kind);
 
-    // Blocking a HUMAN is narrower and more deliberate than opening a ROOM.
-    // If the room won, blocking would be meaningless.
-    expect(result.kind).toBe("message");
-    if (result.kind !== "message") throw new Error("unreachable");
-    expect(result.outcome.kind).toBe("ignored");
+    // In a direct message, the person row still decides: silence, no turn.
+    const turnsBefore = await db.turn.count({
+      where: { conversation: { agentId } },
+    });
+    const inDm = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: dmEvent("U-STRANGER", "6.2", "hi directly"),
+      eventId: "Ev-precedence-dm",
+    });
+    expect(inDm.kind).toBe("message");
+    if (inDm.kind !== "message") throw new Error("unreachable");
+    expect(inDm.outcome).toEqual({
+      kind: "ignored",
+      reason: "person-reach-denied",
+    });
     expect(await db.turn.count({ where: { conversation: { agentId } } })).toBe(
-      0,
+      turnsBefore,
     );
   });
 
@@ -3391,7 +3586,7 @@ const chatterEvent = (
 
 const promote = async (
   seeded: { agentId: string; integrationId: string },
-  state: "approved" | "members_only" | "blocked" | "pending",
+  state: "approved" | "blocked" | "pending",
   listen: "all" | "mentions" = "all",
 ) => {
   await reach.ensureSpaceGrant({
@@ -3468,25 +3663,6 @@ describe.skipIf(!PROOF_URL)("reach — point of contact (listen = all)", () => {
     expect(slackCallsFor("assistant.threads.setStatus")).toHaveLength(0);
   });
 
-  it("PROMOTED in a members-only channel: a stranger is ignored QUIETLY (no 'link your account' reply)", async () => {
-    const seeded = await seedChannelAgent("poc-quiet");
-    await promote(seeded, "members_only");
-    scriptGuestLane();
-    const result = await dispatch.dispatchSlackEvent({
-      presenceId: seeded.presenceId,
-      identityRef: "UBOT",
-      event: chatterEvent("U-STRANGER", "C-ROOM", "12.1", "hi all"),
-      eventId: "Ev-poc-quiet",
-    });
-    expect(result.kind).toBe("message");
-    if (result.kind !== "message") throw new Error("unreachable");
-    expect(result.outcome).toEqual({
-      kind: "ignored",
-      reason: "overheard-unlinked-speaker",
-    });
-    expect(slackCallsFor("chat.postMessage")).toHaveLength(0);
-  });
-
   it("PROMOTED but the channel answers no one (blocked or pending): nothing is heard", async () => {
     for (const state of ["blocked", "pending"] as const) {
       const seeded = await seedChannelAgent(`poc-${state}`);
@@ -3519,7 +3695,7 @@ describe.skipIf(!PROOF_URL)("reach — point of contact (listen = all)", () => {
     expect(result).toEqual({ kind: "ignored", reason: "app-unaddressed" });
   });
 
-  it("PROMOTED: a person block still wins over an open, promoted channel", async () => {
+  it("PROMOTED: a person set to 'Not allowed' is still answered in an open, promoted channel", async () => {
     const seeded = await seedChannelAgent("poc-block");
     await promote(seeded, "approved");
     scriptGuestLane();
@@ -3541,10 +3717,10 @@ describe.skipIf(!PROOF_URL)("reach — point of contact (listen = all)", () => {
     });
     expect(result.kind).toBe("message");
     if (result.kind !== "message") throw new Error("unreachable");
-    expect(result.outcome).toEqual({
-      kind: "ignored",
-      reason: "person-reach-denied",
-    });
+    // The reported case: the room heard them as a guest like anyone else.
+    // (No judge key here, so the overheard message reaches the agent, which
+    // decides on its own whether to speak.)
+    expect(["turn", "followUp"]).toContain(result.outcome.kind);
   });
 
   it("PROMOTED: a reply in a thread it never joined (answering the agent's reply) reaches the room, answered in that thread", async () => {
@@ -3643,6 +3819,53 @@ describe.skipIf(!PROOF_URL)("reach — point of contact (listen = all)", () => {
       kind: "ignored",
       reason: "overheard-budget",
     });
+  });
+
+  it("a name inside a PASTED TABLE is data, not a call by name: heard, but not addressed", async () => {
+    const seeded = await seedChannelAgent("poc-table");
+    await linkUser(seeded.integrationId, "U-MEMBER", MEMBER);
+    await promote(seeded, "approved");
+    scriptGuestLane();
+    slackHandlers["reactions.add"] = () => ({});
+    const result = await dispatch.dispatchSlackEvent({
+      presenceId: seeded.presenceId,
+      identityRef: "UBOT",
+      event: {
+        ...chatterEvent("U-MEMBER", "C-ROOM", "21.1", "the new roster"),
+        attachments: [
+          {
+            blocks: [
+              {
+                type: "table",
+                rows: [
+                  [
+                    { type: "raw_text", text: "agent poc-table" },
+                    { type: "raw_text", text: "on call" },
+                  ],
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      eventId: "Ev-poc-table",
+    });
+    expect(result.kind).toBe("message");
+    // The table reached the agent...
+    const turn = await db.turn.findFirstOrThrow({
+      where: {
+        conversation: { agentId: seeded.agentId, externalRef: "C-ROOM" },
+      },
+      select: { message: true },
+    });
+    expect(turn.message).toBe(
+      "Morgan Member: the new roster\n\nagent poc-table | on call",
+    );
+    // ...but did not address it: no seen mark. MUTATION-PROOF: match the
+    // name against `text` (table included) and the mark is attached.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(slackCallsFor("reactions.add")).toHaveLength(0);
+    expect(slackCallsFor("assistant.threads.setStatus")).toHaveLength(0);
   });
 
   it("callsByName: whole words only, any case, short names ignored", () => {
@@ -3788,7 +4011,7 @@ describe.skipIf(!PROOF_URL)("reach — point of contact (listen = all)", () => {
 
     await db.agentReachGrant.updateMany({
       where: { agentId: seeded.agentId, externalRef: "C-ROOM" },
-      data: { state: "members_only" },
+      data: { state: "approved" },
     });
     await expect(
       reach.setSpaceListen({ ...base, listen: "all" }),
@@ -3959,5 +4182,229 @@ describe.skipIf(!PROOF_URL)(
       // A top-level message the judge placed in a thread: under the message.
       expect(turn.sourceThreadId).toBe("30.2");
     });
+
+    it("the judge's room read names people with a BOUNDED number of users.info calls, the speaker first", async () => {
+      const seeded = await seedChannelAgent("poc-judge-cap");
+      await linkUser(seeded.integrationId, "U-MEMBER", MEMBER);
+      await promote(seeded, "approved");
+      scriptGuestLane();
+      await db.secret.updateMany({
+        where: { name: `${P}poc-judge-cap` },
+        data: { encryptedValue: await getCrypto().encrypt("sk-ant-proof") },
+      });
+      // A room whose messages tag 100 unlinked strangers, and a speaker who
+      // is unlinked too: without the cap, one judged message would be 100+
+      // users.info calls.
+      const strangers = Array.from(
+        { length: 100 },
+        (_, i) => `UX${String(i).padStart(4, "0")}`,
+      );
+      slackHandlers["conversations.history"] = () => ({
+        messages: strangers.map((id, i) => ({
+          ts: `40.${i}`,
+          user: "U-MEMBER",
+          text: `cc <@${id}>`,
+        })),
+      });
+      slackHandlers["v1/messages"] = () => ({
+        content: [{ type: "text", text: "WHO: OTHER\nWHERE: CHANNEL" }],
+      });
+      await dispatch.dispatchSlackEvent({
+        presenceId: seeded.presenceId,
+        identityRef: "UBOT",
+        event: chatterEvent("U-SPEAKER", "C-ROOM", "41.1", "anyone free?"),
+        eventId: "Ev-poc-judge-cap",
+      });
+      const probed = slackCallsFor("users.info").map((c) => c.form.get("user"));
+      expect(probed.length).toBeLessThanOrEqual(roomTranscript.MAX_NAME_PROBES);
+      // The person being judged is always among those named.
+      expect(probed).toContain("U-SPEAKER");
+    });
   },
 );
+
+describe.skipIf(!PROOF_URL)("reach — telling the approved person", () => {
+  /** Every "you can talk to me now" DM, by its fixed tail. */
+  const notices = () =>
+    slackCallsFor("chat.postMessage").filter((c) =>
+      (c.form.get("text") ?? "").includes("send your message again here"),
+    );
+  const openedTo = (ref: string) =>
+    slackCallsFor("conversations.open").some(
+      (c) => c.form.get("users") === ref,
+    );
+  /** The notice is detached from the decision: wait for it to land. */
+  const settleNotice = () => settleDetached(() => notices().length > 0);
+
+  /** A person who DMed the agent and was told to wait: a pending knock. */
+  const knock = async (suffix: string) => {
+    const seeded = await seedChannelAgent(suffix);
+    const grant = await reach.ensurePersonGrant({
+      agentId: seeded.agentId,
+      integrationId: seeded.integrationId,
+      provider: "slack",
+      externalRef: "U-STRANGER",
+    });
+    scriptGuestLane();
+    return { ...seeded, grantId: grant.id };
+  };
+
+  it("approving a knock from the owner's card DMs the person once, naming the agent and the decider", async () => {
+    const { integrationId, presenceId, grantId } = await knock("notice-card");
+    await linkUser(integrationId, "U-OWNER", OWNER);
+
+    const result = await reach.decideReachFromChannel({
+      presenceId,
+      grantId,
+      decision: "approved",
+      clickerExternalUserId: "U-OWNER",
+    });
+
+    expect(result).toMatchObject({ kind: "decided", state: "approved" });
+    await settleNotice();
+    expect(openedTo("U-STRANGER")).toBe(true);
+    expect(notices()).toHaveLength(1);
+    expect(notices()[0]?.form.get("text")).toBe(
+      "Olive Owner approved you. You can talk to me (agent notice-card) now, just send your message again here.",
+    );
+  });
+
+  it("a decider with no name is never named by email: the notice stays neutral", async () => {
+    const NAMELESS = `${P}nameless`;
+    await db.user.create({
+      data: {
+        id: NAMELESS,
+        email: `${NAMELESS}@example.com`,
+        externalAuthId: NAMELESS,
+      },
+    });
+    const { grantId } = await knock("notice-nameless");
+
+    await reach.decideReachGrant({
+      grantId,
+      decision: "approved",
+      deciderUserId: NAMELESS,
+      announce: true,
+    });
+
+    await settleNotice();
+    const text = notices()[0]?.form.get("text") ?? "";
+    expect(text).toMatch(/^You've been approved\. /);
+    expect(text).not.toContain("@");
+  });
+
+  it("the dashboard answering a waiting knock notifies too, and a later re-approve stays silent", async () => {
+    const { agentId } = await knock("notice-dash");
+    const set = (state: "approved" | "blocked") =>
+      reach.setPersonReachState({
+        workspaceId: WORKSPACE,
+        agentId,
+        provider: "slack",
+        externalRef: "U-STRANGER",
+        state,
+        deciderUserId: OWNER,
+      });
+
+    await set("approved");
+    await settleNotice();
+    expect(notices()).toHaveLength(1);
+
+    await set("blocked");
+    await set("approved");
+    await settleDetached(() => notices().length > 1);
+    expect(notices()).toHaveLength(1);
+  });
+
+  it("the dashboard adding someone who never wrote does not DM them", async () => {
+    const { agentId } = await seedChannelAgent("notice-added");
+    scriptGuestLane();
+
+    const result = await reach.setPersonReachState({
+      workspaceId: WORKSPACE,
+      agentId,
+      provider: "slack",
+      externalRef: "U-NEVER-WROTE",
+      state: "approved",
+      deciderUserId: OWNER,
+    });
+
+    expect(result).toMatchObject({ kind: "decided", state: "approved" });
+    await settleDetached(() => notices().length > 0);
+    expect(notices()).toHaveLength(0);
+    expect(openedTo("U-NEVER-WROTE")).toBe(false);
+  });
+
+  it("an approval no door announces (the agent's own outbound) tells no one", async () => {
+    const { grantId } = await knock("notice-unannounced");
+
+    await reach.decideReachGrant({
+      grantId,
+      decision: "approved",
+      deciderUserId: OWNER,
+    });
+
+    await settleDetached(() => notices().length > 0);
+    expect(notices()).toHaveLength(0);
+  });
+
+  it("blocking a person sends nothing", async () => {
+    const { grantId } = await knock("notice-block");
+    await reach.decideReachGrant({
+      grantId,
+      decision: "blocked",
+      deciderUserId: OWNER,
+      announce: true,
+    });
+    await settleDetached(() => notices().length > 0);
+    expect(notices()).toHaveLength(0);
+  });
+
+  it("approving a CHANNEL tells no one", async () => {
+    const { agentId, integrationId } = await seedChannelAgent("notice-space");
+    const grant = await reach.ensureSpaceGrant({
+      agentId,
+      integrationId,
+      provider: "slack",
+      externalRef: "C-PROJ",
+      subjectLabel: "#proj-x",
+    });
+    scriptGuestLane();
+    slackHandlers["conversations.info"] = (call) => ({
+      channel: {
+        id: call.form.get("channel"),
+        name: "proj-x",
+        is_member: true,
+      },
+    });
+    await reach.decideReachGrant({
+      grantId: grant.id,
+      decision: "approved",
+      deciderUserId: OWNER,
+      announce: true,
+    });
+    await settleDetached(() => notices().length > 0);
+    expect(notices()).toHaveLength(0);
+  });
+
+  it("a failed notice never undoes the approval", async () => {
+    const { grantId } = await knock("notice-fail");
+    slackHandlers["chat.postMessage"] = () => ({
+      ok: false,
+      error: "channel_not_found",
+    });
+
+    const result = await reach.decideReachGrant({
+      grantId,
+      decision: "approved",
+      deciderUserId: OWNER,
+      announce: true,
+    });
+
+    expect(result.kind).toBe("decided");
+    await settleDetached(() => slackCallsFor("chat.postMessage").length > 0);
+    const grant = await db.agentReachGrant.findUniqueOrThrow({
+      where: { id: grantId },
+    });
+    expect(grant.state).toBe("approved");
+  });
+});

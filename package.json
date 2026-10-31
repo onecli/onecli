@@ -50,6 +50,9 @@
     "overrides": {
       "openid-client": "6.8.5",
       "@smithy/types": "^4.18.0"
+    },
+    "patchedDependencies": {
+      "@novnc/novnc@1.7.0": "patches/@novnc__novnc@1.7.0.patch"
     }
   }
 }

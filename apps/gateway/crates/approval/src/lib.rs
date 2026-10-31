@@ -27,6 +27,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, watch};
 use tracing::{debug, warn};
 
+pub mod hold;
+
 // ── Constants ──────────────────────────────────────────────────────────
 
 /// How long a pending approval lives before it expires (seconds).

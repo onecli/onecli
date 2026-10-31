@@ -1,5 +1,6 @@
 import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "./errors";
+import { isPlatformJobRun } from "./platform-jobs";
 import {
   CONVERSATION_SOURCES,
   type ConversationSource,
@@ -155,6 +156,16 @@ export const createConversation = async (
   const source = input.source ?? "web";
   if (!CONVERSATION_SOURCES.includes(source)) {
     throw new ServiceError("BAD_REQUEST", "Unknown conversation source");
+  }
+  // A platform job's run source is minted by its pass only (platform-jobs,
+  // rule 3). Asked of the registry, so a new job is fenced here with no
+  // edit: a client conversation on that source, pointed at someone else's
+  // thread, is the one the pass would then reuse for its runs.
+  if (isPlatformJobRun(source)) {
+    throw new ServiceError(
+      "UNPROCESSABLE",
+      "Conversation source is platform-only",
+    );
   }
 
   return db.conversation.create({

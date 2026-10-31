@@ -4,7 +4,11 @@ import {
   conversationsHistory,
   conversationsReplies,
   decodeSlackTokens,
+  deleteMessage,
+  markdownToMrkdwn,
+  updateBlocksMessage,
   oauthUserAccess,
+  postMessage,
   SlackApiError,
   userConversationInfo,
   usersConversations,
@@ -13,10 +17,36 @@ import {
   type SlackHistoryMessage,
   type SlackUserConversation,
 } from "@onecli/channels/slack";
-import { isDeadCredentialError } from "@onecli/channels";
+import { isDeadCredentialError, mentionNamesOf } from "@onecli/channels";
+import { resolveMentionNames } from "../../services/channels/mention-resolution-service";
 import { getCrypto } from "../../providers";
-import type { ConversationReader } from "../../providers/hooks/conversation-reader";
+import { z } from "zod";
+import { dashboardUrl } from "../../lib/dashboard-url";
+import type {
+  ConversationReader,
+  ConversationSender,
+} from "../../providers/hooks/conversation-reader";
+import {
+  registerActionHandler,
+  requestActionApproval,
+  resolveActionApprovals,
+  supersedeActionApprovals,
+} from "../../services/channels/action-approval-service";
+import {
+  CONNECT_REASONS,
+  SLACK_ACCESS_ACTION,
+  slackAccessPayloadSchema,
+  type SlackAccessPayload,
+  type SlackAccessReason,
+} from "../../validations/slack-access";
+import {
+  AUDIT_ACTIONS,
+  AUDIT_SERVICES,
+  AUDIT_SOURCE,
+  recordAuditEvent,
+} from "../../services/audit-service";
 import { ServiceError } from "../../services/errors";
+import { userDisplayName } from "../../services/user-service";
 import { logger } from "../../lib/logger";
 import { cleanLabel } from "../../lib/format";
 import {
@@ -45,22 +75,44 @@ import { agentImageUrlOrNull } from "../../services/agent-image-service";
  *  1. A grant row must exist, and it hangs off the granter's own token row,
  *     so nobody can grant what they cannot see and disconnecting kills every
  *     grant (FK cascade).
- *  2. The grant's AUDIENCE must admit the turn's reader. `granter_only` =
- *     only the granter's own direct thread, or a schedule they created that
- *     reports privately; any shared conversation (a channel thread, a peer
+ *  2. Only the GRANTER may use it: the turn's verified reader must be the
+ *     person who shared it (their own direct thread, or a schedule they
+ *     created that reports privately); any shared conversation (a channel thread, a peer
  *     agent, a guest) reads as nobody, even when the granter is the one
  *     asking there.
  *  3. Live: the read uses the granter's token, so Slack itself refuses a
  *     conversation they have since left.
  *
- * Read-only by construction: the module holds no send path and the scopes
- * carry no write.
+ * Per conversation the granter also picks a READ mode and a WRITE mode
+ * (allow | ask | never). `ask` holds the action for the GRANTER's approval
+ * (theirs alone to decide: their data, their voice). Sending as the person
+ * (`send_as_me`) needs a token that carries `chat:write`; tokens connected
+ * before that scope existed read on and simply cannot send.
  */
 
 const log = logger.child({ component: "slack-read" });
 
-export const READ_AUDIENCES = ["anyone", "granter_only"] as const;
-type ReadAudience = (typeof READ_AUDIENCES)[number];
+export const GRANT_MODES = ["allow", "ask", "never"] as const;
+type GrantMode = (typeof GRANT_MODES)[number];
+
+const isGrantMode = (raw: string): raw is GrantMode =>
+  (GRANT_MODES as readonly string[]).includes(raw);
+
+/** A stored mode, read defensively (the column is a free string): anything
+ * unknown is "never", which only ever narrows. */
+const modeOf = (raw: string): GrantMode => (isGrantMode(raw) ? raw : "never");
+
+const SLACK_READ_ACTION = "slack_read_as_user";
+const SLACK_SEND_ACTION = "slack_send_as_user";
+const SLACK_EDIT_ACTION = "slack_edit_as_user";
+const SLACK_DELETE_ACTION = "slack_delete_as_user";
+/** How long after sending a message the agent may still change it. */
+const OWN_MESSAGE_WINDOW_MS = 24 * 60 * 60 * 1000;
+const NOT_MY_MESSAGE =
+  "I can only change messages I sent as you in the last 24 hours.";
+const WRITE_SCOPE = "chat:write";
+const NEEDS_RECONNECT_FOR_WRITE =
+  "Reconnect your Slack to let the agent send as you.";
 
 type ConversationKind = "channel" | "private_channel" | "dm" | "group_dm";
 
@@ -149,20 +201,36 @@ const findMyToken = (presenceId: string, userId: string) =>
     select: { id: true, externalUserId: true, credentials: true },
   });
 
-const decryptUserToken = async (encrypted: string): Promise<string | null> => {
+/** The stored user credential: the token, plus the scopes Slack reported
+ * granting (absent on rows connected before scopes were recorded = no
+ * write). */
+const decryptUserCredential = async (
+  encrypted: string,
+): Promise<{ accessToken: string; scopes: string[] } | null> => {
   try {
     const raw: unknown = JSON.parse(await getCrypto().decrypt(encrypted));
     if (raw && typeof raw === "object" && "accessToken" in raw) {
       const { accessToken } = raw;
-      return typeof accessToken === "string" && accessToken
-        ? accessToken
-        : null;
+      if (typeof accessToken !== "string" || !accessToken) return null;
+      const scopes =
+        "scopes" in raw && Array.isArray(raw.scopes)
+          ? raw.scopes.filter((x): x is string => typeof x === "string")
+          : [];
+      return { accessToken, scopes };
     }
     return null;
   } catch {
     return null;
   }
 };
+
+const decryptUserToken = async (encrypted: string): Promise<string | null> =>
+  (await decryptUserCredential(encrypted))?.accessToken ?? null;
+
+/** Whether a stored user credential may post as its person. */
+const credentialCanWrite = async (encrypted: string): Promise<boolean> =>
+  (await decryptUserCredential(encrypted))?.scopes.includes(WRITE_SCOPE) ===
+  true;
 
 /** A token that Slack refused as dead: the row goes (and, by cascade, its
  * grants), and the agent re-renders so the tool stops being listed. */
@@ -202,6 +270,12 @@ interface ConnectionView {
   available: boolean;
   /** The CALLER's own Slack profile, when connected. Display only. */
   profile: SlackProfileView | null;
+  /** The caller's token carries chat:write: the agent may send as them
+   * where they allow it. False = reconnect to enable sending. */
+  canWrite: boolean;
+  /** The caller's OWN Slack user id (never anyone else's), so the dashboard
+   * can tell their own row apart. Null when not connected. */
+  slackUserId: string | null;
 }
 
 export interface SlackReadAgentView {
@@ -300,6 +374,8 @@ export const getMyConnection = async (input: {
     connected: token !== null,
     available: canConnect(presence.status, creds),
     profile,
+    canWrite: token ? await credentialCanWrite(token.credentials) : false,
+    slackUserId: token?.externalUserId ?? null,
   };
 };
 
@@ -383,7 +459,7 @@ export const completeConnect = async (input: {
   redirectUri: string;
   exchange: (args: Parameters<typeof oauthUserAccess>[0]) => Promise<{
     team: { id: string };
-    authed_user: { id: string; access_token: string };
+    authed_user: { id: string; access_token: string; scope?: string };
   }>;
   isActiveMember: (userId: string, organizationId: string) => Promise<boolean>;
 }): Promise<{ workspaceId: string; agentId: string }> => {
@@ -448,8 +524,12 @@ export const completeConnect = async (input: {
       "The Slack account that approved doesn't match your OneCLI account. Sign in to Slack as yourself and try again.",
     );
   }
+  const scopes = (person.scope ?? "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
   const credentials = await getCrypto().encrypt(
-    JSON.stringify({ accessToken: person.access_token }),
+    JSON.stringify({ accessToken: person.access_token, scopes }),
   );
   const existing = await findMyToken(presence.id, userId);
   // Re-connecting as a DIFFERENT Slack person replaces the old row, and with
@@ -476,6 +556,7 @@ export const completeConnect = async (input: {
     }),
   ]);
   if (changedPerson) rerender(agentId);
+  await settleConnectRequests(agentId, userId, scopes.includes(WRITE_SCOPE));
   return { workspaceId, agentId };
 };
 
@@ -541,6 +622,8 @@ interface MyConversation {
   ref: string;
   kind: ConversationKind;
   name: string;
+  /** DM only: the other person's Slack user id. */
+  counterpartRef: string | null;
 }
 
 const kindOf = (c: SlackUserConversation): ConversationKind =>
@@ -568,6 +651,10 @@ const displayName = (
   return `#${cleanLabel(c.name ?? "") ?? c.id}`;
 };
 
+/** A DM's other person (Slack user id); null for anything else. */
+const counterpartOf = (c: SlackUserConversation): string | null =>
+  c.is_im && c.user ? c.user : null;
+
 /** The caller's licensed presence and their own decrypted token. */
 const requireMyToken = async (input: {
   workspaceId: string;
@@ -582,14 +669,15 @@ const requireMyToken = async (input: {
   if (!token) {
     throw new ServiceError("UNPROCESSABLE", "Connect your Slack first.");
   }
-  const accessToken = await decryptUserToken(token.credentials);
-  if (!accessToken) {
+  const credential = await decryptUserCredential(token.credentials);
+  if (!credential) {
     throw new ServiceError("UNPROCESSABLE", "Reconnect your Slack.");
   }
   return {
     presence,
     token: { id: token.id, agentId: input.agentId },
-    accessToken,
+    accessToken: credential.accessToken,
+    canWrite: credential.scopes.includes(WRITE_SCOPE),
   };
 };
 
@@ -639,9 +727,11 @@ const peopleNames = async (
 
 /** Every conversation the token's person is in, named for display (a DM
  * shows the other person's name), channels first. */
-const listConversationsFor = async (
-  mine: Awaited<ReturnType<typeof requireMyToken>>,
-): Promise<MyConversation[]> => {
+const listConversationsFor = async (mine: {
+  presence: { credentials: string | null };
+  token: { id: string; agentId: string };
+  accessToken: string;
+}): Promise<MyConversation[]> => {
   const raw: SlackUserConversation[] = [];
   try {
     let cursor: string | undefined;
@@ -665,7 +755,12 @@ const listConversationsFor = async (
     raw.flatMap((c) => (c.is_im && c.user ? [c.user] : [])),
   );
   return raw
-    .map((c) => ({ ref: c.id, kind: kindOf(c), name: displayName(c, names) }))
+    .map((c) => ({
+      ref: c.id,
+      kind: kindOf(c),
+      name: displayName(c, names),
+      counterpartRef: counterpartOf(c),
+    }))
     .sort(
       (a, b) =>
         KIND_ORDER[a.kind] - KIND_ORDER[b.kind] || a.name.localeCompare(b.name),
@@ -685,7 +780,9 @@ const grantWithGranterSelect = {
   subjectKind: true,
   externalRef: true,
   subjectLabel: true,
-  audience: true,
+  counterpartRef: true,
+  readMode: true,
+  writeMode: true,
   userToken: {
     select: { user: { select: { id: true, name: true, email: true } } },
   },
@@ -696,29 +793,41 @@ type GrantWithGranter = Prisma.AgentReadGrantGetPayload<{
 }>;
 
 /** A grant as the dashboard sees it: who made it, and whether the viewer
- * did (only they may change its audience). */
+ * did (only they may change it). */
 const grantView = (
-  { userToken, ...grant }: GrantWithGranter,
+  { userToken, readMode, writeMode, ...grant }: GrantWithGranter,
   viewer: string,
 ) => ({
   ...grant,
+  readMode: modeOf(readMode),
+  writeMode: modeOf(writeMode),
   grantedBy: userToken.user,
   mine: userToken.user.id === viewer,
 });
 type ReadGrantView = ReturnType<typeof grantView>;
 
 /** Write one grant under the caller's token; label and kind come from
- * Slack, never from the client. */
+ * Slack, never from the client. A NEW share takes only the mode it was made
+ * for: shared to read, it reads and never sends; shared to write (a "Send
+ * as me" pick, an approved write card), it sends and never reads (consent
+ * to post there is not consent to have the history read). An existing
+ * share keeps every mode it is not given. */
 const saveGrant = (
   tokenId: string,
   conversation: MyConversation,
-  audience: ReadAudience,
+  settings: {
+    readMode?: GrantMode;
+    writeMode?: GrantMode;
+  },
 ) => {
   const fields = {
     subjectKind: conversation.kind,
     subjectLabel: conversation.name,
-    audience,
+    counterpartRef: conversation.counterpartRef,
+    ...(settings.readMode && { readMode: settings.readMode }),
+    ...(settings.writeMode && { writeMode: settings.writeMode }),
   };
+  const forWriting = settings.writeMode !== undefined && !settings.readMode;
   return db.agentReadGrant.upsert({
     where: {
       userTokenId_externalRef: {
@@ -726,7 +835,13 @@ const saveGrant = (
         externalRef: conversation.ref,
       },
     },
-    create: { userTokenId: tokenId, externalRef: conversation.ref, ...fields },
+    create: {
+      userTokenId: tokenId,
+      externalRef: conversation.ref,
+      readMode: forWriting ? "never" : "allow",
+      writeMode: "never",
+      ...fields,
+    },
     update: fields,
     select: grantWithGranterSelect,
   });
@@ -766,7 +881,6 @@ export const shareConversations = async (input: {
   agentId: string;
   userId: string;
   externalRefs: string[];
-  audience: ReadAudience;
 }): Promise<ReadGrantView[]> => {
   const refs = [...new Set(input.externalRefs)];
   if (refs.length === 0 || refs.length > MAX_BULK_SHARE) {
@@ -787,7 +901,7 @@ export const shareConversations = async (input: {
     );
   }
   const rows = await db.$transaction(
-    picked.map((c) => saveGrant(mine.token.id, c, input.audience)),
+    picked.map((c) => saveGrant(mine.token.id, c, {})),
   );
   rerender(input.agentId);
   return rows.map((row) => grantView(row, input.userId));
@@ -804,9 +918,19 @@ export const upsertGrant = async (input: {
   agentId: string;
   userId: string;
   externalRef: string;
-  audience: ReadAudience;
+  readMode?: GrantMode;
+  writeMode?: GrantMode;
 }): Promise<ReadGrantView> => {
+  if (!input.readMode && !input.writeMode) {
+    throw new ServiceError("UNPROCESSABLE", "Nothing to change.");
+  }
   const mine = await requireMyToken(input);
+  // Sending as the person needs a token that carries chat:write (one
+  // connected before the scope existed must reconnect first). Checked
+  // before Slack is asked anything.
+  if (input.writeMode && input.writeMode !== "never" && !mine.canWrite) {
+    throw new ServiceError("UNPROCESSABLE", NEEDS_RECONNECT_FOR_WRITE);
+  }
   const notYours = new ServiceError(
     "NOT_FOUND",
     "That conversation isn't one you're in.",
@@ -827,8 +951,16 @@ export const upsertGrant = async (input: {
   const names = await peopleNames(botToken, c.is_im && c.user ? [c.user] : []);
   const row = await saveGrant(
     mine.token.id,
-    { ref: input.externalRef, kind: kindOf(c), name: displayName(c, names) },
-    input.audience,
+    {
+      ref: input.externalRef,
+      kind: kindOf(c),
+      name: displayName(c, names),
+      counterpartRef: counterpartOf(c),
+    },
+    {
+      ...(input.readMode && { readMode: input.readMode }),
+      ...(input.writeMode && { writeMode: input.writeMode }),
+    },
   );
   rerender(input.agentId);
   return grantView(row, input.userId);
@@ -873,92 +1005,621 @@ const readFailureCode = (err: unknown): string => {
   return err.name || "error";
 };
 
+const presenceForToolSelect = {
+  id: true,
+  identityRef: true,
+  credentials: true,
+  agent: {
+    select: { name: true, workspace: { select: { organizationId: true } } },
+  },
+} as const satisfies Prisma.AgentChannelSelect;
+
+type ToolPresence = Prisma.AgentChannelGetPayload<{
+  select: typeof presenceForToolSelect;
+}>;
+
+/** The agent's ACTIVE Slack presence, licensed, for the tool doors. */
+const toolPresence = async (agentId: string): Promise<ToolPresence | null> => {
+  const presence = await db.agentChannel.findFirst({
+    where: { agentId, provider: "slack", status: "active" },
+    select: presenceForToolSelect,
+  });
+  if (presence) {
+    await assertCanUseGranularAccess(presence.agent.workspace.organizationId);
+  }
+  return presence;
+};
+
+const toolGrantSelect = {
+  id: true,
+  externalRef: true,
+  subjectKind: true,
+  subjectLabel: true,
+  counterpartRef: true,
+  readMode: true,
+  writeMode: true,
+  userToken: {
+    select: {
+      id: true,
+      userId: true,
+      externalUserId: true,
+      credentials: true,
+      user: { select: { name: true, email: true } },
+    },
+  },
+} as const satisfies Prisma.AgentReadGrantSelect;
+
+type ToolGrant = Prisma.AgentReadGrantGetPayload<{
+  select: typeof toolGrantSelect;
+}>;
+
+const grantName = (g: { subjectLabel: string | null; externalRef: string }) =>
+  g.subjectLabel ?? g.externalRef;
+
+const granterName = (g: ToolGrant): string =>
+  cleanLabel(g.userToken.user.name || g.userToken.user.email) || "its owner";
+
+/**
+ * What a tool call names. `name` is the model's words; `ref` is the exact
+ * provider id when the platform resolved one (send_message's recipient: a
+ * channel id, or the person a DM is with); `exact` = no partial names.
+ * Reads forgive a near miss ("notif" finds "#notifications"); writes never
+ * do, since a near miss would post into someone else's conversation as the
+ * person.
+ */
+interface Asked {
+  name: string;
+  ref?: string;
+  exact: boolean;
+}
+
+type Picked<T> =
+  | { kind: "one"; item: T }
+  | { kind: "none" }
+  | { kind: "many"; items: T[] };
+
+const pickedOf = <T>(hits: T[]): Picked<T> =>
+  hits.length === 1
+    ? { kind: "one", item: hits[0]! }
+    : hits.length === 0
+      ? { kind: "none" }
+      : { kind: "many", items: hits };
+
+/** Resolve `asked` among `items` (already fenced by the caller): the
+ * resolved id, else an exact id or name, else (reads only) a unique
+ * partial name. Several matches at a step answer "many", never a guess. */
+const pick = <T>(
+  items: T[],
+  view: (item: T) => {
+    ref: string;
+    name: string | null;
+    dmWith: string | null;
+  },
+  asked: Asked,
+): Picked<T> => {
+  if (asked.ref) {
+    return pickedOf(
+      items.filter((i) => {
+        const v = view(i);
+        return v.ref === asked.ref || v.dmWith === asked.ref;
+      }),
+    );
+  }
+  const byRef = items.filter((i) => view(i).ref === asked.name);
+  if (byRef.length > 0) return pickedOf(byRef);
+  const wanted = normalize(asked.name);
+  const named = items.filter((i) => {
+    const name = view(i).name;
+    return name !== null && normalize(name) === wanted;
+  });
+  if (named.length > 0 || asked.exact) return pickedOf(named);
+  return pickedOf(
+    items.filter((i) => {
+      const name = view(i).name;
+      return name !== null && normalize(name).includes(wanted);
+    }),
+  );
+};
+
+/** One grant for `asked`, or undefined (missing or ambiguous). */
+const matchGrant = <
+  G extends {
+    externalRef: string;
+    subjectLabel: string | null;
+    subjectKind: string;
+    counterpartRef: string | null;
+  },
+>(
+  grants: G[],
+  asked: Asked,
+): G | undefined => {
+  const found = pick(
+    grants,
+    (g) => ({
+      ref: g.externalRef,
+      name: g.subjectLabel,
+      dmWith: g.subjectKind === "dm" ? g.counterpartRef : null,
+    }),
+    asked,
+  );
+  return found.kind === "one" ? found.item : undefined;
+};
+
+/** The approval payload of a held read or send: the frozen truth, re-read
+ * through this schema (the JSON column is an input). */
+const heldReadPayload = z.object({
+  grantId: z.string().min(1),
+  granterUserId: z.string().min(1),
+  granterExternalUserId: z.string().min(1),
+  readerUserId: z.string().nullable(),
+  sinceHours: z.number().int().positive().optional(),
+  threadRef: z.string().optional(),
+  before: z.string().optional(),
+  limit: z.number().int().positive().optional(),
+});
+const heldSendPayload = z.object({
+  grantId: z.string().min(1),
+  granterUserId: z.string().min(1),
+  granterExternalUserId: z.string().min(1),
+  text: z.string().min(1).max(4000),
+});
+
+/** The one person who decides a held read/send: the granter (their Slack
+ * is what the agent would use). */
+const granterOf = (payload: unknown) => {
+  const p = z
+    .object({
+      granterUserId: z.string().min(1),
+      granterExternalUserId: z.string().min(1),
+    })
+    .safeParse(payload);
+  return p.success
+    ? {
+        userId: p.data.granterUserId,
+        externalUserId: p.data.granterExternalUserId,
+      }
+    : null;
+};
+
+/** The granter fence: a grant is usable ONLY in a turn whose verified reader
+ * is the person who shared it (null reader = a shared turn = nobody). */
+const granterAdmits = (
+  g: { userToken: { userId: string } },
+  readerUserId: string | null,
+) => readerUserId !== null && g.userToken.userId === readerUserId;
+
+// ── Access requests (needs_access) ─────────────────────────────────────────
+
+/** The refusal for a turn with no verified reader (a shared channel or
+ * thread, someone else's turn): no card there, since a card in a shared
+ * place would let others act or learn of the share. */
+const privateChatOnly = async (askerUserId: string | null | undefined) => {
+  const person =
+    (askerUserId ? await userDisplayName(askerUserId) : null) ?? "someone";
+  return `I can only act as ${person} in their own private chat with me (the web chat or a DM with me). Ask there.`;
+};
+
+/** The reader's own token row on this presence, and (when it decrypts)
+ * their usable credential in the shape the conversation lister takes.
+ * Null when not connected. */
+const readerToken = async (
+  presence: ToolPresence,
+  agentId: string,
+  readerUserId: string,
+) => {
+  const row = await findMyToken(presence.id, readerUserId);
+  if (!row) return null;
+  const credential = await decryptUserCredential(row.credentials);
+  return {
+    row,
+    mine: credential
+      ? {
+          presence: { credentials: presence.credentials },
+          token: { id: row.id, agentId },
+          accessToken: credential.accessToken,
+          canWrite: credential.scopes.includes(WRITE_SCOPE),
+        }
+      : null,
+  };
+};
+
+type Mine = NonNullable<
+  NonNullable<Awaited<ReturnType<typeof readerToken>>>["mine"]
+>;
+
+/** Resolve what the person asked for among THEIR OWN Slack conversations
+ * (live, with their token), by the same rule as their grants. */
+const resolveOwnConversation = async (
+  mine: Mine,
+  asked: Asked,
+): Promise<Picked<MyConversation>> =>
+  pick(
+    await listConversationsFor(mine),
+    (c) => ({ ref: c.ref, name: c.name, dmWith: c.counterpartRef }),
+    asked,
+  );
+
+/** The model-readable answer when `asked` names none, or several, of the
+ * person's conversations. */
+const unresolved = (
+  found: Exclude<Picked<MyConversation>, { kind: "one" }>,
+  asked: Asked,
+  kind: "read" | "write",
+): string => {
+  const nothing = kind === "write" ? " Nothing was sent." : "";
+  return found.kind === "none"
+    ? `They aren't in a Slack conversation matching ${asked.name}.${nothing}`
+    : `${asked.name} matches several of their conversations: ${found.items
+        .slice(0, 8)
+        .map((c) => c.name)
+        .join(", ")}. Ask again with the exact name.${nothing}`;
+};
+
+const accessSummary = (agentName: string, p: SlackAccessPayload): string => {
+  const agent = cleanLabel(agentName) || "the agent";
+  const label = p.conversationLabel ?? p.conversationQuery ?? "it";
+  switch (p.reason) {
+    case "not_connected":
+      return p.kind === "read"
+        ? `Connect your Slack so ${agent} can read as you`
+        : `Connect your Slack so ${agent} can write as you`;
+    case "reconnect_for_write":
+      return `Reconnect your Slack so ${agent} can write as you`;
+    case "not_shared":
+      return p.kind === "read"
+        ? `Let ${agent} read ${label} as you`
+        : `Let ${agent} write in ${label} as you?`;
+    case "write_off":
+      return `Let ${agent} write in ${label} as you?`;
+  }
+};
+
+/** What the agent tells the person the card is for, addressed to them (by
+ * name: the agent says "you (<Name>)", never someone else). */
+const accessNote = (reason: SlackAccessReason, name: string | null): string => {
+  const you = name ? `you (${name})` : "you";
+  return CONNECT_REASONS.has(reason)
+    ? `A card in this chat asks ${you} to connect your Slack. Tell the person you are talking to, in one short line, that the card is for them ("you"), never for the recipient or anyone else; ask again after they connect.`
+    : `A card in this chat asks ${you} to allow it; once allowed, the result arrives as a notice in this conversation. Tell the person you are talking to so in one short line, addressing them as "you", never as the recipient.`;
+};
+
+/** Open (or reuse) the person's access request and answer needs_access.
+ * Deduped per reader+agent+kind+reason+asked conversation (+text for a
+ * write): a repeat ask returns the pending one. */
+const requestAccess = async (
+  presence: ToolPresence,
+  agentId: string,
+  origin: { conversationId: string | null; turnId: string | null },
+  p: Omit<SlackAccessPayload, "agentId">,
+) => {
+  const payload: SlackAccessPayload = { ...p, agentId };
+  const key = (x: SlackAccessPayload) =>
+    [
+      x.readerUserId,
+      x.kind,
+      x.reason,
+      normalize(x.conversationQuery ?? ""),
+      x.text ?? "",
+    ].join("|");
+  const pending = await db.actionApproval.findMany({
+    where: {
+      agentId,
+      action: SLACK_ACCESS_ACTION,
+      status: "pending",
+      expiresAt: { gt: new Date() },
+    },
+    select: { id: true, payload: true },
+  });
+  const same = pending.find((row) => {
+    const parsed = slackAccessPayloadSchema.safeParse(row.payload);
+    return parsed.success && key(parsed.data) === key(payload);
+  });
+  // One connect card per person at a time: a fresher connect ask replaces
+  // the older pending ones (the newest carries the send to make).
+  if (!same && CONNECT_REASONS.has(payload.reason)) {
+    const stale = pending.flatMap((row) => {
+      const parsed = slackAccessPayloadSchema.safeParse(row.payload);
+      return parsed.success &&
+        parsed.data.readerUserId === payload.readerUserId &&
+        CONNECT_REASONS.has(parsed.data.reason)
+        ? [row.id]
+        : [];
+    });
+    await supersedeActionApprovals(stale);
+  }
+  // The payload is frozen once asked (approvals are immutable), so a write
+  // with different text is its own request.
+  const id =
+    same?.id ??
+    (
+      await requestActionApproval({
+        agentId,
+        conversationId: origin.conversationId,
+        originTurnId: origin.turnId,
+        action: SLACK_ACCESS_ACTION,
+        payload,
+        summary: accessSummary(presence.agent.name, payload),
+      })
+    ).id;
+  const label = payload.conversationLabel ?? payload.conversationQuery;
+  return {
+    ok: true as const,
+    result: {
+      status: "needs_access",
+      reason: payload.reason,
+      ...(label && { conversation: label }),
+      accessRequestId: id,
+      note: accessNote(
+        payload.reason,
+        await userDisplayName(payload.readerUserId),
+      ),
+    },
+  };
+};
+
+/** The person asked for a conversation they haven't shared: find it in
+ * their own Slack first, so the card names the real conversation (and a
+ * name that matches nothing, or many, is answered now, not after a click). */
+const notSharedRequest = async (
+  presence: ToolPresence,
+  origin: { conversationId: string | null; turnId: string | null },
+  reader: { userId: string; externalUserId: string; mine: Mine },
+  kind: "read" | "write",
+  asked: Asked,
+  text?: string,
+) => {
+  let found: Picked<MyConversation>;
+  try {
+    found = await resolveOwnConversation(reader.mine, asked);
+  } catch (err) {
+    return {
+      ok: false as const,
+      error:
+        err instanceof ServiceError
+          ? err.message
+          : "Couldn't look up their Slack conversations right now.",
+    };
+  }
+  if (found.kind !== "one") {
+    return { ok: false as const, error: unresolved(found, asked, kind) };
+  }
+  return requestAccess(presence, reader.mine.token.agentId, origin, {
+    readerUserId: reader.userId,
+    readerExternalUserId: reader.externalUserId,
+    kind,
+    reason: "not_shared",
+    conversationQuery: asked.name,
+    conversationRef: asked.ref ?? found.item.ref,
+    conversationLabel: found.item.name,
+    ...(text && { text }),
+  });
+};
+
+/** The person completed Connect: their pending connect requests on this
+ * agent are done (a write-reconnect only when the new token can write). */
+const settleConnectRequests = async (
+  agentId: string,
+  userId: string,
+  canWrite: boolean,
+) => {
+  const pending = await db.actionApproval.findMany({
+    where: { agentId, action: SLACK_ACCESS_ACTION, status: "pending" },
+    select: { id: true, payload: true },
+  });
+  const settled = pending.flatMap((row) => {
+    const p = slackAccessPayloadSchema.safeParse(row.payload);
+    if (!p.success || p.data.readerUserId !== userId) return [];
+    if (p.data.reason === "not_connected") return [{ id: row.id, p: p.data }];
+    if (p.data.reason === "reconnect_for_write" && canWrite) {
+      return [{ id: row.id, p: p.data }];
+    }
+    return [];
+  });
+  // A write that was waiting on this connect (e.g. "send as me" picked on a
+  // choose-sender card) goes out now with its frozen text, or raises its
+  // next card (share / allow writing); its request settles saying which.
+  const ids: string[] = [];
+  for (const { id, p } of settled) {
+    if (p.kind !== "write" || !p.text || !p.conversationQuery || !canWrite) {
+      ids.push(id);
+      continue;
+    }
+    const origin = await db.actionApproval.findUnique({
+      where: { id },
+      select: { conversationId: true, originTurnId: true },
+    });
+    try {
+      const out = await sendAsUser({
+        agentId,
+        readerUserId: userId,
+        askerUserId: userId,
+        conversation: p.conversationQuery,
+        ...(p.conversationRef && { conversationRef: p.conversationRef }),
+        text: p.text,
+        originConversationId: origin?.conversationId ?? null,
+        originTurnId: origin?.originTurnId ?? null,
+        ...(p.consented && { consented: true }),
+      });
+      const status = out.ok ? out.result.status : null;
+      const where = p.conversationLabel ?? p.conversationQuery;
+      const note = !out.ok
+        ? `Slack connected, but the message was not sent: ${out.error}`
+        : status === "sent"
+          ? `Sent as you to ${where}: "${cleanLabel(p.text, 200)}"`
+          : status === "held"
+            ? "Slack connected; the message waits for your approval."
+            : "Slack connected; one more step is needed before it is sent.";
+      await resolveActionApprovals(
+        [id],
+        note,
+        !out.ok
+          ? {
+              resume: `Not sent to ${where}: ${out.error} Tell the person in one short line; never say it was sent.`,
+            }
+          : status === "sent"
+            ? {
+                resume: `Sent as you to ${where}: "${cleanLabel(p.text, 200)}". Already delivered: don't send it again. Confirm in one short line and continue the original request.`,
+              }
+            : { chained: true },
+      );
+    } catch (err) {
+      log.warn({ err, agentId }, "sending a connect-held write failed");
+      ids.push(id);
+    }
+  }
+  try {
+    await resolveActionApprovals(ids, "Slack connected; ask again");
+  } catch (err) {
+    log.warn({ err, agentId }, "settling connect requests failed");
+  }
+};
+
 /**
  * The `read_conversation` tool's body. Matches the model's name against the
- * agent's grants ONLY (never the workspace), applies the audience fence,
- * and reads with the GRANTER's token. A conversation the reader may not see
- * gets the same answer as one that does not exist.
+ * agent's grants ONLY (never the workspace), applies the granter fence and
+ * the read mode (never = invisible, ask = held for the granter), and reads
+ * with the GRANTER's token. A conversation the reader may not see gets the
+ * same answer as one that does not exist.
  */
 export const readConversation = async (
   input: ReadConversationInput,
 ): Promise<ReadConversationOutcome> => {
-  const presence = await db.agentChannel.findFirst({
-    where: { agentId: input.agentId, provider: "slack", status: "active" },
-    select: {
-      id: true,
-      identityRef: true,
-      credentials: true,
-      agent: {
-        select: { name: true, workspace: { select: { organizationId: true } } },
-      },
-    },
-  });
+  const presence = await toolPresence(input.agentId);
   if (!presence) {
     return { ok: false, error: "You have no active Slack app to read with." };
   }
-  await assertCanUseGranularAccess(presence.agent.workspace.organizationId);
 
+  const origin = {
+    conversationId: input.originConversationId ?? null,
+    turnId: input.originTurnId ?? null,
+  };
   const grants = await db.agentReadGrant.findMany({
     where: { userToken: { agentChannelId: presence.id } },
-    select: {
-      externalRef: true,
-      subjectLabel: true,
-      audience: true,
-      userToken: { select: { id: true, userId: true, credentials: true } },
-    },
+    select: toolGrantSelect,
   });
-  // The audience fence: "anyone" admits every turn, "granter_only" only
-  // the verified reader who granted it (null reader = a shared audience).
   const visible = grants.filter(
     (g) =>
-      g.audience === "anyone" ||
-      (input.readerUserId !== null &&
-        g.userToken.userId === input.readerUserId),
+      modeOf(g.readMode) !== "never" && granterAdmits(g, input.readerUserId),
   );
-  const nameOf = (g: (typeof visible)[number]) =>
-    g.subjectLabel ?? g.externalRef;
-  const asked = (input.conversation ?? "").trim();
-  const wanted = normalize(asked);
-  // No conversation named: list what THIS reader may read (the audience
-  // fence already applied, so nobody learns of a share they can't use).
-  if (!wanted) {
+  const asked: Asked = {
+    name: (input.conversation ?? "").trim(),
+    exact: false,
+  };
+  const named = normalize(asked.name) !== "";
+  // The verified person asking, in their own private chat: a missing
+  // connection or share is a card for them, never a dead end.
+  if (input.readerUserId !== null) {
+    const reader = await readerToken(
+      presence,
+      input.agentId,
+      input.readerUserId,
+    );
+    if (!reader?.mine) {
+      return requestAccess(presence, input.agentId, origin, {
+        readerUserId: input.readerUserId,
+        readerExternalUserId: reader?.row.externalUserId ?? null,
+        kind: "read",
+        reason: "not_connected",
+        conversationQuery: named ? asked.name : null,
+        conversationRef: null,
+        conversationLabel: null,
+      });
+    }
+    const own = grants.filter((g) => granterAdmits(g, input.readerUserId));
+    if (named && !matchGrant(own, asked)) {
+      return notSharedRequest(
+        presence,
+        origin,
+        {
+          userId: input.readerUserId,
+          externalUserId: reader.row.externalUserId,
+          mine: reader.mine,
+        },
+        "read",
+        asked,
+      );
+    }
+  } else if (named) {
+    return { ok: false, error: await privateChatOnly(input.askerUserId) };
+  }
+  // No conversation named: list what THIS reader may read (the fences
+  // already applied, so nobody learns of a share they can't use).
+  if (!named) {
     return {
       ok: true,
       result: {
-        readable: visible.map(nameOf),
+        readable: visible.map(grantName),
         note:
           visible.length > 0
             ? "Call read_conversation again with one of these names."
-            : "Nothing has been shared for you to read here.",
+            : input.readerUserId === null
+              ? "Nothing is readable here: reading as someone works only in their own private chat with you (the web chat or a DM with you)."
+              : "Nothing has been shared for you to read here. Call read_conversation with a conversation name to ask them for access.",
       },
     };
   }
-  // Exact id or name first; then a unique partial match ("notif" finds
-  // "#notifications"), so a near-miss name still reads instead of failing.
-  const exact = visible.find(
-    (g) =>
-      g.externalRef === asked ||
-      (g.subjectLabel !== null && normalize(g.subjectLabel) === wanted),
-  );
-  const partial = exact
-    ? []
-    : visible.filter(
-        (g) =>
-          g.subjectLabel !== null && normalize(g.subjectLabel).includes(wanted),
-      );
-  const grant = exact ?? (partial.length === 1 ? partial[0] : undefined);
+  const grant = matchGrant(visible, asked);
   if (!grant) {
-    const names = visible.map(nameOf);
+    const names = visible.map(grantName);
     return {
       ok: false,
-      error: `You don't have read access to ${asked} in this conversation.${
+      error: `You don't have read access to ${asked.name} in this conversation.${
         names.length > 0
           ? ` Conversations you may read here: ${names.join(", ")}.`
           : " You have no readable conversations here."
-      } Access is granted per conversation by people who connected their Slack on the agent's Slack page.`,
+      } Access is granted per conversation by people who connected their Slack in the agent's Contacts ("acts as you").`,
     };
   }
-  const label = nameOf(grant);
+  const params: ReadParams = {
+    ...(input.sinceHours !== undefined && { sinceHours: input.sinceHours }),
+    ...(input.threadRef && { threadRef: input.threadRef }),
+    ...(input.before && { before: input.before }),
+    ...(input.limit !== undefined && { limit: input.limit }),
+  };
+  if (modeOf(grant.readMode) === "ask") {
+    const label = grantName(grant);
+    await requestActionApproval({
+      agentId: input.agentId,
+      conversationId: input.originConversationId ?? null,
+      originTurnId: input.originTurnId ?? null,
+      action: SLACK_READ_ACTION,
+      payload: {
+        grantId: grant.id,
+        granterUserId: grant.userToken.userId,
+        granterExternalUserId: grant.userToken.externalUserId,
+        readerUserId: input.readerUserId,
+        ...params,
+      },
+      summary: `Read ${label} as ${granterName(grant)}`,
+    });
+    return {
+      ok: true,
+      result: {
+        status: "held",
+        conversation: label,
+        note: `Reading ${label} needs your approval each time, you (${granterName(grant)}): a card in this chat asks you. The messages arrive as a notice in this conversation once you approve. Address the person as "you", never "them". If you mention it, one short line; don't explain the approval process.`,
+      },
+    };
+  }
+  return performRead(presence, grant, input.agentId, params);
+};
+
+interface ReadParams {
+  sinceHours?: number;
+  threadRef?: string;
+  before?: string;
+  limit?: number;
+}
+
+/** The read itself, with the granter's token (after every fence). */
+const performRead = async (
+  presence: ToolPresence,
+  grant: ToolGrant,
+  agentId: string,
+  params: ReadParams,
+): Promise<ReadConversationOutcome> => {
+  const input = { agentId, ...params };
+  const label = grantName(grant);
 
   const accessToken = await decryptUserToken(grant.userToken.credentials);
   if (!accessToken) {
@@ -1094,6 +1755,982 @@ export const readConversation = async (
     },
   };
 };
+
+// ── Send as the person ─────────────────────────────────────────────────────
+
+type SendInput = Parameters<ConversationSender["send"]>[0];
+type SendOutcome = Awaited<ReturnType<ConversationSender["send"]>>;
+
+/** Audit one send as the granter (never the text: it is their message). */
+const auditSend = async (
+  grant: ToolGrant,
+  agentId: string,
+  outcome: "sent" | "held",
+  approvalId?: string,
+) => {
+  const workspace = await db.agent.findUnique({
+    where: { id: agentId },
+    select: { workspaceId: true },
+  });
+  if (!workspace) return;
+  await recordAuditEvent({
+    workspaceId: workspace.workspaceId,
+    userId: grant.userToken.userId,
+    userEmail: grant.userToken.user.email,
+    action: AUDIT_ACTIONS.CREATE,
+    service: AUDIT_SERVICES.CHANNEL,
+    source: AUDIT_SOURCE.API,
+    metadata: {
+      agentId,
+      viaAgent: "true",
+      sendAsUser: outcome,
+      readGrantId: grant.id,
+      conversationRef: grant.externalRef,
+      writeMode: modeOf(grant.writeMode),
+      ...(approvalId && { actionApprovalId: approvalId }),
+    },
+  });
+};
+
+/**
+ * The person's message as Slack text: the markdown renderer the agent's own
+ * posts use (everything escaped, so no raw `<@…>` / `<!channel>` from the
+ * model), with `@[Name]` tokens resolved the way send_message resolves them
+ * (anchors, then linked teammates) into real mentions. The agent's contact
+ * blocks do NOT apply: this is the person's own message under their own
+ * Slack. Unresolved tokens read as `@Name`.
+ */
+const renderAsPersonText = async (
+  agentId: string,
+  text: string,
+  conversationId: string | null,
+): Promise<string> => {
+  const names = mentionNamesOf(text);
+  const presence =
+    names.length > 0
+      ? await db.agentChannel.findFirst({
+          where: { agentId, provider: "slack", status: "active" },
+          select: { id: true },
+        })
+      : null;
+  const mentions = new Map<string, string>();
+  if (presence) {
+    for (const r of await resolveMentionNames(
+      presence.id,
+      names,
+      conversationId ?? undefined,
+    )) {
+      if (r.kind === "resolved") mentions.set(r.name, r.externalUserId);
+    }
+  }
+  return markdownToMrkdwn(text, { mentions });
+};
+
+/** Post with the granter's token. Throws a model-readable Error. */
+const postAsGranter = async (
+  grant: ToolGrant,
+  agentId: string,
+  text: string,
+  conversationId: string | null = null,
+) => {
+  const label = grantName(grant);
+  const credential = await decryptUserCredential(grant.userToken.credentials);
+  if (!credential?.scopes.includes(WRITE_SCOPE)) {
+    throw new Error(
+      `${granterName(grant)} must reconnect their Slack before the agent can send as them.`,
+    );
+  }
+  let ts: string;
+  try {
+    ({ ts } = await postMessage(credential.accessToken, {
+      channel: grant.externalRef,
+      text: await renderAsPersonText(agentId, text, conversationId),
+    }));
+  } catch (err) {
+    if (await dropDeadToken({ id: grant.userToken.id, agentId }, err)) {
+      throw new Error(
+        `Sending to ${label} ended: ${granterName(grant)}'s Slack connection is gone.`,
+      );
+    }
+    const code = readFailureCode(err);
+    log.warn(
+      { err, agentId, conversationRef: grant.externalRef, code },
+      "send_as_me provider post failed",
+    );
+    throw new Error(`Couldn't send to ${label} (Slack: ${code}).`);
+  }
+  // The record is what edit/delete may later touch. A failed write here
+  // must not report a sent message as unsent: log and carry on.
+  try {
+    await db.agentSentAsUser.create({
+      data: {
+        grantId: grant.id,
+        userTokenId: grant.userToken.id,
+        agentId,
+        channelRef: grant.externalRef,
+        messageTs: ts,
+      },
+    });
+  } catch (err) {
+    log.warn({ err, agentId }, "recording a send_as_me message failed");
+  }
+  return ts;
+};
+
+/** "Send as me" picked: resolve the conversation with THEIR token (it
+ * must be one they are in) and save it with writing allowed. */
+const consentToWrite = async (
+  mine: Mine,
+  userId: string,
+  asked: Asked,
+): Promise<{ ok: true; grant: ToolGrant } | { ok: false; error: string }> => {
+  const agentId = mine.token.agentId;
+  let found: Picked<MyConversation>;
+  try {
+    found = await resolveOwnConversation(mine, asked);
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof ServiceError
+          ? `${err.message} Nothing was sent.`
+          : "Couldn't look up their Slack conversations right now. Nothing was sent.",
+    };
+  }
+  if (found.kind !== "one") {
+    return { ok: false, error: unresolved(found, asked, "write") };
+  }
+  const saved = await saveGrant(mine.token.id, found.item, {
+    writeMode: "allow",
+  });
+  rerender(agentId);
+  const [workspace, user] = await Promise.all([
+    db.agent.findUnique({
+      where: { id: agentId },
+      select: { workspaceId: true },
+    }),
+    db.user.findUnique({ where: { id: userId }, select: { email: true } }),
+  ]);
+  if (workspace) {
+    await recordAuditEvent({
+      workspaceId: workspace.workspaceId,
+      userId,
+      userEmail: user?.email ?? "",
+      action: AUDIT_ACTIONS.UPDATE,
+      service: AUDIT_SERVICES.CHANNEL,
+      source: AUDIT_SOURCE.API,
+      metadata: {
+        agentId,
+        readGrantId: saved.id,
+        conversationRef: found.item.ref,
+        writeMode: "allow",
+        via: "choose_sender",
+      },
+    });
+  }
+  return {
+    ok: true,
+    grant: await db.agentReadGrant.findUniqueOrThrow({
+      where: { id: saved.id },
+      select: toolGrantSelect,
+    }),
+  };
+};
+
+/**
+ * Whether sending as a person is possible for this agent: a live Slack
+ * presence on a licensed org. The person's own connection is not checked
+ * (a choice to send as them chains the Connect card). Never throws.
+ */
+export const canSendAsUser = async (agentId: string): Promise<boolean> => {
+  try {
+    return (await toolPresence(agentId)) !== null;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * The `send_as_me` tool's body. Only the READER's OWN grants are
+ * targetable (a null reader, any shared conversation, refuses): the person
+ * is the one asking, in their own private thread or schedule, to speak as
+ * themselves. `allow` posts now; `ask` holds for their approval; `never`
+ * (or a token without chat:write) refuses.
+ */
+export const sendAsUser = async (input: SendInput): Promise<SendOutcome> => {
+  if (input.readerUserId === null) {
+    return {
+      ok: false,
+      error: `${await privateChatOnly(input.askerUserId)} Nothing was sent.`,
+    };
+  }
+  const presence = await toolPresence(input.agentId);
+  if (!presence) {
+    return { ok: false, error: "You have no active Slack app to send with." };
+  }
+  const origin = {
+    conversationId: input.originConversationId,
+    turnId: input.originTurnId,
+  };
+  // A write never guesses: an exact name, or the platform's resolved id.
+  const asked: Asked = {
+    name: input.conversation.trim(),
+    ...(input.conversationRef && { ref: input.conversationRef }),
+    exact: true,
+  };
+  const reader = await readerToken(presence, input.agentId, input.readerUserId);
+  const readerUserId = input.readerUserId;
+  const access = (
+    reason: SlackAccessReason,
+    conv: { ref: string; label: string } | null,
+  ) =>
+    requestAccess(presence, input.agentId, origin, {
+      readerUserId,
+      readerExternalUserId: reader?.row.externalUserId ?? null,
+      kind: "write",
+      reason,
+      conversationQuery: asked.name,
+      // The platform's resolved recipient wins: it is what a later card
+      // for the same send (or its undo) is matched on.
+      conversationRef: asked.ref ?? conv?.ref ?? null,
+      conversationLabel: conv?.label ?? null,
+      text: input.text,
+      ...(input.consented && { consented: true }),
+    });
+  if (!reader?.mine) return access("not_connected", null);
+  const mine = await db.agentReadGrant.findMany({
+    where: {
+      userToken: { agentChannelId: presence.id, userId: readerUserId },
+    },
+    select: toolGrantSelect,
+  });
+  let grant = matchGrant(mine, asked);
+  if (!reader.mine.canWrite) {
+    return access(
+      "reconnect_for_write",
+      grant ? { ref: grant.externalRef, label: grantName(grant) } : null,
+    );
+  }
+  if (input.consented && (!grant || modeOf(grant.writeMode) !== "allow")) {
+    // The pick is the consent: share (or upgrade) this one conversation
+    // with writing allowed, persisted, so later sends need no card.
+    const consented = await consentToWrite(
+      reader.mine,
+      readerUserId,
+      grant ? { name: grant.externalRef, exact: true } : asked,
+    );
+    if (!consented.ok) return consented;
+    grant = consented.grant;
+  }
+  if (!grant) {
+    return notSharedRequest(
+      presence,
+      origin,
+      {
+        userId: readerUserId,
+        externalUserId: reader.row.externalUserId,
+        mine: reader.mine,
+      },
+      "write",
+      asked,
+      input.text,
+    );
+  }
+  if (modeOf(grant.writeMode) === "never") {
+    return access("write_off", {
+      ref: grant.externalRef,
+      label: grantName(grant),
+    });
+  }
+  const label = grantName(grant);
+  if (modeOf(grant.writeMode) === "ask") {
+    const held = await requestActionApproval({
+      agentId: input.agentId,
+      conversationId: input.originConversationId,
+      originTurnId: input.originTurnId,
+      action: SLACK_SEND_ACTION,
+      payload: {
+        grantId: grant.id,
+        granterUserId: grant.userToken.userId,
+        granterExternalUserId: grant.userToken.externalUserId,
+        text: input.text,
+      },
+      summary: `Send to ${label} as ${granterName(grant)}: "${cleanLabel(input.text, 300)}"`,
+    });
+    await auditSend(grant, input.agentId, "held", held.id);
+    return {
+      ok: true,
+      result: {
+        status: "held",
+        conversation: label,
+        note: `A card in this chat asks you (${granterName(grant)}) to approve it; the decision arrives as a notice in this conversation. Address the person as "you", never "them" or the recipient. If you mention it, one short line; don't explain the approval process.`,
+      },
+    };
+  }
+  let messageId: string;
+  try {
+    messageId = await postAsGranter(
+      grant,
+      input.agentId,
+      input.text,
+      input.originConversationId,
+    );
+  } catch (err) {
+    return {
+      ok: false,
+      error: `${err instanceof Error ? err.message : String(err)} Nothing was sent.`,
+    };
+  }
+  await auditSend(grant, input.agentId, "sent");
+  return {
+    ok: true,
+    result: {
+      status: "sent",
+      conversation: label,
+      messageId,
+      note: `Sent to ${label} as ${granterName(grant)}.`,
+    },
+  };
+};
+
+// ── Edit / delete a message sent as the person ─────────────────────────────
+
+type OwnMessageInput = Parameters<ConversationSender["delete"]>[0];
+
+/** Audit one edit/delete as the granter (never the text). */
+const auditOwnMessage = async (
+  grant: ToolGrant,
+  agentId: string,
+  op: "edit" | "delete",
+  outcome: "done" | "held",
+  messageTs: string,
+  approvalId?: string,
+) => {
+  const workspace = await db.agent.findUnique({
+    where: { id: agentId },
+    select: { workspaceId: true },
+  });
+  if (!workspace) return;
+  await recordAuditEvent({
+    workspaceId: workspace.workspaceId,
+    userId: grant.userToken.userId,
+    userEmail: grant.userToken.user.email,
+    action: op === "edit" ? AUDIT_ACTIONS.UPDATE : AUDIT_ACTIONS.DELETE,
+    service: AUDIT_SERVICES.CHANNEL,
+    source: AUDIT_SOURCE.API,
+    metadata: {
+      agentId,
+      viaAgent: "true",
+      [op === "edit" ? "editAsUser" : "deleteAsUser"]: outcome,
+      readGrantId: grant.id,
+      conversationRef: grant.externalRef,
+      messageTs,
+      writeMode: modeOf(grant.writeMode),
+      ...(approvalId && { actionApprovalId: approvalId }),
+    },
+  });
+};
+
+/** The record of a message THIS agent sent as THIS person in THIS
+ * conversation, still inside the window. Null = not ours to touch. */
+const findOwnMessage = (
+  agentId: string,
+  grant: ToolGrant,
+  messageTs: string,
+  now: Date = new Date(),
+) =>
+  db.agentSentAsUser.findFirst({
+    where: {
+      agentId,
+      grantId: grant.id,
+      userTokenId: grant.userToken.id,
+      channelRef: grant.externalRef,
+      messageTs,
+      createdAt: { gte: new Date(now.getTime() - OWN_MESSAGE_WINDOW_MS) },
+    },
+    select: { id: true },
+  });
+
+/**
+ * The shared fence for edit/delete: a verified reader, their OWN grant for
+ * the named conversation, and a recorded send_as_me message by this agent
+ * with their token there in the last 24h. Anything else gets the same
+ * refusal (the message is not confirmed to exist).
+ */
+const resolveOwnMessage = async (
+  input: OwnMessageInput,
+  op: "edit" | "delete",
+): Promise<
+  | { kind: "done"; outcome: SendOutcome }
+  | { kind: "ok"; grant: ToolGrant; credential: { accessToken: string } }
+> => {
+  const nothing =
+    op === "edit" ? "Nothing was changed." : "Nothing was deleted.";
+  if (input.readerUserId === null) {
+    return {
+      kind: "done",
+      outcome: {
+        ok: false,
+        error: `${await privateChatOnly(input.askerUserId)} ${nothing}`,
+      },
+    };
+  }
+  const presence = await toolPresence(input.agentId);
+  if (!presence) {
+    return {
+      kind: "done",
+      outcome: { ok: false, error: "You have no active Slack app to use." },
+    };
+  }
+  const refuse = {
+    kind: "done" as const,
+    outcome: { ok: false as const, error: NOT_MY_MESSAGE },
+  };
+  const readerUserId = input.readerUserId;
+  const reader = await readerToken(presence, input.agentId, readerUserId);
+  if (!reader?.mine) return refuse;
+  const mine = await db.agentReadGrant.findMany({
+    where: {
+      userToken: { agentChannelId: presence.id, userId: readerUserId },
+    },
+    select: toolGrantSelect,
+  });
+  const asked: Asked = { name: input.conversation.trim(), exact: true };
+  const grant = matchGrant(mine, asked);
+  if (
+    !grant ||
+    !(await findOwnMessage(input.agentId, grant, input.messageId))
+  ) {
+    return refuse;
+  }
+  const origin = {
+    conversationId: input.originConversationId,
+    turnId: input.originTurnId,
+  };
+  const access = (reason: SlackAccessReason) =>
+    requestAccess(presence, input.agentId, origin, {
+      readerUserId,
+      readerExternalUserId: reader.row.externalUserId,
+      kind: "write",
+      reason,
+      conversationQuery: asked.name,
+      conversationRef: grant.externalRef,
+      conversationLabel: grantName(grant),
+      // No text: approving access must never post the edit as a NEW message.
+    });
+  if (!reader.mine.canWrite) {
+    return { kind: "done", outcome: await access("reconnect_for_write") };
+  }
+  if (modeOf(grant.writeMode) === "never") {
+    return { kind: "done", outcome: await access("write_off") };
+  }
+  return {
+    kind: "ok",
+    grant,
+    credential: { accessToken: reader.mine.accessToken },
+  };
+};
+
+/** Run a Slack write with the granter's token; model-readable errors. */
+const asGranter = async (
+  grant: ToolGrant,
+  agentId: string,
+  what: string,
+  run: (accessToken: string) => Promise<unknown>,
+) => {
+  const credential = await decryptUserCredential(grant.userToken.credentials);
+  if (!credential?.scopes.includes(WRITE_SCOPE)) {
+    throw new Error(
+      `${granterName(grant)} must reconnect their Slack before the agent can ${what} as them.`,
+    );
+  }
+  try {
+    await run(credential.accessToken);
+  } catch (err) {
+    if (await dropDeadToken({ id: grant.userToken.id, agentId }, err)) {
+      throw new Error(`${granterName(grant)}'s Slack connection is gone.`);
+    }
+    const code = readFailureCode(err);
+    log.warn(
+      { err, agentId, conversationRef: grant.externalRef, code },
+      `${what} as user failed`,
+    );
+    throw new Error(`Couldn't ${what} the message (Slack: ${code}).`);
+  }
+};
+
+const performEdit = (
+  grant: ToolGrant,
+  agentId: string,
+  messageTs: string,
+  text: string,
+  conversationId: string | null,
+) =>
+  asGranter(grant, agentId, "edit", async (token) =>
+    updateBlocksMessage(token, {
+      channel: grant.externalRef,
+      ts: messageTs,
+      text: await renderAsPersonText(agentId, text, conversationId),
+    }),
+  );
+
+const performDelete = async (
+  grant: ToolGrant,
+  agentId: string,
+  messageTs: string,
+) => {
+  await asGranter(grant, agentId, "delete", (token) =>
+    deleteMessage(token, { channel: grant.externalRef, ts: messageTs }),
+  );
+  await db.agentSentAsUser.deleteMany({
+    where: { channelRef: grant.externalRef, messageTs },
+  });
+};
+
+/** The message's current text (for the delete card), with the granter's
+ * token. Best effort: null when it can't be read. */
+const messageTextOf = async (
+  accessToken: string,
+  channel: string,
+  ts: string,
+): Promise<string | null> => {
+  try {
+    const page = await conversationsHistory(accessToken, {
+      channel,
+      latest: ts,
+      inclusive: true,
+      limit: 1,
+    });
+    const m = page.messages.find((x) => x.ts === ts);
+    return m?.text
+      ? cleanLabel(await decodeSlackTokens(m.text, async () => null), 300)
+      : null;
+  } catch (err) {
+    log.warn({ err, channel }, "reading a message to delete failed");
+    return null;
+  }
+};
+
+const heldOwnPayload = z.object({
+  grantId: z.string().min(1),
+  granterUserId: z.string().min(1),
+  granterExternalUserId: z.string().min(1),
+  messageTs: z.string().min(1),
+});
+const heldEditPayload = heldOwnPayload.extend({
+  text: z.string().min(1).max(4000),
+});
+
+/**
+ * The `edit_my_message` tool's body: allow edits now, ask holds for the
+ * person, never answers with an access card.
+ */
+export const editAsUser = async (
+  input: OwnMessageInput & { text: string },
+): Promise<SendOutcome> => {
+  const found = await resolveOwnMessage(input, "edit");
+  if (found.kind === "done") return found.outcome;
+  const { grant } = found;
+  const label = grantName(grant);
+  if (modeOf(grant.writeMode) === "ask") {
+    const held = await requestActionApproval({
+      agentId: input.agentId,
+      conversationId: input.originConversationId,
+      originTurnId: input.originTurnId,
+      action: SLACK_EDIT_ACTION,
+      payload: {
+        grantId: grant.id,
+        granterUserId: grant.userToken.userId,
+        granterExternalUserId: grant.userToken.externalUserId,
+        messageTs: input.messageId,
+        text: input.text,
+      },
+      summary: `Edit your message in ${label} to: "${cleanLabel(input.text, 300)}"`,
+    });
+    await auditOwnMessage(
+      grant,
+      input.agentId,
+      "edit",
+      "held",
+      input.messageId,
+      held.id,
+    );
+    return {
+      ok: true,
+      result: {
+        status: "held",
+        conversation: label,
+        messageId: input.messageId,
+        note: `A card in this chat asks you (${granterName(grant)}) to approve it; the decision arrives as a notice in this conversation. Address the person as "you", never "them". If you mention it, one short line.`,
+      },
+    };
+  }
+  try {
+    await performEdit(
+      grant,
+      input.agentId,
+      input.messageId,
+      input.text,
+      input.originConversationId,
+    );
+  } catch (err) {
+    return {
+      ok: false,
+      error: `${err instanceof Error ? err.message : String(err)} Nothing was changed.`,
+    };
+  }
+  await auditOwnMessage(grant, input.agentId, "edit", "done", input.messageId);
+  return {
+    ok: true,
+    result: {
+      status: "edited",
+      conversation: label,
+      messageId: input.messageId,
+      note: `Edited the message in ${label}.`,
+    },
+  };
+};
+
+/**
+ * The `delete_my_message` tool's body: ALWAYS held for the person (even
+ * with writing on allow); the card shows what would be deleted.
+ */
+export const deleteAsUser = async (
+  input: OwnMessageInput,
+): Promise<SendOutcome> => {
+  const found = await resolveOwnMessage(input, "delete");
+  if (found.kind === "done") return found.outcome;
+  const { grant } = found;
+  const label = grantName(grant);
+  const current = await messageTextOf(
+    found.credential.accessToken,
+    grant.externalRef,
+    input.messageId,
+  );
+  const held = await requestActionApproval({
+    agentId: input.agentId,
+    conversationId: input.originConversationId,
+    originTurnId: input.originTurnId,
+    action: SLACK_DELETE_ACTION,
+    payload: {
+      grantId: grant.id,
+      granterUserId: grant.userToken.userId,
+      granterExternalUserId: grant.userToken.externalUserId,
+      messageTs: input.messageId,
+    },
+    summary: current
+      ? `Delete your message in ${label}: "${current}"`
+      : `Delete your message in ${label}`,
+  });
+  await auditOwnMessage(
+    grant,
+    input.agentId,
+    "delete",
+    "held",
+    input.messageId,
+    held.id,
+  );
+  return {
+    ok: true,
+    result: {
+      status: "held",
+      conversation: label,
+      messageId: input.messageId,
+      note: `Deleting always needs your approval: a card in this chat asks you (${granterName(grant)}). Address the person as "you", never "them". The decision arrives as a notice in this conversation. If you mention it, one short line.`,
+    },
+  };
+};
+
+/** A held edit/delete, re-checked at decide time: the grant still theirs
+ * and writable, and the message still a recorded send of this agent. */
+const reloadOwnMessage = async (
+  agentId: string,
+  payload: z.infer<typeof heldOwnPayload>,
+) => {
+  const { grant } = await reloadHeldGrant(agentId, payload);
+  if (modeOf(grant.writeMode) === "never") {
+    throw new Error("Writing in this conversation is no longer allowed.");
+  }
+  if (!(await findOwnMessage(agentId, grant, payload.messageTs))) {
+    throw new Error("That message can no longer be changed.");
+  }
+  return grant;
+};
+
+/** A held grant, re-read at decide time: it must still exist on an active
+ * presence of THIS agent, still belong to the same granter, and still allow
+ * the action (a mode turned to never after the ask kills it). */
+const reloadHeldGrant = async (
+  agentId: string,
+  payload: { grantId: string; granterUserId: string },
+) => {
+  const presence = await toolPresence(agentId);
+  if (!presence) throw new Error("The agent's Slack app isn't active.");
+  const grant = await db.agentReadGrant.findFirst({
+    where: {
+      id: payload.grantId,
+      userToken: {
+        agentChannelId: presence.id,
+        userId: payload.granterUserId,
+      },
+    },
+    select: toolGrantSelect,
+  });
+  if (!grant) throw new Error("That conversation is no longer shared.");
+  return { presence, grant };
+};
+
+/** An approved read's result rides the outcome note; bounded so the note
+ * stays a context block, not a flood. */
+const HELD_READ_NOTE_MAX = 16_000;
+
+registerActionHandler(
+  SLACK_READ_ACTION,
+  async (approval) => {
+    const payload = heldReadPayload.parse(approval.payload);
+    const { presence, grant } = await reloadHeldGrant(
+      approval.agentId,
+      payload,
+    );
+    if (
+      modeOf(grant.readMode) === "never" ||
+      !granterAdmits(grant, payload.readerUserId)
+    ) {
+      throw new Error("Reading this conversation is no longer allowed.");
+    }
+    const outcome = await performRead(presence, grant, approval.agentId, {
+      ...(payload.sinceHours !== undefined && {
+        sinceHours: payload.sinceHours,
+      }),
+      ...(payload.threadRef && { threadRef: payload.threadRef }),
+      ...(payload.before && { before: payload.before }),
+      ...(payload.limit !== undefined && { limit: payload.limit }),
+    });
+    if (!outcome.ok) throw new Error(outcome.error);
+    return `The read result (JSON): ${JSON.stringify(outcome.result)}`.slice(
+      0,
+      HELD_READ_NOTE_MAX,
+    );
+  },
+  {
+    decidedBy: granterOf,
+    noteMaxChars: HELD_READ_NOTE_MAX,
+    resumeOnExecute: true,
+  },
+);
+
+/** A held send/edit/delete is about one message: the same person, the
+ * same conversation, and the same message (an edit/delete's ts, or a
+ * send's exact text). */
+const heldMessageKey = (payload: unknown) => {
+  const p = z
+    .object({
+      granterUserId: z.string(),
+      grantId: z.string(),
+      messageTs: z.string().optional(),
+      text: z.string().optional(),
+    })
+    .safeParse(payload);
+  return p.success
+    ? [
+        p.data.granterUserId,
+        p.data.grantId,
+        p.data.messageTs ?? `text:${p.data.text ?? ""}`,
+      ].join("|")
+    : null;
+};
+
+registerActionHandler(
+  SLACK_SEND_ACTION,
+  async (approval) => {
+    const payload = heldSendPayload.parse(approval.payload);
+    const { grant } = await reloadHeldGrant(approval.agentId, payload);
+    if (modeOf(grant.writeMode) === "never") {
+      throw new Error("Sending to this conversation is no longer allowed.");
+    }
+    await postAsGranter(
+      grant,
+      approval.agentId,
+      payload.text,
+      approval.conversationId,
+    );
+    await auditSend(grant, approval.agentId, "sent", approval.id);
+    return `Sent to ${grantName(grant)}.`;
+  },
+  {
+    decidedBy: granterOf,
+    resumeOnExecute: true,
+    supersedeKey: heldMessageKey,
+  },
+);
+
+registerActionHandler(
+  SLACK_EDIT_ACTION,
+  async (approval) => {
+    const payload = heldEditPayload.parse(approval.payload);
+    const grant = await reloadOwnMessage(approval.agentId, payload);
+    await performEdit(
+      grant,
+      approval.agentId,
+      payload.messageTs,
+      payload.text,
+      approval.conversationId,
+    );
+    await auditOwnMessage(
+      grant,
+      approval.agentId,
+      "edit",
+      "done",
+      payload.messageTs,
+      approval.id,
+    );
+    return `Edited the message in ${grantName(grant)}.`;
+  },
+  {
+    decidedBy: granterOf,
+    resumeOnExecute: true,
+    supersedeKey: heldMessageKey,
+  },
+);
+
+registerActionHandler(
+  SLACK_DELETE_ACTION,
+  async (approval) => {
+    const payload = heldOwnPayload.parse(approval.payload);
+    const grant = await reloadOwnMessage(approval.agentId, payload);
+    await performDelete(grant, approval.agentId, payload.messageTs);
+    await auditOwnMessage(
+      grant,
+      approval.agentId,
+      "delete",
+      "done",
+      payload.messageTs,
+      approval.id,
+    );
+    return `Deleted the message in ${grantName(grant)}.`;
+  },
+  {
+    decidedBy: granterOf,
+    resumeOnExecute: true,
+    supersedeKey: heldMessageKey,
+  },
+);
+
+registerActionHandler(
+  SLACK_ACCESS_ACTION,
+  async (approval) => {
+    const p = slackAccessPayloadSchema.parse(approval.payload);
+    if (CONNECT_REASONS.has(p.reason)) {
+      throw new Error("This request resolves when they connect their Slack.");
+    }
+    const presence = await toolPresence(approval.agentId);
+    if (!presence) throw new Error("The agent's Slack app isn't active.");
+    const reader = await readerToken(
+      presence,
+      approval.agentId,
+      p.readerUserId,
+    );
+    if (!reader?.mine) throw new Error("Their Slack isn't connected anymore.");
+    if (p.kind === "write" && !reader.mine.canWrite) {
+      throw new Error(NEEDS_RECONNECT_FOR_WRITE);
+    }
+    // Re-resolve with THEIR token now: it must still be one conversation
+    // they are in (never trust the frozen ref alone). A frozen id is the
+    // target; a bare name is a read's, matched as reads are.
+    const asked: Asked = p.conversationRef
+      ? { name: p.conversationRef, ref: p.conversationRef, exact: true }
+      : { name: p.conversationQuery ?? "", exact: p.kind === "write" };
+    const found = await resolveOwnConversation(reader.mine, asked);
+    if (found.kind !== "one") {
+      throw new Error(
+        found.kind === "none"
+          ? `No conversation of theirs matches ${p.conversationLabel ?? asked.name} anymore.`
+          : unresolved(found, asked, p.kind),
+      );
+    }
+    const saved = await saveGrant(
+      reader.row.id,
+      found.item,
+      p.kind === "read" ? { readMode: "allow" } : { writeMode: "allow" },
+    );
+    rerender(approval.agentId);
+    const grant = await db.agentReadGrant.findUniqueOrThrow({
+      where: { id: saved.id },
+      select: toolGrantSelect,
+    });
+    if (p.kind === "read") {
+      const outcome = await performRead(presence, grant, approval.agentId, {});
+      if (!outcome.ok) throw new Error(outcome.error);
+      return `Access granted. The read result (JSON): ${JSON.stringify(outcome.result)}`.slice(
+        0,
+        HELD_READ_NOTE_MAX,
+      );
+    }
+    if (!p.text) return `Writing in ${grantName(grant)} is now allowed.`;
+    await postAsGranter(
+      grant,
+      approval.agentId,
+      p.text,
+      approval.conversationId,
+    );
+    await auditSend(grant, approval.agentId, "sent", approval.id);
+    return {
+      note: `Writing allowed; sent to ${grantName(grant)}.`,
+      resume: `Sent as you to ${grantName(grant)}: "${cleanLabel(p.text, 200)}". Already delivered: don't send it again. Confirm in one short line and continue the original request.`,
+    };
+  },
+  {
+    decidedBy: (payload) => {
+      const p = slackAccessPayloadSchema.safeParse(payload);
+      return p.success
+        ? {
+            userId: p.data.readerUserId,
+            externalUserId: p.data.readerExternalUserId ?? "",
+          }
+        : null;
+    },
+    // A connect request can't be done from Slack: its DM card is a link to
+    // the agent's Contacts, which starts the connect flow on arrival.
+    dmLink: (payload, ctx) => {
+      const p = slackAccessPayloadSchema.safeParse(payload);
+      if (!p.success || !CONNECT_REASONS.has(p.data.reason)) return null;
+      return {
+        url: dashboardUrl(
+          `/agents/${encodeURIComponent(ctx.agentId)}/contacts?connect=slack`,
+          { workspaceId: ctx.workspaceId },
+        ),
+        label:
+          p.data.reason === "reconnect_for_write"
+            ? "Reconnect your Slack"
+            : "Connect your Slack",
+        note: "Connecting happens in OneCLI; the agent continues once you do.",
+      };
+    },
+    // Connect asks: one per person. Access asks: one per person, kind and
+    // conversation.
+    supersedeKey: (payload) => {
+      const p = slackAccessPayloadSchema.safeParse(payload);
+      if (!p.success) return null;
+      return CONNECT_REASONS.has(p.data.reason)
+        ? `${p.data.readerUserId}|connect`
+        : [
+            p.data.readerUserId,
+            "access",
+            p.data.kind,
+            p.data.conversationRef ?? normalize(p.data.conversationQuery ?? ""),
+          ].join("|");
+    },
+    approvable: (payload) => {
+      const p = slackAccessPayloadSchema.safeParse(payload);
+      return p.success && CONNECT_REASONS.has(p.data.reason)
+        ? "Connect your Slack from the card in the chat; this request completes when you do."
+        : true;
+    },
+    noteMaxChars: HELD_READ_NOTE_MAX,
+    // Connecting (or allowing) wakes the asking chat: the agent retries.
+    resumeOnExecute: true,
+  },
+);
 
 /**
  * Messages (oldest first) as the model reads them: author names resolved

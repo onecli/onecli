@@ -14,48 +14,52 @@ datasource db {
 // multiple organizations (today: one auto-created on signup; future: invited
 // to others, can create more). Workspaces under an org share its plan/quotas.
 model Organization {
-  id                  String   @id @default(uuid())
-  name                String
-  slug                String   @unique
-  stripeCustomerId    String?  @unique @map("stripe_customer_id")
-  subscriptionStatus  String   @default("free") @map("subscription_status")
+  id                           String   @id @default(uuid())
+  name                         String
+  slug                         String   @unique
+  stripeCustomerId             String?  @unique @map("stripe_customer_id")
+  subscriptionStatus           String   @default("free") @map("subscription_status")
   // Cloud-only (inert in OSS): ops-set per-org agent-cap override (SQL only,
   // no UI) — lets a self-serve org exceed its plan's maxAgents without moving
   // to the sales-managed enterprise plan. Null = plan default.
-  maxAgentsOverride   Int?     @map("max_agents_override")
+  maxAgentsOverride            Int?     @map("max_agents_override")
   // Cloud-only (inert in OSS): ops-set per-org seat-cap override (SQL only,
   // no UI) — the seat twin of maxAgentsOverride, for negotiated deals that
   // buy extra seats without moving to the sales-managed enterprise plan.
   // Null = plan default. Seats in use = members + pending invitations, so
   // this caps that same total.
-  maxMembersOverride  Int?     @map("max_members_override")
-  awsExternalId       String?  @map("aws_external_id")
+  maxMembersOverride           Int?     @map("max_members_override")
+  // Operator-managed sandbox defaults. Null inherits the runner's deployment profile.
+  sandboxCpuMillicoresOverride Int?     @map("sandbox_cpu_millicores_override")
+  sandboxMemoryMiBOverride     Int?     @map("sandbox_memory_mib_override")
+  sandboxHomeGiBOverride       Int?     @map("sandbox_home_gib_override")
+  awsExternalId                String?  @map("aws_external_id")
   // App-availability posture (step 7): "open" = every app connectable (default,
   // = today's behavior); "restricted" = allowlist — an app is available to a
   // workspace when an AppAvailabilityRule that grants it names one of the workspace's
   // WorkspaceAccess people. Cloud/EE-only (directory-dependent); inert in OSS.
-  appAvailabilityMode String   @default("open") @map("app_availability_mode") // "open" | "restricted"
+  appAvailabilityMode          String   @default("open") @map("app_availability_mode") // "open" | "restricted"
   // Cloud-only (inert in OSS): members of this org's verified domains must
   // sign in through the org's SSO connection (break-glass via
   // OrganizationMember.ssoExempt).
-  ssoRequired         Boolean  @default(false) @map("sso_required")
+  ssoRequired                  Boolean  @default(false) @map("sso_required")
   // Cloud-only (inert in OSS): first SSO login on a verified domain
   // auto-joins the org as a member.
-  jitEnabled          Boolean  @default(true) @map("jit_enabled")
+  jitEnabled                   Boolean  @default(true) @map("jit_enabled")
   // The org's creation world on the hosted cloud platform: false = hosted-only
   // creation (the default for every org), true = BYO-only creation (hosted
   // starts with an onboarding call). Set MANUALLY by the cloud operator —
   // never written by application code. Inert on self-host, where creation is
   // ungated in both directions.
-  byoLegacy           Boolean  @default(false) @map("byo_legacy")
+  byoLegacy                    Boolean  @default(false) @map("byo_legacy")
   // The MIXED creation world (only read when byoLegacy is false): hosted stays
   // the default door, and BYO creation is additionally allowed — the gradual
   // migration path for a legacy customer moving to hosted. byoLegacy=true wins
   // (this column is never consulted there). Set MANUALLY by the cloud
   // operator, like byoLegacy. Inert on self-host.
-  byoEnabled          Boolean  @default(false) @map("byo_enabled")
-  createdAt           DateTime @default(now()) @map("created_at")
-  updatedAt           DateTime @updatedAt @map("updated_at")
+  byoEnabled                   Boolean  @default(false) @map("byo_enabled")
+  createdAt                    DateTime @default(now()) @map("created_at")
+  updatedAt                    DateTime @updatedAt @map("updated_at")
 
   workspaces                   Workspace[]
   members                      OrganizationMember[]
@@ -369,7 +373,6 @@ model User {
   createdWebhooks               AgentWebhook[]                @relation("WebhookCreator")
   channelUserLinks              ChannelUserLink[]             @relation("ChannelUserLinkUser")
   decidedReachGrants            AgentReachGrant[]             @relation("ReachGrantDecider")
-  decidedAgentContacts          AgentContact[]                @relation("AgentContactDecider")
   channelUserTokens             AgentChannelUserToken[]       @relation("ChannelUserTokenOwner")
   decidedAgentLinksA            AgentLink[]                   @relation("AgentLinkDeciderA")
   decidedAgentLinksB            AgentLink[]                   @relation("AgentLinkDeciderB")
@@ -382,6 +385,7 @@ model User {
   skillsCreated                 Skill[]                       @relation("SkillCreator")
   processesCreated              SandboxProcess[]              @relation("ProcessCreator")
   sandboxPortsCreated           SandboxPort[]                 @relation("SandboxPortCreator")
+  homeGrowthOperations          SandboxHomeGrowthOperation[]
   desktopsControlled            DesktopSession[]              @relation("DesktopController")
   watchesCreated                ProcessWatch[]                @relation("WatchCreator")
   peerTasksCreated              PeerTask[]                    @relation("PeerTaskCreator")
@@ -390,6 +394,7 @@ model User {
   sessions                      Session[]
   accounts                      Account[]
   sshKeys                       UserSshKey[]
+  sendAsPreferences             AgentSendAsPreference[]
   provisionedAs                 UserProvision?                @relation("ProvisionedUser")
   createdProvisions             UserProvision[]               @relation("ProvisionCreator")
 
@@ -429,53 +434,57 @@ model ApiKey {
 // ── Workspace data (scoped by workspaceId) ──────────────────────────────────
 
 model Agent {
-  id            String    @id @default(uuid())
-  workspaceId   String    @map("workspace_id")
-  name          String
-  identifier    String // user-provided machine-readable ID, unique per workspace
-  accessToken   String    @unique @map("access_token") // "aoc_..." prefix, used for gateway auth
+  id                           String    @id @default(uuid())
+  workspaceId                  String    @map("workspace_id")
+  name                         String
+  identifier                   String // user-provided machine-readable ID, unique per workspace
+  accessToken                  String    @unique @map("access_token") // "aoc_..." prefix, used for gateway auth
   // DEPRECATED: never written anymore and surfaced nowhere. Kept nullable for
   // pre-v2 rows so /v1/container-config can resolve an unpinned machine to the
   // workspace's legacy default agent. New agents get NULL.
-  isDefault     Boolean?  @map("is_default")
+  isDefault                    Boolean?  @map("is_default")
   // "byo" (bring-your-own: laptops, CI) | "hosted" (a platform-run sandbox).
   // On the hosted cloud platform, which kind an org may CREATE is picked by
   // Organization.byoLegacy (the creation worlds); existing agents of either
   // kind keep working everywhere. Self-host creation is ungated.
-  kind          String    @default("byo") // "byo" | "hosted"
+  kind                         String    @default("byo") // "byo" | "hosted"
   // Hosted only — which harness adapter runs inside the sandbox. One value
   // today ("jcode"); the column is the seam that keeps a second adapter cheap.
-  harness       String?
+  harness                      String?
   // Hosted only — the user's model OVERRIDE, not "the model this agent runs".
   // Null is the normal, healthy state: the granted LLM key names a provider,
   // and that provider supplies the default (§3.10). The PROVIDER's own id
   // (`claude-sonnet-4-6`), never a harness alias — translating is the
   // adapter's job (§3.5).
-  model         String?
+  model                        String?
   // Which provider the override above belongs to, so a key swap can drop it
   // rather than point the agent at a model its new key cannot serve. Never
   // inferred from the id: harness catalogs carry ids like `opus-4.6` and
   // `gpt-oss-120b-medium` where a prefix rule gets the provider wrong.
   // Coherence with `model`/`effort` is enforced by a CHECK constraint in the
   // migration (Prisma cannot express it).
-  modelProvider String?   @map("model_provider")
+  modelProvider                String?   @map("model_provider")
   // Hosted only — the reasoning-effort override, on OUR scale (see
   // `AgentEffort`). Governed by the same `modelProvider` stamp as `model`.
-  effort        String?
+  effort                       String?
   // Hosted only — the per-agent brief (§3.11): the user-authored "what this
   // agent is for", rendered at the top of its generated CLAUDE.md/AGENTS.md.
-  instructions  String?
+  instructions                 String?
+  // Operator-managed per-field resource overrides for hosted agents.
+  sandboxCpuMillicoresOverride Int?      @map("sandbox_cpu_millicores_override")
+  sandboxMemoryMiBOverride     Int?      @map("sandbox_memory_mib_override")
+  sandboxHomeGiBOverride       Int?      @map("sandbox_home_gib_override")
   // The agent's avatar — raster bytes inline (the attachments precedent:
   // self-host's api container has no disk besides Postgres, and one capped
   // image per agent is tiny). `imageKey` is the unguessable serving token:
   // Slack fetches `icon_url` unauthenticated, so the public GET is fenced by
   // this 128-bit random key, rotated on every image change.
-  imageData     Bytes?    @map("image_data")
-  imageMime     String?   @map("image_mime")
-  imageKey      String?   @map("image_key")
-  createdAt     DateTime  @default(now()) @map("created_at")
-  updatedAt     DateTime  @updatedAt @map("updated_at")
-  workspace     Workspace @relation(fields: [workspaceId], references: [id])
+  imageData                    Bytes?    @map("image_data")
+  imageMime                    String?   @map("image_mime")
+  imageKey                     String?   @map("image_key")
+  createdAt                    DateTime  @default(now()) @map("created_at")
+  updatedAt                    DateTime  @updatedAt @map("updated_at")
+  workspace                    Workspace @relation(fields: [workspaceId], references: [id])
 
   policyRuleIdentities PolicyRuleIdentity[]
   sandbox              Sandbox?
@@ -493,11 +502,11 @@ model Agent {
   actionApprovals      ActionApproval[]
   sandboxPorts         SandboxPort[]
   desktopSession       DesktopSession?
-  contacts             AgentContact[]
-  linksAsA             AgentLink[]          @relation("AgentLinkA")
-  linksAsB             AgentLink[]          @relation("AgentLinkB")
-  peerTasks            PeerTask[]           @relation("PeerTaskOwner")
-  peerTasksAsPeer      PeerTask[]           @relation("PeerTaskPeer")
+  linksAsA             AgentLink[]             @relation("AgentLinkA")
+  linksAsB             AgentLink[]             @relation("AgentLinkB")
+  peerTasks            PeerTask[]              @relation("PeerTaskOwner")
+  peerTasksAsPeer      PeerTask[]              @relation("PeerTaskPeer")
+  sendAsPreferences    AgentSendAsPreference[]
 
   @@unique([workspaceId, identifier])
   @@index([workspaceId])
@@ -559,53 +568,60 @@ model RunnerReplica {
 // agent; the container is disposable, the home is durable behind the
 // opaque homeRef (§3.9's home seam — meaning is backend-defined).
 model Sandbox {
-  id              String    @id @default(uuid())
-  agentId         String    @unique @map("agent_id")
-  runnerId        String    @map("runner_id")
-  status          String    @default("unprovisioned") // "unprovisioned" | "starting" | "running" | "stopped" | "failed"
-  containerRef    String?   @map("container_ref")
-  homeRef         String?   @map("home_ref") // opaque, backend-defined (§3.9)
-  lastActiveAt    DateTime? @map("last_active_at")
+  id                       String    @id @default(uuid())
+  agentId                  String    @unique @map("agent_id")
+  runnerId                 String    @map("runner_id")
+  status                   String    @default("unprovisioned") // "unprovisioned" | "starting" | "running" | "stopped" | "failed"
+  containerRef             String?   @map("container_ref")
+  homeRef                  String?   @map("home_ref") // opaque, backend-defined (§3.9)
+  // Observed backend facts, never filled from desired defaults. Legacy stays unknown.
+  appliedCpuMillicores     Int?      @map("applied_cpu_millicores")
+  appliedMemoryMiB         Int?      @map("applied_memory_mib")
+  observedHomeBytes        BigInt?   @map("observed_home_bytes")
+  appliedResourceProfileId String?   @map("applied_resource_profile_id")
+  resourceObservedAt       DateTime? @map("resource_observed_at")
+  resourceContainerRef     String?   @map("resource_container_ref")
+  lastActiveAt             DateTime? @map("last_active_at")
   // The guest's listening TCP ports as port discovery last reported them
   // (plans/sandbox-ports.md §7): the runner forwards the supervisor's
   // `ports.state` as a `sandbox.ports` event, stamped with the container it
   // came from. Meaningful only while status = 'running' (a stopped box
   // listens on nothing; the start claim resets it).
-  listeningPorts  Int[]     @default([]) @map("listening_ports")
+  listeningPorts           Int[]     @default([]) @map("listening_ports")
   // Whether the sandbox's screen can be watched (hosted agent desktop): the
   // supervisor's `desktop.state` report, forwarded as the `sandbox.desktop`
   // event under the same stamping rule as the ports. NULL = not reported
   // (booting, or no hosted desktop); true = it can be watched; false = a
   // desktop nobody can watch, so the dashboard says so instead of waiting.
   // Meaningful only while status = 'running' (a stop resets it to NULL).
-  desktopViewable Boolean?  @map("desktop_viewable")
+  desktopViewable          Boolean?  @map("desktop_viewable")
   // A person restarted the agent ("Restart agent"), and the sandbox has not
   // started a fresh boot since. While set: a running box is stopped at once
   // (ahead of the idle window and keep-awake), no turn is dispatched to it,
   // and no session ref it reports is persisted, so nothing from the
   // pre-restart boot can leak into the fresh one. The next start claim
   // clears it.
-  stopRequestedAt DateTime? @map("stop_requested_at")
+  stopRequestedAt          DateTime? @map("stop_requested_at")
   // The engagement clock (the 12h background-only cap, due-work): the last
   // moment a PERSON or a TURN touched this sandbox — a message, a turn
   // event, preview/desktop/SSH use. Deliberately NOT `lastActiveAt`, which
   // every boot and ready report also stamps: the cap must measure time since
   // somebody wanted the box, not since it last came up. Null until the first
   // engagement, which the cap treats as "never" (no hold without it).
-  lastEngagedAt   DateTime? @map("last_engaged_at")
+  lastEngagedAt            DateTime? @map("last_engaged_at")
   // Why the control plane is taking this sandbox down, stamped by the claim
   // that moved it to `stopping` and cleared by the next start claim:
   // "idle" | "cap" | "evict" | "restart". The lost sweep reads it to tell a
   // PARKED process (the platform chose to sleep: a quiet notice) from a
   // LOST one (the container died: a wake). Null = not a control-plane stop.
-  stopReason      String?   @map("stop_reason")
+  stopReason               String?   @map("stop_reason")
   // Why the sandbox is being woken, set by the door that flips a parked row
   // to `unprovisioned` and cleared by the supervisor's ready report (the
   // start claim leaves it: the payload is composed after the claim and
   // reads it): "preview" = a person opened a preview link, so the start
   // payload carries the shares' relaunch commands. Null = any other wake
   // (a message, a schedule, SSH): the apps stay down and the wake stays fast.
-  wakeReason      String?   @map("wake_reason")
+  wakeReason               String?   @map("wake_reason")
 
   // The home projection's sync clock (step 9). `desired` is bumped by
   // any write that changes the materialized file set (skills, memory, brief,
@@ -620,6 +636,29 @@ model Sandbox {
   homeDesiredGeneration Int       @default(1) @map("home_desired_generation")
   homeAppliedGeneration Int       @default(0) @map("home_applied_generation")
   homeSyncClaimedAt     DateTime? @map("home_sync_claimed_at")
+
+  // The resource reconciliation clock, used by a hosted deployment's
+  // sandbox-lifecycle extension (inert on self-host, where every column
+  // stays at its default). A managed home always has a finite recurring
+  // deadline; the extension claims pages ordered by it and the claim
+  // advances it in the same transaction, converged, busy and blocked rows
+  // alike. NULL means "not managed" (legacy, or a backend that never
+  // advertised resource support), never "due now".
+  // `resourceDesiredGeneration` is bumped when discovery resolves a profile
+  // different from the last one it recorded; `resourceObservedGeneration`
+  // is set by the extension's completion receipt, so a reader can tell
+  // "processed" from "stale" (the observedGeneration convention; same shape
+  // as the home sync clock above). `resourceReconcileReason` is the
+  // consumed pending reason (`waiting_for_idle`, `waiting_for_capacity`,
+  // `unsupported_target`, `blocked_invalid_override`, …) and
+  // `resourceReconcileAttempts` paces the per-row exponential backoff of a
+  // blocked row so one poison row never starves the page.
+  resourceReconcileAfter     DateTime? @map("resource_reconcile_after")
+  resourceReconcileReason    String?   @map("resource_reconcile_reason")
+  resourceReconcileAttempts  Int       @default(0) @map("resource_reconcile_attempts")
+  resourceDesiredGeneration  Int       @default(1) @map("resource_desired_generation")
+  resourceObservedGeneration Int       @default(0) @map("resource_observed_generation")
+  resourceDesiredProfileId   String?   @map("resource_desired_profile_id")
 
   // The supervisor's control channel: where it is, so any runner copy can
   // accept it and only the copy holding it is handed socket-bound work.
@@ -644,19 +683,99 @@ model Sandbox {
   // fresh sandbox, or a single-process runner).
   ownerReplicaId String? @map("owner_replica_id")
 
-  createdAt      DateTime         @default(now()) @map("created_at")
-  updatedAt      DateTime         @updatedAt @map("updated_at")
-  agent          Agent            @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  runner         Runner           @relation(fields: [runnerId], references: [id])
-  channelReplica RunnerReplica?   @relation("SandboxChannelReplica", fields: [channelReplicaId], references: [id], onDelete: SetNull)
-  ownerReplica   RunnerReplica?   @relation("SandboxOwnerReplica", fields: [ownerReplicaId], references: [id], onDelete: SetNull)
-  processes      SandboxProcess[]
-  sshSessions    SshSession[]
+  createdAt                   DateTime                     @default(now()) @map("created_at")
+  updatedAt                   DateTime                     @updatedAt @map("updated_at")
+  agent                       Agent                        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  runner                      Runner                       @relation(fields: [runnerId], references: [id])
+  channelReplica              RunnerReplica?               @relation("SandboxChannelReplica", fields: [channelReplicaId], references: [id], onDelete: SetNull)
+  ownerReplica                RunnerReplica?               @relation("SandboxOwnerReplica", fields: [ownerReplicaId], references: [id], onDelete: SetNull)
+  processes                   SandboxProcess[]
+  activeHomeGrowthOperationId String?                      @map("active_home_growth_operation_id")
+  // The composite FK (`id, sandboxId`) pins the active operation to THIS
+  // sandbox. `Restrict` is on the operation side: an operation row cannot
+  // be deleted while a sandbox names it active. The SANDBOX's own delete
+  // is not held by it (deliberate): the operation cascades with its
+  // sandbox (`SandboxHomeGrowthHistory` below), so an agent deleted
+  // mid-operation takes its operation rows with it; the operation's story
+  // survives in the audit_logs rows written at each transition, and the
+  // extension that runs the operation settles it on its own record.
+  activeHomeGrowthOperation   SandboxHomeGrowthOperation?  @relation("ActiveSandboxHomeGrowth", fields: [activeHomeGrowthOperationId, id], references: [id, sandboxId], onDelete: Restrict)
+  homeGrowthOperations        SandboxHomeGrowthOperation[] @relation("SandboxHomeGrowthHistory")
+  sshSessions                 SshSession[]
 
   @@index([runnerId])
   @@index([channelReplicaId])
   @@index([ownerReplicaId])
+  @@index([runnerId, resourceReconcileAfter])
   @@map("sandboxes")
+}
+
+// ── Sandbox home operations ──────────────────────────────────────────────
+// A hosted deployment's sandbox-lifecycle extension records the provisioning
+// and growth of a managed home here; a self-host never writes a row. An
+// immutable id / attempt / target / expected backend attempt identify every
+// retry, so a retry can never become a second physical operation.
+model SandboxHomeGrowthOperation {
+  id                        String    @id @default(uuid())
+  sandboxId                 String    @map("sandbox_id")
+  attemptId                 String    @default(uuid()) @map("attempt_id")
+  expectedAttemptId         String    @map("expected_attempt_id")
+  // The operator who queued it. Nulled when that account is deleted: the
+  // operation is immutable history the sandbox keeps; attribution survives in
+  // the audit log rows written at each transition.
+  requestedByUserId         String?   @map("requested_by_user_id")
+  requestedBy               User?     @relation(fields: [requestedByUserId], references: [id], onDelete: SetNull)
+  targetGiB                 Int       @map("target_gib")
+  // Frozen on the first claim, then replayed byte-for-byte across retries.
+  resources                 Json?
+  state                     String    @default("queued")
+  claimedAt                 DateTime? @map("claimed_at")
+  observedDeviceBytes       BigInt?   @map("observed_device_bytes")
+  observedFilesystemBytes   BigInt?   @map("observed_filesystem_bytes")
+  archiveSha256             String?   @map("archive_sha256")
+  reason                    String?
+  // One operation table, kind discriminated. `provision` is the immutable
+  // birth intent written at sandbox creation (initiator `system`); `grow`
+  // is a later desired-mismatch operation. `desiredSnapshot` freezes the
+  // resolved profile, the override axes and the baseline source at the
+  // moment the operation was admitted and is never rewritten.
+  // `enrollmentGeneration` / `enrollmentRef` bind the operation to the exact
+  // enrollment the extension reported; `expectedRevision` is the CAS token
+  // every receipt must carry; `idempotencyKey` makes the create idempotent
+  // per sandbox; `claimedBy` / `claimExpiresAt` are the extension's work
+  // claim (an expired claim permits retry only, never a new physical
+  // operation).
+  kind                      String    @default("grow")
+  initiator                 String    @default("user")
+  desiredSnapshot           Json?     @map("desired_snapshot")
+  enrollmentGeneration      Int?      @map("enrollment_generation")
+  enrollmentRef             String?   @map("enrollment_ref")
+  expectedRevision          Int       @default(0) @map("expected_revision")
+  idempotencyKey            String?   @map("idempotency_key")
+  claimedBy                 String?   @map("claimed_by")
+  claimExpiresAt            DateTime? @map("claim_expires_at")
+  // The extension's provisional reservation receipt and the desired
+  // generation it was admitted against: typed, so an idempotent replay can
+  // compare the WHOLE request and a reader never parses a reason string.
+  reservationNodeUid        String?   @map("reservation_node_uid")
+  reservationReceipt        String?   @map("reservation_receipt")
+  admittedDesiredGeneration Int?      @map("admitted_desired_generation")
+  // WHY a provision failed, one of the typed reasons the extension's receipt
+  // names; null on every other row and state. Typed so the api's own
+  // re-record rule and an operator read the same word, never a free-text
+  // `reason`. Additive, nullable.
+  failure                   String?
+  createdAt                 DateTime  @default(now()) @map("created_at")
+  updatedAt                 DateTime  @updatedAt @map("updated_at")
+  sandbox                   Sandbox   @relation("SandboxHomeGrowthHistory", fields: [sandboxId], references: [id], onDelete: Cascade)
+  activeForSandbox          Sandbox[] @relation("ActiveSandboxHomeGrowth")
+
+  @@unique([id, sandboxId])
+  @@unique([sandboxId, idempotencyKey])
+  @@index([sandboxId, state, createdAt])
+  @@index([state, claimedAt])
+  @@index([kind, state, claimedAt])
+  @@map("sandbox_home_growth_operations")
 }
 
 // ── Background processes + watches (plans/hosted-agents-v2.md step 10, §3.9) ──
@@ -1036,6 +1155,12 @@ model Turn {
   // the platform never parses it, it only hands it back to the provider that
   // minted it.
   sourceThreadId String? @map("source_thread_id")
+  // The provider event that created this turn, when a channel door did
+  // (door-stamped and provider-opaque, like `sourceThreadId`). It is how a
+  // redelivered event whose first processing died after the turn landed
+  // finds that turn instead of creating a second one
+  // (`ChannelIngestedEvent`). Null for every turn no channel event created.
+  sourceEventId  String? @map("source_event_id")
   // Set when someone asks an in-flight turn to stop. The turn stays active
   // until the sandbox confirms — a request is not an outcome, and a sandbox
   // that never answers is recovered by the stale-turn sweep instead.
@@ -1112,6 +1237,8 @@ model Turn {
   @@index([conversationId, createdAt])
   @@index([status, updatedAt])
   @@index([followUpOfTurnId])
+  // A taken-over event looks up the turn its dead holder created.
+  @@index([sourceEventId])
   @@map("turns")
 }
 
@@ -1465,18 +1592,21 @@ model Skill {
   @@map("skills")
 }
 
-// Extra files of one skill (references, templates) — the repo's first
-// multi-file content, deliberately a child table rather than a Json blob.
-// `path` is RELATIVE under .agents/skills/<name>/, ≤2 segments, each
-// starting [a-z0-9] (".." and absolute paths are unrepresentable by the
-// validation pattern; the composer re-verifies containment as the braces).
-// "skill.md" is refused — it collides with the rendered SKILL.md on
-// case-insensitive filesystems.
+// Files of one skill beyond SKILL.md: references, playbooks, scripts, data.
+// `path` is RELATIVE under .agents/skills/<name>/ (depth and characters per
+// SKILL_FILE_PATH_PATTERN; ".." and absolute paths are unrepresentable; the
+// composer re-verifies containment as the braces). "skill.md" is refused:
+// it collides with the rendered SKILL.md on case-insensitive filesystems.
+// Text lives in `content`; a binary file (an image, a PDF) lives in `data`
+// with `content` empty. `executable` files land runnable (0555) in the
+// sandbox, so a skill's `./run` works as written.
 model SkillFile {
-  id      String @id @default(uuid())
-  skillId String @map("skill_id")
-  path    String
-  content String // ≤24_000; counted into MAX_SKILL_TOTAL_CHARS
+  id         String  @id @default(uuid())
+  skillId    String  @map("skill_id")
+  path       String
+  content    String
+  data       Bytes?
+  executable Boolean @default(false)
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -1758,6 +1888,7 @@ model AgentChannel {
   apiKey              ApiKey?                     @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
   threadLinks         ChannelThreadLink[]
   ingestedEvents      ChannelIngestedEvent[]
+  inboundEvents       ChannelInboundEvent[]
   toolApprovalCards   ToolApprovalCard[]
   turnReceipts        ChannelTurnReceipt[]
   userTokens          AgentChannelUserToken[]
@@ -1906,8 +2037,9 @@ model ActionApproval {
 //
 // Keyed by (agent, integration, kind, externalRef) - NOT by agentChannelId -
 // so a presence detach/re-attach never silently wipes decided grants.
-// Precedence law (reserved for person rows): a person-level denied/blocked
-// beats a space-level approved.
+// One setting per surface: a space row decides its channel, a person row
+// (`external_user`) decides that person's direct messages and the agent's
+// own messages to them. Neither reaches into the other.
 model AgentReachGrant {
   // Monotonic optimistic-concurrency fence, including same-state decisions.
   revision      Int     @default(0)
@@ -1915,15 +2047,15 @@ model AgentReachGrant {
   agentId       String  @map("agent_id")
   integrationId String  @map("integration_id")
   provider      String // "slack"
-  // "space" = a whole group surface (Slack: a channel); "external_user" is
-  // the reserved person kind (the knock) - nothing writes it yet.
+  // "space" = a whole group surface (Slack: a channel); "external_user" = one
+  // person (the DM knock, or the agent's first message to them).
   subjectKind   String  @map("subject_kind")
   // Provider-opaque subject address (Slack space rows: the channel id).
   externalRef   String  @map("external_ref")
   // Display-only label captured at create (Slack: "#channel-name"); never
   // used for matching - names rename, ids don't.
   subjectLabel  String? @map("subject_label")
-  state         String  @default("pending") // "pending" | "approved" | "denied" | "revoked"
+  state         String  @default("pending") // "pending" | "approved" | "blocked" | "left" | "expired"
   // Space grants only: what the agent HEARS in this channel. "mentions" =
   // only @mentions and threads it joined (the default). "all" = every
   // message (the channel's "point of contact"): it decides when to reply.
@@ -1980,64 +2112,77 @@ model AgentChannelUserToken {
 // private channel, DM, or group DM they are in). NO row = no read. The
 // granter is the token owner by construction (the FK), so nobody can grant
 // what they cannot see, and disconnecting deletes every grant (Cascade).
-// `audience` is the leak fence: "granter_only" = readable only in the
-// granter's own direct thread or their schedules; "anyone" = in any turn.
+// The leak fence: a grant is readable/sendable ONLY in a turn whose verified
+// reader is the granter (their own direct thread or their own schedule).
 // Enforced server-side at read time, never in the prompt.
 model AgentReadGrant {
-  id           String   @id @default(uuid())
-  userTokenId  String   @map("user_token_id")
+  id             String   @id @default(uuid())
+  userTokenId    String   @map("user_token_id")
   // "channel" | "private_channel" | "dm" | "group_dm" - display + audit.
-  subjectKind  String   @map("subject_kind")
+  subjectKind    String   @map("subject_kind")
   // Provider conversation id (Slack: C…/G…/D…) - the identity key.
-  externalRef  String   @map("external_ref")
+  externalRef    String   @map("external_ref")
   // Display-only label captured from the provider at grant time.
-  subjectLabel String?  @map("subject_label")
-  audience     String   @default("granter_only")
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
+  subjectLabel   String?  @map("subject_label")
+  // DM only: the other person's provider user id (Slack U…), so the
+  // dashboard can show the share under that person's Contacts row. Null for
+  // channels, group DMs, and DMs shared before this column existed.
+  counterpartRef String?  @map("counterpart_ref")
+  // "allow" | "ask" | "never": may the agent read this conversation as the
+  // granter (ask = an approval per read, decided by the granter).
+  readMode       String   @default("allow") @map("read_mode")
+  // "allow" | "ask" | "never": may the agent SEND here as the granter
+  // (send_as_me). Needs a token carrying chat:write.
+  writeMode      String   @default("never") @map("write_mode")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
 
-  userToken AgentChannelUserToken @relation(fields: [userTokenId], references: [id], onDelete: Cascade)
+  userToken  AgentChannelUserToken @relation(fields: [userTokenId], references: [id], onDelete: Cascade)
+  sentAsUser AgentSentAsUser[]
 
   @@unique([userTokenId, externalRef])
   @@map("agent_read_grants")
 }
 
-// The agent's OUTBOUND address book — who it may proactively message
-// (send_message, 4c). One row per recipient the owner has decided about;
-// NO row means the default: `ask` (every send holds for an action
-// approval). `allow` is the "always allow" upgrade — the card's third
-// button or a dashboard flip. Vocabulary: this is a standing GRANT in the
-// outbound direction (the reach grant's twin); the per-send one-shot stays
-// `action_approvals`.
-//
-// `blocked` (4e) is the owner's standing NO — the per-recipient override:
-// refuses sends before any card AND degrades the recipient's @[mention]
-// to plain text (the block must stop pings too, or it is not a block).
-model AgentContact {
-  id          String @id @default(uuid())
-  agentId     String @map("agent_id")
-  // "person" | "channel" | "app" (4e). Part of the identity key: a user
-  // id and a channel id live in different provider namespaces.
-  kind        String
-  // Provider-opaque recipient address (Slack: U…/W… user id or C… channel
-  // id) — the identity key, never the name (names rename, ids don't).
-  externalRef String @map("external_ref")
-  // Display-only label captured at decision time (the reach grant's
-  // subjectLabel rule) — shown on dashboards, never matched on.
-  displayName String @map("display_name")
-  // "ask" (hold each send for approval) | "allow" (send directly) |
-  // "blocked" (refuse sends, degrade mentions — the standing no).
-  policy      String @default("ask")
+// One message the agent posted AS a person (send_as_me): the ONLY messages
+// edit_my_message / delete_my_message may touch (same agent, same person's
+// token, same conversation, within 24h).
+model AgentSentAsUser {
+  id          String   @id @default(uuid())
+  grantId     String   @map("grant_id")
+  userTokenId String   @map("user_token_id")
+  agentId     String   @map("agent_id")
+  // Provider conversation id (Slack C…/G…/D…).
+  channelRef  String   @map("channel_ref")
+  // Provider message id (Slack ts).
+  messageTs   String   @map("message_ts")
+  createdAt   DateTime @default(now()) @map("created_at")
 
-  decidedByUserId String?  @map("decided_by_user_id")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
+  grant AgentReadGrant @relation(fields: [grantId], references: [id], onDelete: Cascade)
 
-  agent     Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  decidedBy User? @relation("AgentContactDecider", fields: [decidedByUserId], references: [id], onDelete: SetNull)
+  @@unique([channelRef, messageTs])
+  @@index([agentId, userTokenId])
+  @@map("agent_sent_as_user")
+}
 
-  @@unique([agentId, kind, externalRef])
-  @@map("agent_contacts")
+// A person's remembered answer to "send as the agent or as you?" for one
+// recipient (send_message sendAs "ask"): set from the choose-sender card's
+// "Remember" box, cleared from Contacts. recipientRef is the provider id
+// (Slack U…/C…).
+model AgentSendAsPreference {
+  id           String   @id @default(uuid())
+  agentId      String   @map("agent_id")
+  userId       String   @map("user_id")
+  recipientRef String   @map("recipient_ref")
+  // "agent" | "you"
+  sendAs       String   @map("send_as")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, userId, recipientRef])
+  @@map("agent_send_as_preferences")
 }
 
 // THE AGENT LINK (PR 5b): one relationship between two OneCLI agents, one
@@ -2181,19 +2326,58 @@ model ChannelThreadLink {
 
 // At-least-once delivery insurance: providers redeliver events (unacked
 // envelopes, reconnects, webhook retries), and adapter memory dies with the
-// process — so idempotency lives HERE. Doors insert first; a P2002 means
-// "already ingested" and the door answers duplicate. Pruned opportunistically
-// (>24h) on insert.
+// process, so idempotency lives HERE, for every provider. A door CLAIMS an
+// event before acting on it: the row is written with a lease (`claimToken`,
+// `claimExpiresAt`, renewed while the door runs), and a concurrent delivery
+// of the same event is told it is in flight. Once the event has been
+// processed the claim is settled (`claimExpiresAt` NULL, as every row from
+// before leases existed reads) and every later delivery is a duplicate. A
+// claim whose holder died lapses and the next delivery takes the event over,
+// so a crash mid-event never loses the message; a turn the dead holder
+// already created is found by its `Turn.sourceEventId`, so it is never
+// created twice. Pruned opportunistically (>24h) on insert.
 model ChannelIngestedEvent {
-  id             String   @id @default(uuid())
-  agentChannelId String   @map("agent_channel_id")
-  eventId        String   @map("event_id")
-  createdAt      DateTime @default(now()) @map("created_at")
+  id             String    @id @default(uuid())
+  agentChannelId String    @map("agent_channel_id")
+  eventId        String    @map("event_id")
+  // The holder's fence: only the run that holds the claim renews or
+  // settles it, never one that overran its lease and was taken over.
+  claimToken     String?   @map("claim_token")
+  claimExpiresAt DateTime? @map("claim_expires_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
 
   agentChannel AgentChannel @relation(fields: [agentChannelId], references: [id], onDelete: Cascade)
 
   @@unique([agentChannelId, eventId])
   @@map("channel_ingested_events")
+}
+
+// The durable inbox of the HTTP events transport: a verified provider event
+// is written here and acknowledged at once, then processed off the request
+// (the provider's ack window is seconds; processing can fetch files for far
+// longer). The row IS the delivery guarantee: it lives until processing
+// finishes, so an api-server that dies mid-event leaves it for the recovery
+// pass (any replica) to claim once the claim lease lapses. Unique per
+// presence + event id, so a provider redelivery of an event still in flight
+// is absorbed here. Deleted on completion; bounded by attempts and expiresAt.
+model ChannelInboundEvent {
+  id             String    @id @default(uuid())
+  agentChannelId String    @map("agent_channel_id")
+  eventId        String    @map("event_id")
+  // The provider's event payload, verified before it was written.
+  event          Json
+  attempts       Int       @default(0)
+  nextAttemptAt  DateTime  @default(now()) @map("next_attempt_at")
+  claimToken     String?   @map("claim_token")
+  claimExpiresAt DateTime? @map("claim_expires_at")
+  expiresAt      DateTime  @map("expires_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  agentChannel AgentChannel @relation(fields: [agentChannelId], references: [id], onDelete: Cascade)
+
+  @@unique([agentChannelId, eventId])
+  @@index([nextAttemptAt])
+  @@map("channel_inbound_events")
 }
 
 // What `send_message` delivered, and WHERE a reply to it will arrive: the
@@ -2510,6 +2694,14 @@ model AuditLog {
   organizationId String?       @map("organization_id")
   userId         String        @map("user_id")
   userEmail      String        @map("user_email")
+  // Who acted. `user` (default): the row's user is the actor. `service`: a
+  // platform service acted on its own authority; `serviceActor` names it
+  // (its stable kebab-case id) and the user columns carry
+  // the org owner only to satisfy the FK, exactly as SCIM rows do today, so
+  // no reader may present the owner as having acted. Never a fabricated
+  // human and never the identity of whoever ran SQL.
+  actorKind      String        @default("user") @map("actor_kind")
+  serviceActor   String?       @map("service_actor")
   action         String
   service        String
   status         String

@@ -26,6 +26,10 @@ export interface ChannelProviderDisplay {
   name: string;
   /** The brand mark as served from /public. */
   iconSrc: string;
+  /** Where one of the provider's channels opens, from its id and the
+   * provider tenant it lives in. Optional: a provider without a deep link
+   * simply shows none. */
+  channelUrl?: (channelRef: string, tenantId: string) => string;
 }
 
 /** Props the section hands the ATTACHED face. */
@@ -66,9 +70,9 @@ export interface ChannelProviderUi extends ChannelProviderDisplay {
   id: string;
   PresenceCard: ComponentType<PresenceCardProps>;
   AttachCard: ComponentType<AttachCardProps>;
-  /** Optional, licensed (granular_access): the "connect your account and
-   * share conversations" card shown under a connected presence. Rendered
-   * only when the instance is entitled. */
+  /** Optional: a pointer under a connected presence to where people's own
+   * accounts are managed (Contacts, "acts as you"; licensed). Rendered only
+   * when the instance is entitled. */
   ReadAccessCard?: ComponentType<{ agentId: string; agentName: string }>;
 }
 

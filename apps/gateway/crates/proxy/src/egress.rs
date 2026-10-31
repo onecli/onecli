@@ -14,7 +14,8 @@
 //!   refused addresses, and hyper dials only what it returns, so the checked
 //!   address is the connected address (no DNS-rebinding window). IP-literal
 //!   hosts skip resolvers entirely, so [`check_url`] covers them before send.
-//! - WebSocket: [`connect_tcp`] resolves, filters, and dials the survivor.
+//! - Raw TCP (WebSocket, the open tunnel lane, database sessions):
+//!   [`connect_tcp`] resolves, filters, and dials the survivor.
 //!
 //! Addresses that embed an IPv4 inside IPv6 (mapped, compatible, NAT64, 6to4)
 //! are judged by the embedded IPv4.
@@ -22,10 +23,15 @@
 //! Operators reach internal services with `GATEWAY_ALLOW_PRIVATE_DESTINATIONS`
 //! (CIDRs, IPs, hostnames, `*.suffix`). Cloud-metadata addresses are never
 //! opened by a CIDR or hostname entry — only by naming the exact IP.
+//!
+//! One set of destinations no allowlist opens: the gateway's OWN data stores
+//! (its Postgres and Redis, [`OwnStores`]). An operator who allows a private
+//! range to reach an internal service would otherwise also hand every agent
+//! the gateway's database, which holds every tenant's encrypted credentials.
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use tokio::net::TcpStream;
 use tracing::{info, warn};
@@ -330,6 +336,108 @@ impl EgressPolicy {
     }
 }
 
+// ── The gateway's own data stores ───────────────────────────────────────
+
+/// One of the gateway's own data stores, as its configuration names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnStore {
+    pub host: String,
+    pub port: u16,
+}
+
+/// The gateway's own Postgres and Redis endpoints, resolved to the socket
+/// addresses they answer on. No agent is ever dialed to one of these, whatever
+/// the allowlist says.
+///
+/// Judged by address AND port, not address alone: a single-host deployment
+/// runs its database beside services an operator legitimately opens (the same
+/// loopback or docker bridge address), and refusing the whole address would
+/// break those. Resolved once at boot ([`install_own_stores`]), the same
+/// moment the gateway's own connections resolve them, so a name that later
+/// moves keeps its old address here exactly as the gateway's pool does.
+#[derive(Debug, Default)]
+struct OwnStores {
+    addrs: Vec<SocketAddr>,
+}
+
+impl OwnStores {
+    fn contains(&self, addr: SocketAddr) -> bool {
+        let ip = canonical(addr.ip());
+        self.addrs
+            .iter()
+            .any(|own| own.port() == addr.port() && canonical(own.ip()) == ip)
+    }
+}
+
+fn own_stores() -> &'static RwLock<OwnStores> {
+    static STORES: OnceLock<RwLock<OwnStores>> = OnceLock::new();
+    STORES.get_or_init(|| RwLock::new(OwnStores::default()))
+}
+
+/// Resolve the gateway's own data stores and refuse them on every lane from
+/// now on. Called once by the composition root, after its own connections are
+/// up. A name that does not resolve cannot be dialed by the gateway either, so
+/// it is logged and skipped rather than failing startup.
+pub async fn install_own_stores(stores: &[OwnStore]) {
+    let mut addrs = Vec::new();
+    for store in stores {
+        match tokio::net::lookup_host((normalize_host(&store.host).as_str(), store.port)).await {
+            Ok(resolved) => addrs.extend(resolved),
+            Err(error) => {
+                warn!(host = %store.host, port = store.port, %error, "egress guard: could not resolve an own data store");
+            }
+        }
+    }
+    info!(
+        count = addrs.len(),
+        "egress guard: the gateway's own data stores are refused on every lane"
+    );
+    *own_stores()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = OwnStores { addrs };
+}
+
+/// Whether `addr` is one of the gateway's own data stores.
+fn is_own_store(addr: SocketAddr) -> bool {
+    own_stores()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(addr)
+}
+
+/// Whether any own data store listens on `port`: the cheap pre-check that
+/// spares every ordinary request a DNS lookup.
+fn is_own_store_port(port: u16) -> bool {
+    own_stores()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .addrs
+        .iter()
+        .any(|own| own.port() == port)
+}
+
+/// The data stores a Postgres URL and a Redis host/port name. Pure so the
+/// composition root's environment reading stays the only env access.
+#[must_use]
+pub fn own_stores_from(database_url: &str, redis: Option<(&str, u16)>) -> Vec<OwnStore> {
+    let mut stores = Vec::new();
+    if let Ok(url) = reqwest::Url::parse(database_url) {
+        if let Some(host) = url.host_str() {
+            stores.push(OwnStore {
+                host: host.to_string(),
+                port: url.port().unwrap_or(5432),
+            });
+        }
+    }
+    if let Some((host, port)) = redis {
+        stores.push(OwnStore {
+            host: host.to_string(),
+            port,
+        });
+    }
+    stores
+}
+
 /// The process-wide policy, read once from [`ALLOW_ENV`]. Call it at boot so
 /// a malformed allowlist is reported before the first proxied request.
 pub fn policy() -> &'static EgressPolicy {
@@ -481,6 +589,10 @@ impl std::error::Error for ResolveError {
 
 /// Resolve `host` and keep only addresses the policy permits. Refuses when
 /// nothing survives. The returned addresses are the ones to dial.
+///
+/// `port` is the port about to be dialed, which the own-store check needs.
+/// The HTTP resolver passes `0` (hyper picks the port after resolution), so
+/// the HTTP lane runs that check before send instead ([`check_own_store`]).
 pub async fn resolve_checked(
     policy: &EgressPolicy,
     host: &str,
@@ -497,13 +609,59 @@ pub async fn resolve_checked(
     let permitted: Vec<SocketAddr> = resolved
         .iter()
         .copied()
-        .filter(|a| policy.permits(&bare, a.ip()))
+        .filter(|a| admits(policy, &bare, *a))
         .collect();
     if permitted.is_empty() && !resolved.is_empty() {
         warn!(host = %bare, "egress guard: refused non-public destination");
         return Err(ResolveError::Refused(DestinationNotAllowed { host: bare }));
     }
     Ok(permitted)
+}
+
+/// May the gateway dial `addr`, reached by asking for `host`? The policy's
+/// verdict on the address, and never one of the gateway's own data stores
+/// (port `0` is the HTTP resolver's "not known yet", see [`check_own_store`]).
+fn admits(policy: &EgressPolicy, host: &str, addr: SocketAddr) -> bool {
+    policy.permits(host, addr.ip()) && !(addr.port() != 0 && is_own_store(addr))
+}
+
+/// The HTTP lane's half of the own-store refusal: its resolver never learns
+/// the port, so a request whose port is one an own data store listens on is
+/// resolved and judged here before send. `authority` is the request's
+/// `host[:port]`; `default_port` is its scheme's. Every other request returns
+/// at the port check without a lookup.
+pub async fn check_own_store(
+    authority: &str,
+    default_port: u16,
+) -> Result<(), DestinationNotAllowed> {
+    let (host, port) = split_authority(authority, default_port);
+    if !is_own_store_port(port) {
+        return Ok(());
+    }
+    match resolve_checked(policy(), host, port).await {
+        Err(ResolveError::Refused(refusal)) => Err(refusal),
+        // A name that does not resolve is the send's failure to report.
+        Err(ResolveError::Lookup(_)) | Ok(_) => Ok(()),
+    }
+}
+
+/// The host and port an authority names (`host`, `host:port`, `[v6]:port`).
+///
+/// Bracket-aware, unlike `strip_port`: `[::1]:443` is the IPv6 loopback on
+/// 443, not a host called `[`, and the guard can only refuse an address it is
+/// shown (`normalize_host` strips the brackets itself). `default_port` when
+/// none is named, or when the named one does not parse.
+#[must_use]
+pub fn split_authority(authority: &str, default_port: u16) -> (&str, u16) {
+    let (host, port) = match authority.rsplit_once(':') {
+        // `[v6]:port` or `host:port`. A bare `v6` has colons too but no
+        // brackets, and must not lose its last group to a port.
+        Some((host, port)) if host.ends_with(']') || !host.contains(':') => {
+            (host, port.parse().ok())
+        }
+        _ => (authority, None),
+    };
+    (host, port.unwrap_or(default_port))
 }
 
 /// `reqwest` DNS resolver that applies the guard. Every name the upstream
@@ -773,6 +931,107 @@ mod tests {
         let err = client.get("http://localhost:9/").send().await.unwrap_err();
         let refusal = find_refusal(&err).unwrap_or_else(|| panic!("refusal lost in: {err:?}"));
         assert_eq!(refusal.host, "localhost");
+    }
+
+    #[test]
+    fn authority_splits_host_and_port_with_the_default() {
+        assert_eq!(split_authority("example.com", 443), ("example.com", 443));
+        assert_eq!(split_authority("example.com:443", 80), ("example.com", 443));
+        assert_eq!(
+            split_authority("example.com:8443", 443),
+            ("example.com", 8443)
+        );
+        assert_eq!(
+            split_authority("example.com:nope", 443),
+            ("example.com", 443)
+        );
+        assert_eq!(split_authority("10.0.0.5:80", 443), ("10.0.0.5", 80));
+    }
+
+    /// The shape `strip_port` gets wrong: the guard must be shown `[::1]`,
+    /// not `[`, or a loopback dial becomes a lookup failure instead of a
+    /// refusal.
+    #[test]
+    fn authority_keeps_a_bracketed_ipv6_literal_whole() {
+        assert_eq!(split_authority("[::1]:443", 80), ("[::1]", 443));
+        assert_eq!(split_authority("[::1]", 443), ("[::1]", 443));
+        assert_eq!(
+            split_authority("[::ffff:127.0.0.1]:8443", 443),
+            ("[::ffff:127.0.0.1]", 8443)
+        );
+        // Unbracketed: no port can be told apart from a group, so none is.
+        assert_eq!(split_authority("::1", 443), ("::1", 443));
+    }
+
+    #[test]
+    fn own_stores_come_from_the_database_url_and_redis() {
+        assert_eq!(
+            own_stores_from(
+                "postgresql://u:p%40ss@db.internal:6432/onecli",
+                Some(("redis", 6379))
+            ),
+            vec![
+                OwnStore {
+                    host: "db.internal".into(),
+                    port: 6432
+                },
+                OwnStore {
+                    host: "redis".into(),
+                    port: 6379
+                },
+            ]
+        );
+        // No port in the URL is Postgres's default; no Redis is no entry.
+        assert_eq!(
+            own_stores_from("postgres://u@10.1.2.3/onecli", None),
+            vec![OwnStore {
+                host: "10.1.2.3".into(),
+                port: 5432
+            }]
+        );
+        assert!(own_stores_from("not a url", None).is_empty());
+    }
+
+    #[test]
+    fn an_own_store_matches_its_address_and_port_in_every_spelling() {
+        let stores = OwnStores {
+            addrs: vec!["10.0.0.5:5432".parse().unwrap()],
+        };
+        assert!(stores.contains("10.0.0.5:5432".parse().unwrap()));
+        assert!(
+            stores.contains("[::ffff:10.0.0.5]:5432".parse().unwrap()),
+            "the mapped form of the same address"
+        );
+        // A different port on the same host is someone else's service.
+        assert!(!stores.contains("10.0.0.5:8080".parse().unwrap()));
+        assert!(!stores.contains("10.0.0.6:5432".parse().unwrap()));
+    }
+
+    /// The incident shape: an operator allows the private range the
+    /// gateway's database sits in. Everything else in the range opens; the
+    /// database itself never does, on any lane that dials with its port.
+    #[tokio::test]
+    async fn the_allowlist_never_opens_an_own_store() {
+        let (allow_all, _) = EgressPolicy::parse("127.0.0.0/8");
+        install_own_stores(&[OwnStore {
+            host: "127.0.0.1".into(),
+            port: 55_432,
+        }])
+        .await;
+
+        let refused = resolve_checked(&allow_all, "127.0.0.1", 55_432)
+            .await
+            .unwrap_err();
+        assert!(matches!(refused, ResolveError::Refused(_)), "{refused}");
+        assert!(!resolve_checked(&allow_all, "127.0.0.1", 55_433)
+            .await
+            .unwrap()
+            .is_empty());
+        // The HTTP resolver's port-less lookup is judged before send.
+        assert!(check_own_store("127.0.0.1:55432", 80).await.is_err());
+        assert!(check_own_store("127.0.0.1:55433", 80).await.is_ok());
+
+        install_own_stores(&[]).await;
     }
 
     #[test]

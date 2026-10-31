@@ -40,9 +40,12 @@ import { GitHubAppConnectDialog } from "@/app/(dashboard)/w/[workspaceId]/connec
 /**
  * The agent-scoped app picker: search the catalog, Connect opens the OAuth
  * popup in place (the shared `openConnectPopup`). The connect carries THIS
- * agent, so a new account lands switched on (reads allowed, writes and
- * anything else needing approval) for it alone (the API's connecting-agent
- * grant): there is no grant to write here, and Manage is the scoping door.
+ * agent, so a new account lands switched on for it alone (the API's
+ * connecting-agent grant): read tools allowed, writes needing approval, and
+ * requests outside the tool list needing approval too unless the catalog
+ * was checked safe for reads. The dialog shows no consent paragraph (kept
+ * short on purpose); what lands is visible and adjustable under Manage.
+ * There is no grant to write here, and Manage is the scoping door.
  * The catalog honors the org app-availability restriction exactly like the
  * connections page's picker. Shared by the agent Connections section's Add
  * button and the chat's connector card, so both doors keep one contract.
@@ -149,8 +152,8 @@ export const ConnectAppPickerDialog = ({
   }, [query, availableApps]);
 
   // Slack is not a catalog app (the gateway never injects Slack creds): its
-  // read access is a per-agent connection on this agent's Slack page, so the
-  // row is a door there, offered only where that feature is entitled.
+  // read access is a per-agent connection in this agent's Contacts ("acts as
+  // you"), so the row is a door there, offered only where entitled.
   const showSlack =
     instance?.entitled === true &&
     (!query.trim() || "slack".includes(query.trim().toLowerCase()));
@@ -159,7 +162,13 @@ export const ConnectAppPickerDialog = ({
   );
   const openSlack = () => {
     onOpenChange(false);
-    router.push(agentSectionPath(pathname, agentId, "channels"));
+    // With Slack attached, connecting your own Slack lives in Contacts
+    // ("acts as you"); without it, the Slack page adds the agent first.
+    router.push(
+      hasSlackApp
+        ? agentSectionPath(pathname, agentId, "contacts")
+        : agentSectionPath(pathname, agentId, "channels"),
+    );
   };
 
   const openPopupFor = (app: AppDefinition) => {
@@ -195,11 +204,8 @@ export const ConnectAppPickerDialog = ({
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Connect an app</DialogTitle>
-            <DialogDescription>
-              Connecting turns the account on for this agent, not for your other
-              agents. Reads are allowed. Writes and anything else need your
-              approval (an app with no tool list gets full access). Adjust it
-              anytime under Manage.
+            <DialogDescription className="sr-only">
+              Search for an app to connect.
             </DialogDescription>
           </DialogHeader>
           <div className="relative">

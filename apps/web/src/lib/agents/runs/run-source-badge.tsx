@@ -11,6 +11,7 @@ const SOURCE_LABEL: Record<string, string> = {
   agent: "Agent",
   greeting: "Greeting",
   peer_task: "Peer task",
+  memory_review: "Memory review",
 };
 
 export const RunSourceBadge = ({ source }: { source: string }) => (

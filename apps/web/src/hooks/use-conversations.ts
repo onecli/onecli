@@ -17,14 +17,8 @@ import type {
 } from "@/lib/api/types";
 import { hasUnsettledTurn } from "@/lib/chat/turns";
 
-/**
- * A staged upload riding a send: the server row's metadata plus the local
- * object URL the optimistic bubble previews with (the settled row swaps to
- * the authenticated blob fetch).
- */
-export interface OutgoingAttachment extends AttachmentMeta {
-  objectUrl?: string;
-}
+/** A staged server upload riding a send. Local preview URLs stay composer-owned. */
+export type OutgoingAttachment = AttachmentMeta;
 
 export interface OutgoingMessage {
   message: string;
@@ -183,7 +177,7 @@ export const useSendMessage = (conversationId: string) => {
         message,
         attachments?.map((attachment) => attachment.id),
       ),
-    onSuccess: (outcome, variables) => {
+    onSuccess: (outcome) => {
       qc.setQueryData<TurnsPage>(
         queryKeys.conversations.turns(conversationId),
         (page) =>
@@ -191,17 +185,6 @@ export const useSendMessage = (conversationId: string) => {
             ? { ...page, turns: [...page.turns, outcome.turn] }
             : page,
       );
-      // Hand the composer's local previews to the blob cache: the SETTLED row
-      // carries metadata only, so without this its chips would re-download
-      // bytes this browser just uploaded. Ownership transfers with them — the
-      // cache revokes each URL when it evicts the entry.
-      for (const attachment of variables.attachments ?? []) {
-        if (!attachment.objectUrl) continue;
-        qc.setQueryData(
-          queryKeys.attachments.blob(conversationId, attachment.id),
-          attachment.objectUrl,
-        );
-      }
     },
     onSettled: () => {
       qc.invalidateQueries({

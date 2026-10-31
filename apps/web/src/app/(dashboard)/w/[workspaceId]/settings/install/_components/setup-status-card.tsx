@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useAgentDetail } from "@/hooks/use-agents";
-import { withWorkspacePrefix } from "@/lib/navigation";
+import { agentPath, withWorkspacePrefix } from "@/lib/navigation";
 
 // One honest live signal: the agent's first gateway request. "CLI installed"
 // stages are deliberately absent — their only server signal is workspace-level
@@ -46,7 +46,7 @@ export const SetupStatusCard = ({
               </Link>
               {" · "}
               <Link
-                href={withWorkspacePrefix(pathname, "/agents")}
+                href={agentPath(pathname, agent.id)}
                 className="text-brand font-medium hover:underline"
               >
                 manage agent

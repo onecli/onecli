@@ -40,6 +40,7 @@ import type { NavItem } from "@dashboard/nav-main";
 import {
   activeSettingsItem,
   getSettingsSections,
+  getWorkspaceSettingsSections,
   workspaceNavItems,
 } from "@/lib/nav-config";
 import { GetStartedButton } from "@dashboard/get-started-button";
@@ -80,7 +81,7 @@ const getOrgNavItems = (orgId?: string): NavItem[] => {
  * `@dashboard/dashboard-header` re-export shim. Renders a workspace-aware
  * breadcrumb when the URL is under `/w/[workspaceId]/...`:
  *
- *     All workspaces / <Workspace Name> / Overview / sub
+ *     All workspaces / <Workspace Name> / Activity / sub
  *
  * Outside a workspace (`/org/<id>/workspaces`, settings, etc.) it falls back to
  * plain segment breadcrumbs.
@@ -219,10 +220,7 @@ export const DashboardHeader = () => {
               <BreadcrumbItem className="hidden min-w-0 truncate sm:block">
                 {sectionTitle ? (
                   <BreadcrumbLink asChild>
-                    <Link
-                      href={`/w/${workspaceId}/overview`}
-                      title={workspaceLabel}
-                    >
+                    <Link href={`/w/${workspaceId}`} title={workspaceLabel}>
                       {workspaceLabel}
                     </Link>
                   </BreadcrumbLink>
@@ -284,8 +282,16 @@ export const DashboardHeader = () => {
                 // URL ("Channels" — the drift the table exists to prevent).
                 // Inside a connections section it is a tab or an app, named
                 // as the page names it ("LLMs", "GitHub").
+                // Inside Workspace Settings it is a settings pane, named as
+                // the pane nav names it ("API Key", never "Api key").
                 const label =
                   (agentCrumbId ? agentSectionTitle(segment) : undefined) ??
+                  (workspaceId
+                    ? activeSettingsItem(
+                        getWorkspaceSettingsSections(workspaceId),
+                        href,
+                      )?.title
+                    : undefined) ??
                   breadcrumbSegmentLabel(segment, { inConnections });
                 return (
                   <span key={segment} className="contents">

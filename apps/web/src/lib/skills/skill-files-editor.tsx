@@ -1,20 +1,22 @@
 "use client";
 
 import { Plus, Trash2 } from "lucide-react";
+import {
+  MAX_FILES_PER_SKILL,
+  SKILL_FILE_CONTENT_MAX_LENGTH,
+  SKILL_FILE_PATH_MAX_LENGTH,
+  SKILL_FILE_PATH_PATTERN,
+} from "@onecli/api/validations/skills";
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
 import { Textarea } from "@onecli/ui/components/textarea";
 import type { SkillFileInput } from "@/lib/api";
 
 /**
- * The extra-files editor: small path+content rows. Client-side mirror of the
- * wire shape (relative, ≤2 lowercase segments) so a traversal-shaped path
- * fails here with words instead of a 422 — the server stays the validator.
+ * The extra-files editor: small path+content rows. Checks paths with the
+ * server's own pattern so a traversal-shaped path fails here with words
+ * instead of a 422; the server stays the validator.
  */
-
-export const MAX_SKILL_FILES = 5;
-
-const FILE_PATH_RE = /^[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)?$/;
 
 /** What is wrong with one row, and which of its two inputs it is about, so a
  *  blocked save can put the caret on the right one. */
@@ -36,11 +38,10 @@ export const skillFileProblem = (
   if (path === "") {
     return { field: "path", message: "Give this file a path, or remove it" };
   }
-  if (!FILE_PATH_RE.test(path)) {
+  if (!SKILL_FILE_PATH_PATTERN.test(path)) {
     return {
       field: "path",
-      message:
-        "Relative, at most two lowercase segments, like references/api.md",
+      message: "Relative, at most six folders deep, like references/api.md",
     };
   }
   if (path.toLowerCase() === "skill.md") {
@@ -118,13 +119,13 @@ export const SkillFilesEditor = ({
             type="button"
             variant="ghost"
             size="sm"
-            disabled={disabled || locked || files.length >= MAX_SKILL_FILES}
+            disabled={disabled || locked || files.length >= MAX_FILES_PER_SKILL}
             aria-describedby={locked ? LOCK_HINT_ID : undefined}
             onClick={() => onChange([...files, { path: "", content: "" }])}
           >
             <Plus className="size-4" />
-            {files.length >= MAX_SKILL_FILES
-              ? `Up to ${MAX_SKILL_FILES} files`
+            {files.length >= MAX_FILES_PER_SKILL
+              ? `Up to ${MAX_FILES_PER_SKILL} files`
               : "Add file"}
           </Button>
         </div>
@@ -146,7 +147,7 @@ export const SkillFilesEditor = ({
                 }
                 placeholder="references/api.md"
                 className="font-mono"
-                maxLength={128}
+                maxLength={SKILL_FILE_PATH_MAX_LENGTH}
                 spellCheck={false}
                 autoComplete="off"
                 disabled={disabled}
@@ -180,7 +181,7 @@ export const SkillFilesEditor = ({
               }
               placeholder="File content"
               rows={4}
-              maxLength={24_000}
+              maxLength={SKILL_FILE_CONTENT_MAX_LENGTH}
               disabled={disabled}
               aria-label={`File ${index + 1} content`}
               aria-invalid={showErrors && problem?.field === "content"}

@@ -314,7 +314,11 @@ describe.skipIf(!PROOF_URL)(
       });
       expect(list.status).toBe(200);
       expect(await list.json()).toMatchObject([
-        { sourceConnectionId: source.id, connectedHere: 0 },
+        {
+          sourceConnectionId: source.id,
+          connectedHere: 0,
+          connectedHereIds: [],
+        },
       ]);
 
       const shared = await app.request("/v1/apps/github-app/connections", {
@@ -363,6 +367,19 @@ describe.skipIf(!PROOF_URL)(
         body: JSON.stringify({ sourceConnectionId: source.id }),
       });
       expect(again.status).toBe(409);
+
+      // Shared, it now reaches WS_B: the listing names that connection, which
+      // an agent page in WS_B turns on instead of connecting it again.
+      const after = await app.request("/v1/apps/github-app/installations", {
+        headers: session(ADMIN, WS_B),
+      });
+      expect(await after.json()).toMatchObject([
+        {
+          sourceConnectionId: source.id,
+          connectedHere: 1,
+          connectedHereIds: [source.id],
+        },
+      ]);
     });
 
     it("edit a connection's repositories over HTTP: audited without secrets; members refused", async () => {

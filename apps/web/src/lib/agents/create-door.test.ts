@@ -1,6 +1,18 @@
 import { describe, it, expect } from "vitest";
-import { createDoor } from "./create-door";
+import { createDoor, isHostedPrimary, isSplitDoor } from "./create-door";
 import type { HostedAvailability } from "./availability";
+
+describe("door shape helpers", () => {
+  it.each([
+    ["hosted", true, false],
+    ["hosted-with-byo", true, true],
+    ["byo", false, false],
+    ["byo-with-hosted", false, true],
+  ] as const)("%s: hosted primary %s, split %s", (door, hosted, split) => {
+    expect(isHostedPrimary(door)).toBe(hosted);
+    expect(isSplitDoor(door)).toBe(split);
+  });
+});
 
 const byo = { kind: "byo" as const };
 const hosted = { kind: "hosted" as const };

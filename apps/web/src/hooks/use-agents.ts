@@ -65,6 +65,8 @@ export const useCreateAgent = () => {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
       qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
+      // The agent quota the create gates read (cloud; inert elsewhere).
+      qc.invalidateQueries({ queryKey: queryKeys.billing.planUsage() });
       // A new agent appears in the connection→agents reverse view (app-page
       // connection cards, keyed under connections.*) — refresh it too.
       qc.invalidateQueries({ queryKey: queryKeys.connections.all() });
@@ -108,6 +110,8 @@ export const useCreateHostedAgent = () => {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
       qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
+      // The agent quota the create gates read (cloud; inert elsewhere).
+      qc.invalidateQueries({ queryKey: queryKeys.billing.planUsage() });
       qc.invalidateQueries({ queryKey: queryKeys.connections.all() });
       // Creation writes grants here too (see `useCreateAgent`).
       qc.invalidateQueries({ queryKey: queryKeys.grants.all() });
@@ -124,6 +128,8 @@ export const useDeleteAgent = () => {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
       qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
+      // The agent quota the create gates read (cloud; inert elsewhere).
+      qc.invalidateQueries({ queryKey: queryKeys.billing.planUsage() });
       // Drop the deleted agent from the connection→agents and secret→agents
       // reverse views too.
       qc.invalidateQueries({ queryKey: queryKeys.connections.all() });
@@ -215,7 +221,7 @@ export const useUpdateAgentModel = () => {
         ...(effort !== undefined && { effort }),
       }),
     onSuccess: (_data, { agentId }) => {
-      // Both: `models` holds the selection, `detail` renders it on Overview.
+      // Both: `models` holds the selection, `detail` renders it in Details.
       qc.invalidateQueries({ queryKey: queryKeys.agents.models(agentId) });
       qc.invalidateQueries({ queryKey: queryKeys.agents.detail(agentId) });
       toast.success("Model updated");

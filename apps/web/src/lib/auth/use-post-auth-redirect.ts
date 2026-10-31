@@ -105,9 +105,7 @@ export const usePostAuthRedirect = (options?: {
           const data = (await res.json()) as { workspaceId?: string };
           // No workspace context: the /org index server-redirects to the
           // validated /org/<defaultOrgId>/workspaces (the home destination).
-          router.replace(
-            data.workspaceId ? `/w/${data.workspaceId}/overview` : "/org",
-          );
+          router.replace(data.workspaceId ? `/w/${data.workspaceId}` : "/org");
           return;
         }
         if (res.status === 401) {

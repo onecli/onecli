@@ -11,6 +11,7 @@
 //! `tower::service_fn` wrapper, following the official Axum http-proxy
 //! example pattern.
 
+mod connection_api;
 mod vault_api;
 
 pub mod entrypoint;
@@ -53,12 +54,16 @@ pub use context::{GatewayState, ProxyContext};
 
 // ── GatewayServer ───────────────────────────────────────────────────────
 
-/// The combined HTTP listener: absolute-form proxying, CONNECT interception,
-/// and the axum control-plane router on one port. Constructed by `main` and
-/// run through the [`Entrypoint`] machinery.
+/// The combined listener: absolute-form proxying, CONNECT interception, the
+/// axum control-plane router, and the PostgreSQL front door, on one port.
+/// The first byte a client sends tells them apart: HTTP starts with a
+/// method's letter, a PostgreSQL client with a zero length byte or a TLS
+/// handshake. Constructed by `main` and run through the [`Entrypoint`]
+/// machinery.
 pub struct GatewayServer {
     state: GatewayState,
     port: u16,
+    postgres: dbproxy_postgres::FrontDoor,
 }
 
 /// Build the HTTP client used for upstream requests.
@@ -77,80 +82,6 @@ fn build_http_client(accept_invalid_certs: bool) -> reqwest::Client {
         .expect("build HTTP client")
 }
 
-/// Accepts any server certificate, for the hosts an operator has explicitly
-/// exempted from verification.
-///
-/// This is deliberately the same posture `reqwest`'s `danger_accept_invalid_certs`
-/// gives the HTTP path: chain, hostname *and* handshake signature all go
-/// unchecked. Parity is the point — an operator who exempts an internal host
-/// expects it to work over both protocols, and the appliances that need the
-/// exemption at all are exactly the ones with certificates and signature
-/// algorithms nothing modern will accept.
-#[derive(Debug)]
-struct AcceptAnyServerCert;
-
-impl rustls::client::danger::ServerCertVerifier for AcceptAnyServerCert {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    // Both signature paths must be stubbed: rustls calls exactly one depending
-    // on the negotiated version, and TLS 1.2 is still reachable here.
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    /// This list is load-bearing, not decoration: it becomes the ClientHello's
-    /// `signature_algorithms`. Return nothing and the server finds no acceptable
-    /// scheme and aborts *before sending a certificate* — the verifier above
-    /// never runs, and skipping verification manifests as an unexplained
-    /// handshake failure.
-    ///
-    /// Copied from reqwest so the two paths advertise the same thing. It
-    /// deliberately includes schemes our own provider cannot verify (SHA-1,
-    /// Ed448) — harmless, because nothing here verifies anything, and it is
-    /// what lets a legacy appliance find something it can sign with.
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        use rustls::SignatureScheme;
-        vec![
-            SignatureScheme::RSA_PKCS1_SHA1,
-            SignatureScheme::ECDSA_SHA1_Legacy,
-            SignatureScheme::RSA_PKCS1_SHA256,
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::RSA_PKCS1_SHA384,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-            SignatureScheme::RSA_PKCS1_SHA512,
-            SignatureScheme::ECDSA_NISTP521_SHA512,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::RSA_PSS_SHA384,
-            SignatureScheme::RSA_PSS_SHA512,
-            SignatureScheme::ED25519,
-            SignatureScheme::ED448,
-        ]
-    }
-}
-
 /// Build the TLS config used to dial upstream WebSocket servers.
 ///
 /// The sibling of [`build_http_client`], and built the same way for the same
@@ -167,7 +98,7 @@ fn build_ws_tls_config(accept_invalid_certs: bool) -> Arc<rustls::ClientConfig> 
     let mut config = if accept_invalid_certs {
         rustls::ClientConfig::builder()
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert))
+            .with_custom_certificate_verifier(Arc::new(ca::AcceptAnyServerCert))
             .with_no_client_auth()
     } else {
         let mut roots = rustls::RootCertStore::empty();
@@ -235,6 +166,7 @@ impl GatewayServer {
         vault_service: Arc<vault::VaultService>,
         cache: Arc<dyn CacheStore>,
         approval_store: Arc<dyn ApprovalStore>,
+        parse_pool: dbproxy::parse_pool::ParsePool,
     ) -> Self {
         let global_skip = parse_danger_accept_invalid_certs(
             std::env::var("GATEWAY_DANGER_ACCEPT_INVALID_CERTS")
@@ -266,7 +198,21 @@ impl GatewayServer {
             approval_store,
         };
 
-        Self { state, port }
+        let postgres = dbproxy_postgres::FrontDoor {
+            ca: Arc::clone(&state.ca),
+            policy_engine: Arc::clone(&state.policy_engine),
+            cache: Arc::clone(&state.cache),
+            approvals: Arc::clone(&state.approval_store),
+            parse_pool,
+            slots: dbproxy::limits::SessionSlots::default(),
+            cancels: dbproxy_postgres::cancel::CancelKeys::default(),
+        };
+
+        Self {
+            state,
+            port,
+            postgres,
+        }
     }
 
     /// Start the gateway TCP listener. Runs forever.
@@ -295,6 +241,7 @@ impl GatewayServer {
                 // workspace via this header; it must be allow-listed or the CORS
                 // preflight blocks the request. (OSS never sends it.)
                 hyper::header::HeaderName::from_static("x-workspace-id"),
+                hyper::header::HeaderName::from_static("x-organization-id"),
                 // Rename compat (temporary): old browser callers still send
                 // the pre-rename header.
                 common::compat::LEGACY_WORKSPACE_HEADER,
@@ -314,6 +261,10 @@ impl GatewayServer {
             .route("/healthz", axum::routing::get(healthz))
             .route("/me", axum::routing::get(me))
             // /v1 routes
+            .route(
+                "/v1/connections/{connectionId}/test",
+                axum::routing::post(connection_api::test_connection),
+            )
             .route(
                 "/v1/vault/{provider}/pair",
                 axum::routing::post(vault_api::vault_pair),
@@ -419,12 +370,19 @@ impl GatewayServer {
 
             let state = self.state.clone();
             let router = axum_router.clone();
+            let postgres = self.postgres.clone();
             let guard = shutdown::task_guard();
 
             tokio::spawn(async move {
                 let _guard = guard;
-                if let Err(e) = handle_connection(stream, peer_addr, state, router).await {
-                    warn!(peer = %peer_addr, error = ?e, "connection error");
+                match first_byte(&stream).await {
+                    Some(byte) if is_postgres_opening(byte) => postgres.serve(stream).await,
+                    Some(_) => {
+                        if let Err(e) = handle_connection(stream, peer_addr, state, router).await {
+                            warn!(peer = %peer_addr, error = ?e, "connection error");
+                        }
+                    }
+                    None => debug!(peer = %peer_addr, "connection closed before speaking"),
                 }
             });
         }
@@ -825,7 +783,29 @@ fn is_http_proxy_request<T>(req: &Request<T>) -> bool {
 
 // ── Connection handling ─────────────────────────────────────────────────
 
-/// Handle a single client connection.
+/// How long a new connection may stay silent before its first byte decides
+/// which protocol it speaks.
+const FIRST_BYTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The first byte a client sent, without consuming it; `None` when it
+/// closed or stayed silent.
+async fn first_byte(stream: &TcpStream) -> Option<u8> {
+    let mut byte = [0u8; 1];
+    match tokio::time::timeout(FIRST_BYTE_TIMEOUT, stream.peek(&mut byte)).await {
+        Ok(Ok(1)) => Some(byte[0]),
+        _ => None,
+    }
+}
+
+/// Whether a connection's first byte opens a PostgreSQL session: the high
+/// byte of a startup packet's length (always zero, the packets are short)
+/// or a TLS handshake (`sslnegotiation=direct`). An HTTP request starts with
+/// a method's letter, and nothing else is served on this port.
+fn is_postgres_opening(byte: u8) -> bool {
+    byte == 0 || byte == dbproxy_postgres::TLS_HANDSHAKE
+}
+
+/// Handle a single HTTP client connection.
 ///
 /// Uses a `service_fn` wrapper that intercepts CONNECT requests before they reach
 /// the Axum router (CONNECT URIs like `host:port` don't match Axum's path-based routing).
@@ -1161,6 +1141,17 @@ async fn handle_http_proxy(
         }
     };
 
+    // Who is asking, for every answer from here on (the request log, the
+    // agent-facing links). Taken out of `resolved` once.
+    let proxy_ctx = ProxyContext {
+        workspace_id: resolved.workspace_id.take(),
+        organization_id: resolved.organization_id.take(),
+        agent_id: resolved.agent_id.take(),
+        agent_name: resolved.agent_name.take(),
+        agent_identifier: resolved.agent_identifier.take(),
+        agent_token,
+    };
+
     // Custom secrets filling the same slot are disambiguated first (same law
     // as the MITM path, `mitm::resolve_rules`).
     let (connection_id, secret_choices) = match connect::select_secret_rules(
@@ -1211,8 +1202,8 @@ async fn handle_http_proxy(
     // `ResolvedRules::host_mismatch`.
     let mut host_mismatch: Option<Vec<proxy::connect::ConnectionChoice>> = None;
     if !resolved.app_connections.is_empty() {
-        let oid = resolved.organization_id.as_deref().unwrap_or("");
-        let pid = resolved.workspace_id.as_deref().unwrap_or("");
+        let oid = proxy_ctx.organization_id.as_deref().unwrap_or("");
+        let pid = proxy_ctx.workspace_id.as_deref().unwrap_or("");
         let request_path = req_path.as_deref();
         let secret_rules = std::mem::take(&mut resolved.injection_rules);
         let secrets_serve = inject::rules_serve_path(&secret_rules, request_path);
@@ -1273,9 +1264,16 @@ async fn handle_http_proxy(
             Ok(AppConnectionResult::NeedsReconnect { connection }) => {
                 if !secrets_serve {
                     info!(peer = %peer_addr, host = %authority, connection_id = %connection.id, "HTTP proxy: connection needs reconnect; request not forwarded");
+                    proxy::hooks::record_needs_reconnect(
+                        &proxy_ctx,
+                        &hostname,
+                        req_method.as_str(),
+                        req_path.as_deref().unwrap_or("/"),
+                        start,
+                    );
                     return Ok(proxy::response::connection_needs_reconnect_axum(
                         &connection,
-                        resolved.workspace_id.as_deref(),
+                        proxy_ctx.workspace_id.as_deref(),
                     ));
                 }
                 debug!(host = %authority, "connection needs reconnect; secret rules serve this path");
@@ -1301,7 +1299,7 @@ async fn handle_http_proxy(
     // it will inject once allowed, and a vault credential adopted here would
     // land on the same host alongside it.
     if resolved.injection_rules.is_empty() && pending_injections.is_empty() {
-        if let Some(ref aid) = resolved.workspace_id {
+        if let Some(ref aid) = proxy_ctx.workspace_id {
             if let Some(cred) = state.vault_service.request_credential(aid, &hostname).await {
                 let vault_rules = inject::vault_credential_to_rules(&hostname, &cred);
                 if !vault_rules.is_empty() {
@@ -1315,10 +1313,10 @@ async fn handle_http_proxy(
     let session_span = info_span!("session",
         peer = %peer_addr,
         host = %authority,
-        workspace_id = resolved.workspace_id.as_deref().unwrap_or("-"),
-        org_id = resolved.organization_id.as_deref().unwrap_or("-"),
-        agent = resolved.agent_name.as_deref().unwrap_or("-"),
-        agent_id = resolved.agent_id.as_deref().unwrap_or("-"),
+        workspace_id = proxy_ctx.workspace_id.as_deref().unwrap_or("-"),
+        org_id = proxy_ctx.organization_id.as_deref().unwrap_or("-"),
+        agent = proxy_ctx.agent_name.as_deref().unwrap_or("-"),
+        agent_id = proxy_ctx.agent_id.as_deref().unwrap_or("-"),
     );
 
     info!(
@@ -1327,15 +1325,6 @@ async fn handle_http_proxy(
         injection_count = resolved.injection_rules.len(),
         "HTTP_PROXY"
     );
-
-    let proxy_ctx = ProxyContext {
-        workspace_id: resolved.workspace_id,
-        organization_id: resolved.organization_id,
-        agent_id: resolved.agent_id,
-        agent_name: resolved.agent_name,
-        agent_identifier: resolved.agent_identifier,
-        agent_token,
-    };
 
     // Non-injecting alias host: report the bound host (see mitm::resolve_rules).
     let host_mismatch =
@@ -1347,6 +1336,7 @@ async fn handle_http_proxy(
         policy_rules_v2: resolved.policy_rules_v2,
         available_apps: resolved.available_apps,
         access_restricted: resolved.access_restricted,
+        credential_unavailable: resolved.credential_unavailable,
         intercept_token: None,
         plan: resolved.plan,
         rewrite_host: None,
@@ -1482,17 +1472,6 @@ mod tests {
 
         let config = build_ws_tls_config(true);
         assert_eq!(config.alpn_protocols, vec![b"http/1.1".to_vec()]);
-    }
-
-    /// The scheme list is what the ClientHello advertises. An empty one makes
-    /// the server abort before it ever sends a certificate, so "skip
-    /// verification" would surface as an unexplained handshake failure.
-    #[test]
-    fn accept_any_server_cert_advertises_signature_schemes() {
-        use rustls::client::danger::ServerCertVerifier;
-
-        let schemes = AcceptAnyServerCert.supported_verify_schemes();
-        assert!(schemes.contains(&rustls::SignatureScheme::RSA_PKCS1_SHA256));
     }
 
     #[tokio::test]

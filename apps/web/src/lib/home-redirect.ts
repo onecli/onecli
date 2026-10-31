@@ -51,7 +51,7 @@ export const resolveHomeRedirect = async (): Promise<string> => {
   const defaultOrgId = await getUserDefaultOrgId();
   if (defaultOrgId) return `/org/${defaultOrgId}/workspaces`;
 
-  if (data.workspaceId) return `/w/${data.workspaceId}/overview`;
+  if (data.workspaceId) return `/w/${data.workspaceId}`;
 
   return "/create-org";
 };

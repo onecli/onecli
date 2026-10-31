@@ -19,6 +19,11 @@ vi.mock("next/navigation", () => ({
 vi.mock("../../_components/manage-permissions-dialog", () => ({
   ManagePermissionsDialog: () => null,
 }));
+// The greeting's actions bring the connect card's live graph and the app
+// picker; this suite's contract is WHEN they show, so they are a marker.
+vi.mock("./greeting-actions", () => ({
+  GreetingActions: () => <div data-testid="greeting-actions" />,
+}));
 
 // SEND NOW's request, observable without a network.
 const sendNow = vi.hoisted(() => vi.fn());
@@ -188,6 +193,58 @@ describe("TurnBlock", () => {
       />,
     );
     expect(screen.getByRole("list")).toHaveAttribute("dir", "rtl");
+  });
+
+  it("never shows an approval resume prompt as a message: a turn renders only the answer, a follow-up a quiet line", () => {
+    const prompt =
+      "Sent as Helper to Sam. Already delivered: don't send it again.";
+    const { unmount } = render(
+      <TurnBlock
+        turn={turn({ source: "approval", message: prompt })}
+        rendered={rendered({ text: "Sent to Sam." })}
+      />,
+    );
+    expect(screen.queryByText(prompt)).toBeNull();
+    expect(screen.getByText("Sent to Sam.")).toBeTruthy();
+    unmount();
+    render(
+      <TurnBlock
+        turn={turn()}
+        rendered={rendered({ text: "Done." })}
+        followUps={[
+          turn({
+            id: "f1",
+            status: "joined",
+            source: "approval",
+            message: prompt,
+            followUpOfTurnId: "t1",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.queryByText(prompt)).toBeNull();
+    expect(screen.getByText("Continued after your choice")).toBeTruthy();
+  });
+
+  it("a desktop resume follow-up shows neither its prompt nor the approval line", () => {
+    const prompt = "The person handed the desktop back. Continue.";
+    render(
+      <TurnBlock
+        turn={turn()}
+        rendered={rendered({ text: "Done." })}
+        followUps={[
+          turn({
+            id: "f1",
+            status: "joined",
+            source: "desktop",
+            message: prompt,
+            followUpOfTurnId: "t1",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.queryByText(prompt)).toBeNull();
+    expect(screen.queryByText("Continued after your choice")).toBeNull();
   });
 
   it("renders follow-ups BETWEEN the question and the answer — the answer stays last", () => {
@@ -970,6 +1027,65 @@ describe("a platform automation delivery turn", () => {
   });
 });
 
+describe("the onboarding agent's greeting turn", () => {
+  const greeting = (overrides: Partial<Turn> = {}) =>
+    turn({
+      source: "greeting",
+      message: "This is the very first message… (the platform's brief)",
+      ...overrides,
+    });
+
+  it("shows the agent's own reply as a normal answer, never the brief", () => {
+    render(
+      <TurnBlock
+        turn={greeting()}
+        rendered={rendered({ text: "Hi Alex, I'm Donna. What's your name?" })}
+      />,
+    );
+    expect(
+      screen.getByText("Hi Alex, I'm Donna. What's your name?"),
+    ).toBeInTheDocument();
+    // The brief is plumbing: no user bubble, no header.
+    expect(screen.queryByText(/platform's brief/)).toBeNull();
+    expect(screen.getByTestId("greeting-actions")).toBeInTheDocument();
+  });
+
+  it("holds the Gmail card until the agent's words have landed", () => {
+    render(
+      <TurnBlock
+        turn={greeting({ status: "running" })}
+        rendered={rendered({ ended: false })}
+      />,
+    );
+    expect(screen.queryByTestId("greeting-actions")).toBeNull();
+  });
+
+  it("still offers the first step under a greeting the agent could not answer", () => {
+    // No words are invented for the agent: the failure reads as the
+    // product's notice, and connecting Gmail stays one click away.
+    // MUTATION-PROOF: render the actions only beside the answer text and
+    // this row loses its card.
+    render(
+      <TurnBlock
+        turn={greeting({
+          status: "failed",
+          error: "The agent couldn't start. Try again in a moment.",
+        })}
+        rendered={undefined}
+      />,
+    );
+    expect(
+      screen.getByText("The agent couldn't start. Try again in a moment."),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("greeting-actions")).toBeInTheDocument();
+  });
+
+  it("never adds the card to an ordinary turn", () => {
+    render(<TurnBlock turn={turn()} rendered={rendered({ text: "Done." })} />);
+    expect(screen.queryByTestId("greeting-actions")).toBeNull();
+  });
+});
+
 describe("the origin chip", () => {
   it('says "via Slack" on a turn that entered through the Slack door', () => {
     render(
@@ -1002,8 +1118,6 @@ describe("a turn that could not run for a reason the reader can fix", () => {
     );
     const action = screen.getByRole("link", { name: "Connect a model key" });
     expect(action).toHaveAttribute("href", "/w/p1/agents/a1/models");
-    // Guidance, not a crash: none of the destructive treatment.
-    expect(document.querySelector(".text-destructive")).toBeNull();
   });
 
   it("opens the in-place door instead of navigating when one is wired", async () => {
@@ -1070,7 +1184,6 @@ describe("a turn that could not run for a reason the reader can fix", () => {
     );
     const action = screen.getByRole("link", { name: "Check the model key" });
     expect(action).toHaveAttribute("href", "/w/p1/agents/a1/models");
-    expect(document.querySelector(".text-destructive")).toBeNull();
   });
 
   it("a provider refusal without a models href keeps the notice, minus the door", () => {
@@ -1090,7 +1203,6 @@ describe("a turn that could not run for a reason the reader can fix", () => {
       "The agent's model provider rejected the request.",
     );
     expect(screen.queryByRole("link")).toBeNull();
-    expect(document.querySelector(".text-destructive")).toBeNull();
   });
 
   it("trial-credit exhaustion opens the in-place add-key door, like no_model_key", async () => {
@@ -1117,8 +1229,6 @@ describe("a turn that could not run for a reason the reader can fix", () => {
       screen.getByRole("button", { name: "Add your own model key" }),
     );
     expect(onConnectModelKey).toHaveBeenCalledTimes(1);
-    // Guidance, not a crash: none of the destructive treatment.
-    expect(document.querySelector(".text-destructive")).toBeNull();
   });
 
   it("trial-credit exhaustion navigates to Models when no in-place door is wired", () => {
@@ -1138,59 +1248,111 @@ describe("a turn that could not run for a reason the reader can fix", () => {
       name: "Add your own model key",
     });
     expect(action).toHaveAttribute("href", "/w/p1/agents/a1/models");
-    expect(document.querySelector(".text-destructive")).toBeNull();
   });
 
+  // Every failure is guidance with the sentence it carries, whatever its
+  // code (or none): a lifecycle hiccup, a gateway refusal with no one-click
+  // fix, or an uncoded readable sentence. None gets an action, and none is
+  // painted as a crash.
   it.each([
-    "agent_restarted",
-    "agent_start_failed",
-    "at_capacity",
-    "image_unavailable",
-    "turn_stalled",
-    "turn_time_limit",
-  ])("renders a %s failure as a quiet notice, not the red box", (errorCode) => {
-    // A platform hiccup whose copy already says what to do — red would say
-    // the agent is broken. Read off the CODE, never the message text.
+    ["agent_restarted", "The agent had to restart while working on this."],
+    ["agent_start_failed", "The agent couldn't start."],
+    ["at_capacity", "Too many agents are running right now."],
+    ["image_unavailable", "Its software isn't installed yet."],
+    ["turn_stalled", "The agent stopped responding."],
+    ["turn_time_limit", "This turn reached its time limit."],
+    ["blocked_by_policy", "A OneCLI policy stopped this request."],
+    ["gateway_unavailable", "OneCLI couldn't reach the model provider."],
+    [null, "harness event stream ended unexpectedly"],
+  ])(
+    "renders a %s failure as a notice with its own sentence",
+    (errorCode, error) => {
+      render(
+        <TurnBlock
+          turn={turn({ status: "failed", error, errorCode })}
+          rendered={undefined}
+          modelsHref="/w/p1/agents/a1/models"
+        />,
+      );
+      // The POSITIVE pin: the notice treatment (role=status) with the text as
+      // written, not merely the absence of red.
+      expect(screen.getByRole("status")).toHaveTextContent(error);
+      expect(screen.queryByRole("link")).toBeNull();
+      expect(screen.queryByRole("button")).toBeNull();
+      expect(document.querySelector(".text-destructive")).toBeNull();
+    },
+  );
+
+  // The gateway said the workspace holds a key this agent was not given.
+  // The fix is attaching it on the Models page, so the notice links there
+  // (never the add-key dialog: adding a second key is not the fix), and the
+  // raw gateway body stays folded away.
+  it("offers Attach the key for model_key_not_attached, with the raw body folded", async () => {
+    const user = userEvent.setup();
+    const onConnectModelKey = vi.fn();
+    const raw =
+      'Anthropic API error (401 Unauthorized): {"error":"access_restricted","message":"attach the key"}';
     render(
       <TurnBlock
         turn={turn({
           status: "failed",
-          error: "The agent had to restart while working on this.",
-          errorCode,
+          error: "This agent doesn't have access to your model key yet.",
+          errorCode: "model_key_not_attached",
         })}
-        rendered={undefined}
+        rendered={rendered({ error: raw })}
         modelsHref="/w/p1/agents/a1/models"
+        onConnectModelKey={onConnectModelKey}
       />,
     );
-    // The POSITIVE pin: the notice treatment (role=status), not merely the
-    // absence of red — a bare unstyled <p> would otherwise pass.
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "The agent had to restart while working on this.",
-    );
-    expect(document.querySelector(".text-destructive")).toBeNull();
-    // And no action link — the sentence is the whole guidance.
-    expect(screen.queryByRole("link")).toBeNull();
+    expect(
+      screen.getByRole("link", { name: "Attach the key" }),
+    ).toHaveAttribute("href", "/w/p1/agents/a1/models");
+    expect(screen.queryByText(/access_restricted/)).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Technical details" }));
+    expect(screen.getByText(/access_restricted/).textContent).toBe(raw);
+    expect(onConnectModelKey).not.toHaveBeenCalled();
   });
 
-  it("keeps the plain error treatment for every other failure", () => {
-    // The code is what switches the rendering — never the message text.
+  // The agent HAS the key, but its saved value could not be read. The fix is
+  // re-entering it on the Models page: never the add-key dialog, and never
+  // a provider-refusal label that blames a usage limit.
+  it("offers Re-enter the key for model_key_unreadable, never the add-key dialog", () => {
+    const onConnectModelKey = vi.fn();
     render(
       <TurnBlock
         turn={turn({
           status: "failed",
-          error: "The agent restarted. Send the message again.",
-          errorCode: null,
+          error: "OneCLI couldn't read this agent's saved model key.",
+          errorCode: "model_key_unreadable",
         })}
         rendered={undefined}
         modelsHref="/w/p1/agents/a1/models"
+        onConnectModelKey={onConnectModelKey}
       />,
     );
     expect(
-      screen.queryByRole("link", { name: "Connect a model key" }),
-    ).toBeNull();
-    expect(
-      screen.getByText("The agent restarted. Send the message again."),
-    ).toHaveClass("text-destructive");
+      screen.getByRole("link", { name: "Re-enter the key" }),
+    ).toHaveAttribute("href", "/w/p1/agents/a1/models");
+    expect(screen.queryByRole("button", { name: /key/i })).toBeNull();
+    expect(onConnectModelKey).not.toHaveBeenCalled();
+  });
+
+  it("keeps a policy refusal's raw answer, which names the rule, one click away", async () => {
+    const user = userEvent.setup();
+    const raw =
+      'API Error: 403 {"error":"blocked_by_policy","message":"Blocked by OneCLI policy rule \\"No weekend calls\\"."}';
+    render(
+      <TurnBlock
+        turn={turn({
+          status: "failed",
+          error: "A OneCLI policy or spending limit stopped this request.",
+          errorCode: "blocked_by_policy",
+        })}
+        rendered={rendered({ error: raw })}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Technical details" }));
+    expect(screen.getByText(/No weekend calls/).textContent).toBe(raw);
   });
 
   // An uncoded failure that carries a provider's raw response body: nothing
@@ -1215,7 +1377,6 @@ describe("a turn that could not run for a reason the reader can fix", () => {
     expect(screen.getByRole("status")).toHaveTextContent(
       "The agent ran into an error and couldn't finish this message.",
     );
-    expect(document.querySelector(".text-destructive")).toBeNull();
     // Nothing classified it, so no key fix is claimed.
     expect(screen.queryByRole("link")).toBeNull();
     // Collapsed: the blob is not on screen until asked for.
@@ -1317,6 +1478,47 @@ describe("a turn that could not run for a reason the reader can fix", () => {
     expect(container.textContent).not.toContain("connections?connect");
   });
 
+  it("renders the connect card from a request_app_connection result even when the answer carries no link", () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    queryClient.setQueryData(queryKeys.connections.list("workspace"), []);
+    queryClient.setQueryData(queryKeys.grants.agent("agent-1"), {
+      agentId: "agent-1",
+      mode: "grants",
+      connections: [],
+      secrets: [],
+    });
+    queryClient.setQueryData(
+      [...queryKeys.agents.all(), "agent-1", "effective-credentials"],
+      { agentId: "agent-1", mode: "selective", secrets: [], connections: [] },
+    );
+    render(
+      <QueryClientProvider client={queryClient}>
+        <TurnBlock
+          turn={turn()}
+          rendered={rendered({
+            text: "Jira isn't connected yet. Use the button below.",
+            tools: [
+              {
+                callId: "c1",
+                name: "mcp__onecli__request_app_connection",
+                output: JSON.stringify({
+                  status: "connect",
+                  connectUrl:
+                    "https://app.onecli.sh/w/a/connections?connect=jira&source=agent&agent_name=Arik&agent_id=agent%2D1",
+                }),
+              },
+            ],
+          })}
+        />
+      </QueryClientProvider>,
+    );
+    expect(
+      screen.getByRole("button", { name: "Connect Jira" }),
+    ).toBeInTheDocument();
+  });
+
   describe("the agent's files (send_file)", () => {
     it("renders outbound files under the AGENT's answer and inbound files under the PERSON's bubble — never mixed", () => {
       const { container } = withQuery(
@@ -1351,11 +1553,9 @@ describe("a turn that could not run for a reason the reader can fix", () => {
       expect(personSide?.textContent).not.toContain("clip.webm");
       expect(agentSide?.textContent).toContain("Recorded it.");
       expect(agentSide?.textContent).toContain("clip.webm");
-      expect(agentSide?.textContent).toContain("3.0MB");
-      expect(agentSide?.textContent).toContain("the run, recorded");
       expect(agentSide?.textContent).not.toContain("brief.txt");
       expect(
-        screen.getByRole("button", { name: "Save clip.webm" }),
+        screen.getByRole("button", { name: "Preview clip.webm" }),
       ).toBeInTheDocument();
     });
 
@@ -1376,12 +1576,14 @@ describe("a turn that could not run for a reason the reader can fix", () => {
           rendered={rendered({ text: "ok" })}
         />,
       );
+      // A PDF tile shows its page, not its name: find it by its label.
+      const tile = '[aria-label="Preview legacy.pdf"]';
       expect(
-        container.querySelector('[data-align="end"]')?.textContent,
-      ).toContain("legacy.pdf");
+        container.querySelector(`[data-align="end"] ${tile}`),
+      ).not.toBeNull();
       expect(
-        container.querySelector('[data-align="start"]')?.textContent,
-      ).not.toContain("legacy.pdf");
+        container.querySelector(`[data-align="start"] ${tile}`),
+      ).toBeNull();
     });
 
     it("an expired file (retention took the bytes) is a quiet inert chip: named, struck, not a button, never previewed", () => {
@@ -1408,7 +1610,7 @@ describe("a turn that could not run for a reason the reader can fix", () => {
       expect(agentSide?.textContent).toContain("shot.png");
       expect(agentSide?.textContent).toContain("expired");
       expect(
-        screen.queryByRole("button", { name: "Save shot.png" }),
+        screen.queryByRole("button", { name: "Preview shot.png" }),
       ).toBeNull();
       expect(container.querySelector("img")).toBeNull();
       expect(
@@ -1435,7 +1637,7 @@ describe("a turn that could not run for a reason the reader can fix", () => {
         />,
       );
       expect(
-        screen.getByRole("button", { name: "Save report.pdf" }),
+        screen.getByRole("button", { name: "Preview report.pdf" }),
       ).toBeInTheDocument();
     });
   });

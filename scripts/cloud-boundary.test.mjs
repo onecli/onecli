@@ -24,6 +24,8 @@ const CLOUD_ONLY_PACKAGES = [
   "apps/preview-relay",
   "packages/sandbox-home-device-proto",
   "packages/sandbox-shared",
+  "packages/api-cloud",
+  "packages/runner-cloud",
 ];
 
 const path = (rel) => fileURLToPath(new URL(`../${rel}`, import.meta.url));
@@ -81,6 +83,115 @@ test(
   },
 );
 
+// ── Imports from synced files ───────────────────────────────────────────────
+
+/**
+ * The workspace names of the cloud-only packages: a synced file importing
+ * one would compile here and break in the mirror, which is the Golden Rule's
+ * first invariant made mechanical. Derived from the packages above so a new
+ * cloud-only package is guarded the day its row lands.
+ */
+const cloudOnlyPackageNames = () =>
+  CLOUD_ONLY_PACKAGES.flatMap((pkg) => {
+    const manifest = path(`${pkg}/package.json`);
+    return existsSync(manifest)
+      ? [JSON.parse(readFileSync(manifest, "utf8")).name]
+      : [];
+  });
+
+/**
+ * Every way a module specifier reaches a cloud-only package from a synced
+ * file: `import`/`export … from` (type-only included: a type import still
+ * fails to resolve in the mirror), dynamic `import()`, `require()`,
+ * `vi.mock()`/`vi.doMock()`/`jest.mock()`, and a RELATIVE path into the
+ * package's directory (the cloud entrypoints use that form by design, and
+ * they are excluded; a synced file must not).
+ */
+const cloudImportMatcher = (names, dirs) => {
+  const quoted = (xs) => xs.map((x) => x.replace(/[/.]/g, "\\$&")).join("|");
+  const byName = `(${quoted(names)})(/|["'])`;
+  // A relative path reaches the package either through its repo path
+  // (`../../packages/api-cloud/…`) or, from a sibling package, through its
+  // bare directory name (`../../api-cloud/…`): both are matched.
+  const basenames = dirs.map((d) => d.slice(d.lastIndexOf("/") + 1));
+  const byDir = `(\\.\\.?/)+(${quoted(dirs)}|${quoted(basenames)})(/|["'])`;
+  return new RegExp(
+    `(from\\s+|\\bimport\\s*\\(\\s*|\\brequire\\s*\\(\\s*|\\b(?:vi|jest)\\.(?:mock|doMock)\\s*\\(\\s*)["'](?:${byName}|${byDir})`,
+  );
+};
+
+test(
+  "no synced file imports a cloud-only package",
+  { skip: !inCloudRepo },
+  () => {
+    const names = cloudOnlyPackageNames();
+    assert.ok(names.includes("@onecli/api-cloud"));
+    const specifier = cloudImportMatcher(names, CLOUD_ONLY_PACKAGES);
+    const findings = [];
+    for (const file of syncedFiles()) {
+      // This guard's own negative controls are the one synced place the
+      // specifiers appear as fixtures.
+      if (!TS_LIKE.test(file) || file === "scripts/cloud-boundary.test.mjs")
+        continue;
+      let source;
+      try {
+        source = readFileSync(path(file), "utf8");
+      } catch {
+        continue;
+      }
+      source.split("\n").forEach((text, i) => {
+        if (specifier.test(text))
+          findings.push(`${file}:${i + 1} ${text.trim().slice(0, 120)}`);
+      });
+    }
+    assert.deepEqual(
+      findings,
+      [],
+      "synced code imports a cloud-only package; move the code or put the dependency behind a seam the host registers:\n" +
+        findings.join("\n"),
+    );
+  },
+);
+
+test(
+  "the import guard catches every specifier form (negative control)",
+  { skip: !inCloudRepo },
+  () => {
+    const matcher = cloudImportMatcher(
+      ["@onecli/api-cloud", "@onecli/runner-cloud"],
+      ["packages/api-cloud", "packages/runner-cloud"],
+    );
+    const caught = [
+      'import { x } from "@onecli/api-cloud";',
+      "import type { X } from '@onecli/api-cloud';",
+      'import x from "@onecli/api-cloud";',
+      'export { x } from "@onecli/api-cloud";',
+      'export * from "@onecli/api-cloud/services/x";',
+      'export type { X } from "@onecli/runner-cloud";',
+      'const m = await import("@onecli/api-cloud");',
+      'const m = require("@onecli/runner-cloud");',
+      'vi.mock("@onecli/api-cloud", () => ({}));',
+      'vi.doMock("@onecli/api-cloud");',
+      'import { y } from "../../packages/api-cloud/src/index.ts";',
+      'import("../packages/runner-cloud/src/index.ts");',
+      'import { y } from "../../api-cloud/src/index.ts";',
+      'export * from "../../../runner-cloud/src/index";',
+    ];
+    const allowed = [
+      'import { y } from "@onecli/api-cloudy";',
+      'import { y } from "@onecli/api";',
+      'import { y } from "@onecli/api/services/due-work";',
+      'import { y } from "./packages-api-cloud-ish";',
+      'import { y } from "./api-cloud-adjacent";',
+      '// a comment that mentions "@onecli/api-cloud" is not an import',
+      'const name = "@onecli/api-cloud";',
+    ];
+    for (const line of caught) assert.ok(matcher.test(line), `missed: ${line}`);
+    for (const line of allowed)
+      assert.ok(!matcher.test(line), `false positive: ${line}`);
+  },
+);
+
 // ── Comments in synced files ────────────────────────────────────────────────
 
 /**
@@ -130,6 +241,15 @@ const CLOUD_IMPLEMENTATION_TERMS = [
   /\b[a-z0-9]+-dev\.onecli\.sh\b/i,
   /\bcloud-scripts\b/,
   /\bplans\/deploy-ownership\b/,
+  // The hosted platform's resource-management components (the admission
+  // ledger, the placement reconciler, the rootfs probe, a demand pod) are
+  // cloud machinery; synced prose says "capacity" and "a hosted scheduler"
+  // instead.
+  /\badmission ledger\b/i,
+  /\bstorage ledger\b/i,
+  /\bplacement reconciler\b/i,
+  /\brootfs probe\b/i,
+  /\bdemand pods?\b/i,
   /\bdeploy(-infra|-sandbox-platform|-analytics)?\.yml\b/,
   /\bdev live gate\b/i,
   /\bobserved on dev\b/i,
@@ -138,11 +258,11 @@ const CLOUD_IMPLEMENTATION_TERMS = [
   /\bip-target registration\b/i,
   /\b(found|seen) (live )?on dev\b|\b(after boot|ran) on dev\b|\bdev ran on\b|\bon dev:/i,
   /#1300\b/,
-  /(^|[^\w#&])#(803|1335|1401)\b/,
+  /(^|[^\w#&])#(803|1335|1375|1401|1470)\b/,
   // The hosted agent desktop is licensed hosted-platform code: its plan and
   // the screen server it runs are named only inside ee/ and cloud-only dirs.
   /\bplans\/desktop-takeover\b/,
-  /\bx0?tigervnc\b/i,
+  /\b(x0)?tigervnc\b/i,
 ];
 
 /** Synced files whose prose may name these terms by design. */
@@ -329,13 +449,15 @@ test(
     const rows = await commentsOf(
       "x.ts",
       'const a = "fargate";\n// boots under Fargate\nconst b = `sandbox-manager ${a}`;\n' +
-        'const c = "behind the NLB";\n// Found live on dev: behind the NLB\n',
+        'const c = "behind the NLB";\n// Found live on dev: behind the NLB\n' +
+        'const d = "X0tigervnc";\n// verified against the real TigerVNC desktop\n',
     );
     const flagged = rows.filter(({ text }) =>
       CLOUD_IMPLEMENTATION_TERMS.some((re) => re.test(text)),
     );
-    assert.equal(flagged.length, 2);
+    assert.equal(flagged.length, 3);
     assert.equal(flagged[0].line, 2);
     assert.equal(flagged[1].line, 5);
+    assert.equal(flagged[2].line, 7);
   },
 );

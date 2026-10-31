@@ -564,6 +564,6 @@ mod tests {
             ])
         );
         // Not recognized: the generic card, as before.
-        assert_eq!(card("GET", "/v1/Flows", "").0, "GET request");
+        assert_eq!(card("GET", "/v1/Flows", "").0, "Read flows");
     }
 }

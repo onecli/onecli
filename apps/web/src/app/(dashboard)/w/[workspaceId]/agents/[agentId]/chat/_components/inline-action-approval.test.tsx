@@ -23,6 +23,23 @@ vi.mock("@/hooks/use-approvals", () => ({
   useApproveCustomConnection: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 
+vi.mock("@/ee/slack-read/slack-access-card", () => ({
+  SlackAccessCard: ({ item }: { item: { summary: string } }) => (
+    <div data-testid="slack-access-card">{item.summary}</div>
+  ),
+}));
+vi.mock("next/dynamic", () => ({
+  default: (load: () => Promise<unknown>) => {
+    // Resolve the (mocked) module synchronously enough for the test: the
+    // dynamic wrapper renders the loaded component once ready.
+    let Loaded: ((p: object) => unknown) | null = null;
+    void load().then((c) => {
+      Loaded = c as (p: object) => unknown;
+    });
+    return (props: object) => (Loaded ? Loaded(props) : null);
+  },
+}));
+
 const { useActionApprovalCards } = await import("./use-action-approval-cards");
 const { InlineActionApproval } = await import("./inline-action-approval");
 
@@ -34,7 +51,7 @@ const action = (
   agentId: "donna",
   agentName: "Donna",
   summary: 'Donna wants to talk to Mark: "what time is it?"',
-  offersAlwaysAllow: true,
+  standingChoice: false,
   conversationId: "conv-home",
   createdAt: "2026-10-08T05:26:08Z",
   expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
@@ -93,6 +110,7 @@ describe("inline action approvals in the chat", () => {
     expect(state.mutate).toHaveBeenCalledWith({
       approvalId: "act-1",
       decision: "approve",
+      standing: false,
     });
   });
 
@@ -114,6 +132,7 @@ describe("inline action approvals in the chat", () => {
     expect(state.mutate).toHaveBeenCalledWith({
       approvalId: "act-1",
       decision: "approve",
+      standing: false,
     });
   });
 
@@ -122,5 +141,25 @@ describe("inline action approvals in the chat", () => {
       <Cards agentId="donna" conversationId="conv-home" />,
     );
     expect(container.textContent).toBe("");
+  });
+
+  it("a Slack access request renders the access card (server summary), not the generic row", async () => {
+    state.items = [
+      action({
+        summary: "Connect your Slack so Donna can read as you",
+        slackAccess: {
+          kind: "read",
+          reason: "not_connected",
+          conversationLabel: null,
+        },
+      }),
+    ];
+    // Let the lazy module settle, then render.
+    await new Promise((r) => setTimeout(r, 0));
+    render(<Cards agentId="donna" conversationId="conv-home" />);
+    expect(screen.getByTestId("slack-access-card").textContent).toBe(
+      "Connect your Slack so Donna can read as you",
+    );
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
   });
 });

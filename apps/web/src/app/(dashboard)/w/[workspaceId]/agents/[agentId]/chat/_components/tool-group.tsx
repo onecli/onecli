@@ -2,8 +2,7 @@
 
 import { ChevronDown, Loader2 } from "lucide-react";
 import {
-  activityForTool,
-  finishedActivityForTool,
+  activityForToolCall,
   toolKind,
   type ToolKind,
 } from "@onecli/agent-protocol/activity";
@@ -48,9 +47,7 @@ const COUNTED: Record<
 export const groupLabel = (tools: ToolCall[], running: boolean): string => {
   const [first] = tools;
   if (tools.length === 1 && first)
-    return running
-      ? activityForTool(first.name)
-      : finishedActivityForTool(first.name);
+    return activityForToolCall(first.name, first.input, running, first);
   const kinds = new Set(tools.map((tool) => toolKind(tool.name)));
   const [only] = kinds;
   const counted = COUNTED[kinds.size === 1 && only ? only : "step"];

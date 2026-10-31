@@ -6,8 +6,8 @@ import { agentLastSeen } from "@onecli/api/lib/agent-activity";
  * When this agent was last heard from — one element, never a second status
  * chip: the freshness dot lives INSIDE the text and only for activity within
  * the hour. "Seen" is always last-request-time, never presence (the agent's
- * own state is `AgentStatusPill`'s job). Shared by the agent card and the
- * agent page so the two can't word it differently.
+ * own state is `AgentStatusPill`'s job). Rendered in the agent's Details
+ * dialog.
  */
 export const AgentLastSeen = ({
   lastSeenAt,

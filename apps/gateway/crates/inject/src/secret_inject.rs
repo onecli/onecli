@@ -292,12 +292,13 @@ pub fn is_llm_provider_type(secret_type: &str) -> bool {
 /// front makes the precedence real for every provider instead of
 /// special-casing header shapes.
 ///
-/// Within one scope, two secrets of the same LLM type keep the first in pool
-/// order (the pool queries have no `ORDER BY`). On a shared path that pair
-/// was already arbitrary (last-wins by row order); on disjoint `path_pattern`s
-/// each used to inject on its own path and now only one does, which matches
-/// what the API side already presents (`findInjectableSecretOfType` picks one
-/// row per type).
+/// Within one scope, two secrets of the same LLM type resolve to the lower
+/// `id`. The pool queries have no `ORDER BY`, so keeping "the first in pool
+/// order" left the choice to Postgres row order, and the API side
+/// (`findInjectableSecretOfType`) could advertise the OTHER key's auth mode to
+/// the container. An Anthropic API-key request then met an OAuth rule that had
+/// no `authorization` header to replace, and went upstream with no credential
+/// at all. Both sides now break the tie on the id, so they always agree.
 ///
 /// The chosen credential is the only one for its provider: if its value
 /// cannot be resolved, nothing is injected for that provider. The
@@ -319,13 +320,11 @@ pub fn one_credential_per_llm_provider(secrets: &[db::SecretRow]) -> Vec<&db::Se
         match kept.iter().position(|k| k.type_ == secret.type_) {
             None => kept.push(secret),
             Some(index) => {
-                // Workspace beats organization; a tie keeps the incumbent. The
-                // rule is written so the outcome never depends on which pool
-                // was concatenated first. `scope` is compared as a string to
-                // match how the rest of the gateway reads the column
-                // (`assemble.rs`, `enforce.rs`).
-                let replaces_incumbent =
-                    kept[index].scope == "organization" && secret.scope != "organization";
+                // `llm_rank` is total, so the pick never depends on which pool
+                // was concatenated first or on row order. `scope` is compared
+                // as a string to match how the rest of the gateway reads the
+                // column (`assemble.rs`, `enforce.rs`).
+                let replaces_incumbent = llm_rank(secret) < llm_rank(kept[index]);
                 if replaces_incumbent {
                     kept[index] = secret;
                 }
@@ -338,6 +337,13 @@ pub fn one_credential_per_llm_provider(secrets: &[db::SecretRow]) -> Vec<&db::Se
         }
     }
     kept
+}
+
+/// Precedence key for two credentials of one LLM provider: workspace before
+/// organization, then the lower id, the same order as the API's
+/// `SCOPE_PRECEDENCE`. Lower sorts first and wins.
+fn llm_rank(secret: &db::SecretRow) -> (bool, &str) {
+    (secret.scope == "organization", secret.id.as_str())
 }
 
 /// If the OpenAI OAuth access_token is expired, refresh it and persist the
@@ -599,6 +605,38 @@ mod tests {
 
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].id, "ws-key");
+    }
+
+    // Two Anthropic keys in ONE workspace: the lower id wins whatever the pool
+    // order (see `one_credential_per_llm_provider` for why the tie matters).
+    #[test]
+    fn same_scope_tie_resolves_to_the_lower_id_in_any_order() {
+        for secrets in [
+            vec![
+                secret_row("b-oauth", "anthropic", "workspace"),
+                secret_row("a-api-key", "anthropic", "workspace"),
+            ],
+            vec![
+                secret_row("a-api-key", "anthropic", "workspace"),
+                secret_row("b-oauth", "anthropic", "workspace"),
+            ],
+        ] {
+            let kept = one_credential_per_llm_provider(&secrets);
+            assert_eq!(kept.len(), 1);
+            assert_eq!(kept[0].id, "a-api-key");
+        }
+    }
+
+    // Scope still outranks the id: an org key with a lower id never beats a
+    // workspace key.
+    #[test]
+    fn scope_outranks_the_id_tie_break() {
+        let secrets = vec![
+            secret_row("z-ws", "anthropic", "workspace"),
+            secret_row("a-org", "anthropic", "organization"),
+        ];
+        let kept = one_credential_per_llm_provider(&secrets);
+        assert_eq!(kept[0].id, "z-ws");
     }
 
     #[test]

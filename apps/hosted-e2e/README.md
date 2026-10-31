@@ -58,6 +58,48 @@ about half a minute) and runs only with `HOSTED_E2E_SCALE=1`; otherwise it
 registers as skipped. Run it after touching the attachment door, the blob
 store, or the pool.
 
+## Live command-output delivery (opt-in)
+
+`tests/live-jcode-output-delivery.test.ts` uses real Jcode on the full local
+stack, not the fake harness. It spends model tokens, and API-key usage is
+billable to the Anthropic API account. After the local prerequisites above
+are ready, export exactly one auth option through a secure environment:
+
+- `E2E_ANTHROPIC_OAUTH_TOKEN` for Anthropic OAuth.
+- `E2E_ANTHROPIC_API_KEY` for Anthropic API-key authentication.
+
+Never put either credential in a command literal or committed file. There is
+no automatic fallback between auth modes. Both variables supplied, or a
+supplied value that is empty or contains whitespace, fail with a secret-free
+configuration error.
+
+```bash
+# Exactly one of E2E_ANTHROPIC_OAUTH_TOKEN or E2E_ANTHROPIC_API_KEY is already exported.
+E2E_ADMIN_DATABASE_URL=postgresql://postgres:postgres@localhost:5461/postgres \
+E2E_TEMPLATE_DB=onecli_he2e_template \
+E2E_AGENT_IMAGE=onecli-agent:he2e \
+  pnpm --filter @onecli/hosted-e2e exec vitest run \
+    tests/live-jcode-output-delivery.test.ts
+```
+
+Without either auth variable, the live scenario explicitly registers as
+skipped, while deterministic auth-selection and delivery-oracle tests still run.
+Each turn has a three-minute deadline and the scenario has a twenty-minute
+ceiling. Only synthetic records are generated. Checks require every field of
+all four small-result rows in durable final text, then every field of all
+100 larger-result rows in final text or a bound outbound attachment whose
+API download contains all records. The repeat request must deliver again on
+a **new turn**, not borrow the previous answer or attachment. A subsequent
+explicit CSV export request additionally requires a **new bound outbound
+attachment** on that export turn, with every row and field verified through
+the API download. The export must be a CSV-named file with the expected header
+and complete CSV records, not a Markdown table saved as a file. Complete
+inline text cannot substitute for this export.
+Only that turn's last `text` event counts as final text: collapsed tool output and
+progress cannot satisfy delivery. Empty output, command failure, and a
+nonexistent-file send must be reported truthfully. Attachment containment,
+size, and count fences remain covered by `tests/send-file.test.ts`.
+
 ## The four laws worth knowing before writing a scenario
 
 1. **Door 2 is seeded from day one.** A sandbox will not start without a

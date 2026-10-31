@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { AlertTriangle, Loader2, Search } from "lucide-react";
+import { Loader2, Search } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@onecli/ui/components/button";
 import { Checkbox } from "@onecli/ui/components/checkbox";
@@ -17,9 +17,9 @@ import {
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
 import { cn } from "@onecli/ui/lib/utils";
-import type { ConversationKind, MyConversation, ReadAudience } from "./api";
+import type { ConversationKind } from "./api";
 import { useMyConversations, useShareConversations } from "./hooks";
-import { AUDIENCE_ORDER, AUDIENCES, KIND_ICON } from "./read-grant-row";
+import { KIND_ICON } from "./read-constants";
 
 export interface AddReadGrantDialogProps {
   agentId: string;
@@ -40,15 +40,11 @@ const FILTERS: { value: Filter; label: string }[] = [
   { value: "group_dm", label: "Group DMs" },
 ];
 
-const isPrivateMessage = (c: MyConversation) =>
-  c.kind === "dm" || c.kind === "group_dm";
-
 /**
  * Pick ONE OR MANY of your own Slack conversations for the agent to read,
- * and who may ask about them. Filter chips + "select all shown" make bulk
+ * only ever asked about by you. Filter chips + "select all shown" make bulk
  * picks quick, but each pick still becomes its own grant (a snapshot: new
- * conversations are never added implicitly). New shares default to "Only
- * me", and sharing DMs with "Anyone" needs an explicit acknowledgement.
+ * conversations are never added implicitly).
  */
 export const AddReadGrantDialog = ({
   agentId,
@@ -62,8 +58,6 @@ export const AddReadGrantDialog = ({
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [audience, setAudience] = useState<ReadAudience>("granter_only");
-  const [ackDms, setAckDms] = useState(false);
 
   const shareable = useMemo(
     () =>
@@ -93,8 +87,6 @@ export const AddReadGrantDialog = ({
   }, [shareable, filter, query]);
 
   const picked = shareable.filter((c) => selected.has(c.ref));
-  const pickedDms = picked.filter(isPrivateMessage).length;
-  const needsAck = audience === "anyone" && pickedDms > 0;
   const shownSelected = shown.filter((c) => selected.has(c.ref)).length;
   const allShown = shown.length > 0 && shownSelected === shown.length;
 
@@ -120,14 +112,12 @@ export const AddReadGrantDialog = ({
     setQuery("");
     setFilter("all");
     setSelected(new Set());
-    setAudience("granter_only");
-    setAckDms(false);
   };
 
   const submit = () => {
-    if (picked.length === 0 || (needsAck && !ackDms)) return;
+    if (picked.length === 0) return;
     share.mutate(
-      { externalRefs: picked.map((c) => c.ref), audience },
+      { externalRefs: picked.map((c) => c.ref) },
       {
         onSuccess: () => {
           toast.success(
@@ -302,62 +292,11 @@ export const AddReadGrantDialog = ({
               </div>
             </div>
           </div>
-          <fieldset className="space-y-2">
-            <legend className="text-sm font-medium">
-              Who can ask about {picked.length > 1 ? "them" : "it"}
-            </legend>
-            <div className="grid grid-cols-2 gap-2">
-              {AUDIENCE_ORDER.map((value) => {
-                const option = AUDIENCES[value];
-                const Icon = option.icon;
-                return (
-                  <button
-                    key={value}
-                    type="button"
-                    aria-pressed={audience === value}
-                    onClick={() => {
-                      setAudience(value);
-                      setAckDms(false);
-                    }}
-                    className={cn(
-                      "rounded-md border p-3 text-left",
-                      audience === value
-                        ? "border-primary ring-primary/20 ring-2"
-                        : "hover:bg-muted",
-                    )}
-                  >
-                    <span className="flex items-center gap-1.5 text-sm font-medium">
-                      <Icon className="size-3.5" aria-hidden />
-                      {option.label}
-                    </span>
-                    <span className="text-muted-foreground mt-1 block text-xs text-pretty">
-                      {option.hint}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-            {needsAck ? (
-              <label className="flex cursor-pointer items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs">
-                <Checkbox
-                  checked={ackDms}
-                  onCheckedChange={(v) => setAckDms(v === true)}
-                  className="mt-0.5"
-                />
-                <span className="text-pretty">
-                  <AlertTriangle
-                    className="mr-1 inline size-3.5 text-amber-600"
-                    aria-hidden
-                  />
-                  {pickedDms === 1
-                    ? "1 private message is selected."
-                    : `${pickedDms} private messages are selected.`}{" "}
-                  Anyone {agentName} talks to will be able to ask about{" "}
-                  {pickedDms === 1 ? "it" : "them"}. I understand.
-                </span>
-              </label>
-            ) : null}
-          </fieldset>
+          <p className="text-muted-foreground text-xs text-pretty">
+            Only you can ask {agentName} about{" "}
+            {picked.length > 1 ? "them" : "it"}, in your own chat with it or
+            your own schedules.
+          </p>
         </DialogBody>
         <DialogFooter>
           <Button
@@ -369,9 +308,7 @@ export const AddReadGrantDialog = ({
           </Button>
           <Button
             onClick={submit}
-            disabled={
-              picked.length === 0 || (needsAck && !ackDms) || share.isPending
-            }
+            disabled={picked.length === 0 || share.isPending}
           >
             {share.isPending ? (
               <>

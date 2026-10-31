@@ -1,5 +1,6 @@
 "use client";
 
+import { displayConnectionLabel } from "@onecli/api/lib/connection-display";
 import { useEffect, useMemo, useState } from "react";
 import { Loader2, TriangleAlert } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
@@ -247,7 +248,9 @@ export const ManagePermissionsDialog = ({
 
   const app = connection ? getApp(connection.provider) : undefined;
   const title = connection
-    ? (connection.label ?? app?.name ?? connection.provider)
+    ? (displayConnectionLabel(connection.label, connection.metadata) ??
+      app?.name ??
+      connection.provider)
     : "";
 
   return (
@@ -324,13 +327,15 @@ export const ManagePermissionsDialog = ({
                   onGroupSelect={setGroup}
                 />
               ))}
-              <OtherRequestsSection
-                other={other}
-                unlisted={definition.unlisted}
-                allToolsAllowed={allowAll(choices)}
-                readOnly={readOnly || save.isPending}
-                onChange={setOtherEdits}
-              />
+              {!definition.exhaustive && (
+                <OtherRequestsSection
+                  other={other}
+                  unlisted={definition.unlisted}
+                  allToolsAllowed={allowAll(choices)}
+                  readOnly={readOnly || save.isPending}
+                  onChange={setOtherEdits}
+                />
+              )}
             </>
           )}
         </div>

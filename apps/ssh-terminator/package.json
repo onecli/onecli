@@ -16,7 +16,7 @@
   "dependencies": {
     "@aws-sdk/client-cloudwatch": "^3.1014.0",
     "@aws-sdk/client-secrets-manager": "^3.1014.0",
-    "@kubernetes/client-node": "2.0.0",
+    "@kubernetes/client-node": "2.0.1",
     "@onecli/ssh-cert": "workspace:*",
     "pino": "^10.3.1",
     "ssh2": "^1.17.0",

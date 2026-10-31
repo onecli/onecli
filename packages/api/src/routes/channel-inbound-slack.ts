@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { z } from "zod";
 import { db } from "@onecli/db";
 import {
   escapeSlackText,
@@ -11,18 +12,17 @@ import { getCrypto } from "../providers";
 import { configuredAppUrl } from "../lib/app-origin";
 import { ServiceError } from "../services/errors";
 import { verifySlackSignature } from "../services/channels/providers/slack/signature";
-import { dispatchSlackEvent } from "../services/channels/providers/slack/dispatch";
+import {
+  acceptInboundEvent,
+  processInboundEventDetached,
+} from "../services/channels/inbound-event-service";
 import {
   actOnCardFollowUp,
   stopFromCard,
 } from "../services/channels/channel-ingestion-service";
 import { interpretSlackEvent } from "../services/channels/providers/slack/interpret";
 import { sharedSlackApp } from "../services/channels/providers/slack/shared-app";
-import {
-  postBlocksMessage,
-  postEphemeral,
-  postMessage,
-} from "@onecli/channels/slack";
+import { postBlocksMessage, postMessage } from "@onecli/channels/slack";
 import { parseSlackPresenceCredentials } from "../services/channels/providers/slack/types";
 import {
   getInboundPresence,
@@ -49,11 +49,10 @@ import { REACH_ACTION_DECISIONS } from "../services/channels/providers/slack/rea
 import { decideActionApprovalFromChannel } from "../services/channels/action-approval-service";
 import { getUserReadConnectCompleter } from "../providers/hooks/conversation-reader";
 import {
-  ACTION_APPROVAL_DECISIONS,
+  actionApprovalClickOf,
   settledActionCardText,
 } from "../services/channels/providers/slack/action-approval-card";
-import { agentImageUrlOrNull } from "../services/agent-image-service";
-import { oauthCallbackUrl, publicApiUrl } from "../services/channels/posture";
+import { oauthCallbackUrl } from "../services/channels/posture";
 import { logger } from "../lib/logger";
 
 const log = logger.child({ component: "slack-inbound" });
@@ -93,15 +92,10 @@ const TIMESTAMP_WINDOW_SECONDS = 60 * 5;
  * count our refusals toward its failure-rate cutoff. */
 const NO_RETRY = { "x-slack-no-retry": "1" } as const;
 
-interface VerifiedPresence {
-  id: string;
-  identityRef: string | null;
-  botToken: string | null;
-  /** The agent's public avatar URL for `icon_url`, or null. Rides the
-   * signing-secret cache, so an avatar change can lag here by up to its TTL
-   * (≤60s) — acceptable for a refusal reply's icon. */
-  iconUrl: string | null;
-}
+/** The inner event as the inbox stores it: a JSON object (every event the
+ * interpreter routes is one). Anything else is acked and dropped, as the
+ * interpreter would ignore it. */
+const inboundEventSchema = z.record(z.string(), z.json());
 
 /**
  * A malformed or out-of-window `x-slack-request-timestamp` is rejected before
@@ -126,13 +120,14 @@ const timestampInWindow = (headers: Headers): boolean => {
 
 /**
  * Look the presence up by Slack app id and verify the signature over the raw
- * body. Every refusal is the same hint-free 401.
+ * body. Answers the verified presence's id; every refusal is the same
+ * hint-free null (401).
  */
 const verifyInbound = async (
   rawBody: string,
   headers: Headers,
   apiAppId: string | undefined,
-): Promise<VerifiedPresence | null> => {
+): Promise<string | null> => {
   if (!apiAppId) return null;
   // Cheap pre-filter before any DB/KMS work (unauthenticated DoS surface).
   if (!timestampInWindow(headers)) return null;
@@ -149,9 +144,7 @@ const verifyInbound = async (
       select: {
         id: true,
         status: true,
-        identityRef: true,
         credentials: true,
-        agent: { select: { id: true, imageKey: true } },
       },
     });
     if (!presence?.credentials) return null;
@@ -174,15 +167,7 @@ const verifyInbound = async (
       if (!creds.signingSecret) return null;
       entry = {
         signingSecret: creds.signingSecret,
-        botToken: creds.botToken ?? null,
         presenceId: presence.id,
-        identityRef: presence.identityRef,
-        // Same gate as the adapter config feed: Slack can never fetch a
-        // localhost/plain-http icon_url, so a non-public origin sends none.
-        iconUrl:
-          publicApiUrl() !== null
-            ? agentImageUrlOrNull(presence.agent.id, presence.agent.imageKey)
-            : null,
       };
       setInboundPresence(apiAppId, entry);
     } catch {
@@ -198,12 +183,7 @@ const verifyInbound = async (
   });
   if (!ok) return null;
 
-  return {
-    id: entry.presenceId,
-    identityRef: entry.identityRef,
-    botToken: entry.botToken,
-    iconUrl: entry.iconUrl,
-  };
+  return entry.presenceId;
 };
 
 /**
@@ -625,82 +605,29 @@ export const channelInboundSlackRoutes = () => {
       return c.json({ ok: true });
     }
 
-    const presence = await verifyInbound(
+    const presenceId = await verifyInbound(
       rawBody,
       c.req.raw.headers,
       envelope.api_app_id,
     );
-    if (!presence) return c.json({ error: "Unauthorized" }, 401, NO_RETRY);
+    if (!presenceId) return c.json({ error: "Unauthorized" }, 401, NO_RETRY);
 
     if (envelope.type !== "event_callback" || !envelope.event_id) {
       return c.json({ ok: true });
     }
+    const event = inboundEventSchema.safeParse(envelope.event);
+    if (!event.success) return c.json({ ok: true });
 
-    const result = await dispatchSlackEvent({
-      presenceId: presence.id,
-      identityRef: presence.identityRef,
-      event: envelope.event,
+    // Ack first, process after: the verified event is written to the durable
+    // inbox and Slack gets its 2xx now, whatever processing costs (a
+    // message's files are fetched before its turn exists). A redelivery of
+    // an event still in the inbox is absorbed there (`accepted` is null).
+    const accepted = await acceptInboundEvent({
+      presenceId,
       eventId: envelope.event_id,
+      event: event.data,
     });
-
-    // Request-scoped replies for outcomes that OWE one right now, fired WITHOUT
-    // blocking the ack (Slack's 3s window). Turn outcomes post NOTHING here —
-    // the adapter's completion pass posts every finished turn's answer once,
-    // door failures included (their `turn.error` is the answer; an immediate
-    // reply here would double-deliver it).
-    if (presence.botToken) {
-      const botToken = presence.botToken;
-      if (result.kind === "message") {
-        const reply = {
-          channel: result.call.replyChannel,
-          threadTs: result.call.replyThreadTs ?? undefined,
-        };
-        if (result.outcome.kind === "refused") {
-          // Covers the follow-up cap too — a refusal must stay VISIBLE, or
-          // the silent-drop bug this feature killed is reborn at message #11.
-          const message = result.outcome.message;
-          const iconUrl = presence.iconUrl;
-          fireReply(() =>
-            postMessage(botToken, {
-              ...reply,
-              text: escapeSlackText(message),
-              ...(iconUrl && { iconUrl }),
-            }),
-          );
-        }
-        // A mid-run message is no longer "busy": it lands as a follow-up
-        // (steers into the live turn or runs next) and its ack is the
-        // receipt reaction moving to it — no text is owed here.
-      } else if (result.kind === "invite" && result.outcome.kind === "refuse") {
-        // Refuse-and-stay-muted: no leave call (it would need channel-manage
-        // scopes; see the door's comment). The refusal itself is the signal.
-        const channel = result.call.channel;
-        const message = result.outcome.message;
-        const iconUrl = presence.iconUrl;
-        fireReply(() =>
-          postMessage(botToken, {
-            channel,
-            text: escapeSlackText(message),
-            ...(iconUrl && { iconUrl }),
-          }),
-        );
-      } else if (result.kind === "stop" && result.outcome.kind === "refused") {
-        // A refused Stop is the clicker's business alone: a private note in
-        // the thread they clicked in. The loader stays (the agent IS still
-        // working); an authorized stop owes nothing here (its close posts
-        // "Stopped." to everyone).
-        const { channel, threadTs, externalUserId } = result.call;
-        const message = result.outcome.message;
-        fireReply(() =>
-          postEphemeral(botToken, {
-            channel,
-            threadTs,
-            user: externalUserId,
-            text: escapeSlackText(message),
-          }),
-        );
-      }
-    }
+    if (accepted) processInboundEventDetached(accepted);
 
     return c.json({ ok: true });
   });
@@ -746,10 +673,11 @@ export const channelInboundSlackRoutes = () => {
         ? (REACH_ACTION_DECISIONS[action.action_id] ?? null)
         : null;
     // The action-approval card's own vocabulary - same classification rule.
-    const actionApprovalDecision =
+    const actionApprovalClick =
       payload.type === "block_actions" && action?.action_id
-        ? (ACTION_APPROVAL_DECISIONS[action.action_id] ?? null)
+        ? actionApprovalClickOf(action.action_id)
         : null;
+    const actionApprovalDecision = actionApprovalClick?.decision ?? null;
 
     // ── The SHARED app's arm: the onboarding bot has ONE interactive
     // element, a URL button — Slack still posts a block_actions payload on
@@ -763,12 +691,12 @@ export const channelInboundSlackRoutes = () => {
       return c.json({ ok: true });
     }
 
-    const presence = await verifyInbound(
+    const presenceId = await verifyInbound(
       rawBody,
       c.req.raw.headers,
       payload.api_app_id,
     );
-    if (!presence) return c.json({ error: "Unauthorized" }, 401);
+    if (!presenceId) return c.json({ error: "Unauthorized" }, 401);
 
     // The reach card's own branch: decide + settle-via-response_url, then
     // ack. The service rewrites every OTHER owner's card through its
@@ -776,7 +704,7 @@ export const channelInboundSlackRoutes = () => {
     // 3s-window pattern the approval branch uses).
     if (reachDecisionKind && action?.value && clicker) {
       const reachDecision = await decideReachFromChannel({
-        presenceId: presence.id,
+        presenceId,
         grantId: action.value,
         decision: reachDecisionKind,
         clickerExternalUserId: clicker,
@@ -788,9 +716,7 @@ export const channelInboundSlackRoutes = () => {
             ? `${
                 reachDecision.state === "approved"
                   ? "✅ Answering anyone in the channel"
-                  : reachDecision.state === "blocked"
-                    ? "⛔ Not answering there"
-                    : "🔒 OneCLI users only"
+                  : "⛔ Not answering there"
               } · decided by ${escapeSlackText(reachDecision.decidedByName)}`
             : reachDecision.kind === "already_settled"
               ? "This request was already decided."
@@ -823,10 +749,13 @@ export const channelInboundSlackRoutes = () => {
     // service's cardRefs settle).
     if (actionApprovalDecision && action?.value && clicker) {
       const outcome = await decideActionApprovalFromChannel({
-        presenceId: presence.id,
+        presenceId,
         approvalId: action.value,
         decision: actionApprovalDecision,
         clickerExternalUserId: clicker,
+        ...(actionApprovalClick?.choice && {
+          choice: actionApprovalClick.choice,
+        }),
       });
       if (payload.response_url && isSlackResponseUrl(payload.response_url)) {
         const responseUrl = payload.response_url;
@@ -838,6 +767,7 @@ export const channelInboundSlackRoutes = () => {
                 summary: outcome.summary,
                 outcome: outcome.status,
                 decidedByName: outcome.decidedByName,
+                standing: outcome.standing,
               })
             : outcome.kind === "already_settled"
               ? "This request was already decided."
@@ -872,7 +802,7 @@ export const channelInboundSlackRoutes = () => {
     const cardStop = turnStopClickOf(payload);
     if (cardStop) {
       const outcome = await stopFromCard({
-        agentChannelId: presence.id,
+        agentChannelId: presenceId,
         externalUserId: cardStop.clickerExternalUserId,
         channel: cardStop.channel,
         cardTs: cardStop.messageTs,
@@ -892,7 +822,7 @@ export const channelInboundSlackRoutes = () => {
     const rowAction = followUpActionClickOf(payload);
     if (rowAction) {
       const outcome = await actOnCardFollowUp({
-        agentChannelId: presence.id,
+        agentChannelId: presenceId,
         externalUserId: rowAction.clickerExternalUserId,
         channel: rowAction.channel,
         cardTs: rowAction.messageTs,
@@ -919,7 +849,7 @@ export const channelInboundSlackRoutes = () => {
           : null;
       fireReply(async () => {
         const outcome = await decideApprovalsFromChannel({
-          presenceId: presence.id,
+          presenceId,
           approvalIds: groupClick.approvalIds,
           decision: groupClick.decision,
           clickerExternalUserId: clicker,
@@ -956,7 +886,7 @@ export const channelInboundSlackRoutes = () => {
     }
 
     const decision = await decideApprovalFromChannel({
-      presenceId: presence.id,
+      presenceId,
       approvalId: action.value,
       decision: action.action_id === "channel_approve" ? "approve" : "deny",
       clickerExternalUserId: clicker,
@@ -1125,8 +1055,11 @@ export const channelInboundSlackRoutes = () => {
             `<!doctype html><meta charset="utf-8"><title>Slack connected</title><body style="font-family:system-ui;padding:2rem;max-width:32rem;margin:auto"><p>Your Slack is connected. Close this window and return to the dashboard.</p></body>`,
           );
         }
+        // Back to Contacts ("acts as you"), where connecting starts: a
+        // popup hands the result to its opener there; a same-tab flow
+        // (popup blocked, or the Slack DM card's link) lands on it.
         return c.redirect(
-          `${appUrl}/w/${encodeURIComponent(done.workspaceId)}/agents/${encodeURIComponent(done.agentId)}/channels?connected=slack-read`,
+          `${appUrl}/w/${encodeURIComponent(done.workspaceId)}/agents/${encodeURIComponent(done.agentId)}/contacts?connected=slack-read`,
         );
       } catch (err) {
         if (err instanceof ServiceError) return fallback(err.message);

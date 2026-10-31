@@ -86,7 +86,11 @@ const services = vi.hoisted(() => ({
   decideReachFromChannel: vi.fn(),
   // action-approval-service (the 4b click door)
   decideActionApprovalFromChannel: vi.fn(),
+  // slack dispatch (the socket arm's ingest door, through the provider)
   dispatchSlackEvent: vi.fn(),
+  // slack inbound-events (the events arm's durable inbox)
+  acceptInboundEvent: vi.fn(),
+  processInboundEventDetached: vi.fn(),
   // turn-receipt-service
   clearTurnReceipts: vi.fn(),
   // presence-icons-service (the card's "Sync image")
@@ -255,6 +259,11 @@ vi.mock("../services/channels/providers/slack/dispatch", () => ({
   dispatchSlackEvent: services.dispatchSlackEvent,
 }));
 
+vi.mock("../services/channels/inbound-event-service", () => ({
+  acceptInboundEvent: services.acceptInboundEvent,
+  processInboundEventDetached: services.processInboundEventDetached,
+}));
+
 vi.mock("../services/attachment-service", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../services/attachment-service")>()),
   getAttachmentBytesForAdapter: services.getAttachmentBytesForAdapter,
@@ -382,8 +391,9 @@ beforeEach(() => {
     kind: "ignored",
     reason: "test-default",
   });
+  services.acceptInboundEvent.mockResolvedValue(null);
   // Resolve by the (provider, externalId) composite unique now. A100 keeps its
-  // "pr-1" id (the dispatch assertion pins it); A-CACHE and A-STALE are
+  // "pr-1" id (the accept assertion pins it); A-CACHE and A-STALE are
   // never-cached ids the signing-secret-cache and timestamp-precheck tests use.
   dbSpies.presenceByAppId.mockImplementation(
     async ({
@@ -396,27 +406,13 @@ beforeEach(() => {
         return {
           id: "pr-1",
           status: "active",
-          identityRef: "UBOT",
           credentials: ENCRYPTED_PRESENCE_CREDS,
-          agent: { id: "ag-1", imageKey: null },
         };
       if (appId === "A-CACHE" || appId === "A-STALE")
         return {
           id: `pr-${appId}`,
           status: "active",
-          identityRef: "UBOT",
           credentials: ENCRYPTED_PRESENCE_CREDS,
-          agent: { id: "ag-1", imageKey: null },
-        };
-      // The avatar arm: a presence whose agent HAS an image key, so the
-      // events-side refusal posts must carry the derived icon_url.
-      if (appId === "A-ICON")
-        return {
-          id: "pr-icon",
-          status: "active",
-          identityRef: "UBOT",
-          credentials: ENCRYPTED_PRESENCE_CREDS,
-          agent: { id: "ag-icon", imageKey: "k".repeat(32) },
         };
       return null;
     },
@@ -1864,8 +1860,10 @@ describe("POST /v1/channels/slack/events", () => {
     expect(res.status).toBe(401);
   });
 
-  it("dispatches a correctly signed event to the shared door", async () => {
+  it("acks a correctly signed event once it is in the durable inbox, and processes it off the request", async () => {
     const event = { type: "message", channel: "D1", text: "hello" };
+    const claim = { id: "row-1", claimToken: "tok-1" };
+    services.acceptInboundEvent.mockResolvedValue(claim);
     const body = envelope(event);
     const res = await appRbacOff.request("/v1/channels/slack/events", {
       method: "POST",
@@ -1875,120 +1873,39 @@ describe("POST /v1/channels/slack/events", () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
-    expect(services.dispatchSlackEvent).toHaveBeenCalledWith({
+    expect(services.acceptInboundEvent).toHaveBeenCalledWith({
       presenceId: "pr-1",
-      identityRef: "UBOT",
-      event,
       eventId: "Ev-1",
+      event,
     });
+    expect(services.processInboundEventDetached).toHaveBeenCalledWith(claim);
+    // Nothing is processed inside the request: the ack never waits on it.
+    expect(services.dispatchSlackEvent).not.toHaveBeenCalled();
   });
 
-  it("answers an invite REFUSAL with the refusal post ONLY — no leave call", async () => {
-    // Refuse-and-stay-muted on the events arm: leaving a channel needs
-    // channels:manage/groups:write, scopes the manifest deliberately never
-    // requests — a conversations.leave here would just be a missing_scope
-    // error. MUTATION-TESTED: reintroduce a leave after the refusal post and
-    // the second outbound call shows up in the fetch spy's URL list.
-    services.dispatchSlackEvent.mockResolvedValue({
-      kind: "invite",
-      call: { door: "invite", inviterExternalUserId: "U404", channel: "C9" },
-      outcome: {
-        kind: "refuse",
-        leave: false,
-        message:
-          "No access. I'll stay muted in this channel. Anyone can remove me from it.",
-      },
+  it("acks a redelivery of an event already in the inbox without processing it again", async () => {
+    // MUTATION-TESTED: process unconditionally and Slack's redelivery of an
+    // event still in flight (its first ack timed out) starts a second run.
+    services.acceptInboundEvent.mockResolvedValue(null);
+    const body = envelope({ type: "message", channel: "D1", text: "again" });
+    const res = await appRbacOff.request("/v1/channels/slack/events", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...slackSigned(body) },
+      body,
     });
-    const fetchSpy = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValue(
-        new Response(JSON.stringify({ ok: true, channel: "C9", ts: "9.1" })),
-      );
-    try {
-      const body = envelope({
-        type: "member_joined_channel",
-        channel: "C9",
-        user: "UBOT",
-        inviter: "U404",
-      });
-      const res = await appRbacOff.request("/v1/channels/slack/events", {
-        method: "POST",
-        headers: { "content-type": "application/json", ...slackSigned(body) },
-        body,
-      });
-      expect(res.status).toBe(200);
-
-      // The refusal fires WITHOUT blocking the ack — wait for it to land.
-      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalled());
-      const [url, init] = fetchSpy.mock.calls[0]!;
-      expect(String(url)).toContain("/chat.postMessage");
-      const form = new URLSearchParams(String(init?.body));
-      expect(form.get("channel")).toBe("C9");
-      expect(form.get("text")).toContain("stay muted in this channel");
-      // This agent has no avatar — the post carries no icon_url at all.
-      expect(form.get("icon_url")).toBeNull();
-      // And that post is the ONLY outbound call — nothing tried to leave.
-      expect(fetchSpy.mock.calls.map(([u]) => String(u))).toEqual([
-        expect.stringContaining("/chat.postMessage"),
-      ]);
-    } finally {
-      fetchSpy.mockRestore();
-    }
+    expect(res.status).toBe(200);
+    expect(services.processInboundEventDetached).not.toHaveBeenCalled();
   });
 
-  it("carries the agent's avatar as icon_url on an events-arm refusal — with a plain retry on missing_scope", async () => {
-    // The socket arm's parity contract: same icon, same `missing_scope`
-    // carve (an install predating chat:write.customize must still get the
-    // refusal, just without the icon).
-    services.dispatchSlackEvent.mockResolvedValue({
-      kind: "invite",
-      call: { door: "invite", inviterExternalUserId: "U404", channel: "C9" },
-      outcome: { kind: "refuse", leave: false, message: "No access." },
+  it("acks an event that is not a JSON object without storing it", async () => {
+    const body = envelope("not-an-object");
+    const res = await appRbacOff.request("/v1/channels/slack/events", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...slackSigned(body) },
+      body,
     });
-    const fetchSpy = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ ok: false, error: "missing_scope" })),
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ ok: true, channel: "C9", ts: "9.2" })),
-      );
-    try {
-      const body = JSON.stringify({
-        type: "event_callback",
-        api_app_id: "A-ICON",
-        event_id: "Ev-icon-1",
-        event: {
-          type: "member_joined_channel",
-          channel: "C9",
-          user: "UBOT",
-          inviter: "U404",
-        },
-      });
-      const res = await appRbacOff.request("/v1/channels/slack/events", {
-        method: "POST",
-        headers: { "content-type": "application/json", ...slackSigned(body) },
-        body,
-      });
-      expect(res.status).toBe(200);
-
-      // First attempt carries the derived key-fenced icon…
-      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
-      const first = new URLSearchParams(
-        String(fetchSpy.mock.calls[0]![1]?.body),
-      );
-      expect(first.get("icon_url")).toContain(
-        `/v1/agent-images/ag-icon/${"k".repeat(32)}`,
-      );
-      // …and the missing_scope answer retried the SAME refusal plain.
-      const second = new URLSearchParams(
-        String(fetchSpy.mock.calls[1]![1]?.body),
-      );
-      expect(second.get("icon_url")).toBeNull();
-      expect(second.get("text")).toBe(first.get("text"));
-    } finally {
-      fetchSpy.mockRestore();
-    }
+    expect(res.status).toBe(200);
+    expect(services.acceptInboundEvent).not.toHaveBeenCalled();
   });
 
   it("acks a signed non-event envelope without dispatching", async () => {
@@ -2218,6 +2135,43 @@ describe("POST /v1/channels/slack/interactivity", () => {
       // which request this was without scrolling up.
       expect(sent.text).toContain("send @Dana");
       expect(sent.text).toContain("Approved by Morgan");
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("a clicked STANDING card says the answer its button used (Never), not Rejected", async () => {
+    services.decideActionApprovalFromChannel.mockResolvedValue({
+      kind: "decided",
+      status: "rejected",
+      summary: "message Sam from now on?",
+      decidedByName: "Morgan",
+      standing: true,
+    });
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("{}"));
+    try {
+      const body = interactivityBody({
+        ...approvePayload,
+        actions: [{ action_id: "action_reject", value: "act-2" }],
+        response_url: "https://hooks.slack.com/actions/T1/B1/std",
+      });
+      const res = await appRbacOff.request("/v1/channels/slack/interactivity", {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          ...slackSigned(body),
+        },
+        body,
+      });
+      expect(res.status).toBe(200);
+      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+      const sent = JSON.parse(
+        String((fetchSpy.mock.calls[0]?.[1] as RequestInit).body),
+      );
+      expect(sent.text).toContain("Never by Morgan");
+      expect(sent.text).not.toContain("Rejected");
     } finally {
       fetchSpy.mockRestore();
     }

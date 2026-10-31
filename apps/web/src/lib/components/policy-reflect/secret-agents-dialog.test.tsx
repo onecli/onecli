@@ -168,10 +168,9 @@ describe("SecretAgentsDialog", () => {
     renderDialog();
 
     expect(await screen.findByText("No agents yet")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Go to Agents" })).toHaveAttribute(
-      "href",
-      "/w/ws-1/agents",
-    );
+    expect(
+      screen.getByRole("link", { name: "Create an agent" }),
+    ).toHaveAttribute("href", "/w/ws-1/agents");
   });
 
   it("says so instead of showing switches over unknown state when the read fails", async () => {

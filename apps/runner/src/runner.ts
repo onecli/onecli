@@ -1,8 +1,14 @@
 import { createHash } from "node:crypto";
 import {
+  MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_SANDBOX_CHECK_IDS,
   SESSION_RESUME_GRACE_MS,
   TURN_FAILURE_CODES,
+  sandboxResourceProfileId,
+  sandboxResourceProfileSchema,
+  sandboxResourceProfileWithinBounds,
+  sandboxResourceObservationSchema,
+  sandboxStartResourcesSchema,
   type AttachmentManifestEntry,
   type RunnerCapabilities,
   type RunnerEvent,
@@ -30,6 +36,7 @@ import {
   type SupervisorConnection,
 } from "./ws/server";
 import { log } from "./log";
+import { IMPLICIT_HOME_GIB, resourceOverrideAxes } from "./backend/resources";
 
 /**
  * The runner loop (plans/hosted-agents-v2.md step 3).
@@ -123,6 +130,16 @@ export const payloadHash = (payload: SandboxStartPayload): string =>
         harness: payload.harness ?? null,
         instructions: payload.instructions ?? null,
         channels: payload.channels ?? null,
+        ...(payload.resources && {
+          resources: {
+            cpuMillicores: payload.resources.profile.cpuMillicores,
+            memoryMiB: payload.resources.profile.memoryMiB,
+            homeGiB: payload.resources.profile.homeGiB,
+            profileId: payload.resources.profileId,
+            hasOverrides: payload.resources.hasOverrides,
+            overrideAxes: [...resourceOverrideAxes(payload.resources)].sort(),
+          },
+        }),
       }),
     )
     .digest("hex");
@@ -410,7 +427,31 @@ export const createRunner = ({
     startHeartbeats.set(sandboxId, timer);
   };
 
+  // Older installations may configure values outside the profile bounds or
+  // below whole millicores. Keep their legacy limits instead of rewriting
+  // settings or making registration fail with an invalid advertisement.
+  const defaultCpuMillicores = Math.round(config.limits.cpus * 1000);
+  const resourceDefaults = sandboxResourceProfileSchema.safeParse({
+    cpuMillicores: defaultCpuMillicores,
+    memoryMiB: config.limits.memoryMb,
+    homeGiB: backend.defaultHomeGiB ?? IMPLICIT_HOME_GIB,
+  });
   const capabilities = (): RunnerCapabilities => ({
+    ...(backend.resourceSupport &&
+      resourceDefaults.success &&
+      (!backend.resourceBounds ||
+        sandboxResourceProfileWithinBounds(
+          resourceDefaults.data,
+          backend.resourceBounds,
+        )) &&
+      Math.abs(defaultCpuMillicores - config.limits.cpus * 1000) < 0.000001 && {
+        resourceProfilesV1: true,
+        resourceDefaults: resourceDefaults.data,
+        resourceSupport: backend.resourceSupport,
+        ...(backend.resourceBounds && {
+          resourceBounds: backend.resourceBounds,
+        }),
+      }),
     maxSandboxes: config.maxSandboxes,
     backend: backend.id,
     homeDurability: backend.homeDurability,
@@ -428,6 +469,9 @@ export const createRunner = ({
     // And ahead of a mid-run follow-up's `turn.message` the same way: the
     // steer arm hands a follow-up with files only to a runner saying so.
     steerAttachments: true,
+    // This build's wire schema parses manifests up to the current cap; the
+    // control plane bounds each manifest to what a runner advertises here.
+    maxAttachmentsPerMessage: MAX_ATTACHMENTS_PER_MESSAGE,
     // This build forwards `desktop.control` to the supervisor and relays
     // its `desktop.state`. The claim arm is gated on it, so an older runner
     // never meets the kind.
@@ -479,6 +523,55 @@ export const createRunner = ({
     const events: RunnerEvent[] = [];
 
     try {
+      const resources = item.payload.resources
+        ? sandboxStartResourcesSchema.parse(item.payload.resources)
+        : undefined;
+      if (resources) {
+        if (!backend.resourceSupport) {
+          throw new Error("backend does not support resource profiles");
+        }
+        if (
+          backend.resourceBounds &&
+          !sandboxResourceProfileWithinBounds(
+            resources.profile,
+            backend.resourceBounds,
+          )
+        ) {
+          throw new Error("resource profile exceeds backend supported bounds");
+        }
+        if (
+          resources.profileId !== sandboxResourceProfileId(resources.profile)
+        ) {
+          throw new Error(
+            "resource profile identity does not match its values",
+          );
+        }
+        // The home axis demands `homeProvision` when it is an explicit
+        // override, or a size that is neither the backend's default nor the
+        // home's OWN baseline. A managed home born or adopted at 20 GiB on a
+        // backend whose default moved to 40 is dispatched at 20: that is
+        // the size it already has, not a quota to enforce, so a backend
+        // that cannot size homes still runs it.
+        if (
+          !backend.resourceSupport.homeProvision &&
+          (resourceOverrideAxes(resources).includes("home") ||
+            (resources.profile.homeGiB !==
+              (backend.defaultHomeGiB ?? IMPLICIT_HOME_GIB) &&
+              resources.profile.homeGiB !== resources.baselineHomeGiB))
+        ) {
+          throw new Error("backend does not enforce home disk quotas");
+        }
+        if (
+          (!backend.resourceSupport.cpu &&
+            resourceOverrideAxes(resources).includes("cpu")) ||
+          (!backend.resourceSupport.memory &&
+            resourceOverrideAxes(resources).includes("memory"))
+        ) {
+          throw new Error(
+            "backend does not enforce requested compute overrides",
+          );
+        }
+      }
       const snapshots = await backend.listSandboxes();
       const existing = snapshots.find(
         (snapshot) => snapshot.sandboxId === item.sandboxId,
@@ -516,7 +609,7 @@ export const createRunner = ({
         admittedNew.add(item.sandboxId);
       }
 
-      const homeRef = await backend.provisionHome(item.sandboxId);
+      const homeRef = await backend.provisionHome(item.sandboxId, resources);
 
       events.push({
         kind: "sandbox.status",
@@ -541,7 +634,31 @@ export const createRunner = ({
       // The workspace is the wake's placement for a home it has to BIRTH
       // (a brand-new agent on a snapshot backend: disk and device come up
       // before the sandbox exists); an existing home ignores it.
-      await backend.wakeHome(homeRef, item.payload.workspaceId);
+      //
+      // A HELD wake (the backend typed its `waking` as, today,
+      // `waiting_for_capacity`: capacity is being brought up for the home)
+      // is reported as it happens, off the start's own report chain: a
+      // `starting` progress event carrying the hold as `reasonCode`, so the
+      // control plane can surface an honest wait instead of a bare
+      // "starting" for however long that takes. Progress, not a failure:
+      // `status` stays `starting`, and the heartbeat keeps the claim fresh
+      // exactly as before.
+      await backend.wakeHome(
+        homeRef,
+        item.payload.workspaceId,
+        resources,
+        (reason) => {
+          void enqueueReport([
+            {
+              kind: "sandbox.status",
+              sandboxId: item.sandboxId,
+              status: "starting",
+              homeRef,
+              reasonCode: reason,
+            },
+          ]);
+        },
+      );
       // Minted here and never kept: the control plane holds only its hash,
       // so whichever copy the supervisor reaches can admit it, once.
       const bootstrapToken = mintBootstrapToken();
@@ -612,7 +729,14 @@ export const createRunner = ({
         },
         files: item.payload.files,
         homeRef,
-        limits: config.limits,
+        limits: resources
+          ? {
+              ...config.limits,
+              cpus: resources.profile.cpuMillicores / 1000,
+              memoryMb: resources.profile.memoryMiB,
+            }
+          : config.limits,
+        ...(resources && { resources }),
         payloadHash: hash,
         resumable: wsServer.resumable,
       });
@@ -629,10 +753,28 @@ export const createRunner = ({
       // down and remove what was just created; nothing is reported, since
       // the row is someone else's business. (Its capacity admission frees
       // itself: the next check prunes an admitted id with no container.)
+      const measured = resources
+        ? await backend
+            .resourceObservation?.(containerRef, resources)
+            .catch((error: unknown) => {
+              log("warn", "resource observation unavailable", {
+                sandboxId: item.sandboxId,
+                error: String(error),
+              });
+              return undefined;
+            })
+        : undefined;
+      const observation = sandboxResourceObservationSchema.safeParse(measured);
+      const resourceObservation =
+        observation.success &&
+        observation.data.profileId === resources?.profileId
+          ? observation.data
+          : undefined;
       const recorded = await controlPlane
         .recordSpawn(item.sandboxId, {
           containerRef,
           tokenHash: hashBootstrapToken(bootstrapToken),
+          ...(resourceObservation && { resourceObservation }),
         })
         .catch(async (error: unknown) => {
           await removeQuietly(containerRef, item.sandboxId);
@@ -664,6 +806,7 @@ export const createRunner = ({
         status: "starting",
         containerRef,
         homeRef,
+        ...(resourceObservation && { resourceObservation }),
       });
     } catch (error) {
       // A failed fresh create holds no capacity — without this a string of
@@ -882,6 +1025,7 @@ export const createRunner = ({
       ...(item.resumeSessionRef && {
         resumeSessionRef: item.resumeSessionRef,
       }),
+      ...(item.ephemeralSession && { ephemeralSession: true as const }),
       // Delivery-only memory context (step 8) — forwarded verbatim; the
       // supervisor concatenates, the transcript never sees it.
       ...(item.context && { context: item.context }),
@@ -1115,6 +1259,7 @@ export const createRunner = ({
         part: index + 1,
         of: item.parts.length,
         files: part.files,
+        ...(part.blobs && part.blobs.length > 0 && { blobs: part.blobs }),
         ...(part.prune && { prune: part.prune }),
         ...(part.instructions !== undefined && {
           instructions: part.instructions,
@@ -1554,6 +1699,9 @@ export const createRunner = ({
 
     // Volumes are reaped separately: a sandbox whose container was already
     // removed still leaves its (durable, deliberately persistent) home.
+    // A backend whose home list cannot be read (a remote substrate refusing
+    // a read under an unreadable record) throws past this sweep like any
+    // transport failure; the next sweep retries.
     for (const home of await backend.listHomes()) {
       if (expected.has(home.sandboxId)) continue;
       log("info", "reaping orphaned home", { sandboxId: home.sandboxId });

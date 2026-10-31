@@ -4,10 +4,9 @@ import { render, screen } from "@testing-library/react";
 import { SidebarProvider } from "@onecli/ui/components/sidebar";
 
 /**
- * The Agents group's faces (§3.18 nav as amended 2026-08-16), rendered for
- * real: the unconditional Manage agents row, the agent list (BYO and hosted
- * alike, kind-aware links), the separator between management and agents, and
- * the one-highlight law.
+ * The Agents group's faces (§3.18 nav as amended), rendered for real: the
+ * agent list (BYO and hosted alike, kind-aware links, oldest first), the New
+ * agent row under the last agent, and the one-highlight law.
  */
 
 const state = vi.hoisted(() => ({
@@ -15,10 +14,11 @@ const state = vi.hoisted(() => ({
     id: string;
     name: string;
     kind: string;
+    createdAt?: string;
     channels?: Array<{ provider: string; status?: string }>;
   }>,
   agentsPending: false,
-  pathname: "/w/p1/overview",
+  pathname: "/w/p1/activity",
 }));
 
 vi.mock("@/hooks/use-agents", () => ({
@@ -38,6 +38,12 @@ vi.mock("next/navigation", () => ({
 }));
 
 // Structural chrome (the Slack mark renders through AppIcon → next/image).
+// The New agent row owns the create flow (its own suite covers it); these
+// suites are about the agent rows.
+vi.mock("@/lib/dashboard/new-agent-row", () => ({
+  NewAgentRow: () => <li>New agent</li>,
+}));
+
 vi.mock("next/image", () => ({
   default: ({ src, alt }: { src: unknown; alt?: string }) => (
     // eslint-disable-next-line @next/next/no-img-element
@@ -72,15 +78,30 @@ const BYO = { id: "ag-2", name: "Laptop", kind: "byo" };
 beforeEach(() => {
   state.agents = [];
   state.agentsPending = false;
-  state.pathname = "/w/p1/overview";
+  state.pathname = "/w/p1/activity";
 });
 
-describe("the Manage agents row is unconditional", () => {
-  it("renders the group label and Manage agents link", () => {
+describe("the group's frame", () => {
+  it("has no Manage agents row — only agents and the New agent row", () => {
+    state.agents = [HOSTED];
     renderGroup();
     expect(screen.getByText("Agents")).toBeInTheDocument();
-    const manageAgents = screen.getByRole("link", { name: /Manage Agents/ });
-    expect(manageAgents).toHaveAttribute("href", "/w/p1/agents");
+    expect(screen.queryByText(/Manage Agents/i)).toBeNull();
+    expect(
+      screen.getAllByRole("link").map((el) => el.getAttribute("href")),
+    ).toEqual(["/w/p1/agents/ag-1/chat"]);
+  });
+
+  it("puts the New agent row under the LAST agent", () => {
+    state.agents = [HOSTED, BYO];
+    renderGroup();
+    const items = screen.getAllByRole("listitem").map((el) => el.textContent);
+    expect(items.at(-1)).toBe("New agent");
+  });
+
+  it("still offers New agent in an empty workspace", () => {
+    renderGroup();
+    expect(screen.getByText("New agent")).toBeInTheDocument();
   });
 });
 
@@ -97,6 +118,33 @@ describe("the agents list (§3.18 as amended)", () => {
       "/w/p1/agents/ag-2/connections",
     );
   });
+
+  it("lists the OLDEST agent on top — the one a bare workspace URL opens", () => {
+    // The API answers newest-first; the group re-orders.
+    state.agents = [
+      {
+        ...BYO,
+        id: "ag-new",
+        name: "Newest",
+        createdAt: "2026-10-03T00:00:00Z",
+      },
+      {
+        ...HOSTED,
+        id: "ag-old",
+        name: "Oldest",
+        createdAt: "2026-10-01T00:00:00Z",
+      },
+      {
+        ...BYO,
+        id: "ag-mid",
+        name: "Middle",
+        createdAt: "2026-10-02T00:00:00Z",
+      },
+    ];
+    renderGroup();
+    const agentRows = screen.getAllByRole("link").map((el) => el.textContent);
+    expect(agentRows).toEqual(["Oldest", "Middle", "Newest"]);
+  });
 });
 
 describe("what the group highlights", () => {
@@ -106,14 +154,7 @@ describe("what the group highlights", () => {
       .filter((el) => el.dataset.active === "true")
       .map((el) => el.textContent);
 
-  it("highlights Manage agents on the agents list itself", () => {
-    state.agents = [HOSTED];
-    state.pathname = "/w/p1/agents";
-    renderGroup();
-    expect(activeNames()).toEqual(["Manage Agents"]);
-  });
-
-  it("highlights the agent — and NOT Manage agents — anywhere inside that agent", () => {
+  it("highlights the agent anywhere inside that agent", () => {
     state.agents = [HOSTED];
     for (const path of [
       "/w/p1/agents/ag-1/chat",
@@ -137,22 +178,11 @@ describe("what the group highlights", () => {
     }
   });
 
-  it("highlights Manage agents inside an agent that has no row — never zero rows", () => {
+  it("highlights nothing inside an agent that has no row", () => {
     // An agent missing from the list (deleted, or the list resolved empty):
-    // the roster row is the only place the sidebar can point at.
+    // no other row may claim to be where the user is.
     state.agents = [HOSTED];
     state.pathname = "/w/p1/agents/ag-2/connections";
-    renderGroup();
-    expect(activeNames()).toEqual(["Manage Agents"]);
-  });
-
-  it("highlights NOTHING while the list is still loading — no wrong-then-right flash", () => {
-    // A cold load inside an agent's page: until the agent list settles, the
-    // sidebar cannot know whether this agent owns a row. Highlighting Manage
-    // agents here would flash and then jump.
-    state.pathname = "/w/p1/agents/ag-1/chat";
-    state.agents = [HOSTED];
-    state.agentsPending = true;
     renderGroup();
     expect(activeNames()).toEqual([]);
   });

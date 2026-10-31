@@ -19,8 +19,8 @@ use super::bulk::{
 };
 use super::redact::{is_sensitive_key, redact_string};
 use super::{
-    humanize_key, json_object, ApprovalSummary, ContextField, CurrentRecord, RecordResolver,
-    SummaryRequest, Target,
+    human_size, humanize_key, json_object, ApprovalSummary, ContextField, CurrentRecord,
+    RecordResolver, SummaryRequest, Target,
 };
 
 pub(super) struct Salesforce;
@@ -37,6 +37,8 @@ impl super::RequestSummarizer for Salesforce {
         if let Some(s) = bulk_write(req)
             .or_else(|| bulk_delete(req))
             .or_else(|| composite_updates(req))
+            .or_else(|| flow_write(req))
+            .or_else(|| analytics_or_tooling(req))
         {
             return Some(s);
         }
@@ -101,6 +103,7 @@ impl RecordResolver for Salesforce {
             "00G" => "Group",
             "069" => "ContentDocument",
             "068" => "ContentVersion",
+            "00O" => "Report",
             _ => return None,
         })
     }
@@ -392,6 +395,16 @@ pub(super) fn is_bulk_write(method: &str, path: &str) -> bool {
 pub(super) fn answers_per_record(method: &str, path: &str) -> bool {
     is_bulk_write(method, path)
         || (method.eq_ignore_ascii_case("DELETE") && is_collections_path(path))
+}
+
+/// A request whose card must read its body whole: a list of records (a
+/// cut list would read as the whole one), or a new Flow version, whose
+/// metadata usually runs past the gateway's short peek and only compares
+/// with the active version when read whole.
+pub(super) fn reads_whole_body(method: &str, path: &str) -> bool {
+    is_bulk_write(method, path)
+        || (method.eq_ignore_ascii_case("POST")
+            && data_resource(path) == Some("tooling/sobjects/Flow"))
 }
 
 /// Most subrequests one Composite call may carry (Salesforce's own cap):
@@ -944,6 +957,223 @@ fn parent_target(
     Some(Target::of(&r.id, join, Some(api_label(&r.object))))
 }
 
+// ── Reports and queries ────────────────────────────────────────────────────
+
+/// Analytics GET executes a report; only /describe reads its metadata.
+/// PATCH saves metadata, so retain the generic nested-body reader rather
+/// than reducing filters, formulas, and columns to a count.
+fn analytics_or_tooling(req: &SummaryRequest<'_>) -> Option<ApprovalSummary> {
+    let tail = data_resource(req.path)?;
+    let segments: Vec<_> = tail.split('/').collect();
+    let method = req.method_upper();
+    match (method.as_str(), segments.as_slice()) {
+        ("GET", ["analytics", "reports", id, "describe"]) => {
+            Some(report_card("Read metadata of", id))
+        }
+        ("GET" | "POST" | "PATCH", ["analytics", "reports", id]) => {
+            let mut s = super::generic::summarize(req);
+            let updating = method == "PATCH";
+            let target = report_card(if updating { "Update" } else { "Run" }, id);
+            s.action = target.action;
+            s.target = target.target;
+            if let Some(range) = &mut s.fallback {
+                range.start += target.details.len();
+                range.end += target.details.len();
+            }
+            s.details.splice(0..0, target.details);
+            s.refs = target.refs;
+            if !updating {
+                if let Some(details) = req.query_param("includeDetails") {
+                    s.push("Include details", details);
+                }
+            }
+            Some(s)
+        }
+        ("DELETE", ["analytics", "reports", id]) => Some(report_card("Delete", id)),
+        ("POST", ["analytics", "reports"]) => {
+            let mut s = super::generic::summarize(req);
+            s.action = "Create report".into();
+            Some(s)
+        }
+        ("GET", ["query"] | ["tooling", "query"]) => {
+            let mut s = ApprovalSummary::new("Run query");
+            // Parse only the query string, never the path as form data.
+            if let Some(q) = req.query_param("q") {
+                s.push_clamped("Query", q, super::MAX_SNIPPET_LEN);
+            }
+            Some(s)
+        }
+        _ => None,
+    }
+}
+
+fn report_card(verb: &str, id: &str) -> ApprovalSummary {
+    let mut s = ApprovalSummary::new(verb);
+    if Salesforce.object_of(id) == Some("Report") {
+        s.push_record("Report", "Report", id);
+        s.target = Some(Target::of(id, " ", Some("report".into())));
+    } else {
+        s.action = format!("{verb} report");
+        s.push("Report", id);
+    }
+    s
+}
+
+// ── Flows (Tooling API) ─────────────────────────────────────────────────────
+
+/// A Flow change through the Tooling API, the way agents edit automations:
+///
+/// - `POST /tooling/sobjects/Flow` with `{FullName, Metadata}` creates a new
+///   VERSION of the Flow named by `FullName` (`Name` or `Name-<n>`). The
+///   card reads the body as labeled rows (the generic reader) and asks the
+///   gateway to read the Flow's ACTIVE version, so it can lead with what
+///   this version changes: the message template line by line, every other
+///   setting as old → new.
+/// - `PATCH /tooling/sobjects/FlowDefinition/{id}` with
+///   `{"Metadata": {"activeVersionNumber": n}}` switches which version
+///   runs: "Activate Flow version n", or, for 0, "Deactivate Flow", said
+///   as plainly as it is (every record change stops running it).
+///
+/// Anything else under `/tooling` keeps the generic card.
+fn flow_write(req: &SummaryRequest<'_>) -> Option<ApprovalSummary> {
+    let tail = data_resource(req.path)?.strip_prefix("tooling/sobjects/")?;
+    let method = req.method_upper();
+    let body = req.body.and_then(super::parse_json)?;
+    match (
+        method.as_str(),
+        tail.split('/').collect::<Vec<_>>().as_slice(),
+    ) {
+        ("POST", ["Flow"]) => {
+            let full_name = body.get("FullName")?.as_str()?.trim();
+            let metadata = body.get("Metadata").filter(|m| m.is_object())?;
+            let developer = flow_developer_name(full_name)?;
+            let mut s = ApprovalSummary::new(format!("Create Flow version {full_name}"));
+            push_flow_facts(&mut s, metadata);
+            s.change = Some(super::ChangeHint {
+                read_path: flow_active_version_read(&developer),
+                shape: super::change::CurrentShape::SalesforceFlowQuery,
+            });
+            Some(s)
+        }
+        ("PATCH", ["FlowDefinition", id]) if is_record_id(id) => {
+            let version = body.get("Metadata")?.get("activeVersionNumber")?.as_u64()?;
+            let mut s = if version == 0 {
+                let mut s = ApprovalSummary::new("Deactivate Flow");
+                s.push(
+                    "Effect",
+                    "The Flow stops running: no version stays active until one is activated again",
+                );
+                s
+            } else {
+                let mut s = ApprovalSummary::new(format!("Activate Flow version {version}"));
+                s.push(
+                    "Effect",
+                    format!("Version {version} runs from now on, replacing the active one"),
+                );
+                s
+            };
+            s.push("Flow definition", *id);
+            Some(s)
+        }
+        _ => None,
+    }
+}
+
+/// What a Flow version says, the way a person describes it: its message
+/// templates in full, then three facts (what triggers it, what it does,
+/// whether it runs), with every other setting counted, not listed. The
+/// before → after replaces this with what changes, once the gateway has
+/// read the active version.
+fn push_flow_facts(s: &mut ApprovalSummary, m: &Value) {
+    fn str_at<'v>(v: &'v Value, k: &str) -> Option<&'v str> {
+        v.get(k).and_then(Value::as_str).map(str::trim)
+    }
+    for t in m
+        .get("textTemplates")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(3)
+    {
+        if let (Some(name), Some(text)) = (str_at(t, "name"), str_at(t, "text")) {
+            if !text.is_empty() {
+                s.push_clamped(
+                    format!("Message {}", super::one_line(name, 60)),
+                    text,
+                    super::MAX_SNIPPET_LEN,
+                );
+            }
+        }
+    }
+    let start = m.get("start");
+    let object = start.and_then(|v| str_at(v, "object"));
+    let fields: Vec<String> = start
+        .and_then(|v| v.get("filters"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|f| {
+            let field = str_at(f, "field")?;
+            let op = str_at(f, "operator").unwrap_or("");
+            Some(format!(
+                "{} {}",
+                api_label(field),
+                humanize_key(op).to_lowercase()
+            ))
+        })
+        .take(3)
+        .collect();
+    if let Some(object) = object {
+        let when = if fields.is_empty() {
+            String::new()
+        } else {
+            format!(", when {}", fields.join(" and "))
+        };
+        s.push("Trigger", format!("{}{when}", api_label(object)));
+    }
+    let actions: Vec<String> = m
+        .get("actionCalls")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|a| str_at(a, "label").or_else(|| str_at(a, "name")))
+        .map(|l| super::one_line(l, 60))
+        .take(4)
+        .collect();
+    if !actions.is_empty() {
+        s.push("Actions", actions.join(", "));
+    }
+    if let Some(status) = str_at(m, "status") {
+        s.push("Status", status);
+    }
+}
+
+/// The Flow's developer name from a version's `FullName`: `Name` or
+/// `Name-<n>` (a version number suffix). Only an API name survives, so it is
+/// safe inside the server-built query. A managed package's Flow
+/// (`ns__Name`: a developer name never holds `__`) gets none: Salesforce
+/// returns no metadata for it, and its bare name could be another Flow's.
+fn flow_developer_name(full_name: &str) -> Option<String> {
+    let base = match full_name.rsplit_once('-') {
+        Some((name, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => name,
+        _ => full_name,
+    };
+    (is_api_name(base) && !base.contains("__")).then(|| base.to_string())
+}
+
+/// The Tooling query for a Flow's active version and its metadata.
+/// `developer` is a validated API name, so the SOQL is fully server-built.
+/// The answer is used only when it holds exactly one record (see
+/// `change::apply_current`): Salesforce returns `Metadata` for one record
+/// at a time.
+fn flow_active_version_read(developer: &str) -> String {
+    let soql = format!(
+        "SELECT Id, VersionNumber, Metadata FROM Flow WHERE Definition.DeveloperName = '{developer}' AND Status = 'Active'"
+    );
+    let q: String = form_urlencoded::byte_serialize(soql.as_bytes()).collect();
+    format!("/services/data/{API_VERSION}/tooling/query?q={q}")
+}
+
 /// `(object, remaining segments)` for `/services/data/v{N}/sobjects/{Type}[/…]`.
 /// A trailing slash is ignored (Salesforce accepts both spellings).
 fn sobject_path(base: &str) -> Option<(&str, Vec<&str>)> {
@@ -1004,18 +1234,6 @@ fn value_start(body: &[u8], key: &str) -> Option<usize> {
             .take_while(|b| b.is_ascii_whitespace() || **b == b':')
             .count();
     (body.get(i) == Some(&b'"')).then_some(i + 1)
-}
-
-fn human_size(bytes: usize) -> String {
-    const KB: f64 = 1024.0;
-    let b = bytes as f64;
-    if b < KB {
-        format!("{bytes} B")
-    } else if b < KB * KB {
-        format!("{:.0} KB", b / KB)
-    } else {
-        format!("{:.1} MB", b / KB / KB)
-    }
 }
 
 /// Push the JSON body's fields: the record's name first, then contact points,
@@ -1110,6 +1328,125 @@ mod tests {
             .iter()
             .map(|d| (d.label.clone(), d.value.clone()))
             .collect()
+    }
+
+    #[test]
+    fn report_cards_execute_describe_and_resolve_names() {
+        const ID: &str = "00O000000000001AAA";
+        assert_eq!(Salesforce.object_of(ID), Some("Report"));
+        let path = Salesforce.names_read("Report", &[ID]);
+        let query = form_urlencoded::parse(path.split_once('?').unwrap().1.as_bytes())
+            .find(|(key, _)| key == "q")
+            .unwrap()
+            .1
+            .into_owned();
+        assert_eq!(
+            query,
+            format!("SELECT Id, Name FROM Report WHERE Id IN ('{ID}')")
+        );
+        assert_eq!(
+            Salesforce.parse_names(
+                "Report",
+                br#"{"records":[{"Id":"00O000000000001AAA","Name":"Pipeline"}]}"#
+            ),
+            vec![(ID.into(), "Pipeline".into())]
+        );
+        for (method, suffix, verb) in [
+            ("GET", "?includeDetails=true", "Run"),
+            ("POST", "", "Run"),
+            ("GET", "/describe?includeDetails=true", "Read metadata of"),
+            ("PATCH", "", "Update"),
+            ("DELETE", "", "Delete"),
+        ] {
+            let mut s = sf(
+                method,
+                &format!("/services/data/v62.0/analytics/reports/{ID}{suffix}"),
+                None,
+            );
+            assert_eq!(s.ref_ids().collect::<Vec<_>>(), [ID]);
+            s.name_refs(|_| Some("Pipeline"));
+            s.finalize_title();
+            assert_eq!(s.action, format!("{verb} report Pipeline"));
+        }
+    }
+
+    #[test]
+    fn report_execution_keeps_explicit_details_mode() {
+        for method in ["GET", "POST"] {
+            for value in ["true", "false"] {
+                let s = sf(
+                    method,
+                    &format!("/services/data/v62.0/analytics/reports/00O000000000001AAA?includeDetails={value}"),
+                    Some(r#"{"reportMetadata":{"name":"Synthetic report"}}"#),
+                );
+                assert_eq!(row(&s, "Include details"), Some(value));
+                // A later nested-body comparison replaces only body rows,
+                // never the execution's explicit details mode.
+                let range = s.fallback.unwrap();
+                assert!(s.details[range]
+                    .iter()
+                    .all(|d| d.label != "Include details"));
+            }
+            let s = sf(
+                method,
+                "/services/data/v62.0/analytics/reports/00O000000000001AAA",
+                None,
+            );
+            assert_eq!(row(&s, "Include details"), None);
+        }
+    }
+
+    #[test]
+    fn report_invalid_and_wrong_prefix_ids_stay_visible_without_lookups() {
+        for id in ["invalid", "001000000000001AAA", "00O-invalid"] {
+            let s = sf(
+                "PATCH",
+                &format!("/services/data/v62.0/analytics/reports/{id}?x=y"),
+                Some("{}"),
+            );
+            assert_eq!(row(&s, "Report"), Some(id));
+            assert!(s.refs.is_empty());
+            assert!(s.target.is_none());
+        }
+    }
+
+    #[test]
+    fn report_writes_keep_generic_nested_modifications() {
+        let body = r#"{"reportMetadata":{"name":"Q4","detailColumns":["ACCOUNT.NAME","AMOUNT"],"reportFilters":[{"column":"AMOUNT","operator":"greaterThan","value":"1000"}],"reportBooleanFilter":"1"}}"#;
+        for (method, path) in [
+            ("POST", "/services/data/v62.0/analytics/reports"),
+            (
+                "PATCH",
+                "/services/data/v62.0/analytics/reports/00O000000000001AAA",
+            ),
+        ] {
+            let req = SummaryRequest {
+                method,
+                path,
+                content_type: Some("application/json"),
+                body: Some(body.as_bytes()),
+            };
+            let generic = super::super::generic::summarize(&req);
+            let s = sf(method, path, Some(body));
+            for detail in generic.details {
+                assert!(rows(&s).contains(&(detail.label, detail.value)));
+            }
+        }
+    }
+
+    #[test]
+    fn query_cards_decode_only_query_parameters() {
+        for resource in ["query", "tooling/query"] {
+            let s = sf("GET", &format!("/services/data/v62.0/{resource}?q=SELECT+Id%2C+Name+FROM+Report+WHERE+Name%3D%27A%26B%27"), None);
+            assert_eq!(s.action, "Run query");
+            assert_eq!(
+                row(&s, "Query"),
+                Some("SELECT Id, Name FROM Report WHERE Name='A&B'")
+            );
+            let s = sf("GET", &format!("/services/data/v62.0/{resource}"), None);
+            assert_eq!(s.action, "Run query");
+            assert!(s.details.is_empty());
+        }
     }
 
     fn row<'a>(s: &'a ApprovalSummary, label: &str) -> Option<&'a str> {
@@ -1474,6 +1811,32 @@ mod tests {
     }
 
     #[test]
+    fn a_bulk_update_whose_records_set_different_fields_is_one_table() {
+        // Filling only each record's blanks: the gateway skill tells agents
+        // to send this as ONE collections update, not one call per field
+        // set. The card must read it as one table over every field.
+        let body = r#"{"allOrNone":false,"records":[
+            {"attributes":{"type":"Account"},"id":"001AA00000AbCdEFGH","Industry":"Retail"},
+            {"attributes":{"type":"Account"},"id":"001AA00000AbCdEFGJ","NumberOfEmployees":40},
+            {"attributes":{"type":"Account"},"id":"001AA00000AbCdEFGK","Industry":"Energy","NumberOfEmployees":250}
+        ]}"#;
+        let s = sf("PATCH", BULK, Some(body));
+        assert_eq!(s.action, "Update 3 Accounts");
+        let b = s.bulk.as_ref().expect("one table");
+        assert_eq!(b.kind, BulkKind::Update);
+        let cols: Vec<_> = b.fields.iter().map(|f| f.api.as_str()).collect();
+        assert_eq!(cols, ["Industry", "NumberOfEmployees"]);
+        assert_eq!(b.rows.len(), 3);
+        // Each record shows only what it sets. The other cell stays blank.
+        assert_eq!(b.rows[0].new, vec![Some("Retail".into()), None]);
+        assert_eq!(b.rows[1].new, vec![None, Some("40".into())]);
+        assert_eq!(
+            b.rows[2].new,
+            vec![Some("Energy".into()), Some("250".into())]
+        );
+    }
+
+    #[test]
     fn a_bulk_body_it_cannot_fully_read_is_never_summarized() {
         let ok = bulk_body(&[("Contact", "003AA00000AbCdEFGH", "Canada")]);
         let cases: Vec<(&str, String)> = vec![
@@ -1759,6 +2122,33 @@ mod tests {
             "PATCH",
             "/services/data/v62.0/sobjects/Contact/003AA00000AbCdEFGH"
         ));
+        // A new Flow version reads whole too; any other Tooling write keeps
+        // the short peek.
+        assert!(reads_whole_body(
+            "salesforce",
+            "POST",
+            "/services/data/v62.0/tooling/sobjects/Flow"
+        ));
+        assert!(!reads_whole_body(
+            "salesforce",
+            "POST",
+            "/services/data/v62.0/tooling/sobjects/ApexClass"
+        ));
+    }
+
+    #[test]
+    fn a_managed_package_flow_gets_no_read_of_its_active_version() {
+        assert_eq!(
+            flow_developer_name("Lead_Alert-4").as_deref(),
+            Some("Lead_Alert")
+        );
+        assert_eq!(
+            flow_developer_name("Lead_Alert").as_deref(),
+            Some("Lead_Alert")
+        );
+        for name in ["acme__Lead_Alert-4", "acme__Lead_Alert", "x-y", ""] {
+            assert_eq!(flow_developer_name(name), None, "{name}");
+        }
     }
 
     #[test]
@@ -1833,7 +2223,7 @@ mod tests {
             ("POST", "/services/data/v60.0/sobjects/Bad-Name"),
         ] {
             let s = sf(m, p, Some("{}"));
-            assert!(s.action.ends_with(" request"), "{m} {p}: {}", s.action);
+            assert!(s.is_generic(), "{m} {p}: {}", s.action);
             assert!(s.refs.is_empty());
         }
     }

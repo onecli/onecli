@@ -136,16 +136,20 @@ export interface PendingApproval {
 export type ApprovalDecisionInput = "approve" | "deny";
 
 /** How a decision landed: delivered, or the approval was already gone
- * (expired, decided elsewhere, or dropped by a gateway restart). */
+ * (expired, decided elsewhere, withdrawn when the agent stopped waiting, or
+ * dropped by a gateway restart). */
 export type DecisionOutcome = "delivered" | "already_settled";
 
 /** How a held request ended, once it left the pending list: this browser's
- *  own click ("approved" / "denied"), another surface's decision
- *  ("decided"), or the gateway's auto-deny at the deadline ("expired"). */
+ *  own click ("approved" / "denied"), or the gateway's auto-deny at the
+ *  deadline ("expired"). Otherwise it is "unknown" until the API's record
+ *  says how it ended: another surface's decision, or "cancelled" when the
+ *  agent stopped waiting and no one decided it. */
 export type SettledOutcome =
   | "approved"
   | "denied"
-  | "decided"
+  | "unknown"
+  | "cancelled"
   | "expired"
   /** The person's newer message changed the request, so it was withdrawn. */
   | "replaced";

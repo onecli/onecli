@@ -19,6 +19,8 @@ members = [
   "crates/context",
   "crates/crypto",
   "crates/db",
+  "crates/dbproxy",
+  "crates/dbproxy-postgres",
   "crates/inject",
   "crates/policy",
   "crates/policy-engine",
@@ -60,6 +62,7 @@ aws-sdk-sts = "1"
 aws-sigv4 = "1"
 axum = "0.8"
 base64 = "0.22"
+bytes = "1"
 clap = { version = "4", features = ["derive"] }
 dashmap = "6"
 # gzip only (the default pure-Rust miniz_oxide backend): upstream error bodies
@@ -75,6 +78,13 @@ hyper = { version = "1", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 jsonwebtoken = "9"
 percent-encoding = "2"
+# The real PostgreSQL parser (libpg_query, vendored C built by `cc` + bindgen,
+# so the build images carry clang). The database front door classifies every
+# statement with the parser the server itself runs, so a comment, a quoted
+# `;` or an exotic syntax can never be read one way here and another there.
+pg_query = "6.2"
+# Postgres wire framing and SCRAM-SHA-256 for the database front door.
+postgres-protocol = "0.6"
 rcgen = "0.13"
 redis = { version = "1", features = ["tokio-comp", "connection-manager", "tokio-rustls-comp"] }
 regex = "1"
@@ -84,6 +94,9 @@ rustls = { version = "0.23", features = ["ring"] }
 rustls-pemfile = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# TCP keepalive tuning (idle, interval, retries) for long-lived database
+# sessions; already in the tree through tokio and hyper.
+socket2 = "0.6"
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres"] }
 tempfile = "3"
 time = { version = "0.3", features = ["parsing"] }

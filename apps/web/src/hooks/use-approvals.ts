@@ -18,7 +18,7 @@ import {
 import { listPendingChannelApprovals } from "@/lib/api/channel-approvals";
 import type { PendingChannelApprovalItem } from "@/lib/api/channel-approvals";
 import * as channels from "@/lib/api/channels";
-import type { ChannelProvider } from "@/lib/api/channels";
+import type { ChannelProvider, ReachDecision } from "@/lib/api/channels";
 import { getWorkspaceId } from "@/lib/api-fetch";
 import { queryKeys } from "@/lib/api/keys";
 import { invalidateGatewayCache } from "@/lib/api/cache";
@@ -315,6 +315,8 @@ export const usePendingChannelApprovals = () => {
     queryKey: queryKeys.approvals.channel(workspaceId ?? "none"),
     queryFn: () => listPendingChannelApprovals(workspaceId as string),
     enabled: hasWorkspaceContext(pathname) && workspaceId !== undefined,
+    // Cards raised in an open chat refetch instantly (`raisesApproval`);
+    // this catches cards raised elsewhere (Slack, schedules, other members).
     refetchInterval: 15_000,
     refetchIntervalInBackground: false,
   });
@@ -339,40 +341,46 @@ const refreshChannelBell = (qc: QueryClient) =>
     qc.invalidateQueries({ queryKey: queryKeys.channels.all() }),
   ]);
 
-/** Decide one action approval from the bell (approve / always-allow /
- * reject+reason) — the per-agent decide door. Instant: the ask leaves the
- * bell on click, and the outcome (done, failed, already settled) is said
- * when the server answers; the row is gone by then, so the hook says it. */
+/** Decide one action approval from the bell (approve / reject+reason), the
+ * per-agent decide door. On a standing question an approve is Always allow
+ * and a reject is Never. Instant: the ask leaves the bell on click, and the
+ * outcome (done, failed, already settled) is said when the server answers;
+ * the row is gone by then, so the hook says it. */
 export const useDecideChannelAction = (agentId: string) =>
   useOptimisticMutation<
     Awaited<ReturnType<typeof channels.decideActionApproval>>,
     {
       approvalId: string;
-      decision: "approve" | "approve_always" | "reject";
+      decision: "approve" | "reject";
+      /** The ask is a standing question: say the outcome in its words. */
+      standing?: boolean;
       reason?: string;
+      /** The picked option on a choice card. */
+      choice?: "agent" | "you" | "allow";
     }
   >({
     family: "channel-bell",
     itemKey: ({ approvalId }) => `channel-ask:${approvalId}`,
-    write: ({ approvalId, decision, reason }) =>
+    write: ({ approvalId, decision, reason, choice }) =>
       channels.decideActionApproval(agentId, approvalId, {
         decision,
         ...(reason !== undefined && { reason }),
+        ...(choice !== undefined && { choice }),
       }),
     apply: (qc, { approvalId }) => leaveChannelBell(qc, approvalId),
-    succeeded: (outcome, { decision }) => {
+    succeeded: (outcome, { decision, standing }) => {
       if (outcome.kind === "already_settled") {
         toast.info("Already decided elsewhere.");
       } else if (decision === "reject") {
-        toast.success("Rejected. The agent was told.");
+        toast.success(
+          standing
+            ? "Never. The agent was told."
+            : "Rejected. The agent was told.",
+        );
       } else if (outcome.status === "failed") {
         toast.error("Approved, but it failed. The agent was told.");
       } else {
-        toast.success(
-          decision === "approve_always"
-            ? "Done. This recipient is now always allowed."
-            : "Approved and done.",
-        );
+        toast.success(approvedToast(outcome.note, standing === true));
       }
     },
     refresh: refreshChannelBell,
@@ -381,6 +389,17 @@ export const useDecideChannelAction = (agentId: string) =>
         ? "Couldn't reject the request"
         : "Couldn't approve the request",
   });
+
+/** What a successful approve says: the handler's own outcome line when it
+ * gave one (e.g. "Sent to Sam."), else the generic words. */
+export const approvedToast = (
+  note: string | undefined,
+  standing: boolean,
+): string => {
+  const said = note?.trim();
+  if (said) return said;
+  return standing ? "Done. Always allowed from now on." : "Approved and done.";
+};
 
 /** Approve an agent-proposed custom connection with the key the person
  * typed. The server creates the secret and grants it to that agent only, so
@@ -411,7 +430,7 @@ export const useApproveCustomConnection = (agentId: string) => {
   });
 };
 
-/** Decide one reach ask from the bell — space (3-way) or person (2-way),
+/** Decide one reach ask from the bell: a space or a person, both two-way,
  * through the existing per-agent reach doors. Instant: the ask leaves the
  * bell on click and comes back if the decision fails. */
 export const useDecideChannelReach = (agentId: string, provider: string) =>
@@ -421,7 +440,7 @@ export const useDecideChannelReach = (agentId: string, provider: string) =>
       itemId: string;
       externalRef: string;
       subjectKind: "space" | "external_user";
-      state: "approved" | "members_only" | "blocked";
+      state: ReachDecision;
       /** Said once the server agrees ("Donna answers everyone in #ops"). */
       confirmation: string;
     }
@@ -440,7 +459,7 @@ export const useDecideChannelReach = (agentId: string, provider: string) =>
             agentId,
             provider as ChannelProvider,
             externalRef,
-            state === "members_only" ? "blocked" : state,
+            state,
           ),
     apply: (qc, { itemId }) => leaveChannelBell(qc, itemId),
     succeeded: (_result, { confirmation }) => toast.success(confirmation),

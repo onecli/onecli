@@ -124,8 +124,11 @@ async fn serve(provider: Arc<Provider>) -> &'static str {
 
 fn config(token_url: &'static str) -> &'static apps::RefreshConfig {
     Box::leak(Box::new(apps::RefreshConfig {
-        token_url,
-        alternate_token_urls: &[],
+        endpoint: apps::TokenEndpoint::Fixed {
+            url: token_url,
+            alternates: &[],
+        },
+        requested_lifetimes: None,
         // Never set in the test process: the client pair comes from the
         // seeded app config (the BYOC tier), like a real connection's would.
         client_id_env: "ONECLI_REFRESH_TEST_UNSET_ID",
@@ -909,4 +912,94 @@ async fn a_refusal_with_a_refused_refresh_token_flags_the_connection() {
 
     assert_eq!(outcome, RefreshOutcome::NeedsReconnect);
     assert!(world.flagged().await);
+}
+
+// ── Key-minted credentials (GitHub App, service account, client secret) ──
+
+/// The ciphertext currently stored for the world's connection.
+async fn stored_ciphertext(world: &World) -> String {
+    sqlx::query_scalar("SELECT credentials FROM app_connections WHERE id = $1")
+        .bind(&world.connection_id)
+        .fetch_one(&world.pool)
+        .await
+        .expect("read credentials")
+}
+
+fn revoked() -> apps::CredentialRevoked {
+    apps::CredentialRevoked {
+        detail: "client_credentials token exchange (401 Unauthorized): invalid_client".into(),
+    }
+}
+
+/// A key the provider refused for good flags the connection it was read
+/// from; a reconnect that replaced the credential meanwhile is never flagged,
+/// and that request then falls back like any failed mint.
+#[tokio::test]
+async fn a_refused_key_flags_only_the_credential_it_was_read_from() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let a = instance(Duration::from_secs(20)).await;
+    let world = World::seed(pool, &a).await;
+    let read = stored_ciphertext(&world).await;
+
+    // A reconnect lands between the mint's read and its refusal.
+    world
+        .reconnect(
+            &a,
+            &json!({ "access_token": "user-at", "expires_at": 4_102_444_800_i64 }),
+        )
+        .await;
+    assert!(
+        !super::flag_revoked_key(&a.pool, &world.connection_id, "gitlab", &read, &revoked()).await,
+        "the refusal of a replaced credential does not stand"
+    );
+    assert!(!world.flagged().await, "the new credential is healthy");
+
+    // The credential that is still stored is refused: flagged.
+    let current = stored_ciphertext(&world).await;
+    assert!(
+        super::flag_revoked_key(
+            &a.pool,
+            &world.connection_id,
+            "gitlab",
+            &current,
+            &revoked()
+        )
+        .await
+    );
+    assert!(world.flagged().await);
+}
+
+/// A credential the provider accepted again (a suspended installation
+/// unsuspended, a disabled key re-enabled) clears the flag the moment it is
+/// stored: the dashboard stops asking for a reconnect nobody needs.
+#[tokio::test]
+async fn a_stored_remint_clears_the_needs_reconnect_flag() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let a = instance(Duration::from_secs(20)).await;
+    let world = World::seed(pool, &a).await;
+    let read = stored_ciphertext(&world).await;
+    assert!(
+        super::flag_revoked_key(&a.pool, &world.connection_id, "gitlab", &read, &revoked()).await
+    );
+    assert!(world.flagged().await);
+
+    super::persist(
+        &a.crypto,
+        &a.pool,
+        &world.connection_id,
+        "gitlab",
+        &read,
+        &json!({ "access_token": "re-minted", "expires_at": 4_102_444_800_i64 }),
+    )
+    .await;
+
+    assert!(!world.flagged().await, "a stored re-mint clears the flag");
+    assert_eq!(
+        world.stored(&a).await.expect("row")["access_token"],
+        "re-minted"
+    );
 }

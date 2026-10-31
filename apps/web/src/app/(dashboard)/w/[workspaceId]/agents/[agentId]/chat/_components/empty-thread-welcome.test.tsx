@@ -4,9 +4,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { EmptyThreadWelcome } from "./empty-thread-welcome";
 
 // The connect card pulls live queries of its own; this unit's contract is
-// WHAT THE COPY CLAIMS, so the card is stubbed.
+// WHAT THE COPY CLAIMS (and which card shape it asks for), so the card is
+// stubbed.
 vi.mock("./greeting-connect-card", () => ({
-  GreetingConnectCard: () => <div data-testid="connect-card" />,
+  GreetingConnectCard: ({ variant }: { variant: string }) => (
+    <div data-testid="connect-card" data-variant={variant} />
+  ),
 }));
 
 const { useAgentModels } = vi.hoisted(() => ({ useAgentModels: vi.fn() }));
@@ -56,5 +59,13 @@ describe("<EmptyThreadWelcome />", () => {
     useAgentModels.mockReturnValue({ data: { provider: null } });
     renderWelcome();
     expect(screen.getByTestId("connect-card")).toBeTruthy();
+  });
+
+  it("asks for the full welcome card, not the onboarding greeting's Gmail-only row", () => {
+    // Every new agent's empty thread offers Gmail, GitHub and Slack. The
+    // Gmail-only shape belongs under the onboarding agent's own greeting.
+    useAgentModels.mockReturnValue({ data: { provider: "anthropic" } });
+    renderWelcome();
+    expect(screen.getByTestId("connect-card").dataset.variant).toBe("welcome");
   });
 });

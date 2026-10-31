@@ -1298,12 +1298,18 @@ const historyMessage = z.object({
   /** The posting APP (a bot post carries no `user`): how the agent
    * recognizes its own posts. */
   app_id: z.string().optional(),
+  /** Present on a Block Kit post (a card): only its length matters to the
+   * readers here, so the elements stay unparsed. */
+  blocks: z.array(z.unknown()).optional(),
 });
 export type SlackHistoryMessage = z.infer<typeof historyMessage>;
 
 const historyResponse = z.object({
   messages: z.array(historyMessage),
   has_more: z.boolean().optional(),
+  response_metadata: z
+    .object({ next_cursor: z.string().optional() })
+    .optional(),
 });
 
 /**
@@ -1314,7 +1320,14 @@ const historyResponse = z.object({
  */
 export const conversationsHistory = (
   token: string,
-  input: { channel: string; oldest?: string; latest?: string; limit?: number },
+  input: {
+    channel: string;
+    oldest?: string;
+    latest?: string;
+    limit?: number;
+    /** Include a message AT `latest`/`oldest` (one message by ts). */
+    inclusive?: boolean;
+  },
 ) =>
   slackCall(
     "conversations.history",
@@ -1327,16 +1340,30 @@ export const conversationsHistory = (
         // Exclusive upper bound: pass the oldest ts of the previous page to
         // walk backwards through the whole history.
         ...(input.latest && { latest: input.latest }),
+        ...(input.inclusive && { inclusive: "true" }),
       },
       retry5xx: true,
     },
     historyResponse,
   );
 
-/** One thread's messages, parent first. Same rules as history. */
+/**
+ * One page of a thread's messages, OLDEST first (the parent leads the first
+ * page), unlike history. `oldest` / `latest` bound the page by ts
+ * (exclusive unless `inclusive`); `cursor` continues from a previous page's
+ * `response_metadata.next_cursor`. Same rules as history otherwise.
+ */
 export const conversationsReplies = (
   token: string,
-  input: { channel: string; ts: string; limit?: number },
+  input: {
+    channel: string;
+    ts: string;
+    limit?: number;
+    oldest?: string;
+    latest?: string;
+    inclusive?: boolean;
+    cursor?: string;
+  },
 ) =>
   slackCall(
     "conversations.replies",
@@ -1346,6 +1373,10 @@ export const conversationsReplies = (
         channel: input.channel,
         ts: input.ts,
         limit: String(input.limit ?? 50),
+        ...(input.oldest && { oldest: input.oldest }),
+        ...(input.latest && { latest: input.latest }),
+        ...(input.inclusive && { inclusive: "true" }),
+        ...(input.cursor && { cursor: input.cursor }),
       },
       retry5xx: true,
     },
@@ -1467,6 +1498,8 @@ const oauthUserAccessResponse = z.object({
   authed_user: z.object({
     id: z.string().min(1),
     access_token: z.string().min(1),
+    /** Comma-separated scopes the person actually granted. */
+    scope: z.string().optional(),
   }),
 });
 

@@ -5,6 +5,10 @@ export type StepSlug = "welcome" | "create";
  * from the v1 survey; v2 records the hosted agent it created. */
 export interface OnboardingProgress {
   discovery: string[];
+  /** Step 1: the team's messaging tool ("slack" | "teams" | "other"). */
+  messagingTool?: string | null;
+  /** Free text when `messagingTool` is "other". */
+  messagingToolOther?: string | null;
   agentName: string | null;
   /** The hosted agent created during onboarding, once it exists. */
   createdAgentId?: string | null;

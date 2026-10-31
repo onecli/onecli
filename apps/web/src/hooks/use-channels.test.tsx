@@ -80,9 +80,11 @@ describe("channel mutations sweep the agents ROOT (not the scoped all())", () =>
 describe("an instant reach dismiss that fails", () => {
   const person = (externalRef: string): ChannelPersonReach => ({
     externalRef,
-    label: `@${externalRef}`,
+    label: externalRef,
     state: "approved",
     decidedAt: null,
+    avatarUrl: null,
+    isOwner: false,
   });
   const view = (people: ChannelPersonReach[]): AgentChannelsView => ({
     presences: [

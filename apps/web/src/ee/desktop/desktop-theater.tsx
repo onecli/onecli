@@ -49,7 +49,7 @@ export const DesktopTheater = ({
       <div className="flex min-h-0 w-full flex-1 items-center justify-center [container-type:size]">
         <DesktopScreen
           state={state}
-          viewOnly={!driving}
+          viewOnly={!driving || session.stopping}
           quality={QUALITY_THEATER}
           onStatus={session.setStatus}
           onEscape={session.focusStop}

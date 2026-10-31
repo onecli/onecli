@@ -16,6 +16,8 @@ cache = { path = "../cache" }
 common = { path = "../common" }
 context = { path = "../context" }
 db = { path = "../db" }
+dbproxy = { path = "../dbproxy" }
+dbproxy-postgres = { path = "../dbproxy-postgres" }
 ee = { path = "../ee/ee" }
 inject = { path = "../inject" }
 proxy = { path = "../proxy" }

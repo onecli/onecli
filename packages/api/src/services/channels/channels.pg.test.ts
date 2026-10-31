@@ -500,8 +500,8 @@ const linkUser = (
  * A channel's reach grant is a PRECONDITION (agent-reach-service): until a
  * human settles it, the agent answers nobody there - member or stranger.
  * These group-surface arms are about identity, not about reach, so they
- * settle the channel to `members_only` (the historical behavior they were
- * written against) and then assert on the lane they actually test.
+ * settle the channel to `approved` and then assert on the lane they
+ * actually test.
  */
 const settleChannel = (
   agentId: string,
@@ -515,7 +515,7 @@ const settleChannel = (
       provider: "slack",
       subjectKind: "space",
       externalRef,
-      state: "members_only",
+      state: "approved",
       cardRefs: [],
     },
     select: { id: true },
@@ -4819,10 +4819,10 @@ describe.skipIf(!PROOF_URL)("ingestion — direct messages", () => {
   });
 
   it("REDELIVERY of the same eventId is a no-op duplicate — no second turn", async () => {
-    // MUTATION-TESTED: the dedupe is the insert-FIRST row in
-    // channel_ingested_events. Delete the recordEventOnce insert (or move it
-    // after the turn) and Slack's at-least-once redelivery posts the same
-    // message twice — this test's turn count catches exactly that.
+    // MUTATION-TESTED: the dedupe is the claim row in
+    // channel_ingested_events. Delete the claim (or settle it before the
+    // turn) and Slack's at-least-once redelivery posts the same message
+    // twice. This test's turn count catches exactly that.
     const { agentId, integrationId, presenceId } =
       await seedChannelAgent("dm-dupe");
     await linkUser(integrationId, "U111", MEMBER);
@@ -4847,6 +4847,222 @@ describe.skipIf(!PROOF_URL)("ingestion — direct messages", () => {
     expect(await db.turn.count({ where: { conversation: { agentId } } })).toBe(
       1,
     );
+    // The run settled its claim: nothing is left in flight.
+    expect(
+      await db.channelIngestedEvent.findUniqueOrThrow({
+        where: {
+          agentChannelId_eventId: {
+            agentChannelId: presenceId,
+            eventId: "Ev-dupe",
+          },
+        },
+        select: { claimExpiresAt: true },
+      }),
+    ).toEqual({ claimExpiresAt: null });
+  });
+
+  it("a delivery of an event another run is still processing is retried, not dropped", async () => {
+    // The claim of a LIVE holder: a concurrent delivery must neither run
+    // the door a second time nor read as a settled duplicate (which would
+    // drop the message if the live holder then died).
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("dm-inflight");
+    await linkUser(integrationId, "U111", MEMBER);
+    await db.channelIngestedEvent.create({
+      data: {
+        agentChannelId: presenceId,
+        eventId: "Ev-inflight",
+        claimExpiresAt: new Date(Date.now() + 60_000),
+      },
+    });
+
+    await expect(
+      dispatch.dispatchSlackEvent({
+        presenceId,
+        identityRef: "UBOT",
+        event: dmEvent("U111", "D123", "busy"),
+        eventId: "Ev-inflight",
+      }),
+    ).rejects.toBeInstanceOf(ingestion.EventInFlightError);
+    expect(await db.turn.count({ where: { conversation: { agentId } } })).toBe(
+      0,
+    );
+  });
+
+  it("a crash BEFORE the turn: the lapsed claim is taken over and the message still lands once", async () => {
+    // The holder died mid-event (files fetching, say): its claim stayed,
+    // unsettled, past its lease. The next delivery takes it over.
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("dm-takeover");
+    await linkUser(integrationId, "U111", MEMBER);
+    await db.channelIngestedEvent.create({
+      data: {
+        agentChannelId: presenceId,
+        eventId: "Ev-takeover",
+        claimExpiresAt: new Date(Date.now() - 1000),
+      },
+    });
+
+    const result = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: dmEvent("U111", "D123", "still here?"),
+      eventId: "Ev-takeover",
+    });
+
+    expect(result.kind === "message" && result.outcome.kind).toBe("turn");
+    const turns = await db.turn.findMany({
+      where: { conversation: { agentId } },
+      select: { message: true, sourceEventId: true },
+    });
+    expect(turns).toEqual([
+      { message: "still here?", sourceEventId: "Ev-takeover" },
+    ]);
+  });
+
+  it("a run that throws hands its claim back, so the event is retried at once, never lost as a duplicate", async () => {
+    // MUTATION-TESTED: settle the claim in a `finally` and the failed event
+    // reads as a settled duplicate: the message is silently dropped.
+    const { agentId, integrationId, presenceId } = await seedChannelAgent(
+      "dm-throws",
+      { presenceCredentials: "not-a-ciphertext" },
+    );
+    await linkUser(integrationId, "U111", MEMBER);
+    const input = {
+      agentChannelId: presenceId,
+      externalUserId: "U111",
+      externalThreadId: "D123",
+      text: "with a file",
+      files: [
+        {
+          id: "F1",
+          name: "a.txt",
+          mimeType: "text/plain",
+          size: 1,
+          url: null,
+          needsInfo: false,
+        },
+      ],
+      eventId: "Ev-throws",
+    };
+    const claimRow = () =>
+      db.channelIngestedEvent.findUniqueOrThrow({
+        where: {
+          agentChannelId_eventId: {
+            agentChannelId: presenceId,
+            eventId: "Ev-throws",
+          },
+        },
+        select: { claimToken: true, claimExpiresAt: true },
+      });
+
+    // The garbled credential fails the run at its file fetch.
+    await expect(ingestion.ingestDirectMessage(input)).rejects.toThrow();
+    const released = await claimRow();
+    expect(released.claimToken).toBeNull();
+    expect(released.claimExpiresAt!.getTime()).toBeLessThanOrEqual(Date.now());
+
+    // The next delivery runs it again right away (here it fails again: the
+    // credential is still garbled), not a duplicate and not in flight.
+    await expect(
+      ingestion.ingestDirectMessage(input),
+    ).rejects.not.toBeInstanceOf(ingestion.EventInFlightError);
+    expect(await db.turn.count({ where: { conversation: { agentId } } })).toBe(
+      0,
+    );
+  });
+
+  it("a run that overran its lease never settles the claim of the run that took the event over", async () => {
+    // The fence: a slow first run's late settle must not mark the event
+    // done while the run that took it over is still processing it, or a
+    // crash of that second run would lose the message.
+    const { integrationId, presenceId } = await seedChannelAgent("dm-overran");
+    await linkUser(integrationId, "U111", MEMBER);
+    const { CHANNEL_PROVIDERS } = await import("./registry");
+    const slackProvider = CHANNEL_PROVIDERS.slack;
+    const realDecode = slackProvider.decodeInboundText;
+    const where = { agentChannelId: presenceId, eventId: "Ev-overran" };
+    // The first run stalls inside the door until the takeover happened.
+    let resume!: () => void;
+    let stalled!: () => void;
+    const reached = new Promise<void>((resolve) => (stalled = resolve));
+    slackProvider.decodeInboundText = async (input) => {
+      stalled();
+      await new Promise<void>((resolve) => (resume = resolve));
+      return realDecode ? realDecode.call(slackProvider, input) : input.text;
+    };
+    try {
+      const first = ingestion.ingestDirectMessage({
+        agentChannelId: presenceId,
+        externalUserId: "U111",
+        externalThreadId: "D123",
+        text: "slow",
+        eventId: "Ev-overran",
+      });
+      await reached;
+      // Its lease lapses and another run takes the event over.
+      await db.channelIngestedEvent.updateMany({
+        where,
+        data: { claimExpiresAt: new Date(Date.now() - 1000) },
+      });
+      await db.channelIngestedEvent.updateMany({
+        where,
+        data: {
+          claimToken: "the-taker",
+          claimExpiresAt: new Date(Date.now() + 60_000),
+        },
+      });
+
+      resume();
+      await first;
+      const row = await db.channelIngestedEvent.findFirstOrThrow({
+        where,
+        select: { claimToken: true, claimExpiresAt: true },
+      });
+      expect(row.claimToken).toBe("the-taker");
+      expect(row.claimExpiresAt).not.toBeNull();
+    } finally {
+      slackProvider.decodeInboundText = realDecode;
+    }
+  });
+
+  it("a crash AFTER the turn landed: the taken-over event answers that turn, never a second one", async () => {
+    // MUTATION-TESTED: drop the landed-turn check and the takeover creates
+    // the message's turn twice (the agent answers it twice).
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("dm-landed");
+    await linkUser(integrationId, "U111", MEMBER);
+    const event = dmEvent("U111", "D123", "exactly once");
+    const first = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event,
+      eventId: "Ev-landed",
+    });
+    // Rewind to the moment the first holder died: the turn committed, the
+    // claim never settled, and its lease has lapsed.
+    await db.channelIngestedEvent.updateMany({
+      where: { agentChannelId: presenceId, eventId: "Ev-landed" },
+      data: { claimExpiresAt: new Date(Date.now() - 1000) },
+    });
+
+    const second = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event,
+      eventId: "Ev-landed",
+    });
+
+    expect(await db.turn.count({ where: { conversation: { agentId } } })).toBe(
+      1,
+    );
+    if (first.kind !== "message" || second.kind !== "message") {
+      throw new Error("unreachable");
+    }
+    expect(second.outcome.kind).toBe("turn");
+    expect(second.outcome.kind === "turn" && second.outcome.turn.id).toBe(
+      first.outcome.kind === "turn" && first.outcome.turn.id,
+    );
   });
 
   it("an agent-authored event is refused BEFORE the dedupe row is consumed", async () => {
@@ -4865,8 +5081,8 @@ describe.skipIf(!PROOF_URL)("ingestion — direct messages", () => {
     });
 
     expect(outcome).toEqual({ kind: "ignored", reason: "agent-authored" });
-    // The identity check runs BEFORE recordEventOnce: no dedupe row burned,
-    // so a real event reusing the id later is not misread as a duplicate.
+    // The identity check runs BEFORE the event is claimed: no ledger row
+    // burned, so a real event reusing the id later is not misread as one.
     expect(
       await db.channelIngestedEvent.count({
         where: { agentChannelId: presenceId, eventId: "Ev-echo" },
@@ -5605,7 +5821,7 @@ describe.skipIf(!PROOF_URL)("ingestion — attachments (file_share)", () => {
   it("MORE than the deliverable cap: the message still lands, surplus files marked failed", async () => {
     // REGRESSION (found in review): the over-cap arm minted a `failed` row per
     // surplus file and pushed every id into the bind, whose guard was the
-    // DELIVERABLE cap — so a 6-file message threw inside the turn-create
+    // DELIVERABLE cap, so an over-cap message threw inside the turn-create
     // transaction and the whole message vanished, text included. The bind now
     // caps only what is actually delivered; byteless rows ride along.
     const { agentId, integrationId, presenceId } = await seedChannelAgent(
@@ -5614,7 +5830,7 @@ describe.skipIf(!PROOF_URL)("ingestion — attachments (file_share)", () => {
     );
     await linkUser(integrationId, "U111", MEMBER);
     const slackUrl = process.env.SLACK_API_BASE_URL;
-    const files = Array.from({ length: 7 }, (_, i) => {
+    const files = Array.from({ length: 12 }, (_, i) => {
       scriptFileDownload(
         `files-pri/T1-FC${i}/f${i}.png`,
         PNG_BYTES,
@@ -5632,7 +5848,7 @@ describe.skipIf(!PROOF_URL)("ingestion — attachments (file_share)", () => {
     const result = await dispatch.dispatchSlackEvent({
       presenceId,
       identityRef: "UBOT",
-      event: fileShareEvent("U111", "D910", "seven files", files),
+      event: fileShareEvent("U111", "D910", "twelve files", files),
       eventId: "Ev-att-overcap",
     });
 
@@ -5643,19 +5859,19 @@ describe.skipIf(!PROOF_URL)("ingestion — attachments (file_share)", () => {
     const turn = await db.turn.findFirstOrThrow({
       where: { conversation: { agentId } },
     });
-    expect(turn.message).toBe("seven files");
+    expect(turn.message).toBe("twelve files");
 
     const rows = await db.conversationAttachment.findMany({
       where: { turnId: turn.id },
       orderBy: { createdAt: "asc" },
     });
-    expect(rows).toHaveLength(7);
-    expect(rows.filter((r) => r.status === "bound")).toHaveLength(5);
+    expect(rows).toHaveLength(12);
+    expect(rows.filter((r) => r.status === "bound")).toHaveLength(10);
     const refused = rows.filter((r) => r.status === "failed");
     expect(refused).toHaveLength(2);
-    expect(refused[0]?.error).toContain("5-file limit");
+    expect(refused[0]?.error).toContain("10-file limit");
     // Only the deliverable ones were fetched.
-    expect(fileDownloadCalls()).toHaveLength(5);
+    expect(fileDownloadCalls()).toHaveLength(10);
   });
 
   it("a Slack Connect stub (check_file_info) resolves through files.info before downloading", async () => {
@@ -7918,6 +8134,118 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
         where: { turnId: oldReaction },
       }),
     ).not.toBeNull();
+  });
+
+  it("a receipt whose turn FINISHED is cleared by the sweep whatever its age; a just-finished turn keeps its clear window", async () => {
+    // The clear raced an API restart: the turn is done, the card and
+    // loader are still up. Age of the receipt is irrelevant.
+    const { agentId, presenceId } = await seedChannelAgent(
+      "receipt-sweep-terminal",
+      {
+        appMode: "agent",
+        presenceCredentials: await getCrypto().encrypt(
+          JSON.stringify({ botToken: "xoxb-sweep-terminal" }),
+        ),
+      },
+    );
+    slackHandlers["agents.sessions.setStatus"] = () => ({ ok: true });
+    slackHandlers["chat.delete"] = () => ({ ok: true });
+    const mk = async (ref: string, finishedAt: Date) => {
+      const conversation = await db.conversation.create({
+        data: { agentId, source: "slack", externalRef: ref },
+        select: { id: true },
+      });
+      return (
+        await db.turn.create({
+          data: {
+            conversationId: conversation.id,
+            message: ref,
+            source: "slack",
+            status: "done",
+            finishedAt,
+          },
+          select: { id: true },
+        })
+      ).id;
+    };
+    const finishedLongAgo = await mk("C930:1", new Date(Date.now() - 60_000));
+    const finishedNow = await mk("C930:2", new Date());
+    await db.channelTurnReceipt.createMany({
+      data: [finishedLongAgo, finishedNow].map((turnId, index) => ({
+        turnId,
+        agentChannelId: presenceId,
+        channel: "C930",
+        messageTs: `930.000${index}`,
+        kind: "session",
+        workStatusSet: true,
+        cardTs: `930.900${index}`,
+        // Young: the age-only arm would never touch these.
+      })),
+    });
+
+    await receipts.sweepStaleSessionReceipts();
+
+    expect(
+      await db.channelTurnReceipt.findUnique({
+        where: { turnId: finishedLongAgo },
+      }),
+    ).toBeNull();
+    expect(
+      await db.channelTurnReceipt.findUnique({
+        where: { turnId: finishedNow },
+      }),
+    ).not.toBeNull();
+  });
+
+  it("clearTurnReceiptWithRetry retries a refused clear until the receipt is gone", async () => {
+    const { agentId, presenceId } = await seedChannelAgent(
+      "receipt-clear-retry",
+      {
+        appMode: "agent",
+        presenceCredentials: await getCrypto().encrypt(
+          JSON.stringify({ botToken: "xoxb-clear-retry" }),
+        ),
+      },
+    );
+    let calls = 0;
+    // Refused once (the restart blip), then accepted.
+    slackHandlers["agents.sessions.setStatus"] = () =>
+      (calls += 1) === 1
+        ? { ok: false, error: "internal_error" }
+        : { ok: true };
+    const conversation = await db.conversation.create({
+      data: { agentId, source: "slack", externalRef: "C931:1" },
+      select: { id: true },
+    });
+    const turnId = (
+      await db.turn.create({
+        data: {
+          conversationId: conversation.id,
+          message: "x",
+          source: "slack",
+          status: "done",
+          finishedAt: new Date(),
+        },
+        select: { id: true },
+      })
+    ).id;
+    await db.channelTurnReceipt.create({
+      data: {
+        turnId,
+        agentChannelId: presenceId,
+        channel: "C931",
+        messageTs: "931.0001",
+        kind: "session",
+        workStatusSet: true,
+      },
+    });
+    expect(await receipts.clearTurnReceiptWithRetry(turnId, [1, 1, 1])).toBe(
+      true,
+    );
+    expect(calls).toBe(2);
+    expect(
+      await db.channelTurnReceipt.findUnique({ where: { turnId } }),
+    ).toBeNull();
   });
 
   it("REGRESSION (live 2026-09-15): the stale-session sweep never yanks a LIVE turn's loader", async () => {

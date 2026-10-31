@@ -35,6 +35,10 @@ const ROWS = [
 const BLOCKED_ALLOW_WHY =
   "Set every tool above to Always allow first: this app's credential reaches every service, and some services run deletes sent as reads";
 
+/** The catch-all row a choice on `key` does not name. */
+const siblingKey = (key: keyof OtherChoices): keyof OtherChoices =>
+  key === "otherReads" ? "otherWrites" : "otherReads";
+
 /**
  * The catch-all section, set apart from the tool sections on purpose: these
  * rows don't name a tool, they decide every request the app's tool list
@@ -60,12 +64,15 @@ export const OtherRequestsSection = ({
       ? { disabled: true, why: BLOCKED_ALLOW_WHY }
       : { disabled: false };
   // On a closed catalog, Always allow is full access, which covers both rows:
-  // choosing it on one sets both, and leaving it on one leaves it on both.
+  // choosing it on one sets both. Leaving it on one row takes the sibling off
+  // it too (a customized grant can't allow either), down to Needs approval,
+  // never to a copy of this row's pick: the user chose for ONE row.
   const select = (key: keyof OtherChoices, choice: ToolChoice) => {
     const next = { ...other, [key]: choice };
-    if (closed && (choice === "allow" || other[key] === "allow")) {
-      next.otherReads = choice;
-      next.otherWrites = choice;
+    if (closed) {
+      const sibling = siblingKey(key);
+      if (choice === "allow") next[sibling] = "allow";
+      else if (other[sibling] === "allow") next[sibling] = "ask";
     }
     onChange(next);
   };

@@ -71,6 +71,8 @@ const AUTOMATION_ICONS: Record<AutomationSource, string> = {
   watch: ":stopwatch:",
   webhook: ":link:",
   peer_task: ":speech_balloon:",
+  // Never posted (a review delivers nothing); present for exhaustiveness.
+  memory_review: ":brain:",
 };
 
 export const automationCaption = (title: string): string => {
@@ -449,6 +451,26 @@ export const slackMirrorPosts: MirrorPosts = {
       context:
         "This agent was running on OneCLI's free credit, which ran out. Add your own model key, then send your message again.",
       button: "Add a model key",
+    });
+  },
+  async modelKeyNotAttached(input) {
+    // Same card shape; the key already exists in the workspace, so the fix
+    // is attaching it to this agent, not adding a new one.
+    await modelKeyCard(input, {
+      headline: "*This agent doesn't have access to your model key*",
+      context:
+        "A model key is connected in OneCLI but not attached to this agent. Attach it, then send your message again.",
+      button: "Attach the key",
+    });
+  },
+  async modelKeyUnreadable(input) {
+    // Same card shape; the agent already has the key, but its saved value
+    // could not be read, so the fix is re-entering it.
+    await modelKeyCard(input, {
+      headline: "*OneCLI couldn't read this agent's model key*",
+      context:
+        "The key is attached, but its saved value could not be read. Re-enter it, then send your message again.",
+      button: "Re-enter the key",
     });
   },
   async files(input) {

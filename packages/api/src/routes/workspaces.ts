@@ -21,6 +21,7 @@ import {
   AUDIT_SOURCE,
 } from "../services/audit-service";
 import { listWorkspacePendingChannelApprovals } from "../services/channels/workspace-approvals-service";
+import { listLostChannelConnections } from "../services/channels/channel-health-service";
 
 const read = auth({ requireWorkspace: false });
 const admin = auth({ requireWorkspace: false, role: "admin" });
@@ -55,7 +56,29 @@ export const workspaceRoutes = () => {
       targetId,
       role,
     );
-    const items = await listWorkspacePendingChannelApprovals(targetId);
+    const items = await listWorkspacePendingChannelApprovals(
+      targetId,
+      authCtx.userId,
+    );
+    return c.json({ items });
+  });
+
+  // GET /workspaces/:workspaceId/channel-alerts: the bell's "Needs
+  // attention" arm: agents whose messaging connection broke on the
+  // provider's side (app uninstalled, token revoked). The same visibility
+  // fence as the approvals arm; everyone past it can re-attach, so everyone
+  // past it is told.
+  app.get("/:workspaceId/channel-alerts", read, async (c) => {
+    const authCtx = c.get("auth");
+    const targetId = c.req.param("workspaceId");
+    const role = await getUserRole(authCtx.userId, authCtx.organizationId);
+    await getWorkspaceById(
+      authCtx.userId,
+      authCtx.organizationId,
+      targetId,
+      role,
+    );
+    const items = await listLostChannelConnections(targetId);
     return c.json({ items });
   });
 

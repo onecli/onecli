@@ -8,18 +8,18 @@ import { proofDatabaseUrl } from "../../testing/pg-proof";
  * a fake Slack: resolve → guard → hold/send → decide → deliver.
  *
  * The properties pinned:
- *  - an undecided recipient HOLDS (ask-by-default): no wire post happens
- *    until the owner approves; approve delivers exactly the frozen text
- *    to exactly the frozen recipient (row-is-truth, inherited from 4b);
- *  - an `allow` contact sends immediately — no approval row at all;
- *  - `approve_always` executes AND flips the contact, so the next send to
- *    the same recipient skips the card entirely;
- *  - the flip records the decider; the dashboard revoke (policy back to
- *    `ask`) makes the next send hold again;
+ *  - an undecided recipient HOLDS (asks once): no wire post happens until
+ *    the owner answers; Always allow delivers exactly the frozen text to
+ *    exactly the frozen recipient (row-is-truth, inherited from 4b);
+ *  - a recipient's ONE setting is its reach row: Always allow sends with no
+ *    approval row at all, Never refuses before any card;
+ *  - the card asks about the RECIPIENT: Always allow executes AND sets
+ *    them, so the next send skips the card; Never refuses AND sets them;
+ *    the decider is recorded, and Remove makes the next send ask again;
+ *  - a workspace owner (and the presence's manager) is messaged straight;
  *  - recipients resolve id-anchored: an anchor from find_recipient makes
  *    an unlinked person sendable, and an unknown name errors actionably;
  *  - channels resolve by exact name; a person send opens the DM first;
- *  - tenancy: a foreign workspace's contact flip reads not-found;
  *  - every delivery is recorded where its reply will arrive, and the reply's
  *    turn is told what was sent and from where: once, only there, names only.
  */
@@ -28,9 +28,7 @@ const PROOF_URL = proofDatabaseUrl();
 
 const P = "smp-";
 const ORG = `${P}org`;
-const OTHER_ORG = `${P}other-org`;
 const WORKSPACE = `${P}ws`;
-const OTHER_WORKSPACE = `${P}other-ws`;
 const OWNER = `${P}owner`;
 const TENANT = "T-SMP";
 
@@ -168,8 +166,8 @@ const seedStage = async (suffix: string) => {
   });
   await db.workspaceAccess.upsert({
     where: { workspaceId_userId: { workspaceId: WORKSPACE, userId: OWNER } },
-    create: { workspaceId: WORKSPACE, userId: OWNER, role: "owner" },
-    update: { role: "owner" },
+    create: { workspaceId: WORKSPACE, userId: OWNER, role: "member" },
+    update: { role: "member" },
   });
   const conversation = await db.conversation.create({
     data: { agentId: agent.id, source: "slack", externalRef: `${P}${suffix}` },
@@ -194,10 +192,30 @@ const seedStage = async (suffix: string) => {
   };
 };
 
+/** Set a recipient's ONE setting directly (its reach row on the stage's
+ * integration), the way the dashboard or an earlier answer leaves it. */
+const setRecipient = (
+  stage: { agentId: string; integrationId: string },
+  to: { kind: "person" | "channel"; ref: string; label?: string },
+  state: "approved" | "blocked",
+) =>
+  db.agentReachGrant.create({
+    data: {
+      agentId: stage.agentId,
+      integrationId: stage.integrationId,
+      provider: "slack",
+      subjectKind: to.kind === "channel" ? "space" : "external_user",
+      externalRef: to.ref,
+      subjectLabel: to.label ?? to.ref,
+      state,
+      decidedByUserId: OWNER,
+    },
+  });
+
 const reset = async () => {
   await db.agent.deleteMany({ where: { identifier: { startsWith: P } } });
   await db.channelIntegration.deleteMany({
-    where: { organizationId: { in: [ORG, OTHER_ORG] } },
+    where: { organizationId: { startsWith: P } },
   });
   sharedIntegrationId = null;
 };
@@ -224,23 +242,13 @@ beforeAll(async () => {
     where: { userId: { startsWith: P } },
   });
   await db.workspaceAccess.deleteMany({ where: { userId: { startsWith: P } } });
-  await db.workspace.deleteMany({
-    where: { id: { in: [WORKSPACE, OTHER_WORKSPACE] } },
-  });
-  await db.organization.deleteMany({ where: { id: { in: [ORG, OTHER_ORG] } } });
+  await db.workspace.deleteMany({ where: { id: { startsWith: P } } });
+  await db.organization.deleteMany({ where: { id: { startsWith: P } } });
   await db.user.deleteMany({ where: { id: { startsWith: P } } });
 
-  await db.organization.createMany({
-    data: [
-      { id: ORG, name: ORG, slug: ORG },
-      { id: OTHER_ORG, name: OTHER_ORG, slug: OTHER_ORG },
-    ],
-  });
-  await db.workspace.createMany({
-    data: [
-      { id: WORKSPACE, name: "SMP", organizationId: ORG },
-      { id: OTHER_WORKSPACE, name: "SMP Other", organizationId: OTHER_ORG },
-    ],
+  await db.organization.create({ data: { id: ORG, name: ORG, slug: ORG } });
+  await db.workspace.create({
+    data: { id: WORKSPACE, name: "SMP", organizationId: ORG },
   });
   await db.user.create({
     data: {
@@ -291,12 +299,15 @@ describe.skipIf(!PROOF_URL)("send_message (4c)", () => {
         originConversationId: stage.conversationId,
         originTurnId: stage.turnId,
       });
-      if (out.kind !== "held") throw new Error("unreachable");
-      await approvals.decideActionApproval({
-        approvalId: out.approvalId,
-        decision: "approve",
-        deciderUserId: OWNER,
-      });
+      // The first send asks about Dana; the answer is remembered, so the
+      // second goes straight out.
+      if (out.kind === "held") {
+        await approvals.decideActionApproval({
+          approvalId: out.approvalId,
+          decision: "approve",
+          deciderUserId: OWNER,
+        });
+      }
       return slackCallsFor("chat.postMessage").at(-1)?.form.get("text") ?? "";
     };
 
@@ -309,8 +320,8 @@ describe.skipIf(!PROOF_URL)("send_message (4c)", () => {
     expect(second).not.toContain("an AI agent");
     expect(second).toContain("any update?");
 
-    // Approving the send also lets Dana reply: no second "approve this
-    // person?" gate when she answers, recorded in the approver's name.
+    // The answer was about Dana: Always allow, recorded in the approver's
+    // name, so she can DM the agent back too.
     const grant = await db.agentReachGrant.findFirstOrThrow({
       where: { agentId: stage.agentId, externalRef: "U-DANA" },
       select: { state: true, subjectKind: true, decidedByUserId: true },
@@ -404,83 +415,51 @@ describe.skipIf(!PROOF_URL)("send_message (4c)", () => {
     expect(await sendTo("Kai Knocker", "U-KAI")).not.toContain("an AI agent");
   });
 
-  it("an always-allow send opens the reply lane in the ALLOWER's name; with no recorded allower, it opens nothing", async () => {
+  it("an Allowed person is messaged without a card; a send to them never changes their setting", async () => {
     const stage = await seedStage("allow-decider");
-    // The presence was attached by someone OTHER than the allower: the
-    // reach decision must never be recorded in the attacher's name.
-    const ATTACHER = `${P}attacher`;
-    await db.user.upsert({
-      where: { id: ATTACHER },
-      create: {
-        id: ATTACHER,
-        email: `${ATTACHER}@example.com`,
-        externalAuthId: ATTACHER,
-        name: "Attacher",
-      },
-      update: {},
-    });
-    await db.agentChannel.update({
-      where: { id: stage.presenceId },
-      data: { createdByUserId: ATTACHER },
-    });
     scriptSlack();
-    const sendAllowed = async (
-      name: string,
-      ref: string,
-      decidedByUserId: string | null,
-    ) => {
-      await search.anchorRecipient({
-        conversationId: stage.conversationId,
-        name,
-        externalUserId: ref,
-      });
-      await db.agentContact.create({
-        data: {
-          agentId: stage.agentId,
-          kind: "person",
-          externalRef: ref,
-          displayName: name,
-          policy: "allow",
-          decidedByUserId,
-        },
-      });
-      const out = await send.requestSend({
+    await db.agentReachGrant.create({
+      data: {
         agentId: stage.agentId,
-        to: name,
-        text: "hello",
-        originConversationId: stage.conversationId,
-        originTurnId: stage.turnId,
-      });
-      expect(out.kind).toBe("sent");
-    };
-
-    await sendAllowed("Ari Allowed", "U-ARI", OWNER);
+        integrationId: stage.integrationId,
+        provider: "slack",
+        subjectKind: "external_user",
+        externalRef: "U-ARI",
+        state: "approved",
+        decidedByUserId: OWNER,
+      },
+    });
+    await search.anchorRecipient({
+      conversationId: stage.conversationId,
+      name: "Ari Allowed",
+      externalUserId: "U-ARI",
+    });
+    const out = await send.requestSend({
+      agentId: stage.agentId,
+      to: "Ari Allowed",
+      text: "hello",
+      originConversationId: stage.conversationId,
+      originTurnId: stage.turnId,
+    });
+    expect(out.kind).toBe("sent");
+    expect(
+      await db.actionApproval.count({ where: { agentId: stage.agentId } }),
+    ).toBe(0);
     expect(
       await db.agentReachGrant.findFirstOrThrow({
         where: { agentId: stage.agentId, externalRef: "U-ARI" },
         select: { state: true, decidedByUserId: true },
       }),
     ).toEqual({ state: "approved", decidedByUserId: OWNER });
-
-    await sendAllowed("Uma Unattributed", "U-UMA", null);
-    expect(
-      await db.agentReachGrant.count({
-        where: { agentId: stage.agentId, externalRef: "U-UMA" },
-      }),
-    ).toBe(0);
   });
 
-  it("a delivered send never overrides an explicit reach block", async () => {
+  it("a person set to Not allowed is refused before any card", async () => {
     const stage = await seedStage("reach-blocked");
     scriptSlack();
-    const presence = await db.agentChannel.findUniqueOrThrow({
-      where: { id: stage.presenceId },
-      select: { integrationId: true },
-    });
     await db.agentReachGrant.create({
       data: {
         agentId: stage.agentId,
-        integrationId: presence.integrationId,
+        integrationId: stage.integrationId,
         provider: "slack",
         subjectKind: "external_user",
         externalRef: "U-DANA",
@@ -493,24 +472,153 @@ describe.skipIf(!PROOF_URL)("send_message (4c)", () => {
       name: "Dana Guest",
       externalUserId: "U-DANA",
     });
-    const out = await send.requestSend({
+    await expect(
+      send.requestSend({
+        agentId: stage.agentId,
+        to: "Dana Guest",
+        text: "hello",
+        originConversationId: stage.conversationId,
+        originTurnId: stage.turnId,
+      }),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("has blocked messaging Dana Guest"),
+    });
+    expect(
+      await db.actionApproval.count({ where: { agentId: stage.agentId } }),
+    ).toBe(0);
+  });
+
+  it("a manager who never DMed the agent is still the manager: linked by their Slack email, no card", async () => {
+    const stage = await seedStage("manager-unlinked");
+    await db.agentChannel.update({
+      where: { id: stage.presenceId },
+      data: { createdByUserId: OWNER },
+    });
+    await db.channelUserLink.deleteMany({
+      where: { externalUserId: "U-OWNER", userId: OWNER },
+    });
+    scriptSlack();
+    slackHandlers["users.info"] = (call) => ({
+      user: {
+        id: call.form.get("user"),
+        team_id: TENANT,
+        name: "owner",
+        profile: { display_name: "Owner", email: `${OWNER}@example.com` },
+      },
+    });
+    await search.anchorRecipient({
+      conversationId: stage.conversationId,
+      name: "Olive Owner",
+      externalUserId: "U-OWNER",
+    });
+
+    const outcome = await send.requestSend({
+      agentId: stage.agentId,
+      to: "Olive Owner",
+      text: "Jonathan asks: what is the best number?",
+      originConversationId: stage.conversationId,
+      originTurnId: stage.turnId,
+    });
+
+    expect(outcome.kind).toBe("sent");
+    expect(
+      await db.actionApproval.count({ where: { agentId: stage.agentId } }),
+    ).toBe(0);
+    // The link now exists, minted the same way a first DM would.
+    const link = await db.channelUserLink.findFirstOrThrow({
+      where: { externalUserId: "U-OWNER" },
+      select: { userId: true, linkedVia: true },
+    });
+    expect(link).toEqual({ userId: OWNER, linkedVia: "email" });
+  });
+
+  it("an unlinked recipient whose Slack email is someone else is NOT treated as the manager", async () => {
+    const stage = await seedStage("manager-impostor");
+    await db.agentChannel.update({
+      where: { id: stage.presenceId },
+      data: { createdByUserId: OWNER },
+    });
+    scriptSlack();
+    slackHandlers["users.info"] = (call) => ({
+      user: {
+        id: call.form.get("user"),
+        team_id: TENANT,
+        name: "dana",
+        profile: { display_name: "Dana", email: "dana@elsewhere.example" },
+      },
+    });
+    await search.anchorRecipient({
+      conversationId: stage.conversationId,
+      name: "Dana Guest",
+      externalUserId: "U-DANA",
+    });
+
+    const outcome = await send.requestSend({
       agentId: stage.agentId,
       to: "Dana Guest",
       text: "hello",
       originConversationId: stage.conversationId,
       originTurnId: stage.turnId,
     });
-    if (out.kind !== "held") throw new Error("unreachable");
-    await approvals.decideActionApproval({
-      approvalId: out.approvalId,
-      decision: "approve",
-      deciderUserId: OWNER,
+
+    expect(outcome.kind).toBe("held");
+    expect(
+      await db.channelUserLink.count({ where: { externalUserId: "U-DANA" } }),
+    ).toBe(0);
+  });
+
+  it("an unlinked TEAMMATE who is not the manager is held, and is not linked as a side effect", async () => {
+    // Their Slack email belongs to a live org member, so the shared
+    // authorizer WOULD link them; only the manager's own email may reach it.
+    const MATE = `${P}mate`;
+    await db.user.create({
+      data: {
+        id: MATE,
+        email: `${MATE}@example.com`,
+        externalAuthId: MATE,
+        name: "Morgan Mate",
+      },
     });
-    const grant = await db.agentReachGrant.findFirstOrThrow({
-      where: { agentId: stage.agentId, externalRef: "U-DANA" },
-      select: { state: true },
+    await db.organizationMember.create({
+      data: {
+        organizationId: ORG,
+        userId: MATE,
+        userEmail: `${MATE}@example.com`,
+        role: "member",
+      },
     });
-    expect(grant.state).toBe("blocked");
+    const stage = await seedStage("manager-mate");
+    await db.agentChannel.update({
+      where: { id: stage.presenceId },
+      data: { createdByUserId: OWNER },
+    });
+    scriptSlack();
+    slackHandlers["users.info"] = (call) => ({
+      user: {
+        id: call.form.get("user"),
+        team_id: TENANT,
+        name: "morgan",
+        profile: { display_name: "Morgan", email: `${MATE}@example.com` },
+      },
+    });
+    await search.anchorRecipient({
+      conversationId: stage.conversationId,
+      name: "Morgan Mate",
+      externalUserId: "U-MATE",
+    });
+
+    const outcome = await send.requestSend({
+      agentId: stage.agentId,
+      to: "Morgan Mate",
+      text: "hello",
+      originConversationId: stage.conversationId,
+      originTurnId: stage.turnId,
+    });
+
+    expect(outcome.kind).toBe("held");
+    expect(
+      await db.channelUserLink.count({ where: { externalUserId: "U-MATE" } }),
+    ).toBe(0);
   });
 
   it("a message to the agent's MANAGER goes straight out - no card asking them to approve themselves", async () => {
@@ -537,11 +645,45 @@ describe.skipIf(!PROOF_URL)("send_message (4c)", () => {
     ).toBe(0);
     const posts = slackCallsFor("chat.postMessage");
     expect(posts.at(-1)?.form.get("text")).toContain("Dana replied");
-    // Nor a contact: an `ask` row would tell the dashboard the next message
-    // to the manager asks first, and it never does.
-    expect(
-      await db.agentContact.count({ where: { agentId: stage.agentId } }),
-    ).toBe(0);
+  });
+
+  it("a message to the WORKSPACE OWNER goes straight out, even over a stale Never", async () => {
+    const stage = await seedStage("ws-owner");
+    await db.workspaceAccess.update({
+      where: { workspaceId_userId: { workspaceId: WORKSPACE, userId: OWNER } },
+      data: { role: "owner" },
+    });
+    await db.agentReachGrant.create({
+      data: {
+        agentId: stage.agentId,
+        integrationId: stage.integrationId,
+        provider: "slack",
+        subjectKind: "external_user",
+        externalRef: "U-OWNER",
+        state: "blocked",
+      },
+    });
+    scriptSlack();
+    try {
+      const outcome = await send.requestSend({
+        agentId: stage.agentId,
+        to: "Olive Owner",
+        text: "status update",
+        originConversationId: stage.conversationId,
+        originTurnId: stage.turnId,
+      });
+      expect(outcome.kind).toBe("sent");
+      expect(
+        await db.actionApproval.count({ where: { agentId: stage.agentId } }),
+      ).toBe(0);
+    } finally {
+      await db.workspaceAccess.update({
+        where: {
+          workspaceId_userId: { workspaceId: WORKSPACE, userId: OWNER },
+        },
+        data: { role: "member" },
+      });
+    }
   });
 
   it("the manager shortcut ends with the manager's access: a suspended member is asked like anyone", async () => {
@@ -623,21 +765,21 @@ describe.skipIf(!PROOF_URL)("send_message (4c)", () => {
     ).toBe(1);
     expect(slackCallsFor("chat.postMessage")).toHaveLength(cardsAfterFirst);
 
-    // Once the first is decided, a new send asks fresh.
+    // Once the first is decided, the answer stands: Never refuses the
+    // next send outright (no new card).
     await approvals.decideActionApproval({
       approvalId: first.id,
       decision: "reject",
       deciderUserId: OWNER,
     });
     expect(await callSend("a different follow-up")).toMatchObject({
-      ok: true,
-      result: { status: "held" },
+      ok: false,
     });
     expect(
       await db.actionApproval.count({
         where: { agentId: stage.agentId, status: "pending" },
       }),
-    ).toBe(1);
+    ).toBe(0);
   });
 
   it("holds for an undecided recipient, then approve delivers the FROZEN text to the FROZEN recipient", async () => {
@@ -680,17 +822,14 @@ describe.skipIf(!PROOF_URL)("send_message (4c)", () => {
       /^_Hi, I'm .+, an AI agent\. You can reply right here\._\n\nthe dashboard is ready$/,
     );
 
-    // Plain approve RECORDS the recipient (visible on Contacts) but grants
-    // nothing: the row is `ask`, so the next send still asks.
-    const recorded = await db.agentContact.findFirstOrThrow({
-      where: { agentId: stage.agentId },
-    });
-    expect(recorded).toMatchObject({
-      kind: "person",
-      externalRef: "U-OWNER",
-      displayName: "Olive Owner",
-      policy: "ask",
-    });
+    // The answer was about the person: Always allow (an approve on this
+    // card is the standing answer), so the next send goes straight out.
+    expect(
+      await db.agentReachGrant.findFirstOrThrow({
+        where: { agentId: stage.agentId, externalRef: "U-OWNER" },
+        select: { state: true, subjectLabel: true },
+      }),
+    ).toEqual({ state: "approved", subjectLabel: "Olive Owner" });
     const again = await send.requestSend({
       agentId: stage.agentId,
       to: "Olive Owner",
@@ -698,54 +837,10 @@ describe.skipIf(!PROOF_URL)("send_message (4c)", () => {
       originConversationId: stage.conversationId,
       originTurnId: stage.turnId,
     });
-    expect(again.kind).toBe("held");
+    expect(again.kind).toBe("sent");
   });
 
-  it("a REJECTED send records no contact: only delivery adds someone", async () => {
-    const stage = await seedStage("reject-nocontact");
-    scriptSlack();
-    const outcome = await send.requestSend({
-      agentId: stage.agentId,
-      to: "Olive Owner",
-      text: "never sent",
-      originConversationId: stage.conversationId,
-      originTurnId: stage.turnId,
-    });
-    if (outcome.kind !== "held") throw new Error("unreachable");
-    await approvals.decideActionApproval({
-      approvalId: outcome.approvalId,
-      decision: "reject",
-      deciderUserId: OWNER,
-    });
-    expect(
-      await db.agentContact.findFirst({ where: { agentId: stage.agentId } }),
-    ).toBeNull();
-  });
-
-  it("delivery never overwrites a standing policy (allow stays allow)", async () => {
-    const stage = await seedStage("keep-policy");
-    scriptSlack();
-    await send.allowContact({
-      agentId: stage.agentId,
-      recipient: { kind: "person", ref: "U-OWNER", label: "Olive Owner" },
-      deciderUserId: OWNER,
-    });
-    const sent = await send.requestSend({
-      agentId: stage.agentId,
-      to: "Olive Owner",
-      text: "goes straight out",
-      originConversationId: stage.conversationId,
-      originTurnId: stage.turnId,
-    });
-    expect(sent.kind).toBe("sent");
-    const contact = await db.agentContact.findFirstOrThrow({
-      where: { agentId: stage.agentId },
-    });
-    expect(contact.policy).toBe("allow");
-    expect(contact.decidedByUserId).toBe(OWNER);
-  });
-
-  it("approve_always delivers AND flips the contact - the next send skips the card", async () => {
+  it("Always allow (an approve) delivers AND sets the person, decider recorded - the next send skips the card", async () => {
     const stage = await seedStage("always");
     scriptSlack();
 
@@ -761,17 +856,28 @@ describe.skipIf(!PROOF_URL)("send_message (4c)", () => {
 
     const decided = await approvals.decideActionApproval({
       approvalId: first.approvalId,
-      decision: "approve_always",
+      decision: "approve",
       deciderUserId: OWNER,
     });
     expect(decided).toMatchObject({ kind: "decided", status: "executed" });
 
-    // The standing grant exists, decider recorded.
-    const contact = await db.agentContact.findFirstOrThrow({
-      where: { agentId: stage.agentId, kind: "person" },
-    });
-    expect(contact.policy).toBe("allow");
-    expect(contact.decidedByUserId).toBe(OWNER);
+    // The standing grant is the person's ONE setting, decider recorded.
+    expect(
+      await db.agentReachGrant.findFirstOrThrow({
+        where: { agentId: stage.agentId, externalRef: "U-OWNER" },
+        select: { state: true, decidedByUserId: true },
+      }),
+    ).toEqual({ state: "approved", decidedByUserId: OWNER });
+    // They were messaged, not answered: no "you can talk to me now" DM. The
+    // notice would be detached, so give it the time one would take.
+    const notices = () =>
+      slackCallsFor("chat.postMessage").filter((c) =>
+        (c.form.get("text") ?? "").includes("send your message again here"),
+      );
+    for (let i = 0; i < 50 && notices().length === 0; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(notices()).toHaveLength(0);
 
     // The SECOND send goes straight out: sent, no new approval row.
     const before = slackCallsFor("chat.postMessage").length;
@@ -793,65 +899,64 @@ describe.skipIf(!PROOF_URL)("send_message (4c)", () => {
     expect(posts[0]!.form.get("text")).toBe("second sails through");
   });
 
-  it("a dashboard revoke (allow → ask) makes the next send hold again", async () => {
-    const stage = await seedStage("revoke");
+  it("Always allow never lifts a Never set after the card went out", async () => {
+    const stage = await seedStage("always-blocked");
     scriptSlack();
-
-    await send.allowContact({
-      agentId: stage.agentId,
-      recipient: { kind: "person", ref: "U-OWNER", label: "Olive Owner" },
-      deciderUserId: OWNER,
-    });
-    const contact = await db.agentContact.findFirstOrThrow({
-      where: { agentId: stage.agentId },
-      select: { id: true },
-    });
-
-    const flipped = await send.setContactPolicy({
-      workspaceId: WORKSPACE,
-      agentId: stage.agentId,
-      contactId: contact.id,
-      policy: "ask",
-      deciderUserId: OWNER,
-    });
-    expect(flipped).toEqual({ id: contact.id, policy: "ask" });
-
-    const outcome = await send.requestSend({
+    const first = await send.requestSend({
       agentId: stage.agentId,
       to: "Olive Owner",
-      text: "asks again",
+      text: "first ask",
       originConversationId: stage.conversationId,
       originTurnId: stage.turnId,
     });
-    expect(outcome.kind).toBe("held");
-  });
-
-  it("a FOREIGN workspace's contact flip reads not-found (tenancy fence)", async () => {
-    const stage = await seedStage("tenancy");
-    await send.allowContact({
-      agentId: stage.agentId,
-      recipient: { kind: "person", ref: "U-OWNER", label: "Olive Owner" },
+    if (first.kind !== "held") throw new Error("unreachable");
+    await setRecipient(stage, { kind: "person", ref: "U-OWNER" }, "blocked");
+    const decided = await approvals.decideActionApproval({
+      approvalId: first.approvalId,
+      decision: "approve",
       deciderUserId: OWNER,
     });
-    const contact = await db.agentContact.findFirstOrThrow({
-      where: { agentId: stage.agentId },
-      select: { id: true },
-    });
-    const foreign = await send.setContactPolicy({
-      workspaceId: OTHER_WORKSPACE,
-      agentId: stage.agentId,
-      contactId: contact.id,
-      policy: "allow",
-      deciderUserId: OWNER,
-    });
-    expect(foreign).toBeNull();
+    expect(decided).toMatchObject({ kind: "decided", status: "failed" });
     expect(
       (
-        await db.agentContact.findUniqueOrThrow({
-          where: { id: contact.id },
+        await db.agentReachGrant.findFirstOrThrow({
+          where: { agentId: stage.agentId, externalRef: "U-OWNER" },
         })
-      ).policy,
-    ).toBe("allow");
+      ).state,
+    ).toBe("blocked");
+  });
+
+  it("Remove clears a person's setting: the next send asks again; a value this build does not know fails closed", async () => {
+    const stage = await seedStage("revoke");
+    scriptSlack();
+    const grant = await setRecipient(
+      stage,
+      { kind: "person", ref: "U-OWNER" },
+      "approved",
+    );
+    const sendIt = () =>
+      send.requestSend({
+        agentId: stage.agentId,
+        to: "Olive Owner",
+        text: "hello",
+        originConversationId: stage.conversationId,
+        originTurnId: stage.turnId,
+      });
+    expect((await sendIt()).kind).toBe("sent");
+
+    // A stored value this build does not know (an older release's spelling)
+    // reads as Never: refused, never sent.
+    await db.agentReachGrant.update({
+      where: { id: grant.id },
+      data: { state: "members_only" },
+    });
+    await expect(sendIt()).rejects.toMatchObject({
+      message: expect.stringContaining("blocked"),
+    });
+
+    // Remove (the row gone): back to asking once.
+    await db.agentReachGrant.delete({ where: { id: grant.id } });
+    expect((await sendIt()).kind).toBe("held");
   });
 
   it("an anchored find_recipient pick makes an UNLINKED person sendable; unknown names error actionably", async () => {
@@ -894,6 +999,114 @@ describe.skipIf(!PROOF_URL)("send_message (4c)", () => {
     });
   });
 
+  it("a channel has ONE setting: on means the agent posts freely, Off refuses, undecided asks", async () => {
+    const stage = await seedStage("one-setting");
+    scriptSlack();
+    slackHandlers["conversations.list"] = () => ({
+      channels: [
+        { id: "C-ON", name: "on-room", is_member: true },
+        { id: "C-OFF", name: "off-room", is_member: true },
+        { id: "C-NEW", name: "new-room", is_member: true },
+      ],
+    });
+    const grant = (externalRef: string, state: string) =>
+      db.agentReachGrant.create({
+        data: {
+          agentId: stage.agentId,
+          integrationId: stage.integrationId,
+          provider: "slack",
+          subjectKind: "space",
+          externalRef,
+          subjectLabel: externalRef,
+          state,
+        },
+      });
+    await grant("C-ON", "approved");
+    await grant("C-OFF", "blocked");
+    const post = (to: string) =>
+      send.requestSend({
+        agentId: stage.agentId,
+        to,
+        text: "update",
+        originConversationId: stage.conversationId,
+        originTurnId: stage.turnId,
+      });
+
+    expect((await post("#on-room")).kind).toBe("sent");
+    await expect(post("#off-room")).rejects.toMatchObject({
+      message: expect.stringContaining("turned you off in #off-room"),
+    });
+    expect((await post("#new-room")).kind).toBe("held");
+  });
+
+  it("an ask is held, not delivered; a channel turned Off before approval fails closed", async () => {
+    const stage = await seedStage("off-before-approve");
+    scriptSlack();
+    slackHandlers["conversations.list"] = () => ({
+      channels: [{ id: "C-LATE", name: "late-room", is_member: true }],
+    });
+    const outcome = await send.requestSend({
+      agentId: stage.agentId,
+      to: "#late-room",
+      text: "hello",
+      originConversationId: stage.conversationId,
+      originTurnId: stage.turnId,
+    });
+    expect(outcome.kind).toBe("held");
+    await db.agentReachGrant.create({
+      data: {
+        agentId: stage.agentId,
+        integrationId: stage.integrationId,
+        provider: "slack",
+        subjectKind: "space",
+        externalRef: "C-LATE",
+        state: "blocked",
+      },
+    });
+    const before = slackCallsFor("chat.postMessage").length;
+    if (outcome.kind !== "held") throw new Error("expected a hold");
+    await approvals.decideActionApproval({
+      approvalId: outcome.approvalId,
+      decision: "approve",
+      deciderUserId: OWNER,
+    });
+    expect(slackCallsFor("chat.postMessage").slice(before)).toHaveLength(0);
+  });
+
+  it("Always allow on a channel card turns the undecided channel on: the post goes out and the next one needs no card", async () => {
+    const stage = await seedStage("always-channel");
+    scriptSlack();
+    slackHandlers["conversations.list"] = () => ({
+      channels: [{ id: "C-NEW", name: "new-room", is_member: true }],
+    });
+    const post = (text: string) =>
+      send.requestSend({
+        agentId: stage.agentId,
+        to: "#new-room",
+        text,
+        originConversationId: stage.conversationId,
+        originTurnId: stage.turnId,
+      });
+    const first = await post("hello room");
+    if (first.kind !== "held") throw new Error("expected a hold");
+    expect(
+      await approvals.decideActionApproval({
+        approvalId: first.approvalId,
+        decision: "approve",
+        deciderUserId: OWNER,
+      }),
+    ).toMatchObject({ kind: "decided", status: "executed" });
+    expect(
+      (
+        await db.agentReachGrant.findFirstOrThrow({
+          where: { agentId: stage.agentId, subjectKind: "space" },
+          select: { state: true },
+        })
+      ).state,
+    ).toBe("approved");
+    expect((await post("again")).kind).toBe("sent");
+  });
+
   it("a #channel send resolves by exact name and posts to the channel id (no DM open)", async () => {
     const stage = await seedStage("channel");
     scriptSlack();
@@ -904,11 +1117,7 @@ describe.skipIf(!PROOF_URL)("send_message (4c)", () => {
       ],
     });
 
-    await send.allowContact({
-      agentId: stage.agentId,
-      recipient: { kind: "channel", ref: "C-PROJ", label: "#proj-updates" },
-      deciderUserId: OWNER,
-    });
+    await setRecipient(stage, { kind: "channel", ref: "C-PROJ" }, "approved");
     const before = slackCallsFor("chat.postMessage").length;
     const outcome = await send.requestSend({
       agentId: stage.agentId,
@@ -937,11 +1146,7 @@ describe.skipIf(!PROOF_URL)("send_message (4c)", () => {
     slackHandlers["conversations.list"] = () => ({
       channels: [{ id: "C-DEAD", name: "dead-proj", is_member: true }],
     });
-    await send.allowContact({
-      agentId: stage.agentId,
-      recipient: { kind: "channel", ref: "C-DEAD", label: "#dead-proj" },
-      deciderUserId: OWNER,
-    });
+    await setRecipient(stage, { kind: "channel", ref: "C-DEAD" }, "approved");
 
     // Control first: a transient refusal is the caller's error, not a removal.
     slackHandlers["chat.postMessage"] = () => ({
@@ -1179,7 +1384,10 @@ describe.skipIf(!PROOF_URL)(
         originTurnId: stage.turnId,
       });
 
+    /** Approve a held send (the first to Dana asks about her; once allowed,
+     * later sends go straight out and there is nothing to approve). */
     const approve = async (outcome: Awaited<ReturnType<typeof sendToDana>>) => {
+      if (outcome.kind === "sent") return null;
       if (outcome.kind !== "held") throw new Error(`held, got ${outcome.kind}`);
       await approvals.decideActionApproval({
         approvalId: outcome.approvalId,
@@ -1194,6 +1402,7 @@ describe.skipIf(!PROOF_URL)(
       const approvalId = await approve(
         await sendToDana(stage, "are you in the office tomorrow?"),
       );
+      if (!approvalId) throw new Error("the first send asks");
 
       // The approval row keeps exactly what the owner approved.
       const row = await db.actionApproval.findUniqueOrThrow({
@@ -1215,15 +1424,11 @@ describe.skipIf(!PROOF_URL)(
       expect(note).toContain("send_message");
     });
 
-    it("an always-allow send is recorded too (no approval row), so its reply hears it", async () => {
+    it("an Always allow send is recorded too (no approval row), so its reply hears it", async () => {
       // MUTATION-PROOF: record only from the approval handler (the old
       // shape) and this note is null.
       const stage = await askingStage("relay-allow");
-      await send.allowContact({
-        agentId: stage.agentId,
-        recipient: { kind: "person", ref: "U-DANA", label: "Dana Guest" },
-        deciderUserId: OWNER,
-      });
+      await setRecipient(stage, { kind: "person", ref: "U-DANA" }, "approved");
       const outcome = await sendToDana(stage, "can you join at 3?");
       expect(outcome.kind).toBe("sent");
 
@@ -1320,11 +1525,7 @@ describe.skipIf(!PROOF_URL)(
       slackHandlers["conversations.list"] = () => ({
         channels: [{ id: "C-PROJ", name: "proj-updates", is_member: true }],
       });
-      await send.allowContact({
-        agentId: stage.agentId,
-        recipient: { kind: "channel", ref: "C-PROJ", label: "#proj-updates" },
-        deciderUserId: OWNER,
-      });
+      await setRecipient(stage, { kind: "channel", ref: "C-PROJ" }, "approved");
       const outcome = await send.requestSend({
         agentId: stage.agentId,
         to: "#proj-updates",
@@ -1438,3 +1639,381 @@ describe.skipIf(!PROOF_URL)(
     });
   },
 );
+
+describe.skipIf(!PROOF_URL)(
+  "a person's ONE setting (Always allow / Never), asked once",
+  () => {
+    const person = (
+      stage: { agentId: string; integrationId: string },
+      ref: string,
+      state: string,
+    ) =>
+      db.agentReachGrant.create({
+        data: {
+          agentId: stage.agentId,
+          integrationId: stage.integrationId,
+          provider: "slack",
+          subjectKind: "external_user",
+          externalRef: ref,
+          subjectLabel: ref,
+          state,
+        },
+      });
+
+    it("Always allow sends; Never refuses; no setting asks ONCE about the person", async () => {
+      const stage = await seedStage("one-person");
+      scriptSlack();
+      await person(stage, "U-A", "approved");
+      await person(stage, "U-N", "blocked");
+      for (const [name, ref] of [
+        ["Ann", "U-A"],
+        ["Ned", "U-N"],
+        ["Kim", "U-K"],
+      ] as const) {
+        await search.anchorRecipient({
+          conversationId: stage.conversationId,
+          name,
+          externalUserId: ref,
+        });
+      }
+      const sendTo = (to: string) =>
+        send.requestSend({
+          agentId: stage.agentId,
+          to,
+          text: "hello",
+          originConversationId: stage.conversationId,
+          originTurnId: stage.turnId,
+        });
+      expect((await sendTo("Ann")).kind).toBe("sent");
+      await expect(sendTo("Ned")).rejects.toMatchObject({
+        message: expect.stringContaining("blocked"),
+      });
+      const asked = await sendTo("Kim");
+      expect(asked.kind).toBe("held");
+      if (asked.kind !== "held") throw new Error("unreachable");
+      const row = await db.actionApproval.findUniqueOrThrow({
+        where: { id: asked.approvalId },
+      });
+      // The card asks about the PERSON, offering only the two answers.
+      expect(row.summary).toContain("message Kim from now on?");
+      expect(approvals.isStandingChoice(row.action)).toBe(true);
+    });
+
+    it("answering Always allow sends it AND sets the person, so the next send goes straight out", async () => {
+      // MUTATION-PROOF: drop the standing branch in the decide door and a
+      // plain approve sends once but leaves the person unset.
+      const stage = await seedStage("standing-allow");
+      scriptSlack();
+      await search.anchorRecipient({
+        conversationId: stage.conversationId,
+        name: "Kim",
+        externalUserId: "U-KIM",
+      });
+      const sendIt = () =>
+        send.requestSend({
+          agentId: stage.agentId,
+          to: "Kim",
+          text: "hello",
+          originConversationId: stage.conversationId,
+          originTurnId: stage.turnId,
+        });
+      const first = await sendIt();
+      if (first.kind !== "held") throw new Error("expected a hold");
+      // Even a plain approve (an older client) is the standing answer.
+      expect(
+        await approvals.decideActionApproval({
+          approvalId: first.approvalId,
+          decision: "approve",
+          deciderUserId: OWNER,
+        }),
+      ).toMatchObject({ kind: "decided", status: "executed" });
+      expect(
+        (
+          await db.agentReachGrant.findFirstOrThrow({
+            where: { agentId: stage.agentId, externalRef: "U-KIM" },
+          })
+        ).state,
+      ).toBe("approved");
+      expect((await sendIt()).kind).toBe("sent");
+    });
+
+    it("answering Never refuses it AND sets the person to Never", async () => {
+      const stage = await seedStage("standing-never");
+      scriptSlack();
+      await search.anchorRecipient({
+        conversationId: stage.conversationId,
+        name: "Remy",
+        externalUserId: "U-REMY",
+      });
+      const sendIt = () =>
+        send.requestSend({
+          agentId: stage.agentId,
+          to: "Remy",
+          text: "hello",
+          originConversationId: stage.conversationId,
+          originTurnId: stage.turnId,
+        });
+      const first = await sendIt();
+      if (first.kind !== "held") throw new Error("expected a hold");
+      const before = slackCallsFor("chat.postMessage").length;
+      await approvals.decideActionApproval({
+        approvalId: first.approvalId,
+        decision: "reject",
+        deciderUserId: OWNER,
+      });
+      expect(
+        slackCallsFor("chat.postMessage")
+          .slice(before)
+          .some((c) => c.form.get("text") === "hello"),
+      ).toBe(false);
+      expect(
+        (
+          await db.agentReachGrant.findFirstOrThrow({
+            where: { agentId: stage.agentId, externalRef: "U-REMY" },
+          })
+        ).state,
+      ).toBe("blocked");
+      // The person and the model hear the answer the owner gave: Never, a
+      // standing no, never "adjust and ask again".
+      const notice = await db.turnEvent.findFirstOrThrow({
+        where: { turnId: stage.turnId, type: "notice" },
+      });
+      const said = (notice.payload as { text: string }).text;
+      expect(said).toMatch(/^Never: message Remy from now on\?/);
+      expect(said).toContain("Don't ask again.");
+      expect(said).not.toContain("ask again if it still matters");
+      await expect(sendIt()).rejects.toMatchObject({
+        message: expect.stringContaining("blocked"),
+      });
+    });
+
+    it("the dashboard sets a person with only the two answers", async () => {
+      const { setPersonReachStateSchema } =
+        await import("../../validations/channels");
+      expect(
+        setPersonReachStateSchema.safeParse({ state: "approved" }).success,
+      ).toBe(true);
+      expect(
+        setPersonReachStateSchema.safeParse({ state: "ask" }).success,
+      ).toBe(false);
+    });
+  },
+);
+
+describe.skipIf(!PROOF_URL)("send_message to a blocked contact", () => {
+  const READER = `${P}reader`;
+  const MEMBER = `${P}member`;
+
+  /** A stage plus the reader's own direct chat with the agent (the only
+   * place a card may be raised) and a blocked Dana. */
+  const blockedStage = async (suffix: string) => {
+    const stage = await seedStage(suffix);
+    for (const [id, name] of [
+      [READER, "Alex Reader"],
+      [MEMBER, "Mia Member"],
+    ] as const) {
+      await db.user.upsert({
+        where: { id },
+        create: { id, email: `${id}@example.com`, externalAuthId: id, name },
+        update: {},
+      });
+      await db.workspaceAccess.upsert({
+        where: { workspaceId_userId: { workspaceId: WORKSPACE, userId: id } },
+        create: { workspaceId: WORKSPACE, userId: id, role: "member" },
+        update: {},
+      });
+    }
+    const direct = await db.conversation.create({
+      data: {
+        agentId: stage.agentId,
+        source: "web",
+        direct: true,
+        userId: READER,
+      },
+      select: { id: true },
+    });
+    const turn = await db.turn.create({
+      data: {
+        conversationId: direct.id,
+        message: "tell Dana hi",
+        status: "done",
+        source: "web",
+        userId: READER,
+        finishedAt: new Date(),
+      },
+      select: { id: true },
+    });
+    await setRecipient(
+      stage,
+      { kind: "person", ref: "U-DANA", label: "Dana Guest" },
+      "blocked",
+    );
+    await search.anchorRecipient({
+      conversationId: direct.id,
+      name: "Dana Guest",
+      externalUserId: "U-DANA",
+    });
+    scriptSlack();
+    const ask = () =>
+      send.requestSend({
+        agentId: stage.agentId,
+        to: "Dana Guest",
+        text: "hi from Alex",
+        originConversationId: direct.id,
+        originTurnId: turn.id,
+        readerUserId: READER,
+      });
+    return { ...stage, directId: direct.id, ask };
+  };
+
+  const danaState = async (agentId: string) =>
+    (
+      await db.agentReachGrant.findFirstOrThrow({
+        where: { agentId, externalRef: "U-DANA" },
+        select: { state: true },
+      })
+    ).state;
+
+  it("raises a server-worded card for the reader; Allow sets Always allow (decider recorded), sends that exact message, and resumes the chat", async () => {
+    const stage = await blockedStage("blocked-allow");
+    const out = await stage.ask();
+    expect(out.kind).toBe("blocked");
+    if (out.kind !== "blocked") return;
+    const row = await db.actionApproval.findUniqueOrThrow({
+      where: { id: out.approvalId },
+      select: { summary: true, action: true },
+    });
+    expect(row.action).toBe(send.CONTACT_BLOCKED_ACTION);
+    expect(row.summary).toBe("Let smp agent blocked-allow message Dana Guest?");
+    // A repeat ask reuses the pending card.
+    const again = await stage.ask();
+    expect(again).toMatchObject({ approvalId: out.approvalId });
+    expect(slackCallsFor("chat.postMessage")).toHaveLength(0);
+
+    // Another member may not decide it.
+    expect(
+      await approvals.decideActionApproval({
+        approvalId: out.approvalId,
+        decision: "approve",
+        choice: "allow",
+        deciderUserId: MEMBER,
+      }),
+    ).toMatchObject({ kind: "refused" });
+
+    const decided = await approvals.decideActionApproval({
+      approvalId: out.approvalId,
+      decision: "approve",
+      choice: "allow",
+      deciderUserId: READER,
+    });
+    expect(decided).toMatchObject({ kind: "decided", status: "executed" });
+    const posts = slackCallsFor("chat.postMessage");
+    expect(posts.at(-1)?.form.get("text")).toContain("hi from Alex");
+    const grant = await db.agentReachGrant.findFirstOrThrow({
+      where: { agentId: stage.agentId, externalRef: "U-DANA" },
+      select: { state: true, decidedByUserId: true },
+    });
+    expect(grant).toEqual({ state: "approved", decidedByUserId: READER });
+
+    // The origin chat was woken by the platform, not the person.
+    const resume = await db.turn.findFirst({
+      where: { conversationId: stage.directId, source: "approval" },
+      select: { message: true, userId: true },
+    });
+    expect(resume?.userId).toBeNull();
+    expect(resume?.message).toMatch(
+      /^Sent as smp agent blocked-allow to Dana Guest: "hi from Alex"/,
+    );
+  });
+
+  it("Don't send rejects: nothing sent, Dana stays blocked, the resume says not sent", async () => {
+    const stage = await blockedStage("blocked-keep");
+    const out = await stage.ask();
+    if (out.kind !== "blocked") throw new Error("expected a card");
+    const decided = await approvals.decideActionApproval({
+      approvalId: out.approvalId,
+      decision: "reject",
+      deciderUserId: READER,
+    });
+    expect(decided).toMatchObject({ kind: "decided", status: "rejected" });
+    expect(slackCallsFor("chat.postMessage")).toHaveLength(0);
+    expect(await danaState(stage.agentId)).toBe("blocked");
+    const resumes = await db.turn.findMany({
+      where: { conversationId: stage.directId, source: "approval" },
+      select: { message: true },
+    });
+    expect(resumes).toHaveLength(1);
+    expect(resumes[0]!.message).toMatch(
+      /^Not sent to Dana Guest: you chose Don't send\./,
+    );
+  });
+
+  it("the card also goes to the reader's Slack DM; a newer ask for the same contact replaces the older card", async () => {
+    const stage = await blockedStage("blocked-dm");
+    await db.channelUserLink.upsert({
+      where: {
+        integrationId_externalUserId: {
+          integrationId: stage.integrationId,
+          externalUserId: "U-READER",
+        },
+      },
+      create: {
+        integrationId: stage.integrationId,
+        externalUserId: "U-READER",
+        userId: READER,
+        linkedVia: "manual",
+      },
+      update: {},
+    });
+    const first = await stage.ask();
+    if (first.kind !== "blocked") throw new Error("expected a card");
+    expect(slackCallsFor("conversations.open").at(-1)?.form.get("users")).toBe(
+      "U-READER",
+    );
+    expect(slackCallsFor("chat.postMessage")).toHaveLength(1);
+    // A later ask to Dana with other words: the 13:26 card must not linger.
+    const second = await send.requestSend({
+      agentId: stage.agentId,
+      to: "Dana Guest",
+      text: "second try",
+      originConversationId: stage.directId,
+      originTurnId: null,
+      readerUserId: READER,
+    });
+    if (second.kind !== "blocked") throw new Error("expected a card");
+    const old = await db.actionApproval.findUniqueOrThrow({
+      where: { id: first.approvalId },
+      select: { status: true, reason: true },
+    });
+    expect(old).toEqual({
+      status: "expired",
+      reason: "Replaced by a newer request.",
+    });
+    // Its Slack card was settled too.
+    expect(slackCallsFor("chat.update").length).toBeGreaterThan(0);
+  });
+
+  it("no verified reader (a shared place): the refusal, pointing at Contacts, and no card", async () => {
+    const stage = await blockedStage("blocked-shared");
+    await search.anchorRecipient({
+      conversationId: stage.conversationId,
+      name: "Dana Guest",
+      externalUserId: "U-DANA",
+    });
+    await expect(
+      send.requestSend({
+        agentId: stage.agentId,
+        to: "Dana Guest",
+        text: "hello",
+        originConversationId: stage.conversationId,
+        originTurnId: stage.turnId,
+        readerUserId: null,
+      }),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("You can change this in Contacts."),
+    });
+    expect(
+      await db.actionApproval.count({ where: { agentId: stage.agentId } }),
+    ).toBe(0);
+  });
+});

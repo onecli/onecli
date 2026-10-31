@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { CheckCheck } from "lucide-react";
 import { Badge } from "@onecli/ui/components/badge";
 import { Button } from "@onecli/ui/components/button";
 import {
@@ -15,7 +14,8 @@ import {
 import { Textarea } from "@onecli/ui/components/textarea";
 import type { PendingActionApprovalItem } from "@/lib/api/channel-approvals";
 import { useDecideChannelAction } from "@/hooks/use-approvals";
-import { formatAge } from "./format-age";
+import { RequestedAtLabel } from "./requested-at-label";
+import { formatRequestedAt } from "./requested-at";
 import { WebhookChangePreview } from "./webhook-change-preview";
 
 interface GenericActionApprovalRowProps {
@@ -23,10 +23,12 @@ interface GenericActionApprovalRowProps {
 }
 
 /**
- * One pending one-shot action approval in the bell, THE decide surface for
- * these (the agent's Contacts page keeps settings only). Approve/Reject
- * inline; the dialog carries the full ask plus the two decisions Slack's
- * buttons can't: Approve + always allow, and Reject with a reason.
+ * One pending action approval in the bell, THE decide surface for these (the
+ * agent's Contacts page keeps settings only). A standing question about who
+ * the agent wants to reach reads Always allow / Never, the Contacts words.
+ * Anything else is a one-off: Approve / Reject inline, both one click. The
+ * Details dialog carries the full ask plus the one decision Slack's buttons
+ * can't: Reject with a reason, which the agent hears as a steer.
  */
 export const GenericActionApprovalRow = ({
   item,
@@ -40,17 +42,39 @@ export const GenericActionApprovalRow = ({
   // Instant: the ask leaves the bell (and the chat) on click, so the row
   // and its dialogs unmount at once. The hook says the outcome when the
   // server answers, or puts the ask back with the reason.
-  const submit = (
-    decision: "approve" | "approve_always" | "reject",
-    reasonText?: string,
-  ) => {
+  const submit = (decision: "approve" | "reject", reasonText?: string) => {
     setDialog("closed");
     decide.mutate({
       approvalId: item.id,
       decision,
+      standing: item.standingChoice,
       ...(reasonText ? { reason: reasonText } : {}),
     });
   };
+
+  if (item.standingChoice) {
+    return (
+      <div className="flex flex-col gap-2 px-4 py-3">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium">{item.summary}</p>
+            <p className="text-muted-foreground truncate text-xs">
+              {item.agentName} · your answer is remembered
+            </p>
+          </div>
+          <RequestedAtLabel createdAt={item.createdAt} />
+        </div>
+        <div className="flex items-center justify-end gap-1.5">
+          <Button variant="outline" size="xs" onClick={() => submit("reject")}>
+            Never
+          </Button>
+          <Button size="xs" onClick={() => submit("approve")}>
+            Always allow
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-2 px-4 py-3">
@@ -61,9 +85,7 @@ export const GenericActionApprovalRow = ({
             {item.agentName} · asks your approval
           </p>
         </div>
-        <span className="text-muted-foreground shrink-0 text-xs tabular-nums">
-          {formatAge(item.createdAt)}
-        </span>
+        <RequestedAtLabel createdAt={item.createdAt} />
       </div>
       {item.webhookChange && (
         <WebhookChangePreview change={item.webhookChange} />
@@ -78,11 +100,7 @@ export const GenericActionApprovalRow = ({
           Details
         </Button>
         <div className="flex items-center gap-1.5">
-          <Button
-            variant="outline"
-            size="xs"
-            onClick={() => setDialog("reject")}
-          >
+          <Button variant="outline" size="xs" onClick={() => submit("reject")}>
             Reject
           </Button>
           <Button size="xs" onClick={() => submit("approve")}>
@@ -111,27 +129,16 @@ export const GenericActionApprovalRow = ({
                 )}
                 <p className="text-xs">
                   Nothing happens until you decide. Asked{" "}
-                  {formatAge(item.createdAt)} ago.
+                  {formatRequestedAt(item.createdAt)}.
                 </p>
               </div>
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="gap-2 sm:justify-between">
             <Button variant="outline" onClick={() => setDialog("reject")}>
-              Reject
+              Reject with a reason…
             </Button>
-            <div className="flex gap-2">
-              {item.offersAlwaysAllow && (
-                <Button
-                  variant="outline"
-                  onClick={() => submit("approve_always")}
-                >
-                  <CheckCheck aria-hidden="true" className="size-4" />
-                  Approve + always allow
-                </Button>
-              )}
-              <Button onClick={() => submit("approve")}>Approve</Button>
-            </div>
+            <Button onClick={() => submit("approve")}>Approve</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

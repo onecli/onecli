@@ -16,12 +16,12 @@ export interface AgentLastSeen {
   label: string;
   /** Exact timestamp for a hover title; null when there is nothing to show. */
   exactAt: Date | null;
-  /** Seen within the last hour — the card renders its activity dot. */
+  /** Seen within the last hour — the UI renders its activity dot. */
   fresh: boolean;
 }
 
 /**
- * The card-facing reading of `lastSeenAt`. Agents have no presence — no
+ * The display reading of `lastSeenAt`. Agents have no presence — no
  * heartbeat, no connection — so "seen" can only ever mean "made a gateway
  * request". Null is ambiguous by construction (the window bounds the query):
  * an agent *created inside* the window provably never made a request, while

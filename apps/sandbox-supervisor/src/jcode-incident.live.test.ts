@@ -416,6 +416,71 @@ describe.skipIf(!LIVE)("the stuck-sandbox incident, fixed (live jcode)", () => {
     });
   }, 240_000);
 
+  it("a brief saved during a turn reaches the resumed model request without interrupting the active turn", async () => {
+    await withMock(2_000, async (mock) => {
+      const t = createTransport();
+      const run = runSupervisor(
+        { ...supervisorConfig(shortHome()), instructions: "BRIEF_BEFORE_SAVE" },
+        createJcodeHarness(),
+        t.transport,
+        { memoryHarvester: stubHarvester },
+      );
+      try {
+        t.push(deliver("before", "cv", `${LONG_RUN_MARKER} continue`));
+        await t.until(
+          () => mock.requests.length > 0,
+          "the original model request",
+          90_000,
+        );
+        expect(mock.requests[0]!.systemText).toContain("BRIEF_BEFORE_SAVE");
+        expect(t.resultsOf("before")).toHaveLength(0);
+        t.push({
+          kind: "skills.changed",
+          generation: 2,
+          part: 1,
+          of: 1,
+          files: [],
+          prune: [],
+          instructions: "BRIEF_AFTER_SAVE",
+        });
+        await t.until(
+          () => t.sent.some((s) => s.message.kind === "home.synced"),
+          "brief sync",
+          10_000,
+        );
+        await t.until(
+          () => t.resultsOf("before").length > 0,
+          "the uninterrupted turn",
+          30_000,
+        );
+        const before = t.resultsOf("before")[0]!.result;
+        expect(before.status).toBe("done");
+        expect(before.sessionRef).toEqual(expect.any(String));
+        expect(t.textOf("before")).toContain(FINAL_ANSWER_MARKER);
+
+        t.push(deliver("after", "cv", "continue with the current brief"));
+        await t.until(
+          () => t.resultsOf("after").length > 0,
+          "the resumed turn",
+          90_000,
+        );
+        expect(t.resultsOf("after")[0]!.result).toMatchObject({
+          status: "done",
+          sessionRef: before.sessionRef,
+        });
+        const resumed = mock.requests.at(-1)!;
+        expect(resumed.systemText).toContain("BRIEF_AFTER_SAVE");
+        expect(resumed.systemText).not.toContain("BRIEF_BEFORE_SAVE");
+        expect(resumed.lastUser).toContain(
+          "your operator just updated your brief",
+        );
+      } finally {
+        t.push({ kind: "shutdown" });
+        await run;
+      }
+    });
+  }, 240_000);
+
   it("a Slack presence attached MID-RUN reaches the live conversation's next turn — the doc AND the tools the model sees (the dev incident, 2026-09-15)", async () => {
     // Observed live: an agent whose session was already awake had Slack
     // attached; the home sync re-rendered CLAUDE.md, but jcode captures the

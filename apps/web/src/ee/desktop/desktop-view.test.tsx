@@ -1,5 +1,12 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -30,6 +37,19 @@ const fake = vi.hoisted(() => {
     disconnected = false;
     focused = 0;
     keys: Array<{ keysym: number; code: string | null }> = [];
+    clipboardTexts: string[] = [];
+    clears = 0;
+    released = 0;
+    clipboardPaste = vi.fn(async (text: string) => {
+      this.clipboardTexts.push(text);
+    });
+    clipboardRead = vi.fn(async () => "guest text");
+    clearClipboard() {
+      this.clears += 1;
+    }
+    releaseKeys() {
+      this.released += 1;
+    }
     constructor(
       public target: HTMLElement,
       public url: string,
@@ -95,6 +115,126 @@ afterEach(() => {
 });
 
 describe("DesktopView", () => {
+  it("never reads a clipboard on connection and disables automatic guest requests", async () => {
+    const view = createRef<DesktopViewHandle>();
+    render(<DesktopView ref={view} host={HOST} viewOnly={false} />);
+    await waitFor(() => expect(fake.FakeRfb.instances).toHaveLength(1));
+    act(() => latest().connect());
+    expect(latest().options).toMatchObject({ clipboardAutoRequest: false });
+    expect(latest().clipboardRead).not.toHaveBeenCalled();
+    expect(latest().clipboardPaste).not.toHaveBeenCalled();
+  });
+
+  it("refuses clipboard commands while watching", async () => {
+    const view = createRef<DesktopViewHandle>();
+    render(<DesktopView ref={view} host={HOST} viewOnly />);
+    await waitFor(() => expect(fake.FakeRfb.instances).toHaveLength(1));
+    act(() => latest().connect());
+    fireEvent.paste(screen.getByRole("img"), {
+      clipboardData: { getData: () => "test marker" },
+    });
+    fireEvent.keyDown(screen.getByRole("img"), {
+      key: "c",
+      code: "KeyC",
+      ctrlKey: true,
+    });
+    expect(latest().clipboardPaste).not.toHaveBeenCalled();
+    expect(latest().clipboardRead).not.toHaveBeenCalled();
+  });
+
+  it("pastes multiline Unicode from the mobile field as clipboard data, not typed keys", async () => {
+    const user = userEvent.setup();
+    const view = createRef<DesktopViewHandle>();
+    render(<DesktopView ref={view} host={HOST} viewOnly={false} />);
+    await waitFor(() => expect(fake.FakeRfb.instances).toHaveLength(1));
+    act(() => latest().connect());
+    act(() => view.current?.openKeyboard());
+    const text = "  clipboard 🧪 שלום\nnext\tline  ";
+    await user.paste(text);
+    await waitFor(() => expect(latest().clipboardTexts).toEqual([text]));
+    expect(screen.getByLabelText("Type on the agent's screen")).toHaveValue(
+      KEYBOARD_SENTINEL,
+    );
+    expect(latest().keys.map(({ keysym }) => keysym)).toEqual([
+      0xffe3, 118, 0xffe3,
+    ]);
+    expect(latest().keys.some(({ keysym }) => keysym === XK_RETURN)).toBe(
+      false,
+    );
+  });
+
+  it("rejects a paste-only input fallback instead of typing Return or Tab", async () => {
+    const view = createRef<DesktopViewHandle>();
+    render(<DesktopView ref={view} host={HOST} viewOnly={false} />);
+    await waitFor(() => expect(fake.FakeRfb.instances).toHaveLength(1));
+    act(() => latest().connect());
+    act(() => view.current?.openKeyboard());
+    fireEvent.input(screen.getByLabelText("Type on the agent's screen"), {
+      target: { value: `${KEYBOARD_SENTINEL}unsafe\n\t` },
+      inputType: "insertFromPaste",
+    });
+    expect(latest().keys).toEqual([]);
+    expect(screen.getByLabelText("Type on the agent's screen")).toHaveValue(
+      KEYBOARD_SENTINEL,
+    );
+  });
+
+  it("does not send paste keys after an in-flight transfer loses control", async () => {
+    const view = createRef<DesktopViewHandle>();
+    const { rerender } = render(
+      <DesktopView ref={view} host={HOST} viewOnly={false} />,
+    );
+    await waitFor(() => expect(fake.FakeRfb.instances).toHaveLength(1));
+    const client = latest();
+    act(() => client.connect());
+    let finish: (() => void) | undefined;
+    client.clipboardPaste.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    fireEvent.paste(screen.getByRole("img"), {
+      clipboardData: { getData: () => "cancel marker" },
+    });
+    rerender(<DesktopView ref={view} host={HOST} viewOnly />);
+    await act(async () => finish?.());
+    expect(client.keys).toEqual([]);
+    expect(client.clears).toBeGreaterThan(0);
+    expect(client.disconnected).toBe(true);
+  });
+
+  it.each(["pointer", "copy", "paste", "tab"])(
+    "cancels a pending paste before %s can change its guest target",
+    async (input) => {
+      const view = createRef<DesktopViewHandle>();
+      render(<DesktopView ref={view} host={HOST} viewOnly={false} />);
+      await waitFor(() => expect(fake.FakeRfb.instances).toHaveLength(1));
+      const client = latest();
+      act(() => client.connect());
+      let finish: (() => void) | undefined;
+      client.clipboardPaste.mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      fireEvent.paste(screen.getByRole("img"), {
+        clipboardData: { getData: () => "cancel marker" },
+      });
+      if (input === "pointer") fireEvent.pointerDown(screen.getByRole("img"));
+      else
+        fireEvent.keyDown(screen.getByRole("img"), {
+          key: input === "copy" ? "c" : input === "paste" ? "v" : "Tab",
+          code: input === "copy" ? "KeyC" : input === "paste" ? "KeyV" : "Tab",
+          ctrlKey: input !== "tab",
+        });
+      await act(async () => finish?.());
+      expect(client.keys).toEqual([]);
+      expect(client.disconnected).toBe(true);
+    },
+  );
+
   it("retries a failed RFB startup instead of leaving Connecting forever", async () => {
     fake.FakeRfb.failNext = true;
     render(<DesktopView host={HOST} viewOnly />);

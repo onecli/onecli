@@ -562,10 +562,9 @@ export const setConnectionGrant = async (
     requireConnection(scope, connectionId),
   ]);
   // `default` is the attach toggles' request, resolved here per provider to
-  // the shape every new attach gets (reads allowed, writes and requests
-  // outside the tool list needing approval). It names its catch-alls
-  // explicitly, so it never inherits a stored choice; `resources` keeps its
-  // tri-state.
+  // the shape every new attach gets (`defaultConnectionGrant`). It names its
+  // catch-alls explicitly, so it never inherits a stored choice; `resources`
+  // keeps its tri-state.
   const input: ConnectionGrantInput =
     request.access === "default"
       ? {

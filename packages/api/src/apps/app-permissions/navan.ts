@@ -20,6 +20,7 @@ const read = (
 
 export const navanPermissions: AppPermissionDefinition = {
   provider: "navan",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

@@ -1,12 +1,24 @@
 import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "./errors";
 import {
+  MAX_FILES_PER_SKILL,
+  MAX_IMPORTED_SKILL_FILES,
   MAX_SKILL_TOTAL_CHARS,
   MAX_SKILLS_PER_AGENT,
   MAX_SKILLS_PER_ORG,
+  SKILL_CONTENT_MAX_LENGTH,
+  SKILL_FILE_CONTENT_MAX_LENGTH,
+  SKILL_TIER_BUDGETS,
+  cleanSkillDescription,
+  skillPathClashes,
   type SkillScope,
 } from "../validations/skills";
-import { bumpHomeForAgent, bumpHomeForOrganization } from "./home-sync-service";
+import {
+  bumpHomeForAgent,
+  bumpHomeForOrganization,
+  skillManifestBytes,
+} from "./home-sync-service";
+import { summarizeSkillFiles, type ImportedSkill } from "./skill-import";
 
 /**
  * User-authored skills (plans/hosted-agents-v2.md step 9, §3.7/§3.8).
@@ -50,7 +62,7 @@ const skillDetailSelect = {
   updatedAt: true,
   files: {
     orderBy: { path: "asc" as const },
-    select: { path: true, content: true },
+    select: { path: true, content: true, data: true, executable: true },
   },
 } as const;
 
@@ -68,10 +80,57 @@ export type SkillListItem = {
   fileCount: number;
 };
 
+/** One file of a skill as the dashboard reads it. A file the hand-written
+ * editor can't show or save as it is (binary, runnable, or larger than the
+ * editor's cap) comes back with empty `content` and `editable: false`: its
+ * bytes stay server-side, and a save keeps it. */
+export interface SkillFileView {
+  path: string;
+  content: string;
+  bytes: number;
+  binary: boolean;
+  executable: boolean;
+  editable: boolean;
+}
+
 export type SkillView = Omit<SkillListItem, "fileCount"> & {
   content: string;
-  files: { path: string; content: string }[];
+  files: SkillFileView[];
 };
+
+type SkillFileRow = {
+  path: string;
+  content: string;
+  data: Uint8Array | null;
+  executable: boolean;
+};
+
+type SkillRow = Omit<SkillView, "files"> & { files: SkillFileRow[] };
+
+/** The one rule for which files the hand-written editor owns: plain text
+ * it can show and save back unchanged (a runnable flag it can't show would
+ * be lost on save). The view and the patch both use it. */
+const fitsEditor = (file: SkillFileRow): boolean =>
+  file.data === null &&
+  !file.executable &&
+  file.content.length <= SKILL_FILE_CONTENT_MAX_LENGTH;
+
+const toView = (row: SkillRow): SkillView => ({
+  ...row,
+  // Read clean too: rows stored before every door cleaned show as one line.
+  description: cleanSkillDescription(row.description),
+  files: row.files.map((file) => {
+    const editable = fitsEditor(file);
+    return {
+      path: file.path,
+      content: editable ? file.content : "",
+      bytes: file.data ? file.data.byteLength : Buffer.byteLength(file.content),
+      binary: file.data !== null,
+      executable: file.executable,
+      editable,
+    };
+  }),
+});
 
 export interface SkillFileInput {
   path: string;
@@ -103,7 +162,11 @@ const toListItem = (
   row: Omit<SkillListItem, "fileCount"> & { _count: { files: number } },
 ): SkillListItem => {
   const { _count, ...rest } = row;
-  return { ...rest, fileCount: _count.files };
+  return {
+    ...rest,
+    description: cleanSkillDescription(rest.description),
+    fileCount: _count.files,
+  };
 };
 
 /** The agent fence the agent tier shares with crons/memory. */
@@ -159,7 +222,7 @@ export const getSkill = async (
     select: skillDetailSelect,
   });
   if (!skill) throw new ServiceError("NOT_FOUND", "Skill not found");
-  return skill;
+  return toView(skill);
 };
 
 const capMessageFor = (scope: SkillScope): string => {
@@ -171,52 +234,66 @@ const capMessageFor = (scope: SkillScope): string => {
   }
 };
 
+type SkillOwner = { agentId: string } | { organizationId: string };
+
+const ownerKey = (owner: SkillOwner): string =>
+  "agentId" in owner
+    ? `agent:${owner.agentId}`
+    : `organization:${owner.organizationId}`;
+
+/** Serializes skill writes per owner, so two concurrent creates or imports
+ * can't both pass the count cap or the tier budgets. */
+const lockOwner = (tx: Prisma.TransactionClient, owner: SkillOwner) =>
+  tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`skills:${ownerKey(owner)}`}))`;
+
 const assertTierCap = async (
+  tx: Prisma.TransactionClient,
   scope: SkillScope,
-  ownerId: string,
+  owner: SkillOwner,
 ): Promise<void> => {
-  const where =
-    scope === "agent" ? { agentId: ownerId } : { organizationId: ownerId };
   const max = scope === "agent" ? MAX_SKILLS_PER_AGENT : MAX_SKILLS_PER_ORG;
-  const held = await db.skill.count({ where });
+  const held = await tx.skill.count({ where: owner });
   if (held >= max) {
     throw new ServiceError("UNPROCESSABLE", capMessageFor(scope));
   }
 };
+
+const isUniqueViolation = (err: unknown): boolean =>
+  err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002";
 
 const duplicateNameError = (name: string) =>
   new ServiceError("CONFLICT", `A skill named "${name}" already exists here`);
 
 const createRow = async (
   scope: SkillScope,
-  owner: { agentId: string } | { organizationId: string },
+  owner: SkillOwner,
   input: SkillInput,
   creator: SkillCreator,
 ): Promise<SkillView> => {
   try {
-    return await db.skill.create({
-      data: {
-        scope,
-        ...owner,
-        name: input.name,
-        description: input.description,
-        content: input.content,
-        enabled: input.enabled ?? true,
-        createdByUserId: creator.userId,
-        createdByEmail: creator.email,
-        ...(input.files?.length && {
-          files: { create: input.files.map((f) => ({ ...f })) },
-        }),
-      },
-      select: skillDetailSelect,
+    const created = await db.$transaction(async (tx) => {
+      await lockOwner(tx, owner);
+      await assertTierCap(tx, scope, owner);
+      return tx.skill.create({
+        data: {
+          scope,
+          ...owner,
+          name: input.name,
+          description: input.description,
+          content: input.content,
+          enabled: input.enabled ?? true,
+          createdByUserId: creator.userId,
+          createdByEmail: creator.email,
+          ...(input.files?.length && {
+            files: { create: input.files.map((f) => ({ ...f })) },
+          }),
+        },
+        select: skillDetailSelect,
+      });
     });
+    return toView(created);
   } catch (err) {
-    if (
-      err instanceof Prisma.PrismaClientKnownRequestError &&
-      err.code === "P2002"
-    ) {
-      throw duplicateNameError(input.name);
-    }
+    if (isUniqueViolation(err)) throw duplicateNameError(input.name);
     throw err;
   }
 };
@@ -229,7 +306,6 @@ export const createSkill = async (
   creator: SkillCreator,
 ): Promise<SkillView> => {
   await requireHostedAgent(workspaceId, input.agentId);
-  await assertTierCap("agent", input.agentId);
   const skill = await createRow(
     "agent",
     { agentId: input.agentId },
@@ -245,7 +321,6 @@ export const createOrgSkill = async (
   input: SkillInput,
   creator: SkillCreator,
 ): Promise<SkillView> => {
-  await assertTierCap("organization", organizationId);
   const skill = await createRow(
     "organization",
     { organizationId },
@@ -255,6 +330,179 @@ export const createOrgSkill = async (
   await bumpHomeForOrganization(organizationId);
   return skill;
 };
+
+/** One imported skill as saved: what the person and the agent are told.
+ * `id` is the saved row (the same one when a name was replaced). */
+export interface ImportedSkillOutcome {
+  id: string;
+  name: string;
+  description: string;
+  files: number;
+  bytes: number;
+  groups: Record<string, number>;
+  skipped: { path: string; reason: string }[];
+  replaced: boolean;
+}
+
+const MB = 1024 * 1024;
+
+/** What one held skill costs its tier, measured in the database: its body
+ * and file bytes, and the manifest its file paths put on the sync. */
+const heldSkills = async (tx: Prisma.TransactionClient, owner: SkillOwner) => {
+  const rows = await tx.$queryRaw<
+    { id: string; name: string; bytes: bigint; paths: string[] }[]
+  >`
+    SELECT s.id, s.name,
+      octet_length(s.content)
+        + COALESCE(SUM(COALESCE(octet_length(f.data), octet_length(f.content))), 0)
+        AS bytes,
+      COALESCE(array_agg(f.path) FILTER (WHERE f.path IS NOT NULL), '{}') AS paths
+    FROM skills s LEFT JOIN skill_files f ON f.skill_id = s.id
+    WHERE ${
+      "agentId" in owner
+        ? Prisma.sql`s.agent_id = ${owner.agentId}`
+        : Prisma.sql`s.organization_id = ${owner.organizationId}`
+    }
+    GROUP BY s.id`;
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    bytes: Number(row.bytes),
+    manifestBytes: skillManifestBytes(row.name, ["SKILL.md", ...row.paths]),
+  }));
+};
+
+/**
+ * Save skills read from a zip (`importSkillZip`) for one owner, all or
+ * nothing: one transaction, serialized per owner, so the count cap and the
+ * tier budgets (SKILL_TIER_BUDGETS) hold under concurrent imports. A name
+ * the owner already holds is REPLACED (re-uploading a fixed zip is the
+ * normal way to update it); a new name counts against the cap. One home
+ * bump for the owner after, and none when there is nothing to save.
+ */
+const saveImportedSkills = async (
+  scope: SkillScope,
+  owner: SkillOwner,
+  skills: ImportedSkill[],
+  creator: SkillCreator,
+): Promise<ImportedSkillOutcome[]> => {
+  if (skills.length === 0) return [];
+  const budget = SKILL_TIER_BUDGETS[scope];
+  // The owner lock makes every name read below current, so each name either
+  // exists (replaced) or is free (created): no unique-violation race.
+  const saved = await db.$transaction(
+    async (tx) => {
+      await lockOwner(tx, owner);
+      const held = await heldSkills(tx, owner);
+      const importing = new Set(skills.map((s) => s.name));
+      const kept = held.filter((s) => !importing.has(s.name));
+      const max = scope === "agent" ? MAX_SKILLS_PER_AGENT : MAX_SKILLS_PER_ORG;
+      if (kept.length + skills.length > max) {
+        throw new ServiceError("UNPROCESSABLE", capMessageFor(scope));
+      }
+      const bytes =
+        kept.reduce((sum, s) => sum + s.bytes, 0) +
+        skills.reduce((sum, s) => sum + s.bytes, 0);
+      if (bytes > budget.bytes) {
+        throw new ServiceError(
+          "UNPROCESSABLE",
+          `Skills here are limited to ${budget.bytes / MB} MB together, and this would make ${(bytes / MB).toFixed(1)} MB. Remove a skill or some files first`,
+        );
+      }
+      const manifest =
+        kept.reduce((sum, s) => sum + s.manifestBytes, 0) +
+        skills.reduce(
+          (sum, s) =>
+            sum +
+            skillManifestBytes(s.name, [
+              "SKILL.md",
+              ...s.files.map((f) => f.path),
+            ]),
+          0,
+        );
+      if (manifest > budget.manifestBytes) {
+        throw new ServiceError(
+          "UNPROCESSABLE",
+          "Skills here would hold too many files together. Remove a skill or some files first",
+        );
+      }
+
+      const prior = new Map(held.map((s) => [s.name, s.id]));
+      const outcomes: ImportedSkillOutcome[] = [];
+      for (const skill of skills) {
+        const files = skill.files.map((file) => ({
+          path: file.path,
+          content: file.content,
+          data: file.data ? new Uint8Array(file.data) : null,
+          executable: file.executable,
+        }));
+        const outcome = (id: string, replaced: boolean) => ({
+          id,
+          name: skill.name,
+          description: skill.description,
+          files: skill.files.length + 1,
+          bytes: skill.bytes,
+          groups: summarizeSkillFiles(skill.files),
+          skipped: skill.skipped,
+          replaced,
+        });
+        const priorId = prior.get(skill.name);
+        if (priorId) {
+          await tx.skillFile.deleteMany({ where: { skillId: priorId } });
+          await tx.skill.update({
+            where: { id: priorId },
+            data: {
+              description: skill.description,
+              content: skill.content,
+              files: { create: files },
+            },
+          });
+          outcomes.push(outcome(priorId, true));
+          continue;
+        }
+        const created = await tx.skill.create({
+          data: {
+            scope,
+            ...owner,
+            name: skill.name,
+            description: skill.description,
+            content: skill.content,
+            createdByUserId: creator.userId,
+            createdByEmail: creator.email,
+            files: { create: files },
+          },
+          select: { id: true },
+        });
+        outcomes.push(outcome(created.id, false));
+      }
+      return outcomes;
+    },
+    { maxWait: 10_000, timeout: 30_000 },
+  );
+
+  if ("agentId" in owner) await bumpHomeForAgent(owner.agentId);
+  else await bumpHomeForOrganization(owner.organizationId);
+  return saved;
+};
+
+/** Import skills from a zip into one hosted agent of this workspace. */
+export const importAgentSkills = async (
+  workspaceId: string,
+  agentId: string,
+  skills: ImportedSkill[],
+  creator: SkillCreator,
+): Promise<ImportedSkillOutcome[]> => {
+  await requireHostedAgent(workspaceId, agentId);
+  return saveImportedSkills("agent", { agentId }, skills, creator);
+};
+
+/** Import skills from a zip into the organization tier. */
+export const importOrgSkills = (
+  organizationId: string,
+  skills: ImportedSkill[],
+  creator: SkillCreator,
+): Promise<ImportedSkillOutcome[]> =>
+  saveImportedSkills("organization", { organizationId }, skills, creator);
 
 /** The write fence for the workspace door: org rows are member-VISIBLE here
  * but managed at org level — a same-tenant role denial is FORBIDDEN with a
@@ -276,7 +524,9 @@ const requireWorkspaceWritableSkill = async (
       content: true,
       enabled: true,
       description: true,
-      files: { select: { path: true, content: true } },
+      files: {
+        select: { path: true, content: true, data: true, executable: true },
+      },
     },
   });
   if (!skill) throw new ServiceError("NOT_FOUND", "Skill not found");
@@ -298,18 +548,71 @@ const applyPatch = async (
     description: string;
     content: string;
     enabled: boolean;
-    files: { path: string; content: string }[];
+    files: SkillFileRow[];
   },
   patch: SkillPatch,
 ): Promise<SkillView | null> => {
+  // An imported skill: files the hand-written editor can't hold whole (one
+  // `fitsEditor` refuses, or more than it takes), or a body imported past
+  // its limit. Its patch files replace their own paths and every other file
+  // is KEPT, so saving a description never wipes the folder; re-uploading
+  // the zip is how its files change. Any other skill's files are replaced
+  // whole, under the hand-written limits.
+  const imported =
+    existing.files.length > MAX_FILES_PER_SKILL ||
+    existing.files.some((file) => !fitsEditor(file)) ||
+    existing.content.length > SKILL_CONTENT_MAX_LENGTH;
+  // An imported body may be edited but never grow.
+  const contentLimit = Math.max(
+    SKILL_CONTENT_MAX_LENGTH,
+    existing.content.length,
+  );
+  if (patch.content !== undefined && patch.content.length > contentLimit) {
+    throw new ServiceError(
+      "UNPROCESSABLE",
+      `Instructions are limited to ${contentLimit.toLocaleString("en-US")} characters`,
+    );
+  }
+  const patchFiles = patch.files;
+  const kept =
+    patchFiles === undefined || !imported
+      ? []
+      : existing.files.filter(
+          (file) => !patchFiles.some((p) => p.path === file.path),
+        );
+  if (
+    patchFiles !== undefined &&
+    kept.length + patchFiles.length > MAX_IMPORTED_SKILL_FILES - 1
+  ) {
+    throw new ServiceError(
+      "UNPROCESSABLE",
+      `A skill holds at most ${MAX_IMPORTED_SKILL_FILES} files, SKILL.md included`,
+    );
+  }
+  if (patchFiles !== undefined) {
+    // The editor never sees kept files, so its own paths must not clash
+    // with theirs (a file where a kept folder is, or the reverse).
+    const taken = new Set(kept.map((file) => file.path.toLowerCase()));
+    const clash = patchFiles.find((file) => {
+      const clashes = skillPathClashes(file.path, taken);
+      taken.add(file.path.toLowerCase());
+      return clashes;
+    });
+    if (clash) {
+      throw new ServiceError(
+        "UNPROCESSABLE",
+        `"${clash.path}" clashes with a file this skill already holds`,
+      );
+    }
+  }
   const nextFiles = patch.files ?? existing.files;
   const nextContent = patch.content ?? existing.content;
-  // The merged-row budget re-check: a content-only PATCH must not smuggle
-  // the sum over the cap the create door enforced.
+  // The merged-row budget re-check guards hand-written skills; an imported
+  // folder is bounded by the import limits instead.
   const total =
     nextContent.length +
     nextFiles.reduce((sum, file) => sum + file.content.length, 0);
-  if (total > MAX_SKILL_TOTAL_CHARS) {
+  if (!imported && total > MAX_SKILL_TOTAL_CHARS) {
     throw new ServiceError(
       "UNPROCESSABLE",
       `A skill's body and files together are limited to ${MAX_SKILL_TOTAL_CHARS.toLocaleString("en-US")} characters`,
@@ -322,19 +625,21 @@ const applyPatch = async (
     (patch.content === undefined || patch.content === existing.content) &&
     (patch.enabled === undefined || patch.enabled === existing.enabled) &&
     (patch.files === undefined ||
-      (patch.files.length === existing.files.length &&
-        patch.files.every((file) =>
-          existing.files.some(
-            (own) => own.path === file.path && own.content === file.content,
-          ),
-        )));
+      (patch.files.every((file) =>
+        existing.files.some(
+          (own) => own.path === file.path && own.content === file.content,
+        ),
+      ) &&
+        patch.files.length + kept.length === existing.files.length));
   if (noOp) return null;
 
-  return db.$transaction(async (tx) => {
+  const updated = await db.$transaction(async (tx) => {
     if (patch.files !== undefined) {
-      // Full replacement — the payload is small and capped; partial file
-      // surgery would add four endpoints to save nothing.
-      await tx.skillFile.deleteMany({ where: { skillId } });
+      // Replace what the editor owns; keep what it never showed.
+      const keepPaths = kept.map((file) => file.path);
+      await tx.skillFile.deleteMany({
+        where: { skillId, path: { notIn: keepPaths } },
+      });
       if (patch.files.length > 0) {
         await tx.skillFile.createMany({
           data: patch.files.map((file) => ({ skillId, ...file })),
@@ -353,6 +658,7 @@ const applyPatch = async (
       select: skillDetailSelect,
     });
   });
+  return toView(updated);
 };
 
 export const updateSkill = async (
@@ -399,7 +705,7 @@ const getSkillById = async (skillId: string): Promise<SkillView> => {
     select: skillDetailSelect,
   });
   if (!skill) throw new ServiceError("NOT_FOUND", "Skill not found");
-  return skill;
+  return toView(skill);
 };
 
 // ── The agent door (the skill_* MCP tools) ──────────────────────────────────
@@ -439,7 +745,9 @@ const requireAgentOwnSkill = async (
       description: true,
       content: true,
       enabled: true,
-      files: { select: { path: true, content: true } },
+      files: {
+        select: { path: true, content: true, data: true, executable: true },
+      },
     },
   });
   if (own) return own;
@@ -504,7 +812,9 @@ const requireOrgSkill = async (organizationId: string, skillId: string) => {
       description: true,
       content: true,
       enabled: true,
-      files: { select: { path: true, content: true } },
+      files: {
+        select: { path: true, content: true, data: true, executable: true },
+      },
     },
   });
   if (!skill) throw new ServiceError("NOT_FOUND", "Skill not found");
@@ -520,7 +830,7 @@ export const getOrgSkill = async (
     select: skillDetailSelect,
   });
   if (!skill) throw new ServiceError("NOT_FOUND", "Skill not found");
-  return skill;
+  return toView(skill);
 };
 
 export const updateOrgSkill = async (

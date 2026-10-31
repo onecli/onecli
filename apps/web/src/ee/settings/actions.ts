@@ -201,6 +201,6 @@ export const createOrganizationAction = async (
 
     await setDefaultOrgCookie(org.id);
 
-    return { redirectTo: `/w/${workspace.id}/overview` };
+    return { redirectTo: `/w/${workspace.id}` };
   });
 };

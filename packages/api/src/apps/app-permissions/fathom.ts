@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const fathomPermissions: AppPermissionDefinition = {
   provider: "fathom",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

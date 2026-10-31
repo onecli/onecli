@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
@@ -54,6 +55,8 @@ const MEMORY_ROOT = "memory";
 const MEMORY_INDEX_PATH = `${MEMORY_ROOT}/index.md`;
 
 const PROJECTION_MODE = 0o444;
+/** A skill's runnable files (`executable` on the wire): read + execute. */
+const EXECUTABLE_MODE = 0o555;
 /** Memory files are the agent's working copy — writable by design. */
 const MEMORY_FILE_MODE = 0o644;
 
@@ -194,6 +197,87 @@ const pruneMemoryRoot = async (
   }
 };
 
+/**
+ * Chunks of big skill files, keyed by path, collected across the parts of
+ * one generation (parts arrive in order on one socket). A file lands only
+ * when its last chunk arrives AND the joined bytes match its sha256; a gap
+ * or mismatch drops it (the next generation re-sends it whole). Cleared
+ * whenever a new generation starts, so nothing lingers.
+ */
+const pendingChunks = new Map<
+  string,
+  { generation: number; sha256: string; of: number; parts: Buffer[] }
+>();
+
+type SyncBlob = NonNullable<SyncItem["blobs"]>[number];
+
+/** The bytes to write for one blob, or null when it is a chunk that isn't
+ * complete yet (or failed verification). */
+const bytesOf = (blob: SyncBlob, generation: number): Buffer | null => {
+  const raw = Buffer.from(blob.dataBase64, "base64");
+  if (!blob.chunk) return raw;
+  const { index, of, sha256 } = blob.chunk;
+  let pending = pendingChunks.get(blob.path);
+  if (index === 1 || !pending || pending.generation !== generation) {
+    pending = { generation, sha256, of, parts: [] };
+    pendingChunks.set(blob.path, pending);
+  }
+  if (pending.sha256 !== sha256 || pending.parts.length !== index - 1) {
+    pendingChunks.delete(blob.path);
+    log("warn", "skill file chunk out of order; dropped", { path: blob.path });
+    return null;
+  }
+  pending.parts.push(raw);
+  if (index < of) return null;
+  pendingChunks.delete(blob.path);
+  const joined = Buffer.concat(pending.parts);
+  if (createHash("sha256").update(joined).digest("hex") !== sha256) {
+    log("warn", "skill file failed verification; dropped", { path: blob.path });
+    return null;
+  }
+  return joined;
+};
+
+/** Land one binary or big skill file. Skill paths only: memory never
+ * travels as a blob. Idempotent like the text path (same bytes and mode =
+ * untouched). */
+const writeBlob = (
+  homeDir: string,
+  skillsDir: string | null,
+  blob: SyncBlob,
+  generation: number,
+): void => {
+  const mapped = mapManagedPath(blob.path, skillsDir);
+  if (mapped === null || !skillsDir || !mapped.startsWith(`${skillsDir}/`)) {
+    if (skillsDir) {
+      log("warn", "sync blob outside the skills root; refused", {
+        path: blob.path,
+      });
+    }
+    return;
+  }
+  const bytes = bytesOf(blob, generation);
+  if (bytes === null) return;
+  const target = join(homeDir, mapped);
+  ensureManagedDir(homeDir, dirname(mapped));
+  const mode = blob.executable ? EXECUTABLE_MODE : PROJECTION_MODE;
+  try {
+    const stat = lstatSync(target, { throwIfNoEntry: false });
+    if (
+      stat?.isFile() &&
+      !stat.isSymbolicLink() &&
+      (stat.mode & 0o777) === mode &&
+      stat.size === bytes.byteLength &&
+      readFileSync(target).equals(bytes)
+    ) {
+      return;
+    }
+  } catch {
+    // Unreadable: rewrite below.
+  }
+  writeManagedFile(target, bytes, mode);
+};
+
 export const applyHomeSync = async (
   homeDir: string,
   item: SyncItem,
@@ -202,6 +286,14 @@ export const applyHomeSync = async (
   harvester: MemoryHarvester | null = null,
 ): Promise<void> => {
   const skillsDir = renderInputs.capabilities.skillsDir;
+  if (item.part === 1) {
+    for (const [path, pending] of pendingChunks) {
+      if (pending.generation !== item.generation) pendingChunks.delete(path);
+    }
+  }
+  for (const blob of item.blobs ?? []) {
+    writeBlob(homeDir, skillsDir, blob, item.generation);
+  }
 
   for (const file of item.files) {
     const mapped = mapManagedPath(file.path, skillsDir);
@@ -219,7 +311,11 @@ export const applyHomeSync = async (
     const target = join(homeDir, mapped);
     ensureManagedDir(homeDir, dirname(mapped));
     const isMemoryFile = isMemoryFilePath(mapped);
-    const mode = isMemoryFile ? MEMORY_FILE_MODE : PROJECTION_MODE;
+    const mode = isMemoryFile
+      ? MEMORY_FILE_MODE
+      : file.executable
+        ? EXECUTABLE_MODE
+        : PROJECTION_MODE;
     // Idempotent: a byte-identical REGULAR file is left untouched, so its
     // mtime is honest evidence of when content last CHANGED (the live proof
     // reads it), and repeated re-pushes cost nothing. lstat first: a planted

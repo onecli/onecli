@@ -24,7 +24,9 @@ const grant = (over: Partial<ReadGrant>): ReadGrant => ({
   subjectKind: "channel",
   externalRef: "C0X",
   subjectLabel: "#x",
-  audience: "granter_only",
+  counterpartRef: null,
+  readMode: "allow",
+  writeMode: "never",
   grantedBy: { id: "u", name: null, email: "u@example.com" },
   mine: true,
   ...over,
@@ -37,15 +39,23 @@ describe("SlackReadConnectionRow", () => {
   });
 
   it("renders nothing until the caller has connected", () => {
-    state.connection = { connected: false, available: true, profile: null };
+    state.connection = {
+      connected: false,
+      available: true,
+      canWrite: false,
+      slackUserId: null,
+      profile: null,
+    };
     const { container } = render(<SlackReadConnectionRow agentId="ag-1" />);
     expect(container.textContent).toBe("");
   });
 
-  it("connected: a locked-on line with your account, your share count, and Manage to the Slack page", () => {
+  it("connected: a locked-on line with your account, your share count, and Manage to Contacts as you", () => {
     state.connection = {
       connected: true,
       available: true,
+      canWrite: true,
+      slackUserId: "U0ALEX",
       profile: {
         handle: "riley",
         realName: "Riley Chen",
@@ -64,7 +74,7 @@ describe("SlackReadConnectionRow", () => {
     expect(screen.getByText(/read only · 2 shared/)).toBeTruthy();
     expect(
       screen.getByRole("link", { name: /Manage/ }).getAttribute("href"),
-    ).toBe("/w/ws-1/agents/ag-1/channels");
+    ).toBe("/w/ws-1/agents/ag-1/contacts");
     const toggle = screen.getByRole("switch", {
       name: /Slack read access is on/,
     });

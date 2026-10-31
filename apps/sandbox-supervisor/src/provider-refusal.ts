@@ -1,12 +1,15 @@
+import {
+  TURN_FAILURE_CODES,
+  type TurnFailureCode,
+} from "@onecli/agent-protocol";
+
 /**
  * The gateway's OWN refusals, which ride the same wire as provider errors
- * (sandbox model traffic is proxied): a policy rate limit or block is a
- * self-inflicted, self-fixable condition — telling the user to check their
- * model key would misdirect them, so these always keep the raw passthrough
- * (whose text already names the policy rule). Matched on the gateway's
- * response vocabulary: the "OneCLI policy" phrase in its human messages and
- * the coded JSON bodies (`rate_limited`, `blocked_by_policy`,
- * `access_restricted`).
+ * (sandbox model traffic is proxied): telling the user to check their model
+ * key would misdirect them, so these never read as a provider refusal.
+ * Matched on the "OneCLI policy" phrase in the gateway's human messages and
+ * its coded bodies, so each predicate below stays safe on its own (inside
+ * `terminalErrorClass` a coded body already has its own class).
  */
 const GATEWAY_POLICY_SHAPES =
   /onecli policy|"error"\s*:\s*"(rate_limited|blocked_by_policy|access_restricted)"/i;
@@ -55,6 +58,72 @@ export const isTrialCreditExhausted = (message: string): boolean =>
   TRIAL_CREDIT_SHAPE.test(message);
 
 /**
+ * The gateway's OWN coded answers on a model call, mapped to the failure
+ * class a person can act on. The gateway answers in a FLAT shape
+ * (`"error": "<code>"` beside a readable `message`), which a provider never
+ * uses (providers nest an object under `error`), so matching the flat code is
+ * matching the gateway, never prose. The coverage test reads the gateway's
+ * request-path response builders and fails on a code this table does not
+ * classify, so a new one cannot reach the chat as raw JSON unnoticed.
+ *
+ * `trial_credit_exhausted` is deliberately absent: it keeps its own sharper
+ * class (`isTrialCreditExhausted`), checked first. A Map, so a code read off
+ * untrusted text can never resolve to a prototype member.
+ */
+const GATEWAY_CODE_CLASS: ReadonlyMap<string, TurnFailureCode> = new Map<
+  string,
+  TurnFailureCode
+>([
+  // A key exists in the workspace; this agent was not given it.
+  ["access_restricted", TURN_FAILURE_CODES.modelKeyNotAttached],
+  // This agent was given the key, but its stored value could not be read:
+  // the fix is re-entering it, not attaching or checking it.
+  ["credential_unavailable", TURN_FAILURE_CODES.modelKeyUnreadable],
+  // The agent has no usable key for this host: the fix is the key, on the
+  // agent's Models page.
+  ["credential_not_found", TURN_FAILURE_CODES.modelProviderError],
+  ["app_not_connected", TURN_FAILURE_CODES.modelProviderError],
+  ["connection_needs_reconnect", TURN_FAILURE_CODES.modelProviderError],
+  ["connection_host_mismatch", TURN_FAILURE_CODES.modelProviderError],
+  ["connection_not_found", TURN_FAILURE_CODES.modelProviderError],
+  ["multiple_connections", TURN_FAILURE_CODES.modelProviderError],
+  ["multiple_providers", TURN_FAILURE_CODES.modelProviderError],
+  // An admin's rule decided: a policy, a limit, a refused approval.
+  ["blocked_by_policy", TURN_FAILURE_CODES.blockedByPolicy],
+  ["blocked_by_default_policy", TURN_FAILURE_CODES.blockedByPolicy],
+  ["rate_limited", TURN_FAILURE_CODES.blockedByPolicy],
+  ["quota_exceeded", TURN_FAILURE_CODES.blockedByPolicy],
+  ["budget_exceeded", TURN_FAILURE_CODES.blockedByPolicy],
+  ["manual_approval_denied", TURN_FAILURE_CODES.blockedByPolicy],
+  ["destination_not_allowed", TURN_FAILURE_CODES.blockedByPolicy],
+  ["method_override_refused", TURN_FAILURE_CODES.blockedByPolicy],
+  ["resource_access_denied", TURN_FAILURE_CODES.blockedByPolicy],
+  ["app_unavailable", TURN_FAILURE_CODES.blockedByPolicy],
+  ["github_org_access_required", TURN_FAILURE_CODES.blockedByPolicy],
+  // The gateway itself could not complete the call: temporary.
+  ["gateway_restarting", TURN_FAILURE_CODES.gatewayUnavailable],
+  ["upstream_unreachable", TURN_FAILURE_CODES.gatewayUnavailable],
+  ["upstream_timeout", TURN_FAILURE_CODES.gatewayUnavailable],
+  ["bad_gateway", TURN_FAILURE_CODES.gatewayUnavailable],
+  ["approval_store_unavailable", TURN_FAILURE_CODES.gatewayUnavailable],
+  ["resolution_failed", TURN_FAILURE_CODES.gatewayUnavailable],
+]);
+
+/** The FLAT gateway shape `"error": "<code>"`, with the quotes optionally
+ * escaped when the body is quoted inside another string. A provider's nested
+ * `"error": {` never matches (the value must be a string). No nested
+ * quantifiers: the text is untrusted and can be long. */
+const GATEWAY_CODE = /"error\\?"\s*:\s*\\?"([a-z_]{1,64})\\?"/;
+
+/** The failure class for a terminal error carrying one of the gateway's own
+ * codes, or `undefined` when the text holds none this table knows (a
+ * provider error, a harness error, an unknown code). */
+const gatewayFailureCode = (message: string): TurnFailureCode | undefined => {
+  const code = GATEWAY_CODE.exec(message)?.[1];
+  return code === undefined ? undefined : GATEWAY_CODE_CLASS.get(code);
+};
+
+/**
  * The provider rejecting the CONVERSATION ITSELF as malformed. None of these
  * is a key problem (so it must never read as a provider refusal), and none
  * can succeed on resend: the stored transcript is replayed whole on every
@@ -92,8 +161,7 @@ export const isTranscriptRejected = (message: string): boolean =>
  * behind the Anthropic wrapper.
  *
  * The gateway's OWN 404s (`credential_not_found`, an unknown connection)
- * are not this: they carry a readable message naming the fix, so they keep
- * the passthrough like the policy refusals.
+ * are not this: they name their fix, and their code has its own class.
  */
 const MODEL_ENDPOINT_NOT_FOUND_SHAPE = /\bapi error:?\s*\(?404\b/i;
 const GATEWAY_NOT_FOUND_SHAPE = /"error"\s*:\s*"credential_not_found"/i;
@@ -117,3 +185,33 @@ export const isModelEndpointNotFound = (message: string): boolean =>
  */
 export const isProviderRefusal = (message: string): boolean =>
   !GATEWAY_POLICY_SHAPES.test(message) && PROVIDER_REFUSAL_SHAPES.test(message);
+
+/**
+ * The failure class a live harness's terminal error text earns, or
+ * `undefined` to keep the raw passthrough. Most specific first:
+ * - a rejected transcript before anything else: its 400 must never read as a
+ *   key problem (#1194);
+ * - the trial-credit pause, a gateway code with its own add-a-key fix;
+ * - every other gateway code, before the provider shapes, so
+ *   `access_restricted` reads as a missing grant, not a broken key;
+ * - the provider refusing the key;
+ * - a model-endpoint 404 last: a 404 whose body also names a refusal (a
+ *   quota page behind a proxy) keeps the more actionable key copy.
+ */
+export const terminalErrorClass = (
+  message: string,
+): TurnFailureCode | undefined => {
+  if (isTranscriptRejected(message)) {
+    return TURN_FAILURE_CODES.transcriptRejected;
+  }
+  if (isTrialCreditExhausted(message)) {
+    return TURN_FAILURE_CODES.trialCreditExhausted;
+  }
+  const gateway = gatewayFailureCode(message);
+  if (gateway) return gateway;
+  if (isProviderRefusal(message)) return TURN_FAILURE_CODES.modelProviderError;
+  if (isModelEndpointNotFound(message)) {
+    return TURN_FAILURE_CODES.modelEndpointNotFound;
+  }
+  return undefined;
+};

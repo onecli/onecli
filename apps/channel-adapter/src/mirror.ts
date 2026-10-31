@@ -11,6 +11,7 @@ import { getApp } from "@onecli/api/apps/registry";
 // in one edit.
 import {
   GREETING_SOURCE,
+  isPlatformAuthoredSource,
   TURN_FAILED_PARTIAL_MESSAGE,
   TURN_FAILED_RAW_ERROR_MESSAGE,
   TURN_FAILED_SILENT_MESSAGE,
@@ -414,6 +415,7 @@ const PROVIDER_DOMAINS: Record<string, string> = {
   "google-meet": "meet.google.com",
   "google-chat": "chat.google.com",
   "google-tasks": "tasks.google.com",
+  "google-keep": "keep.google.com",
   "google-contacts": "contacts.google.com",
   "google-forms": "forms.google.com",
   "google-photos": "photos.google.com",
@@ -447,12 +449,14 @@ const PROVIDER_DOMAINS: Record<string, string> = {
   fireflies: "fireflies.ai",
   timeless: "timeless.day",
   circleback: "circleback.ai",
+  heyreach: "heyreach.io",
   pylon: "usepylon.com",
   pagerduty: "pagerduty.com",
   coralogix: "coralogix.com",
   onyx: "onyx.app",
   twilio: "twilio.com",
   dripify: "dripify.com",
+  postgres: "postgresql.org",
 };
 
 /** The app's favicon via Google's resolver — Slack's image elements accept
@@ -627,6 +631,16 @@ export interface MirrorPosts {
   trialCreditExhausted(
     input: ChannelPostTarget & { modelsUrl: string; answer: string },
   ): Promise<void>;
+  /** The workspace holds a model key this agent was not given: same card,
+   * whose button attaches the key on the agent's Models page. */
+  modelKeyNotAttached(
+    input: ChannelPostTarget & { modelsUrl: string; answer: string },
+  ): Promise<void>;
+  /** This agent holds a model key whose saved value could not be read: same
+   * card, whose button opens the agent's Models page to re-enter it. */
+  modelKeyUnreadable(
+    input: ChannelPostTarget & { modelsUrl: string; answer: string },
+  ): Promise<void>;
   /**
    * The agent's files for this turn (send_file), posted AFTER the answer as
    * ONE share: `files` carry bytes the mirror already pulled; `unavailable`
@@ -672,8 +686,8 @@ export interface MirrorDeps {
   knownCursor: string | null;
   item: AdapterWorkItem;
   /** Where a key-problem answer's call to action points (the agent's
-   * Models page) — no_model_key and model_provider_error alike.
-   * Omitted → plain text, no button. */
+   * Models page): every key card, whether the fix is adding, checking or
+   * attaching a key. Omitted → plain text, no button. */
   modelsUrl?: string;
   /** The agent's chat page — connect-card buttons deep-link here with
    * `?attach=<provider>` so the web opens the attach dialog over the
@@ -1064,6 +1078,19 @@ export const mirrorFinishedTurn = async (
           });
           continue;
         }
+        // A platform resume that joined this turn: its instruction is for
+        // the agent only. Just what the agent said back posts.
+        if (isPlatformAuthoredSource(followUp.source)) {
+          if (reply) {
+            await postModelText(
+              deps,
+              targetFor(followUp),
+              reply,
+              replyMentions,
+            );
+          }
+          continue;
+        }
         // Attributed by the follow-up's OWN author. An older control plane
         // sends no per-follow-up name (field absent), so fall back to the
         // turn's asker, the pre-field behavior, exact on direct threads.
@@ -1111,7 +1138,9 @@ export const mirrorFinishedTurn = async (
       return item.turn.createdAt;
     }
 
-    if (!fromProvider) {
+    // A platform-authored prompt (an approval or desktop resume) is the
+    // agent's instruction, never a person's words: only the answer posts.
+    if (!fromProvider && !isPlatformAuthoredSource(item.turn.source)) {
       await postSourced({
         // By name when the control plane resolved one.
         userName: item.turn.userName ?? null,
@@ -1144,6 +1173,24 @@ export const mirrorFinishedTurn = async (
         deps.modelsUrl
       ) {
         await deps.posts.providerError({
+          ...target,
+          modelsUrl: deps.modelsUrl,
+          answer,
+        });
+      } else if (
+        item.turn.errorCode === "model_key_not_attached" &&
+        deps.modelsUrl
+      ) {
+        await deps.posts.modelKeyNotAttached({
+          ...target,
+          modelsUrl: deps.modelsUrl,
+          answer,
+        });
+      } else if (
+        item.turn.errorCode === "model_key_unreadable" &&
+        deps.modelsUrl
+      ) {
+        await deps.posts.modelKeyUnreadable({
           ...target,
           modelsUrl: deps.modelsUrl,
           answer,
@@ -1273,7 +1320,10 @@ export const mirrorFollowUpReply = async (
     ...(deps.iconUrl && { iconUrl: deps.iconUrl }),
   };
   try {
-    if (item.followUp.source !== deps.provider) {
+    if (
+      item.followUp.source !== deps.provider &&
+      !isPlatformAuthoredSource(item.followUp.source)
+    ) {
       await deps.posts.webSourced({
         ...target,
         userName: item.followUp.userName,

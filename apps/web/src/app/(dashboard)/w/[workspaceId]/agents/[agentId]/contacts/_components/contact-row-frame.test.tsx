@@ -15,7 +15,7 @@ describe("ContactRowFrame", () => {
     render(
       <ContactRowFrame
         label="Alex Kim"
-        status={<span>Waiting in the bell</span>}
+        status={<span>Waiting for approval</span>}
       />,
     );
     expect(screen.queryByRole("button", { name: /More for/ })).toBeNull();

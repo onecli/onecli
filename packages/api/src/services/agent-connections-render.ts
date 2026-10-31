@@ -105,6 +105,11 @@ export const connectionsForRender = async (
       // Where and how to call it, from the catalog (the Granola fix: its
       // public API host, not the desktop host an agent would guess).
       ...catalogFactsFor(row.provider),
+      // A database is reached with a database client through the gateway's
+      // front door, logging in as this connection's id.
+      ...(app.database && {
+        database: { engine: app.database.engine, connectionId: row.id },
+      }),
     });
   }
   return out.slice(0, MAX_AGENT_CONNECTIONS);

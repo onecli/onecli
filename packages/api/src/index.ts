@@ -18,4 +18,9 @@ export {
   initRuleActionGate,
 } from "./providers";
 export type { SessionHooks } from "./routes/auth-session";
+export type {
+  SandboxLifecycleHooks,
+  StartResourcesDecision,
+} from "./providers/hooks/sandbox-lifecycle-hooks";
+export { initSandboxLifecycleHooks } from "./providers/hooks/sandbox-lifecycle-hooks";
 export { initSessionHooks } from "./routes/auth-session";

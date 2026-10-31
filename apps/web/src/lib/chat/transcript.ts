@@ -356,6 +356,12 @@ const APPROVAL_TOOLS = [
   "message_agent",
   "preview_expose",
   "update_webhook",
+  // Act as you (licensed): an "Ask" read or write holds a card for the
+  // person whose Slack would be used.
+  "read_conversation",
+  "send_as_me",
+  "edit_my_message",
+  "delete_my_message",
 ] as const;
 
 /**

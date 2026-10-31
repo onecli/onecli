@@ -280,10 +280,21 @@ export const USER_READ_SCOPES = [
 ] as const;
 
 /**
- * Add the user read scopes (and, when missing, the OAuth redirect) to an
- * EXPORTED manifest - export-then-edit, like the rename, so an app that
- * predates the current template keeps everything else it has. Idempotent:
- * returns null when nothing would change (no manifest update needed).
+ * The one WRITE user scope ("send as me"): post as the person, only into a
+ * conversation they explicitly set to allow/ask. Requested alongside the
+ * read scopes; a token granted before it existed simply can't send.
+ */
+export const USER_WRITE_SCOPES = ["chat:write"] as const;
+
+/** Every user scope "Connect your Slack" requests. */
+export const USER_SCOPES = [...USER_READ_SCOPES, ...USER_WRITE_SCOPES] as const;
+
+/**
+ * Add every user scope "Connect your Slack" requests (and, when missing,
+ * the OAuth redirect) to an EXPORTED manifest - export-then-edit, like the
+ * rename, so an app that predates the current template keeps everything
+ * else it has. Idempotent: returns null when nothing would change (no
+ * manifest update needed).
  */
 export const withUserReadScopes = (
   manifest: Record<string, unknown>,
@@ -297,7 +308,7 @@ export const withUserReadScopes = (
   const redirects = Array.isArray(oauth.redirect_urls)
     ? oauth.redirect_urls.filter((u): u is string => typeof u === "string")
     : [];
-  const missingScopes = USER_READ_SCOPES.filter((s) => !user.includes(s));
+  const missingScopes = USER_SCOPES.filter((s) => !user.includes(s));
   const missingRedirect = !redirects.includes(redirectUrl);
   if (missingScopes.length === 0 && !missingRedirect) return null;
   return {

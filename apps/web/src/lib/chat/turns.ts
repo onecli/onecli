@@ -87,6 +87,14 @@ export const hasUnsettledTurn = (turns: Turn[] | undefined): boolean =>
   turns?.some((turn) => UNSETTLED.includes(turn.status)) ?? false;
 
 /**
+ * Whether a failed turn's code means "no usable key: add one" (none yet, or
+ * the free trial credit ran out). These are the codes the chat's in-place
+ * add-key door fixes, and the ones it re-sends after.
+ */
+export const isAddKeyCode = (errorCode: string | null | undefined): boolean =>
+  errorCode === "no_model_key" || errorCode === "trial_credit_exhausted";
+
+/**
  * The turn the chat's in-place key door may RE-SEND once a key attaches:
  * only the newest thing the user themselves asked (trailing platform rows —
  * `userId` null, a cron report landing after the failed ask — don't change
@@ -99,14 +107,7 @@ export const hasUnsettledTurn = (turns: Turn[] | undefined): boolean =>
  */
 export const resendableKeylessTurn = (turns: Turn[]): Turn | null => {
   const last = [...turns].reverse().find((turn) => turn.userId !== null);
-  // Both codes are the same situation for the resend: the message failed
-  // for want of a usable key, and the user just connected one.
-  if (
-    !last ||
-    (last.errorCode !== "no_model_key" &&
-      last.errorCode !== "trial_credit_exhausted")
-  )
-    return null;
+  if (!last || !isAddKeyCode(last.errorCode)) return null;
   if (last.attachments.length > 0) return null;
   if (hasActiveTurn(turns)) return null;
   return last;

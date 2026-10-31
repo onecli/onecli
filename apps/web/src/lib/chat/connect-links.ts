@@ -1,9 +1,11 @@
 import { getApp } from "@onecli/api/apps/registry";
 import type { AppDefinition } from "@onecli/api/apps/types";
+import { bareToolName } from "@onecli/agent-protocol/activity";
 import {
   GITHUB_OAUTH_PROVIDER,
   isGitHubOrgLogin,
 } from "@onecli/api/lib/github-org-access";
+import type { ToolCall } from "./transcript";
 
 /**
  * Recognition of the gateway's "connect this app" links in agent output —
@@ -157,3 +159,30 @@ export const extractConnectSuggestions = (text: string): CardSuggestion[] => {
   }
   return [...byProvider.values()];
 };
+
+/** The platform tool whose result carries a built-in app's connect (or
+ * manage) link, minted by the control plane in the gateway's exact shapes. */
+const APP_CONNECTION_TOOL = "request_app_connection";
+
+/**
+ * The connect links a turn's `request_app_connection` calls returned, as
+ * one text for `extractConnectSuggestions`. This is what makes the card
+ * independent of the agent's wording: the agent may paraphrase, shorten or
+ * drop the link, and the Connect card still renders from the tool's own
+ * result. Failed calls are skipped (an error carries no link).
+ *
+ * Trust is unchanged: the output is sandbox-reported text like the answer
+ * itself, and every link still passes `parseConnectLink`'s shape check and
+ * the catalog lookup, and the card only ever opens OneCLI's own connect flow
+ * for a catalog app. MCP names arrive prefixed (`mcp__onecli__<tool>`).
+ */
+export const connectLinkTextFromTools = (tools: readonly ToolCall[]): string =>
+  tools
+    .filter(
+      (tool) =>
+        bareToolName(tool.name) === APP_CONNECTION_TOOL &&
+        tool.isError !== true &&
+        typeof tool.output === "string",
+    )
+    .map((tool) => tool.output)
+    .join("\n");

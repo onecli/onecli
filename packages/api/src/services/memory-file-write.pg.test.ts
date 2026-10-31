@@ -114,7 +114,7 @@ beforeEach(async () => {
     data: { id: FOREIGN_RUNNER, name: "runner x", token: `rnr_${P}x` },
   });
   // Pacing state is per-process; a suite must start each test full.
-  platformTools.resetMemoryWritePacing();
+  platformTools.resetSandboxPacing();
 });
 
 /** A hosted agent WITH its sandbox — the file door's identity is the

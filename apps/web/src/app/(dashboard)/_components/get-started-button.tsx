@@ -33,9 +33,10 @@ export const GetStartedButton = () => {
   const pathname = usePathname();
   const [pickerOrgId, setPickerOrgId] = useState<string | null>(null);
 
-  // Follows the URL scope and shares the roster's cache entry, so this costs
-  // no extra request on any workspace page and is warm by the time it's
-  // clicked. Off outside a workspace — there the picker does the reading.
+  // Follows the URL scope and shares the workspace agent list's cache entry
+  // (the agent page reads the same one), so this costs no extra request on
+  // any workspace page and is warm by the time it's clicked. Off outside a
+  // workspace — there the picker does the reading.
   const workspaceId = WORKSPACE_PATH_RE.exec(pathname)?.[1];
   const { data: agents = [] } = useAgents(Boolean(workspaceId));
   const existing = workspaceId ? firstHostedAgent(agents) : undefined;

@@ -146,6 +146,18 @@ pub enum SecretKind {
     LlmKey,
 }
 
+impl SecretKind {
+    /// The kind of a secret of `secret_type`.
+    #[must_use]
+    pub fn of(secret_type: &str) -> Self {
+        if secret_type == "generic" {
+            Self::Custom
+        } else {
+            Self::LlmKey
+        }
+    }
+}
+
 /// An app the agent could use by being switched on for it: a connected
 /// account of `provider` in its workspace or organization that its grants do
 /// not select and that needs no reconnect. One entry per app, and never an
@@ -213,14 +225,18 @@ fn restricted_secret_kind(secrets: &[db::SecretRow], hostname: &str) -> Option<S
                 hostname,
             )
         })
-        .map(|s| {
-            if s.type_ == "generic" {
-                SecretKind::Custom
-            } else {
-                SecretKind::LlmKey
-            }
-        })
+        .map(|s| SecretKind::of(&s.type_))
         .max_by_key(|kind| *kind == SecretKind::Custom)
+}
+
+/// What the secret side of a CONNECT resolution produced.
+#[derive(Debug)]
+pub struct SecretInjections {
+    pub rules: Vec<InjectionRule>,
+    pub budget_bindings: Vec<ee::budget::BudgetBinding>,
+    /// A granted secret for this host was skipped because its value could not
+    /// be produced: its kind (see [`ConnectResponse::credential_unavailable`]).
+    pub unavailable: Option<SecretKind>,
 }
 
 /// Result of policy resolution for a CONNECT request.
@@ -244,6 +260,15 @@ pub struct ConnectResponse {
     /// as a cache miss and re-resolves, rather than defaulting to "not restricted".
     #[serde(default)]
     pub access_restricted: Option<RestrictedCredential>,
+    /// Set when the agent WAS granted a secret for this host but its value
+    /// could not be produced (a decrypt failure, a 1Password reference that
+    /// did not resolve), so nothing injected. An upstream auth failure is then
+    /// answered with `credential_unavailable` instead of `access_restricted`:
+    /// the agent has access, and the fix is re-entering the stored value on
+    /// the page its kind names. A cache entry from a version without the field
+    /// reads as `None`, the answer that version gave.
+    #[serde(default)]
+    pub credential_unavailable: Option<SecretKind>,
     /// Normalized plan name for quota enforcement ("free", "pro", "team",
     /// "enterprise").
     #[serde(default)]
@@ -328,11 +353,13 @@ pub enum AppConnectionResult {
     /// legitimate public traffic), and the choices are surfaced only when it
     /// then fails in a way the mismatch explains.
     HostMismatch { connections: Vec<ConnectionChoice> },
-    /// The connection serving this request has a refresh token its provider
-    /// refused (`invalid_grant`): nothing can be injected until the user
-    /// reconnects it. The request is answered with
-    /// `connection_needs_reconnect` straight away, before any policy or
-    /// approval hold, because approving it could only forward a dead token.
+    /// The connection serving this request holds a credential its provider
+    /// refused for good (`apps::CredentialRevoked`: a revoked refresh token,
+    /// a GitHub App installation that is gone, a deleted key, a rotated
+    /// secret): nothing can be injected until the user reconnects it. The
+    /// request is answered with `connection_needs_reconnect` straight away,
+    /// before any policy or approval hold, because approving it could only
+    /// forward a dead token.
     NeedsReconnect { connection: ConnectionChoice },
 }
 
@@ -343,9 +370,10 @@ pub enum TokenFailure {
     /// mint, a disconnected row, or a failed refresh with no token to fall
     /// back to. The connection contributes nothing, as it always did.
     Unavailable,
-    /// The provider refused the refresh token for good. Only the user
-    /// reconnecting the account can fix it, so the request is answered with
-    /// `connection_needs_reconnect` before any approval hold.
+    /// The provider refused the stored credential for good
+    /// (`apps::CredentialRevoked`). Only the user reconnecting the account can
+    /// fix it, so the request is answered with `connection_needs_reconnect`
+    /// before any approval hold.
     NeedsReconnect,
 }
 
@@ -357,6 +385,17 @@ fn granular_scoping_requested(session_policy: Option<&serde_json::Value>) -> boo
     session_policy
         .and_then(|sp| sp.as_object())
         .is_some_and(|obj| !obj.is_empty())
+}
+
+/// The refusal that asks the user to reconnect, if any: the provider refused
+/// the connection's OWN (unscoped) mint for good. A resource-scoped mint
+/// answers for an admin's policy, and a policy problem must never take the
+/// whole connection down.
+fn reconnect_refusal(error: &anyhow::Error, from_scoper: bool) -> Option<&apps::CredentialRevoked> {
+    if from_scoper {
+        return None;
+    }
+    error.downcast_ref::<apps::CredentialRevoked>()
 }
 
 /// Every app connection the agent's v2 allow rules select, regardless of
@@ -480,11 +519,17 @@ pub struct ConnectionChoice {
 
 impl ConnectionChoice {
     pub fn from_row(row: &db::AppConnectionRow) -> Self {
+        Self::for_connection(&row.id, &row.provider, row.label.clone())
+    }
+
+    /// The choice for an app connection known by id and provider (a request
+    /// whose injected token named it, without its row in hand).
+    pub fn for_connection(id: &str, provider: &str, label: Option<String>) -> Self {
         Self {
-            id: row.id.clone(),
-            label: row.label.clone(),
-            provider: row.provider.clone(),
-            display_name: apps::display_name_for_provider(&row.provider),
+            id: id.to_string(),
+            label,
+            provider: provider.to_string(),
+            display_name: apps::display_name_for_provider(provider),
             host: None,
         }
     }
@@ -686,13 +731,12 @@ pub trait PolicyEngineExt {
     ) -> Result<ConnectResponse, ConnectError>;
 
     /// Build injection rules from secrets matching this host.
-    /// Returns `(rules, budget_bindings)`.
     async fn resolve_secret_injections(
         &self,
         agent: &db::AgentRow,
         hostname: &str,
         selection: &db::InjectSelection,
-    ) -> Result<(Vec<InjectionRule>, Vec<ee::budget::BudgetBinding>), ConnectError>;
+    ) -> Result<SecretInjections, ConnectError>;
 
     /// Produce a secret's plaintext value from its source — the encrypted column
     /// (inline) or a live 1Password reference. Returns `None` (after logging) when
@@ -877,7 +921,11 @@ impl PolicyEngineExt for PolicyEngine {
         .map_err(db_err)?;
         let inject_selection = policy_engine::derive_inject_selection(&policy_rules_v2, &agent.id);
 
-        let (injection_rules, budget_bindings) = self
+        let SecretInjections {
+            rules: injection_rules,
+            budget_bindings,
+            unavailable: secret_unavailable,
+        } = self
             .resolve_secret_injections(agent, hostname, &inject_selection)
             .await?;
         let app_connections = self
@@ -898,8 +946,12 @@ impl PolicyEngineExt for PolicyEngine {
         // Check if the workspace has credentials (secrets or app connections) for
         // this host that the agent's grants don't attach — surfaced as an
         // `access_restricted` error pointing at the attach surface instead of a
-        // generic credential-not-found.
-        let access_restricted = if injection_rules.is_empty() {
+        // generic credential-not-found. Skipped when the agent WAS granted a
+        // secret here whose value could not be read: that agent has access, and
+        // telling it to attach a key it already holds sends the person to the
+        // wrong fix (`credential_unavailable` answers instead).
+        let credential_unavailable = secret_unavailable.filter(|_| injection_rules.is_empty());
+        let access_restricted = if injection_rules.is_empty() && credential_unavailable.is_none() {
             self.restricted_credential(agent, hostname, &inject_selection)
                 .await
         } else {
@@ -921,7 +973,9 @@ impl PolicyEngineExt for PolicyEngine {
         .await;
 
         Ok(ConnectResponse {
-            intercept: has_credentials || access_restricted.is_some(),
+            intercept: has_credentials
+                || access_restricted.is_some()
+                || credential_unavailable.is_some(),
             injection_rules,
             app_connections,
             workspace_id: Some(agent.workspace_id.clone()),
@@ -930,6 +984,7 @@ impl PolicyEngineExt for PolicyEngine {
             agent_name: Some(agent.name.clone()),
             agent_identifier: agent.identifier.clone(),
             access_restricted,
+            credential_unavailable,
             plan,
             budget_bindings,
             policy_rules_v2,
@@ -938,13 +993,12 @@ impl PolicyEngineExt for PolicyEngine {
         })
     }
     /// Build injection rules from secrets matching this host.
-    /// Returns `(rules, budget_bindings)`.
     async fn resolve_secret_injections(
         &self,
         agent: &db::AgentRow,
         hostname: &str,
         selection: &db::InjectSelection,
-    ) -> Result<(Vec<InjectionRule>, Vec<ee::budget::BudgetBinding>), ConnectError> {
+    ) -> Result<SecretInjections, ConnectError> {
         // The platform trial credit decides eligibility on the UNFILTERED
         // org+workspace pool (an existing-but-restricted LLM key must count as
         // present — see `ee::platform_llm`), so the pool is fetched when
@@ -1023,11 +1077,15 @@ impl PolicyEngineExt for PolicyEngine {
         let injectable = secret_inject::one_credential_per_llm_provider(&matching);
 
         let mut rules = Vec::with_capacity(injectable.len());
+        let mut unavailable = None;
         for secret in injectable {
             // Resolve the value from its source (inline column or live 1Password
             // reference); a failure skips the secret, exactly as a decrypt
-            // failure always has.
+            // failure always has, and is remembered so an upstream auth failure
+            // is answered with the truth (a granted credential that could not
+            // be read) instead of "this agent has no access".
             let Some(value) = self.resolve_secret_value(secret, &agent.workspace_id).await else {
+                unavailable = Some(SecretKind::of(&secret.type_));
                 continue;
             };
 
@@ -1107,7 +1165,11 @@ impl PolicyEngineExt for PolicyEngine {
             budget_bindings.push(binding);
         }
 
-        Ok((rules, budget_bindings))
+        Ok(SecretInjections {
+            rules,
+            budget_bindings,
+            unavailable,
+        })
     }
     /// Produce a secret's plaintext value from its source — the encrypted column
     /// (inline) or a live 1Password reference. Returns `None` (after logging) when
@@ -1936,6 +1998,9 @@ impl PolicyEngineExt for PolicyEngine {
                     Some(r) => Some(r),
                     None => apps::try_refresh_credentials(&cred_type, &creds, session_policy).await,
                 };
+                // The ciphertext the mint read: both the persist and the
+                // refusal flag below only land while the row still holds it.
+                let stored = conn.credentials.as_deref();
 
                 if let Some(result) = refresh_result {
                     match result {
@@ -1947,7 +2012,7 @@ impl PolicyEngineExt for PolicyEngine {
                             if needs_scoped_token {
                                 scoped_token_minted = from_scoper;
                                 debug!(provider = %provider, "scoped token generated, skipping persist");
-                            } else if let Some(stored) = conn.credentials.as_deref() {
+                            } else if let Some(stored) = stored {
                                 creds["access_token"] = serde_json::Value::String(new_token);
                                 creds["expires_at"] = serde_json::json!(new_expires_at);
                                 // A borrowed signing key (shared GitHub App
@@ -1973,9 +2038,28 @@ impl PolicyEngineExt for PolicyEngine {
                                 .await;
                             }
                         }
-                        Err(e) => {
-                            debug!(provider = %provider, %cred_type, error = ?e, "credential refresh failed");
-                        }
+                        // The provider refused the key itself (installation
+                        // gone, key deleted, secret rotated): flag the row so
+                        // the dashboard and the agent's card say "reconnect",
+                        // and answer before any approval hold.
+                        Err(e) => match (reconnect_refusal(&e, from_scoper), stored) {
+                            (Some(revoked), Some(stored)) => {
+                                if crate::refresh::flag_revoked_key(
+                                    &self.pool,
+                                    connection_id,
+                                    provider,
+                                    stored,
+                                    revoked,
+                                )
+                                .await
+                                {
+                                    return Err(TokenFailure::NeedsReconnect);
+                                }
+                            }
+                            _ => {
+                                debug!(provider = %provider, %cred_type, error = ?e, "credential refresh failed");
+                            }
+                        },
                     }
                 } else if let (true, Some(config), true) = (
                     expired,
@@ -2566,6 +2650,7 @@ mod tests {
             agent_name: None,
             agent_identifier: None,
             access_restricted: None,
+            credential_unavailable: None,
             plan: "pro".to_string(),
             budget_bindings: vec![],
             policy_rules_v2: db::PolicyV2Rules::default(),
@@ -2613,6 +2698,7 @@ mod tests {
             agent_name: Some("Test".to_string()),
             agent_identifier: None,
             access_restricted: None,
+            credential_unavailable: None,
             plan: "pro".to_string(),
             budget_bindings: vec![],
             policy_rules_v2: db::PolicyV2Rules::default(),
@@ -2658,6 +2744,7 @@ mod tests {
                 provider: "resend".to_string(),
                 shared_by_organization: true,
             }])),
+            credential_unavailable: Some(SecretKind::LlmKey),
             plan: "pro".to_string(),
             budget_bindings: vec![],
             policy_rules_v2: db::PolicyV2Rules::default(),
@@ -2984,6 +3071,32 @@ mod tests {
             credential_host_gate("snowflake", None, "x.snowflakecomputing.com"),
             HostGate::Mismatch { bound_host: None }
         );
+    }
+
+    #[test]
+    fn zendesk_credential_host_gate_pins_the_connection_account() {
+        let own = serde_json::json!({ "instance_host": "acme.zendesk.com" });
+        assert_eq!(
+            credential_host_gate("zendesk", Some(&own), "acme.zendesk.com"),
+            HostGate::Pass
+        );
+        assert_eq!(
+            credential_host_gate("zendesk", Some(&own), "other.zendesk.com"),
+            HostGate::Mismatch {
+                bound_host: Some("acme.zendesk.com".to_string())
+            }
+        );
+        for creds in [
+            None,
+            Some(serde_json::json!({})),
+            Some(serde_json::json!({"instance_host":""})),
+            Some(serde_json::json!({"instance_host":"acme.zendesk.com.evil.test"})),
+        ] {
+            assert_eq!(
+                credential_host_gate("zendesk", creds.as_ref(), "acme.zendesk.com"),
+                HostGate::Mismatch { bound_host: None }
+            );
+        }
     }
 
     #[test]
@@ -3977,6 +4090,24 @@ mod deferred_injection_tests {
             metadata: None,
             session_policy,
         }
+    }
+
+    /// Only the connection's own mint can ask for a reconnect. The same
+    /// permanent refusal from a resource-scoped mint never flags the
+    /// connection (that mint answers for one policy, not for the
+    /// connection), and a passing failure never does either.
+    #[test]
+    fn only_an_unscoped_permanent_refusal_asks_for_a_reconnect() {
+        let revoked = || {
+            anyhow::Error::new(apps::CredentialRevoked {
+                detail: "GitHub App token exchange (404 Not Found): Integration not found".into(),
+            })
+        };
+        assert!(reconnect_refusal(&revoked(), false).is_some());
+        assert!(reconnect_refusal(&revoked(), true).is_none());
+        let transient = anyhow::anyhow!("GitHub App token exchange (503 Service Unavailable)");
+        assert!(reconnect_refusal(&transient, false).is_none());
+        assert!(reconnect_refusal(&transient, true).is_none());
     }
 
     #[test]

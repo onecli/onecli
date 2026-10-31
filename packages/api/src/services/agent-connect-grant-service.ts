@@ -28,9 +28,8 @@ import { auditAutoGrants, autoAttachScope } from "./llm-autoattach-service";
  *    on an existing account (same name) turns it on for the connecting agent
  *    too. An explicit Reconnect of one connection only refreshes credentials,
  *    so callers never pass it here.
- *  - **The default attach** (`defaultConnectionGrant`): read tools allowed,
- *    write tools and requests outside the tool list needing approval, exactly
- *    what the attach toggle writes, so turning it off is the same detach.
+ *  - **The default attach** (`defaultConnectionGrant`), exactly what the
+ *    attach toggle writes, so turning it off is the same detach.
  *  - **Org policy still wins.** A grant is a workspace rule, and org rules
  *    stay a hard ceiling in the engine.
  *

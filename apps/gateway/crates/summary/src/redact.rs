@@ -7,32 +7,68 @@
 //!   which may be cut mid-value by the gateway's peek, so it scans text
 //!   instead of parsing.
 //!
-//! The gateway's log lines start from the same list ([`is_sensitive_key`])
-//! when they mask a request URL's query.
+//! A URL's query carries credentials under names no body would use
+//! (`X-Amz-Signature`, `sig`, `code`): [`is_url_credential`] widens the
+//! list for those, and both the card's query rows and the gateway's log
+//! lines mask by it.
 
+use percent_encoding::percent_decode_str;
 use serde_json::Value;
 
 /// Whether a JSON / form key names a secret (`password`, `client_secret`,
-/// `api_key`, …).
+/// `api_key`, a 2FA key, a session cookie, …). A header-style or spaced
+/// spelling (`X-Api-Key`, `api key`) names the same secret as its snake_case
+/// one.
 #[must_use]
 pub fn is_sensitive_key(k: &str) -> bool {
-    let k = k.to_ascii_lowercase();
-    [
-        "authorization",
-        "password",
-        "passwd",
-        "secret",
-        "token",
-        "api_key",
-        "apikey",
-        "access_key",
-        "accesskey",
-        "private_key",
-        "client_secret",
-        "refresh_token",
-    ]
-    .iter()
-    .any(|p| k.contains(p))
+    let k = k.to_ascii_lowercase().replace(['-', ' '], "_");
+    // A PIN only as the whole name: as a fragment, `pin` is in `shipping`.
+    k == "pin"
+        || [
+            "authorization",
+            "password",
+            "passwd",
+            "secret",
+            "token",
+            "api_key",
+            "apikey",
+            "access_key",
+            "accesskey",
+            "private_key",
+            "client_secret",
+            "refresh_token",
+            "twofactor",
+            "two_factor",
+            "cookie",
+        ]
+        .iter()
+        .any(|p| k.contains(p))
+}
+
+/// Name fragments that mark a credential in a URL query on top of the secret
+/// keys a body is masked by ([`is_sensitive_key`]): request signatures
+/// (`sig`, `X-Amz-Signature`), `X-Amz-Credential`, embedded auth tokens
+/// (`tempauth`, `authtoken`), OAuth `code`, and session handles that
+/// authorize on their own (`session_id`, a resumable upload's `upload_id`).
+const URL_CREDENTIAL_FRAGMENTS: [&str; 6] =
+    ["sig", "auth", "code", "credential", "session", "upload_id"];
+
+/// Whether a URL query parameter's name looks like it carries a credential.
+///
+/// Substring-matched on the decoded, lowercased name, so a provider's new
+/// `*_token` or `*_secret` is covered the day it appears, and any name ending
+/// in `key` is one (Google's and Trello's `key`, `x-api-key`, Azure API
+/// Management's `subscription-key`).
+/// Deliberately over-inclusive: masking a harmless `next_token` cursor or a
+/// `sort_key` costs a little readability, a missed credential costs a leak.
+#[must_use]
+pub fn is_url_credential(name: &str) -> bool {
+    let name = percent_decode_str(name)
+        .decode_utf8_lossy()
+        .to_ascii_lowercase();
+    name.ends_with("key")
+        || is_sensitive_key(&name)
+        || URL_CREDENTIAL_FRAGMENTS.iter().any(|f| name.contains(f))
 }
 
 /// A parsed value as the card may show it: a secret-named key's value is
@@ -84,12 +120,18 @@ pub(crate) fn looks_like_base64_blob(s: &str) -> bool {
 ///
 /// - JSON: a string value keeps its quotes (`"password": "***"`); a number,
 ///   literal, object or array becomes `"***"` whole.
+/// - Multipart form (`Content-Disposition: form-data; name="password"`):
+///   the part's value, through its closing boundary line.
 /// - Form style (`a=b&c=d`): `password=***`, through the next `&`.
 #[must_use]
 pub fn mask_secrets(text: &str) -> (String, bool) {
     let (text, json_hit) = mask_json_values(text);
-    let (text, form_hit) = mask_form_values(&text);
-    (text, json_hit || form_hit)
+    let (text, pairs_hit) = if is_multipart(&text) {
+        mask_multipart_values(&text)
+    } else {
+        mask_form_values(&text)
+    };
+    (text, json_hit || pairs_hit)
 }
 
 fn mask_json_values(text: &str) -> (String, bool) {
@@ -184,6 +226,129 @@ fn mask_json_values(text: &str) -> (String, bool) {
     (String::from_utf8_lossy(&out).into_owned(), hit)
 }
 
+/// A body with multipart form parts, whatever its declared type.
+pub(crate) fn is_multipart(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("content-disposition:") && lower.contains("form-data")
+}
+
+/// Mask each multipart part whose field name is secret-named: everything
+/// between the part's blank line and its boundary line (`\r\n--…`). A part
+/// cut off by truncation is masked through the end.
+fn mask_multipart_values(text: &str) -> (String, bool) {
+    // ASCII lowercasing keeps every byte offset, and every offset below is
+    // found by an ASCII pattern, so each lands on a char boundary of `text`.
+    // Without an opening delimiter, mask sensitive parts through EOF.
+    let boundary = text.split_once('\n').and_then(|(line, _)| {
+        let line = line.trim_end_matches('\r').trim_end_matches([' ', '\t']);
+        let token = line.strip_prefix("--")?;
+        (!token.is_empty() && token.len() <= 70 && !token.ends_with("--")).then_some(line)
+    });
+    let lower = text.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut hit = false;
+    let mut copied = 0;
+    let mut from = 0;
+    while let Some(at) = lower[from..].find("content-disposition:") {
+        let header = from + at;
+        let line_end = lower[header..]
+            .find('\n')
+            .map_or(lower.len(), |e| header + e);
+        let Some(name) = part_name(&text[header..line_end]) else {
+            from = line_end;
+            continue;
+        };
+        let Some(value_start) = ["\r\n\r\n", "\n\n"]
+            .iter()
+            .filter_map(|blank| {
+                lower[header..]
+                    .find(blank)
+                    .map(|e| header + e + blank.len())
+            })
+            .min()
+        else {
+            break;
+        };
+        let value_end = boundary
+            .and_then(|boundary| {
+                let mut offset = value_start;
+                for line in text[value_start..].split_inclusive('\n') {
+                    let delimiter = line
+                        .trim_end_matches('\n')
+                        .trim_end_matches('\r')
+                        .trim_end_matches([' ', '\t']);
+                    // Match the complete, case-sensitive delimiter, never a prefix.
+                    if delimiter == boundary || delimiter.strip_suffix("--") == Some(boundary) {
+                        if offset == value_start {
+                            return Some(value_start);
+                        }
+                        let end = offset - 1;
+                        return Some(if text[..end].ends_with('\r') {
+                            end - 1
+                        } else {
+                            end
+                        });
+                    }
+                    offset += line.len();
+                }
+                None
+            })
+            .unwrap_or(text.len());
+        if is_sensitive_key(&name) && value_end > value_start {
+            out.push_str(&text[copied..value_start]);
+            out.push_str("***");
+            copied = value_end;
+            hit = true;
+        }
+        from = if boundary.is_none() && !is_sensitive_key(&name) {
+            value_start
+        } else {
+            value_end
+        };
+    }
+    out.push_str(&text[copied..]);
+    (out, hit)
+}
+
+/// The field name in a part's `Content-Disposition` line (`name="password"`),
+/// never its `filename=`.
+fn part_name(line: &str) -> Option<String> {
+    // Parse whole parameters so filename and quoted semicolons cannot spoof name.
+    let mut rest = line.split_once(';')?.1;
+    while !rest.is_empty() {
+        rest = rest.trim_start();
+        let (key, value) = rest.split_once('=')?;
+        let value = value.trim_start();
+        let (name, tail) = if let Some(quoted) = value.strip_prefix('"') {
+            let mut name = String::new();
+            let mut escaped = false;
+            let mut end = quoted.len();
+            for (at, ch) in quoted.char_indices() {
+                if escaped {
+                    name.push(ch);
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    end = at + 1;
+                    break;
+                } else {
+                    name.push(ch);
+                }
+            }
+            (name, &quoted[end..])
+        } else {
+            let end = value.find(';').unwrap_or(value.len());
+            (value[..end].trim().to_string(), &value[end..])
+        };
+        if key.trim().eq_ignore_ascii_case("name") {
+            return Some(name);
+        }
+        rest = tail.trim_start().strip_prefix(';')?;
+    }
+    None
+}
+
 fn mask_form_values(text: &str) -> (String, bool) {
     // Only bodies that look like `a=b&c=d`, never JSON.
     let trimmed = text.trim_start();
@@ -249,6 +414,105 @@ mod tests {
         assert_eq!(text, "grant_type=password&username=ada&password=***");
     }
 
+    /// A multipart field reads as sent in the raw view, so a secret-named
+    /// one is masked there exactly as the card hides it.
+    #[test]
+    fn masks_secret_named_multipart_fields() {
+        let body = "--XX\r\nContent-Disposition: form-data; name=\"user\"\r\n\r\nada\r\n\
+                    --XX\r\nContent-Disposition: form-data; name=\"password\"\r\n\r\nhunter2\r\n\
+                    --XX\r\nContent-Disposition: form-data; name=\"doc\"; filename=\"token.txt\"\r\n\
+                    Content-Type: text/plain\r\n\r\nhello\r\n--XX--\r\n";
+        let (text, hit) = mask_secrets(body);
+        assert!(hit);
+        assert!(!text.contains("hunter2"), "{text}");
+        assert!(
+            text.contains("name=\"password\"\r\n\r\n***\r\n--XX"),
+            "{text}"
+        );
+        // Other fields, and a part whose FILE name looks secret, read as sent.
+        assert!(text.contains("\r\n\r\nada\r\n") && text.contains("\r\n\r\nhello\r\n"));
+        // Cut off inside the secret part: masked through the end.
+        let (text, hit) =
+            mask_secrets("--XX\nContent-Disposition: form-data; name=\"api_key\"\n\nsk-live-abc");
+        assert!(hit);
+        assert!(!text.contains("sk-live"), "{text}");
+    }
+
+    #[test]
+    fn multipart_fake_delimiters_never_reveal_secret_suffixes() {
+        for fake in ["--FAKE", "--XXsuffix", "--xx", "--XX--suffix"] {
+            let body = format!("--XX\r\nContent-Disposition: form-data; name=password\r\n\r\nfirst\r\n{fake}\r\nsecret-suffix\r\n--XX\r\nContent-Disposition: form-data; name=note\r\n\r\nkeep me\r\n--XX--\r\n");
+            let (masked, hit) = mask_secrets(&body);
+            assert!(hit);
+            assert!(
+                !masked.contains("first") && !masked.contains("secret-suffix"),
+                "{masked}"
+            );
+            assert!(masked.contains("keep me"), "{masked}");
+        }
+    }
+
+    #[test]
+    fn multipart_names_allow_spacing_case_and_quoted_parameters() {
+        for name in [
+            "NaMe = PaSsWoRd",
+            "name=\"password\"",
+            "name = \"pass\\word\"",
+            "filename=\"safe; name=note\"; NAME\t=\tpassword",
+        ] {
+            let body =
+                format!("--XX\nCONTENT-DISPOSITION: FORM-DATA; {name}\n\ncredential\n--XX--\n");
+            let (masked, hit) = mask_secrets(&body);
+            assert!(hit && !masked.contains("credential"), "{masked}");
+        }
+        assert_eq!(
+            part_name("Content-Disposition: form-data; filename=\"name=password\"; name=note"),
+            Some("note".into())
+        );
+    }
+
+    #[test]
+    fn multipart_empty_harmless_part_does_not_skip_following_secret() {
+        let body = "--XX\nContent-Disposition: form-data; name=note\n\n--XX\nContent-Disposition: form-data; name=password\n\ncredential\n--XX--\n";
+        let (masked, hit) = mask_secrets(body);
+        assert!(hit && !masked.contains("credential"), "{masked}");
+    }
+
+    #[test]
+    fn multipart_without_reliable_boundary_masks_through_eof() {
+        for prefix in ["", "preamble\n"] {
+            let body = format!("{prefix}Content-Disposition: form-data; name=note\n\nharmless\n--guess\nContent-Disposition: form-data; name=password\n\nsecret-start\n--fake\nsecret-suffix");
+            let (masked, hit) = mask_secrets(&body);
+            assert!(hit);
+            assert!(masked.ends_with("***"), "{masked}");
+            assert!(!masked.contains("secret-start") && !masked.contains("secret-suffix"));
+        }
+        for ending in ["cut-secret", "cut-secret\n--X", "cut-secret\n--XXsuffix"] {
+            let body = format!("--XX\nContent-Disposition: form-data; name=password\n\n{ending}");
+            assert!(mask_secrets(&body).0.ends_with("***"));
+        }
+    }
+
+    #[test]
+    fn url_credentials_cover_what_a_body_key_list_misses() {
+        for name in [
+            "X-Amz-Signature",
+            "sig",
+            "code",
+            "upload_id",
+            "tempauth",
+            "subscription-key",
+        ] {
+            assert!(is_url_credential(name), "{name}");
+            assert!(!is_sensitive_key(name), "{name} is already a body secret");
+        }
+        // Decoded before matching: `access%5Ftoken` is `access_token`.
+        assert!(is_url_credential("access%5Ftoken"));
+        for name in ["startDateTime", "$top", "keyword", "page"] {
+            assert!(!is_url_credential(name), "{name}");
+        }
+    }
+
     #[test]
     fn survives_hostile_input_without_panicking() {
         for s in [
@@ -261,9 +525,43 @@ mod tests {
             "{\"🔑password\":\"x\"}",
             "{\"secret\":[[[\"",
             "{\"secret\":]]]}",
+            "Content-Disposition: form-data; name=\"password",
+            "Content-Disposition: form-data; name=\"token\"\r\n\r\n",
+            "content-disposition:form-data;name=\"é\"\n\né\n--",
         ] {
             let _ = mask_secrets(s);
         }
+    }
+
+    #[test]
+    fn header_and_spaced_spellings_name_the_same_secret() {
+        for key in ["X-Api-Key", "api key", "Client-Secret", "x-access-key"] {
+            assert!(is_sensitive_key(key), "{key}");
+        }
+        assert!(!is_sensitive_key("Content-Type"));
+    }
+
+    /// An account sign-in carries more than a password: a 2FA key (TOTP
+    /// seed), a one-time PIN, and session cookies each sign in on their own
+    /// (HeyReach's `li_account/Connect`, `SubmitPin`, `ConnectWithCookies`).
+    #[test]
+    fn sign_in_secrets_are_masked_on_the_card_and_in_the_raw_view() {
+        for key in ["twoFactorAuthKey", "two_factor_code", "pin", "PIN"] {
+            assert!(is_sensitive_key(key), "{key}");
+        }
+        assert!(is_sensitive_key("cookies") && is_sensitive_key("Set-Cookie"));
+        // A PIN only as the whole name.
+        for key in ["shipping", "pinned", "mapping", "spinner"] {
+            assert!(!is_sensitive_key(key), "{key}");
+        }
+        let (text, hit) = mask_secrets(
+            r#"{"username":"u@example.com","twoFactorAuthKey":"JBSWY3DPEHPK3PXP","accountId":1,"pin":"123456","cookies":[{"name":"li_at","value":"AQEDAR-cookie"}]}"#,
+        );
+        assert!(hit);
+        assert_eq!(
+            text,
+            r#"{"username":"u@example.com","twoFactorAuthKey":"***","accountId":1,"pin":"***","cookies":"***"}"#
+        );
     }
 
     #[test]

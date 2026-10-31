@@ -53,6 +53,7 @@ const write = (
 
 export const pylonPermissions: AppPermissionDefinition = {
   provider: "pylon",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

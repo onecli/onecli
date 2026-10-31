@@ -20,8 +20,8 @@ import { TextBubbleContent } from "./text-bubble-content";
  * a control on that same line (SEND NOW), after the words.
  *
  * `attachments` render under the bubble (or alone, for a file-only message —
- * an empty bubble would read as a glitch); the optimistic row passes local
- * object URLs, the settled row's chips fetch through the blob endpoint.
+ * an empty bubble would read as a glitch). Both optimistic and settled tiles
+ * share authenticated bytes through the same query cache.
  */
 export const UserBubble = ({
   text,
@@ -36,7 +36,7 @@ export const UserBubble = ({
   hint?: string;
   action?: React.ReactNode;
   conversationId?: string;
-  attachments?: (AttachmentMeta & { objectUrl?: string })[];
+  attachments?: AttachmentMeta[];
 }) => (
   <Message align="end">
     <MessageContent>

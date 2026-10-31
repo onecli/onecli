@@ -38,6 +38,12 @@ vi.mock("next/navigation", () => ({
   usePathname: () => state.pathname,
 }));
 
+// The New agent row owns the create flow (its own suite covers it); these
+// suites are about the agent rows.
+vi.mock("@/lib/dashboard/new-agent-row", () => ({
+  NewAgentRow: () => <li>New agent</li>,
+}));
+
 vi.mock("next/image", () => ({
   default: ({ src, alt }: { src: unknown; alt?: string }) => (
     // eslint-disable-next-line @next/next/no-img-element
@@ -105,9 +111,9 @@ describe("pure auto-hide: no runner, no feature", () => {
 
   it("the workspace sidebar shows no thread links — self-host absent is SILENT", async () => {
     state.runners = { registered: false, online: false };
-    state.pathname = "/w/p1/overview";
+    state.pathname = "/w/p1/activity";
     renderSidebar();
-    await screen.findByText("Overview");
+    await screen.findByText("Activity");
     expect(
       screen
         .queryAllByRole("link")
@@ -119,7 +125,7 @@ describe("pure auto-hide: no runner, no feature", () => {
     // The 2026-08-16 amendment made executable: the agent list never depends
     // on a runner existing — only the hosted nav entries do.
     state.runners = { registered: false, online: false };
-    state.pathname = "/w/p1/overview";
+    state.pathname = "/w/p1/activity";
     state.agents = [{ id: "ag-b", name: "Laptop", kind: "byo" }];
     renderSidebar();
     await screen.findByText("Laptop");
@@ -127,6 +133,25 @@ describe("pure auto-hide: no runner, no feature", () => {
       "href",
       "/w/p1/agents/ag-b/connections",
     );
+  });
+
+  it("labels the workspace nav under the Agents group — and only in a workspace", async () => {
+    state.runners = { registered: false, online: false };
+    state.pathname = "/w/p1/activity";
+    const view = renderSidebar();
+    await screen.findByText("Activity");
+    const labels = [
+      ...view.container.querySelectorAll('[data-sidebar="group-label"]'),
+    ].map((el) => el.textContent);
+    expect(labels).toEqual(["Agents", "Workspace"]);
+    view.unmount();
+
+    state.pathname = "/org/o1/workspaces";
+    const org = renderSidebar();
+    await screen.findByText("Members");
+    expect(
+      org.container.querySelectorAll('[data-sidebar="group-label"]'),
+    ).toHaveLength(0);
   });
 
   it("a runner flips the same install to the full surface with no code change", async () => {

@@ -57,15 +57,6 @@ export interface RunnerConfig {
   /** Minimum age before a stale-label object may be reaped. */
   orphanGraceSeconds: number;
   /**
-   * The `cloud` backend's remote endpoint + shared service secret. No
-   * defaults, and required only when
-   * RUNNER_BACKEND=cloud — every other backend must not even be asked to
-   * carry them. Checked at boot so a missing value is one clear line, not a
-   * stream of 401s.
-   */
-  sandboxManagerUrl: string | null;
-  sandboxManagerToken: string | null;
-  /**
    * The supervisor-session signing keyring (`RUNNER_SESSION_KEY`, raw:
    * `kid.secret[,kid.secret…]` or a bare secret), parsed by the composition
    * root. Null = resumption off: a runner restart severs every supervisor
@@ -94,22 +85,6 @@ export interface RunnerConfig {
    * the host's 127.0.0.1) turns it off.
    */
   noProxyLoopback: boolean;
-  /**
-   * Ceiling on waiting for the backend to ACCEPT a park (never the archive
-   * itself, which completes backend-side): bounds the predecessor
-   * sandbox's termination grace plus slack.
-   */
-  cloudParkWaitSeconds: number;
-  /**
-   * Ceiling on waking a home: a wake may pay a still-finishing park, fresh
-   * capacity coming up, and a full restore.
-   */
-  cloudWakeWaitSeconds: number;
-  /**
-   * How long a create watches the new sandbox for an image-pull refusal
-   * (the remote analogue of Docker's synchronous pull failure).
-   */
-  cloudImageWaitSeconds: number;
   /**
    * How many sandbox STARTS may execute concurrently. Default 1
    * keeps backend-touching work globally serialized — docker operations on
@@ -275,15 +250,6 @@ export const loadConfig = (
   }
 
   const backend = env.RUNNER_BACKEND ?? "docker";
-  const sandboxManagerUrl = env.RUNNER_SANDBOX_MANAGER_URL?.trim() || null;
-  const sandboxManagerToken = env.RUNNER_SANDBOX_MANAGER_TOKEN?.trim() || null;
-  if (backend === "cloud" && (!sandboxManagerUrl || !sandboxManagerToken)) {
-    throw new ConfigError(
-      'RUNNER_BACKEND="cloud" requires RUNNER_SANDBOX_MANAGER_URL and ' +
-        "RUNNER_SANDBOX_MANAGER_TOKEN — the cloud backend cannot reach its " +
-        "sandbox-manager without them.",
-    );
-  }
   const kubeNamespace = env.RUNNER_KUBE_NAMESPACE?.trim() || "";
   if (backend === "kubernetes" && !kubeNamespace) {
     throw new ConfigError(
@@ -330,16 +296,11 @@ export const loadConfig = (
       .filter((entry) => entry.length > 0),
     orphanReap: bool(env.RUNNER_ORPHAN_REAP, true),
     orphanGraceSeconds: int(env.RUNNER_ORPHAN_GRACE_SECONDS, 3600),
-    sandboxManagerUrl,
-    sandboxManagerToken,
     portApi: portApiConfig(env),
     noProxyLoopback: bool(env.RUNNER_NO_PROXY_LOOPBACK, true),
-    cloudParkWaitSeconds: int(env.RUNNER_CLOUD_PARK_WAIT_SECONDS, 120),
-    cloudWakeWaitSeconds: int(env.RUNNER_CLOUD_WAKE_WAIT_SECONDS, 900),
-    cloudImageWaitSeconds: int(env.RUNNER_CLOUD_IMAGE_WAIT_SECONDS, 240),
-    // The kubernetes backend's starts are remote operations like the cloud
-    // arm's, so the default serialization that protects a single Docker
-    // host would only head-of-line-block them here.
+    // The kubernetes backend's starts are remote operations, so the default
+    // serialization that protects a single Docker host would only
+    // head-of-line-block them here.
     lifecycleConcurrency: int(
       env.RUNNER_LIFECYCLE_CONCURRENCY,
       backend === "kubernetes" ? 4 : 1,

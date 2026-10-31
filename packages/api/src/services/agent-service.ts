@@ -23,6 +23,7 @@ import { autoAttachLlmKeys } from "./llm-autoattach-service";
 import { dropPrincipalFromPolicyInTx, lockScope } from "./policy-service";
 import { llmProvider } from "../llm/registry";
 import { isOnpremEdition } from "../lib/policy-flags";
+import { getSandboxLifecycleHooks } from "../providers/hooks/sandbox-lifecycle-hooks";
 import { logger } from "../lib/logger";
 import {
   AGENT_CONFLICT_REASON_EXISTING,
@@ -37,6 +38,7 @@ import {
 
 /** The #1115 conflict line. Module scope: one child, not one per create. */
 const logAgentConflict = createLogAgentConflict(logger);
+const log = logger.child({ component: "agent-service" });
 
 export const generateAccessToken = () =>
   `aoc_${randomBytes(32).toString("hex")}`;
@@ -335,6 +337,27 @@ export const createAgent = async (
         createdAt: true,
       },
     });
+
+    // A hosted extension's after-create step (best-effort by contract, like
+    // the LLM auto-attach: a failure here must never make "created" false).
+    const afterSandboxCreated = getSandboxLifecycleHooks().afterSandboxCreated;
+    if (hosted && runnerId && afterSandboxCreated) {
+      try {
+        const born = await db.sandbox.findUnique({
+          where: { agentId: agent.id },
+          select: { id: true },
+        });
+        if (born) {
+          await afterSandboxCreated({
+            agentId: agent.id,
+            sandboxId: born.id,
+            runnerId,
+          });
+        }
+      } catch (err: unknown) {
+        log.warn({ err, agentId: agent.id }, "after-create hook failed");
+      }
+    }
 
     // Wake any held runner poll so the sandbox starts now rather than after
     // the next re-check.

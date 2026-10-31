@@ -37,6 +37,8 @@ describe("gateway approval guidance", () => {
         "do not ask the user to connect the service again",
         "Show the user the `manage_url`",
         "only for a user who wants a different account",
+        "`credential_unavailable` means this agent HAS the credential",
+        "Do not ask the user to connect or attach anything",
       ])
         expect(text).toContain(guidance);
       expect(text).not.toContain("policy error (403 with a JSON body)");
@@ -76,10 +78,17 @@ describe("gateway approval guidance", () => {
         "Each group of 25 is its own batch: a new id",
         "(2 of 5)",
         "the total counting only that group, never the whole list",
+        // A total the agent can't send at once leaves the card waiting on
+        // requests that only leave once it is decided.
+        "Set a total only when you send that many at once",
+        "use ONE bulk call where the API has one, or tag no total",
         "Wait until that group is decided before sending the next",
         "Updating a list of Salesforce records: send ONE bulk update** of up to 200 records",
         "PATCH /services/data/v62.0/composite/sobjects",
-        "One record type per call. Each record sets only its own fields.",
+        "One record type per call. Each record sets only its own fields",
+        // Splitting one task by field set gives the reviewer one approval
+        // per call for what is one change.
+        "never one call per set of fields",
         "so ONE approval for the whole list",
         "stop if they all failed",
         "the number started must equal the group's size",
@@ -96,6 +105,9 @@ describe("gateway approval guidance", () => {
       // for a whole 105-record list left each card waiting for the rest.
       expect(text).not.toContain("at most 10 at a time");
       expect(text).not.toContain("up to 25 at once");
+      // Salesforce takes any fields per record in one collections update.
+      // The old rule split one task into a call per field set.
+      expect(text).not.toContain("the same fields per call");
     },
   );
 
@@ -177,6 +189,20 @@ describe("gateway approval guidance", () => {
 
 describe("custom connection proposals", () => {
   it.each([undefined, "claude", "hermes"])(
+    "sends a built-in app through request_app_connection, never a custom connection (%s)",
+    (agent) => {
+      const text = getGatewaySkill(agent).replace(/\s+/g, " ");
+      for (const guidance of [
+        "When you have `request_app_connection`, call it first: a custom connection is only for a service it answers `no_builtin_app` for",
+        "If `propose_custom_connection` refuses because the service is a built-in app, call `request_app_connection`",
+        "Never offer an API key, an API token or a custom connection for a built-in app.",
+      ]) {
+        expect(text).toContain(guidance);
+      }
+    },
+  );
+
+  it.each([undefined, "claude", "hermes"])(
     "teaches propose_custom_connection and never pasting keys in chat (%s)",
     (agent) => {
       const text = getGatewaySkill(agent).replace(/\s+/g, " ");
@@ -187,7 +213,25 @@ describe("custom connection proposals", () => {
         "You never see the key",
         "**Never** ask them to paste a key into the chat",
         "one read-only GET",
-        'version: "0.9.0"',
+        'version: "0.10.0"',
+      ]) {
+        expect(text).toContain(guidance);
+      }
+    },
+  );
+
+  it.each([undefined, "claude", "hermes"])(
+    "steers GitHub App connections off the personal paths and names the missing permission (%s)",
+    (agent) => {
+      const text = getGatewaySkill(agent).replace(/\s+/g, " ");
+      for (const guidance of [
+        "`GET /installation/repositories`",
+        "`POST /orgs/<org>/repos`",
+        "Never use the personal `/user/...` paths",
+        'misleading 403 "Rate Limit Exceeded"',
+        "`X-Accepted-GitHub-Permissions`",
+        '"Repository creation" or "Administration", write',
+        "approved by whoever installed it",
       ]) {
         expect(text).toContain(guidance);
       }

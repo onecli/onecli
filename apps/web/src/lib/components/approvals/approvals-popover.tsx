@@ -11,14 +11,21 @@ import {
   usePendingChannelApprovals,
 } from "@/hooks/use-approvals";
 import type { PendingApproval } from "@/lib/api/approvals";
-import type { PendingChannelApprovalItem } from "@/lib/api/channel-approvals";
+import {
+  bellChannelApprovals,
+  type PendingChannelApprovalItem,
+} from "@/lib/api/channel-approvals";
 import { ApprovalListItem } from "./approval-list-item";
 import { GroupedApprovalCard } from "./grouped-approval-card";
 import { ActionApprovalRow } from "./action-approval-row";
 import { ReachAskRow } from "./reach-ask-row";
+import { LostConnectionRow } from "./lost-connection-row";
+import { useChannelAlerts } from "@/hooks/use-channel-alerts";
 
 interface ApprovalsPopoverProps {
   onShowDetails: (approval: PendingApproval) => void;
+  /** Close the popover when a row navigates away (the alert's Fix link). */
+  onNavigate?: () => void;
 }
 
 /** One row of the merged inbox, tagged by source. A task's several gateway
@@ -35,11 +42,17 @@ type BellItem =
 /**
  * The ONE approvals inbox: gateway tool prompts, one-shot action approvals,
  * and reach asks, merged and sorted by age (oldest first — the longest-
- * waiting decision surfaces on top). Every kind decides right here.
+ * waiting decision surfaces on top). Every kind decides right here. Above
+ * them, "Needs attention": agents that lost their channel connection.
  */
-export const ApprovalsPopover = ({ onShowDetails }: ApprovalsPopoverProps) => {
+export const ApprovalsPopover = ({
+  onShowDetails,
+  onNavigate,
+}: ApprovalsPopoverProps) => {
   const { data: gateway = [] } = usePendingApprovals();
-  const { data: channel = [] } = usePendingChannelApprovals();
+  const { data: allChannel = [] } = usePendingChannelApprovals();
+  const { data: alerts = [] } = useChannelAlerts();
+  const channel = bellChannelApprovals(allChannel);
 
   const items: BellItem[] = [
     ...groupApprovals(gateway).flatMap((group): BellItem[] => {
@@ -56,6 +69,22 @@ export const ApprovalsPopover = ({ onShowDetails }: ApprovalsPopoverProps) => {
 
   return (
     <div className="flex flex-col">
+      {alerts.length > 0 && (
+        <div className="border-b">
+          <div className="flex items-center border-b px-4 py-3">
+            <span className="text-sm font-medium">Needs attention</span>
+          </div>
+          <div className="divide-y">
+            {alerts.map((alert) => (
+              <LostConnectionRow
+                key={alert.id}
+                item={alert}
+                onNavigate={onNavigate}
+              />
+            ))}
+          </div>
+        </div>
+      )}
       <div className="flex items-center justify-between border-b px-4 py-3">
         <span className="text-sm font-medium">Pending approvals</span>
         <span className="text-muted-foreground flex items-center gap-1.5 text-xs">
@@ -65,18 +94,24 @@ export const ApprovalsPopover = ({ onShowDetails }: ApprovalsPopoverProps) => {
       </div>
 
       {items.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-2 px-4 py-10 text-center">
-          <div className="bg-muted flex size-10 items-center justify-center rounded-full">
-            <Inbox
-              aria-hidden="true"
-              className="text-muted-foreground size-5"
-            />
-          </div>
-          <p className="text-sm font-medium">No pending approvals</p>
-          <p className="text-muted-foreground text-xs">
-            You&apos;re all caught up.
+        alerts.length > 0 ? (
+          <p className="text-muted-foreground px-4 py-6 text-center text-xs">
+            No pending approvals.
           </p>
-        </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center gap-2 px-4 py-10 text-center">
+            <div className="bg-muted flex size-10 items-center justify-center rounded-full">
+              <Inbox
+                aria-hidden="true"
+                className="text-muted-foreground size-5"
+              />
+            </div>
+            <p className="text-sm font-medium">No pending approvals</p>
+            <p className="text-muted-foreground text-xs">
+              You&apos;re all caught up.
+            </p>
+          </div>
+        )
       ) : (
         <ScrollArea className="max-h-96">
           <div className="divide-y">

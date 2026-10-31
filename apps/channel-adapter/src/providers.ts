@@ -57,12 +57,11 @@ export interface ProviderTransportHandlers {
   /** A human clicked a REACH card's button ("how should the agent handle
    * this channel?"). Same trust shape as the approval click: only the
    * opaque grant id + the clicker's channel-native id ride the wire, and
-   * the control plane authorizes the clicker. The three settlements are
-   * the card's three answers - open to everyone here, OneCLI users only,
-   * or silent in this channel. */
+   * the control plane authorizes the clicker. Two settlements: answer
+   * everyone here, or stay silent in this channel. */
   onReachDecision: (input: {
     grantId: string;
-    decision: "approved" | "members_only" | "blocked";
+    decision: "approved" | "blocked";
     clickerExternalUserId: string;
   }) => void;
   /** A human clicked an ACTION-approval card's button ("may the agent do
@@ -72,8 +71,10 @@ export interface ProviderTransportHandlers {
    * rewrites every posted card itself. */
   onActionDecision: (input: {
     approvalId: string;
-    decision: "approve" | "approve_always" | "reject";
+    decision: "approve" | "reject";
     clickerExternalUserId: string;
+    /** A choice card's picked option. */
+    choice?: string;
   }) => void;
   /** A human pressed Stop on the agent's narration card (where no native
    * loader stands). Only the card's address and the clicker ride the wire;

@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const trelloPermissions: AppPermissionDefinition = {
   provider: "trello",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

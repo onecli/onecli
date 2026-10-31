@@ -5,6 +5,7 @@ import type {
   SandboxSnapshot,
   SandboxSpec,
   HomeRef,
+  WakeHoldReason,
 } from "./types";
 
 /**
@@ -30,6 +31,10 @@ export interface FakeBackend extends SandboxBackend {
   readonly wakes: Array<{ ref: HomeRef; workspaceId?: string }>;
   /** Every parkHome call's ref, in order. */
   readonly parks: HomeRef[];
+  /** Make the NEXT wake announce these holds (in order) before returning
+   * ready: how a test drives the runner's `waiting_for_capacity` report
+   * without a real substrate. */
+  holdNextWake(reasons: WakeHoldReason[]): void;
   readonly prepared: () => boolean;
   /** The runner id the backend was told to label its objects with. */
   readonly owner: () => string | undefined;
@@ -55,6 +60,7 @@ export const createFakeBackend = (): FakeBackend => {
   const homes = new Map<string, HomeRef>();
   const wakes: Array<{ ref: HomeRef; workspaceId?: string }> = [];
   const parks: HomeRef[] = [];
+  let pendingWakeHolds: WakeHoldReason[] = [];
   const failures = new Map<string, Error | undefined>();
   /** Foreign-labeled leftovers planted by tests (the sweep's subjects). */
   let seeded: ManagedObject[] = [];
@@ -132,8 +138,14 @@ export const createFakeBackend = (): FakeBackend => {
     async parkHome(ref) {
       parks.push(ref);
     },
-    async wakeHome(ref, workspaceId) {
+    async wakeHome(ref, workspaceId, _resources, onHold) {
       wakes.push({ ref, ...(workspaceId !== undefined && { workspaceId }) });
+      const holds = pendingWakeHolds;
+      pendingWakeHolds = [];
+      for (const reason of holds) onHold?.(reason);
+    },
+    holdNextWake(reasons) {
+      pendingWakeHolds = [...reasons];
     },
 
     async listHomes() {

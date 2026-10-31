@@ -171,6 +171,7 @@ pub async fn handle_websocket(
                 "GET",
                 &path,
                 host,
+                proxy_ctx.agent_id.as_deref(),
                 proxy_ctx.workspace_id.as_deref(),
             ));
         }
@@ -180,6 +181,7 @@ pub async fn handle_websocket(
                 "GET",
                 &path,
                 rule_name,
+                proxy_ctx.agent_id.as_deref(),
                 proxy_ctx.workspace_id.as_deref(),
             ));
         }
@@ -198,6 +200,7 @@ pub async fn handle_websocket(
                 "GET",
                 &path,
                 "Manual approval required",
+                proxy_ctx.agent_id.as_deref(),
                 proxy_ctx.workspace_id.as_deref(),
             ));
         }

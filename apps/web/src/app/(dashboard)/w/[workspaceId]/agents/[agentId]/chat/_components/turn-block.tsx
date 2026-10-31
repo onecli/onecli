@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  LIFECYCLE_TURN_ERROR_CODES,
   TURN_FAILED_RAW_ERROR_MESSAGE,
   isRawErrorPayload,
 } from "@onecli/api/validations/conversation";
@@ -11,6 +10,7 @@ import type { Turn } from "@/lib/api/types";
 import type { RenderedTurn } from "@/lib/chat/transcript";
 import {
   isActiveTurn,
+  isAddKeyCode,
   isAutomationTurn,
   isJoinedTurn,
   isJoiningTurn,
@@ -20,13 +20,16 @@ import { AgentAnswer } from "./agent-answer";
 import { AutomationTurnHeader } from "./automation-turn";
 import { ActivityLine } from "./activity-line";
 import { FollowUpExchange } from "./follow-up-exchange";
-import { GreetingConnectCard } from "./greeting-connect-card";
+import { GreetingActions } from "./greeting-actions";
 import { NarrationText } from "./narration-text";
 import { AttachmentChips } from "./attachment-chips";
 import { originLabel } from "./origin-label";
 import { ToolGroup } from "./tool-group";
-import { TurnNotice } from "./turn-notice";
+import { connectLinkTextFromTools } from "@/lib/chat/connect-links";
+import { TurnNotice, type TurnNoticeAction } from "./turn-notice";
 import { UserBubble } from "./user-bubble";
+import { SkillImportCard } from "./skill-import-card";
+import { isSkillImportTool, parseSkillImport } from "@/lib/chat/skill-import";
 
 /**
  * One turn: what was asked, what the agent did, what came back.
@@ -41,26 +44,25 @@ const waitingCopy = (turn: Turn): string =>
     ? "Waking the agent…"
     : "Thinking…";
 
-/** Turn.errorCode values that mean "a platform hiccup, not agent output" —
- *  rendered as the quiet TurnNotice, never the red failure box (the copy
- *  already says what to do; red would say the agent is broken). Derived from
- *  the API's own registry (the same client-safe module the composer reads
- *  TURN_MESSAGE_MAX_LENGTH from), so a new lifecycle code reaches this
- *  branch without a hand-synced copy; an unknown code still safely falls
- *  back to the red box. */
-const FRIENDLY_FAILURE_CODES = new Set<string>(LIFECYCLE_TURN_ERROR_CODES);
-
 /** Turn.errorCode values whose fix is a link away on the agent's Models
- *  page, with the label saying WHICH fix: no key at all vs a key the
- *  provider refused. Keyed on the CODE, never the message text — and a Map,
- *  not a bare object, so a peer-supplied string can never resolve to a
- *  prototype member. */
+ *  page, with the label saying WHICH fix: no key at all, a key the provider
+ *  refused, a key the workspace holds that this agent was not given, or a
+ *  key it holds whose saved value could not be read.
+ *  Keyed on the CODE, never the message text, and a Map, not a bare
+ *  object, so a peer-supplied string can never resolve to a prototype
+ *  member. */
 const KEY_FIX_LABELS = new Map<string, string>([
   ["no_model_key", "Connect a model key"],
   ["model_provider_error", "Check the model key"],
   // The free trial credit ran out — same family, sharper verb: there is no
   // user key to check, the fix is adding one.
   ["trial_credit_exhausted", "Add your own model key"],
+  // The key exists; it is attached on the same Models page, so this one
+  // always navigates (the in-place dialog ADDS a key, which is not the fix).
+  ["model_key_not_attached", "Attach the key"],
+  // The agent holds the key but its saved value could not be read: it is
+  // re-entered on the same page (never the add-key dialog either).
+  ["model_key_unreadable", "Re-enter the key"],
 ]);
 
 export const TurnBlock = ({
@@ -126,9 +128,9 @@ export const TurnBlock = ({
   );
   // The transcript stream's raw `error` event lands a beat before the turns
   // poll flips the status and delivers the canonical error + errorCode. While
-  // the poll still says ACTIVE, showing the stream's raw text would flash the
-  // red blob and then swap to the friendly notice — so an active turn keeps
-  // its waiting state and the error renders only from the settled poll view.
+  // the poll still says ACTIVE, showing the stream's raw text would flash it
+  // and then swap to the canonical notice, so an active turn keeps its
+  // waiting state and the error renders only from the settled poll view.
   const errorText = turn.error ?? (active ? undefined : rendered?.error);
   // WORKING vs SETTLED. While the turn runs and no durable answer exists,
   // the agent block is a live WORK LOG, Claude-style: the agent's opening
@@ -161,18 +163,35 @@ export const TurnBlock = ({
   const lastTool = rendered?.tools.at(-1);
   const captionRepeatsHeader =
     lastTool !== undefined && activityText === activityForTool(lastTool.name);
-  // A turn the reader can fix from the Models page — no key yet, or a key
-  // the provider refused. Rendered as guidance with the fix attached, rather
-  // than as a failure.
+  // EVERY failure renders as a notice, never a red failure box: each
+  // sentence on this surface already says what to do next, and none is a
+  // crash the reader caused. What varies is the action and the details.
+  //
+  // The fix the code names, when it is a link away on the Models page. The
+  // in-place add-key dialog applies only when the fix is ADDING a key.
   const keyFixLabel = KEY_FIX_LABELS.get(turn.errorCode ?? "");
-  // A lifecycle hiccup (restart, start failure, capacity): guidance too,
-  // just with no action to attach — the sentence itself says what to do.
-  const friendlyFailure = FRIENDLY_FAILURE_CODES.has(turn.errorCode ?? "");
+  const keyFix: TurnNoticeAction | undefined = keyFixLabel
+    ? isAddKeyCode(turn.errorCode) && onConnectModelKey
+      ? { onClick: onConnectModelKey, label: keyFixLabel }
+      : modelsHref
+        ? { href: modelsHref, label: keyFixLabel }
+        : undefined
+    : undefined;
   // An uncoded failure whose text is a provider's raw response body, not a
-  // sentence: the reader gets the generic copy, and the raw text stays one
-  // click away for whoever is debugging. A readable sentence keeps the red
-  // line as written.
+  // sentence (a coded one always carries the control plane's canonical
+  // copy): the reader gets the generic line. A readable sentence is shown as
+  // written.
   const rawPayload = Boolean(errorText && isRawErrorPayload(errorText));
+  const noticeText = rawPayload ? TURN_FAILED_RAW_ERROR_MESSAGE : errorText;
+  // The raw text behind the notice, one click away for whoever is
+  // debugging: the payload the generic line replaced, or, under a coded
+  // failure's canonical copy, the transcript's error event (a policy
+  // refusal names its rule there).
+  const rawDetails = rawPayload
+    ? errorText
+    : turn.errorCode && rendered?.error && rendered.error !== errorText
+      ? rendered.error
+      : undefined;
 
   return (
     <>
@@ -250,17 +269,22 @@ export const TurnBlock = ({
                   />
                 )}
                 {rendered?.text ? (
-                  <>
-                    <AgentAnswer text={rendered.text} />
-                    {/* Under the agent's greeting, the first-connection
-                        picks it just named — the same card a connect link
-                        would render, one click each. Only on a finished
-                        greeting: the text lands first, the card follows. */}
-                    {turn.source === "greeting" && !active && (
-                      <GreetingConnectCard />
-                    )}
-                  </>
+                  <AgentAnswer
+                    text={rendered.text}
+                    toolConnectLinks={connectLinkTextFromTools(rendered.tools)}
+                  />
                 ) : null}
+                {/* What a skill import did, under the reply: built from the
+                    import tool's own result, one card per import call. */}
+                {!active &&
+                  rendered?.tools
+                    .filter((tool) => isSkillImportTool(tool.name))
+                    .map((tool) => {
+                      const data = parseSkillImport(tool.output);
+                      return data ? (
+                        <SkillImportCard key={tool.callId} data={data} />
+                      ) : null;
+                    })}
               </>
             )}
             {/* THE AGENT'S FILES (send_file), under its answer: the same
@@ -309,38 +333,22 @@ export const TurnBlock = ({
                 />
               );
             })}
-            {errorText &&
-              (keyFixLabel ? (
-                <TurnNotice
-                  message={errorText}
-                  {...((turn.errorCode === "no_model_key" ||
-                    turn.errorCode === "trial_credit_exhausted") &&
-                  onConnectModelKey
-                    ? {
-                        action: {
-                          onClick: onConnectModelKey,
-                          label: keyFixLabel,
-                        },
-                      }
-                    : modelsHref && {
-                        action: { href: modelsHref, label: keyFixLabel },
-                      })}
-                />
-              ) : friendlyFailure ? (
-                <TurnNotice message={errorText} />
-              ) : rawPayload ? (
-                <TurnNotice
-                  message={TURN_FAILED_RAW_ERROR_MESSAGE}
-                  details={errorText}
-                />
-              ) : (
-                <p className="bg-destructive/10 text-destructive rounded-md px-3 py-2 text-xs">
-                  {errorText}
-                </p>
-              ))}
+            {noticeText && (
+              <TurnNotice
+                message={noticeText}
+                action={keyFix}
+                details={rawDetails}
+              />
+            )}
             {turn.status === "aborted" && !errorText && (
               <p className="text-muted-foreground text-xs italic">Stopped.</p>
             )}
+            {/* Under the onboarding agent's first message, the first step
+                it just pointed at, one click each. Only once the greeting
+                settles (its words land first, the card follows), and under
+                a greeting that failed too: the agent could not speak, but
+                connecting Gmail is still the first thing to do. */}
+            {turn.source === "greeting" && !active && <GreetingActions />}
           </MessageContent>
         </Message>
       )}

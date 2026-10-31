@@ -50,12 +50,12 @@ const requireUser = async () => {
 
 /**
  * Returns the URL of the user's active workspace for client-side redirects
- * after sign-in / onboarding. Falls back to `/workspaces` when the user has
- * no workspace yet (shouldn't happen post-signup but safe to handle).
+ * after sign-in / onboarding: the bare `/w/<id>`, whose index page lands on
+ * the workspace's first agent (or agent creation). Falls back to `/create-org`
+ * when the user has no workspace yet (shouldn't happen post-signup but safe
+ * to handle).
  */
-export const getActiveWorkspacePath = async (
-  destination: string = "overview",
-): Promise<string> => {
+export const getActiveWorkspacePath = async (): Promise<string> => {
   const user = await requireUser();
   const defaultWorkspace = await ensureUserDefaultOrgAndWorkspace(
     user.id,
@@ -64,7 +64,7 @@ export const getActiveWorkspacePath = async (
 
   if (!defaultWorkspace) return "/create-org";
 
-  return `/w/${defaultWorkspace.id}/${destination}`;
+  return `/w/${defaultWorkspace.id}`;
 };
 
 /**
@@ -146,12 +146,12 @@ export const createWorkspaceAction = async (
 };
 
 /**
- * Switch the user's active workspace and redirect to its overview page.
- * Used by the "switch workspace" form on the `/workspaces` page.
+ * Switch the user's active workspace and redirect into it (its first agent,
+ * via the workspace index). Used by the "switch workspace" form on the
+ * `/workspaces` page.
  */
 export const switchWorkspaceAction = async (
   workspaceId: string,
-  destination: string = "overview",
 ): Promise<ActionResult> => {
   return safeAction(async () => {
     const user = await requireUser();
@@ -159,7 +159,7 @@ export const switchWorkspaceAction = async (
       throw new Error("Workspace not found");
     }
 
-    redirect(`/w/${workspaceId}/${destination}`);
+    redirect(`/w/${encodeURIComponent(workspaceId)}`);
   });
 };
 

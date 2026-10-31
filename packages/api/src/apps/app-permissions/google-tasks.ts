@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const googleTasksPermissions: AppPermissionDefinition = {
   provider: "google-tasks",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

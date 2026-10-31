@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { proofDatabaseUrl } from "../testing/pg-proof.js";
+import { MAX_IMPORTED_SKILL_FILES } from "../validations/skills";
+import type { ImportedSkill } from "./skill-import";
 
 /**
  * Skills on REAL PostgreSQL (step 9). What only pg can prove: the
@@ -576,5 +578,337 @@ describe.skipIf(!PROOF_URL)("the agent door (the skill_* tools)", () => {
         content: "y".repeat(13_000),
       }),
     ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+  });
+});
+
+describe.skipIf(!PROOF_URL)("folder skills from a zip (pg)", () => {
+  const imported = (name: string): ImportedSkill => ({
+    folder: name,
+    name,
+    description: "Use it for incidents.",
+    content: "# Tools\n\nRun ./run.",
+    bytes: 0,
+    skipped: [],
+    files: [
+      {
+        path: "run",
+        content: "#!/bin/sh\n",
+        data: null,
+        executable: true,
+      },
+      {
+        path: "fixtures/incidents/a.json",
+        content: "{}",
+        data: null,
+        executable: false,
+      },
+      {
+        path: "assets/logo.png",
+        content: "",
+        data: Buffer.from([0, 1, 255]),
+        executable: false,
+      },
+    ],
+  });
+
+  it("saves every file, keeps binary bytes and the runnable flag", async () => {
+    const agentId = await seedAgent("zip");
+    const [outcome] = await skillService.importAgentSkills(
+      WORKSPACE,
+      agentId,
+      [imported(`${P}tools`)],
+      CREATOR,
+    );
+    expect(outcome).toMatchObject({ files: 4, replaced: false });
+    const files = await db.skillFile.findMany({
+      where: { skill: { agentId } },
+      orderBy: { path: "asc" },
+      select: { path: true, data: true, executable: true },
+    });
+    expect(files.map((f) => [f.path, f.executable])).toEqual([
+      ["assets/logo.png", false],
+      ["fixtures/incidents/a.json", false],
+      ["run", true],
+    ]);
+    expect(Buffer.from(files[0]!.data!)).toEqual(Buffer.from([0, 1, 255]));
+  });
+
+  it("re-importing the same name replaces it instead of failing", async () => {
+    const agentId = await seedAgent("zip2");
+    await skillService.importAgentSkills(
+      WORKSPACE,
+      agentId,
+      [imported(`${P}tools`)],
+      CREATOR,
+    );
+    const again = {
+      ...imported(`${P}tools`),
+      files: [imported(`${P}tools`).files[0]!],
+    };
+    const [outcome] = await skillService.importAgentSkills(
+      WORKSPACE,
+      agentId,
+      [again],
+      CREATOR,
+    );
+    expect(outcome?.replaced).toBe(true);
+    expect(await db.skillFile.count({ where: { skill: { agentId } } })).toBe(1);
+  });
+
+  it("a description stored before the doors cleaned it reads clean, and a save rewrites it", async () => {
+    const agentId = await seedAgent("legacy-desc");
+    const dirty = `Old${String.fromCharCode(0x07)} row${String.fromCharCode(0x202e)} here`;
+    const row = await db.skill.create({
+      data: {
+        scope: "agent",
+        agentId,
+        name: `${P}legacy`,
+        description: dirty,
+        content: "# body",
+      },
+    });
+    const view = await skillService.getSkill(WORKSPACE, ORG, row.id);
+    expect(view.description).toBe("Old row here");
+    const listed = await skillService.listSkillsForWorkspace(WORKSPACE, ORG);
+    expect(listed.find((s) => s.id === row.id)?.description).toBe(
+      "Old row here",
+    );
+    // The editor sends back what it showed; that rewrites the row clean.
+    await skillService.updateSkill(WORKSPACE, ORG, row.id, {
+      description: view.description,
+    });
+    const stored = await db.skill.findUniqueOrThrow({ where: { id: row.id } });
+    expect(stored.description).toBe("Old row here");
+  });
+
+  it("names each saved row by id, the same row when a name is replaced", async () => {
+    const agentId = await seedAgent("zip-ids");
+    const [first, second] = await skillService.importAgentSkills(
+      WORKSPACE,
+      agentId,
+      [imported(`${P}tools`), imported(`${P}notes`)],
+      CREATOR,
+    );
+    const rows = await db.skill.findMany({
+      where: { agentId },
+      select: { id: true, name: true },
+    });
+    const idOf = new Map(rows.map((r) => [r.name, r.id]));
+    expect(first?.id).toBe(idOf.get(`${P}tools`));
+    expect(second?.id).toBe(idOf.get(`${P}notes`));
+    expect(first?.id).not.toBe(second?.id);
+
+    const [again] = await skillService.importAgentSkills(
+      WORKSPACE,
+      agentId,
+      [imported(`${P}tools`)],
+      CREATOR,
+    );
+    expect(again).toMatchObject({ id: first?.id, replaced: true });
+  });
+
+  it("editing the description in the dashboard keeps imported files", async () => {
+    const agentId = await seedAgent("zip3");
+    await skillService.importAgentSkills(
+      WORKSPACE,
+      agentId,
+      [imported(`${P}tools`)],
+      CREATOR,
+    );
+    const skill = await db.skill.findFirstOrThrow({ where: { agentId } });
+    const view = await skillService.getSkill(WORKSPACE, ORG, skill.id);
+    // The dashboard sends back only the files it can edit (text ones).
+    const editable = view.files
+      .filter((f) => f.editable)
+      .map((f) => ({ path: f.path, content: f.content }));
+    await skillService.updateSkill(WORKSPACE, ORG, skill.id, {
+      description: "New words.",
+      files: editable,
+    });
+    expect(await db.skillFile.count({ where: { skillId: skill.id } })).toBe(3);
+    const binary = view.files.find((f) => f.path === "assets/logo.png");
+    expect(binary).toMatchObject({
+      binary: true,
+      editable: false,
+      content: "",
+    });
+  });
+
+  it("refuses an import that would pass the agent's skill count", async () => {
+    const agentId = await seedAgent("zip4");
+    const many = Array.from({ length: 11 }, (_, i) => imported(`${P}s${i}`));
+    await expect(
+      skillService.importAgentSkills(WORKSPACE, agentId, many, CREATOR),
+    ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+    // All or nothing: not one of them was saved.
+    expect(await db.skill.count({ where: { agentId } })).toBe(0);
+  });
+
+  it("refuses an import past the tier's byte budget, counting what is held", async () => {
+    const agentId = await seedAgent("zip-bytes");
+    const heavy = (name: string) => ({
+      ...imported(name),
+      bytes: 6 * 1024 * 1024,
+    });
+    await skillService.importAgentSkills(
+      WORKSPACE,
+      agentId,
+      [heavy(`${P}h1`)],
+      CREATOR,
+    );
+    // Held bytes are measured in the database, not taken from the caller.
+    await db.skillFile.create({
+      data: {
+        skill: { connect: { agentId_name: { agentId, name: `${P}h1` } } },
+        path: "big.bin",
+        content: "",
+        data: new Uint8Array(6 * 1024 * 1024),
+      },
+    });
+    await expect(
+      skillService.importAgentSkills(
+        WORKSPACE,
+        agentId,
+        [heavy(`${P}h2`)],
+        CREATOR,
+      ),
+    ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+    // Replacing the held skill frees its bytes.
+    await expect(
+      skillService.importAgentSkills(
+        WORKSPACE,
+        agentId,
+        [heavy(`${P}h1`)],
+        CREATOR,
+      ),
+    ).resolves.toHaveLength(1);
+  });
+
+  it("concurrent imports can't both pass the count cap", async () => {
+    const agentId = await seedAgent("zip-race");
+    const batch = (from: number) =>
+      Array.from({ length: 6 }, (_, i) => imported(`${P}r${from + i}`));
+    const results = await Promise.allSettled([
+      skillService.importAgentSkills(WORKSPACE, agentId, batch(0), CREATOR),
+      skillService.importAgentSkills(WORKSPACE, agentId, batch(10), CREATOR),
+    ]);
+    expect(results.map((r) => r.status).sort()).toEqual([
+      "fulfilled",
+      "rejected",
+    ]);
+    expect(await db.skill.count({ where: { agentId } })).toBe(6);
+  });
+
+  it("imports nothing and bumps nothing for an empty list", async () => {
+    const agentId = await seedAgent("zip-empty");
+    await expect(
+      skillService.importAgentSkills(WORKSPACE, agentId, [], CREATOR),
+    ).resolves.toEqual([]);
+  });
+
+  it("a runnable text file is listed, not edited, and a save keeps its flag", async () => {
+    const agentId = await seedAgent("zip-exec");
+    await skillService.importAgentSkills(
+      WORKSPACE,
+      agentId,
+      [{ ...imported(`${P}x`), files: [imported(`${P}x`).files[0]!] }],
+      CREATOR,
+    );
+    const skill = await db.skill.findFirstOrThrow({ where: { agentId } });
+    const view = await skillService.getSkill(WORKSPACE, ORG, skill.id);
+    expect(view.files).toEqual([
+      expect.objectContaining({ path: "run", editable: false, content: "" }),
+    ]);
+    await skillService.updateSkill(WORKSPACE, ORG, skill.id, {
+      files: [{ path: "notes.md", content: "added" }],
+    });
+    const run = await db.skillFile.findFirstOrThrow({
+      where: { skillId: skill.id, path: "run" },
+    });
+    expect(run.executable).toBe(true);
+  });
+
+  it("a long imported SKILL.md body can be edited but never grow", async () => {
+    const agentId = await seedAgent("zip-long");
+    const long = "# Long\n\n" + "x".repeat(40_000);
+    await skillService.importAgentSkills(
+      WORKSPACE,
+      agentId,
+      [{ ...imported(`${P}long`), content: long, files: [] }],
+      CREATOR,
+    );
+    const skill = await db.skill.findFirstOrThrow({ where: { agentId } });
+    const shorter = long.slice(0, 30_000);
+    await skillService.updateSkill(WORKSPACE, ORG, skill.id, {
+      content: shorter,
+    });
+    expect(
+      (await db.skill.findUniqueOrThrow({ where: { id: skill.id } })).content,
+    ).toBe(shorter);
+    await expect(
+      skillService.updateSkill(WORKSPACE, ORG, skill.id, {
+        content: `${shorter}${"y".repeat(10_001)}`,
+      }),
+    ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+  });
+
+  it("refuses a dashboard file that clashes with a kept imported file", async () => {
+    const agentId = await seedAgent("zip-clash");
+    await skillService.importAgentSkills(
+      WORKSPACE,
+      agentId,
+      [imported(`${P}c`)],
+      CREATOR,
+    );
+    const skill = await db.skill.findFirstOrThrow({ where: { agentId } });
+    await expect(
+      skillService.updateSkill(WORKSPACE, ORG, skill.id, {
+        files: [{ path: "assets", content: "a file where a folder is" }],
+      }),
+    ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+  });
+
+  it("a patch never grows an imported skill past its file limit", async () => {
+    const agentId = await seedAgent("zip-count");
+    const full = Array.from(
+      { length: MAX_IMPORTED_SKILL_FILES - 1 },
+      (_, i) => ({
+        path: `f/${i}.txt`,
+        content: "x",
+        data: null,
+        executable: false,
+      }),
+    );
+    await skillService.importAgentSkills(
+      WORKSPACE,
+      agentId,
+      [{ ...imported(`${P}full`), files: full }],
+      CREATOR,
+    );
+    const skill = await db.skill.findFirstOrThrow({ where: { agentId } });
+    await expect(
+      skillService.updateSkill(WORKSPACE, ORG, skill.id, {
+        files: [{ path: "one-more.md", content: "y" }],
+      }),
+    ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+    // Rewriting a file it already holds stays inside the limit.
+    await skillService.updateSkill(WORKSPACE, ORG, skill.id, {
+      files: [{ path: "f/0.txt", content: "rewritten" }],
+    });
+    expect(await db.skillFile.count({ where: { skillId: skill.id } })).toBe(
+      MAX_IMPORTED_SKILL_FILES - 1,
+    );
+  });
+
+  it("never imports into another workspace's agent", async () => {
+    const foreign = await seedAgent("zipf", FOREIGN_WORKSPACE);
+    await expect(
+      skillService.importAgentSkills(
+        WORKSPACE,
+        foreign,
+        [imported(`${P}x`)],
+        CREATOR,
+      ),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 });

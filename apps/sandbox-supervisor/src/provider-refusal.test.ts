@@ -1,9 +1,14 @@
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { TURN_FAILURE_CODES } from "@onecli/agent-protocol";
 import { describe, expect, it } from "vitest";
 import {
   isModelEndpointNotFound,
   isProviderRefusal,
   isTranscriptRejected,
   isTrialCreditExhausted,
+  terminalErrorClass,
 } from "./provider-refusal";
 
 /** The #1194 terminal error in the exact shape jcode relays it (ids made
@@ -186,9 +191,118 @@ describe("isModelEndpointNotFound", () => {
     'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 214937 tokens > 200000 maximum"}}',
     // A status that merely starts with 404 is not 404.
     "API Error: 4040 something",
-    // The gateway's OWN 404 names its fix; it keeps the passthrough.
+    // The gateway's OWN 404 names its fix; it is not the model endpoint.
     'API Error: 404 {"error":"credential_not_found","message":"No credentials configured for api.example.com in OneCLI."}',
   ])("keeps the raw passthrough for: %s", (message) => {
     expect(isModelEndpointNotFound(message)).toBe(false);
+  });
+});
+
+/** The gateway's `access_restricted` answer on a model call, in the exact
+ * shape jcode relays it (ids made up). */
+const ACCESS_RESTRICTED_401 =
+  'Anthropic API error (401 Unauthorized): {"error":"access_restricted","manage_url":"http://localhost:10254/w/ws/agents/a1/models","message":"api.anthropic.com credentials exist in OneCLI but this agent does not have access. Ask the user to attach the key to this agent: http://localhost:10254/w/ws/agents/a1/models","provider":"api.anthropic.com"}';
+
+describe("terminalErrorClass", () => {
+  it.each([
+    // A missing grant is not a broken key, though its prose would match.
+    [ACCESS_RESTRICTED_401, TURN_FAILURE_CODES.modelKeyNotAttached],
+    [
+      'API Error: 403 {"error":"blocked_by_policy","message":"Blocked by OneCLI policy rule \\"x\\"."}',
+      TURN_FAILURE_CODES.blockedByPolicy,
+    ],
+    [
+      'API Error: 429 {"error":"rate_limited","message":"This request was rate-limited by an OneCLI policy rule.","limit":10}',
+      TURN_FAILURE_CODES.blockedByPolicy,
+    ],
+    [
+      'Anthropic API error (401 Unauthorized): {"error":"credential_unavailable","message":"stored value could not be read"}',
+      TURN_FAILURE_CODES.modelKeyUnreadable,
+    ],
+    [
+      'API Error: 503 {"error":"gateway_restarting","message":"The gateway is restarting."}',
+      TURN_FAILURE_CODES.gatewayUnavailable,
+    ],
+    // Quoted inside another string, the quotes arrive escaped.
+    [
+      '{"detail":"{\\"error\\":\\"upstream_timeout\\",\\"message\\":\\"slow\\"}"}',
+      TURN_FAILURE_CODES.gatewayUnavailable,
+    ],
+    // The gateway's own 404 is its code's class, never the endpoint copy.
+    [
+      'API Error: 404 {"error":"credential_not_found","message":"No credentials configured for api.example.com in OneCLI."}',
+      TURN_FAILURE_CODES.modelProviderError,
+    ],
+    // Each non-gateway class keeps its place in the order.
+    [TRANSCRIPT_400, TURN_FAILURE_CODES.transcriptRejected],
+    [TRIAL_CREDIT_403, TURN_FAILURE_CODES.trialCreditExhausted],
+    [
+      'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}',
+      TURN_FAILURE_CODES.modelProviderError,
+    ],
+    [PROXY_WRONG_PATH_404, TURN_FAILURE_CODES.modelEndpointNotFound],
+  ])("classifies %s", (message, code) => {
+    expect(terminalErrorClass(message)).toBe(code);
+  });
+
+  it.each([
+    // A provider's NESTED error object is never a gateway code.
+    'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long"}}',
+    // An unknown flat code keeps the raw passthrough.
+    '{"error":"some_future_code","message":"x"}',
+    // Prototype names are never classes.
+    '{"error":"constructor"}',
+    "harness event stream ended unexpectedly",
+  ])("keeps the raw passthrough for: %s", (message) => {
+    expect(terminalErrorClass(message)).toBeUndefined();
+  });
+
+  it("classifies every code the gateway answers a proxied request with", () => {
+    // The request path's vocabulary, read from the gateway's sources: the
+    // proxy crate's response builders and the licensed per-request ones.
+    // Control-plane routes (approval decisions, org admin) never answer a
+    // model call, and test code only asserts on bodies the gateway forwards,
+    // so both stay out. A code this misses would reach the chat as raw JSON.
+    const crates = fileURLToPath(
+      new URL("../../gateway/crates", import.meta.url),
+    );
+    const isTestFile = (name: string) => /(^|_)tests?\.rs$/.test(name);
+    const rustFiles = (dir: string): string[] =>
+      readdirSync(dir).flatMap((name) => {
+        const path = join(dir, name);
+        if (statSync(path).isDirectory()) return rustFiles(path);
+        return name.endsWith(".rs") && !isTestFile(name) ? [path] : [];
+      });
+    const sources = [
+      ...rustFiles(join(crates, "proxy/src")),
+      join(crates, "ee/ee/src/response.rs"),
+    ];
+    const emitted = new Set<string>();
+    for (const file of sources) {
+      // Production code only: each file's trailing test module asserts on
+      // provider bodies (`invalid_grant`, ...) the gateway forwards.
+      const text = readFileSync(file, "utf8");
+      const testModule = text.search(/#\[cfg\(test\)\]\s*mod tests/);
+      const source = testModule === -1 ? text : text.slice(0, testModule);
+      for (const shape of [
+        /"error"\s*:\s*"([a-z_]+)"/g,
+        /ERROR(?:_[A-Z_]+)?: &str = "([a-z_]+)"/g,
+        // A code chosen at runtime is returned as `("<code>", format!(...))`.
+        /\(\s*"([a-z_]+)",\s*format!/g,
+      ]) {
+        for (const match of source.matchAll(shape)) {
+          if (match[1]) emitted.add(match[1]);
+        }
+      }
+    }
+    // Floors on the scan itself, so a source move cannot empty it silently.
+    expect(emitted.size).toBeGreaterThan(20);
+    expect(emitted).toContain("budget_exceeded");
+    expect(emitted).toContain("trial_credit_exhausted");
+    const unclassified = [...emitted].filter(
+      (code) =>
+        terminalErrorClass(JSON.stringify({ error: code })) === undefined,
+    );
+    expect(unclassified).toEqual([]);
   });
 });

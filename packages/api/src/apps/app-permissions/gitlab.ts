@@ -19,7 +19,14 @@ export const gitlabPermissions: AppPermissionDefinition = {
           name: "Read project",
           description: "Get project details, files, and metadata",
           hostPattern: "gitlab.com",
-          pathPattern: "/api/v4/projects/*",
+          // The project itself (trailing slash = exactly one segment) and its
+          // repository content (files, tree, blobs, commits, compare). Never
+          // the project's other sub-resources: a raw `/projects/*` prefix also
+          // matched `/variables` (CI variable values), `/triggers` (trigger
+          // tokens) and `/deploy_tokens`, so a read-only grant handed those
+          // out.
+          pathPattern: "/api/v4/projects/*/",
+          aliasPatterns: ["/api/v4/projects/*/repository/*"],
           method: "GET",
         },
         {

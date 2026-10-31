@@ -20,7 +20,16 @@ import { StayedSilentNote } from "./stayed-silent-note";
  * not to answer) renders as a quiet note: nothing was posted in the channel,
  * and the transcript should say so rather than show a stray token.
  */
-export const AgentAnswer = ({ text }: { text: string }) =>
+export const AgentAnswer = ({
+  text,
+  toolConnectLinks = "",
+}: {
+  text: string;
+  /** Connect links the turn's `request_app_connection` calls returned
+   * (`connectLinkTextFromTools`), so the card renders even when the answer
+   * paraphrased or dropped the link. */
+  toolConnectLinks?: string;
+}) =>
   isNoReply(text) ? (
     <StayedSilentNote />
   ) : (
@@ -36,8 +45,11 @@ export const AgentAnswer = ({ text }: { text: string }) =>
           <ChatMarkdown text={text} suppressConnectLinks />
         </BubbleContent>
       </Bubble>
-      {/* Reads the ANSWER only, never the streamed narration, which is
-          untrusted progress text. */}
-      <ConnectorSuggestions text={text} />
+      {/* Reads the ANSWER and the connection tool's own links, never the
+          streamed narration, which is untrusted progress text. The answer
+          comes first, so a link it carries keeps its position. */}
+      <ConnectorSuggestions
+        text={toolConnectLinks ? `${text}\n${toolConnectLinks}` : text}
+      />
     </>
   );

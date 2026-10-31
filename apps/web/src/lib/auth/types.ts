@@ -3,8 +3,7 @@ export interface AuthUser {
   email: string;
   name?: string;
   // Active workspace id, returned by /v1/auth/session. Used by client-side
-  // redirects to land on /w/[workspaceId]/... rather than the unscoped legacy
-  // /overview URL.
+  // redirects to land on /w/[workspaceId] (its first agent).
   workspaceId?: string;
   // Whether the auth provider proved ownership of `email` (e.g. a verified
   // email claim). Optional — adapters that don't know leave it unset.

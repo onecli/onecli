@@ -66,7 +66,7 @@ beforeEach(() => {
     discovery: [],
     agentName: null,
   });
-  getActiveWorkspacePath.mockReset().mockResolvedValue("/w/p1/overview");
+  getActiveWorkspacePath.mockReset().mockResolvedValue("/w/p1");
 });
 
 afterEach(cleanup);
@@ -77,7 +77,7 @@ describe("onboarding layout (onprem)", () => {
     // fresh, never-onboarded self-hosted owner who types /onboarding gets the
     // cloud-only walkthrough booted for them. Onboarding is cloud-only.
     render(<OnboardingLayout>step</OnboardingLayout>);
-    await waitFor(() => expect(replace).toHaveBeenCalledWith("/w/p1/overview"));
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/w/p1"));
     expect(screen.queryByText("step")).toBeNull();
     expect(getSubscriptionStatus).not.toHaveBeenCalled();
     expect(checkOnboardingComplete).not.toHaveBeenCalled();

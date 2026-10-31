@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import type { AgentKind } from "@/lib/api/types";
+import type { CreateDoorPrimary } from "./agent-create-door";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -34,7 +36,9 @@ vi.hoisted(() => {
 });
 
 const state = vi.hoisted(() => ({
-  agents: [] as { id: string; kind: string; name: string }[] | undefined,
+  agents: [] as
+    | { id: string; kind: AgentKind; name: string; createdAt?: string }[]
+    | undefined,
   availability: "ready" as HostedAvailability,
   // The org's creation world; undefined = the read failed (data absent,
   // isPending false), which must fall back, never lock the page.
@@ -62,10 +66,6 @@ vi.mock("@/hooks/use-agents", () => ({
   }),
 }));
 
-vi.mock("@/hooks/use-grants", () => ({
-  useGrantsSummary: () => ({ data: [] }),
-}));
-
 vi.mock("@/hooks/use-hosted-availability", () => ({
   useHostedAvailability: () => state.availability,
   useHomeDurabilityMessage: () => null,
@@ -75,23 +75,18 @@ vi.mock("@/hooks/use-org", () => ({
   useOrg: () => ({ data: state.org, isPending: state.orgPending }),
 }));
 
-// The card pulls in a wide tail of hooks; the door is what's under test.
-vi.mock("./agent-card", () => ({
-  AgentCard: ({ agent }: { agent: { name: string } }) => (
-    <div>{agent.name}</div>
-  ),
-}));
-
+const routerReplace = vi.hoisted(() => vi.fn());
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useRouter: () => ({ push: vi.fn(), replace: routerReplace }),
   usePathname: () => "/w/ws-1/agents",
   useSearchParams: () => new URLSearchParams(),
   useParams: () => ({ workspaceId: "ws-1" }),
 }));
 
 // The EE quota gate, whose button IS the production primary (see below).
-vi.mock("@/ee/billing/quota-actions", () => ({
-  getResourceQuota: () => Promise.resolve(state.quota),
+// Its quota is read off the cached plan usage, not fetched per button.
+vi.mock("@/ee/billing/use-plan-usage", () => ({
+  useResourceQuota: () => state.quota,
 }));
 vi.mock("@/ee/billing/_components/quota-limit-dialog", () => ({
   QuotaLimitDialog: ({ open }: { open: boolean }) =>
@@ -106,12 +101,37 @@ beforeAll(() => {
 });
 
 const { AgentsContent } = await import("./agents-content");
+const { AgentCreateControl } = await import("./agent-create-control");
+const { useAgentCreateFlow } = await import("./use-agent-create-flow");
 const { CreateAgentButton } =
   await import("@/lib/agents/_components/create-agent-button");
 
-// The page always mounts both create dialogs (closed), and they embed
-// SecretDialog for the LLM-key guided setup, which reads the query client —
-// so the tree needs a real QueryClient even with every page hook mocked.
+/**
+ * The create door exactly as every entry point mounts it (the agents page's
+ * empty state, the sidebar's New agent row): the shared flow + control. The
+ * page itself forwards to the first agent whenever agents exist, so the door
+ * states that need agents in the workspace are exercised through this.
+ */
+const Door = ({
+  renderCreateButton,
+}: {
+  renderCreateButton?: (primary: CreateDoorPrimary) => React.ReactNode;
+}) => {
+  const flow = useAgentCreateFlow(state.agents, false);
+  return (
+    <AgentCreateControl flow={flow} renderCreateButton={renderCreateButton} />
+  );
+};
+const renderDoor = (props?: React.ComponentProps<typeof Door>) =>
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <Door {...props} />
+    </QueryClientProvider>,
+  );
+
+// The create dialogs (mounted on their first open) embed SecretDialog for the
+// LLM-key guided setup, which reads the query client — so the tree needs a
+// real QueryClient even with every page hook mocked.
 const renderPage = (props?: React.ComponentProps<typeof AgentsContent>) =>
   render(
     <QueryClientProvider client={new QueryClient()}>
@@ -126,11 +146,11 @@ const renderPage = (props?: React.ComponentProps<typeof AgentsContent>) =>
  * These render what a cloud user actually gets.
  */
 const renderComposed = () =>
-  renderPage({
+  renderDoor({
     renderCreateButton: (primary) => <CreateAgentButton {...primary} />,
   });
 
-const agent = (kind: string, id = `ag-${kind}`) => ({
+const agent = (kind: AgentKind, id = `ag-${kind}`) => ({
   id,
   kind,
   name: `${kind} agent`,
@@ -151,9 +171,42 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+describe("the agents page is a door, not a roster", () => {
+  beforeEach(() => routerReplace.mockClear());
+
+  it("forwards to the OLDEST agent's first section when agents exist", () => {
+    state.agents = [
+      {
+        id: "ag-new",
+        kind: "byo",
+        name: "new",
+        createdAt: "2026-10-02T00:00:00Z",
+      },
+      {
+        id: "ag-old",
+        kind: "hosted",
+        name: "old",
+        createdAt: "2026-10-01T00:00:00Z",
+      },
+    ];
+    renderPage();
+    expect(routerReplace).toHaveBeenCalledWith("/w/ws-1/agents/ag-old/chat");
+    // No cards, no list: the page holds a skeleton while it forwards.
+    expect(screen.queryByText("new")).toBeNull();
+    expect(screen.queryByText("old")).toBeNull();
+  });
+
+  it("shows the create door, and does not forward, in an empty workspace", () => {
+    renderPage();
+    expect(routerReplace).not.toHaveBeenCalled();
+    expect(screen.getByText(/no agents yet/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /new agent/i })).toBeTruthy();
+  });
+});
+
 describe("the agents page create door", () => {
   it("takes a NEW user straight into hosted creation", async () => {
-    renderPage();
+    renderDoor();
     await userEvent.click(screen.getByRole("button", { name: /new agent/i }));
     // The hosted create dialog — a brief, not a booking.
     expect(
@@ -166,7 +219,7 @@ describe("the agents page create door", () => {
   it("keeps a BYO-world org's primary button on the access-token flow", async () => {
     state.org = { byoLegacy: true, byoEnabled: false };
     state.agents = [agent("byo")];
-    renderPage();
+    renderDoor();
     await userEvent.click(
       screen.getByRole("button", { name: /create agent/i }),
     );
@@ -178,7 +231,7 @@ describe("the agents page create door", () => {
   it("offers a BYO-world org the onboarding call behind the chevron", async () => {
     state.org = { byoLegacy: true, byoEnabled: false };
     state.agents = [agent("byo")];
-    renderPage();
+    renderDoor();
     await userEvent.click(
       screen.getByRole("button", { name: /more ways to create an agent/i }),
     );
@@ -200,7 +253,7 @@ describe("the agents page create door", () => {
 
   it("sends a hosted-only workspace to creation, never to the call", async () => {
     state.agents = [agent("hosted")];
-    renderPage();
+    renderDoor();
     expect(
       screen.queryByRole("button", { name: /more ways to create an agent/i }),
     ).toBeNull();
@@ -213,7 +266,7 @@ describe("the agents page create door", () => {
     // the old agents keep working, but creation is hosted-only now.
     state.org = { byoLegacy: false, byoEnabled: false };
     state.agents = [agent("byo")];
-    renderPage();
+    renderDoor();
     expect(
       screen.queryByRole("button", { name: /more ways to create an agent/i }),
     ).toBeNull();
@@ -226,7 +279,7 @@ describe("the agents page create door", () => {
     // onboarded — their hosted primary opens the create dialog directly.
     state.org = { byoLegacy: false, byoEnabled: true };
     state.agents = [agent("byo")];
-    renderPage();
+    renderDoor();
     await userEvent.click(screen.getByRole("button", { name: /new agent/i }));
     expect(screen.getByPlaceholderText(/Support Triage/i)).toBeTruthy();
     expect(screen.queryByText(/book 15 minutes/i)).toBeNull();
@@ -235,7 +288,7 @@ describe("the agents page create door", () => {
   it("offers a MIXED-world org BYO creation behind the chevron — the real dialog, no call", async () => {
     state.org = { byoLegacy: false, byoEnabled: true };
     state.agents = [];
-    renderPage();
+    renderDoor();
     await userEvent.click(
       screen.getByRole("button", { name: /more ways to create an agent/i }),
     );
@@ -253,7 +306,7 @@ describe("the agents page create door", () => {
     // must not be wrongly hosted-only.
     state.org = { byoLegacy: true, byoEnabled: false };
     state.agents = [];
-    renderPage();
+    renderDoor();
     expect(
       screen.getByRole("button", { name: /more ways to create an agent/i }),
     ).toBeTruthy();
@@ -279,7 +332,7 @@ describe("the agents page create door", () => {
     // fallback that always works.
     state.org = undefined;
     state.agents = [agent("byo")];
-    renderPage();
+    renderDoor();
     expect(screen.getByRole("button", { name: /create agent/i })).toBeTruthy();
   });
 
@@ -287,7 +340,7 @@ describe("the agents page create door", () => {
     state.org = { byoLegacy: true, byoEnabled: false };
     state.availability = "absent";
     state.agents = [agent("byo")];
-    renderPage();
+    renderDoor();
     expect(
       screen.queryByRole("button", { name: /more ways to create an agent/i }),
     ).toBeNull();
@@ -316,7 +369,7 @@ describe("the agents page create door", () => {
       state.availability = availability;
       state.agents = [...agents];
       state.org = { byoLegacy, byoEnabled };
-      renderPage();
+      renderDoor();
       const creates = screen
         .getAllByRole("button")
         .filter((b) => /create agent|new agent/i.test(b.textContent ?? ""));
@@ -388,8 +441,6 @@ describe("the create door as the routed page composes it", () => {
   it("lets the quota stop creation instead of opening a dialog", async () => {
     state.quota = { ...state.quota, atLimit: true, current: 10 };
     renderComposed();
-    // findBy: the quota arrives from an async server action after mount.
-    await screen.findByRole("button", { name: /new agent/i });
     await userEvent.click(screen.getByRole("button", { name: /new agent/i }));
     expect(await screen.findByText(/plan limit reached/i)).toBeTruthy();
     // The create dialog must NOT have opened behind the paywall.

@@ -143,7 +143,7 @@ describe("slack adapter-provider — interactivity classification", () => {
     expect(approvals).toEqual([]);
   });
 
-  it("routes the members-only button as members_only", () => {
+  it("routes the RETIRED members-only button (reach_members) as approved: old cards still settle", () => {
     const { reaches, deliver } = openWithSpies();
     deliver({
       type: "block_actions",
@@ -153,7 +153,7 @@ describe("slack adapter-provider — interactivity classification", () => {
     expect(reaches).toEqual([
       {
         grantId: "grant-9",
-        decision: "members_only",
+        decision: "approved",
         clickerExternalUserId: "U-CLICKER",
       },
     ]);
@@ -175,7 +175,7 @@ describe("slack adapter-provider — interactivity classification", () => {
     ]);
   });
 
-  it("still honors the PRE-RENAME reach_deny id: a card posted before the third button existed settles as members_only", () => {
+  it("still honors the PRE-RENAME reach_deny id: an old card settles as approved", () => {
     const { reaches, deliver } = openWithSpies();
     deliver({
       type: "block_actions",
@@ -185,7 +185,7 @@ describe("slack adapter-provider — interactivity classification", () => {
     expect(reaches).toEqual([
       {
         grantId: "grant-old",
-        decision: "members_only",
+        decision: "approved",
         clickerExternalUserId: "U-CLICKER",
       },
     ]);
@@ -226,7 +226,7 @@ describe("slack adapter-provider — interactivity classification", () => {
     expect(reaches).toEqual([]);
   });
 
-  it("routes the always-allow button as approve_always - the standing upgrade", () => {
+  it("routes the RETIRED always-allow button (older cards) as approve", () => {
     const { actions, deliver } = openWithSpies();
     deliver({
       type: "block_actions",
@@ -236,7 +236,7 @@ describe("slack adapter-provider — interactivity classification", () => {
     expect(actions).toEqual([
       {
         approvalId: "act-9",
-        decision: "approve_always",
+        decision: "approve",
         clickerExternalUserId: "U-CLICKER",
       },
     ]);

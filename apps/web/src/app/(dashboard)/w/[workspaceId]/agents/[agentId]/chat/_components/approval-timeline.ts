@@ -135,7 +135,8 @@ export const approvalTimeline = (
       const counts: Record<GroupedOutcome, number> = {
         approved: 0,
         denied: 0,
-        decided: 0,
+        unknown: 0,
+        cancelled: 0,
         expired: 0,
       };
       for (const s of settled) counts[s.outcome] += 1;

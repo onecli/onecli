@@ -8,6 +8,7 @@ const HOST = "api.timeless.day";
 
 export const timelessPermissions: AppPermissionDefinition = {
   provider: "timeless",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

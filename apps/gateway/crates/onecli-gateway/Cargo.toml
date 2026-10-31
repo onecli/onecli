@@ -21,7 +21,9 @@ common = { path = "../common" }
 context = { path = "../context" }
 crypto = { path = "../crypto" }
 db = { path = "../db" }
+dbproxy = { path = "../dbproxy" }
 ee = { path = "../ee/ee" }
+proxy = { path = "../proxy" }
 server = { path = "../server" }
 shutdown = { path = "../shutdown" }
 telemetry = { path = "../telemetry" }

@@ -1,4 +1,5 @@
 import { db } from "@onecli/db";
+import { CHANNEL_CARD_REPLACED_TEXT } from "../lib/channel-card-ending";
 import { logger } from "../lib/logger";
 import {
   AUDIT_ACTIONS,
@@ -64,8 +65,9 @@ const HELD_LOOKBACK_MS = 60 * 60 * 1000;
 /** The line the transcript (and so the web card and the model) reads. */
 export const SUPERSEDED_NOTICE =
   "Replaced by your message: the waiting approval was withdrawn so your change can be applied.";
-/** The settled Slack card's outcome, after the request's title. */
-export const SUPERSEDED_CARD_TEXT = "Replaced by your message · not sent";
+/** The settled channel card's outcome, after the request's title (shared
+ * with the adapter's record-labelled settle). */
+export const SUPERSEDED_CARD_TEXT = CHANNEL_CARD_REPLACED_TEXT;
 
 export interface SupersedeInput {
   workspaceId: string;
@@ -232,7 +234,7 @@ const recordSupersede = async (input: {
 }): Promise<void> => {
   const ids = input.denied.map((a) => a.id);
   // Ledger first: the adapter's absence arm reads it on its next poll, and
-  // a still-pending row there is relabeled "Decided from the dashboard".
+  // would otherwise rewrite this card itself from the record.
   await rewriteGatewayApprovalCards({
     lines: new Map(ids.map((id) => [id, SUPERSEDED_CARD_TEXT])),
     describes: "card",

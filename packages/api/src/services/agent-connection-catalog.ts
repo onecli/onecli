@@ -113,15 +113,21 @@ const safeDocsUrl = (raw: string | undefined): string | null => {
   }
 };
 
-/** The catalog facts for one provider. Unknown providers get empty facts. */
+/** The catalog facts for one provider. Unknown providers get empty facts,
+ * and so do database apps: their catalog rows are the policy zone's
+ * synthetic requests, never something an agent calls. */
 export const catalogFactsFor = (
   provider: string,
 ): Pick<
   AgentConnectionWire,
   "apiHosts" | "endpoints" | "docsUrl" | "specUrl"
-> => ({
-  apiHosts: fixedApiHosts(provider),
-  endpoints: endpointSamples(provider),
-  docsUrl: safeDocsUrl(getApp(provider)?.apiDocsUrl),
-  specUrl: safeDocsUrl(getApp(provider)?.apiSpecUrl),
-});
+> => {
+  const app = getApp(provider);
+  const http = !app?.database;
+  return {
+    apiHosts: http ? fixedApiHosts(provider) : [],
+    endpoints: http ? endpointSamples(provider) : [],
+    docsUrl: safeDocsUrl(app?.apiDocsUrl),
+    specUrl: safeDocsUrl(app?.apiSpecUrl),
+  };
+};

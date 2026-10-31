@@ -182,6 +182,7 @@ const TOOL_PHRASES: Record<string, ToolPhrase> = {
   skill_update: { running: "Updating a skill", done: "Updated a skill" },
   skill_list: { running: "Reading its skills", done: "Read its skills" },
   skill_delete: { running: "Removing a skill", done: "Removed a skill" },
+  skill_import: { running: "Installing skills", done: "Installed skills" },
   message_agent: {
     running: "Messaging another agent",
     done: "Messaged another agent",
@@ -192,6 +193,24 @@ const TOOL_PHRASES: Record<string, ToolPhrase> = {
     done: "Read a conversation",
   },
   send_message: { running: "Sending a message", done: "Sent a message" },
+  send_as_me: {
+    running: "Sending as you",
+    done: "Sent as you",
+  },
+  edit_my_message: {
+    running: "Editing a message sent as you",
+    done: "Edited a message sent as you",
+  },
+  delete_my_message: {
+    running: "Deleting a message sent as you",
+    done: "Asked to delete a message sent as you",
+  },
+  list_my_replies: {
+    running: "Looking at its own replies",
+    done: "Looked at its own replies",
+  },
+  edit_my_reply: { running: "Editing its reply", done: "Edited its reply" },
+  delete_my_reply: { running: "Deleting its reply", done: "Deleted its reply" },
   send_file: { running: "Sending a file", done: "Sent a file" },
   preview_expose: {
     running: "Asking for a preview link",
@@ -202,6 +221,11 @@ const TOOL_PHRASES: Record<string, ToolPhrase> = {
     done: "Asked a person to take over",
   },
   complete_task: { running: "Reporting back", done: "Reported back" },
+  list_apps: { running: "Checking its apps", done: "Checked its apps" },
+  request_app_connection: {
+    running: "Asking to connect an app",
+    done: "Asked to connect an app",
+  },
 };
 
 /** The phrase for a tool nobody mapped — see TOOL_PHRASES on why we do not
@@ -223,9 +247,119 @@ const phraseFor = (name: string): ToolPhrase =>
 export const activityForTool = (name: string): string =>
   phraseFor(name).running;
 
-/** The line for a finished tool call ("Ran a command"). */
-export const finishedActivityForTool = (name: string): string =>
-  phraseFor(name).done;
+/** Act-as-you tools whose line names the conversation from the call's input
+ * ("Sent as you to #general"). */
+const AS_YOU_TOOLS = new Set([
+  "send_as_me",
+  "edit_my_message",
+  "delete_my_message",
+]);
+
+/** Sending tools whose finished line follows the result's outcome: a call
+ * that came back held / needs_access / needs_choice sent nothing, so its
+ * line must never say "Sent". */
+const SEND_TOOLS = new Set([...AS_YOU_TOOLS, "send_message"]);
+
+const MAX_TARGET_CHARS = 60;
+
+/** The agent's own-reply changes: a failed one must never read "Edited". */
+const OWN_REPLY_FAILED: Record<string, string> = {
+  edit_my_reply: "Couldn't edit its reply",
+  delete_my_reply: "Couldn't delete its reply",
+};
+
+/** One string field of a JSON object, flattened and capped (untrusted). */
+const fieldOf = (raw: string | undefined, key: string): string | null => {
+  if (!raw) return null;
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (value === null || typeof value !== "object") return null;
+    const field: unknown = Reflect.get(value, key);
+    if (typeof field !== "string") return null;
+    const flat = field.replace(/\s+/g, " ").trim();
+    if (!flat) return null;
+    return flat.length > MAX_TARGET_CHARS
+      ? `${flat.slice(0, MAX_TARGET_CHARS - 1)}…`
+      : flat;
+  } catch {
+    return null;
+  }
+};
+
+const outcomeOf = (output: string | undefined, isError: boolean) => {
+  if (isError) return "failed" as const;
+  const status = fieldOf(output, "status");
+  switch (status) {
+    case "held":
+      return "held" as const;
+    case "needs_access":
+    case "needs_choice":
+      return "needs_input" as const;
+    case "not_sent":
+      return "not_sent" as const;
+    default:
+      return "done" as const;
+  }
+};
+
+/** What a sending call targets: the conversation (as-you tools) or `to`. */
+const targetOf = (bare: string, input: string | undefined) =>
+  AS_YOU_TOOLS.has(bare)
+    ? fieldOf(input, "conversation")
+    : fieldOf(input, "to");
+
+/** The verb a not-done line names, per tool. */
+const ACTION_WORDS: Record<string, { what: string; asYou: string }> = {
+  send_message: { what: "send", asYou: "send" },
+  send_as_me: { what: "send", asYou: "send as you" },
+  edit_my_message: { what: "edit a message", asYou: "edit a message" },
+  delete_my_message: { what: "delete a message", asYou: "delete a message" },
+};
+
+/**
+ * A tool call's line with its input (and, once finished, its result) when
+ * that says more. The sending tools name their target and say what really
+ * happened: "Sent as you to #general", "Waiting for your approval: send as
+ * you to #general", "Needs your input: send to @Sam", "Couldn't send to
+ * @Sam". Every other tool reads its plain phrase. Input and output are
+ * untrusted model/tool text: callers render the result as text only.
+ */
+export const activityForToolCall = (
+  name: string,
+  input: string | undefined,
+  running: boolean,
+  result?: { output?: string; isError?: boolean },
+): string => {
+  const phrase = phraseFor(name);
+  const base = running ? phrase.running : phrase.done;
+  const bare = bareToolName(name).toLowerCase();
+  const ownReplyFailed = OWN_REPLY_FAILED[bare];
+  if (ownReplyFailed && !running && result?.isError === true) {
+    return ownReplyFailed;
+  }
+  if (!SEND_TOOLS.has(bare)) return base;
+  const target = targetOf(bare, input);
+  const words = ACTION_WORDS[bare]!;
+  const to = (prep: string) => (target ? ` ${prep} ${target}` : "");
+  const prep = bare === "send_as_me" || bare === "send_message" ? "to" : "in";
+  if (!running && result) {
+    const outcome = outcomeOf(result.output, result.isError === true);
+    switch (outcome) {
+      case "held":
+        return `Waiting for your approval: ${words.asYou}${to(prep)}`;
+      case "needs_input":
+        return `Needs your input: ${words.what}${to(prep)}`;
+      case "not_sent":
+        return `Not sent${to(prep)}`;
+      case "failed":
+        return `Couldn't ${words.what}${to(prep)}`;
+      case "done":
+        break;
+    }
+  }
+  if (!AS_YOU_TOOLS.has(bare) || !target) return base;
+  return `${base}${to(prep)}`;
+};
 
 /** What the tool works on, or undefined when it is not one countable kind. */
 export const toolKind = (name: string): ToolKind | undefined =>

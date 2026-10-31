@@ -176,6 +176,63 @@ const postedSecret = (calls: Recorded[]) => {
   };
 };
 
+describe("self-host resource compatibility", () => {
+  it("does not advertise managed resource profiles or observations", () => {
+    const { backend } = makeBackend();
+    expect(backend.resourceSupport).toBeUndefined();
+    expect(backend.resourceObservation).toBeUndefined();
+    expect(backend.defaultHomeGiB).toBeUndefined();
+  });
+
+  it.each([201, 409])(
+    "preserves configured PVC size and the original create-only call on status %i",
+    async (statusCode) => {
+      const { backend, calls } = makeBackend(
+        [
+          (call) =>
+            call.method === "POST" &&
+            call.path.endsWith("/persistentvolumeclaims")
+              ? { statusCode, body: {} }
+              : null,
+        ],
+        { homeSize: "30Gi" },
+      );
+      expect(await backend.provisionHome("sbx-1")).toBe("onecli-home-sbx-1");
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        method: "POST",
+        path: "/api/v1/namespaces/onecli-sandboxes/persistentvolumeclaims",
+        body: { spec: { resources: { requests: { storage: "30Gi" } } } },
+      });
+    },
+  );
+
+  it.each([
+    { cpus: 0.1, request: "250m" },
+    { cpus: 1, request: "250m" },
+    { cpus: 2, request: "500m" },
+  ])(
+    "preserves the original CPU request policy for $cpus CPUs",
+    async ({ cpus, request }) => {
+      const { backend, calls } = makeBackend();
+      await backend.prepare();
+      await backend.createSandbox({
+        ...spec,
+        limits: { ...spec.limits, cpus },
+      });
+      expect(postedJob(calls).spec.template.spec.containers[0]).toMatchObject({
+        resources: {
+          requests: { cpu: request, memory: "2048Mi" },
+          limits: { cpu: String(cpus), memory: "2048Mi" },
+        },
+      });
+      expect(postedJob(calls).spec.template.spec).not.toHaveProperty(
+        "runtimeClassName",
+      );
+    },
+  );
+});
+
 describe("prepare", () => {
   it("resolves the gateway, runner and api ClusterIPs from the release namespace", async () => {
     const { backend, calls } = makeBackend();

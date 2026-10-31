@@ -12,6 +12,13 @@
  * backend directory (the review greps for it, same rule as invariant 9).
  */
 
+import type {
+  SandboxResourceObservation,
+  SandboxResourceSupport,
+  SandboxResourceBounds,
+  SandboxStartResources,
+} from "@onecli/agent-protocol";
+
 /**
  * The backend could not OBTAIN the sandbox image — it is not present where
  * the backend runs and could not be fetched (unknown tag, registry refusal,
@@ -49,6 +56,41 @@ export class SandboxCapacityError extends Error {
 /** Where a home lives, as far as anything above the backend knows. */
 export type HomeRef = string;
 
+/**
+ * The typed reasons a wake may be HELD by its backend (a `waking` answer
+ * that carries a reason), forwarded verbatim as the start's `reasonCode`:
+ * `waiting_for_capacity` is "capacity is being brought up for this home",
+ * `enrollment_required` is "the control plane has not committed this
+ * home's enrollment yet". Neither is a failure: the runner keeps polling
+ * under its own ceiling instead of the ordinary wake budget, so a slow
+ * control plane can no more turn a healthy wake into a start failure than
+ * slow capacity can. A backend answering any other word is making
+ * ordinary progress.
+ */
+export const WAKE_HOLD_REASONS = [
+  "waiting_for_capacity",
+  "enrollment_required",
+] as const;
+export type WakeHoldReason = (typeof WAKE_HOLD_REASONS)[number];
+
+/**
+ * A wake stayed HELD for capacity past the backend's capacity ceiling: the
+ * backend never found capacity for the home in time. A sibling of
+ * `SandboxCapacityError` (the runner reports it `at_capacity`, the honest
+ * copy, and the control plane's patience window applies), kept distinct
+ * so the operator trail names the hold reason and the ceiling it exhausted.
+ */
+export class WakeCapacityTimeoutError extends SandboxCapacityError {
+  constructor(
+    readonly homeRef: HomeRef,
+    readonly reason: WakeHoldReason,
+    readonly ceilingSeconds: number,
+  ) {
+    super(`home ${homeRef} stayed ${reason} for more than ${ceilingSeconds}s`);
+    this.name = "WakeCapacityTimeoutError";
+  }
+}
+
 /** Where a running (or stopped) sandbox lives. */
 export type ContainerRef = string;
 
@@ -66,6 +108,7 @@ export interface SandboxFileSpec {
 }
 
 export interface SandboxSpec {
+  resources?: SandboxStartResources;
   sandboxId: string;
   /**
    * The workspace the sandbox's agent lives in — a DOMAIN id, not a runtime
@@ -100,6 +143,7 @@ export interface SandboxSpec {
 
 /** What the backend currently holds for a sandbox — the reconcile input. */
 export interface SandboxSnapshot {
+  resourceObservation?: SandboxResourceObservation;
   sandboxId: string;
   containerRef: ContainerRef;
   running: boolean;
@@ -142,6 +186,15 @@ export interface ManagedObject {
 }
 
 export interface SandboxBackend {
+  /** Only advertise axes this backend actually enforces. */
+  readonly resourceSupport?: SandboxResourceSupport;
+  readonly resourceBounds?: SandboxResourceBounds;
+  readonly defaultHomeGiB?: number;
+  /** Read substrate state, never synthesize an observation from a request. */
+  resourceObservation?(
+    ref: ContainerRef,
+    resources: SandboxStartResources,
+  ): Promise<SandboxResourceObservation | undefined>;
   /** Backend id, reported at registration (never a routing key). */
   readonly id: string;
 
@@ -180,7 +233,10 @@ export interface SandboxBackend {
    * ensure: provisioning an existing home returns that same home, untouched.
    * The start path relies on this to resolve the home in one call.
    */
-  provisionHome(sandboxId: string): Promise<HomeRef>;
+  provisionHome(
+    sandboxId: string,
+    resources?: SandboxStartResources,
+  ): Promise<HomeRef>;
   destroyHome(ref: HomeRef): Promise<void>;
   /** No-ops on `resident` backends; archive/restore on `snapshot` ones. */
   parkHome(ref: HomeRef): Promise<void>;
@@ -192,8 +248,20 @@ export interface SandboxBackend {
    * placement only the caller knows. A home that already exists (local or
    * archived) is always placed by the backend's own truth, never by this
    * hint; `resident` backends ignore it.
+   *
+   * `onHold` (optional, additive) is told each time the backend learns the
+   * wake is HELD rather than progressing (a typed reason the backend
+   * answers, e.g. `waiting_for_capacity` while capacity is being brought
+   * up for the home). The runner forwards it as the start's `reasonCode` so
+   * the control plane can show an honest wait instead of a silent
+   * "starting". Backends that wake synchronously never call it.
    */
-  wakeHome(ref: HomeRef, workspaceId?: string): Promise<void>;
+  wakeHome(
+    ref: HomeRef,
+    workspaceId?: string,
+    resources?: SandboxStartResources,
+    onHold?: (reason: WakeHoldReason) => void,
+  ): Promise<void>;
   listHomes(): Promise<Array<{ sandboxId: string; ref: HomeRef }>>;
 
   // ── Sandboxes ─────────────────────────────────────────────────────────
