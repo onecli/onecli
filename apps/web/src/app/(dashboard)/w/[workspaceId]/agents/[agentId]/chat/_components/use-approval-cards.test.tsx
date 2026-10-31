@@ -204,9 +204,9 @@ describe("inline approval cards", () => {
     state.approvals = [];
     view.rerender(<Cards />);
 
-    // Far from its deadline and no own click on record → some other
-    // surface decided it.
-    expect(screen.getByText(/· Decided/)).toBeInTheDocument();
+    // Far from its deadline and no own click on record: this browser
+    // doesn't know how it ended, and says only what it saw.
+    expect(screen.getByText(/· No longer waiting/)).toBeInTheDocument();
     expect(screen.queryByText(/Approved/)).not.toBeInTheDocument();
   });
 
@@ -233,7 +233,7 @@ describe("inline approval cards", () => {
     const view = render(<Cards />);
     state.approvals = [];
     view.rerender(<Cards />);
-    expect(screen.getByText(/· Decided/)).toBeInTheDocument();
+    expect(screen.getByText(/· No longer waiting/)).toBeInTheDocument();
     // Only the guessed departure is asked about.
     expect(state.outcomeAsks.at(-1)).toEqual(["ap-1"]);
 
@@ -250,6 +250,31 @@ describe("inline approval cards", () => {
     ]);
     view.rerender(<Cards />);
     expect(screen.getByRole("status")).toHaveTextContent("Approved in Slack");
+  });
+
+  it("says the agent stopped waiting, never a decision, once the record says no one decided", () => {
+    // Live: the agent's connection dropped while the card waited. The card
+    // read "Decided", as if a person had chosen; no one had.
+    state.approvals = [approval()];
+    const view = render(<Cards />);
+    state.approvals = [];
+    view.rerender(<Cards />);
+    expect(screen.getByRole("status")).toHaveTextContent("No longer waiting");
+
+    state.outcomes = new Map([
+      [
+        "ap-1",
+        {
+          approvalId: "ap-1",
+          outcome: "cancelled",
+          decidedAt: new Date().toISOString(),
+        },
+      ],
+    ]);
+    view.rerender(<Cards />);
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("Cancelled · the agent stopped waiting");
+    expect(status).not.toHaveTextContent(/Approved|Denied|Decided/);
   });
 
   it("says an approved request did nothing, and why, once the record has its result", () => {
@@ -317,20 +342,20 @@ describe("inline approval cards", () => {
     );
   });
 
-  it("relabels a 'decided' record once the supersede notice arrives", () => {
+  it("relabels an unknown record once the supersede notice arrives", () => {
     // The poll can see the card leave a beat BEFORE the transcript notice
-    // names it: the record must not stay a generic "Decided".
+    // names it: the record must not stay a generic "No longer waiting".
     state.approvals = [approval()];
     const view = render(<Cards />);
     state.approvals = [];
     view.rerender(<Cards />);
-    expect(screen.getByText(/· Decided/)).toBeInTheDocument();
+    expect(screen.getByText(/· No longer waiting/)).toBeInTheDocument();
 
     view.rerender(<Cards replaced={new Set(["ap-1"])} />);
     expect(screen.getByRole("status")).toHaveTextContent(
       "Replaced by your message",
     );
-    expect(screen.queryByText(/· Decided/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/· No longer waiting/)).not.toBeInTheDocument();
   });
 
   it("labels a deadline departure with the auto-deny outcome", () => {
@@ -388,7 +413,7 @@ describe("inline approval cards", () => {
     // session records a settled row.
     state.approvals = [];
     view.rerender(<Cards />);
-    expect(screen.getByText(/Decided/)).toBeInTheDocument();
+    expect(screen.getByText(/No longer waiting/)).toBeInTheDocument();
 
     // The mutation fails and React Query rolls back — the id is live again.
     // Exactly one card, the actionable one: the settled record must give way.
@@ -396,11 +421,11 @@ describe("inline approval cards", () => {
     view.rerender(<Cards />);
     expect(screen.getAllByText("Create a GitHub issue")).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
-    expect(screen.queryByText(/Decided/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/No longer waiting/)).not.toBeInTheDocument();
 
     // Departing for real afterwards records the settled row exactly once.
     state.approvals = [];
     view.rerender(<Cards />);
-    expect(screen.getAllByText(/Decided/)).toHaveLength(1);
+    expect(screen.getAllByText(/No longer waiting/)).toHaveLength(1);
   });
 });

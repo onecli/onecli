@@ -406,10 +406,42 @@ export const sweepStaleSessionReceipts = async (): Promise<void> => {
       log.warn({ turnId: row.turn_id }, "stale session loader; sweeping clear");
       await clearTurnReceipt(row.turn_id);
     }
+    // ANY receipt (card, loader, mark) whose turn is TERMINAL, whatever the
+    // receipt's age: the turn's own clear should have taken it, so one still
+    // here raced something (an API restart between the terminal flip and the
+    // clear, a refused provider call). A short grace past `finished_at`
+    // leaves the ordinary answer-post clear its window.
+    const graceBefore = new Date(Date.now() - TERMINAL_SWEEP_GRACE_MS);
+    const finished = await db.$queryRaw<{ turn_id: string }[]>`
+      SELECT r.turn_id
+      FROM channel_turn_receipts r
+      JOIN turns t ON t.id = r.turn_id
+      LEFT JOIN turns p ON p.id = t.follow_up_of_turn_id
+      WHERE (
+          t.status IN ('done', 'failed', 'aborted')
+          AND t.finished_at IS NOT NULL
+          AND t.finished_at < ${graceBefore}
+        ) OR (
+          t.status = 'joined'
+          AND p.status IN ('done', 'failed', 'aborted')
+          AND p.finished_at IS NOT NULL
+          AND p.finished_at < ${graceBefore}
+        )
+      ORDER BY r.created_at ASC
+      LIMIT ${STALE_SESSION_SWEEP_LIMIT}
+    `;
+    for (const row of finished) {
+      log.warn({ turnId: row.turn_id }, "receipt outlived its turn; clearing");
+      await clearTurnReceipt(row.turn_id);
+    }
   } catch (err) {
     log.warn({ err: String(err) }, "stale-session sweep skipped");
   }
 };
+
+/** How long after a turn finished its receipt is presumed leaked: the
+ * answer-post clear lands within seconds of the terminal flip. */
+const TERMINAL_SWEEP_GRACE_MS = 30 * 1000;
 
 /** Fire-and-forget prune: losing one pass costs nothing. */
 const pruneOldReceipts = (agentChannelId: string): void => {
@@ -889,6 +921,38 @@ export const clearTurnReceipt = async (turnId: string): Promise<void> => {
   }
 };
 
+/** Backoff between clear attempts (ms): the clear is the only thing taking
+ * a narration card or loader down, so a transient refusal (a restart, a
+ * provider blip) is retried a few times before the sweep takes over. */
+export const CLEAR_RETRY_DELAYS_MS = [500, 2_000, 5_000];
+
+/**
+ * Clear one turn's receipt, retrying with backoff while the row survives
+ * (a clear that threw keeps the row). Only for a TERMINAL turn: a live
+ * turn's receipt is not ours to retry. Returns whether the row is gone.
+ */
+export const clearTurnReceiptWithRetry = async (
+  turnId: string,
+  delaysMs: readonly number[] = CLEAR_RETRY_DELAYS_MS,
+): Promise<boolean> => {
+  await clearTurnReceipt(turnId);
+  for (const delay of delaysMs) {
+    const left = await db.channelTurnReceipt.findUnique({
+      where: { turnId },
+      select: { id: true },
+    });
+    if (!left) return true;
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    log.info({ turnId }, "receipt survived its clear; retrying");
+    await clearTurnReceipt(turnId);
+  }
+  const left = await db.channelTurnReceipt.findUnique({
+    where: { turnId },
+    select: { id: true },
+  });
+  return left === null;
+};
+
 /**
  * Clear the receipts of a finished turn AND its joined follow-ups — the
  * answer that is posting covers all of them, so every seen-mark the exchange
@@ -902,7 +966,7 @@ export const clearTurnReceipts = async (turnId: string): Promise<void> => {
       select: { id: true },
     });
     for (const id of [turnId, ...joined.map((row) => row.id)]) {
-      await clearTurnReceipt(id);
+      await clearTurnReceiptWithRetry(id);
     }
   } catch (err) {
     log.warn({ err: String(err), turnId }, "receipt family clear skipped");

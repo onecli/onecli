@@ -151,8 +151,8 @@ export const DashboardSidebar = ({
             </SidebarMenuItem>
           </SidebarMenu>
         )}
-        <NavMain items={items} />
         {workspaceId && <AgentsGroup workspaceId={workspaceId} />}
+        <NavMain items={items} label={workspaceId ? "Workspace" : undefined} />
       </SidebarContent>
       <SidebarFooter
         className="justify-center group-data-[collapsible=icon]:px-0"

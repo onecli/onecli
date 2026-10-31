@@ -1,7 +1,6 @@
 import { apiGet, apiPut, apiDelete } from "./client";
 import type {
   AgentGrants,
-  AgentWithGrantsSummary,
   ConnectionGrantInput,
   ConnectionGrants,
   SecretAgentAccess,
@@ -55,6 +54,3 @@ export const setForConnection = (
 
 export const detachForConnection = (connectionId: string, agentId: string) =>
   apiDelete(`/v1/connections/${connectionId}/grants/agents/${agentId}`);
-
-export const summary = () =>
-  apiGet<AgentWithGrantsSummary[]>("/v1/agents?include=grants-summary");

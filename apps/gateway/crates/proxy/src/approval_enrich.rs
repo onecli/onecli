@@ -16,8 +16,9 @@
 //!   never reaches a card for an agent that could not read it.
 //! - **Same connection, same host, same credential.** Only for a request whose
 //!   winning connection injected its credential; the read goes to the held
-//!   request's own host carrying only its `authorization` header. Nothing is
-//!   minted; no other host is contacted.
+//!   request's own host carrying only the headers injection set on it
+//!   (`authorization`, or an app's own key header such as `X-API-KEY`).
+//!   Nothing is minted; no other host is contacted.
 //! - **No injection.** Object types come from the resolver's id table and ids
 //!   are re-validated by it; nothing from the request body reaches the read
 //!   as text.
@@ -53,6 +54,17 @@ const CACHE_TTL_SECS: u64 = 300;
 /// refused) may add before the card is stored.
 const BULK_BUDGET: Duration = Duration::from_millis(4000);
 
+/// Largest answer any enrichment read takes. The read stops here: an
+/// answer this big is not the shape a card reads (200 records with their
+/// fields, or a Flow's metadata, are well under it).
+const MAX_READ_BYTES: usize = 2 * 1024 * 1024;
+
+/// Who the gateway's own reads say they are: some APIs refuse a request
+/// that carries no `User-Agent` (GitHub answers it 403).
+fn user_agent() -> String {
+    format!("onecli-gateway/{}", common::version::app_version())
+}
+
 /// The held request, as the enrichment may use it.
 pub struct EnrichContext<'a> {
     pub http: &'a reqwest::Client,
@@ -64,12 +76,18 @@ pub struct EnrichContext<'a> {
     pub path: &'a str,
     /// Headers of the held request AFTER injection (carry the credential).
     pub headers: &'a reqwest::header::HeaderMap,
+    /// The headers injection set on the held request: its credential. A read
+    /// carries these and nothing else from `headers`.
+    pub credential_headers: &'a [reqwest::header::HeaderName],
     /// The app connection whose credential those headers carry. `None`
     /// (nothing injected, or a secret / vault credential): no name read.
     pub connection_id: Option<&'a str>,
     pub cache: &'a dyn CacheStore,
     /// `true` iff the agent's own rules plainly allow `GET <path>` here.
     pub may_get: &'a (dyn Fn(&str) -> bool + Sync),
+    /// The gateway's bounded peek of the held request's body, which the
+    /// before → after compares against what stands now. `None`: no body.
+    pub body: Option<&'a [u8]>,
 }
 
 /// Link and name the records `summary` shows, for the catalog app the
@@ -91,10 +109,40 @@ pub async fn enrich(summary: &mut ApprovalSummary, app: Option<&str>, ctx: &Enri
                 host,
             )
             .await;
+            summary.name_refs_from_bulk();
             summary.name_change_values();
         }
+        resolve_current(summary, ctx, &format!("https://{}", ctx.host)).await;
     }
     summary.finalize_title();
+}
+
+/// An edit of something that already exists: read it as it stands, so the
+/// card can lead with before → after. Same guards as the name read: only a
+/// read the agent's own rules plainly allow, only with the credential the
+/// winning connection injected, only on the held request's own host, a
+/// server-built path (the summarizer's [`summary::ChangeHint`]), one call
+/// inside [`BULK_BUDGET`], at most [`MAX_READ_BYTES`]. Any failure keeps the
+/// card as summarized. Not cached: a stale "before" would misstate the
+/// change.
+async fn resolve_current(summary: &mut ApprovalSummary, ctx: &EnrichContext<'_>, origin: &str) {
+    let Some(hint) = summary.change_hint().cloned() else {
+        return;
+    };
+    let Some(body) = ctx.body.filter(|b| !b.is_empty()) else {
+        return;
+    };
+    if ctx.connection_id.is_none() || !(ctx.may_get)(&hint.read_path) {
+        debug!("approval before/after skipped: the agent may not read it");
+        return;
+    }
+    // A provider's "as it stands" read can be slow (a Salesforce Tooling
+    // query with Flow metadata takes seconds): the bulk read's budget.
+    match tokio::time::timeout(BULK_BUDGET, fetch(ctx, origin, &hint.read_path)).await {
+        Ok(Some(current)) => summary.apply_current(body, &current),
+        Ok(None) => debug!("approval before/after read failed; card keeps its rows"),
+        Err(_) => debug!("approval before/after read timed out; card keeps its rows"),
+    }
 }
 
 /// Show each record the agent may read by name, reading from `origin`.
@@ -321,24 +369,48 @@ async fn read_names(
     names
 }
 
-/// `GET <origin><path>` with the held request's credential and nothing else
-/// from it (no content headers, no agent-supplied extras).
+/// `GET <origin><path>` with the held request's credential (the headers
+/// injection set on it) and nothing else from it: no content headers, no
+/// agent-supplied extras. Read up to [`MAX_READ_BYTES`]: a longer answer is
+/// dropped as it streams, never held. No credential, no read.
 async fn fetch(ctx: &EnrichContext<'_>, origin: &str, path: &str) -> Option<Vec<u8>> {
-    let auth = ctx.headers.get(reqwest::header::AUTHORIZATION)?.clone();
-    let resp = ctx
+    let mut req = ctx
         .http
         .get(format!("{origin}{path}"))
-        .header(reqwest::header::AUTHORIZATION, auth)
         .header(reqwest::header::ACCEPT, "application/json")
-        .send()
-        .await
-        .ok()?;
+        .header(reqwest::header::USER_AGENT, user_agent());
+    let mut carried = false;
+    for name in ctx.credential_headers {
+        for value in ctx.headers.get_all(name) {
+            req = req.header(name, value.clone());
+            carried = true;
+        }
+    }
+    if !carried {
+        return None;
+    }
+    let mut resp = req.send().await.ok()?;
     if !resp.status().is_success() {
         // Status only: the body can quote the read, never the credential.
         debug!(status = %resp.status(), "approval enrichment read refused");
         return None;
     }
-    resp.bytes().await.ok().map(Vec::from)
+    if resp
+        .content_length()
+        .is_some_and(|n| n > MAX_READ_BYTES as u64)
+    {
+        debug!("approval enrichment answer too large; dropped");
+        return None;
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.ok()? {
+        if body.len() + chunk.len() > MAX_READ_BYTES {
+            debug!("approval enrichment answer too large; dropped");
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Some(body)
 }
 
 #[cfg(test)]
@@ -463,6 +535,7 @@ mod tests {
     struct Fixture {
         http: reqwest::Client,
         headers: reqwest::header::HeaderMap,
+        credential_headers: Vec<reqwest::header::HeaderName>,
         cache: Arc<dyn CacheStore>,
     }
 
@@ -475,6 +548,7 @@ mod tests {
             Self {
                 http: reqwest::Client::new(),
                 headers,
+                credential_headers: vec![reqwest::header::AUTHORIZATION],
                 cache: cache::in_memory(),
             }
         }
@@ -492,15 +566,123 @@ mod tests {
                 method: "POST",
                 path: "/services/data/v59.0/sobjects/Contact",
                 headers: &self.headers,
+                credential_headers: &self.credential_headers,
                 connection_id,
                 cache: &*self.cache,
                 may_get,
+                body: None,
             }
         }
     }
 
     const ALLOW: &(dyn Fn(&str) -> bool + Sync) = &|_| true;
     const DENY: &(dyn Fn(&str) -> bool + Sync) = &|_| false;
+
+    #[tokio::test]
+    async fn new_provider_names_never_cross_policy_or_connection_boundaries() {
+        for (provider, method, path, label, object, id, answer) in [
+            (
+                "microsoft-word",
+                "DELETE",
+                "/v1.0/me/drive/items/01TESTFOLDER00001",
+                "Item",
+                "Item",
+                "01TESTFOLDER00001",
+                r#"{"id":"01TESTFOLDER00001","name":"Private folder"}"#,
+            ),
+            (
+                "salesforce",
+                "GET",
+                "/services/data/v60.0/analytics/reports/00O000000000001AAA/describe",
+                "Report",
+                "Report",
+                "00O000000000001AAA",
+                r#"{"records":[{"Id":"00O000000000001AAA","Name":"Private report"}]}"#,
+            ),
+        ] {
+            let up = upstream_body(answer).await;
+            let fx = Fixture::new();
+            let resolver = summary::record_resolver(provider).unwrap();
+            let card = || summary::summarize_request(provider, method, path, None, None);
+            let mut allowed = card();
+            resolve_names(
+                &mut allowed,
+                resolver,
+                &fx.ctx("https", Some("owner-connection"), ALLOW),
+                &up.origin,
+            )
+            .await;
+            assert!(row(&allowed, label).value.contains("Private"), "{provider}");
+            assert_eq!(up.hits.load(Ordering::SeqCst), 1);
+            let sent = up.last.lock().unwrap().clone();
+            assert!(sent.contains("authorization: bearer sf-token"));
+            assert!(!sent.contains("x-agent-extra"));
+            if provider == "microsoft-word" {
+                assert!(
+                    sent.starts_with("get /v1.0/me/drive/items/01testfolder00001?$select=id,name ")
+                );
+            }
+
+            // A cached name from an allowed agent is not a grant to a denied one.
+            let mut denied = card();
+            resolve_names(
+                &mut denied,
+                resolver,
+                &fx.ctx("https", Some("owner-connection"), DENY),
+                &up.origin,
+            )
+            .await;
+            assert!(!row(&denied, label).value.contains("Private"));
+            assert_eq!(up.hits.load(Ordering::SeqCst), 1);
+
+            // Even an allowed read on another connection cannot reuse that name.
+            let refused = upstream_body("{}").await;
+            let mut foreign = card();
+            resolve_names(
+                &mut foreign,
+                resolver,
+                &fx.ctx("https", Some("foreign-connection"), ALLOW),
+                &refused.origin,
+            )
+            .await;
+            assert!(!row(&foreign, label).value.contains("Private"));
+            assert_eq!(refused.hits.load(Ordering::SeqCst), 1);
+
+            let key = format!(
+                "approval-name:foreign-connection:{object}:{}",
+                resolver.canonical_id(id)
+            );
+            assert_eq!(fx.cache.get::<String>(&key).await, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_drive_answer_cannot_name_or_cache_an_unrequested_item() {
+        let up = upstream_body(r#"{"id":"01FOREIGNITEM0001","name":"Unrequested"}"#).await;
+        let fx = Fixture::new();
+        let mut s = summary::summarize_request(
+            "microsoft-word",
+            "DELETE",
+            "/v1.0/me/drive/items/01TESTFOLDER00001",
+            None,
+            None,
+        );
+        let resolver = summary::record_resolver("microsoft-word").unwrap();
+        resolve_names(
+            &mut s,
+            resolver,
+            &fx.ctx("https", Some("conn"), ALLOW),
+            &up.origin,
+        )
+        .await;
+        assert_eq!(row(&s, "Item").value, "01TESTFOLDER00001");
+        assert_eq!(
+            fx.cache
+                .get::<String>("approval-name:conn:Item:01FOREIGNITEM0001")
+                .await,
+            None
+        );
+    }
 
     #[tokio::test]
     async fn names_are_read_once_per_type_with_only_the_credential_then_cached() {
@@ -963,6 +1145,109 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_custom_record_is_named_through_enrich_with_one_guarded_read() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        const ID: &str = "a0BAA00000AbCdEFGH";
+        let dir = std::env::temp_dir().join(format!("approval-name-{}", uuid::Uuid::new_v4()));
+        let authority = ca::CertificateAuthority::load_or_generate(&dir)
+            .await
+            .unwrap();
+        let tls =
+            tokio_rustls::TlsAcceptor::from(authority.server_config_for_host("localhost").unwrap());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tls.accept(socket).await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !request.ends_with(b"\r\n\r\n") {
+                let n = socket.read(&mut buf).await.unwrap();
+                assert!(n > 0 && request.len() + n <= 8192);
+                request.extend_from_slice(&buf[..n]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            let body = r#"{"records":[{"Id":"a0BAA00000AbCdEFGH","Name":"Current project"},{"Id":"a0BAA00000XyZaBAAA","Name":"Unasked"}]}"#;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            request
+        });
+        let mut fx = Fixture::new();
+        fx.http = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .add_root_certificate(
+                reqwest::Certificate::from_pem(authority.ca_cert_pem().as_bytes()).unwrap(),
+            )
+            .build()
+            .unwrap();
+        let host = format!("localhost:{}", addr.port());
+        let path = format!("/services/data/v62.0/sobjects/Project__c/{ID}");
+        let build = || {
+            summary::summarize_request(
+                "salesforce",
+                "PATCH",
+                &path,
+                Some("application/json"),
+                Some(br#"{"Name":"Next project"}"#),
+            )
+        };
+        let ctx = EnrichContext {
+            host: &host,
+            method: "PATCH",
+            path: &path,
+            ..fx.ctx("https", Some("c"), ALLOW)
+        };
+        let mut s = build();
+        enrich(&mut s, Some("salesforce"), &ctx).await;
+        assert_eq!(s.action, "Update Project Current project");
+        let subject = s.subject.as_ref().unwrap();
+        assert_eq!(
+            s.details[subject.row].value,
+            format!("Current project ({ID})")
+        );
+        assert_eq!(subject.url, Some(format!("https://localhost/{ID}")));
+        assert_eq!(s.bulk.as_ref().unwrap().rows.len(), 1);
+        let request = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .to_ascii_lowercase();
+        assert!(
+            request
+                .starts_with("get /services/data/v60.0/query?q=select+id%2c+name+from+project__c"),
+            "{request}"
+        );
+        assert!(request.contains("authorization: bearer sf-token"));
+        assert!(!request.contains("x-agent-extra"));
+        // No upstream remains: denied reads and missing connections must
+        // still keep the id, not reuse a name from the earlier card.
+        for ctx in [
+            EnrichContext {
+                may_get: DENY,
+                ..ctx
+            },
+            EnrichContext {
+                connection_id: None,
+                ..ctx
+            },
+        ] {
+            let mut s = build();
+            enrich(&mut s, Some("salesforce"), &ctx).await;
+            assert_eq!(s.action, format!("Update Project {ID}"));
+        }
+        tokio::fs::remove_dir_all(dir).await.unwrap();
+    }
+
     // ── Google Drive and Sheets ──────────────────────────────────────────────────────
 
     const DRIVE_FILE: &str = "1AbCdEfGhIjKlMnOpQrStUvWxYz012345";
@@ -1116,5 +1401,179 @@ mod tests {
                 "https://docs.google.com/spreadsheets/d/{SHEET}/edit"
             ))
         );
+    }
+
+    // ── Before → after ──────────────────────────────────────────────────
+
+    const DEAL: &str = "/crm/v3/objects/deals/123456";
+    const DEAL_BODY: &[u8] = br#"{"properties":{"amount":"5000","dealstage":"won"}}"#;
+    const DEAL_NOW: &str = r#"{"id":"123456","properties":{"amount":"3000","dealstage":"won"}}"#;
+
+    fn deal() -> ApprovalSummary {
+        summary::summarize_request(
+            "hubspot",
+            "PATCH",
+            DEAL,
+            Some("application/json"),
+            Some(DEAL_BODY),
+        )
+    }
+
+    #[tokio::test]
+    async fn an_edit_reads_what_stands_and_leads_with_the_change() {
+        let up = upstream_body(DEAL_NOW).await;
+        let fx = Fixture::new();
+        let ctx = EnrichContext {
+            method: "PATCH",
+            path: DEAL,
+            body: Some(DEAL_BODY),
+            ..fx.ctx("https", Some("conn1"), ALLOW)
+        };
+        let mut s = deal();
+        resolve_current(&mut s, &ctx, &up.origin).await;
+        assert_eq!(row(&s, "Properties › Amount").value, "3000 → 5000");
+        assert_eq!(up.hits.load(Ordering::SeqCst), 1);
+        let last = up.last.lock().unwrap().clone();
+        assert!(last.starts_with(&format!("get {DEAL} ")), "{last}");
+        assert!(last.contains("authorization: bearer sf-token"));
+        assert!(!last.contains("x-agent-extra") && !last.contains("content-length: 212"));
+        // GitHub refuses a read without a User-Agent: every read names the
+        // gateway.
+        assert!(last.contains("user-agent: onecli-gateway/"), "{last}");
+    }
+
+    #[tokio::test]
+    async fn no_read_without_permission_credential_or_body_and_failures_keep_the_card() {
+        let up = upstream_body(DEAL_NOW).await;
+        let fx = Fixture::new();
+        let base = |conn, may: &'static (dyn Fn(&str) -> bool + Sync), body| EnrichContext {
+            method: "PATCH",
+            path: DEAL,
+            body,
+            ..fx.ctx("https", conn, may)
+        };
+        for ctx in [
+            base(Some("c"), DENY, Some(DEAL_BODY)),
+            base(None, ALLOW, Some(DEAL_BODY)),
+            base(Some("c"), ALLOW, None),
+        ] {
+            let mut s = deal();
+            let before = s.clone();
+            resolve_current(&mut s, &ctx, &up.origin).await;
+            assert_eq!(s.details, before.details);
+        }
+        assert_eq!(up.hits.load(Ordering::SeqCst), 0);
+
+        // Refused, unreadable, too slow or too big: the card keeps its rows.
+        let refused = serve(Duration::ZERO, |_| ("403 Forbidden", "{}".into())).await;
+        let junk = upstream_body("<html>").await;
+        let slow = serve(BULK_BUDGET + Duration::from_millis(300), |_| {
+            ("200 OK", DEAL_NOW.into())
+        })
+        .await;
+        let huge = serve(Duration::ZERO, |_| {
+            ("200 OK", " ".repeat(MAX_READ_BYTES + 1) + DEAL_NOW)
+        })
+        .await;
+        for up in [refused, junk, slow, huge] {
+            let mut s = deal();
+            let before = s.details.clone();
+            resolve_current(&mut s, &base(Some("c"), ALLOW, Some(DEAL_BODY)), &up.origin).await;
+            assert_eq!(s.details, before);
+        }
+    }
+
+    // ── An app whose credential is its own header (HeyReach) ───────────────────
+
+    /// HeyReach's two name reads, answered with its documented shapes.
+    const HEYREACH: &[(&str, &str)] = &[
+        (
+            "/api/public/campaign/GetById?campaignId=235",
+            r#"{"id":235,"name":"Q4 outbound","status":"IN_PROGRESS"}"#,
+        ),
+        (
+            "/api/public/inbox/GetChatroom/123/2-ODM0",
+            r#"{"id":"2-ODM0","linkedInAccountId":123,"messages":[{"body":"earlier"}],
+                "correspondentProfile":{"firstName":"Jane","lastName":"Smith"}}"#,
+        ),
+    ];
+
+    /// A held HeyReach request whose injection set `X-API-KEY`; the agent
+    /// also sent headers of its own.
+    fn heyreach_fixture(injected: &[&str]) -> Fixture {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-api-key", "hr-secret-key".parse().unwrap());
+        headers.insert("content-length", "40".parse().unwrap());
+        headers.insert("x-agent-extra", "leak".parse().unwrap());
+        Fixture {
+            headers,
+            credential_headers: injected.iter().map(|h| h.parse().unwrap()).collect(),
+            ..Fixture::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn an_app_keyed_by_its_own_header_is_named_with_that_header_only() {
+        let up = upstream_paths(HEYREACH).await;
+        let fx = heyreach_fixture(&["x-api-key"]);
+        let resolver = summary::record_resolver("heyreach").unwrap();
+        let ctx = fx.ctx("https", Some("conn-hr"), ALLOW);
+
+        let mut s = summary::summarize_request(
+            "heyreach",
+            "POST",
+            "/api/public/campaign/Pause?campaignId=235",
+            None,
+            None,
+        );
+        resolve_names(&mut s, resolver, &ctx, &up.origin).await;
+        s.finalize_title();
+        assert_eq!(s.action, "Pause campaign Q4 outbound");
+        let sent = up.last.lock().unwrap().clone();
+        assert!(
+            sent.starts_with("get /api/public/campaign/getbyid?campaignid=235 "),
+            "{sent}"
+        );
+        assert!(sent.contains("x-api-key: hr-secret-key"), "{sent}");
+        assert!(!sent.contains("x-agent-extra") && !sent.contains("content-length: 40"));
+        assert!(!sent.contains("authorization"), "{sent}");
+
+        // A message's recipient, named from its conversation.
+        let mut s = summary::summarize_request(
+            "heyreach",
+            "POST",
+            "/api/public/inbox/SendMessage",
+            Some("application/json"),
+            Some(br#"{"message":"Hi","conversationId":"2-ODM0","linkedInAccountId":123}"#),
+        );
+        resolve_names(&mut s, resolver, &ctx, &up.origin).await;
+        assert_eq!(row(&s, "To").value, "Jane Smith");
+        assert_eq!(up.hits.load(Ordering::SeqCst), 2, "one read per record");
+    }
+
+    /// A header the AGENT sent is not a credential the gateway injected, so
+    /// it never authorizes a read: nothing injected, nothing carried, no read.
+    #[tokio::test]
+    async fn a_header_the_agent_sent_never_authorizes_a_read() {
+        let up = upstream_paths(HEYREACH).await;
+        for injected in [&[][..], &["authorization"]] {
+            let fx = heyreach_fixture(injected);
+            let mut s = summary::summarize_request(
+                "heyreach",
+                "POST",
+                "/api/public/campaign/Pause?campaignId=235",
+                None,
+                None,
+            );
+            resolve_names(
+                &mut s,
+                summary::record_resolver("heyreach").unwrap(),
+                &fx.ctx("https", Some("conn-hr"), ALLOW),
+                &up.origin,
+            )
+            .await;
+            assert_eq!(row(&s, "Campaign").value, "Campaign · 235", "{injected:?}");
+        }
+        assert_eq!(up.hits.load(Ordering::SeqCst), 0);
     }
 }

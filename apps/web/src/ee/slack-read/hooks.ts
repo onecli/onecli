@@ -3,7 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { queryKeys } from "@/lib/api/keys";
 import * as api from "./api";
-import type { ReadAudience } from "./api";
+import type { GrantPatch, ReadGrant } from "./api";
 
 const k = (agentId: string) => queryKeys.channels.slackRead(agentId);
 
@@ -45,9 +45,33 @@ export const useDisconnectSlack = (agentId: string) => {
 export const useSetReadGrant = (agentId: string) => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: { externalRef: string; audience: ReadAudience }) =>
-      api.setGrant(agentId, input.externalRef, input.audience),
-    onSuccess: () =>
+    mutationFn: ({
+      externalRef,
+      ...patch
+    }: { externalRef: string } & GrantPatch) =>
+      api.setGrant(agentId, externalRef, patch),
+    // Optimistic: the control moves on click; a failure puts it back.
+    onMutate: async ({ externalRef, ...patch }) => {
+      const key = [...k(agentId), "grants"];
+      await qc.cancelQueries({ queryKey: key });
+      const previous = qc.getQueryData<{ grants: ReadGrant[] }>(key);
+      if (previous) {
+        qc.setQueryData<{ grants: ReadGrant[] }>(key, {
+          // Only the caller's own share of it: someone else's share of the
+          // same conversation is theirs, and this PUT never touches it.
+          grants: previous.grants.map((g) =>
+            g.mine && g.externalRef === externalRef ? { ...g, ...patch } : g,
+          ),
+        });
+      }
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.previous) {
+        qc.setQueryData([...k(agentId), "grants"], context.previous);
+      }
+    },
+    onSettled: () =>
       qc.invalidateQueries({ queryKey: [...k(agentId), "grants"] }),
   });
 };
@@ -56,8 +80,8 @@ export const useSetReadGrant = (agentId: string) => {
 export const useShareConversations = (agentId: string) => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: { externalRefs: string[]; audience: ReadAudience }) =>
-      api.shareMany(agentId, input.externalRefs, input.audience),
+    mutationFn: (input: { externalRefs: string[] }) =>
+      api.shareMany(agentId, input.externalRefs),
     onSuccess: () =>
       qc.invalidateQueries({ queryKey: [...k(agentId), "grants"] }),
   });

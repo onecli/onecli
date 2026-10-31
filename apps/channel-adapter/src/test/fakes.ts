@@ -108,6 +108,7 @@ export const createFakeControlPlane = (
   recordPromptMessage: async () => {},
   settlePrompt: async () => {},
   listUnsettledPrompts: async () => [],
+  listPromptOutcomes: async () => [],
   advanceCursor: async () => true,
   claimReply: async () => true,
   reportApprovalHealth: async () => {},

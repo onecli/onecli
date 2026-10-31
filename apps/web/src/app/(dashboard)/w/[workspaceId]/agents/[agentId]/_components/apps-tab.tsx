@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { Loader2, Plug, TriangleAlert } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
+import { cn } from "@onecli/ui/lib/utils";
 import type { Connection } from "@/lib/api";
 import { useConnections } from "@/hooks/use-connections";
 import { useAgentGrants } from "@/hooks/use-grants";
@@ -15,6 +16,8 @@ import { usePinnedPlacement } from "@/hooks/use-stable-placement";
 import { connectionsPath } from "@/lib/navigation";
 import { ConnectionGrantRow } from "./connection-grant-row";
 import { InactiveConnections } from "./inactive-connections";
+import { sortConnectionsForChooser } from "./chooser-order";
+import { chooserEmptyClassName, chooserGridClassName } from "./chooser-layout";
 import dynamic from "next/dynamic";
 import { useInstance } from "@/hooks/use-instance";
 
@@ -29,21 +32,23 @@ const SlackReadConnectionRow = dynamic(() =>
 
 interface AppsTabProps {
   agentId: string;
-  onManage: (connection: Connection) => void;
+  /** Opens the Manage sheet for one connection; without it rows offer no
+   * Manage. */
+  onManage?: (connection: Connection) => void;
   /** Opens the section's in-place Add-connection picker; without it the
    * empty state falls back to linking the workspace Connections page. */
   onAddConnection?: () => void;
-  /** Fold the connections that are off for this agent away (the section's
-   * default). Off in the new agent's "choose connections" window, where
-   * every row starts off and IS the choice. */
-  foldInactive?: boolean;
+  /** The new agent's "choose connections" window: every connection in view
+   * as a tile, A to Z (none folded away, since each starts off and IS the
+   * choice). */
+  chooser?: boolean;
 }
 
 export const AppsTab = ({
   agentId,
   onManage,
   onAddConnection,
-  foldInactive = true,
+  chooser = false,
 }: AppsTabProps) => {
   const pathname = usePathname();
   const connectionsQuery = useConnections("workspace");
@@ -51,9 +56,12 @@ export const AppsTab = ({
   const credentialsQuery = useEffectiveCredentials(agentId);
   const { data: definitions = [] } = useAppPermissionDefinitions();
   const instance = useInstance();
-  const slackRow = instance?.entitled ? (
-    <SlackReadConnectionRow agentId={agentId} />
-  ) : null;
+  // Not in the chooser: it opens right after the agent is created, before
+  // the caller could have connected their Slack to it.
+  const slackRow =
+    instance?.entitled && !chooser ? (
+      <SlackReadConnectionRow agentId={agentId} />
+    ) : null;
   // Active = switched on for this agent or granted by the organization (the
   // switch's own rule). A row the user just toggled keeps its group until the
   // next visit, so it never jumps out from under the pointer.
@@ -103,7 +111,12 @@ export const AppsTab = ({
     return (
       <>
         {slackRow}
-        <Card className="flex flex-col items-center justify-center py-16 text-center">
+        <Card
+          className={cn(
+            "flex flex-col items-center justify-center py-16 text-center",
+            chooser && chooserEmptyClassName,
+          )}
+        >
           <div className="bg-muted mb-4 flex size-12 items-center justify-center rounded-full">
             <Plug className="text-muted-foreground size-5" aria-hidden />
           </div>
@@ -169,19 +182,17 @@ export const AppsTab = ({
           credential?.kind === "connection" && credential.orgBlocked
         }
         hasCatalog={catalogProviders.has(connection.provider)}
-        onManage={() => onManage(connection)}
+        onManage={onManage && (() => onManage(connection))}
         onBeforeToggle={() => placement.pin(connection.id)}
+        compact={chooser}
       />
     );
   };
 
-  // Unfolded (the new agent's chooser): every row in view, each one IS the
-  // choice.
-  if (!foldInactive) {
+  if (chooser) {
     return (
-      <div className="divide-y">
-        {slackRow}
-        {pool.map(renderRow)}
+      <div className={chooserGridClassName}>
+        {sortConnectionsForChooser(pool).map(renderRow)}
       </div>
     );
   }

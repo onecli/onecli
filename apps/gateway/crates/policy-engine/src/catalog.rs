@@ -267,6 +267,164 @@ pub(super) fn app_target_matches(
 mod tests {
     use super::*;
 
+    #[test]
+    fn zendesk_documented_endpoints_keep_method_host_and_depth_fences() {
+        // Mirrors zendesk-permissions.test.ts against the generated catalog.
+        let cases = [
+            ("GET", "/api/v2/tickets", "list_tickets"),
+            ("GET", "/api/v2/tickets/12", "get_ticket"),
+            ("GET", "/api/v2/tickets/12/comments", "list_ticket_comments"),
+            ("GET", "/api/v2/users", "list_users"),
+            ("GET", "/api/v2/users/42", "get_user"),
+            ("GET", "/api/v2/users/me", "get_user"),
+            ("GET", "/api/v2/organizations", "list_organizations"),
+            ("GET", "/api/v2/organizations/42", "get_organization"),
+            ("GET", "/api/v2/search", "search"),
+            ("GET", "/api/v2/help_center/en-us/articles", "list_articles"),
+            ("GET", "/api/v2/job_statuses/abc123", "get_job_status"),
+            ("POST", "/api/v2/tickets", "create_ticket"),
+            ("PUT", "/api/v2/tickets/12", "update_ticket"),
+            ("PUT", "/api/v2/tickets/update_many", "update_ticket"),
+            ("POST", "/api/v2/tickets/12/merge", "merge_tickets"),
+            ("PUT", "/api/v2/tickets/12/mark_as_spam", "mark_ticket_spam"),
+            (
+                "PUT",
+                "/api/v2/tickets/mark_many_as_spam",
+                "mark_ticket_spam",
+            ),
+            ("DELETE", "/api/v2/tickets/12", "delete_tickets"),
+            ("DELETE", "/api/v2/tickets/destroy_many", "delete_tickets"),
+            ("POST", "/api/v2/users", "create_user"),
+            ("PUT", "/api/v2/users/42", "update_user"),
+            ("DELETE", "/api/v2/users/42", "delete_user"),
+            (
+                "POST",
+                "/api/v2/help_center/en-us/sections/42/articles",
+                "create_article",
+            ),
+        ];
+        for (method, path, tool) in cases {
+            for suffix in ["", ".json"] {
+                let endpoint = format!("{path}{suffix}");
+                for id in catalog().get("zendesk").unwrap().keys() {
+                    assert_eq!(
+                        matches("zendesk", &[id], "acme.zendesk.com", method, &endpoint),
+                        id == tool,
+                        "{method} {endpoint}: {id}"
+                    );
+                }
+                assert!(matches(
+                    "zendesk",
+                    &[tool],
+                    "acme.zendesk.com",
+                    method,
+                    &format!("{endpoint}?ids=1,2")
+                ));
+                assert!(!matches(
+                    "zendesk",
+                    &[tool],
+                    "acme.zendesk.com",
+                    method,
+                    &format!("{endpoint}/nested")
+                ));
+                for other in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
+                    if other != method {
+                        assert!(!matches(
+                            "zendesk",
+                            &[tool],
+                            "acme.zendesk.com",
+                            other,
+                            &endpoint
+                        ));
+                    }
+                }
+                for host in ["zendesk.com", "evil.test", "acme.zendesk.com.evil.test"] {
+                    assert!(!matches("zendesk", &[tool], host, method, &endpoint));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zendesk_singular_reads_exclude_named_collection_actions() {
+        for (resource, tool) in [
+            ("tickets", "get_ticket"),
+            ("users", "get_user"),
+            ("organizations", "get_organization"),
+        ] {
+            for suffix in ["", ".json"] {
+                for action in ["show_many", "count", "autocomplete"] {
+                    assert!(!matches(
+                        "zendesk",
+                        &[tool],
+                        "acme.zendesk.com",
+                        "GET",
+                        &format!("/api/v2/{resource}/{action}{suffix}")
+                    ));
+                }
+                for digit in 0..10 {
+                    assert!(matches(
+                        "zendesk",
+                        &[tool],
+                        "acme.zendesk.com",
+                        "GET",
+                        &format!("/api/v2/{resource}/{digit}42{suffix}")
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zendesk_item_writes_exclude_named_actions_and_bulk_user_routes() {
+        for suffix in ["", ".json"] {
+            for digit in 0..10 {
+                for (method, resource, tool) in [
+                    ("PUT", "tickets", "update_ticket"),
+                    ("DELETE", "tickets", "delete_tickets"),
+                    ("PUT", "users", "update_user"),
+                    ("DELETE", "users", "delete_user"),
+                ] {
+                    assert!(matches(
+                        "zendesk",
+                        &[tool],
+                        "acme.zendesk.com",
+                        method,
+                        &format!("/api/v2/{resource}/{digit}42{suffix}")
+                    ));
+                }
+            }
+            for route in ["update_many", "destroy_many", "create_or_update"] {
+                for (method, tool) in [("PUT", "update_user"), ("DELETE", "delete_user")] {
+                    assert!(!matches(
+                        "zendesk",
+                        &[tool],
+                        "acme.zendesk.com",
+                        method,
+                        &format!("/api/v2/users/{route}{suffix}")
+                    ));
+                }
+            }
+            for route in ["12/mark_as_spam", "mark_many_as_spam"] {
+                let path = format!("/api/v2/tickets/{route}{suffix}?ids=12,13");
+                assert!(!matches(
+                    "zendesk",
+                    &["update_ticket"],
+                    "acme.zendesk.com",
+                    "PUT",
+                    &path
+                ));
+                assert!(matches(
+                    "zendesk",
+                    &["mark_ticket_spam"],
+                    "acme.zendesk.com",
+                    "PUT",
+                    &path
+                ));
+            }
+        }
+    }
+
     // ── AWS endpoint coverage: the Rust half of the TS
     // `aws-endpoint-coverage.test.ts` table. Both ports read the SAME generated
     // catalog and must agree, so the same triples are asserted on both sides —

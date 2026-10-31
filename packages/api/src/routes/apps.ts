@@ -28,6 +28,7 @@ import { resolveAppCredentials } from "../apps/resolve-credentials";
 import {
   resolveConnectCredentials,
   type ConnectRequestBody,
+  type ConnectResponse,
 } from "../apps/connect-credentials";
 import { getOAuthOrg, getOrgAppConfig, getAppAvailability } from "../providers";
 import {
@@ -49,7 +50,10 @@ import {
   invalidateGatewayCache,
   invalidateGatewayCacheForAccount,
 } from "../lib/gateway-invalidate";
-import { extractLabel } from "../lib/connection-display";
+import {
+  extractLabel,
+  findDuplicateConnection,
+} from "../lib/connection-display";
 import {
   listConnections,
   createConnection,
@@ -1039,13 +1043,11 @@ export const appRoutes = () => {
         const effectiveLabel =
           connectionOpts.label || extractLabel(metadata) || null;
 
-        const duplicate = effectiveLabel
-          ? existing.find(
-              (conn) =>
-                conn.label?.toLowerCase().trim() ===
-                effectiveLabel.toLowerCase().trim(),
-            )
-          : existing[0];
+        const duplicate = findDuplicateConnection(
+          existing,
+          effectiveLabel,
+          metadata,
+        );
 
         if (duplicate) {
           connection = await reconnectConnection(
@@ -1116,9 +1118,11 @@ export const appRoutes = () => {
       // `connection` is present only for a brand-new connection: the popup's
       // attach step keys on it (an existing one keeps its grants, plus the
       // connecting agent on a re-add).
-      return c.json(
-        created ? { success: true, connection: created } : { success: true },
-      );
+      return c.json({
+        success: true,
+        connectionId: connection.id,
+        ...(created ? { connection: created } : {}),
+      } satisfies ConnectResponse);
     },
   );
 

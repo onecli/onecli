@@ -1,6 +1,7 @@
 import { groupThreadId, userMentionToken } from "@onecli/channels/slack";
 import { z } from "zod";
 import type { ChannelFileRef, SpeakerKind } from "../../types";
+import { messageText } from "./table-text";
 
 /**
  * Slack event → door call, in ONE place for BOTH transports: the HTTP events
@@ -63,6 +64,10 @@ const messageEvent = z.object({
   subtype: z.string().optional(),
   text: z.string().optional(),
   files: z.array(slackFileRef).optional(),
+  // Read only for the tables they carry (./table-text), as `unknown`: no
+  // block shape may make an otherwise valid message unparseable.
+  blocks: z.array(z.unknown()).optional(),
+  attachments: z.array(z.unknown()).optional(),
   ts: z.string().min(1),
   thread_ts: z.string().optional(),
 });
@@ -79,6 +84,8 @@ const appMentionEvent = z.object({
   // defensively (a mention with a file must not lose it; the message twin
   // that also carries it is dropped as the twin).
   files: z.array(slackFileRef).optional(),
+  blocks: z.array(z.unknown()).optional(),
+  attachments: z.array(z.unknown()).optional(),
   ts: z.string().min(1),
   thread_ts: z.string().optional(),
 });
@@ -227,6 +234,9 @@ export type SlackDoorCall =
       replyThreadTs: string;
       /** The triggering message's own ts — where the receipt reaction sits. */
       messageTs: string;
+      /** What the speaker typed, without the tables `text` appends: a name
+       * inside a pasted table is data, not someone calling the agent. */
+      typedText: string;
       /** True when the event was an `app_mention` — addressed to the bot.
        * Plain thread follow-ups (no mention) are false; the dispatchers use
        * this to fence unjoined/unbound thread chatter. */
@@ -400,11 +410,12 @@ export const interpretSlackEvent = (
       door: "group",
       ...speaker,
       externalThreadId: groupThreadId(mention.channel, threadRoot),
-      text: mention.text ?? "",
+      text: messageText(mention),
       files: normalizeFiles(mention.files),
       replyChannel: mention.channel,
       replyThreadTs: threadRoot,
       messageTs: mention.ts,
+      typedText: mention.text ?? "",
       isMention: true,
     };
   }
@@ -446,7 +457,7 @@ export const interpretSlackEvent = (
         door: "direct",
         externalUserId: speaker.externalUserId,
         externalThreadId: message.channel,
-        text: message.text ?? "",
+        text: messageText(message),
         files: normalizeFiles(message.files),
         replyChannel: message.channel,
         // The thread the person actually typed in, when they typed in one.
@@ -482,11 +493,12 @@ export const interpretSlackEvent = (
         door: "group",
         ...speaker,
         externalThreadId: groupThreadId(message.channel, message.thread_ts),
-        text: message.text ?? "",
+        text: messageText(message),
         files: normalizeFiles(message.files),
         replyChannel: message.channel,
         replyThreadTs: message.thread_ts,
         messageTs: message.ts,
+        typedText: message.text ?? "",
         isMention: false,
       };
     }
@@ -497,11 +509,12 @@ export const interpretSlackEvent = (
       // under it. A point-of-contact answer uses the channel's room instead
       // (the dispatcher decides where it lands).
       externalThreadId: groupThreadId(message.channel, message.ts),
-      text: message.text ?? "",
+      text: messageText(message),
       files: normalizeFiles(message.files),
       replyChannel: message.channel,
       replyThreadTs: message.ts,
       messageTs: message.ts,
+      typedText: message.text ?? "",
       isMention: false,
       overheard: true,
     };

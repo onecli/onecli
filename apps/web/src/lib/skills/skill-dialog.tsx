@@ -35,12 +35,18 @@ import {
   useUpdateOrgSkill,
   useUpdateSkill,
 } from "@/hooks/use-skills";
-import type { SkillFileInput, SkillSummary } from "@/lib/api";
+import type { Skill, SkillFileInput, SkillSummary } from "@/lib/api";
+import {
+  MAX_FILES_PER_SKILL,
+  SKILL_CONTENT_MAX_LENGTH,
+  SKILL_DESCRIPTION_MAX_LENGTH,
+} from "@onecli/api/validations/skills";
 import {
   SkillFilesEditor,
   skillFileElementId,
   skillFileProblem,
 } from "./skill-files-editor";
+import { SkillFileList } from "./skill-file-list";
 
 /**
  * Create/edit one skill (both doors — the tier decides which hooks fire).
@@ -55,6 +61,15 @@ const SKILL_TOTAL_MAX = 32_000;
 
 /** The footer line's id, so the Save/Create button is described by it. */
 const BLOCKER_ID = "skill-save-blocker";
+
+/** A skill imported from a zip: files the hand-written editor can't take
+ * whole (one it can't show or save as it is, or more than it holds), or a
+ * body imported past its limit. The dialog lists its files instead of
+ * editing them, and holds its body to its imported length. */
+const isImportedSkill = (skill: Skill): boolean =>
+  skill.files.length > MAX_FILES_PER_SKILL ||
+  skill.files.some((file) => !file.editable) ||
+  skill.content.length > SKILL_CONTENT_MAX_LENGTH;
 
 /** Why a Create/Save click did not save: the words for the footer, and the
  *  input the caret goes to. */
@@ -141,11 +156,19 @@ export const SkillDialog = ({
 
   // Seeded ONCE per open (the memory-dialog lesson): the detail query
   // refetches on window focus, and a data-identity dependency would wipe
-  // what the user has typed.
+  // what the user has typed. An imported skill's files are listed, never
+  // seeded: its save sends none, and the server keeps them all.
   useEffect(() => {
     if (!open || !editing || bodySeeded || !detail.data) return;
     setContent(detail.data.content);
-    setFiles(detail.data.files);
+    setFiles(
+      isImportedSkill(detail.data)
+        ? []
+        : detail.data.files.map(({ path, content: text }) => ({
+            path,
+            content: text,
+          })),
+    );
     setBodySeeded(true);
   }, [open, editing, bodySeeded, detail.data]);
 
@@ -157,9 +180,18 @@ export const SkillDialog = ({
     orgCreate.isPending ||
     orgUpdate.isPending;
   const bodyReady = !editing || bodySeeded;
+  // A skill imported from a zip: it edits the description and instructions
+  // only, lists the files read-only, and its save sends no files, so the
+  // server keeps every one. Its body may change but not outgrow the import.
+  const importedSkill =
+    editing && detail.data && isImportedSkill(detail.data) ? detail.data : null;
+  const importedFiles = importedSkill?.files ?? null;
   const totalChars =
     content.length + files.reduce((sum, file) => sum + file.content.length, 0);
-  const overBudget = totalChars > SKILL_TOTAL_MAX;
+  const totalMax = importedSkill
+    ? Math.max(SKILL_CONTENT_MAX_LENGTH, importedSkill.content.length)
+    : SKILL_TOTAL_MAX;
+  const overBudget = totalChars > totalMax;
 
   const missingName = !editing && name.trim() === "";
   const missingDescription = description.trim() === "";
@@ -225,7 +257,7 @@ export const SkillDialog = ({
         patch: {
           description: description.trim(),
           content,
-          files: cleanFiles,
+          ...(!importedFiles && { files: cleanFiles }),
         },
       };
       if (isOrg) orgUpdate.mutate(payload, handlers);
@@ -332,14 +364,23 @@ export const SkillDialog = ({
               Description
               <Required />
             </Label>
-            <Input
+            {/* Up to 1,024 characters (the standard's limit), so it wraps
+                in view; still one line, which is what the server takes. */}
+            <Textarea
               id="skill-description"
               value={description}
-              onChange={(event) => setDescription(event.target.value)}
+              onChange={(event) =>
+                setDescription(event.target.value.replace(/\r?\n/g, " "))
+              }
+              onKeyDown={(event) => {
+                if (event.key === "Enter") event.preventDefault();
+              }}
               placeholder="One line: how the agent decides when to use it"
               required
               aria-invalid={attempted && missingDescription}
-              maxLength={500}
+              maxLength={SKILL_DESCRIPTION_MAX_LENGTH}
+              rows={1}
+              className="max-h-32 min-h-9 resize-none"
             />
           </div>
 
@@ -355,8 +396,7 @@ export const SkillDialog = ({
                 aria-live="polite"
                 className={`text-xs ${overBudget ? "text-destructive" : "text-muted-foreground"}`}
               >
-                {totalChars.toLocaleString()} /{" "}
-                {SKILL_TOTAL_MAX.toLocaleString()}
+                {totalChars.toLocaleString()} / {totalMax.toLocaleString()}
                 {overBudget && " (too long to save)"}
               </span>
             </div>
@@ -376,7 +416,11 @@ export const SkillDialog = ({
             )}
           </div>
 
-          {bodyReady ? (
+          {!bodyReady ? (
+            <Skeleton className="h-10 w-full" />
+          ) : importedFiles ? (
+            <SkillFileList files={importedFiles} />
+          ) : (
             <SkillFilesEditor
               files={files}
               onChange={setFiles}
@@ -384,8 +428,6 @@ export const SkillDialog = ({
               hasBody={content.trim() !== ""}
               showErrors={attempted}
             />
-          ) : (
-            <Skeleton className="h-10 w-full" />
           )}
         </div>
 

@@ -287,6 +287,20 @@ describe("conversations", () => {
     expect(services.createConversation).not.toHaveBeenCalled();
   });
 
+  it("refuses the platform-only memory review source: no client can fake a review of another thread", async () => {
+    const res = await app.request("/v1/conversations", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({
+        agentId: "ag-1",
+        source: "memory_review",
+        externalRef: "someone-elses-thread",
+      }),
+    });
+    expect(res.status).toBe(422);
+    expect(services.createConversation).not.toHaveBeenCalled();
+  });
+
   it("lists, filtered by agent when asked — as the session's user", async () => {
     const res = await app.request("/v1/conversations?agentId=ag-1", {
       headers: AUTH,

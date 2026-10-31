@@ -541,7 +541,7 @@ describe.skipIf(!PROOF_URL)("the usage reads", () => {
     const foreign = await seedAgent("org-foreign", WORKSPACE_B);
     await plantDay(a, midnight(1), 3600);
     await plantDay(b, midnight(1), 3600);
-    // b also ran today: 1h closed.
+    // b also ran today: 1h closed, 01:00 to 02:00 UTC.
     await plantInterval(
       b,
       "ob",
@@ -557,7 +557,14 @@ describe.skipIf(!PROOF_URL)("the usage reads", () => {
       sandboxId: `${P}sb-f`,
     });
 
-    const result = await usage.getOrgRuntimeUsage(ORG, lastDays(2));
+    // The window ends at today 02:00 UTC, not `now`: a `to` of now clips
+    // b's run whenever the suite runs before 02:00 UTC (seen on CI at
+    // 01:22 UTC: 4919 s). The read is exact for a closed run under any
+    // wall clock, a `to` in the future only bounds open runs (none here).
+    const result = await usage.getOrgRuntimeUsage(ORG, {
+      from: midnight(2),
+      to: new Date(midnight().getTime() + 2 * HOUR),
+    });
     expect(result.agents).toEqual([
       { agentId: b, awakeSeconds: 7200 },
       { agentId: a, awakeSeconds: 3600 },

@@ -126,7 +126,7 @@ export const AgentAccessDialog = ({
               </div>
               <Button variant="outline" size="sm" asChild>
                 <Link href={withWorkspacePrefix(pathname, "/agents")}>
-                  Go to Agents
+                  Create an agent
                 </Link>
               </Button>
             </div>

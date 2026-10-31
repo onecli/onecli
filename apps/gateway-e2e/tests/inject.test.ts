@@ -1,5 +1,6 @@
 import { describe, expect } from "vitest";
 
+import { addSecret, grantSecret } from "../src/fixtures.js";
 import { throughProxy } from "../src/proxy.js";
 import { scenario, type Cx } from "../src/scenario.js";
 
@@ -238,6 +239,52 @@ describe("injection shapes", () => {
         "Bearer sk-ant-oat-workspace-token",
       );
       expect(seen?.header("x-api-key")).toBeUndefined();
+    },
+  );
+
+  // Two Anthropic keys in ONE workspace, both attached: the API side hands
+  // the container the lower-id key's auth mode, so the gateway must inject
+  // that same key whatever order the rows come back in. The lower id (the
+  // API key) is inserted LAST, so a pick left to Postgres row order would
+  // take the OAuth token and send an API-key request with no credential.
+  scenario(
+    "two same-scope Anthropic keys resolve to the lower id",
+    async (cx) => {
+      const upstream = await cx.upstream();
+      await cx.seed({
+        grantAll: true,
+        secrets: [
+          {
+            type: "anthropic",
+            hostPattern: "127.0.0.1",
+            value: "sk-ant-oat-higher-id-token",
+          },
+        ],
+      });
+      // Sorts before the seeded `<ws>-sec-0` ("a" < "s").
+      const lowerId = `${cx.ids.workspace}-a-lower-id`;
+      await addSecret(
+        cx.db.prisma,
+        cx.ids,
+        {
+          type: "anthropic",
+          hostPattern: "127.0.0.1",
+          value: "sk-ant-api03-lower-id-key",
+        },
+        lowerId,
+      );
+      await grantSecret(cx.db.prisma, cx.ids, lowerId);
+      const gw = await cx.startGateway();
+
+      await throughProxy(gw.origin, {
+        url: upstream.url("/v1/messages"),
+        token: cx.ids.agentToken,
+        headers: { "x-api-key": "placeholder" },
+      });
+
+      const [seen] = await upstream.waitForRequests(1);
+      expect(seen?.header("x-api-key")).toBe("sk-ant-api03-lower-id-key");
+      expect(seen?.header("authorization")).toBeUndefined();
     },
   );
 

@@ -11,8 +11,9 @@ interface InlineActionApprovalProps {
 /**
  * A pending action approval inside the agent's chat, where the asking turn
  * ran - the web twin of the Slack DM card. The bell's row, framed as a
- * message: same decide door, same dialogs (details, always allow, reject
- * with a reason). It leaves the thread once decided, like the bell row.
+ * message: same decide door, same answers (Always allow / Never for a
+ * standing question, otherwise Approve / Reject with a reason). It leaves
+ * the thread once decided, like the bell row.
  */
 export const InlineActionApproval = ({ item }: InlineActionApprovalProps) => (
   <Message align="start">

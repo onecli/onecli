@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const googleCalendarPermissions: AppPermissionDefinition = {
   provider: "google-calendar",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

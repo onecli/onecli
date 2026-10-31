@@ -6,6 +6,13 @@ import {
   batchArrival,
 } from "@onecli/api/lib/approval-groups";
 import { CELL_OPS } from "@onecli/api/lib/record-change";
+import {
+  CHANNEL_CARD_EXPIRED_TEXT,
+  CHANNEL_CARD_RECORD_WAIT_MS,
+  channelCardEndingOf,
+  channelCardEndingText,
+  type ChannelCardEnding,
+} from "@onecli/api/lib/channel-card-ending";
 import type { ControlPlaneClient } from "./control-plane";
 import {
   replyTargetForLink,
@@ -225,7 +232,7 @@ export interface ApprovalCardUi {
 }
 
 /** How one grouped approval ended, for the card's done list. */
-type GroupOutcome = "approved" | "denied" | "expired" | "decided";
+type GroupOutcome = ChannelCardEnding;
 
 export interface GroupCardView {
   /** Still pending, oldest first: exactly the ids the buttons carry. */
@@ -266,6 +273,9 @@ interface TrackedPrompt {
   /** The approval's action title, for outcome rewrites ("what was asked").
    * Null for prompts recovered from the ledger (it records no title). */
   title: string | null;
+  /** When this adapter first saw the request gone from the pending list
+   * (ms epoch), while it waits for the record to say how it ended. */
+  departedAt?: number;
 }
 
 export interface ApprovalsManagerDeps {
@@ -459,17 +469,28 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
     }, wait).unref?.();
   };
 
-  const outcomeOf = (
-    state: "decided" | "expired",
-    text: string,
-  ): GroupOutcome =>
-    state === "expired"
-      ? "expired"
-      : text.startsWith("✅")
-        ? "approved"
-        : text.startsWith("⛔")
-          ? "denied"
-          : "decided";
+  /** A settle's per-request verdict: what its card's done list counts, the
+   * line a single card is rewritten with, and the ledger state (the ledger
+   * only tells "settled at the deadline" from "settled otherwise"). */
+  interface Ending {
+    outcome: GroupOutcome;
+    text: string;
+  }
+
+  const ledgerStateOf = (outcome: GroupOutcome): "decided" | "expired" =>
+    outcome === "expired" ? "expired" : "decided";
+
+  const EXPIRED: Ending = {
+    outcome: "expired",
+    text: CHANNEL_CARD_EXPIRED_TEXT,
+  };
+
+  const outcomeOf = (text: string): GroupOutcome =>
+    text.startsWith("✅")
+      ? "approved"
+      : text.startsWith("⛔")
+        ? "denied"
+        : "decided";
 
   /** A row as its card's done list records it. */
   const settledRow = (
@@ -514,43 +535,42 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
    * moved to its card's done list, each touched card renders ONCE, and only
    * then does the ledger settle. A failed render puts the members back and
    * keeps them tracked (the caller's cadence retries), the same contract
-   * `settleTracked` keeps for a single card.
+   * `settleTracked` keeps for a single card. Each prompt carries its own
+   * ending: one poll can see a cancel and a dashboard approval together.
    */
   const settleMany = async (
-    list: TrackedPrompt[],
-    state: "decided" | "expired",
-    text: string,
+    list: { prompt: TrackedPrompt; ending: Ending }[],
   ): Promise<void> => {
-    const byGroup = new Map<GroupCard, TrackedPrompt[]>();
-    for (const prompt of list) {
+    const byGroup = new Map<
+      GroupCard,
+      { prompt: TrackedPrompt; ending: Ending }[]
+    >();
+    for (const item of list) {
+      const { prompt, ending } = item;
       const g = groupFor(prompt);
       if (g && isMulti(g)) {
         const members = byGroup.get(g) ?? [];
-        members.push(prompt);
+        members.push(item);
         byGroup.set(g, members);
         continue;
       }
       try {
-        if (await settleTracked(prompt, state, text)) untrack(prompt);
+        if (await settleTracked(prompt, ending)) untrack(prompt);
       } catch (err) {
         deps.onLog("settle failed; will retry", { err: String(err) });
       }
     }
     for (const [g, members] of byGroup) {
-      const removed = members.map((p) => ({
-        prompt: p,
-        approval: g.live.get(p.approvalId) ?? null,
+      const removed = members.map(({ prompt, ending }) => ({
+        prompt,
+        ending,
+        approval: g.live.get(prompt.approvalId) ?? null,
       }));
-      for (const { prompt, approval } of removed) {
+      for (const { prompt, ending, approval } of removed) {
         g.live.delete(prompt.approvalId);
         markSettled(
           g,
-          settledRow(
-            prompt.approvalId,
-            prompt,
-            approval,
-            outcomeOf(state, text),
-          ),
+          settledRow(prompt.approvalId, prompt, approval, ending.outcome),
         );
       }
       try {
@@ -558,7 +578,7 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
       } catch (err) {
         // Put them back: the card still shows them live, so they must stay
         // tracked and live until a render lands.
-        const ids = new Set(members.map((p) => p.approvalId));
+        const ids = new Set(members.map(({ prompt }) => prompt.approvalId));
         g.settled = g.settled.filter((s) => !ids.has(s.id));
         for (const { prompt, approval } of removed) {
           g.live.set(prompt.approvalId, approval);
@@ -568,9 +588,12 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
         });
         continue;
       }
-      for (const prompt of members) {
+      for (const { prompt, ending } of members) {
         try {
-          await deps.controlPlane.settlePrompt(prompt.approvalId, state);
+          await deps.controlPlane.settlePrompt(
+            prompt.approvalId,
+            ledgerStateOf(ending.outcome),
+          );
           prompts.delete(prompt.approvalId);
         } catch (err) {
           deps.onLog("ledger settle failed; will retry", { err: String(err) });
@@ -624,8 +647,7 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
    */
   const settleTracked = async (
     prompt: TrackedPrompt,
-    state: "decided" | "expired",
-    text: string,
+    ending: Ending,
   ): Promise<boolean> => {
     if (prompt.messageRef) {
       const credential = tokenFor.get(prompt.presenceId);
@@ -636,11 +658,14 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
       await cardUi.settle({
         credential,
         ...ref,
-        text,
+        text: ending.text,
         title: prompt.title,
       });
     }
-    await deps.controlPlane.settlePrompt(prompt.approvalId, state);
+    await deps.controlPlane.settlePrompt(
+      prompt.approvalId,
+      ledgerStateOf(ending.outcome),
+    );
     return true;
   };
 
@@ -713,8 +738,89 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
       (prompt) => prompt.expiresAt !== null && prompt.expiresAt <= now,
     );
     const due = await stillUnsettled(expired);
-    if (due.length === 0) return;
-    await settleMany(due, "expired", "Expired (no response) · denied");
+    if (due.length > 0) {
+      await settleMany(due.map((prompt) => ({ prompt, ending: EXPIRED })));
+    }
+    // A card that left the pending list and is still waiting for its record
+    // gets asked again here (the poll may be idle in its long-poll). Only
+    // what is still tracked: the expiry pass above may have settled it.
+    await settleDeparted(
+      [...prompts.values()].filter(
+        (prompt) =>
+          prompt.departedAt !== undefined &&
+          !(prompt.expiresAt !== null && prompt.expiresAt <= now) &&
+          !deciding.has(prompt.approvalId),
+      ),
+    );
+  };
+
+  /**
+   * Cards whose request left the gateway's pending list with no click on
+   * them: the record says how it ended (a dashboard decision, a request
+   * replaced by a person's message, or the agent no longer waiting), and
+   * the card says exactly that. Channel-neutral: every provider renders the
+   * same ending through its own card seam.
+   *
+   * A request with no record yet stays tracked, stamped with when it left,
+   * and is asked about again (the next poll, or the 5s sweep) for
+   * `CHANNEL_CARD_RECORD_WAIT_MS`; then the card says only what this
+   * adapter saw: "No longer waiting". At its deadline, a request with no
+   * record is the gateway's auto-deny. A failed lookup acts on nothing.
+   */
+  const settleDeparted = async (candidates: TrackedPrompt[]): Promise<void> => {
+    const now = Date.now();
+    for (const prompt of candidates) prompt.departedAt ??= now;
+    const left = await stillUnsettled(candidates);
+    if (left.length === 0) return;
+    let record: Map<string, { outcome: string; via?: string }>;
+    try {
+      // Every departed card is asked about, a read's worth at a time: one
+      // never asked would read "No longer waiting" with a record waiting.
+      const answers = [];
+      for (let i = 0; i < left.length; i += APPROVAL_GROUP_MAX_IDS) {
+        const ids = left
+          .slice(i, i + APPROVAL_GROUP_MAX_IDS)
+          .map((p) => p.approvalId);
+        answers.push(...(await deps.controlPlane.listPromptOutcomes(ids)));
+      }
+      record = new Map(answers.map((o) => [o.approvalId, o]));
+    } catch (err) {
+      deps.onLog("approval outcome lookup failed; will retry", {
+        err: String(err),
+      });
+      return;
+    }
+    const due: { prompt: TrackedPrompt; ending: Ending }[] = [];
+    for (const prompt of left) {
+      const known = record.get(prompt.approvalId);
+      const ending = channelCardEndingOf(known?.outcome);
+      if (ending) {
+        due.push({
+          prompt,
+          ending: {
+            outcome: ending,
+            text: channelCardEndingText(ending, known?.via),
+          },
+        });
+        continue;
+      }
+      if (prompt.expiresAt !== null && prompt.expiresAt - 15_000 <= now) {
+        // At/near the deadline with no other record: the gateway's
+        // auto-deny, settled now rather than after the sweep's local clock.
+        due.push({ prompt, ending: EXPIRED });
+        continue;
+      }
+      if (now - (prompt.departedAt ?? now) >= CHANNEL_CARD_RECORD_WAIT_MS) {
+        due.push({
+          prompt,
+          ending: {
+            outcome: "unknown",
+            text: channelCardEndingText("unknown"),
+          },
+        });
+      }
+    }
+    if (due.length > 0) await settleMany(due);
   };
 
   /** The swallow-wrapper for decision-path rewrites: the outcome is already
@@ -752,7 +858,7 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
     const g = groupFor(prompt);
     if (g && isMulti(g)) {
       await settleDecidedMany([approvalId], {
-        outcome: outcomeOf("decided", text),
+        outcome: outcomeOf(text),
       });
       return;
     }
@@ -916,6 +1022,12 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
           // next poll retries the pair. A card a channel click already
           // settled is untracked instead (`stillUnsettled`).
           const pendingIds = new Set(pending.map((a) => a.id));
+          // Seen pending again (a poll answer that dropped it was stale):
+          // its wait for the record starts over on its next departure.
+          for (const id of pendingIds) {
+            const tracked = prompts.get(id);
+            if (tracked) delete tracked.departedAt;
+          }
           // Recovered group members get their details from this poll. Once
           // a rebuilt card has every row's details it renders again: a join
           // whose debounced render was lost to a restart shows up then.
@@ -943,34 +1055,7 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
               // settle here would win the race with the wrong provenance.
               !deciding.has(prompt.approvalId),
           );
-          const nearDeadline: TrackedPrompt[] = [];
-          const decidedElsewhere: TrackedPrompt[] = [];
-          for (const prompt of await stillUnsettled(absent)) {
-            if (
-              prompt.expiresAt !== null &&
-              prompt.expiresAt - 15_000 <= Date.now()
-            ) {
-              // At/near the deadline: expire NOW rather than waiting out the
-              // sweep against a local clock the gateway already beat.
-              nearDeadline.push(prompt);
-              continue;
-            }
-            decidedElsewhere.push(prompt);
-          }
-          if (nearDeadline.length > 0) {
-            await settleMany(
-              nearDeadline,
-              "expired",
-              "Expired (no response) · denied",
-            );
-          }
-          if (decidedElsewhere.length > 0) {
-            await settleMany(
-              decidedElsewhere,
-              "decided",
-              "Decided from the dashboard",
-            );
-          }
+          await settleDeparted(absent);
           for (const approval of pending) {
             if (prompts.has(approval.id)) continue;
             // The gateway's pending list is WORKSPACE-scoped, but this loop

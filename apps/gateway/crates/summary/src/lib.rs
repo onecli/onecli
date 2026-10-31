@@ -34,22 +34,30 @@ mod records;
 mod redact;
 
 pub mod bulk;
+mod change;
 mod generic;
+mod github;
 mod gmail;
 mod google_calendar;
 mod google_drive;
 mod google_sheets;
+mod graphql;
+mod heyreach;
+mod nested;
+mod onedrive;
 /// What an approved request actually did (see `outcome.rs`).
 pub mod outcome;
 mod outlook_calendar;
 mod outlook_mail;
 mod salesforce;
 mod twilio;
+mod zendesk;
 mod zoom;
 
+pub use change::ChangeHint;
 pub use records::{ContextField, CurrentRecord, RecordResolver, Subject};
 use records::{Named, RecordRef, Target};
-pub use redact::{is_sensitive_key, mask_secrets};
+pub use redact::{is_sensitive_key, is_url_credential, mask_secrets};
 
 // ── Limits ───────────────────────────────────────────────────────────────
 
@@ -65,6 +73,12 @@ pub const MAX_SNIPPET_LEN: usize = 1800;
 pub const MAX_ATTACHMENTS: usize = 5;
 /// Most body fields shown as rows before the rest collapse to "+N more".
 pub(crate) const MAX_FIELD_ROWS: usize = 12;
+/// How much of a held request's body the gateway reads for its card (a
+/// whole-list change reads more, see [`reads_whole_body`]). A body this long
+/// may have been cut, so a card never states it as the whole size. 16 KB is
+/// enough to decode an email's RFC822 headers and first MIME part while
+/// staying tiny next to a multi-megabyte attachment.
+pub const BODY_PEEK: usize = 16 * 1024;
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -105,6 +119,15 @@ pub struct ApprovalSummary {
     /// read them, its current ones. Omitted for single-record requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bulk: Option<bulk::BulkChange>,
+    /// Path record rows that a trusted linked record can replace. Also marks
+    /// fallback cards for telemetry. Gateway-internal, never serialized.
+    #[serde(skip)]
+    fallback: Option<std::ops::Range<usize>>,
+    /// Where the thing this request changes can be read as it stands, so
+    /// the gateway can lead the card with before → after. Gateway-internal:
+    /// never serialized; consumed by [`ApprovalSummary::apply_current`].
+    #[serde(skip)]
+    change: Option<ChangeHint>,
 }
 
 /// The familiar shape a request produces. The details keep their usual labels
@@ -137,7 +160,16 @@ impl ApprovalSummary {
             target: None,
             subject: None,
             bulk: None,
+            fallback: None,
+            change: None,
         }
+    }
+
+    /// Whether the fallback built this card (no app summarizer knew the
+    /// request).
+    #[must_use]
+    pub fn is_generic(&self) -> bool {
+        self.fallback.is_some()
     }
 
     /// Mark what the request produces, so a card can preview it in that
@@ -282,8 +314,11 @@ pub trait RequestSummarizer: Sync {
     fn summarize(&self, req: &SummaryRequest<'_>) -> Option<ApprovalSummary>;
 }
 
+static GITHUB: github::GitHub = github::GitHub;
+static ONEDRIVE: onedrive::OneDrive = onedrive::OneDrive;
 static GMAIL: gmail::Gmail = gmail::Gmail;
 static GOOGLE_CALENDAR: google_calendar::GoogleCalendar = google_calendar::GoogleCalendar;
+static HEYREACH: heyreach::HeyReach = heyreach::HeyReach;
 static OUTLOOK_MAIL: outlook_mail::OutlookMail = outlook_mail::OutlookMail;
 static OUTLOOK_CALENDAR: outlook_calendar::OutlookCalendar = outlook_calendar::OutlookCalendar;
 static SALESFORCE: salesforce::Salesforce = salesforce::Salesforce;
@@ -291,14 +326,18 @@ static ZOOM: zoom::Zoom = zoom::Zoom;
 static GOOGLE_SHEETS: google_sheets::GoogleSheets = google_sheets::GoogleSheets;
 static GOOGLE_DRIVE: google_drive::GoogleDrive = google_drive::GoogleDrive;
 static TWILIO: twilio::Twilio = twilio::Twilio;
+static ZENDESK: zendesk::Zendesk = zendesk::Zendesk;
 
 /// Resolve the summarizer for a OneCLI provider id. `None` for providers
 /// without a dedicated summarizer — the caller falls back to the generic
 /// rendering.
 fn summarizer(provider: &str) -> Option<&'static dyn RequestSummarizer> {
     match provider {
+        "github" | "github-app" => Some(&GITHUB),
+        "microsoft-word" => Some(&ONEDRIVE),
         "gmail" => Some(&GMAIL),
         "google-calendar" => Some(&GOOGLE_CALENDAR),
+        "heyreach" => Some(&HEYREACH),
         "outlook-mail" => Some(&OUTLOOK_MAIL),
         "outlook-calendar" => Some(&OUTLOOK_CALENDAR),
         "salesforce" => Some(&SALESFORCE),
@@ -306,6 +345,7 @@ fn summarizer(provider: &str) -> Option<&'static dyn RequestSummarizer> {
         "google-sheets" => Some(&GOOGLE_SHEETS),
         "google-drive" => Some(&GOOGLE_DRIVE),
         "twilio" => Some(&TWILIO),
+        "zendesk" => Some(&ZENDESK),
         _ => None,
     }
 }
@@ -315,21 +355,24 @@ fn summarizer(provider: &str) -> Option<&'static dyn RequestSummarizer> {
 #[must_use]
 pub fn record_resolver(provider: &str) -> Option<&'static dyn RecordResolver> {
     match provider {
+        "heyreach" => Some(&HEYREACH),
         "salesforce" => Some(&SALESFORCE),
+        "microsoft-word" => Some(&ONEDRIVE),
         "google-sheets" => Some(&GOOGLE_SHEETS),
         "google-drive" => Some(&GOOGLE_DRIVE),
         _ => None,
     }
 }
 
-/// Whether this request's card lists a whole list of records from its body
-/// (a Salesforce sObject Collections write or Composite call), so the
-/// gateway reads the body whole, up to its bulk cap, instead of its usual
-/// short peek: a card must never summarize a cut list as the whole one.
+/// Whether this request's card must read its body whole, up to the gateway's
+/// bulk cap, instead of its usual short peek: a list of records (a
+/// Salesforce sObject Collections write or Composite call: a card must never
+/// summarize a cut list as the whole one) or a new Salesforce Flow version
+/// (its metadata only compares with the active version when read whole).
 /// Only for the app the request matched, never a guess from the path alone.
 #[must_use]
 pub fn reads_whole_body(provider: &str, method: &str, path: &str) -> bool {
-    provider == "salesforce" && salesforce::is_bulk_write(method, path)
+    provider == "salesforce" && salesforce::reads_whole_body(method, path)
 }
 
 /// Build a human-readable summary for a held request.
@@ -434,6 +477,19 @@ pub fn last_segment(path: &str) -> Option<&str> {
     path.rsplit('/').find(|s| !s.is_empty())
 }
 
+/// A byte count as a card shows it: "512 B", "12 KB", "3.4 MB".
+fn human_size(bytes: usize) -> String {
+    const KB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b < KB {
+        format!("{bytes} B")
+    } else if b < KB * KB {
+        format!("{:.0} KB", b / KB)
+    } else {
+        format!("{:.1} MB", b / KB / KB)
+    }
+}
+
 /// A path segment as written before percent-encoding (`Sheet%201` →
 /// `Sheet 1`). A segment that doesn't decode to UTF-8 is kept as sent.
 fn decode_segment(s: &str) -> String {
@@ -502,8 +558,17 @@ mod tests {
     #[test]
     fn unknown_provider_with_no_body_falls_back_to_generic() {
         let s = summarize_request("whatever", "DELETE", "/v1/resource/42", None, None);
-        assert_eq!(s.action, "DELETE request");
-        assert_eq!(detail(&s, "Endpoint"), Some("/v1/resource/42"));
+        assert_eq!(s.action, "Delete resource");
+        assert_eq!(detail(&s, "Resource"), Some("42"));
+        assert!(s.is_generic());
+        assert!(!summarize_request(
+            "gmail",
+            "POST",
+            "/gmail/v1/users/me/messages/send",
+            None,
+            None
+        )
+        .is_generic());
     }
 
     #[test]
@@ -571,6 +636,71 @@ mod tests {
         assert_eq!(s.action, "Delete Contact Dana Reyes");
     }
 
+    /// A custom object has no prefix-based name read, but the current-values
+    /// read can still name it for both the title and the record row.
+    #[test]
+    fn the_title_and_row_take_the_name_read_with_current_values() {
+        let id = "a0BAA00000AbCdEFGH";
+        let mut s = summarize_request(
+            "salesforce",
+            "PATCH",
+            &format!("/services/data/v62.0/sobjects/Project__c/{id}"),
+            Some("application/json"),
+            Some(br#"{"Name":"New project"}"#),
+        );
+        s.bulk.as_mut().unwrap().rows[0].name = Some(" Current project ".into());
+        s.name_refs_from_bulk();
+        s.finalize_title();
+        assert_eq!(s.action, "Update Project Current project");
+        let subject = s.subject.as_ref().unwrap();
+        assert_eq!(
+            s.details[subject.row].value,
+            format!("Current project ({id})")
+        );
+        assert!(s
+            .render_text()
+            .contains(&format!("Project: Current project ({id})")));
+    }
+
+    #[test]
+    fn bulk_names_only_fill_missing_refs_of_the_same_type_and_id() {
+        let id = "a0BAA00000AbCdEFGH";
+        let original = summarize_request(
+            "salesforce",
+            "PATCH",
+            &format!("/services/data/v62.0/sobjects/Project__c/{id}"),
+            Some("application/json"),
+            Some(br#"{"Name":"Next"}"#),
+        );
+        for (object, row_id, name, kind) in [
+            ("Other__c", id, "Other", bulk::BulkKind::Update),
+            (
+                "Project__c",
+                "a0BAA00000XyZaBAAA",
+                "Other",
+                bulk::BulkKind::Update,
+            ),
+            ("Project__c", id, "   ", bulk::BulkKind::Update),
+            ("Project__c", id, "Request chosen", bulk::BulkKind::Create),
+        ] {
+            let mut s = original.clone();
+            let b = s.bulk.as_mut().unwrap();
+            b.object = object.into();
+            b.kind = kind;
+            b.rows[0].id = row_id.into();
+            b.rows[0].name = Some(name.into());
+            s.name_refs_from_bulk();
+            s.finalize_title();
+            assert_eq!(s.action, format!("Update Project {id}"));
+        }
+        let mut s = original;
+        s.name_refs(|_| Some("Already resolved"));
+        s.bulk.as_mut().unwrap().rows[0].name = Some("Fallback".into());
+        s.name_refs_from_bulk();
+        s.finalize_title();
+        assert_eq!(s.action, "Update Project Already resolved");
+    }
+
     #[test]
     fn an_unnamed_record_titles_by_id_and_a_blank_name_is_ignored() {
         let id = "003fn00000Fa7bpAAB";
@@ -595,8 +725,13 @@ mod tests {
     #[test]
     fn record_state_never_reaches_the_wire() {
         let mut s = sf_record("Contact", "003fn00000Fa7bpAAB");
+        s.change = ChangeHint::same_path("PATCH", "/x/1", &serde_json::json!({"a": 1}));
         let wire = serde_json::to_value(&s).unwrap();
         assert!(wire.get("refs").is_none() && wire.get("target").is_none());
+        assert!(
+            wire.get("change").is_none(),
+            "the read stays in the gateway"
+        );
         assert!(wire.get("subject").is_none(), "no subject before the title");
         s.finalize_title();
         let wire = serde_json::to_value(&s).unwrap();

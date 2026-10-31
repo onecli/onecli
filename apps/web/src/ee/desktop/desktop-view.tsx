@@ -9,6 +9,14 @@ import {
   type Ref,
 } from "react";
 import type RFB from "@novnc/novnc";
+import { DESKTOP_CLIPBOARD_MAX_WIRE_BYTES } from "@onecli/agent-protocol";
+import { toast } from "sonner";
+import {
+  clipboardErrorMessage,
+  createDesktopClipboard,
+  DesktopClipboardError,
+  type DesktopClipboard,
+} from "./clipboard/desktop-clipboard";
 import { cn } from "@onecli/ui/lib/utils";
 import * as desktopApi from "./api";
 import { DesktopPlaceholder } from "./desktop-placeholder";
@@ -60,6 +68,7 @@ export interface DesktopViewHandle {
    * Inert while watching.
    */
   openKeyboard: () => void;
+  cancelClipboard: () => void;
 }
 
 /**
@@ -123,6 +132,10 @@ export const DesktopView = ({
 }: DesktopViewProps) => {
   const container = useRef<HTMLDivElement>(null);
   const rfb = useRef<RFB | null>(null);
+  const clipboard = useRef<DesktopClipboard | null>(null);
+  const pasteShift = useRef(false);
+  const capturedKeys = useRef(new Set<string>());
+  const connectionStatus = useRef<DesktopViewStatus>("connecting");
   const pendingFocus = useRef(false);
   const keyboard = useRef<HTMLTextAreaElement>(null);
   const typed = useRef(KEYBOARD_SENTINEL);
@@ -139,8 +152,28 @@ export const DesktopView = ({
   const visible = usePageVisible();
 
   const report = useCallback((next: DesktopViewStatus) => {
+    connectionStatus.current = next;
     setStatus(next);
     statusRef.current?.(next);
+  }, []);
+
+  const attachClipboard = useCallback((client: RFB) => {
+    clipboard.current = createDesktopClipboard(
+      client,
+      () =>
+        rfb.current === client &&
+        connectionStatus.current === "connected" &&
+        !viewOnlyRef.current &&
+        !document.hidden,
+    );
+  }, []);
+
+  const cancelClipboard = useCallback(() => {
+    const current = clipboard.current;
+    clipboard.current = null;
+    current?.dispose();
+    // A fresh connection prevents uncorrelated old replies being reused.
+    rfb.current?.disconnect();
   }, []);
 
   useImperativeHandle(
@@ -151,6 +184,7 @@ export const DesktopView = ({
         else pendingFocus.current = true;
       },
       openKeyboard: () => {
+        if (viewOnlyRef.current) return;
         const field = keyboard.current;
         if (!field) return;
         field.value = KEYBOARD_SENTINEL;
@@ -158,19 +192,31 @@ export const DesktopView = ({
         field.focus({ preventScroll: true });
         field.setSelectionRange(field.value.length, field.value.length);
       },
+      cancelClipboard,
     }),
-    [],
+    [cancelClipboard],
   );
 
   /** The field changed: send the difference as key presses (see
    * keyboard-bridge.ts), then put the sentinel back at once. Nothing the
    * person typed (a password into the guest browser, a 2FA code) stays in
    * this page's DOM past the keystroke that sent it. */
-  const typeFromField = () => {
+  const typeFromField = (event?: React.FormEvent<HTMLTextAreaElement>) => {
     const field = keyboard.current;
     if (!field || composing.current) return;
     const client = rfb.current;
-    if (client && !viewOnlyRef.current) {
+    const input = event?.nativeEvent;
+    const pasted =
+      input instanceof InputEvent &&
+      (input.inputType === "insertFromPaste" ||
+        input.inputType === "insertFromDrop");
+    if (pasted) {
+      // A mobile browser may report input without a paste event. Never turn
+      // pasted newlines/tabs into Return/Tab keystrokes in that fallback path.
+      toast.error(
+        "Paste was blocked by this browser. Use Ctrl+V or ⌘V with the screen focused.",
+      );
+    } else if (client && !viewOnlyRef.current) {
       for (const keysym of keystrokesFor(typed.current, field.value)) {
         client.sendKey(keysym, null);
       }
@@ -196,6 +242,7 @@ export const DesktopView = ({
       return;
     }
     let alive = true;
+    const keys = capturedKeys.current;
     let attempt = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let client: RFB | null = null;
@@ -217,6 +264,8 @@ export const DesktopView = ({
         const next = new Rfb(target, `wss://${host}/`, {
           wsProtocols: [DESKTOP_SUBPROTOCOL, `t.${ticket}`],
           shared: true,
+          clipboardAutoRequest: false,
+          clipboardMaxBytes: DESKTOP_CLIPBOARD_MAX_WIRE_BYTES,
         });
         client = next;
         rfb.current = next;
@@ -231,6 +280,7 @@ export const DesktopView = ({
           if (!alive || client !== next) return;
           attempt = 0;
           report("connected");
+          if (!viewOnlyRef.current) attachClipboard(next);
           if (pendingFocus.current) {
             pendingFocus.current = false;
             next.focus();
@@ -240,6 +290,11 @@ export const DesktopView = ({
           if (!alive || client !== next) return;
           client = null;
           rfb.current = null;
+          const previous = clipboard.current;
+          clipboard.current = null;
+          previous?.dispose();
+          keys.clear();
+          pasteShift.current = false;
           scheduleRetry();
         });
       } catch {
@@ -269,15 +324,34 @@ export const DesktopView = ({
       const current = client;
       client = null;
       rfb.current = null;
+      const previous = clipboard.current;
+      clipboard.current = null;
+      previous?.dispose();
+      keys.clear();
+      pasteShift.current = false;
       current?.disconnect();
       report("closed");
     };
-  }, [host, visible, report]);
+  }, [host, visible, report, attachClipboard]);
 
   // The mode flips live; noVNC needs no reconnect for it.
   useEffect(() => {
-    if (rfb.current) rfb.current.viewOnly = viewOnly;
-  }, [viewOnly]);
+    const client = rfb.current;
+    if (!client) return;
+    if (viewOnly) {
+      const previous = clipboard.current;
+      clipboard.current = null;
+      previous?.dispose();
+    }
+    client.viewOnly = viewOnly;
+    if (
+      !viewOnly &&
+      !clipboard.current &&
+      connectionStatus.current === "connected"
+    ) {
+      attachClipboard(client);
+    }
+  }, [viewOnly, attachClipboard]);
   // So does the quality (noVNC re-sends its encodings on the change).
   useEffect(() => {
     if (rfb.current) rfb.current.qualityLevel = quality;
@@ -290,14 +364,91 @@ export const DesktopView = ({
     if (event.key === "Escape" && !viewOnly && escapeRef.current) {
       event.preventDefault();
       event.stopPropagation();
+      if (clipboard.current?.pasting) cancelClipboard();
+      rfb.current?.releaseKeys();
       escapeRef.current();
+      return;
     }
+    if (viewOnlyRef.current) return;
+    if (
+      clipboard.current?.pasting &&
+      !["Control", "Meta", "Shift", "Alt"].includes(event.key)
+    ) {
+      // No shortcut or target-changing key may race an unfinished paste.
+      event.preventDefault();
+      event.stopPropagation();
+      cancelClipboard();
+      return;
+    }
+    if (!event.isTrusted || event.altKey) return;
+    const key = event.key.toLowerCase();
+    const mac = /Mac|iPhone|iPad/.test(navigator.platform);
+    const modifier = mac
+      ? event.metaKey && !event.ctrlKey
+      : event.ctrlKey && !event.metaKey;
+    if (modifier && (key === "c" || key === "v")) {
+      event.stopPropagation();
+      capturedKeys.current.add(event.code);
+      rfb.current?.releaseKeys();
+      if (key === "v") {
+        // Let the browser dispatch a genuine paste event. Its plain-text data
+        // needs no background clipboard-read permission. Do not send V twice.
+        pasteShift.current = event.shiftKey;
+      } else {
+        event.preventDefault();
+        const operation = clipboard.current?.copy(event.shiftKey);
+        void operation?.catch((error: unknown) => {
+          // Ctrl+C can be a terminal interrupt, not a copy. Keep it quiet.
+          if (
+            error instanceof DesktopClipboardError &&
+            (error.code === "noCopy" || error.code === "cancelled")
+          )
+            return;
+          toast.error(clipboardErrorMessage(error));
+        });
+      }
+    }
+  };
+
+  const onPasteCapture = (event: React.ClipboardEvent) => {
+    if (viewOnlyRef.current || !clipboard.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const shift = pasteShift.current;
+    pasteShift.current = false;
+    const text = event.clipboardData.getData("text/plain");
+    void clipboard.current.paste(text, shift).catch((error: unknown) => {
+      if (error instanceof DesktopClipboardError && error.code === "cancelled")
+        return;
+      toast.error(clipboardErrorMessage(error));
+    });
   };
 
   return (
     <div
-      className={cn("relative min-h-0 min-w-0 flex-1", className)}
+      className={cn("ph-no-capture relative min-h-0 min-w-0 flex-1", className)}
       onKeyDownCapture={onKeyDownCapture}
+      onKeyUpCapture={(event) => {
+        if (capturedKeys.current.delete(event.code)) {
+          event.stopPropagation();
+          pasteShift.current = false;
+        }
+      }}
+      onPasteCapture={onPasteCapture}
+      onPointerDownCapture={(event) => {
+        if (!clipboard.current?.pasting) return;
+        event.preventDefault();
+        event.stopPropagation();
+        cancelClipboard();
+      }}
+      onBlurCapture={(event) => {
+        if (
+          clipboard.current?.pasting &&
+          (!(event.relatedTarget instanceof Node) ||
+            !event.currentTarget.contains(event.relatedTarget))
+        )
+          cancelClipboard();
+      }}
     >
       {/* noVNC fills this element with its canvas; the focus ring is the
           one visible sign that keystrokes now go to the agent's screen. */}
@@ -321,7 +472,7 @@ export const DesktopView = ({
         <textarea
           ref={keyboard}
           aria-label="Type on the agent's screen"
-          className="pointer-events-none absolute bottom-0 left-0 size-px resize-none opacity-0"
+          className="ph-no-capture pointer-events-none absolute bottom-0 left-0 size-px resize-none opacity-0"
           defaultValue={KEYBOARD_SENTINEL}
           autoCapitalize="off"
           autoComplete="off"

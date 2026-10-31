@@ -47,6 +47,43 @@ pub fn answers_per_record(provider: &str, method: &str, path: &str) -> bool {
     provider == "salesforce" && super::salesforce::answers_per_record(method, path)
 }
 
+/// What [`unmask_refusal`] says instead of GitHub's masked wording.
+const NOT_PERMITTED: &str = "Not permitted: the app's access doesn't allow this (not a rate limit)";
+
+/// The upstream's facts a refusal is re-read with: its remaining call quota
+/// (`x-ratelimit-remaining`) and whether it asked for a wait (`retry-after`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RateLimitHeaders {
+    pub remaining: Option<u64>,
+    pub retry_after: bool,
+}
+
+/// Correct an error GitHub masks. A GitHub App installation token that calls
+/// an endpoint only a person can use (creating a repository on `/user/repos`)
+/// is refused with 403 "Rate Limit Exceeded" while its quota is untouched,
+/// and the card must not tell anyone to wait out a limit that isn't there.
+///
+/// Narrow on purpose, per GitHub's REST docs: a real primary limit answers
+/// `x-ratelimit-remaining: 0`, and a SECONDARY limit (which can arrive with
+/// quota left) says so in its message ("You have exceeded a secondary rate
+/// limit") and may send `retry-after`. Only the exact masked wording, with
+/// quota left and no wait asked, on a `github-app` connection is relabeled.
+pub fn unmask_refusal(
+    provider: &str,
+    status: u16,
+    limits: RateLimitHeaders,
+    result: &mut RequestResult,
+) {
+    let masked = provider == "github-app"
+        && status == 403
+        && !limits.retry_after
+        && limits.remaining.is_some_and(|left| left > 0)
+        && result.error.as_deref() == Some("Rate Limit Exceeded");
+    if masked {
+        result.error = Some(NOT_PERMITTED.to_string());
+    }
+}
+
 /// The result of an approved request, from its status and its body.
 /// `per_record` is [`answers_per_record`]. `body` is the whole body, decoded,
 /// or `None` when it was not read or could not be (cut, or an encoding the
@@ -398,6 +435,84 @@ mod tests {
         let body = br#"{"message":"invalid api key: sk-ant-api03-Xy7Qa1Bc2Dd3Ee4Ff5Gg6Hh7Ii8Jj9"}"#;
         let r = request_result(false, 401, Some(body)).unwrap();
         assert_eq!(r.error.as_deref(), Some("invalid api key: ***"));
+    }
+
+    /// `unmask_refusal` over a 403/429 body, as the gateway reads it.
+    fn unmasked(
+        provider: &str,
+        status: u16,
+        body: &[u8],
+        limits: RateLimitHeaders,
+    ) -> Option<String> {
+        let mut r = request_result(false, status, Some(body)).unwrap();
+        unmask_refusal(provider, status, limits, &mut r);
+        r.error
+    }
+
+    const MASKED: &[u8] = br#"{"message":"Rate Limit Exceeded","status":"403"}"#;
+    const QUOTA_LEFT: RateLimitHeaders = RateLimitHeaders {
+        remaining: Some(4997),
+        retry_after: false,
+    };
+
+    #[test]
+    fn a_github_app_permission_refusal_worded_as_a_rate_limit_is_not_one() {
+        // GitHub's answer to an installation token creating a repo on
+        // /user/repos: 403 "Rate Limit Exceeded" with its quota untouched.
+        assert_eq!(
+            unmasked("github-app", 403, MASKED, QUOTA_LEFT).as_deref(),
+            Some(NOT_PERMITTED)
+        );
+    }
+
+    #[test]
+    fn a_real_rate_limit_keeps_github_s_words() {
+        let kept = Some("Rate Limit Exceeded");
+        // Primary limit: the quota really is spent.
+        let spent = RateLimitHeaders {
+            remaining: Some(0),
+            ..QUOTA_LEFT
+        };
+        assert_eq!(unmasked("github-app", 403, MASKED, spent).as_deref(), kept);
+        // GitHub asked for a wait: a limit, whatever the quota says.
+        let wait = RateLimitHeaders {
+            retry_after: true,
+            ..QUOTA_LEFT
+        };
+        assert_eq!(unmasked("github-app", 403, MASKED, wait).as_deref(), kept);
+        // No quota header: nothing contradicts it.
+        assert_eq!(
+            unmasked("github-app", 403, MASKED, RateLimitHeaders::default()).as_deref(),
+            kept
+        );
+        // A 429 is a rate limit whatever the header says.
+        assert_eq!(
+            unmasked("github-app", 429, MASKED, QUOTA_LEFT).as_deref(),
+            kept
+        );
+        // A secondary limit can arrive with quota left; it says so itself.
+        let secondary = br#"{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}"#;
+        assert!(unmasked("github-app", 403, secondary, QUOTA_LEFT)
+            .is_some_and(|e| e.starts_with("You have exceeded a secondary rate limit")));
+    }
+
+    #[test]
+    fn only_a_github_app_connection_is_unmasked() {
+        // A personal token (the `github` OAuth app) or any other provider
+        // keeps the upstream's own words.
+        for provider in ["github", "slack", ""] {
+            assert_eq!(
+                unmasked(provider, 403, MASKED, QUOTA_LEFT).as_deref(),
+                Some("Rate Limit Exceeded"),
+                "{provider}"
+            );
+        }
+        // Any other github-app 403 keeps its own words.
+        let other = br#"{"message":"Resource not accessible by integration"}"#;
+        assert_eq!(
+            unmasked("github-app", 403, other, QUOTA_LEFT).as_deref(),
+            Some("Resource not accessible by integration")
+        );
     }
 
     #[test]

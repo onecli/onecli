@@ -5,7 +5,10 @@ import {
   getAppPermissionDefinitions,
 } from "../apps/app-permissions";
 import { getApps } from "../apps/registry";
-import { catalogToolIds } from "../apps/app-permissions/validate";
+import {
+  assertUnlistedChoicesValid,
+  catalogToolIds,
+} from "../apps/app-permissions/validate";
 import {
   compileConnectionStack,
   defaultConnectionGrant,
@@ -369,21 +372,41 @@ describe("defaultConnectionGrant", () => {
       .flatMap((g) => g.tools.map((t) => t.id))
       .sort();
 
-  it("allows reads, holds every write/delete tool and unlisted requests for approval", () => {
+  it("an audited catalog allows reads (listed and unlisted), holds every write tool and unlisted write", () => {
     const stack = compileConnectionStack(
       "G",
       "github",
       defaultConnectionGrant("github"),
     );
     expect(toolsOf("github", "write").length).toBeGreaterThan(0);
-    expect(stack.map((r) => [r.action, r.requireApproval, r.tools])).toEqual([
-      ["allow", false, toolsOf("github", "read")],
-      ["allow", true, toolsOf("github", "write")],
-      ["allow", true, []],
+    expect(
+      stack.map((r) => [r.action, r.requireApproval, r.tools, r.method]),
+    ).toEqual([
+      ["allow", false, toolsOf("github", "read"), undefined],
+      ["allow", true, toolsOf("github", "write"), undefined],
+      // The stricter catch-all first, narrowed to everything but reads.
+      ["allow", true, [], "!GET,HEAD"],
+      ["allow", false, [], undefined],
     ]);
   });
 
-  it("AWS gets the same shape: reads allowed, writes need approval", () => {
+  it("a catalog not checked safe holds every unlisted request, reads included", () => {
+    const stack = compileConnectionStack(
+      "G",
+      "cloudflare",
+      defaultConnectionGrant("cloudflare"),
+    );
+    // One terminal over everything unlisted: the same shape every stack had
+    // before the two catch-all rows existed.
+    expect(stack.at(-1)).toMatchObject({
+      action: "allow",
+      requireApproval: true,
+      tools: [],
+    });
+    expect(stack.at(-1)?.method).toBeUndefined();
+  });
+
+  it("AWS: read tools allowed, writes and every unlisted request need approval", () => {
     const stack = compileConnectionStack(
       "G",
       "aws-role",
@@ -394,6 +417,20 @@ describe("defaultConnectionGrant", () => {
       ["allow", true, toolsOf("aws-role", "write")],
       ["allow", true, []],
     ]);
+  });
+
+  it("never defaults to a catch-all the catalog rejects, and always holds other writes", () => {
+    for (const app of getApps()) {
+      const grant = defaultConnectionGrant(app.id);
+      if (grant.access !== "custom") continue;
+      expect(grant.otherWrites, app.id).toBe("ask");
+      expect(() =>
+        assertUnlistedChoicesValid(app.id, [
+          grant.otherReads,
+          grant.otherWrites,
+        ]),
+      ).not.toThrow();
+    }
   });
 
   it("no catalog tool is ever 'Always allow' for writes by default, in any app", () => {

@@ -20,7 +20,7 @@ import { proxy } from "./proxy";
 describe("cloud: per-request nonce CSP", () => {
   it("forwards and enforces one CSP carrying a freshly minted nonce, never the client's", () => {
     const response = proxy(
-      new NextRequest("https://app.onecli.sh/w/ws-1/overview", {
+      new NextRequest("https://app.onecli.sh/w/ws-1/activity", {
         headers: { "x-nonce": "attacker" },
       }),
     );

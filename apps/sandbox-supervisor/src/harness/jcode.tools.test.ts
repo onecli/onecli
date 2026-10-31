@@ -85,6 +85,19 @@ describe("the managed config's context cap", () => {
   });
 });
 
+describe("the managed config's OpenAI route", () => {
+  it("pins the OpenAI transport to HTTPS under [provider]", () => {
+    // The default ("auto") tries a WebSocket first, and that client ignores
+    // the proxy env, so in a sandbox it can stall on jcode's 8 s connect
+    // timeout before falling back (rationale in the adapter header).
+    // MUTATION-PROOF: remove the key, set it to "auto"/"websocket", or move
+    // it out of [provider], and this fails.
+    expect(managedConfigToml).toMatch(
+      /\[provider\]\n(?:[^[\n][^\n]*\n)*openai_transport = "https"\n/,
+    );
+  });
+});
+
 describe("the managed config's sponsor opt-out", () => {
   it("opts out of integration discovery", () => {
     expect(managedConfigToml).toMatch(/\[sponsors\]\nenabled = false/);
@@ -151,30 +164,20 @@ describe("the swarm posture: always on, fenced by env", () => {
     ]);
   });
 
-  it("the prompt block states the cap, the flat-fan-out law, and hygiene", () => {
-    expect(SWARM_LIGHT_PROMPT).toContain(`at most ${SWARM_WORKER_CAP} helpers`);
-    expect(SWARM_LIGHT_PROMPT).toContain("helpers never\nspawn their own");
-    expect(SWARM_LIGHT_PROMPT).toContain("headless");
+  it("the prompt block states the cap and the flat-fan-out law", () => {
+    const flat = SWARM_LIGHT_PROMPT.replace(/\s+/g, " ");
+    expect(flat).toContain(`At most ${SWARM_WORKER_CAP} helpers alive at once`);
+    expect(flat).toContain("helpers never spawn their own");
+    expect(flat).toContain("spawn headless only");
     // The sentinel/deep-mode ban: enforcement is the harness's (root-only
     // spawning + the effort map above); the prompt keeps the model from
     // burning turns discovering the walls.
-    expect(SWARM_LIGHT_PROMPT).toContain('Never pass "swarm" or "swarm-deep"');
-    expect(SWARM_LIGHT_PROMPT).toContain("deep mode");
+    expect(flat).toContain('Never pass "swarm" or "swarm-deep"');
+    expect(flat).toContain("deep mode");
     // The startup-race insurance (observed live: first spawn after a
     // swarm-enabled restart can refuse while membership settles).
-    expect(SWARM_LIGHT_PROMPT).toContain("retry once");
-    // The idle-helper hygiene rule (observed live: finished helpers sat
-    // "ready" holding server memory until asked about — and a finished
-    // worker keeps consuming a cap slot until stopped or reaped).
-    expect(SWARM_LIGHT_PROMPT).toContain("stop or clean up");
-    // The deliverable-extraction laws (observed live: every relay of helper
-    // text truncates long content, a message to a completed helper drops
-    // after reporting success, and a stop before collection loses the
-    // deliverable for good). Raw pins — each fragment sits inside one
-    // physical line of the block, like the pins above.
-    expect(SWARM_LIGHT_PROMPT).toContain("name an exact file path");
-    expect(SWARM_LIGHT_PROMPT).toContain("one at a time");
-    expect(SWARM_LIGHT_PROMPT).toContain("already completed");
-    expect(SWARM_LIGHT_PROMPT).toContain("verified in hand");
+    expect(flat).toContain("retry once");
+    // Collection and idle-helper hygiene live in the swarm tool's own
+    // description (SWARM_PROMPT_OVERRIDE, pinned in jcode.prompt.test.ts).
   });
 });

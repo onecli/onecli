@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  actionChoiceSchema,
   adapterCardFollowUpActionRequestSchema,
   adapterCardStopRequestSchema,
   adapterGroupDecisionRequestSchema,
@@ -9,6 +10,7 @@ import {
   CHANNEL_TRANSPORTS,
   LISTEN_MODES,
 } from "../services/channels/types";
+import { MAX_OUTCOME_IDS } from "./approval-outcomes";
 
 /**
  * Zod surfaces for the channel routes (step 6). One definition per union —
@@ -91,28 +93,26 @@ export const adapterReachDecisionSchema = z
   .object({
     presenceId: z.string().trim().min(1).max(200),
     grantId: z.string().trim().min(1).max(500),
-    // Both vocabularies: the three-way settlement, plus the pre-rename
-    // pair an older channel-adapter deployable still sends mid-rollout
-    // ("deny" always meant "OneCLI users only" = members_only).
+    // Two answers, plus retired values an older channel-adapter deployable
+    // may still send mid-rollout: `approve` (old spelling), and
+    // `members_only` / `deny` (the retired "OneCLI users only"), which
+    // settle as `approved` - the same mapping the data migration applied.
     decision: z
-      .enum(["approved", "members_only", "blocked", "approve", "deny"])
-      .transform((d) =>
-        d === "approve" ? "approved" : d === "deny" ? "members_only" : d,
-      ),
+      .enum(["approved", "blocked", "approve", "members_only", "deny"])
+      .transform((d) => (d === "blocked" ? "blocked" : "approved")),
     clickerExternalUserId: z.string().trim().min(1).max(200),
   })
   .strict();
 
 /** PUT /v1/agents/:agentId/channels/:provider/reach/:externalRef - the
- * dashboard's per-space settlement. The same three answers the card asks
- * for: open to everyone in the space, OneCLI users only, or silent there.
- * `revoked` is the pre-rename spelling of `members_only`, still accepted so
- * an older dashboard bundle keeps working through a deploy. */
+ * dashboard's per-space settlement: the same two answers the card asks for
+ * (everyone here, or silent here). Retired values an older dashboard bundle
+ * may send mid-deploy (`members_only`, `revoked`) settle as `approved`. */
 export const setReachStateSchema = z
   .object({
     state: z
-      .enum(["approved", "members_only", "blocked", "revoked"])
-      .transform((v) => (v === "revoked" ? "members_only" : v)),
+      .enum(["approved", "blocked", "members_only", "revoked"])
+      .transform((v) => (v === "blocked" ? "blocked" : "approved")),
   })
   .strict();
 
@@ -122,9 +122,7 @@ export const setSpaceListenSchema = z
   .strict();
 
 /** PUT /v1/agents/:agentId/channels/:provider/reach/people/:externalRef -
- * the dashboard's per-person settlement. Two answers only: a single human
- * either may reach the agent or may not; "OneCLI users only" describes a
- * population, not a person, so it is not offered here. */
+ * the dashboard's per-person setting: Always allow, or Never. */
 export const setPersonReachStateSchema = z
   .object({
     state: z.enum(["approved", "blocked"]),
@@ -177,8 +175,14 @@ export const adapterActionDecisionSchema = z
   .object({
     presenceId: z.string().trim().min(1).max(200),
     approvalId: z.string().trim().min(1).max(500),
-    decision: z.enum(["approve", "approve_always", "reject"]),
+    // `approve_always` is the retired "Approve + always allow" (an older
+    // adapter may still send it mid-rollout): it settles as `approve`.
+    decision: z
+      .enum(["approve", "reject", "approve_always"])
+      .transform((d) => (d === "reject" ? "reject" : "approve")),
     clickerExternalUserId: z.string().trim().min(1).max(200),
+    /** A choice card's picked option. */
+    choice: actionChoiceSchema.optional(),
   })
   .strict();
 
@@ -206,6 +210,15 @@ export const adapterPromptSettleSchema = z
   })
   .strict();
 
+/** `?ids=a,b`: the approval ids of cards the adapter saw leave the pending
+ * set, as many as the outcome read answers. */
+export const adapterPromptOutcomesQuerySchema = z.object({
+  ids: z
+    .string()
+    .transform((s) => s.split(",").filter(Boolean))
+    .pipe(z.array(z.string().uuid()).min(1).max(MAX_OUTCOME_IDS)),
+});
+
 export const adapterCursorSchema = z
   .object({
     linkId: z.string().trim().min(1),
@@ -229,15 +242,23 @@ export const adapterApprovalHealthSchema = z
  * a rejection reason (relayed verbatim to the agent; clamped server-side). */
 export const actionApprovalDecisionSchema = z
   .object({
-    decision: z.enum(["approve", "approve_always", "reject"]),
+    // `approve_always` is the retired "Approve + always allow" (an older
+    // dashboard bundle may still send it mid-deploy): it settles as
+    // `approve`.
+    decision: z
+      .enum(["approve", "reject", "approve_always"])
+      .transform((d) => (d === "reject" ? "reject" : "approve")),
     reason: z.string().trim().min(1).max(500).optional(),
+    /** A choice card's picked option (e.g. choose-sender: agent | you). */
+    choice: actionChoiceSchema.optional(),
   })
   .strict();
 
-/** PUT /agents/:agentId/contacts/:contactId — the dashboard's policy flip.
- * `ask` = revoke the standing permission (the row survives). */
-export const contactPolicySchema = z
+/** PUT /agents/:agentId/links/:peerAgentId: THIS agent's side of a pair:
+ * Always allow, or Never. A pair with no answer yet asks once, on the first
+ * message; Remove (forget) returns it there. */
+export const linkPolicySchema = z
   .object({
-    policy: z.enum(["ask", "allow", "blocked"]),
+    policy: z.enum(["allow", "blocked"]),
   })
   .strict();

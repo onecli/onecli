@@ -3190,7 +3190,7 @@
         "api.machines.dev"
       ],
       "paths": [
-        "/v1/apps/*"
+        "/v1/apps/*/"
       ],
       "methods": [
         "GET"
@@ -3761,7 +3761,8 @@
         "gitlab.com"
       ],
       "paths": [
-        "/api/v4/projects/*"
+        "/api/v4/projects/*/",
+        "/api/v4/projects/*/repository/*"
       ],
       "methods": [
         "GET"
@@ -4907,6 +4908,86 @@
       ]
     }
   },
+  "google-keep": {
+    "create_note": {
+      "hosts": [
+        "keep.googleapis.com"
+      ],
+      "paths": [
+        "/v1/notes"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_note": {
+      "hosts": [
+        "keep.googleapis.com"
+      ],
+      "paths": [
+        "/v1/notes/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "download_attachment": {
+      "hosts": [
+        "keep.googleapis.com"
+      ],
+      "paths": [
+        "/v1/notes/*/attachments/*",
+        "/download/v1/notes/*/attachments/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_note": {
+      "hosts": [
+        "keep.googleapis.com"
+      ],
+      "paths": [
+        "/v1/notes/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_notes": {
+      "hosts": [
+        "keep.googleapis.com"
+      ],
+      "paths": [
+        "/v1/notes"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "share_note": {
+      "hosts": [
+        "keep.googleapis.com"
+      ],
+      "paths": [
+        "/v1/notes/*/permissions:batchCreate"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "unshare_note": {
+      "hosts": [
+        "keep.googleapis.com"
+      ],
+      "paths": [
+        "/v1/notes/*/permissions:batchDelete"
+      ],
+      "methods": [
+        "POST"
+      ]
+    }
+  },
   "google-meet": {
     "create_space": {
       "hosts": [
@@ -5304,6 +5385,526 @@
       ],
       "methods": [
         "GET"
+      ]
+    }
+  },
+  "heyreach": {
+    "add_leads_to_campaign": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/AddLeadsToCampaignV2",
+        "/api/public/campaign/AddLeadsToCampaign"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "add_leads_to_list": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/list/AddLeadsToListV2",
+        "/api/public/list/AddLeadsToList"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "check_api_key": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/auth/CheckApiKey"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "create_api_key": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/management/organizations/api-keys/workspaces/*/"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_campaign": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/Create",
+        "/api/public/campaign/CreateCampaignFromTemplate"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_list": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/list/CreateEmptyList"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_tags": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/lead_tags/CreateTags"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "edit_blacklist": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/blacklist/AddLeads",
+        "/api/public/blacklist/RemoveLeads",
+        "/api/public/blacklist/AddCompanies",
+        "/api/public/blacklist/RemoveCompanies"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "edit_campaign": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/UpdateSettings",
+        "/api/public/campaign/UpdateSchedule",
+        "/api/public/campaign/UpdateAccounts",
+        "/api/public/campaign/AddLinkedInAccountsToCampaign",
+        "/api/public/campaign/RemoveLinkedInAccountsFromCampaign"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "edit_campaign_sequence": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/UpdateSequence"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "find_email": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/enrichment/enrich-email"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_campaign": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/GetById",
+        "/api/public/campaign/GetCampaignSequence"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_email_search": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/enrichment/enrich-email/check-job/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_lead": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/lead/GetLead",
+        "/api/public/lead/GetTags"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_lead_list": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/list/GetById"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_sender_account": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/li_account/GetById",
+        "/api/public/li_account/GetAccountStatus/*/",
+        "/api/public/li_account/GetProxyCountries"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_stats": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/stats/GetOverallStats",
+        "/api/public/stats/GetOverallStatsByCampaign"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "invite_users": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/management/organizations/users/invite/admins",
+        "/api/public/management/organizations/users/invite/members",
+        "/api/public/management/organizations/users/invite/managers"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_campaign_leads": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/GetLeadsFromCampaign"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_campaigns": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/GetAll",
+        "/api/public/campaign/GetCampaignsForLead"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_lead_lists": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/list/GetAll",
+        "/api/public/list/GetListsForLead"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_list_leads": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/list/GetLeadsFromList",
+        "/api/public/list/GetCompaniesFromList"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_organization_members": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/management/organizations/users",
+        "/api/public/management/organizations/users/workspaces/*/",
+        "/api/public/management/organizations/linkedin-accounts"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_sender_accounts": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/li_account/GetAll"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "manage_organization_accounts": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/management/organizations/linkedin-accounts/MoveToWorkspace",
+        "/api/public/management/organizations/linkedin-accounts/*/"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "manage_sender_accounts": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/li_account/Connect",
+        "/api/public/li_account/ConnectWithCookies",
+        "/api/public/li_account/SubmitPin",
+        "/api/public/li_account/Reconnect",
+        "/api/public/li_account/ReloginSalesNavigator",
+        "/api/public/li_account/ReloginRecruiter",
+        "/api/public/li_account/Resync",
+        "/api/public/li_account/UpdateProxy",
+        "/api/public/li_account/UpdateInboxConfiguration"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "manage_webhooks": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/webhooks/CreateWebhook",
+        "/api/public/webhooks/UpdateWebhook",
+        "/api/public/webhooks/DeleteWebhook"
+      ],
+      "methods": [
+        "POST",
+        "PATCH",
+        "DELETE"
+      ]
+    },
+    "manage_workspaces": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/management/organizations/workspaces",
+        "/api/public/management/organizations/workspaces/*/"
+      ],
+      "methods": [
+        "POST",
+        "PATCH"
+      ]
+    },
+    "mark_conversation_seen": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/inbox/SetSeenStatus"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "pause_campaign": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/Pause"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "read_blacklist": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/blacklist/GetLeads",
+        "/api/public/blacklist/GetCompanies"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "read_conversation": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/inbox/GetChatroom/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "read_inbox": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/inbox/GetConversationsV2",
+        "/api/public/inbox/GetConversationsV3"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "read_network": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/MyNetwork/GetMyNetworkForSender",
+        "/api/public/MyNetwork/IsConnection"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "read_organization": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/management/organizations/workspaces",
+        "/api/public/management/organizations/users/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "remove_leads_from_list": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/list/DeleteLeadsFromList",
+        "/api/public/list/DeleteLeadsFromListByProfileUrl"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "remove_sender_account": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/li_account/RemoveAccount/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "resume_campaign": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/Resume"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "send_message": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/inbox/SendMessage"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "start_campaign": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/StartCampaign"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "stop_lead_in_campaign": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/StopLeadInCampaign"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "tag_lead": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/lead/AddTags",
+        "/api/public/lead/ReplaceTags"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_lead_fields": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/UpdateLeadCustomFields/campaigns/*/leads/custom-fields",
+        "/api/public/list/UpdateLeadCustomFields/lists/*/leads/custom-fields"
+      ],
+      "methods": [
+        "PATCH"
       ]
     }
   },
@@ -7717,6 +8318,41 @@
       ]
     }
   },
+  "postgres": {
+    "sql_read": {
+      "hosts": [
+        "*.postgres.onecli.invalid"
+      ],
+      "paths": [
+        "/sql/read"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "sql_schema": {
+      "hosts": [
+        "*.postgres.onecli.invalid"
+      ],
+      "paths": [
+        "/sql/schema"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "sql_write": {
+      "hosts": [
+        "*.postgres.onecli.invalid"
+      ],
+      "paths": [
+        "/sql/write"
+      ],
+      "methods": [
+        "POST"
+      ]
+    }
+  },
   "posthog": {
     "create_annotation": {
       "hosts": [
@@ -9924,7 +10560,7 @@
         "*.sentry.io"
       ],
       "paths": [
-        "/api/0/projects/*/*"
+        "/api/0/projects/*/*/"
       ],
       "methods": [
         "GET"
@@ -10527,7 +11163,7 @@
         "api.supabase.com"
       ],
       "paths": [
-        "/v1/projects/*"
+        "/v1/projects/*/"
       ],
       "methods": [
         "GET"
@@ -10633,6 +11269,128 @@
         "PUT",
         "PATCH",
         "DELETE"
+      ]
+    }
+  },
+  "tavily": {
+    "crawl": {
+      "hosts": [
+        "api.tavily.com"
+      ],
+      "paths": [
+        "/crawl"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "extract": {
+      "hosts": [
+        "api.tavily.com"
+      ],
+      "paths": [
+        "/extract"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "feedback": {
+      "hosts": [
+        "api.tavily.com"
+      ],
+      "paths": [
+        "/feedback"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_research": {
+      "hosts": [
+        "api.tavily.com"
+      ],
+      "paths": [
+        "/research/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "logs": {
+      "hosts": [
+        "api.tavily.com"
+      ],
+      "paths": [
+        "/logs"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "map": {
+      "hosts": [
+        "api.tavily.com"
+      ],
+      "paths": [
+        "/map"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "mcp_access": {
+      "hosts": [
+        "mcp.tavily.com"
+      ],
+      "paths": [
+        "/mcp",
+        "/mcp/*"
+      ],
+      "methods": []
+    },
+    "org_usage": {
+      "hosts": [
+        "api.tavily.com"
+      ],
+      "paths": [
+        "/org-usage"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "research": {
+      "hosts": [
+        "api.tavily.com"
+      ],
+      "paths": [
+        "/research"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search": {
+      "hosts": [
+        "api.tavily.com"
+      ],
+      "paths": [
+        "/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "usage": {
+      "hosts": [
+        "api.tavily.com"
+      ],
+      "paths": [
+        "/usage"
+      ],
+      "methods": [
+        "GET"
       ]
     }
   },
@@ -11351,7 +12109,7 @@
         "api.vercel.com"
       ],
       "paths": [
-        "/v9/projects/*"
+        "/v9/projects/*/"
       ],
       "methods": [
         "GET"
@@ -12375,6 +13133,303 @@
       ]
     }
   },
+  "zendesk": {
+    "create_article": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/help_center/*/sections/*/articles",
+        "/api/v2/help_center/*/sections/*/articles.json",
+        "/api/v2/help_center/sections/*/articles",
+        "/api/v2/help_center/sections/*/articles.json"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_ticket": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/tickets",
+        "/api/v2/tickets.json"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_user": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/users",
+        "/api/v2/users.json"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_tickets": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/tickets/0*/",
+        "/api/v2/tickets/1*/",
+        "/api/v2/tickets/2*/",
+        "/api/v2/tickets/3*/",
+        "/api/v2/tickets/4*/",
+        "/api/v2/tickets/5*/",
+        "/api/v2/tickets/6*/",
+        "/api/v2/tickets/7*/",
+        "/api/v2/tickets/8*/",
+        "/api/v2/tickets/9*/",
+        "/api/v2/tickets/destroy_many",
+        "/api/v2/tickets/destroy_many.json"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_user": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/users/0*/",
+        "/api/v2/users/1*/",
+        "/api/v2/users/2*/",
+        "/api/v2/users/3*/",
+        "/api/v2/users/4*/",
+        "/api/v2/users/5*/",
+        "/api/v2/users/6*/",
+        "/api/v2/users/7*/",
+        "/api/v2/users/8*/",
+        "/api/v2/users/9*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_job_status": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/job_statuses/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_organization": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/organizations/0*/",
+        "/api/v2/organizations/1*/",
+        "/api/v2/organizations/2*/",
+        "/api/v2/organizations/3*/",
+        "/api/v2/organizations/4*/",
+        "/api/v2/organizations/5*/",
+        "/api/v2/organizations/6*/",
+        "/api/v2/organizations/7*/",
+        "/api/v2/organizations/8*/",
+        "/api/v2/organizations/9*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_ticket": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/tickets/0*/",
+        "/api/v2/tickets/1*/",
+        "/api/v2/tickets/2*/",
+        "/api/v2/tickets/3*/",
+        "/api/v2/tickets/4*/",
+        "/api/v2/tickets/5*/",
+        "/api/v2/tickets/6*/",
+        "/api/v2/tickets/7*/",
+        "/api/v2/tickets/8*/",
+        "/api/v2/tickets/9*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_user": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/users/0*/",
+        "/api/v2/users/1*/",
+        "/api/v2/users/2*/",
+        "/api/v2/users/3*/",
+        "/api/v2/users/4*/",
+        "/api/v2/users/5*/",
+        "/api/v2/users/6*/",
+        "/api/v2/users/7*/",
+        "/api/v2/users/8*/",
+        "/api/v2/users/9*/",
+        "/api/v2/users/me",
+        "/api/v2/users/me.json"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_articles": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/help_center/*/articles",
+        "/api/v2/help_center/*/articles.json",
+        "/api/v2/help_center/articles",
+        "/api/v2/help_center/articles.json"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_organizations": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/organizations",
+        "/api/v2/organizations.json"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_ticket_comments": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/tickets/*/comments",
+        "/api/v2/tickets/*/comments.json"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_tickets": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/tickets",
+        "/api/v2/tickets.json"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_users": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/users",
+        "/api/v2/users.json"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "mark_ticket_spam": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/tickets/*/mark_as_spam",
+        "/api/v2/tickets/*/mark_as_spam.json",
+        "/api/v2/tickets/mark_many_as_spam",
+        "/api/v2/tickets/mark_many_as_spam.json"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "merge_tickets": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/tickets/*/merge",
+        "/api/v2/tickets/*/merge.json"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/search",
+        "/api/v2/search.json"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_ticket": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/tickets/0*/",
+        "/api/v2/tickets/1*/",
+        "/api/v2/tickets/2*/",
+        "/api/v2/tickets/3*/",
+        "/api/v2/tickets/4*/",
+        "/api/v2/tickets/5*/",
+        "/api/v2/tickets/6*/",
+        "/api/v2/tickets/7*/",
+        "/api/v2/tickets/8*/",
+        "/api/v2/tickets/9*/",
+        "/api/v2/tickets/update_many",
+        "/api/v2/tickets/update_many.json"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "update_user": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/users/0*/",
+        "/api/v2/users/1*/",
+        "/api/v2/users/2*/",
+        "/api/v2/users/3*/",
+        "/api/v2/users/4*/",
+        "/api/v2/users/5*/",
+        "/api/v2/users/6*/",
+        "/api/v2/users/7*/",
+        "/api/v2/users/8*/",
+        "/api/v2/users/9*/"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    }
+  },
   "zoho-crm": {
     "create_account": {
       "hosts": [
@@ -12546,7 +13601,20 @@
         "www.zohoapis.com"
       ],
       "paths": [
-        "/crm/v8/settings/*"
+        "/crm/v8/settings/modules",
+        "/crm/v8/settings/modules/*/",
+        "/crm/v8/settings/fields",
+        "/crm/v8/settings/fields/*/",
+        "/crm/v8/settings/layouts",
+        "/crm/v8/settings/layouts/*/",
+        "/crm/v8/settings/custom_views",
+        "/crm/v8/settings/custom_views/*/",
+        "/crm/v8/settings/related_lists",
+        "/crm/v8/settings/related_lists/*/",
+        "/crm/v8/settings/roles",
+        "/crm/v8/settings/roles/*/",
+        "/crm/v8/settings/profiles",
+        "/crm/v8/settings/profiles/*/"
       ],
       "methods": [
         "GET"

@@ -1,15 +1,24 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { ApiEnv } from "../types";
 import { authMiddleware, requireWorkspaceId } from "../middleware/auth";
+import { apiError } from "../middleware/error-handler";
 import { ServiceError } from "../services/errors";
 import {
   createSkill,
   deleteSkill,
   getSkill,
+  importAgentSkills,
   listSkillsForWorkspace,
   updateSkill,
 } from "../services/skill-service";
-import { createSkillSchema, updateSkillSchema } from "../validations/skills";
+import {
+  createSkillSchema,
+  MAX_SKILL_ZIP_BYTES,
+  updateSkillSchema,
+} from "../validations/skills";
+import { readCappedBinaryBody } from "@onecli/channels";
+import { importSkillZip, type SkillZipResult } from "../services/skill-import";
+import { ZipError } from "../lib/zip";
 import {
   AUDIT_ACTIONS,
   AUDIT_SERVICES,
@@ -34,9 +43,96 @@ const parseBody = async (raw: Request) =>
     .json()
     .catch(() => null);
 
+/** Folder problems named in a refusal; the rest are counted. */
+const MAX_PROBLEMS_SHOWN = 5;
+
+/**
+ * Read an uploaded skill zip (capped mid-stream) and unpack it: the skills
+ * to save, or the response to send instead (413 past the cap; 422 for an
+ * empty or unreadable upload, a damaged zip, or one with nothing to import,
+ * naming each folder's problem).
+ */
+export const readSkillZipUpload = async (
+  c: Context<ApiEnv>,
+): Promise<SkillZipResult | Response> => {
+  const body = await readCappedBinaryBody(c.req.raw, MAX_SKILL_ZIP_BYTES);
+  if (!body.ok) {
+    if (body.reason === "too_large") {
+      return c.json(
+        apiError(
+          `Skill zips are capped at ${MAX_SKILL_ZIP_BYTES / (1024 * 1024)} MB.`,
+        ),
+        413,
+      );
+    }
+    throw new ServiceError(
+      "UNPROCESSABLE",
+      body.reason === "empty" ? "The upload is empty" : "Unreadable upload",
+    );
+  }
+  let read: SkillZipResult;
+  try {
+    read = await importSkillZip(body.bytes);
+  } catch (err) {
+    if (err instanceof ZipError) {
+      throw new ServiceError("UNPROCESSABLE", err.message);
+    }
+    throw err;
+  }
+  if (read.skills.length === 0) {
+    const shown = read.problems.slice(0, MAX_PROBLEMS_SHOWN);
+    const more = read.problems.length - shown.length;
+    throw new ServiceError(
+      "UNPROCESSABLE",
+      `Nothing to import: ${shown
+        .map((p) => `${p.folder || "the zip"} (${p.reason})`)
+        .join("; ")}${more > 0 ? `; and ${more} more` : ""}`,
+    );
+  }
+  return read;
+};
+
 export const userSkillRoutes = () => {
   const app = new Hono<ApiEnv>();
   app.use("*", authMiddleware);
+
+  // POST /skills/import?agentId=: a skill zip (one or several skills) into
+  // one hosted agent. The body is the raw zip. A name the agent already
+  // holds is replaced.
+  app.post("/import", async (c) => {
+    const a = c.get("auth");
+    const workspaceId = requireWorkspaceId(a);
+    const agentId = c.req.query("agentId")?.trim();
+    if (!agentId) {
+      throw new ServiceError("UNPROCESSABLE", "agentId is required");
+    }
+    const read = await readSkillZipUpload(c);
+    if (read instanceof Response) return read;
+    const imported = await importAgentSkills(
+      workspaceId,
+      agentId,
+      read.skills,
+      { userId: a.userId, email: a.userEmail },
+    );
+    for (const skill of imported) {
+      await recordAuditEvent({
+        workspaceId,
+        userId: a.userId,
+        userEmail: a.userEmail,
+        action: skill.replaced ? AUDIT_ACTIONS.UPDATE : AUDIT_ACTIONS.CREATE,
+        service: AUDIT_SERVICES.SKILL,
+        source: AUDIT_SOURCE.API,
+        metadata: {
+          skillId: skill.id,
+          name: skill.name,
+          agentId,
+          files: String(skill.files),
+          source: "zip",
+        },
+      });
+    }
+    return c.json({ imported, problems: read.problems }, 201);
+  });
 
   // GET /skills — the section's payload: metadata only, bodies per detail
   // fetch (a full list of 32k-char bodies would be a heavy payload).

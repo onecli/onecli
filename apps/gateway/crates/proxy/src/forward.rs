@@ -15,9 +15,8 @@ use hyper::{Request, Response, StatusCode};
 use tracing::{info, warn};
 
 use crate::connect::{inactive_app_for, PolicyEngineExt as _, RestrictedCredential};
-use approval::{
-    ApprovalDecision, ApprovalGuard, ApprovalStore, PendingApproval, APPROVAL_TIMEOUT_SECS,
-};
+use approval::hold::HoldOutcome;
+use approval::{ApprovalStore, PendingApproval, APPROVAL_TIMEOUT_SECS};
 use cache::CacheStore;
 use inject::default_interceptions;
 use policy::PolicyDecision;
@@ -233,30 +232,10 @@ fn content_length_at_most(headers: &hyper::HeaderMap, max: usize) -> bool {
 
 // ── Request forwarding ──────────────────────────────────────────────────
 
-/// Forward a single HTTP request to the real upstream server and stream the response back.
-///
-/// Both request and response bodies are streamed — no full buffering in memory.
-/// This is critical for SSE (Server-Sent Events) and large payloads.
-///
-/// The flow:
-/// 1. Check policy rules (block/rate-limit → 403/429)
-/// 2. Apply injection rules to request headers
-/// 3. Send to upstream
-/// 4. If no credentials were injected and upstream returns 401/403, check if the
-///    host belongs to a known app → return an actionable error for the agent
-/// 5. Stream response back to client
-///
-/// For `ManualApproval`, the gateway peeks a bounded prefix of the body to build
-/// a human-readable approval summary and a redacted preview, then chains it back
-/// with the remaining stream for forwarding. No full-body buffering — the body
-/// stays in the TCP pipe during the approval wait. 16 KB is enough to decode the
-/// RFC822 headers / first MIME part for the summary while staying tiny next to a
-/// multi-megabyte attachment.
-const APPROVAL_BODY_PEEK: usize = 16 * 1024;
-
-/// How much of a bulk change's body the approval card reads: enough for
-/// Salesforce's 200-record cap with long values (see
-/// [`summary::reads_whole_body`]). Bounded, held only for the approval.
+/// How much of a body the approval card reads when it must read it whole: a
+/// bulk change (Salesforce's 200-record cap with long values) or a new Flow
+/// version (see [`summary::reads_whole_body`]). Bounded, held only for the
+/// approval.
 const BULK_BODY_PEEK: usize = 512 * 1024;
 
 /// Maximum response body to buffer when checking if a 400 is auth-related.
@@ -373,7 +352,7 @@ pub async fn materialize_injections<'a>(
                 return Err(Box::new(response::json(
                     StatusCode::BAD_GATEWAY,
                     serde_json::json!({
-                        "error": "credential_unavailable",
+                        "error": response::ERROR_CREDENTIAL_UNAVAILABLE,
                         "message": format!(
                             "OneCLI could not obtain a credential for the {} connection, \
                              so the request was not forwarded.",
@@ -390,6 +369,24 @@ pub async fn materialize_injections<'a>(
     )))
 }
 
+/// Forward a single HTTP request to the real upstream server and stream the response back.
+///
+/// Both request and response bodies are streamed — no full buffering in memory.
+/// This is critical for SSE (Server-Sent Events) and large payloads.
+///
+/// The flow:
+/// 1. Check policy rules (block/rate-limit → 403/429)
+/// 2. Apply injection rules to request headers
+/// 3. Send to upstream
+/// 4. If no credentials were injected and upstream returns 401/403, check if the
+///    host belongs to a known app → return an actionable error for the agent
+/// 5. Stream response back to client
+///
+/// For `ManualApproval`, the gateway peeks a bounded prefix of the body
+/// ([`summary::BODY_PEEK`]) to build a human-readable approval summary and a
+/// redacted preview, then chains it back with the remaining stream for
+/// forwarding. No full-body buffering — the body stays in the TCP pipe during
+/// the approval wait.
 #[allow(clippy::too_many_arguments)]
 pub async fn forward_request(
     req: Request<Incoming>,
@@ -438,6 +435,12 @@ pub async fn forward_request(
         response::destination_not_allowed(refused_host)
     };
     if let Err(refusal) = super::egress::check_url(super::egress::policy(), &url) {
+        return Ok(refuse_destination(&refusal.host));
+    }
+    // The gateway's own data stores are refused whatever the allowlist says.
+    // The resolver never learns the port, so the check runs here, by port.
+    let default_port = if scheme == "https" { 443 } else { 80 };
+    if let Err(refusal) = super::egress::check_own_store(host, default_port).await {
         return Ok(refuse_destination(&refusal.host));
     }
     // Behind an operator's environment proxy the proxy resolves the target,
@@ -621,6 +624,7 @@ pub async fn forward_request(
                 method.as_str(),
                 &path,
                 host,
+                proxy_ctx.agent_id.as_deref(),
                 proxy_ctx.workspace_id.as_deref(),
             ));
         }
@@ -636,6 +640,7 @@ pub async fn forward_request(
                 method.as_str(),
                 &path,
                 rule_name,
+                proxy_ctx.agent_id.as_deref(),
                 proxy_ctx.workspace_id.as_deref(),
             ));
         }
@@ -756,7 +761,7 @@ pub async fn forward_request(
                 Some((app, _)) if summary::reads_whole_body(app, method.as_str(), &path) => {
                     BULK_BODY_PEEK
                 }
-                _ => APPROVAL_BODY_PEEK,
+                _ => summary::BODY_PEEK,
             };
             let (summary_bytes, fwd_body): (Cow<'_, [u8]>, reqwest::Body) = if let Some(ref buf) =
                 condition_buffer
@@ -835,6 +840,9 @@ pub async fn forward_request(
                     &rules.policy_rules_v2,
                 )
             };
+            // The read carries the credential injection set on this request
+            // (Authorization, or an app's own key header), never the agent's.
+            let credential_headers = inject::injected_header_names(&injection_rules, &path);
             let enrich = approval_enrich::EnrichContext {
                 http: &http_client,
                 scheme,
@@ -842,12 +850,14 @@ pub async fn forward_request(
                 method: method.as_str(),
                 path: &path,
                 headers: &headers,
+                credential_headers: &credential_headers,
                 connection_id: rules
                     .winning_connection_id
                     .as_deref()
                     .filter(|_| injection_count > 0),
                 cache,
                 may_get: &may_get,
+                body: summary_body,
             };
             let app = matched_app.map(|(provider, _)| provider);
             approval_enrich::enrich(&mut approval_summary, app, &enrich).await;
@@ -857,6 +867,7 @@ pub async fn forward_request(
             // alongside for richer rendering.
             let body_preview = Some(approval_summary.render_text());
             approval_result_shape = Some((app.unwrap_or(""), approval_summary.action.clone()));
+            let generic_card = approval_summary.is_generic();
 
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -892,29 +903,8 @@ pub async fn forward_request(
                 expires_at: now + APPROVAL_TIMEOUT_SECS,
             };
 
-            let decision_rx = approval_store
-                .prepare_wait(org_id, workspace_id, &approval_id)
-                .await;
-
-            // Guard cleans up the approval if the agent disconnects (future cancelled).
-            // Created BEFORE store() so there's no window where cancellation misses cleanup.
-            let mut guard = ApprovalGuard::new(
-                approval_id.clone(),
-                org_id.to_string(),
-                workspace_id.to_string(),
-                Arc::clone(approval_store),
-            );
-
-            if let Err(e) = approval_store.store(&approval).await {
-                warn!(url = %url, error = ?e, "failed to store pending approval");
-                guard.defuse();
-                approval_store
-                    .remove(org_id, workspace_id, &approval_id)
-                    .await;
-                return Ok(response::approval_store_unavailable());
-            }
-
             let triggered_at = hooks::iso_now();
+            let log_id = uuid::Uuid::new_v4().to_string();
             // The telemetry row for each step of this approval: the pending
             // INSERT carries no latency yet; a resolution carries the wait.
             let approval_meta = |status: u16, latency_ms: u32| {
@@ -924,110 +914,59 @@ pub async fn forward_request(
                         meta
                     })
             };
-
-            let log_id = uuid::Uuid::new_v4().to_string();
-            guard.set_log_context(log_id.clone(), engine.pool.clone());
-            emit_approval_telemetry(
-                approval_meta(202, 0),
-                telemetry::core::RequestDecision::ApprovalPending {
-                    approval_id: approval_id.clone(),
-                    triggered_at: triggered_at.clone(),
-                },
-                Some(log_id.clone()),
-                None,
-                // The pending INSERT is what persists the column (approval
-                // resolution is an UPDATE that never writes it).
-                matched_rule.clone(),
-            );
-
-            info!(
-                url = %url,
-                approval_id = %approval_id,
-                agent = %agent_name,
-                injections = injection_count,
-                "holding request for approval"
-            );
-
-            let mut shutdown_signal = shutdown::subscribe();
-            let outcome = tokio::select! {
-                outcome = decision_rx.wait(Duration::from_secs(APPROVAL_TIMEOUT_SECS)) => {
-                    Some(outcome)
-                }
-                // Shutting down with nobody having decided. Left alone this
-                // request would be cut without an answer while its approval
-                // card lingered in the dashboard for another three minutes —
-                // reviewable, and approvable into a process that no longer
-                // exists. Release it explicitly instead.
-                _ = shutdown_signal.wait() => None,
-            };
-
-            let Some(outcome) = outcome else {
-                warn!(
-                    url = %url,
-                    approval_id = %approval_id,
-                    "shutting down — releasing held request for retry"
-                );
-                // Defuse first: the guard's Drop would spawn this same cleanup
-                // detached, racing the pool close that follows the drain.
-                guard.defuse();
-                approval_store
-                    .remove(org_id, workspace_id, &approval_id)
-                    .await;
-                let resolved_at = hooks::iso_now();
+            // A refused hold UPDATEs the pending row with its outcome.
+            let emit_denied = |status: u16, reason: &str, approved_by: Option<String>| {
                 emit_approval_telemetry(
-                    approval_meta(503, start.elapsed().as_millis() as u32),
+                    approval_meta(status, start.elapsed().as_millis() as u32),
                     telemetry::core::RequestDecision::ApprovalDenied {
                         approval_id: approval_id.clone(),
-                        reason: "gateway_restarting".to_string(),
-                        triggered_at,
-                        resolved_at,
-                        approved_by: None,
+                        reason: reason.to_string(),
+                        triggered_at: triggered_at.clone(),
+                        resolved_at: hooks::iso_now(),
+                        approved_by,
                     },
                     None,
-                    Some(log_id),
+                    Some(log_id.clone()),
                     matched_rule.clone(),
                 );
-                return Ok(response::gateway_restarting(&approval_id));
             };
 
-            // Decision received (or timed out) — defuse guard, handle explicitly.
-            guard.defuse();
-
-            let outcome = match outcome {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    warn!(approval_id = %approval_id, %error, "approval wait failed; request not forwarded");
-                    approval_store
-                        .remove(org_id, workspace_id, &approval_id)
-                        .await;
-                    let resolved_at = hooks::iso_now();
+            let held = approval::hold::hold(
+                approval_store,
+                &approval,
+                Some(approval::hold::HoldLog {
+                    log_id: log_id.clone(),
+                    pool: engine.pool.clone(),
+                }),
+                || {
                     emit_approval_telemetry(
-                        approval_meta(502, start.elapsed().as_millis() as u32),
-                        telemetry::core::RequestDecision::ApprovalDenied {
+                        approval_meta(202, 0),
+                        telemetry::core::RequestDecision::ApprovalPending {
                             approval_id: approval_id.clone(),
-                            reason: "approval_store_unavailable".to_string(),
-                            triggered_at,
-                            resolved_at,
-                            approved_by: None,
+                            triggered_at: triggered_at.clone(),
+                            generic_card,
                         },
+                        Some(log_id.clone()),
                         None,
-                        Some(log_id),
+                        // The pending INSERT is what persists the column
+                        // (approval resolution is an UPDATE that never
+                        // writes it).
                         matched_rule.clone(),
                     );
-                    return Ok(response::approval_wait_unavailable(&approval_id));
-                }
-            };
+                    info!(
+                        url = %url,
+                        approval_id = %approval_id,
+                        agent = %agent_name,
+                        injections = injection_count,
+                        "holding request for approval"
+                    );
+                },
+            )
+            .await;
 
-            let decision = outcome.as_ref().map(|o| o.decision);
-            let deny_reason = outcome.as_ref().and_then(|o| o.reason);
-            let approved_by = outcome.and_then(|o| o.approved_by);
-
-            match decision {
-                Some(ApprovalDecision::Approve) => {
+            match held {
+                HoldOutcome::Approved { approved_by } => {
                     info!(url = %url, approval_id = %approval_id, "APPROVED — forwarding request");
-                    approval_store
-                        .remove(org_id, workspace_id, &approval_id)
-                        .await;
                     approval_approved_by = approved_by;
                     (
                         fwd_body,
@@ -1036,35 +975,31 @@ pub async fn forward_request(
                         Some(triggered_at),
                     )
                 }
-                other => {
-                    let (reason, rejection) = match (other, deny_reason) {
-                        (Some(ApprovalDecision::Deny), Some(approval::DenyReason::Superseded)) => {
-                            ("superseded", response::ApprovalRejection::Superseded)
-                        }
-                        (Some(ApprovalDecision::Deny), _) => {
-                            ("denied", response::ApprovalRejection::Declined)
-                        }
-                        _ => ("timed out", response::ApprovalRejection::Expired),
-                    };
+                HoldOutcome::Rejected {
+                    rejection,
+                    decided_by,
+                } => {
+                    let reason = rejection.telemetry_reason();
                     warn!(url = %url, approval_id = %approval_id, reason, "MANUAL APPROVAL rejected");
-                    approval_store
-                        .remove(org_id, workspace_id, &approval_id)
-                        .await;
-                    let resolved_at = hooks::iso_now();
-                    emit_approval_telemetry(
-                        approval_meta(403, start.elapsed().as_millis() as u32),
-                        telemetry::core::RequestDecision::ApprovalDenied {
-                            approval_id: approval_id.clone(),
-                            reason: reason.to_string(),
-                            triggered_at,
-                            resolved_at,
-                            approved_by,
-                        },
-                        None,
-                        Some(log_id),
-                        matched_rule.clone(),
-                    );
+                    emit_denied(403, reason, decided_by);
                     return Ok(response::manual_approval_denied(&approval_id, rejection));
+                }
+                HoldOutcome::StoreUnavailable => {
+                    return Ok(response::approval_store_unavailable());
+                }
+                HoldOutcome::WaitFailed(error) => {
+                    warn!(approval_id = %approval_id, %error, "approval wait failed; request not forwarded");
+                    emit_denied(502, "approval_store_unavailable", None);
+                    return Ok(response::approval_wait_unavailable(&approval_id));
+                }
+                HoldOutcome::ShuttingDown => {
+                    warn!(
+                        url = %url,
+                        approval_id = %approval_id,
+                        "shutting down — releasing held request for retry"
+                    );
+                    emit_denied(503, "gateway_restarting", None);
+                    return Ok(response::gateway_restarting(&approval_id));
                 }
             }
         } else {
@@ -1127,6 +1062,53 @@ pub async fn forward_request(
     };
 
     // ── Forward to upstream ──────────────────────────────────────────
+    // The request's manual-approval outcome, as the telemetry row records it
+    // (`None` when no approval was involved). Built once per emission: both
+    // the guidance answers below and the normal path at the end carry it.
+    let approval_decision = || match (
+        &approval_log_id,
+        &approval_id_for_telemetry,
+        &approval_triggered_at,
+    ) {
+        (Some(log_id), Some(approval_id), Some(triggered_at)) => Some((
+            log_id.clone(),
+            telemetry::core::RequestDecision::ApprovalApproved {
+                approval_id: approval_id.clone(),
+                triggered_at: triggered_at.clone(),
+                resolved_at: hooks::iso_now(),
+                approved_by: approval_approved_by.clone(),
+            },
+        )),
+        _ => None,
+    };
+    // Every guidance answer below replaces the upstream response and returns
+    // before the normal telemetry at the end of this function, so it records
+    // its own row with the status the agent actually received. A request
+    // that first passed a manual approval instead UPDATES that approval's row
+    // with the final status (it still reads "approved"), as the normal path
+    // would, rather than adding a second one.
+    let guidance = |error: &str, resp: Response<hooks::ForwardResponseBody>| {
+        if let Some(mut meta) = hooks::request_meta(
+            proxy_ctx,
+            host,
+            method.as_str(),
+            &path,
+            resp.status().as_u16(),
+            start.elapsed().as_millis() as u32,
+        ) {
+            meta.matched_rule = matched_rule.clone();
+            match approval_decision() {
+                Some((log_id, approved)) => {
+                    meta.existing_log_id = Some(log_id);
+                    meta.decision = Some(approved);
+                    telemetry::on_request(meta.into_event(None));
+                }
+                None => hooks::record_needs_connection(meta, error),
+            }
+        }
+        Ok(resp)
+    };
+
     // A provider that recovers from a refused token (see `stale_token`) may
     // send this request a second time, so never a signed or transformed one,
     // whose headers and bytes are bound to the first send.
@@ -1194,7 +1176,7 @@ pub async fn forward_request(
                 .await
                 .context("reading the 401 body")?;
 
-            let refreshed = match (
+            let recovery = match (
                 super::stale_token::injected_bearer(&headers, &parts.headers),
                 proxy_ctx.organization_id.as_deref(),
                 proxy_ctx.workspace_id.as_deref(),
@@ -1212,7 +1194,31 @@ pub async fn forward_request(
                     )
                     .await
                 }
-                _ => None,
+                _ => super::stale_token::Recovery::Unavailable,
+            };
+
+            let refreshed = match recovery {
+                super::stale_token::Recovery::Token(token) => Some(token),
+                // A refresh cannot fix this refusal: the agent gets the
+                // reconnect answer (with the link its chat card renders)
+                // instead of the provider's raw 401, so it asks the user
+                // rather than retrying.
+                super::stale_token::Recovery::Reconnect => {
+                    let connection = super::connect::ConnectionChoice::for_connection(
+                        target.connection_id,
+                        target.provider,
+                        rules.connection_label.clone(),
+                    );
+                    info!(method = %method, url = %url, connection_id = %target.connection_id, "refusal no refresh fixes; answering connection_needs_reconnect");
+                    return guidance(
+                        response::ERROR_CONNECTION_NEEDS_RECONNECT,
+                        response::connection_needs_reconnect(
+                            &connection,
+                            proxy_ctx.workspace_id.as_deref(),
+                        ),
+                    );
+                }
+                super::stale_token::Recovery::Unavailable => None,
             };
 
             match refreshed.filter(|_| !has_body) {
@@ -1308,55 +1314,10 @@ pub async fn forward_request(
         .map(|(log_id, (app, action))| ApprovedResultTarget {
             pool: engine.pool.clone(),
             log_id: log_id.clone(),
+            provider: rules.winning_provider.clone(),
             per_record: summary::outcome::answers_per_record(app, method.as_str(), &path),
             action: summary::clamp(action, 120),
         });
-    // The request's manual-approval outcome, as the telemetry row records it
-    // (`None` when no approval was involved). Built once per emission: both
-    // the guidance answers below and the normal path at the end carry it.
-    let approval_decision = || match (
-        &approval_log_id,
-        &approval_id_for_telemetry,
-        &approval_triggered_at,
-    ) {
-        (Some(log_id), Some(approval_id), Some(triggered_at)) => Some((
-            log_id.clone(),
-            telemetry::core::RequestDecision::ApprovalApproved {
-                approval_id: approval_id.clone(),
-                triggered_at: triggered_at.clone(),
-                resolved_at: hooks::iso_now(),
-                approved_by: approval_approved_by.clone(),
-            },
-        )),
-        _ => None,
-    };
-    // Every guidance answer below replaces the upstream response and returns
-    // before the normal telemetry at the end of this function, so it records
-    // its own row with the status the agent actually received. A request
-    // that first passed a manual approval instead UPDATES that approval's row
-    // with the final status (it still reads "approved"), as the normal path
-    // would, rather than adding a second one.
-    let guidance = |error: &str, resp: Response<hooks::ForwardResponseBody>| {
-        if let Some(mut meta) = hooks::request_meta(
-            proxy_ctx,
-            host,
-            method.as_str(),
-            &path,
-            resp.status().as_u16(),
-            start.elapsed().as_millis() as u32,
-        ) {
-            meta.matched_rule = matched_rule.clone();
-            match approval_decision() {
-                Some((log_id, approved)) => {
-                    meta.existing_log_id = Some(log_id);
-                    meta.decision = Some(approved);
-                    telemetry::on_request(meta.into_event(None));
-                }
-                None => hooks::record_needs_connection(meta, error),
-            }
-        }
-        Ok(resp)
-    };
     if injection_count == 0
         && !is_real_oauth_exchange
         && (status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN || wrong_host_404)
@@ -1613,12 +1574,16 @@ async fn github_org_access_check(
 }
 
 /// Where an APPROVED request's real result is recorded: its approval's
-/// request-log row. `per_record` says the upstream answers record by record
-/// (a Salesforce Collections or Composite call), so even its 200 is read;
-/// `action` is the card's own title, whose verb the result line reads in.
+/// request-log row. `provider` is the provider of the connection whose
+/// credential the request carried (`github-app`, not the `github` its shared
+/// host resolves to), or `None` when none was injected; `per_record` says the
+/// upstream answers record by record (a Salesforce Collections or Composite
+/// call), so even its 200 is read; `action` is the card's own title, whose
+/// verb the result line reads in.
 struct ApprovedResultTarget {
     pool: sqlx::PgPool,
     log_id: String,
+    provider: Option<String>,
     per_record: bool,
     action: String,
 }
@@ -1639,11 +1604,23 @@ impl ApprovedResultTarget {
     fn record(&self, status: StatusCode, headers: &hyper::HeaderMap, body: Option<&[u8]>) {
         let decoded =
             body.and_then(|b| super::body::decoded(headers, b, summary::outcome::RESULT_BODY_PEEK));
-        let Some(result) =
+        let Some(mut result) =
             summary::outcome::request_result(self.per_record, status.as_u16(), decoded.as_deref())
         else {
             return;
         };
+        summary::outcome::unmask_refusal(
+            self.provider.as_deref().unwrap_or_default(),
+            status.as_u16(),
+            summary::outcome::RateLimitHeaders {
+                remaining: headers
+                    .get("x-ratelimit-remaining")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse::<u64>().ok()),
+                retry_after: headers.contains_key(hyper::header::RETRY_AFTER),
+            },
+            &mut result,
+        );
         let Ok(mut json) = serde_json::to_value(&result) else {
             return;
         };
@@ -1733,8 +1710,25 @@ fn auth_failure_guidance(
         ));
     }
 
+    // 2. A granted secret for this host whose value could not be produced:
+    //    the agent HAS the credential, so the fix is re-entering it, never
+    //    attaching it (`access_restricted` is not even resolved then).
+    if let Some(kind) = rules.credential_unavailable {
+        return Some((
+            response::ERROR_CREDENTIAL_UNAVAILABLE,
+            response::credential_unavailable(
+                status,
+                kind,
+                hostname,
+                path,
+                workspace_id,
+                proxy_ctx.agent_id.as_deref(),
+            ),
+        ));
+    }
+
     match &rules.access_restricted {
-        // 2. A secret exists for this host that the agent was not given.
+        // 3. A secret exists for this host that the agent was not given.
         Some(RestrictedCredential::Secret(kind)) => {
             return Some((
                 response::ERROR_ACCESS_RESTRICTED,
@@ -1748,7 +1742,7 @@ fn auth_failure_guidance(
                 ),
             ));
         }
-        // 3. A connected account of THIS request's app is just off for the
+        // 4. A connected account of THIS request's app is just off for the
         //    agent: turning it on is the fix (connecting another stays the
         //    alternative). Anything else (the accounts serve another app on
         //    this shared host, or each one is waiting on a reconnect) falls
@@ -1770,7 +1764,7 @@ fn auth_failure_guidance(
         None => {}
     }
 
-    // 4. A known app host (or a provider's alias host): connect it.
+    // 5. A known app host (or a provider's alias host): connect it.
     if let Some((provider, display_name)) = apps::guidance_provider_for(hostname, path) {
         return Some((
             response::ERROR_APP_NOT_CONNECTED,
@@ -1784,7 +1778,7 @@ fn auth_failure_guidance(
         ));
     }
 
-    // 5. A known host on a path no app serves: request the app.
+    // 6. A known host on a path no app serves: request the app.
     if apps::provider_for_host(hostname).is_some() {
         return Some((
             response::ERROR_APP_NOT_CONNECTED,
@@ -1797,7 +1791,7 @@ fn auth_failure_guidance(
         ));
     }
 
-    // 6. An unknown host: add a custom credential.
+    // 7. An unknown host: add a custom credential.
     nudge_unknown_host.then(|| {
         (
             response::ERROR_CREDENTIAL_NOT_FOUND,
@@ -2379,6 +2373,7 @@ mod tests {
             policy_rules_v2: db::PolicyV2Rules::default(),
             available_apps: db::AvailableApps::default(),
             access_restricted: None,
+            credential_unavailable: None,
             intercept_token: None,
             plan: "free".to_string(),
             rewrite_host: None,
@@ -2664,6 +2659,15 @@ mod tests {
             access_restricted,
             ..permissive_rules()
         };
+        guidance_under(&rules, host, path).await
+    }
+
+    /// [`guidance_for`] under any resolved rules.
+    async fn guidance_under(
+        rules: &ResolvedRules,
+        host: &str,
+        path: &str,
+    ) -> (String, Option<String>) {
         let ctx = ProxyContext {
             workspace_id: Some("ws".into()),
             organization_id: Some("org".into()),
@@ -2673,7 +2677,7 @@ mod tests {
             agent_token: "test-token".to_string(),
         };
         let (error, resp) =
-            auth_failure_guidance(StatusCode::UNAUTHORIZED, host, path, &rules, &ctx, true)
+            auth_failure_guidance(StatusCode::UNAUTHORIZED, host, path, rules, &ctx, true)
                 .expect("an uncredentialed auth failure always gets guidance here");
         let body = resp.into_body().collect().await.expect("body").to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
@@ -2684,6 +2688,49 @@ mod tests {
                 .to_string()
         });
         (error.to_string(), manage_url)
+    }
+
+    /// A granted secret whose value could not be produced answers
+    /// `credential_unavailable` on its kind's page. It ranks above
+    /// `access_restricted` (resolution never sets both, but the order must not
+    /// depend on that) and below a host mismatch, which names a URL problem
+    /// the agent can fix itself.
+    #[tokio::test]
+    async fn auth_failure_guidance_puts_an_unreadable_grant_before_a_missing_one() {
+        use crate::connect::{RestrictedCredential, SecretKind};
+        let unreadable = ResolvedRules {
+            credential_unavailable: Some(SecretKind::LlmKey),
+            access_restricted: Some(RestrictedCredential::Secret(SecretKind::LlmKey)),
+            ..permissive_rules()
+        };
+        assert_eq!(
+            guidance_under(&unreadable, "api.anthropic.com", "/v1/messages").await,
+            (
+                "credential_unavailable".into(),
+                Some("/w/ws/agents/ag/models".into())
+            )
+        );
+        let custom = ResolvedRules {
+            credential_unavailable: Some(SecretKind::Custom),
+            ..permissive_rules()
+        };
+        assert_eq!(
+            guidance_under(&custom, "api.unknown-service.test", "/v1").await,
+            (
+                "credential_unavailable".into(),
+                Some("/w/ws/agents/ag/connections?tab=custom".into())
+            )
+        );
+        let mismatch = ResolvedRules {
+            credential_unavailable: Some(SecretKind::Custom),
+            ..host_mismatch_rules()
+        };
+        assert_eq!(
+            guidance_under(&mismatch, "login.salesforce.com", "/services/data/")
+                .await
+                .0,
+            "connection_host_mismatch"
+        );
     }
 
     /// The decision order, shared by the 401/403 and auth-shaped 400 paths:

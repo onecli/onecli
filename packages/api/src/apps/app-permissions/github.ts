@@ -150,10 +150,12 @@ const githubGroups: AppToolGroup[] = [
 
 export const githubPermissions: AppPermissionDefinition = {
   provider: "github",
+  unlistedReads: "allow",
   groups: githubGroups,
 };
 
 export const githubAppPermissions: AppPermissionDefinition = {
   provider: "github-app",
+  unlistedReads: "allow",
   groups: githubGroups,
 };

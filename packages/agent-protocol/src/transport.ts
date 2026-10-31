@@ -44,11 +44,19 @@ export const MAX_TURN_CONTEXT_CHARS = 16_000;
 // Imported for local use (the memory.write byte belt below) AND re-exported
 // so every existing import path keeps working.
 import {
+  MAX_SYNC_FILE_CHUNKS,
   MAX_SYNC_PART_BYTES,
   MAX_SYNC_PARTS,
+  SYNC_FILE_CHUNK_RAW_BYTES,
   syncFrameByteLength,
 } from "./sync-budget";
-export { MAX_SYNC_PART_BYTES, MAX_SYNC_PARTS, syncFrameByteLength };
+export {
+  MAX_SYNC_FILE_CHUNKS,
+  MAX_SYNC_PART_BYTES,
+  MAX_SYNC_PARTS,
+  SYNC_FILE_CHUNK_RAW_BYTES,
+  syncFrameByteLength,
+};
 
 import {
   ATTACHMENT_CHUNK_BASE64_CHARS,
@@ -103,6 +111,12 @@ export const MAX_LISTENING_PORTS_WIRE = 64;
  */
 export const DESKTOP_VIEW_PORT = 5900;
 export const DESKTOP_CONTROL_PORT = 5901;
+/** Maximum UTF-8 text bytes in one desktop clipboard transfer. */
+export const DESKTOP_CLIPBOARD_MAX_BYTES = 64 * 1024;
+/** Bounded protocol allowance for CRLF expansion, a terminator, and
+ * compression/framing overhead. Not a larger user-visible text limit. */
+export const DESKTOP_CLIPBOARD_MAX_WIRE_BYTES =
+  2 * DESKTOP_CLIPBOARD_MAX_BYTES + 1024;
 /** The person's name shown to the agent, bounded like every wire string. */
 export const MAX_DESKTOP_CONTROLLER_NAME_CHARS = 120;
 
@@ -217,8 +231,39 @@ export const homeRelativePathSchema = z
 export const homeSyncFileSchema = z.object({
   path: homeRelativePathSchema,
   content: z.string(),
+  /** Write it runnable (0555) instead of read-only (0444). An older
+   * supervisor ignores the flag and the file still lands, read-only. */
+  executable: z.literal(true).optional(),
 });
 export type HomeSyncFile = z.infer<typeof homeSyncFileSchema>;
+
+/**
+ * A skill file that is binary or too big for one frame, as raw bytes in
+ * base64. These ride their OWN `blobs` list, never `files`: an older runner
+ * or supervisor strips the unknown key and the file is simply absent there,
+ * never written scrambled. A big file arrives as `chunk.of` pieces, in
+ * order, each with the whole file's sha256; the writer joins them and
+ * checks the hash before landing the file.
+ */
+export const homeSyncBlobSchema = z.object({
+  path: homeRelativePathSchema,
+  dataBase64: z
+    .string()
+    .max(Math.ceil(SYNC_FILE_CHUNK_RAW_BYTES / 3) * 4)
+    .regex(/^[A-Za-z0-9+/]*={0,2}$/),
+  executable: z.literal(true).optional(),
+  chunk: z
+    .object({
+      index: z.number().int().min(1),
+      of: z.number().int().min(2).max(MAX_SYNC_FILE_CHUNKS),
+      sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    })
+    .refine((chunk) => chunk.index <= chunk.of, {
+      message: "chunk index past its count",
+    })
+    .optional(),
+});
+export type HomeSyncBlob = z.infer<typeof homeSyncBlobSchema>;
 
 /** Presence statuses the renderer distinguishes. `pending_setup` rows are
  * never sent: a half-finished attach is not a place the agent can be reached. */
@@ -255,8 +300,11 @@ export const agentChannelPresenceSchema = z.object({
    * unknown. */
   workspaceName: z.string().max(120).nullable(),
   /** How many conversations people granted this agent to read through
-   * "Connect your Slack" (a count only: no names, no ids). Drives whether
-   * the read tool is listed. Optional: older control planes omit it. */
+   * "Connect your Slack" (a count only: no names, no ids). Informational:
+   * the read tool no longer depends on it (it is listed with any live
+   * presence, and a read with nothing shared answers with an access card).
+   * Kept on the wire for older supervisor images. Optional: older control
+   * planes omit it. */
   readableConversations: z.number().int().min(0).max(10_000).optional(),
 });
 export type AgentChannelPresenceWire = z.infer<
@@ -300,6 +348,20 @@ export const MAX_AGENT_CONNECTION_API_HOST_CHARS = 100;
 export const MAX_AGENT_CONNECTION_ENDPOINTS = 3;
 export const MAX_AGENT_CONNECTION_ENDPOINT_CHARS = 80;
 export const MAX_AGENT_CONNECTION_DOCS_URL_CHARS = 160;
+/** A connection id: a UUID today; the cap leaves room, never meaning. */
+export const MAX_AGENT_CONNECTION_ID_CHARS = 64;
+
+/** The database engines the gateway's database front door speaks. */
+export const AGENT_DATABASE_ENGINES = ["postgres"] as const;
+
+/**
+ * Where a sandbox's libpq finds the agent's attached databases: the
+ * supervisor writes one service per connection and the agent's token as
+ * their password; the container-config payload points `PGSERVICEFILE` and
+ * `PGPASSFILE` here. One definition, so the two ends cannot drift.
+ */
+export const SANDBOX_PG_SERVICE_FILE = "/tmp/onecli-pg_service.conf";
+export const SANDBOX_PG_PASS_FILE = "/tmp/onecli-pgpass";
 
 /**
  * One app connection attached to this agent, for the supervisor's
@@ -368,6 +430,22 @@ export const agentConnectionSchema = z.object({
     .url()
     .max(MAX_AGENT_CONNECTION_DOCS_URL_CHARS)
     .nullable()
+    .optional(),
+  /**
+   * For a database connection: how a database client logs in through the
+   * gateway's database front door. The user name is this connection's id
+   * and the password is the agent's own OneCLI token, so nothing here is a
+   * secret. Absent for every other app, and from an older control plane.
+   */
+  database: z
+    .object({
+      engine: z.enum(AGENT_DATABASE_ENGINES),
+      connectionId: z
+        .string()
+        .min(1)
+        .max(MAX_AGENT_CONNECTION_ID_CHARS)
+        .regex(/^[A-Za-z0-9_-]+$/, "expected a connection id"),
+    })
     .optional(),
 });
 export type AgentConnectionWire = z.infer<typeof agentConnectionSchema>;
@@ -453,6 +531,17 @@ export const workItemSchema = z.discriminatedUnion("kind", [
      * restarted (`startSession({ resumeSessionRef })`).
      */
     resumeSessionRef: z.string().optional(),
+    /**
+     * Run this turn on a FRESH harness session and end that session with the
+     * turn: no resume, and nothing reused or kept live for the
+     * conversation's next turn. For a background turn whose conversation is
+     * a series of unrelated runs (a memory review), where carrying the last
+     * run's transcript into the next would only replay old work at full
+     * price. Absent = the ordinary per-conversation session. An OLD
+     * supervisor image strips the unknown field (non-strict parse) and runs
+     * the turn on the ordinary session: the cost, never the outcome, regresses.
+     */
+    ephemeralSession: z.literal(true).optional(),
     message: z.string(),
     /**
      * Delivery-only prompt context (step 8: the memory index + snippets),
@@ -583,6 +672,8 @@ export const workItemSchema = z.discriminatedUnion("kind", [
     part: z.number().int().positive(),
     of: z.number().int().positive(),
     files: z.array(homeSyncFileSchema),
+    /** Binary or big skill files (see homeSyncBlobSchema). */
+    blobs: z.array(homeSyncBlobSchema).optional(),
     /** FINAL part only: the complete desired manifest under the managed
      * roots; everything else found there is pruned. */
     prune: z.array(homeRelativePathSchema).optional(),

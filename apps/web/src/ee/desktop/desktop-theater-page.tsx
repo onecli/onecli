@@ -8,11 +8,7 @@ import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { useDesktop } from "./use-desktop";
 import { AgentAvatar } from "@/lib/agents/_components/agent-avatar";
-import {
-  agentPath,
-  DESKTOP_TAKEOVER_PARAM,
-  withWorkspacePrefix,
-} from "@/lib/navigation";
+import { agentPath, DESKTOP_TAKEOVER_PARAM } from "@/lib/navigation";
 import { DesktopTheater } from "./desktop-theater";
 import { useDesktopSession } from "./use-desktop-session";
 import { useAgentPageAgent } from "@/app/(dashboard)/w/[workspaceId]/agents/[agentId]/_components/agent-page-frame";
@@ -84,9 +80,7 @@ export const DesktopTheaterPage = () => {
           </Link>
         </Button>
         <Button variant="ghost" className="min-h-11" asChild>
-          <Link href={withWorkspacePrefix(pathname, "/agents")}>
-            Open dashboard
-          </Link>
+          <Link href={agentPath(pathname, agent.id)}>Open dashboard</Link>
         </Button>
       </header>
       <div

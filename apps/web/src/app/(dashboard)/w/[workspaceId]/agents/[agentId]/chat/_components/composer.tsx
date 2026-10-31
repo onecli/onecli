@@ -1,10 +1,16 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { ArrowUp, FileText, Loader2, Paperclip, Square, X } from "lucide-react";
+import { useEffect, useImperativeHandle, useRef, useState } from "react";
+import type { Ref } from "react";
+import { ArrowUp, Paperclip, Square, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@onecli/ui/components/button";
 import { Textarea } from "@onecli/ui/components/textarea";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@onecli/ui/components/tooltip";
 import { cn } from "@onecli/ui/lib/utils";
 import { TURN_MESSAGE_MAX_LENGTH } from "@onecli/api/validations/conversation";
 import {
@@ -16,6 +22,9 @@ import type {
   OutgoingAttachment,
   OutgoingMessage,
 } from "@/hooks/use-conversations";
+import { FilePreviewDialog } from "./file-preview/file-preview-dialog";
+import { previewKind } from "./file-preview/file-kind";
+import { StagedCardFace } from "./staged-card-face";
 
 /**
  * Deliberately availability-blind: the server queues a turn in every state
@@ -31,16 +40,18 @@ import type {
  */
 
 /** One staged file: local identity + upload lifecycle. */
-interface StagedAttachment {
+export interface StagedAttachment {
   key: number;
   name: string;
   sizeBytes: number;
-  status: "uploading" | "ready" | "failed";
+  status: "uploading" | "ready";
   /** Server row, once the upload lands. */
   meta?: AttachmentMeta;
-  /** Local preview for image files (also reused by the optimistic bubble). */
+  /** Composer-owned local preview for image files. */
   objectUrl?: string;
-  error?: string;
+  /** The picked file, for the click-to-preview dialog. Absent on a draft
+   * restored after a failed send (no local file to read). */
+  file?: File;
 }
 
 interface ComposerProps {
@@ -64,17 +75,19 @@ interface ComposerProps {
    * overwrite words the user is typing. */
   initialDraft?: string;
   className?: string;
+  /** Lets the chat pane's drop zone stage files dropped anywhere on it. */
+  ref?: Ref<ComposerHandle>;
 }
 
-const formatSize = (bytes: number): string =>
-  bytes < 1024 * 1024
-    ? `${Math.max(1, Math.round(bytes / 1024))}KB`
-    : `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+export interface ComposerHandle {
+  stageFiles: (files: Iterable<File>) => void;
+}
 
-/** A local image preview, or nothing — never a throw (jsdom and old engines
- * lack `URL.createObjectURL`; a missing preview degrades to the file chip). */
+/** A local image thumbnail (raster only, the same rule as the preview), or
+ * nothing: never a throw (jsdom and old engines lack
+ * `URL.createObjectURL`; a missing thumbnail degrades to the type badge). */
 const previewUrl = (file: File): string | undefined => {
-  if (!file.type.startsWith("image/")) return undefined;
+  if (previewKind(file.name, file.type) !== "image") return undefined;
   try {
     return URL.createObjectURL(file);
   } catch {
@@ -96,18 +109,34 @@ export const Composer = ({
   autoFocus = false,
   initialDraft,
   className,
+  ref,
 }: ComposerProps) => {
   // Initial state, not an effect: the draft is there on the first paint, so
   // the field never flashes empty and a re-render can't resurrect it after
   // the user clears it.
   const [message, setMessage] = useState(initialDraft ?? "");
   const [staged, setStaged] = useState<StagedAttachment[]>([]);
-  const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** Read by `stageFiles` for the room check — it must not compute capacity
    * inside a state updater (see its header). */
   const stagedRef = useRef<StagedAttachment[]>(staged);
-  stagedRef.current = staged;
+  const mountedRef = useRef(true);
+  // Local previews never leave the composer. Message tiles use the
+  // authenticated bytes cache for both optimistic and settled attachments.
+  const ownedUrls = useRef(new Set<string>());
+  const updateStaged = (entries: StagedAttachment[]) => {
+    stagedRef.current = entries;
+    setStaged(entries);
+  };
+  useEffect(() => {
+    const urls = ownedUrls.current;
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      for (const url of urls) URL.revokeObjectURL(url);
+      urls.clear();
+    };
+  }, []);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   /** The caret is parked exactly once — a later `initialDraft` change must not
    * yank the caret out from under someone who is already typing. */
@@ -138,39 +167,61 @@ export const Composer = ({
   // rows server-side — restage them as ready rather than losing them.
   useEffect(() => {
     if (!failedAttachments || failedAttachments.length === 0) return;
-    setStaged((current) =>
-      current.length > 0
-        ? current
-        : failedAttachments.map((attachment) => ({
-            key: nextKey++,
-            name: attachment.name,
-            sizeBytes: attachment.sizeBytes,
-            status: "ready" as const,
-            meta: attachment,
-            objectUrl: attachment.objectUrl,
-          })),
+    if (stagedRef.current.length > 0) return;
+    updateStaged(
+      failedAttachments.map((attachment) => ({
+        key: nextKey++,
+        name: attachment.name,
+        sizeBytes: attachment.sizeBytes,
+        status: "ready",
+        meta: attachment,
+      })),
     );
   }, [failedAttachments]);
 
-  /**
-   * Stage picked/pasted/dropped files. Every side effect — the upload call,
-   * the toasts, the object URLs, the key counter — happens OUT HERE, never
-   * inside a `setStaged` updater: React may invoke an updater more than once
-   * (StrictMode does, and Next's dev default is StrictMode), which would fire
-   * a second upload per file. The updater below is pure.
-   */
+  const removeStaged = (key: number) => {
+    const entry = stagedRef.current.find((e) => e.key === key);
+    if (entry?.objectUrl && ownedUrls.current.delete(entry.objectUrl)) {
+      URL.revokeObjectURL(entry.objectUrl);
+    }
+    updateStaged(stagedRef.current.filter((e) => e.key !== key));
+  };
+
+  const uploadEntry = async (entry: StagedAttachment & { file: File }) => {
+    const isActive = () =>
+      mountedRef.current && stagedRef.current.some((e) => e.key === entry.key);
+    try {
+      const meta = await uploadFile(entry.file);
+      if (!isActive()) return;
+      updateStaged(
+        stagedRef.current.map((e) =>
+          e.key === entry.key ? { ...e, status: "ready", meta } : e,
+        ),
+      );
+    } catch (error: unknown) {
+      if (!isActive()) return;
+      const reason = error instanceof Error ? error.message : "Upload failed";
+      // Collapse identical batch failures into one toast.
+      toast.error(`Couldn't attach "${entry.name}". ${reason}`, { id: reason });
+      removeStaged(entry.key);
+    }
+  };
+
+  // Reserve capacity synchronously, and keep uploads and URL creation out of
+  // React updaters, which StrictMode may run more than once.
   const stageFiles = (files: Iterable<File>) => {
+    if (!mountedRef.current) return;
     const incoming = [...files];
     if (incoming.length === 0) return;
 
     const room = MAX_ATTACHMENTS_PER_MESSAGE - stagedRef.current.length;
     if (incoming.length > room) {
-      toast.error(
-        `A message can carry at most ${MAX_ATTACHMENTS_PER_MESSAGE} files.`,
+      toast.warning(
+        `You can add at most ${MAX_ATTACHMENTS_PER_MESSAGE} attachments to a message. Please select fewer attachments.`,
       );
     }
 
-    const accepted: StagedAttachment[] = [];
+    const accepted: (StagedAttachment & { file: File })[] = [];
     for (const file of incoming.slice(0, Math.max(0, room))) {
       if (file.size > MAX_ATTACHMENT_BYTES) {
         toast.error(
@@ -182,47 +233,26 @@ export const Composer = ({
         toast.error(`"${file.name}" is empty.`);
         continue;
       }
-      const entry: StagedAttachment = {
+      const entry: StagedAttachment & { file: File } = {
         key: nextKey++,
         name: file.name || "file",
         sizeBytes: file.size,
         status: "uploading",
         objectUrl: previewUrl(file),
+        file,
       };
       accepted.push(entry);
-      void uploadFile(file)
-        .then((meta) =>
-          setStaged((entries) =>
-            entries.map((e) =>
-              e.key === entry.key ? { ...e, status: "ready", meta } : e,
-            ),
-          ),
-        )
-        .catch((error: unknown) =>
-          setStaged((entries) =>
-            entries.map((e) =>
-              e.key === entry.key
-                ? {
-                    ...e,
-                    status: "failed",
-                    error:
-                      error instanceof Error ? error.message : "Upload failed",
-                  }
-                : e,
-            ),
-          ),
-        );
+      if (entry.objectUrl) ownedUrls.current.add(entry.objectUrl);
     }
-    if (accepted.length > 0) setStaged((current) => [...current, ...accepted]);
+    if (accepted.length === 0) return;
+    // Reserve capacity before starting uploads or yielding to another input.
+    updateStaged([...stagedRef.current, ...accepted]);
+    for (const entry of accepted) {
+      void uploadEntry(entry);
+    }
   };
 
-  const removeStaged = (key: number) => {
-    setStaged((entries) => {
-      const entry = entries.find((e) => e.key === key);
-      if (entry?.objectUrl) URL.revokeObjectURL(entry.objectUrl);
-      return entries.filter((e) => e.key !== key);
-    });
-  };
+  useImperativeHandle(ref, () => ({ stageFiles }));
 
   const ready = staged.filter(
     (e): e is StagedAttachment & { meta: AttachmentMeta } =>
@@ -239,81 +269,74 @@ export const Composer = ({
 
   const submit = () => {
     if (!sendable) return;
-    // Say so rather than swallowing it: a failed upload cannot ride the send,
-    // and dropping its chip silently would look like the file went along.
-    const dropped = staged.filter((e) => e.status === "failed");
-    if (dropped.length > 0) {
-      toast.error(
-        dropped.length === 1
-          ? `"${dropped[0]?.name}" didn't upload and wasn't sent.`
-          : `${dropped.length} files didn't upload and weren't sent.`,
-      );
-    }
     onSend({
       message: trimmed,
-      attachments: ready.map((e) => ({ ...e.meta, objectUrl: e.objectUrl })),
+      attachments: ready.map((e) => e.meta),
     });
     setMessage("");
-    // Object URLs of SENT images are handed to the optimistic bubble, so only
-    // the unsent ones are revoked here (the sent ones are released when the
-    // settled row replaces the pending one).
-    for (const e of staged) {
-      if (e.status !== "ready" && e.objectUrl) URL.revokeObjectURL(e.objectUrl);
-    }
-    setStaged([]);
+    for (const url of ownedUrls.current) URL.revokeObjectURL(url);
+    ownedUrls.current.clear();
+    updateStaged([]);
   };
 
   return (
     <div className={cn("shrink-0 border-t p-3", className)}>
       {staged.length > 0 && (
-        <div className="mx-auto mb-2 flex w-full max-w-3xl flex-wrap gap-2">
+        // One scrolling row of cards (like Claude's composer), never a wall of
+        // wrapped chips that pushes the conversation up. pt-2/pr-2 keep each
+        // card's corner remove button inside the scroll box, unclipped.
+        <div className="mx-auto mb-1 flex w-full max-w-3xl gap-2 overflow-x-auto pt-2 pr-2 pb-1">
           {staged.map((entry) => (
             <div
               key={entry.key}
-              className={cn(
-                "flex items-center gap-2 rounded-md border px-2 py-1 text-xs",
-                entry.status === "failed" &&
-                  "border-destructive/50 text-destructive",
-              )}
+              className="group bg-background relative flex h-16 w-52 shrink-0 items-center gap-3 rounded-xl border p-2 pr-3"
             >
-              {entry.status === "uploading" ? (
-                <Loader2 className="size-3.5 animate-spin" aria-hidden />
-              ) : entry.objectUrl ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={entry.objectUrl}
-                  alt=""
-                  className="size-6 rounded-sm object-cover"
-                />
+              {entry.file ? (
+                <FilePreviewDialog
+                  previewKey={`staged:${entry.key}`}
+                  name={entry.name}
+                  mimeType={entry.file.type}
+                  sizeBytes={entry.sizeBytes}
+                  imageUrl={entry.objectUrl}
+                  loadBlob={async () => {
+                    if (!entry.file)
+                      throw new Error("Local file is unavailable");
+                    return entry.file;
+                  }}
+                >
+                  <button
+                    type="button"
+                    aria-label={`Preview ${entry.name}`}
+                    className="focus-visible:ring-ring flex min-w-0 flex-1 cursor-pointer items-center gap-3 rounded-lg text-left focus-visible:ring-2 focus-visible:outline-none"
+                  >
+                    <StagedCardFace entry={entry} />
+                  </button>
+                </FilePreviewDialog>
               ) : (
-                <FileText className="size-3.5" aria-hidden />
+                // A draft restored after a failed send: no local file to read.
+                <div className="flex min-w-0 flex-1 items-center gap-3">
+                  <StagedCardFace entry={entry} />
+                </div>
               )}
-              <span className="max-w-40 truncate" title={entry.name}>
-                {entry.name}
-              </span>
-              <span
-                className={cn(
-                  // The failure REASON keeps the chip's destructive colour —
-                  // muting it would read as de-emphasized metadata.
-                  entry.status === "failed"
-                    ? "font-medium"
-                    : "text-muted-foreground",
-                )}
-              >
-                {entry.status === "failed"
-                  ? (entry.error ?? "Upload failed")
-                  : formatSize(entry.sizeBytes)}
-              </span>
-              <button
-                type="button"
-                onClick={() => removeStaged(entry.key)}
-                aria-label={`Remove ${entry.name}`}
-                // -m-1 p-1: a 24px target (WCAG 2.5.8) without changing the
-                // chip's visual density.
-                className="text-muted-foreground hover:text-foreground focus-visible:ring-ring -m-1 rounded p-1 focus-visible:ring-2 focus-visible:outline-none"
-              >
-                <X className="size-3.5" />
-              </button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={() => removeStaged(entry.key)}
+                    aria-label={`Remove ${entry.name}`}
+                    // Shown on hover/focus so a row of cards stays calm; always
+                    // reachable by keyboard and on touch (no hover there).
+                    className="text-muted-foreground hover:text-foreground focus-visible:ring-ring absolute -top-1.5 -right-1.5 flex size-11 items-start justify-end rounded-lg opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:outline-none motion-reduce:transition-none [@media(hover:none)]:opacity-100"
+                  >
+                    <span className="bg-background pointer-events-none flex size-6 items-center justify-center rounded-full border shadow-sm">
+                      <X className="size-3" aria-hidden />
+                    </span>
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-64">
+                  <span className="block truncate">Remove {entry.name}</span>
+                </TooltipContent>
+              </Tooltip>
             </div>
           ))}
         </div>
@@ -327,32 +350,7 @@ export const Composer = ({
             ? `${ready.length} attachment${ready.length === 1 ? "" : "s"} ready to send`
             : ""}
       </p>
-      <div
-        className={cn(
-          "mx-auto flex w-full max-w-3xl items-end gap-2 rounded-md",
-          dragOver && "ring-primary/40 ring-2",
-        )}
-        onDragOver={(e) => {
-          if (e.dataTransfer.types.includes("Files")) {
-            e.preventDefault();
-            setDragOver(true);
-          }
-        }}
-        // Only a leave that actually exits the row counts — without the
-        // containment check the ring flickers as the pointer crosses the
-        // textarea and buttons inside it.
-        onDragLeave={(e) => {
-          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
-            setDragOver(false);
-          }
-        }}
-        onDrop={(e) => {
-          if (e.dataTransfer.files.length === 0) return;
-          e.preventDefault();
-          setDragOver(false);
-          stageFiles(e.dataTransfer.files);
-        }}
-      >
+      <div className="mx-auto flex w-full max-w-3xl items-end gap-2 rounded-md">
         <input
           ref={fileInputRef}
           type="file"

@@ -248,8 +248,14 @@ export const AuditLogsTable = ({ logs }: Props) => {
                 <span>{selected.source}</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">User</span>
-                <span>{selected.userEmail}</span>
+                <span className="text-muted-foreground">
+                  {selected.actorKind === "service" ? "Service" : "User"}
+                </span>
+                <span>
+                  {selected.actorKind === "service"
+                    ? (selected.serviceActor ?? "platform service")
+                    : selected.userEmail}
+                </span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-muted-foreground">Scope</span>

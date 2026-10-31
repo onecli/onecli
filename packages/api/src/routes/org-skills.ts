@@ -7,9 +7,11 @@ import {
   createOrgSkill,
   deleteOrgSkill,
   getOrgSkill,
+  importOrgSkills,
   listOrgSkills,
   updateOrgSkill,
 } from "../services/skill-service";
+import { readSkillZipUpload } from "./skills";
 import { createOrgSkillSchema, updateSkillSchema } from "../validations/skills";
 import {
   AUDIT_ACTIONS,
@@ -69,6 +71,35 @@ export const orgSkillRoutes = () => {
       metadata: { skillId: skill.id, name: skill.name, scope: skill.scope },
     });
     return c.json(skill, 201);
+  });
+
+  // POST /org/skills/import: a skill zip (one or several skills) into the
+  // organization tier. Admin where roles exist, like every org write.
+  app.post("/import", admin, async (c) => {
+    const a = c.get("auth");
+    const read = await readSkillZipUpload(c);
+    if (read instanceof Response) return read;
+    const imported = await importOrgSkills(a.organizationId, read.skills, {
+      userId: a.userId,
+      email: a.userEmail,
+    });
+    for (const skill of imported) {
+      await recordAuditEvent({
+        organizationId: a.organizationId,
+        userId: a.userId,
+        userEmail: a.userEmail,
+        action: skill.replaced ? AUDIT_ACTIONS.UPDATE : AUDIT_ACTIONS.CREATE,
+        service: AUDIT_SERVICES.SKILL,
+        source: AUDIT_SOURCE.API,
+        metadata: {
+          skillId: skill.id,
+          name: skill.name,
+          files: String(skill.files),
+          source: "zip",
+        },
+      });
+    }
+    return c.json({ imported, problems: read.problems }, 201);
   });
 
   // GET /org/skills/:skillId

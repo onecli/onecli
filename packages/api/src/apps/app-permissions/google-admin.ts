@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const googleAdminPermissions: AppPermissionDefinition = {
   provider: "google-admin",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

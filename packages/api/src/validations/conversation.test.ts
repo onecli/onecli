@@ -25,11 +25,38 @@ describe("model-endpoint 404 copy", () => {
     expect(entry?.message).toContain("contact whoever operates this agent");
     expect(entry?.message).not.toMatch(/\bkey\b/i);
   });
+});
 
-  it("renders as a quiet lifecycle notice, not a red failure", () => {
-    expect(conversation.LIFECYCLE_TURN_ERROR_CODES).toContain(
-      "model_endpoint_not_found",
-    );
+describe("TURN_FAILURE_COPY", () => {
+  it("tells an agent with an unreadable key to re-enter it, not that it hit a limit", () => {
+    // The agent HAS the key (the gateway's `credential_unavailable`), so the
+    // provider-refusal copy ("usually a usage limit or an expired key") and
+    // the attach copy would both send the person to the wrong fix.
+    const entry = conversation.TURN_FAILURE_COPY.model_key_unreadable;
+    expect(entry?.code).toBe("model_key_unreadable");
+    expect(entry?.message).toBe(conversation.MODEL_KEY_UNREADABLE_MESSAGE);
+    expect(entry?.message).toContain("Re-enter the key");
+    expect(entry?.message).not.toMatch(/usage limit|attach/i);
+  });
+
+  it("keys every entry by its own code, and every code is a turn code", () => {
+    // A code the allowlist stores but `TURN_ERROR_CODES` lacks would be a
+    // value the web's types say cannot exist.
+    const codes: readonly string[] = conversation.TURN_ERROR_CODES;
+    for (const [wire, entry] of Object.entries(
+      conversation.TURN_FAILURE_COPY,
+    )) {
+      expect(entry?.code).toBe(wire);
+      expect(codes).toContain(wire);
+    }
+  });
+
+  it("names who can change a policy block without claiming its scope", () => {
+    // An org rule or org budget is not a workspace admin's to change.
+    const message = conversation.TURN_FAILURE_COPY.blocked_by_policy?.message;
+    expect(message).toBe(conversation.BLOCKED_BY_POLICY_MESSAGE);
+    expect(message).toContain("An admin can review it");
+    expect(message).not.toMatch(/workspace admin/i);
   });
 });
 
@@ -47,6 +74,11 @@ describe("isRawErrorPayload", () => {
     // A proxy's HTML error page.
     "Claude API error (502 Bad Gateway): <html>\r\n<head><title>502 Bad Gateway</title></head>\r\n<body></body></html>",
     "<!DOCTYPE html><html><body>Service Unavailable</body></html>",
+    // The gateway could not reach the model provider at all (the laptop's
+    // internet dropped, DNS, TLS), stored by a supervisor that sent no code.
+    'Anthropic API error (502 Bad Gateway): {"error":"upstream_unreachable","host":"api.anthropic.com","message":"Could not reach api.anthropic.com (DNS, connection, or TLS failure). Check the hostname: it may not exist. This is not a credential or connection problem."}',
+    // Same body quoted inside another string.
+    'Error: "{\\"error\\":\\"upstream_unreachable\\",\\"host\\":\\"api.openai.com\\"}"',
   ])("flags a raw payload: %s", (error) => {
     expect(isRawErrorPayload(error)).toBe(true);
   });

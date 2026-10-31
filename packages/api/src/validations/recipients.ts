@@ -12,6 +12,15 @@ export const findRecipientArgsSchema = z
   })
   .strict();
 
+/** send_message's sender choice. */
+export const SEND_AS_VALUES = ["ask", "agent", "you"] as const;
+export type SendAs = (typeof SEND_AS_VALUES)[number];
+
+/** A decided sender: what a choose-sender card answers and a preference
+ * remembers. */
+export const SENDER_CHOICES = ["agent", "you"] as const;
+export type SenderChoice = (typeof SENDER_CHOICES)[number];
+
 /**
  * send_message — the model-facing args. `to` carries a person's exact name
  * or a #channel (the resolver decides); the text cap matches the send
@@ -21,6 +30,10 @@ export const sendMessageArgsSchema = z
   .object({
     to: z.string().trim().min(1).max(81),
     text: z.string().trim().min(1).max(4000),
+    /** Who the message comes from: "agent" (your own app), "you" (as the
+     * person asking, through their connected Slack), or "ask" (default: the
+     * platform asks the person when both are possible). */
+    sendAs: z.enum(SEND_AS_VALUES).default("ask"),
   })
   .strict();
 
@@ -89,4 +102,60 @@ export const readConversationArgsSchema = z
       .optional()
       .transform((v) => (v === undefined ? v : Math.min(v, READ_MAX_LIMIT))),
   })
+  .strict();
+
+/**
+ * send_as_me — the model-facing args. `conversation` is a name from the
+ * person's own shared conversations they let the agent send to; `text` is
+ * posted as them, verbatim.
+ */
+export const sendAsMeArgsSchema = z
+  .object({
+    conversation: z.string().trim().min(1).max(120),
+    text: z.string().trim().min(1).max(4000),
+  })
+  .strict();
+
+/** A Slack message id (ts): the shape both edit families accept, with the
+ * hint naming where the right id comes from. */
+const slackMessageIdSchema = (source: string) =>
+  z
+    .string()
+    .trim()
+    .regex(
+      /^\d{1,12}\.\d{1,9}$/,
+      `messageId must be a messageId from ${source}`,
+    );
+
+const messageIdSchema = slackMessageIdSchema("a send_as_me result");
+
+export const editMyMessageArgsSchema = z
+  .object({
+    conversation: z.string().trim().min(1).max(120),
+    messageId: messageIdSchema,
+    text: z.string().trim().min(1).max(4000),
+  })
+  .strict();
+
+export const deleteMyMessageArgsSchema = z
+  .object({
+    conversation: z.string().trim().min(1).max(120),
+    messageId: messageIdSchema,
+  })
+  .strict();
+
+/** The agent's OWN replies in the current conversation (list/edit/delete). */
+const ownReplyIdSchema = slackMessageIdSchema("list_my_replies");
+
+export const listMyRepliesArgsSchema = z.object({}).strict();
+
+export const editMyReplyArgsSchema = z
+  .object({
+    messageId: ownReplyIdSchema,
+    text: z.string().trim().min(1).max(4000),
+  })
+  .strict();
+
+export const deleteMyReplyArgsSchema = z
+  .object({ messageId: ownReplyIdSchema })
   .strict();

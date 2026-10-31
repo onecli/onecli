@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { AdapterPresence } from "@onecli/agent-protocol";
 import { APPROVAL_GROUP_MAX_IDS } from "@onecli/channels";
+import { CHANNEL_CARD_RECORD_WAIT_MS } from "@onecli/api/lib/channel-card-ending";
 import type { ControlPlaneClient } from "./control-plane";
 import {
   ApprovalsAuthError,
@@ -120,6 +121,19 @@ const ledgerPending =
       expiresAt: null,
       createdAt: new Date().toISOString(),
     }));
+
+/** The control plane's record of how these approvals ended (`via` names
+ * where a person decided, when one did). */
+const recorded =
+  (
+    outcomes: Record<string, string>,
+    via?: string,
+  ): ControlPlaneClient["listPromptOutcomes"] =>
+  async (ids) =>
+    ids.flatMap((approvalId) => {
+      const outcome = outcomes[approvalId];
+      return outcome ? [{ approvalId, outcome, ...(via && { via }) }] : [];
+    });
 
 const makeManager = (
   controlPlane: ControlPlaneClient,
@@ -288,6 +302,62 @@ describe("fetchPendingApprovals", () => {
     expect(pending?.summary?.details?.map((d) => d.url)).toEqual(recordPages);
     const card = JSON.stringify(approvalCardBlocks(pending!));
     for (const url of recordPages) expect(card).toContain(`<${url}|it>`);
+  });
+});
+
+describe("a card's long text", () => {
+  const TEMPLATE = [
+    "*Lead Source Alert*",
+    "*Name:* {!$Record.FirstName} {!$Record.LastName}",
+    "*Title:* {!$Record.Title}",
+    "*Department:* {!$Record.Department}",
+    "*Lead Source:* {!$Record.LeadSource}   ← moved",
+  ].join("\n");
+  const card = (value: string) => {
+    const approval: PendingApproval = {
+      id: "a1",
+      method: "POST",
+      host: "acme.my.salesforce.com",
+      path: "/services/data/v62.0/tooling/sobjects/Flow",
+      summary: {
+        action: "Create Flow version Lead_Source_Alert-3",
+        details: [
+          { label: "Message slack2", value },
+          { label: "Unchanged", value: "26 other settings stay as they are" },
+        ],
+      },
+    };
+    return JSON.stringify(approvalCardBlocks(approval));
+  };
+  const section = (text: string): string =>
+    z
+      .array(z.object({ text: z.object({ text: z.string() }).optional() }))
+      .parse(JSON.parse(text))[1]?.text?.text ?? "";
+
+  it("reads whole, as written, in a code block", () => {
+    const text = card(TEMPLATE);
+    // Every line is there, the last one with its marker: nothing is cut.
+    expect(text).toContain("*Lead Source:* {!$Record.LeadSource}   ← moved");
+    expect(text).toContain("```*Lead Source Alert*");
+    expect(text).toContain("26 other settings stay as they are");
+  });
+
+  it("cannot break out of its block or the card", () => {
+    const text = section(card("a ``` <@U123> <!channel> & b\n".repeat(200)));
+    expect(text).not.toContain("<@U123>");
+    expect(text).not.toContain("<!channel>");
+    expect(text).toContain("&amp;");
+    // Only the block's own fences remain.
+    expect(text.split("```").length).toBe(3);
+    expect(text.length).toBeLessThanOrEqual(3000);
+  });
+
+  it("keeps a backtick at either edge from joining a fence", () => {
+    const text = section(
+      card(`\`starts and ends with a tick\`\n${"x".repeat(90)}\``),
+    );
+    expect(text.split("```").length).toBe(3);
+    expect(text).not.toMatch(/````/);
   });
 });
 
@@ -1090,23 +1160,28 @@ describe("the approval card", () => {
 
   it("clamps an oversized detail value (and the header action) with a trailing ellipsis", () => {
     // The gateway's summary fields are unbounded; a Slack section block caps
-    // at 3,000 chars and a header block at 150. clampDetail keeps each
-    // dynamic field ≤200+ellipsis and clampHeader keeps the action ≤120 so
-    // the card always posts — delete either clamp and a long enough value
-    // kills the entire post with invalid_blocks, silencing the approval.
-    const rendered = JSON.stringify(
-      approvalCardBlocks({
-        ...approval,
-        summary: {
-          action: "t".repeat(300),
-          details: [{ label: "Body", value: "v".repeat(300) }],
-        },
-      }),
-    );
-    expect(rendered).toContain(`${"v".repeat(200)}…`);
-    expect(rendered).not.toContain("v".repeat(201));
-    expect(rendered).toContain(`${"t".repeat(120)}…`);
-    expect(rendered).not.toContain("t".repeat(121));
+    // at 3,000 chars and a header block at 150. A short value is clamped to
+    // 200+ellipsis, prose (long or multi-line) reads whole in a code block
+    // cut at its own budget with a closing ellipsis, and clampHeader keeps
+    // the action ≤120, so the card always posts. Delete any clamp and a long
+    // enough value kills the entire post with invalid_blocks.
+    const render = (value: string) =>
+      JSON.stringify(
+        approvalCardBlocks({
+          ...approval,
+          summary: {
+            action: "t".repeat(300),
+            details: [{ label: "Body", value }],
+          },
+        }),
+      );
+    const prose = render("v".repeat(300));
+    expect(prose).toContain(`\`\`\`${"v".repeat(300)}\`\`\``);
+    const huge = render("v".repeat(5000));
+    expect(huge).toContain(`${"v".repeat(1800)}\\n…\`\`\``);
+    expect(huge).not.toContain("v".repeat(1801));
+    expect(prose).toContain(`${"t".repeat(120)}…`);
+    expect(prose).not.toContain("t".repeat(121));
   });
 
   it("keeps the details section under Slack's cap even when escaping expands every char", () => {
@@ -1412,8 +1487,196 @@ describe("expiry", () => {
   });
 });
 
+describe("a card that left the pending list says how, from the record", () => {
+  // Live: an agent's connection dropped while its card waited, and the card
+  // read "Decided from the dashboard". No one had decided anything. These
+  // rows are the plan's table, one per ending, for every channel provider
+  // (the manager is channel-neutral; Slack renders it here).
+  const departed = async (
+    outcomes: ControlPlaneClient["listPromptOutcomes"],
+  ) => {
+    const settles: [string, string][] = [];
+    const asked: string[][] = [];
+    const controlPlane = createFakeControlPlane({
+      settlePrompt: async (approvalId, state) => {
+        settles.push([approvalId, state]);
+      },
+      listUnsettledPrompts: ledgerPending("app-42"),
+      listPromptOutcomes: async (ids) => {
+        asked.push(ids);
+        return outcomes(ids);
+      },
+    });
+    gateway.script.push({ status: 200, body: pendingBody("app-42") });
+    gateway.script.push({ status: 200, body: { requests: [] } });
+    const manager = makeManager(controlPlane);
+    manager.reconcile([presence()]);
+    return { manager, settles, asked };
+  };
+
+  it.each([
+    ["cancelled", undefined, "Cancelled · the agent stopped waiting"],
+    ["approved", "web", "✅ Approved from the dashboard"],
+    ["denied", "web", "⛔ Denied from the dashboard"],
+    // A dashboard click the gateway alone recorded names no place.
+    ["approved", undefined, "✅ Approved from the dashboard"],
+    // Decided on another channel: the record names the decision, never the
+    // dashboard.
+    ["denied", "slack", "⛔ Denied"],
+    ["replaced", undefined, "Replaced by your message · not sent"],
+  ])("%s (via %s) reads %s", async (outcome, via, line) => {
+    const { settles } = await departed(recorded({ "app-42": outcome }, via));
+    await waitReal(() => settles.length === 1, "settled from the record");
+    expect(settles).toEqual([["app-42", "decided"]]);
+    const updates = slack.callsTo("chat.update");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.form.text).toBe(`Send an email · ${line}`);
+  });
+
+  it("waits for the record, and never guesses a decision meanwhile", async () => {
+    // A cancel is written a beat after the request leaves the list. The
+    // card stays as it was until the record names the ending.
+    let answer: Record<string, string> = {};
+    const { manager, settles, asked } = await departed(async (ids) =>
+      recorded(answer)(ids),
+    );
+    await waitReal(() => asked.length >= 1, "record asked");
+    expect(settles).toEqual([]);
+    expect(slack.callsTo("chat.update")).toEqual([]);
+
+    answer = { "app-42": "cancelled" };
+    await manager.sweepExpired();
+    await waitReal(() => settles.length === 1, "settled once recorded");
+    expect(slack.callsTo("chat.update")[0]?.form.text).toBe(
+      "Send an email · Cancelled · the agent stopped waiting",
+    );
+  });
+
+  it("says only what it saw once the record stays silent past the wait", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const { manager, settles, asked } = await departed(recorded({}));
+    await waitReal(() => asked.length >= 1, "record asked");
+    expect(settles).toEqual([]);
+
+    vi.setSystemTime(Date.now() + CHANNEL_CARD_RECORD_WAIT_MS + 1);
+    await manager.sweepExpired();
+    await waitReal(() => settles.length === 1, "settled past the wait");
+    expect(slack.callsTo("chat.update")[0]?.form.text).toBe(
+      "Send an email · No longer waiting",
+    );
+  });
+
+  it("an older control plane without the read never makes the card guess", async () => {
+    // Version skew: the adapter ships first. The 404 reads as no record;
+    // the card waits, then says only what it saw. It never says "decided".
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const { manager, settles, asked } = await departed(async () => []);
+    await waitReal(() => asked.length >= 1, "record asked");
+    vi.setSystemTime(Date.now() + CHANNEL_CARD_RECORD_WAIT_MS + 1);
+    await manager.sweepExpired();
+    await waitReal(() => settles.length === 1, "settled past the wait");
+    const text = slack.callsTo("chat.update")[0]?.form.text ?? "";
+    expect(text).toBe("Send an email · No longer waiting");
+    expect(text).not.toMatch(/decided/i);
+  });
+
+  it("an ending this build does not know is no answer, never a crash", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const { manager, settles, asked } = await departed(
+      recorded({ "app-42": "teleported" }),
+    );
+    await waitReal(() => asked.length >= 1, "record asked");
+    expect(settles).toEqual([]);
+    vi.setSystemTime(Date.now() + CHANNEL_CARD_RECORD_WAIT_MS + 1);
+    await manager.sweepExpired();
+    await waitReal(() => settles.length === 1, "settled past the wait");
+    expect(slack.callsTo("chat.update")[0]?.form.text).toBe(
+      "Send an email · No longer waiting",
+    );
+  });
+
+  it("a failed record lookup acts on nothing; the next pass retries", async () => {
+    let up = false;
+    const { manager, settles, asked } = await departed(async (ids) => {
+      if (!up) throw new Error("control plane down");
+      return recorded({ "app-42": "cancelled" })(ids);
+    });
+    await waitReal(() => asked.length >= 1, "record asked");
+    expect(settles).toEqual([]);
+    expect(slack.callsTo("chat.update")).toEqual([]);
+
+    up = true;
+    await manager.sweepExpired();
+    await waitReal(() => settles.length === 1, "settled once it answered");
+    expect(slack.callsTo("chat.update")[0]?.form.text).toBe(
+      "Send an email · Cancelled · the agent stopped waiting",
+    );
+  });
+  it("asks about every departed card, past one read's cap", async () => {
+    // More cards leave at once than the read answers in one call. Every
+    // one is asked about. MUTATION-PROOF: ask only the first cap's worth and
+    // the rest read "No longer waiting" with a cancel on record.
+    const n = APPROVAL_GROUP_MAX_IDS + 3;
+    const ids = Array.from({ length: n }, (_, i) => `app-${i}`);
+    const asked: string[][] = [];
+    const settled: string[] = [];
+    const controlPlane = createFakeControlPlane({
+      settlePrompt: async (approvalId) => {
+        settled.push(approvalId);
+      },
+      listUnsettledPrompts: ledgerPending(...ids),
+      listPromptOutcomes: async (batch) => {
+        asked.push(batch);
+        return batch.map((approvalId) => ({
+          approvalId,
+          outcome: "cancelled",
+        }));
+      },
+    });
+    const manager = makeManager(controlPlane);
+    // Recovered from the ledger, then an empty pending list: every one left.
+    await manager.recoverUnsettled();
+    gateway.script.push({ status: 200, body: { requests: [] } });
+    manager.reconcile([presence()]);
+    await waitReal(() => settled.length === n, "every card settled");
+    expect(asked.every((b) => b.length <= APPROVAL_GROUP_MAX_IDS)).toBe(true);
+    expect(new Set(asked.flat()).size).toBe(n);
+  });
+
+  it("a request seen pending again starts its wait over", async () => {
+    // A poll that dropped it was stale; the request is still waiting. Its
+    // first departure must not count toward the next one's wait.
+    // MUTATION-PROOF: keep the first departure's stamp and the card reads
+    // "No longer waiting" while the request is still live.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const asked: string[][] = [];
+    const settles: string[] = [];
+    const controlPlane = createFakeControlPlane({
+      settlePrompt: async (approvalId) => {
+        settles.push(approvalId);
+      },
+      listUnsettledPrompts: ledgerPending("app-42"),
+      listPromptOutcomes: async (ids) => {
+        asked.push(ids);
+        return [];
+      },
+    });
+    gateway.script.push({ status: 200, body: pendingBody("app-42") });
+    gateway.script.push({ status: 200, body: { requests: [] } });
+    gateway.script.push({ status: 200, body: pendingBody("app-42") });
+    const manager = makeManager(controlPlane);
+    manager.reconcile([presence()]);
+    await waitReal(() => gateway.calls.length >= 4, "seen pending again");
+
+    vi.setSystemTime(Date.now() + CHANNEL_CARD_RECORD_WAIT_MS + 1);
+    await manager.sweepExpired();
+    expect(settles).toEqual([]);
+    expect(slack.callsTo("chat.update")).toEqual([]);
+  });
+});
+
 describe("settleDecided", () => {
-  it("rewrites a card whose approval vanished from the pending set (decided on the web)", async () => {
+  it("rewrites a card whose approval was decided on the web, as the record says", async () => {
     const settles: [string, string][] = [];
     const controlPlane = createFakeControlPlane({
       settlePrompt: async (approvalId, state) => {
@@ -1421,6 +1684,7 @@ describe("settleDecided", () => {
       },
       // The dashboard decides at the gateway and never touches the ledger.
       listUnsettledPrompts: ledgerPending("app-42"),
+      listPromptOutcomes: recorded({ "app-42": "approved" }, "web"),
     });
     // Poll 1 posts the card; poll 2 serves an EMPTY set — the approval was
     // decided elsewhere, and the card must follow without a Slack click.
@@ -1434,7 +1698,9 @@ describe("settleDecided", () => {
 
     expect(settles).toContainEqual(["app-42", "decided"]);
     const update = slack.callsTo("chat.update")[0]!;
-    expect(update.form.text).toBe("Send an email · Decided from the dashboard");
+    expect(update.form.text).toBe(
+      "Send an email · ✅ Approved from the dashboard",
+    );
   });
 
   it("keeps the prompt tracked when the rewrite fails — ledger untouched, retried on the next poll", async () => {
@@ -1451,6 +1717,7 @@ describe("settleDecided", () => {
         settles.push([approvalId, state]);
       },
       listUnsettledPrompts: ledgerPending("app-42"),
+      listPromptOutcomes: recorded({ "app-42": "approved" }, "web"),
     });
     let failUpdates = true;
     slack.respond("chat.update", (form) =>
@@ -1545,6 +1812,7 @@ describe("settleDecided", () => {
         settles.push([approvalId, state]);
       },
       listUnsettledPrompts: ledgerPending("app-42"),
+      listPromptOutcomes: recorded({ "app-42": "cancelled" }),
     });
     slack.respond("chat.update", () => ({
       ok: false,
@@ -1664,6 +1932,7 @@ describe("a card a channel click already settled", () => {
         if (!ledgerUp) throw new Error("control plane down");
         return ledgerPending("app-42")();
       },
+      listPromptOutcomes: recorded({ "app-42": "denied" }, "web"),
     });
     gateway.script.push({ status: 200, body: pendingBody("app-42") });
     makeManager(controlPlane).reconcile([presence()]);
@@ -2515,6 +2784,7 @@ describe("grouped approval cards", () => {
       // Decided on the web: the gateway drops both, but no channel click
       // settled them, so the ledger still holds both pending.
       listUnsettledPrompts: ledgerPending("ap-1", "ap-2"),
+      listPromptOutcomes: recorded({ "ap-1": "approved", "ap-2": "approved" }),
     });
     gateway.script.push({
       status: 200,
@@ -2524,7 +2794,45 @@ describe("grouped approval cards", () => {
     groupedManager(controlPlane).reconcile([presence()]);
     await waitReal(() => settles.length === 2, "both settled");
     const blocks = lastBlocks();
-    expect(blocks).toContain("2 decided");
+    expect(blocks).toContain("2 approved");
+  });
+
+  it("counts each request's own ending on one grouped card, never a guessed decision", async () => {
+    // One poll sees three requests leave: the agent stopped waiting for
+    // two, and a person approved one on the dashboard. MUTATION-PROOF: settle
+    // the whole group with one ending (the old shape) and the done line
+    // reads "3 decided" or "3 cancelled" instead.
+    const settles: string[] = [];
+    const controlPlane = createFakeControlPlane({
+      settlePrompt: async (approvalId) => {
+        settles.push(approvalId);
+      },
+      listUnsettledPrompts: ledgerPending("ap-1", "ap-2", "ap-3"),
+      listPromptOutcomes: async (ids) =>
+        [
+          ...(await recorded({ "ap-1": "approved" }, "web")(ids)),
+          ...(await recorded({ "ap-2": "cancelled", "ap-3": "cancelled" })(
+            ids,
+          )),
+        ].filter((o) => ids.includes(o.approvalId)),
+    });
+    gateway.script.push({
+      status: 200,
+      body: {
+        requests: [
+          contact("ap-1", "Ada"),
+          contact("ap-2", "Grace"),
+          contact("ap-3", "Linus"),
+        ],
+      },
+    });
+    gateway.script.push({ status: 200, body: { requests: [] } });
+    groupedManager(controlPlane).reconcile([presence()]);
+    await waitReal(() => settles.length === 3, "all three settled");
+    const blocks = lastBlocks();
+    expect(blocks).toContain("1 approved");
+    expect(blocks).toContain("2 cancelled");
+    expect(blocks).not.toContain("decided");
   });
 
   it("drops a row an events-arm click already settled from the card's live rows", async () => {

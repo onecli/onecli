@@ -1,7 +1,12 @@
 import { logger } from "../lib/logger";
 import { ensureOrgAwsExternalId } from "../services/aws-external-id-service";
 import { ClientCredentialsExchangeError } from "./oauth/client-credentials";
-import type { AppDefinition, ConnectionMethod, ServerField } from "./types";
+import {
+  isConnectFieldShown,
+  type AppDefinition,
+  type ConnectionMethod,
+  type ServerField,
+} from "./types";
 
 /** Request body accepted by the direct-connect endpoints (workspace and org). */
 export interface ConnectRequestBody {
@@ -12,6 +17,14 @@ export interface ConnectRequestBody {
   /** The agent a workspace connect started from: a created or re-added
    * connection is switched on for it (`agent-connect-grant-service`). */
   agentId?: string;
+}
+
+/** Successful direct connect, with the resolved connection in either scope. */
+export interface ConnectResponse {
+  success: true;
+  connectionId: string;
+  /** Present only for a newly created workspace connection, for grant setup. */
+  connection?: { id: string; label: string | null };
 }
 
 /** What a rejected connect writes to the log: see `describeExchangeFailure`. */
@@ -141,12 +154,18 @@ export const resolveConnectCredentials = async (
     activeMethod.type === "credentials_import"
       ? (activeMethod.serverFields ?? [])
       : [];
-  const fields = {
+  const fields: Record<string, string> = {
     ...body.fields,
     ...(serverFields.length
       ? await resolveServerFields(serverFields, organizationId)
       : {}),
   };
+  // A field shown only for another field's value (a CA certificate only when
+  // the certificate is verified) is not stored when that value is not set,
+  // so a stale one can't ride along unseen.
+  for (const field of activeMethod.fields) {
+    if (!isConnectFieldShown(field, fields)) delete fields[field.name];
+  }
 
   let requiredFields: { name: string; label: string }[];
   if (

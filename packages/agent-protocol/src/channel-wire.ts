@@ -407,16 +407,18 @@ export const adapterReachDecisionRequestSchema = z.object({
   presenceId: z.string().min(1),
   grantId: z.string().min(1).max(500),
   /**
-   * The settlement the clicker chose: open the channel to everyone in it,
-   * keep it to OneCLI users, or keep the agent silent there.
+   * The settlement the clicker chose: answer everyone in the channel, or
+   * keep the agent silent there.
    *
-   * The pre-rename `approve`/`deny` pair stays ACCEPTED (never emitted) so
-   * a channel-adapter deployable running older code keeps settling grants
-   * through a rolling deploy - the adapter and the control plane ship
-   * separately, so the wire has to tolerate one being behind. `deny` always
-   * meant "OneCLI users only", which is `members_only`.
+   * Retired values stay ACCEPTED (never emitted) so a channel-adapter
+   * deployable running older code keeps settling grants through a rolling
+   * deploy - the adapter and the control plane ship separately, so the wire
+   * has to tolerate one being behind. `approve` is the old spelling of
+   * `approved`; `members_only` / `deny` were the retired "OneCLI users
+   * only" answer, which now settles as `approved` (the same mapping the
+   * data migration applied to stored rows).
    */
-  decision: z.enum(["approved", "members_only", "blocked", "approve", "deny"]),
+  decision: z.enum(["approved", "blocked", "approve", "members_only", "deny"]),
   clickerExternalUserId: z.string().min(1).max(200),
 });
 export type AdapterReachDecisionRequest = z.infer<
@@ -438,14 +440,36 @@ export type AdapterReachDecisionResponse = z.infer<
 
 // ── Action approvals (one-shot holds: "may I do this specific thing?") ─────
 
+/** A choice card's option (e.g. choose-sender: `agent` | `you`): platform
+ * vocabulary, never free text. The one rule for every surface that carries
+ * it: the Slack button id, the adapter's forwarded click, the decide API. */
+export const actionChoiceSchema = z.string().regex(/^[a-z_]{1,20}$/);
+
+/** A choice card's Slack button: `action_choose__<option>`, value = the
+ * approval id. Clicking it is an approve that carries the option. */
+export const ACTION_CHOICE_PREFIX = "action_choose__";
+
+/** The option a Slack action id carries, or null when it is not a choice
+ * button (or names an option outside the vocabulary). */
+export const actionChoiceOf = (actionId: string): string | null => {
+  if (!actionId.startsWith(ACTION_CHOICE_PREFIX)) return null;
+  const choice = actionChoiceSchema.safeParse(
+    actionId.slice(ACTION_CHOICE_PREFIX.length),
+  );
+  return choice.success ? choice.data : null;
+};
+
 export const adapterActionDecisionRequestSchema = z.object({
   presenceId: z.string().min(1),
   approvalId: z.string().min(1).max(500),
-  // `approve_always` (4c): approve AND record the standing grant. An older
-  // control plane rejects it at the schema and the adapter logs the miss —
-  // the card click degrades loudly, never silently.
-  decision: z.enum(["approve", "approve_always", "reject"]),
+  // `approve_always` is the retired "Approve + always allow" button: still
+  // ACCEPTED (never emitted) so an adapter running older code keeps
+  // settling cards through a rolling deploy; the control plane reads it as
+  // `approve`, which on a standing question IS Always allow.
+  decision: z.enum(["approve", "reject", "approve_always"]),
   clickerExternalUserId: z.string().min(1).max(200),
+  /** A choice card's picked option. */
+  choice: actionChoiceSchema.optional(),
 });
 export type AdapterActionDecisionRequest = z.infer<
   typeof adapterActionDecisionRequestSchema
@@ -548,6 +572,24 @@ export const adapterUnsettledPromptSchema = z.object({
 export const adapterUnsettledPromptsResponseSchema = z.object({
   prompts: z.array(adapterUnsettledPromptSchema),
 });
+
+/**
+ * How the approvals behind the adapter's own cards ended
+ * (`GET /channel-adapter/prompts/outcomes`). `outcome` is an open string,
+ * DELIBERATELY not an enum (as `provider` above): a newer control plane may
+ * answer an ending this build does not know, which it then treats as no
+ * answer instead of rejecting the whole read. `via` names where a person
+ * decided it (`web`, or a channel provider id).
+ */
+export const adapterPromptOutcomeSchema = z.object({
+  approvalId: z.string(),
+  outcome: z.string(),
+  via: z.string().optional(),
+});
+export const adapterPromptOutcomesResponseSchema = z.object({
+  outcomes: z.array(adapterPromptOutcomeSchema),
+});
+export type AdapterPromptOutcome = z.infer<typeof adapterPromptOutcomeSchema>;
 
 export const adapterCursorResponseSchema = z.object({
   advanced: z.boolean(),

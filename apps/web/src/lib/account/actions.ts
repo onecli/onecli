@@ -53,6 +53,13 @@ export interface AuditLogEntry {
   status: string;
   source: string;
   userEmail: string;
+  /**
+   * Who acted. `service` rows were written by a platform service
+   * (`serviceActor` names it); their `userEmail` is the org owner anchoring
+   * the row's FK, not the actor, and must never be shown as one.
+   */
+  actorKind: "user" | "service";
+  serviceActor: string | null;
   workspaceId: string | null;
   workspaceName: string | null;
   organizationName: string | null;
@@ -107,6 +114,8 @@ export const getAuditLogs = async (): Promise<AuditLogEntry[]> => {
       status: true,
       source: true,
       userEmail: true,
+      actorKind: true,
+      serviceActor: true,
       metadata: true,
       createdAt: true,
       workspace: { select: { name: true } },
@@ -122,7 +131,13 @@ export const getAuditLogs = async (): Promise<AuditLogEntry[]> => {
     service: l.service,
     status: l.status,
     source: l.source,
-    userEmail: l.userEmail,
+    // A service row's user columns only anchor the FK: the owner's email is
+    // not the actor and must not even reach the client. Anything that is
+    // not exactly `user` is treated as a service row (fail closed).
+    actorKind:
+      l.actorKind === "user" ? ("user" as const) : ("service" as const),
+    userEmail: l.actorKind === "user" ? l.userEmail : "",
+    serviceActor: l.actorKind === "user" ? null : l.serviceActor,
     workspaceId: l.workspaceId,
     workspaceName: l.workspace?.name ?? null,
     organizationName: l.organization?.name ?? null,

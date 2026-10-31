@@ -66,6 +66,32 @@ export type PresenceStatus = (typeof PRESENCE_STATUSES)[number];
 export const THREAD_LINK_KINDS = ["direct", "group"] as const;
 export type ThreadLinkKind = (typeof THREAD_LINK_KINDS)[number];
 
+/** Where the agent's own replies live: one linked conversation, read and
+ * changed with the presence's own credential (`ChannelProvider.ownReplies`). */
+export interface OwnReplyTarget {
+  credentialsJson: string;
+  /** The presence's provider app id (Slack: app id) and its own identity
+   * (Slack: bot user id): the two marks of the agent's own posts. */
+  externalId: string;
+  identityRef: string;
+  /** The link's provider-opaque thread address and kind. */
+  externalThreadId: string;
+  kind: ThreadLinkKind;
+  /** Where in that conversation the calling turn arrived, when it narrowed
+   * it (`Turn.sourceThreadId`: a thread inside a DM, or inside a channel
+   * room); null = the link's own address. Provider-opaque, like the link. */
+  sourceThreadId: string | null;
+}
+
+/** One of the agent's own replies, as the provider stores it. */
+export interface OwnReply {
+  messageId: string;
+  /** The provider's raw text (Slack: mrkdwn with `<@U…>` tokens). */
+  text: string;
+  /** Epoch ms the reply was sent. */
+  sentAt: number;
+}
+
 /** Definite provider membership evidence, or an inconclusive probe. */
 export type SpaceMembershipResult =
   | { kind: "member" }
@@ -279,6 +305,23 @@ export interface ChannelProvider {
   }): Promise<ChannelDispatchResult>;
 
   /**
+   * Post the replies one dispatched event owes right away, for a provider
+   * whose events arrive over its own HTTP transport (the events inbox
+   * processes them off the request, so nothing else is left to answer):
+   * the visible refusals (a speaker refused, an invite refused, a Stop
+   * refused) on the provider's own surface. Turn outcomes owe nothing here;
+   * their answer is the completion pass's. `iconUrl` is the agent's avatar
+   * when the deployment can serve one. Best-effort: a failed post is
+   * logged, never thrown (the outcome itself already landed). Absent = the
+   * provider's transport answers outcomes itself (a socket adapter).
+   */
+  replyToOutcome?(input: {
+    credentialsJson: string;
+    iconUrl: string | null;
+    result: ChannelDispatchResult;
+  }): Promise<void>;
+
+  /**
    * The deployment-owned shared app, where the provider has one. Absent =
    * the provider has no such concept, and every caller degrades to the
    * pasted-credential arm (routes answer "no shared app" with the
@@ -420,11 +463,11 @@ export interface ChannelProvider {
   }): Promise<void>;
 
   /**
-   * Let people connect their OWN account to this agent's app for read-only
-   * access ("Connect your Slack"): make sure the remote app declares the
-   * read-only user scopes and the OAuth redirect. Export-then-edit and
-   * idempotent (a no-op when already declared). Absent = the provider has
-   * no such flow.
+   * Let people connect their OWN account to this agent's app ("Connect
+   * your Slack": read, and send where they allow it): make sure the remote
+   * app declares the user scopes and the OAuth redirect. Export-then-edit
+   * and idempotent (a no-op when already declared). Absent = the provider
+   * has no such flow.
    */
   enableUserReadAccess?(input: {
     accessToken: string;
@@ -432,7 +475,8 @@ export interface ChannelProvider {
     redirectUrl: string;
   }): Promise<void>;
 
-  /** The read-only user scopes that flow requests. */
+  /** Every user scope that flow requests: the read-only ones, plus the one
+   * write scope a person's "send as me" needs. */
   userReadScopes?: readonly string[];
 
   /**
@@ -601,7 +645,7 @@ export interface ChannelProvider {
    */
   sendMessage(input: {
     credentialsJson: string;
-    to: { kind: "person" | "app" | "channel"; ref: string };
+    to: { kind: "person" | "channel"; ref: string };
     text: string;
     mentions?: ReadonlyMap<string, string>;
   }): Promise<{ externalThreadId: string }>;
@@ -628,6 +672,52 @@ export interface ChannelProvider {
   }): Promise<
     { ref: string; name: string; member: boolean; private: boolean }[]
   >;
+
+  /**
+   * Is this presence's credential still alive? Resolves when it is; throws
+   * the provider's error when the provider refuses it, so the caller can
+   * route a DEAD answer through the removal door (`noteOutboundFailure`).
+   * The daily connection check's probe. Optional: a provider without one is
+   * simply not checked.
+   */
+  checkCredential?(input: { credentialsJson: string }): Promise<void>;
+
+  /**
+   * The agent's OWN replies in one linked conversation (`list_my_replies`,
+   * `edit_my_reply`, `delete_my_reply`). Absent = the provider cannot
+   * change a posted message, and the tools refuse.
+   *
+   * The generic service owns the fence: the conversation is the calling
+   * turn's own (never a model-supplied one), its link names the thread, the
+   * presence is live, and only messages inside the window count. The
+   * provider owns what only it can read: which posts in that thread are the
+   * agent's plain replies (its own app wrote them, and they are neither a
+   * card nor a copy of someone else's words), and how to page the thread.
+   * Every method throws the provider's own error on refusal, so the caller
+   * can route a dead credential through the removal door.
+   */
+  ownReplies?: {
+    /** The newest plain replies sent at or after `since` (epoch ms),
+     * newest first, at most `limit`. `text` is the provider's raw text. */
+    list(
+      input: OwnReplyTarget & { since: number; limit: number },
+    ): Promise<OwnReply[]>;
+    /** One reply by id, or null when it is not one of the agent's plain
+     * replies in THIS thread sent at or after `since`. */
+    find(
+      input: OwnReplyTarget & { messageId: string; since: number },
+    ): Promise<OwnReply | null>;
+    /** Replace a reply's whole text. `text` is the platform's markdown,
+     * rendered natively like `sendMessage`, with `mentions` resolved. */
+    edit(
+      input: OwnReplyTarget & {
+        messageId: string;
+        text: string;
+        mentions: ReadonlyMap<string, string>;
+      },
+    ): Promise<void>;
+    remove(input: OwnReplyTarget & { messageId: string }): Promise<void>;
+  };
 
   /**
    * Decode the provider's inbound mention/link tokens into text the model
@@ -755,18 +845,20 @@ export interface ChannelProvider {
     }): Promise<string | null>;
 
     /**
-     * A PERSON's display label (Slack: "@dana" / their display name), for
-     * the card and the dashboard. The person analogue of `spaceLabel`, and
-     * display-only for the same reason: matching stays on the provider's
-     * stable user id, because people rename themselves.
+     * A PERSON's profile, for the card and the dashboard: their plain
+     * display name (Slack: "Dana", never "@Dana") and their photo (https
+     * only). The person analogue of `spaceLabel`, and display-only for the
+     * same reason: matching stays on the provider's stable user id, because
+     * people rename themselves. Best-effort: null rather than throw, and
+     * either field null when the provider has none.
      *
      * Optional: a provider with no person concept simply never grows a
-     * person lane, and its rows fall back to the raw ref.
+     * person lane, and its rows fall back to the raw ref and initials.
      */
-    personLabel?(input: {
+    personProfile?(input: {
       credentialsJson: string | null;
       externalRef: string;
-    }): Promise<string | null>;
+    }): Promise<{ name: string | null; avatarUrl: string | null } | null>;
 
     /**
      * The APPS in a space (PR 5a): the bot users among its members, same
@@ -882,6 +974,20 @@ export interface ChannelProvider {
         subjectKind?: "space" | "external_user";
       }): Promise<void>;
     };
+
+    /**
+     * Tell a PERSON their pending request was approved, in their DM with
+     * the agent. Optional: a provider without it simply stays silent.
+     * Best-effort for the caller (the decision is already durable).
+     * `decidedByName` is the decider's display name, or null without one:
+     * never an email, since the reader is not a teammate.
+     */
+    notifyApproved?(input: {
+      credentialsJson: string;
+      recipientExternalUserId: string;
+      agentName: string;
+      decidedByName: string | null;
+    }): Promise<void>;
   };
 
   /**
@@ -900,13 +1006,19 @@ export interface ChannelProvider {
       approvalId: string;
       agentName: string;
       summary: string;
-      /** Render the "always allow" upgrade button — set only when the
-       * action's registration declares a standing-grant hook. */
-      offerAlwaysAllow?: boolean;
+      /** A standing question about who the agent wants to reach: the card
+       * words its two buttons Always allow / Never. */
+      standingChoice?: boolean;
       /** Set for actions that can only be approved in the dashboard (they
        * need a key the approver types): the card renders a "Review in
        * OneCLI" link to this URL and NO decide buttons. */
       reviewUrl?: string;
+      /** A link-only card for an action done in OneCLI (e.g. "Connect your
+       * Slack"): the note, then one URL button with this label. */
+      link?: { url: string; label: string; note: string };
+      /** A choice card: one button per option (the click carries the
+       * option), plus Cancel. Replaces Approve/Reject. */
+      choices?: { value: string; label: string }[];
     }): Promise<{ channel: string; ts: string }>;
     settle(input: {
       credentialsJson: string;
@@ -914,6 +1026,9 @@ export interface ChannelProvider {
       ts: string;
       summary: string;
       outcome: string;
+      /** The ask was a standing question: the settled card says Always
+       * allowed / Never, the words its buttons used. */
+      standing?: boolean;
       decidedByName: string;
     }): Promise<void>;
   };

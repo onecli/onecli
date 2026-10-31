@@ -66,30 +66,9 @@ export const ChannelsSection = () => {
     : null;
   // One step left, not done: the install still owes a pasted credential.
   const awaitingStep = installedParam !== null;
-  // The "Connect your Slack" popup lands back here with
-  // `?connected=slack-read`: hand it to the opener (or refresh in place).
-  const slackReadReturn = connectedParam === "slack-read";
   const consumedConnectedParam = useRef(false);
   useEffect(() => {
     if (consumedConnectedParam.current) return;
-    if (slackReadReturn) {
-      consumedConnectedParam.current = true;
-      if (window.opener) {
-        (window.opener as Window).postMessage(
-          { type: "app-connected", provider: "slack-read" },
-          window.location.origin,
-        );
-        window.close();
-        return;
-      }
-      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
-      toast.success("Your Slack is connected");
-      const params = new URLSearchParams(searchParams.toString());
-      params.delete("connected");
-      const qs = params.toString();
-      router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
-      return;
-    }
     if (!connectedProvider) return;
     consumedConnectedParam.current = true;
     if (window.opener) {
@@ -114,23 +93,10 @@ export const ChannelsSection = () => {
     params.delete("installed");
     const qs = params.toString();
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
-  }, [
-    connectedProvider,
-    awaitingStep,
-    slackReadReturn,
-    qc,
-    searchParams,
-    router,
-    pathname,
-  ]);
+  }, [connectedProvider, awaitingStep, qc, searchParams, router, pathname]);
 
   const handleConnected = useCallback(
     ({ provider, pending }: AppConnectedEvent) => {
-      if (provider === "slack-read") {
-        qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
-        toast.success("Your Slack is connected");
-        return;
-      }
       // Provider must match: a popup keeps posting to its opener across
       // client-side navigation, so an app-connect popup opened elsewhere can
       // land here too.

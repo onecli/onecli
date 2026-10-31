@@ -108,19 +108,67 @@ pub enum ClientCredentialMethod {
     BasicAuth,
 }
 
+/// A token endpoint on each account's own host, for providers that serve
+/// every customer from `<label>.<zone>` (Zendesk). The URL is built only from
+/// a stored host that is exactly ONE DNS label under the fixed `zone`, so a
+/// database value can name which account but never which domain: the
+/// client secret and refresh token can only ever reach `*.<zone>`.
+#[derive(Debug, Clone, Copy)]
+pub struct TenantTokenUrl {
+    /// The credential field holding the connection's host
+    /// (`acme.zendesk.com`).
+    pub host_field: &'static str,
+    /// The provider's zone, leading dot included (`.zendesk.com`).
+    pub zone: &'static str,
+    /// The endpoint path on that host (`/oauth/tokens`).
+    pub path: &'static str,
+}
+
+impl TenantTokenUrl {
+    /// `https://<label><zone><path>` for a stored host that is one valid
+    /// label under the zone, case-insensitively; `None` for anything else
+    /// (another domain, a nested name, a port, a path, an empty label).
+    #[must_use]
+    pub fn url_for(&self, host: &str) -> Option<String> {
+        let host = host.trim().to_ascii_lowercase();
+        let label = host.strip_suffix(self.zone)?;
+        let valid = !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        valid.then(|| format!("https://{label}{}{}", self.zone, self.path))
+    }
+}
+
+/// A refresh destination controlled by the provider, never an arbitrary URL
+/// read from a connection. Tenant endpoints have no fixed fallback.
+#[derive(Debug, Clone, Copy)]
+pub enum TokenEndpoint {
+    Fixed {
+        url: &'static str,
+        /// Only these exact static URLs may override `url` via a stored
+        /// `token_endpoint` (Salesforce production versus sandbox).
+        alternates: &'static [&'static str],
+    },
+    Tenant(TenantTokenUrl),
+}
+
+/// Lifetimes requested on every renewal, in seconds. Some older OAuth clients
+/// otherwise issue non-expiring tokens even after an expiring initial grant.
+#[derive(Debug, Clone, Copy)]
+pub struct TokenLifetimes {
+    pub access_secs: i64,
+    pub refresh_secs: i64,
+}
+
 /// Configuration for refreshing expired OAuth tokens.
 pub struct RefreshConfig {
-    /// Token endpoint URL (e.g., `https://oauth2.googleapis.com/token`).
-    pub token_url: &'static str,
-    /// Additional token endpoints a CONNECTION may select via its stored
-    /// `token_endpoint` credential, for providers whose endpoint depends on
-    /// the account rather than the provider (Salesforce production vs sandbox).
-    ///
-    /// The stored value must match one of these strings EXACTLY; anything else
-    /// falls back to `token_url`. An exact match against a static allowlist is
-    /// deliberate — it keeps a value read from the database from ever steering
-    /// a client-secret-bearing request at an arbitrary host.
-    pub alternate_token_urls: &'static [&'static str],
+    pub endpoint: TokenEndpoint,
+    /// `None` preserves the provider's default request and response handling.
+    pub requested_lifetimes: Option<TokenLifetimes>,
     /// Env var for the OAuth client ID.
     pub client_id_env: &'static str,
     /// Env var for the OAuth client secret.
@@ -147,16 +195,26 @@ pub struct RefreshConfig {
 }
 
 impl RefreshConfig {
-    /// Resolve the endpoint for one connection. `stored` comes from the
-    /// connection's credentials and is honored only when allowlisted above.
-    /// The returned URL is always one of this config's own `'static` strings,
-    /// never the caller's bytes, so a database value cannot reach the request.
+    /// Resolve a statically allowlisted endpoint or build a tenant endpoint
+    /// from a validated stored host. An invalid tenant host returns `None`,
+    /// never a fallback that would receive another account's credentials.
     #[must_use]
-    pub fn endpoint_for(&self, stored: Option<&str>) -> &'static str {
-        stored
-            .and_then(|url| self.alternate_token_urls.iter().find(|alt| **alt == url))
-            .copied()
-            .unwrap_or(self.token_url)
+    pub fn endpoint_for_connection(&self, creds: &serde_json::Value) -> Option<String> {
+        match self.endpoint {
+            TokenEndpoint::Tenant(tenant) => {
+                let host = creds.get(tenant.host_field).and_then(|v| v.as_str())?;
+                tenant.url_for(host)
+            }
+            TokenEndpoint::Fixed { url, alternates } => Some(
+                creds
+                    .get("token_endpoint")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|stored| alternates.iter().find(|alt| **alt == stored))
+                    .copied()
+                    .unwrap_or(url)
+                    .to_string(),
+            ),
+        }
     }
 
     /// The lifetime to trust for a token the provider says lives `reported`
@@ -250,8 +308,11 @@ pub struct AppProvider {
 
 /// Shared refresh config for Atlassian OAuth APIs (Jira, Confluence).
 static ATLASSIAN_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://auth.atlassian.com/oauth/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://auth.atlassian.com/oauth/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "ATLASSIAN_CLIENT_ID",
     client_secret_env: "ATLASSIAN_CLIENT_SECRET",
     body_format: TokenBodyFormat::Json,
@@ -262,8 +323,11 @@ static ATLASSIAN_REFRESH: RefreshConfig = RefreshConfig {
 
 /// Refresh config for Todoist OAuth API.
 static TODOIST_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://api.todoist.com/oauth/access_token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://api.todoist.com/oauth/access_token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "TODOIST_CLIENT_ID",
     client_secret_env: "TODOIST_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -274,8 +338,11 @@ static TODOIST_REFRESH: RefreshConfig = RefreshConfig {
 
 /// Shared refresh config for all Google OAuth APIs.
 static GOOGLE_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://oauth2.googleapis.com/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://oauth2.googleapis.com/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "GOOGLE_CLIENT_ID",
     client_secret_env: "GOOGLE_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -286,8 +353,11 @@ static GOOGLE_REFRESH: RefreshConfig = RefreshConfig {
 
 /// Refresh config for Supabase Management API OAuth (uses Basic auth).
 static SUPABASE_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://api.supabase.com/v1/oauth/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://api.supabase.com/v1/oauth/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "SUPABASE_CLIENT_ID",
     client_secret_env: "SUPABASE_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -298,8 +368,11 @@ static SUPABASE_REFRESH: RefreshConfig = RefreshConfig {
 
 /// Refresh config for GitLab OAuth API.
 static GITLAB_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://gitlab.com/oauth/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://gitlab.com/oauth/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "GITLAB_CLIENT_ID",
     client_secret_env: "GITLAB_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -310,8 +383,11 @@ static GITLAB_REFRESH: RefreshConfig = RefreshConfig {
 
 /// Refresh config for Notion OAuth API (uses Basic auth + token rotation).
 static NOTION_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://api.notion.com/v1/oauth/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://api.notion.com/v1/oauth/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "NOTION_CLIENT_ID",
     client_secret_env: "NOTION_CLIENT_SECRET",
     body_format: TokenBodyFormat::Json,
@@ -322,8 +398,11 @@ static NOTION_REFRESH: RefreshConfig = RefreshConfig {
 
 /// Refresh config for Dropbox OAuth API.
 static DROPBOX_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://api.dropboxapi.com/oauth2/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://api.dropboxapi.com/oauth2/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "DROPBOX_CLIENT_ID",
     client_secret_env: "DROPBOX_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -334,8 +413,11 @@ static DROPBOX_REFRESH: RefreshConfig = RefreshConfig {
 
 /// Refresh config for LinkedIn OAuth API.
 static LINKEDIN_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://www.linkedin.com/oauth/v2/accessToken",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://www.linkedin.com/oauth/v2/accessToken",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "LINKEDIN_CLIENT_ID",
     client_secret_env: "LINKEDIN_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -346,8 +428,11 @@ static LINKEDIN_REFRESH: RefreshConfig = RefreshConfig {
 
 /// Refresh config for Sentry OAuth API.
 static SENTRY_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://sentry.io/oauth/token/",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://sentry.io/oauth/token/",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "SENTRY_CLIENT_ID",
     client_secret_env: "SENTRY_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -358,8 +443,11 @@ static SENTRY_REFRESH: RefreshConfig = RefreshConfig {
 
 /// Refresh config for Zoom OAuth API (uses Basic auth for client credentials).
 static ZOOM_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://zoom.us/oauth/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://zoom.us/oauth/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "ZOOM_CLIENT_ID",
     client_secret_env: "ZOOM_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -370,8 +458,11 @@ static ZOOM_REFRESH: RefreshConfig = RefreshConfig {
 
 /// Shared refresh config for all Microsoft 365 OAuth APIs (Outlook Mail, Calendar, Word, OneNote).
 static MICROSOFT_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "MICROSOFT_CLIENT_ID",
     client_secret_env: "MICROSOFT_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -382,8 +473,11 @@ static MICROSOFT_REFRESH: RefreshConfig = RefreshConfig {
 
 /// Refresh config for Linear OAuth API.
 static LINEAR_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://api.linear.app/oauth/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://api.linear.app/oauth/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "LINEAR_CLIENT_ID",
     client_secret_env: "LINEAR_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -394,8 +488,11 @@ static LINEAR_REFRESH: RefreshConfig = RefreshConfig {
 
 /// Refresh config for Fathom AI OAuth API.
 static FATHOM_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://api.fathom.ai/external/v1/oauth2/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://api.fathom.ai/external/v1/oauth2/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "FATHOM_CLIENT_ID",
     client_secret_env: "FATHOM_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -406,8 +503,11 @@ static FATHOM_REFRESH: RefreshConfig = RefreshConfig {
 
 /// Refresh config for X (Twitter) OAuth API (uses Basic auth for client credentials).
 static X_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://api.x.com/2/oauth2/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://api.x.com/2/oauth2/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "X_CLIENT_ID",
     client_secret_env: "X_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -418,8 +518,11 @@ static X_REFRESH: RefreshConfig = RefreshConfig {
 
 /// Refresh config for HubSpot OAuth API.
 static HUBSPOT_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://api.hubapi.com/oauth/2026-03/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://api.hubapi.com/oauth/2026-03/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "HUBSPOT_CLIENT_ID",
     client_secret_env: "HUBSPOT_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -431,11 +534,38 @@ static HUBSPOT_REFRESH: RefreshConfig = RefreshConfig {
 /// Refresh config for Zoho CRM OAuth (BYO clients only — the env vars match
 /// the definition's envDefaults, so an operator-configured client refreshes).
 static ZOHO_CRM_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://accounts.zoho.com/oauth/v2/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://accounts.zoho.com/oauth/v2/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "ZOHO_CRM_CLIENT_ID",
     client_secret_env: "ZOHO_CRM_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
+    client_auth: ClientCredentialMethod::Body,
+    max_lifetime_secs: None,
+    stale_token_error_codes: &[],
+};
+
+/// Zendesk: every account issues and refreshes tokens on its own host, so
+/// the endpoint is built from the connection's validated `instance_host`.
+/// Global OAuth clients must use expiring tokens with refresh (Zendesk,
+/// required since 2026-02-02); a JSON body, client pair in the body.
+static ZENDESK_TOKEN_URL: TenantTokenUrl = TenantTokenUrl {
+    host_field: "instance_host",
+    zone: ".zendesk.com",
+    path: "/oauth/tokens",
+};
+
+static ZENDESK_REFRESH: RefreshConfig = RefreshConfig {
+    endpoint: TokenEndpoint::Tenant(ZENDESK_TOKEN_URL),
+    requested_lifetimes: Some(TokenLifetimes {
+        access_secs: 30 * 60,
+        refresh_secs: 30 * 24 * 60 * 60,
+    }),
+    client_id_env: "ZENDESK_CLIENT_ID",
+    client_secret_env: "ZENDESK_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Json,
     client_auth: ClientCredentialMethod::Body,
     max_lifetime_secs: None,
     stale_token_error_codes: &[],
@@ -446,8 +576,11 @@ static ZOHO_CRM_REFRESH: RefreshConfig = RefreshConfig {
 /// A connection stores its own endpoint: sandboxes, Developer Edition and
 /// scratch orgs authenticate against `test.salesforce.com`.
 static SALESFORCE_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://login.salesforce.com/services/oauth2/token",
-    alternate_token_urls: &["https://test.salesforce.com/services/oauth2/token"],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://login.salesforce.com/services/oauth2/token",
+        alternates: &["https://test.salesforce.com/services/oauth2/token"],
+    },
+    requested_lifetimes: None,
     client_id_env: "SALESFORCE_CLIENT_ID",
     client_secret_env: "SALESFORCE_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
@@ -635,6 +768,14 @@ fn twilio_host_for_region(region: &str, original_host: &str) -> Option<String> {
 }
 
 // ── Provider registry ──────────────────────────────────────────────────
+
+/// The PostgreSQL connection provider id (`app_connections.provider`).
+pub const POSTGRES_PROVIDER: &str = "postgres";
+
+/// The reserved zone a PostgreSQL connection's statements are judged under:
+/// `<connection-id>.postgres.onecli.invalid`. `.invalid` is reserved by
+/// RFC 2606 and can never resolve, so no HTTP request can ever reach it.
+pub const POSTGRES_POLICY_ZONE: &str = ".postgres.onecli.invalid";
 
 static APP_PROVIDERS: &[AppProvider] = &[
     AppProvider {
@@ -906,6 +1047,18 @@ static APP_PROVIDERS: &[AppProvider] = &[
             intercept: false,
             credential_host_field: None,
         }],
+        refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "google-keep",
+        display_name: "Google Keep",
+        host_rules: &[bearer_host("keep.googleapis.com")],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
@@ -1596,6 +1749,30 @@ static APP_PROVIDERS: &[AppProvider] = &[
         body_transform: None,
     },
     AppProvider {
+        provider: POSTGRES_PROVIDER,
+        display_name: "PostgreSQL",
+        // Never an HTTP destination: Postgres speaks its own wire protocol to
+        // the gateway's database front door, which logs in with the stored
+        // credentials itself. The reserved zone exists so the policy engine,
+        // app availability and telemetry can name a connection's statements
+        // the way they name HTTP requests (`dbproxy::policy_host`); `.invalid`
+        // never resolves, and nothing is ever injected.
+        host_rules: &[HostRule {
+            pattern: HostPattern::Suffix(POSTGRES_POLICY_ZONE),
+            path_prefix: None,
+            strategy: AuthStrategy::None,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
         provider: "stripe",
         display_name: "Stripe",
         // Stripe authenticates with API keys over `Authorization: Bearer` (the
@@ -2121,6 +2298,36 @@ static APP_PROVIDERS: &[AppProvider] = &[
         finalizer: None,
         body_transform: None,
     },
+    // HeyReach's public API (documenter.getpostman.com/view/23808049/2sA2xb5F75)
+    // reads its key from `X-API-KEY`, not Authorization, so the strategy is
+    // None and the key is a credential header (as Apollo.io, Clay and
+    // Dripify). api.heyreach.io also serves HeyReach's own web app backend,
+    // so injection is scoped to the public API (`/api/public/`): the key only
+    // ever reaches the surface it was issued for.
+    AppProvider {
+        provider: "heyreach",
+        display_name: "HeyReach",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.heyreach.io"),
+            path_prefix: Some("/api/public/"),
+            strategy: AuthStrategy::None,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[CredentialHeader {
+            // The trimmed copy the connect handler stores, not the raw form
+            // field: a key pasted with a trailing newline would otherwise be
+            // no valid header value, and every call would go out keyless.
+            credential_field: "access_token",
+            header_name: "X-API-KEY",
+        }],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
     AppProvider {
         provider: "linear",
         display_name: "Linear",
@@ -2471,6 +2678,61 @@ static APP_PROVIDERS: &[AppProvider] = &[
         finalizer: None,
         body_transform: None,
     },
+    // Tavily (docs.tavily.com, Headers & Authentication) with one API key as a
+    // Bearer: every path of the REST API host, and only the MCP server's path
+    // on mcp.tavily.com, which also serves Tavily's own OAuth endpoints
+    // (/authorize, /token, /register) that must never carry the key.
+    AppProvider {
+        provider: "tavily",
+        display_name: "Tavily",
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("api.tavily.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("mcp.tavily.com"),
+                path_prefix: Some("/mcp/"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "zendesk",
+        display_name: "Zendesk",
+        // Every account answers on its own `<subdomain>.zendesk.com`, so the
+        // suffix rule is broad and `credential_host_field` narrows it to the
+        // ONE host this connection was issued for. Scoped to the API path so
+        // the token never reaches the account's Help Center or OAuth pages.
+        host_rules: &[HostRule {
+            pattern: HostPattern::Suffix(".zendesk.com"),
+            path_prefix: Some("/api/"),
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: Some("instance_host"),
+        }],
+        // Expiring access tokens with a refresh token, renewed on the
+        // account's own host (see `ZENDESK_REFRESH`).
+        refresh: Some(&ZENDESK_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
     AppProvider {
         provider: "zoho-crm",
         display_name: "Zoho CRM",
@@ -2515,6 +2777,7 @@ pub static OAUTH_CLIENT_GROUPS: &[(&str, &[&str])] = &[
             "google-docs",
             "google-drive",
             "google-forms",
+            "google-keep",
             "google-meet",
             "google-photos",
             "google-search-console",
@@ -3118,22 +3381,121 @@ pub fn is_intercept_target(hostname: &str, path: &str) -> bool {
 /// outlast it, so a queued refresh never gives up on one about to finish.
 pub const REFRESH_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// The provider refused the refresh token itself (`invalid_grant`, RFC 6749
-/// section 5.2): it is revoked, expired, or was superseded. Retrying cannot
-/// help, only the user reconnecting can, so [`refresh_access_token`] returns
-/// this type for it and callers check for it with `anyhow::Error::is`. Every
-/// other failure (network, 5xx, a misconfigured client) stays an opaque error
-/// and is treated as transient.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RefreshRevoked;
+/// The provider refused a stored credential FOR GOOD: an OAuth refresh token
+/// it revoked, a GitHub App installation that is gone or suspended, a deleted
+/// or disabled service-account key, a rotated client secret, a changed Docker
+/// Hub token. Retrying cannot help, only the user reconnecting the account
+/// can, so every refresh and re-mint returns this type for such a refusal and
+/// callers check for it with `anyhow::Error::is`. Every other failure (the
+/// network, a 5xx, a rate limit, a clock out of step, an answer that cannot
+/// be read, a setting only an admin can change) stays an opaque error and is
+/// treated as transient.
+#[derive(Debug)]
+pub struct CredentialRevoked {
+    /// What the provider answered (the status and its error code), for the
+    /// gateway's log. Never a token, never shown to the agent.
+    pub detail: String,
+}
 
-impl std::fmt::Display for RefreshRevoked {
+impl std::fmt::Display for CredentialRevoked {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("token refresh failed: invalid_grant (refresh token revoked or expired)")
+        write!(f, "credential refused for good: {}", self.detail)
     }
 }
 
-impl std::error::Error for RefreshRevoked {}
+impl std::error::Error for CredentialRevoked {}
+
+/// Whose client a token request authenticates with: it decides what a
+/// refused client means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenClient {
+    /// The platform's or a workspace's OAuth app (an OAuth refresh). A
+    /// refused client is a configuration problem that a reconnect, which
+    /// authenticates with the same app, cannot fix.
+    App,
+    /// The connection's own credential (a service-account key, a
+    /// client-credentials pair). A refused client IS the dead credential.
+    Connection,
+}
+
+/// A token endpoint's refusal (RFC 6749 section 5.2) as an error: a
+/// [`CredentialRevoked`] when only a reconnect can fix it, an opaque error
+/// otherwise. `what` names the exchange for the log (`"token refresh"`).
+fn token_endpoint_error(
+    what: &str,
+    client: TokenClient,
+    status: reqwest::StatusCode,
+    body: &serde_json::Value,
+) -> anyhow::Error {
+    let error = body.get("error").and_then(|v| v.as_str());
+    let description = body
+        .get("error_description")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let detail = format!("{what} ({status}): {}", error.unwrap_or("no error code"));
+    if token_refusal_is_permanent(client, status, error, description) {
+        anyhow::Error::new(CredentialRevoked { detail })
+    } else {
+        anyhow::anyhow!("{detail}")
+    }
+}
+
+/// Whether a token endpoint's error means the stored credential itself is
+/// dead (RFC 6749 section 5.2, plus the codes Google adds for a deleted or
+/// disabled client), rather than a passing failure or a setting an admin
+/// changes without a reconnect:
+///
+/// - `invalid_grant`: the refresh token or signing key is revoked, deleted or
+///   expired. Except Google's clock-skew refusal ("…in a reasonable
+///   timeframe. Check your 'iat' and 'exp' values"): the gateway's clock, not
+///   the key, is wrong.
+/// - `invalid_client`, `deleted_client`, `disabled_client`, or a 401 whose
+///   error is no RFC 6749 code at all (a bare 401, or Navan's
+///   `{"error":"Unauthorized"}`): the client failed to authenticate. Dead
+///   only when the client is the connection's own credential
+///   ([`TokenClient::Connection`]).
+///
+/// `access_denied` and `unauthorized_client` are deliberately transient: at
+/// a client-credentials or service-account endpoint they mean an IP access
+/// list or a domain-wide delegation setting refused the request, which an
+/// admin fixes and a reconnect does not.
+fn token_refusal_is_permanent(
+    client: TokenClient,
+    status: reqwest::StatusCode,
+    error: Option<&str>,
+    description: &str,
+) -> bool {
+    let own_client = client == TokenClient::Connection;
+    match error {
+        Some("invalid_grant") => !description.contains("reasonable timeframe"),
+        Some("invalid_client" | "deleted_client" | "disabled_client") => own_client,
+        Some(code) if RFC6749_TOKEN_ERRORS.contains(&code) => false,
+        _ => own_client && status == reqwest::StatusCode::UNAUTHORIZED,
+    }
+}
+
+/// The token-endpoint error codes RFC 6749 section 5.2 defines, plus
+/// `access_denied` / `server_error` / `temporarily_unavailable` (section
+/// 4.1.2.1 defines them for the authorization endpoint; token endpoints
+/// return them too, e.g. MongoDB Atlas's IP access list refusal). Any other
+/// `error` is a provider's own wording.
+const RFC6749_TOKEN_ERRORS: &[&str] = &[
+    "invalid_request",
+    "invalid_client",
+    "invalid_grant",
+    "unauthorized_client",
+    "unsupported_grant_type",
+    "invalid_scope",
+    "access_denied",
+    "temporarily_unavailable",
+    "server_error",
+];
+
+/// The body of a token endpoint's answer, or `Null` when it is not JSON (an
+/// HTML error page from a proxy, an empty 401), so the status alone decides.
+async fn token_endpoint_body(resp: reqwest::Response) -> serde_json::Value {
+    resp.json().await.unwrap_or(serde_json::Value::Null)
+}
 
 /// Refresh an expired access token using the provider's token endpoint.
 /// Returns (new_access_token, expires_at, optional_new_refresh_token).
@@ -3142,18 +3504,29 @@ impl std::error::Error for RefreshRevoked {}
 /// 1. Explicit `client_id`/`client_secret` (from BYOC AppConfig)
 /// 2. Env vars from `RefreshConfig` (platform defaults)
 ///
-/// `stored_token_url` is the connection's own endpoint, honored only when the
-/// provider allowlists it in `alternate_token_urls` (see `endpoint_for`).
+/// `creds` is the connection's stored credentials: the endpoint is the
+/// provider's own, an allowlisted `token_endpoint`, or,
+/// for a per-account provider, built from the connection's validated host
+/// (see [`RefreshConfig::endpoint_for_connection`]).
 ///
 /// Bounded by [`REFRESH_REQUEST_TIMEOUT`]: callers hold a cross-instance lock
 /// for the duration, so a provider that never answers must not hold it forever.
+/// Tenant endpoints never follow redirects. Providers with requested lifetimes
+/// require a successful response, nonempty access and rotated refresh tokens,
+/// and a positive integer expiry (defaulting to, and capped at, the requested
+/// access lifetime). An optional token type must be Bearer. Tokens may not
+/// have surrounding whitespace. Their expiry arithmetic is checked and errors
+/// never include response secrets.
 pub async fn refresh_access_token(
     config: &RefreshConfig,
     refresh_token: &str,
     byoc_client_id: Option<&str>,
     byoc_client_secret: Option<&str>,
-    stored_token_url: Option<&str>,
+    creds: &serde_json::Value,
 ) -> anyhow::Result<(String, i64, Option<String>)> {
+    let token_url = config.endpoint_for_connection(creds).ok_or_else(|| {
+        anyhow::anyhow!("connection has no valid account host for its token endpoint")
+    })?;
     let client_id = match byoc_client_id {
         Some(id) => id.to_string(),
         None => std::env::var(config.client_id_env)
@@ -3165,8 +3538,13 @@ pub async fn refresh_access_token(
             .map_err(|_| anyhow::anyhow!("{} env var not set", config.client_secret_env))?,
     };
 
-    let mut req = reqwest::Client::new()
-        .post(config.endpoint_for(stored_token_url))
+    let mut client = reqwest::Client::builder();
+    if matches!(config.endpoint, TokenEndpoint::Tenant(_)) {
+        client = client.redirect(reqwest::redirect::Policy::none());
+    }
+    let mut req = client
+        .build()?
+        .post(token_url)
         .timeout(REFRESH_REQUEST_TIMEOUT);
 
     if matches!(config.client_auth, ClientCredentialMethod::BasicAuth) {
@@ -3182,12 +3560,19 @@ pub async fn refresh_access_token(
             ("refresh_token", refresh_token),
             ("grant_type", "refresh_token"),
         ]),
-        (TokenBodyFormat::Json, ClientCredentialMethod::Body) => req.json(&serde_json::json!({
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "refresh_token": refresh_token,
-            "grant_type": "refresh_token",
-        })),
+        (TokenBodyFormat::Json, ClientCredentialMethod::Body) => {
+            let mut body = serde_json::json!({
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            });
+            if let Some(lifetimes) = config.requested_lifetimes {
+                body["expires_in"] = lifetimes.access_secs.into();
+                body["refresh_token_expires_in"] = lifetimes.refresh_secs.into();
+            }
+            req.json(&body)
+        }
         (TokenBodyFormat::Form, ClientCredentialMethod::BasicAuth) => req.form(&[
             ("refresh_token", refresh_token),
             ("grant_type", "refresh_token"),
@@ -3199,30 +3584,81 @@ pub async fn refresh_access_token(
             }))
         }
     };
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("refresh request failed: {e}"))?;
+    let resp = req.send().await.map_err(|error| {
+        if matches!(config.endpoint, TokenEndpoint::Tenant(_))
+            || config.requested_lifetimes.is_some()
+        {
+            anyhow::anyhow!("refresh request failed")
+        } else {
+            anyhow::anyhow!("refresh request failed: {error}")
+        }
+    })?;
 
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("refresh response parse failed: {e}"))?;
+    let status = resp.status();
+    let body = token_endpoint_body(resp).await;
+
+    // Expiring, rotating providers must not turn malformed or error replies
+    // into a successful credential update. Never echo their response secrets.
+    if let Some(lifetimes) = config.requested_lifetimes {
+        let invalid =
+            || anyhow::anyhow!("token refresh returned an invalid rotating token response");
+        if !status.is_success() {
+            let code = body.get("error").and_then(serde_json::Value::as_str);
+            let description = body
+                .get("error_description")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if status.is_client_error()
+                && token_refusal_is_permanent(TokenClient::App, status, code, description)
+            {
+                return Err(anyhow::Error::new(CredentialRevoked {
+                    detail: format!("token refresh ({status}): invalid_grant"),
+                }));
+            }
+            return Err(invalid());
+        }
+        if let Some(kind) = body.get("token_type") {
+            if !kind
+                .as_str()
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("bearer"))
+            {
+                return Err(invalid());
+            }
+        }
+        let access = body
+            .get("access_token")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty() && value.trim() == *value)
+            .ok_or_else(invalid)?;
+        let rotated = body
+            .get("refresh_token")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty() && value.trim() == *value && *value != refresh_token)
+            .ok_or_else(invalid)?;
+        let lifetime = match body.get("expires_in") {
+            None => lifetimes.access_secs,
+            Some(value) => value
+                .as_i64()
+                .filter(|seconds| *seconds > 0)
+                .ok_or_else(invalid)?,
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| invalid())?
+            .as_secs();
+        let expiry = i64::try_from(now)
+            .ok()
+            .and_then(|now| {
+                now.checked_add(config.trusted_lifetime(lifetime.min(lifetimes.access_secs)))
+            })
+            .ok_or_else(invalid)?;
+        return Ok((access.to_string(), expiry, Some(rotated.to_string())));
+    }
 
     let access_token = body
         .get("access_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            let error = body
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            if error == "invalid_grant" {
-                anyhow::Error::new(RefreshRevoked)
-            } else {
-                anyhow::anyhow!("token refresh failed: {error}")
-            }
-        })?
+        .ok_or_else(|| token_endpoint_error("token refresh", TokenClient::App, status, &body))?
         .to_string();
 
     let new_refresh_token = body
@@ -3295,20 +3731,19 @@ pub async fn refresh_via_service_account(
         .await
         .map_err(|e| anyhow::anyhow!("service account token request failed: {e}"))?;
 
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("service account token response parse failed: {e}"))?;
+    let status = resp.status();
+    let body = token_endpoint_body(resp).await;
 
     let access_token = body
         .get("access_token")
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
-            let error = body
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            anyhow::anyhow!("service account token exchange failed: {error}")
+            token_endpoint_error(
+                "service account token exchange",
+                TokenClient::Connection,
+                status,
+                &body,
+            )
         })?
         .to_string();
 
@@ -3345,20 +3780,19 @@ pub async fn refresh_via_client_credentials(
         .await
         .map_err(|e| anyhow::anyhow!("client_credentials token request failed: {e}"))?;
 
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("client_credentials token response parse failed: {e}"))?;
+    let status = resp.status();
+    let body = token_endpoint_body(resp).await;
 
     let access_token = body
         .get("access_token")
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
-            let error = body
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            anyhow::anyhow!("client_credentials token exchange failed: {error}")
+            token_endpoint_error(
+                "client_credentials token exchange",
+                TokenClient::Connection,
+                status,
+                &body,
+            )
         })?
         .to_string();
 
@@ -3434,12 +3868,21 @@ pub async fn refresh_github_app_token(
         .await
         .map_err(|e| anyhow::anyhow!("GitHub App token request failed: {e}"))?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!(
-            "GitHub App token exchange failed ({status}): {body}"
-        ));
+    let status = resp.status();
+    if !status.is_success() {
+        // GitHub's error is JSON with a `message`; only that is kept (for
+        // the classification and the log), never an arbitrary body.
+        let message = resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_owned))
+            .unwrap_or_default();
+        let detail = format!("GitHub App token exchange ({status}): {message}");
+        if github_mint_refusal_is_permanent(status, &message) {
+            return Err(anyhow::Error::new(CredentialRevoked { detail }));
+        }
+        return Err(anyhow::anyhow!("{detail}"));
     }
 
     let body: serde_json::Value = resp
@@ -3506,8 +3949,33 @@ pub fn github_app_pinned_repositories(creds: &serde_json::Value) -> PinnedRepos 
     }
 }
 
+/// Whether GitHub's refusal to mint an installation token (`message` is its
+/// error message) means the connection is dead, per the endpoint's documented
+/// answers (`401`, `403`, `404`, `422`):
+///
+/// - `404`: the installation is gone (uninstalled, or the app reinstalled
+///   under a new id).
+/// - `401`: the app's key no longer authenticates (rotated or deleted, or the
+///   app itself deleted). Except the JWT's `exp` / `iat` claim refused: the
+///   gateway's clock is out of step with GitHub's, which a reconnect cannot
+///   fix (Octokit retries exactly these).
+/// - `403`: only a suspended installation. Every other 403 here is a primary
+///   or secondary rate limit, which GitHub asks callers to wait out.
+///
+/// Anything else (`422` for a repository the installation cannot reach, a
+/// `429`, a `5xx`) is transient.
+fn github_mint_refusal_is_permanent(status: reqwest::StatusCode, message: &str) -> bool {
+    match status.as_u16() {
+        404 => true,
+        401 => !message.contains("claim ('exp')") && !message.contains("claim ('iat')"),
+        403 => message.to_ascii_lowercase().contains("suspended"),
+        _ => false,
+    }
+}
+
 /// Attempt to refresh credentials for a known credential type.
 /// Returns `None` if the type is not recognized (falls through to standard OAuth refresh).
+/// A refusal the user must fix carries [`CredentialRevoked`].
 pub async fn try_refresh_credentials(
     cred_type: &str,
     creds: &serde_json::Value,
@@ -3564,40 +4032,54 @@ pub async fn try_refresh_credentials(
                     "Docker Hub credentials incomplete, cannot refresh"
                 )));
             };
-            Some(refresh_docker_hub_token(username, password).await)
+            Some(refresh_docker_hub_token(DOCKER_HUB_TOKEN_URL, username, password).await)
         }
         _ => None,
     }
 }
 
-async fn refresh_docker_hub_token(username: &str, password: &str) -> anyhow::Result<(String, i64)> {
+/// Docker Hub's "Create access token" endpoint: exchanges a username and a
+/// personal access token (or password) for a short-lived bearer JWT. Replaces
+/// the deprecated `/v2/users/login`.
+const DOCKER_HUB_TOKEN_URL: &str = "https://hub.docker.com/v2/auth/token";
+
+/// Mint a Docker Hub access token from the connection's username and
+/// personal access token (stored as `password`). The endpoint documents one
+/// refusal, `401` (the token was revoked or the password changed), which
+/// only a reconnect fixes. Anything else (a 429, a 5xx) is transient.
+async fn refresh_docker_hub_token(
+    token_url: &str,
+    username: &str,
+    secret: &str,
+) -> anyhow::Result<(String, i64)> {
     let resp = reqwest::Client::new()
-        .post("https://hub.docker.com/v2/users/login")
+        .post(token_url)
         .json(&serde_json::json!({
-            "username": username,
-            "password": password,
+            "identifier": username,
+            "secret": secret,
         }))
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("Docker Hub login request failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Docker Hub token request failed: {e}"))?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!(
-            "Docker Hub login failed ({status}): {body}"
-        ));
+    let status = resp.status();
+    if !status.is_success() {
+        let detail = format!("Docker Hub token exchange ({status})");
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(anyhow::Error::new(CredentialRevoked { detail }));
+        }
+        return Err(anyhow::anyhow!("{detail}"));
     }
 
     let body: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| anyhow::anyhow!("Docker Hub login response parse failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Docker Hub token response parse failed: {e}"))?;
 
     let token = body
-        .get("token")
+        .get("access_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Docker Hub login response missing 'token' field"))?
+        .ok_or_else(|| anyhow::anyhow!("Docker Hub token response missing 'access_token'"))?
         .to_string();
 
     let now = std::time::SystemTime::now()
@@ -3892,6 +4374,10 @@ mod tests {
             vec!["google-tasks"]
         );
         assert_eq!(
+            providers_for_host("keep.googleapis.com"),
+            vec!["google-keep"]
+        );
+        assert_eq!(
             providers_for_host("forms.googleapis.com"),
             vec!["google-forms"]
         );
@@ -3974,6 +4460,7 @@ mod tests {
             ("google-sheets", "sheets.googleapis.com"),
             ("google-slides", "slides.googleapis.com"),
             ("google-tasks", "tasks.googleapis.com"),
+            ("google-keep", "keep.googleapis.com"),
             ("google-forms", "forms.googleapis.com"),
             ("google-classroom", "classroom.googleapis.com"),
             ("google-admin", "admin.googleapis.com"),
@@ -5110,6 +5597,41 @@ mod tests {
         );
     }
 
+    // ── PostgreSQL ────────────────────────────────────────────────────
+
+    /// The policy zone names a connection's statements for the engine and the
+    /// activity feed, and never carries a credential: Postgres logs in on its
+    /// own wire, never through an HTTP header.
+    #[test]
+    fn postgres_zone_identifies_the_provider_and_never_injects() {
+        let host = format!("c1{POSTGRES_POLICY_ZONE}");
+        assert_eq!(
+            provider_for_host_and_path(&host, "/sql/read"),
+            Some((POSTGRES_PROVIDER, "PostgreSQL"))
+        );
+        assert!(!needs_access_token(POSTGRES_PROVIDER));
+        assert!(build_app_injections(POSTGRES_PROVIDER, &host, "secret").is_empty());
+        assert!(
+            build_app_injection_rules(POSTGRES_PROVIDER, &host, "secret")
+                .iter()
+                .all(|(_, injections)| injections.is_empty())
+        );
+    }
+
+    /// No real host is ever in the zone: the bare zone, a lookalike, and a
+    /// public name that merely contains `postgres` all match nothing.
+    #[test]
+    fn postgres_zone_matches_no_real_host() {
+        for host in [
+            "postgres.onecli.invalid",
+            "c1.postgres.onecli.invalid.evil.com",
+            "db.postgres.example.com",
+            "postgres.example.com",
+        ] {
+            assert_eq!(provider_for_host_and_path(host, "/"), None, "{host}");
+        }
+    }
+
     // ── Salesforce ────────────────────────────────────────────────────
 
     #[test]
@@ -5257,12 +5779,14 @@ mod tests {
         let config = refresh_config("salesforce").expect("salesforce refreshes");
         // Default (production) when nothing is stored or the value is unknown.
         assert_eq!(
-            config.endpoint_for(None),
-            "https://login.salesforce.com/services/oauth2/token"
+            config
+                .endpoint_for_connection(&serde_json::json!({}))
+                .as_deref(),
+            Some("https://login.salesforce.com/services/oauth2/token")
         );
         assert_eq!(
-            config.endpoint_for(Some("https://test.salesforce.com/services/oauth2/token")),
-            "https://test.salesforce.com/services/oauth2/token"
+            config.endpoint_for_connection(&serde_json::json!({"token_endpoint": "https://test.salesforce.com/services/oauth2/token"})).as_deref(),
+Some("https://test.salesforce.com/services/oauth2/token")
         );
         // A stored endpoint outside the allowlist must never be dialed: the
         // client secret would otherwise be posted to an attacker's host.
@@ -5273,8 +5797,10 @@ mod tests {
             "",
         ] {
             assert_eq!(
-                config.endpoint_for(Some(stored)),
-                "https://login.salesforce.com/services/oauth2/token",
+                config
+                    .endpoint_for_connection(&serde_json::json!({"token_endpoint": stored}))
+                    .as_deref(),
+                Some("https://login.salesforce.com/services/oauth2/token"),
                 "{stored}"
             );
         }
@@ -5284,8 +5810,12 @@ mod tests {
     fn providers_without_alternates_ignore_a_stored_endpoint() {
         let config = refresh_config("google-calendar").expect("google refreshes");
         assert_eq!(
-            config.endpoint_for(Some("https://evil.test/token")),
-            "https://oauth2.googleapis.com/token"
+            config
+                .endpoint_for_connection(
+                    &serde_json::json!({"token_endpoint": "https://evil.test/token"})
+                )
+                .as_deref(),
+            Some("https://oauth2.googleapis.com/token")
         );
     }
 
@@ -5479,8 +6009,9 @@ mod tests {
     fn linkedin_has_refresh_config() {
         let cfg = refresh_config("linkedin").expect("linkedin should have refresh config");
         assert_eq!(
-            cfg.token_url,
-            "https://www.linkedin.com/oauth/v2/accessToken"
+            cfg.endpoint_for_connection(&serde_json::json!({}))
+                .as_deref(),
+            Some("https://www.linkedin.com/oauth/v2/accessToken")
         );
     }
 
@@ -5791,8 +6322,9 @@ mod tests {
         let cfg = refresh_config("microsoft-onenote")
             .expect("microsoft-onenote should have refresh config");
         assert_eq!(
-            cfg.token_url,
-            "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+            cfg.endpoint_for_connection(&serde_json::json!({}))
+                .as_deref(),
+            Some("https://login.microsoftonline.com/common/oauth2/v2.0/token")
         );
     }
 
@@ -6447,6 +6979,62 @@ mod tests {
         }
     }
 
+    // ── HeyReach ───────────────────────────────────────────────────────
+    #[test]
+    fn heyreach_injects_x_api_key_on_the_public_api_only() {
+        assert_eq!(providers_for_host("api.heyreach.io"), vec!["heyreach"]);
+        // The key rides a credential header, never Authorization, and it is
+        // the trimmed copy the connect handler stores.
+        assert!(!needs_access_token("heyreach"));
+        let headers = credential_headers("heyreach");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].credential_field, "access_token");
+        assert_eq!(headers[0].header_name, "X-API-KEY");
+        assert!(refresh_config("heyreach").is_none());
+        assert_eq!(
+            build_app_injection_rules("heyreach", "api.heyreach.io", "tok"),
+            vec![("/api/public/*".to_string(), vec![])],
+        );
+        for path in [
+            "/api/public/auth/CheckApiKey",
+            "/api/public/campaign/GetAll",
+            "/api/public/li_account/GetAll",
+            "/api/public/campaign/GetById?campaignId=1",
+        ] {
+            assert!(
+                provider_matches_host_and_path("heyreach", "api.heyreach.io", path),
+                "{path}"
+            );
+        }
+        // HeyReach's own web app backend shares the host and never carries
+        // the key.
+        for path in [
+            "/",
+            "/UserConfiguration/GetAllExtended",
+            "/api/WhiteLabel/WhiteLabelThemeConfig",
+            "/api/TokenAuth/Authenticate",
+            "/api/publicx/campaign/GetAll",
+        ] {
+            assert!(
+                !provider_matches_host_and_path("heyreach", "api.heyreach.io", path),
+                "{path}"
+            );
+        }
+        // The web app, the marketing site, the live-updates host and
+        // lookalikes get nothing.
+        for host in [
+            "app.heyreach.io",
+            "heyreach.io",
+            "www.heyreach.io",
+            "live-updates.heyreach.io",
+            "api.heyreach.com",
+            "api.heyreach.io.evil.example",
+            "evilapi.heyreach.io",
+        ] {
+            assert!(providers_for_host(host).is_empty(), "{host}");
+        }
+    }
+
     // ── Onyx ───────────────────────────────────────────────────────────
     #[test]
     fn onyx_injects_only_on_the_api_and_mcp_paths() {
@@ -6586,6 +7174,110 @@ mod tests {
     }
 
     #[test]
+    fn zendesk_is_host_gated_bearer_on_api_path() {
+        assert_eq!(
+            provider_for_host_and_path("acme.zendesk.com", "/api/v2/tickets"),
+            Some(("zendesk", "Zendesk"))
+        );
+        assert_eq!(
+            credential_host_field("zendesk", "acme.zendesk.com"),
+            Some("instance_host")
+        );
+        assert!(is_host_bound("zendesk"));
+        assert!(refresh_config("zendesk").is_some());
+        let injections = build_app_injections("zendesk", "acme.zendesk.com", "zd_token");
+        assert_eq!(
+            injections,
+            vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer zd_token".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn zendesk_refreshes_on_the_connections_own_account() {
+        let config = refresh_config("zendesk").expect("zendesk refreshes");
+        let at = |host: &str| {
+            config.endpoint_for_connection(&serde_json::json!({ "instance_host": host }))
+        };
+        assert_eq!(
+            at("acme.zendesk.com").as_deref(),
+            Some("https://acme.zendesk.com/oauth/tokens")
+        );
+        assert_eq!(
+            at(" ACME-2.Zendesk.com ").as_deref(),
+            Some("https://acme-2.zendesk.com/oauth/tokens")
+        );
+        // Anything but one label under .zendesk.com is refused, never sent
+        // to a fallback: the client secret travels with this request.
+        for bad in [
+            "evil.test",
+            "zendesk.com",
+            ".zendesk.com",
+            "a.b.zendesk.com",
+            "acme.zendesk.com.evil.test",
+            "acme.zendesk.com:8443",
+            "acme.zendesk.com/x",
+            "-acme.zendesk.com",
+            "acme-.zendesk.com",
+            "ac_me.zendesk.com",
+            "acme%2eevil.zendesk.com",
+        ] {
+            assert_eq!(at(bad), None, "{bad}");
+        }
+        assert_eq!(
+            config.endpoint_for_connection(&serde_json::json!({})),
+            None,
+            "no stored host, no refresh"
+        );
+        // A stored token_endpoint never overrides the per-account rule.
+        assert_eq!(
+            config
+                .endpoint_for_connection(&serde_json::json!({
+                    "instance_host": "acme.zendesk.com",
+                    "token_endpoint": "https://evil.test/token",
+                }))
+                .as_deref(),
+            Some("https://acme.zendesk.com/oauth/tokens")
+        );
+    }
+
+    #[test]
+    fn rotating_lifetime_providers_have_a_complete_json_lifecycle() {
+        let mut configured = 0;
+        for app in all_providers() {
+            let Some(config) = app.refresh else { continue };
+            let Some(lifetimes) = config.requested_lifetimes else {
+                continue;
+            };
+            configured += 1;
+            assert_eq!(app.provider, "zendesk");
+            assert!(matches!(config.endpoint, TokenEndpoint::Tenant(_)));
+            assert!(matches!(config.body_format, TokenBodyFormat::Json));
+            assert!(matches!(config.client_auth, ClientCredentialMethod::Body));
+            assert_eq!(lifetimes.access_secs, 1800);
+            assert_eq!(lifetimes.refresh_secs, 2592000);
+            assert!(lifetimes.refresh_secs > lifetimes.access_secs);
+        }
+        assert_eq!(
+            configured, 1,
+            "Zendesk must request expiring rotating tokens"
+        );
+    }
+
+    #[test]
+    fn zendesk_suffix_no_false_positives() {
+        assert!(providers_for_host("zendesk.com").is_empty());
+        assert!(providers_for_host("myzendesk.com").is_empty());
+        assert!(providers_for_host("acme.zendesk.com.evil.test").is_empty());
+        assert_eq!(
+            provider_for_host_and_path("acme.zendesk.com", "/hc/en-us"),
+            None
+        );
+    }
+
+    #[test]
     fn providers_for_zoho_crm_host() {
         assert_eq!(providers_for_host("www.zohoapis.com"), vec!["zoho-crm"]);
     }
@@ -6647,6 +7339,59 @@ mod tests {
             "api.fireflies.ai",
             "/mcp"
         ));
+    }
+
+    // ── Tavily ─────────────────────────────────────────────────────────
+    #[test]
+    fn tavily_injects_on_the_api_host_and_the_mcp_path_only() {
+        assert_eq!(providers_for_host("api.tavily.com"), vec!["tavily"]);
+        assert_eq!(providers_for_host("mcp.tavily.com"), vec!["tavily"]);
+        assert!(refresh_config("tavily").is_none());
+        // Every path of the API host, only the MCP path of the MCP host.
+        for (host, pattern) in [("api.tavily.com", "*"), ("mcp.tavily.com", "/mcp/*")] {
+            assert_eq!(
+                build_app_injection_rules("tavily", host, "tvly-tok"),
+                vec![(
+                    pattern.to_string(),
+                    vec![Injection::SetHeader {
+                        name: "authorization".to_string(),
+                        value: "Bearer tvly-tok".to_string(),
+                    }]
+                )],
+                "{host}"
+            );
+        }
+        for path in ["/mcp", "/mcp/"] {
+            assert!(
+                provider_matches_host_and_path("tavily", "mcp.tavily.com", path),
+                "{path}"
+            );
+        }
+        // Tavily's OAuth server on the same host never carries the key.
+        for path in [
+            "/",
+            "/authorize",
+            "/token",
+            "/register",
+            "/.well-known/oauth-authorization-server",
+            "/mcpx",
+        ] {
+            assert!(
+                !provider_matches_host_and_path("tavily", "mcp.tavily.com", path),
+                "{path}"
+            );
+        }
+        // The dashboard, the docs, the marketing site, and lookalikes get nothing.
+        for host in [
+            "app.tavily.com",
+            "docs.tavily.com",
+            "tavily.com",
+            "www.tavily.com",
+            "api.tavily.com.evil.example",
+            "evilapi.tavily.com",
+        ] {
+            assert!(providers_for_host(host).is_empty(), "{host}");
+        }
     }
 
     // ── HubSpot ─────────────────────────────────────────────────────
@@ -6982,8 +7727,11 @@ mod tests {
         });
         let token_url: &'static str = Box::leak(format!("http://{addr}/token").into_boxed_str());
         let config = RefreshConfig {
-            token_url,
-            alternate_token_urls: &[],
+            endpoint: TokenEndpoint::Fixed {
+                url: token_url,
+                alternates: &[],
+            },
+            requested_lifetimes: None,
             client_id_env: "ONECLI_TIMEOUT_TEST_UNSET_ID",
             client_secret_env: "ONECLI_TIMEOUT_TEST_UNSET_SECRET",
             body_format: TokenBodyFormat::Form,
@@ -6997,7 +7745,13 @@ mod tests {
         // instead of hanging it.
         let outcome = tokio::time::timeout(
             REFRESH_REQUEST_TIMEOUT * 4,
-            refresh_access_token(&config, "rt", Some("id"), Some("secret"), None),
+            refresh_access_token(
+                &config,
+                "rt",
+                Some("id"),
+                Some("secret"),
+                &serde_json::json!({}),
+            ),
         )
         .await
         .expect("the request timeout fired before the outer bound");
@@ -7015,5 +7769,461 @@ mod tests {
             elapsed < REFRESH_REQUEST_TIMEOUT + std::time::Duration::from_secs(1),
             "gave up late: {elapsed:?}"
         );
+    }
+
+    // ── Refusals only a reconnect fixes (`CredentialRevoked`) ────────────
+
+    fn is_revoked(e: &anyhow::Error) -> bool {
+        e.is::<CredentialRevoked>()
+    }
+
+    /// Token endpoint answers, as Google's service-account endpoint, MongoDB
+    /// Atlas and RFC 6749 document them: only a dead credential is a
+    /// reconnect. The clock, a rate limit, an admin setting or an outage
+    /// never are.
+    #[test]
+    fn a_token_endpoint_refusal_is_permanent_only_for_a_dead_credential() {
+        use reqwest::StatusCode;
+        use serde_json::json;
+        let permanent = |client, status, body: serde_json::Value| {
+            is_revoked(&token_endpoint_error("mint", client, status, &body))
+        };
+        let conn = TokenClient::Connection;
+        let app = TokenClient::App;
+        let bad_request = StatusCode::BAD_REQUEST;
+
+        // A deleted, disabled or expired key (Google: "Invalid JWT
+        // Signature."), a revoked refresh token.
+        let revoked_key =
+            json!({ "error": "invalid_grant", "error_description": "Invalid JWT Signature." });
+        assert!(permanent(conn, bad_request, revoked_key.clone()));
+        assert!(permanent(
+            app,
+            bad_request,
+            json!({ "error": "invalid_grant" })
+        ));
+        // The gateway's clock is wrong, not the key.
+        let skew = json!({
+            "error": "invalid_grant",
+            "error_description": "Invalid JWT: Token must be a short-lived token (60 minutes) and in a reasonable timeframe. Check your iat and exp values in the JWT claim."
+        });
+        assert!(!permanent(conn, bad_request, skew));
+
+        // The connection's own client is dead: a rotated Atlas secret, a
+        // deleted or disabled Google client, a bare 401.
+        let unauthorized = StatusCode::UNAUTHORIZED;
+        for code in ["invalid_client", "deleted_client", "disabled_client"] {
+            assert!(
+                permanent(conn, unauthorized, json!({ "error": code })),
+                "{code}"
+            );
+            // The OAuth app is a configuration problem a reconnect, which
+            // uses the same app, cannot fix.
+            assert!(
+                !permanent(app, unauthorized, json!({ "error": code })),
+                "{code}"
+            );
+        }
+        assert!(permanent(conn, unauthorized, serde_json::Value::Null));
+        assert!(!permanent(app, unauthorized, serde_json::Value::Null));
+        // Bodies the live endpoints returned for a deleted or wrong secret:
+        // Navan's (no RFC 6749 code), MongoDB Atlas's, Google's for a
+        // service account that no longer exists.
+        let navan = json!({ "status": 401, "error": "Unauthorized", "message": "Unauthorized" });
+        assert!(permanent(conn, unauthorized, navan));
+        let atlas = json!({ "error": "invalid_client", "error_description": "Invalid credentials provided" });
+        assert!(permanent(conn, unauthorized, atlas));
+        let google_gone = json!({
+            "error": "invalid_grant",
+            "error_description": "Invalid grant: account not found"
+        });
+        assert!(permanent(conn, bad_request, google_gone));
+        // A provider's own wording on anything but a 401 says nothing.
+        assert!(!permanent(
+            conn,
+            StatusCode::TOO_MANY_REQUESTS,
+            json!({ "error": "Too Many Requests" })
+        ));
+
+        // An IP access list (Atlas) or domain-wide delegation (Google)
+        // setting: an admin fixes it, a reconnect does not.
+        assert!(!permanent(
+            conn,
+            bad_request,
+            json!({ "error": "access_denied" })
+        ));
+        assert!(!permanent(
+            conn,
+            unauthorized,
+            json!({ "error": "unauthorized_client" })
+        ));
+        // Passing failures.
+        for (status, body) in [
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                json!({ "error": "rate_limited" }),
+            ),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({ "error": "server_error" }),
+            ),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({ "error": "temporarily_unavailable" }),
+            ),
+            (StatusCode::BAD_GATEWAY, serde_json::Value::Null),
+        ] {
+            assert!(!permanent(conn, status, body.clone()), "{status} {body}");
+        }
+    }
+
+    /// GitHub's documented answers to an installation-token mint, with the
+    /// messages it really sends.
+    #[test]
+    fn a_github_mint_refusal_is_permanent_only_for_a_dead_installation_or_key() {
+        use reqwest::StatusCode;
+        for (status, message, permanent) in [
+            // Uninstalled, or reinstalled under a new id.
+            (StatusCode::NOT_FOUND, "Not Found", true),
+            // The app's key was rotated or deleted.
+            (
+                StatusCode::UNAUTHORIZED,
+                "A JSON web token could not be decoded",
+                true,
+            ),
+            (StatusCode::UNAUTHORIZED, "Bad credentials", true),
+            // The gateway's clock is out of step: Octokit retries these.
+            (
+                StatusCode::UNAUTHORIZED,
+                "'Expiration time' claim ('exp') must be a numeric value representing the future time at which the assertion expires",
+                false,
+            ),
+            (
+                StatusCode::UNAUTHORIZED,
+                "'Issued at' claim ('iat') must be an Integer representing the time that the assertion was issued",
+                false,
+            ),
+            (
+                StatusCode::FORBIDDEN,
+                "This installation has been suspended",
+                true,
+            ),
+            // Primary and secondary rate limits: wait, never reconnect.
+            (
+                StatusCode::FORBIDDEN,
+                "API rate limit exceeded for installation ID 1.",
+                false,
+            ),
+            (
+                StatusCode::FORBIDDEN,
+                "You have exceeded a secondary rate limit.",
+                false,
+            ),
+            (StatusCode::TOO_MANY_REQUESTS, "", false),
+            // A repository the installation cannot reach.
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "There is at least one repository that does not exist or is not accessible to the parent installation.",
+                false,
+            ),
+            (StatusCode::BAD_GATEWAY, "", false),
+        ] {
+            assert_eq!(
+                github_mint_refusal_is_permanent(status, message),
+                permanent,
+                "{status} {message}"
+            );
+        }
+    }
+
+    /// A one-shot HTTP endpoint answering every request with `status` and
+    /// `body`, recording the request bodies it was sent.
+    async fn stub_endpoint(
+        status: u16,
+        body: &'static str,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = std::sync::Arc::clone(&seen);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = Vec::new();
+                let mut buf = [0u8; 4096];
+                // One small request per connection: headers, then a body of
+                // `content-length` bytes.
+                loop {
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some((head, rest)) = text.split_once("\r\n\r\n") {
+                        let length = head
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                            })
+                            .unwrap_or(0);
+                        if rest.len() >= length {
+                            record.lock().expect("lock").push(rest.to_string());
+                            break;
+                        }
+                    }
+                }
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        (format!("http://{addr}/v2/auth/token"), seen)
+    }
+
+    async fn local_zendesk_refresh(
+        status: u16,
+        body: &'static str,
+    ) -> (
+        anyhow::Result<(String, i64, Option<String>)>,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let (url, seen) = stub_endpoint(status, body).await;
+        let config = RefreshConfig {
+            endpoint: TokenEndpoint::Fixed {
+                url: Box::leak(url.into_boxed_str()),
+                alternates: &[],
+            },
+            ..ZENDESK_REFRESH
+        };
+        (
+            refresh_access_token(
+                &config,
+                "old-refresh",
+                Some("client"),
+                Some("secret"),
+                &serde_json::json!({}),
+            )
+            .await,
+            seen,
+        )
+    }
+
+    #[tokio::test]
+    async fn zendesk_refresh_requests_expiry_and_returns_rotated_tokens() {
+        for body in [
+            r#"{"access_token":"new-access","refresh_token":"new-refresh"}"#,
+            r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":1800}"#,
+            r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":9223372036854775807,"token_type":"bEaReR"}"#,
+        ] {
+            let before = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            let (result, seen) = local_zendesk_refresh(200, body).await;
+            let (access, expires, refresh) = result.expect("valid rotating response");
+            assert_eq!(access, "new-access");
+            assert_eq!(refresh.as_deref(), Some("new-refresh"));
+            assert!((before + 1800..=before + 1805).contains(&expires));
+            let payload: serde_json::Value =
+                serde_json::from_str(&seen.lock().unwrap()[0]).unwrap();
+            assert_eq!(
+                payload,
+                serde_json::json!({"client_id":"client", "client_secret":"secret", "grant_type":"refresh_token", "refresh_token":"old-refresh", "expires_in":1800, "refresh_token_expires_in":2592000})
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn zendesk_refresh_rejects_malformed_or_unrotated_tokens() {
+        for (status, body) in [
+            (
+                401,
+                r#"{"access_token":"secret-access","refresh_token":"secret-refresh"}"#,
+            ),
+            (200, r#"{"access_token":"","refresh_token":"new-refresh"}"#),
+            (200, r#"{"access_token":"new-access"}"#),
+            (200, r#"{"access_token":"new-access","refresh_token":""}"#),
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"old-refresh"}"#,
+            ),
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":0}"#,
+            ),
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":-1}"#,
+            ),
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":1.5}"#,
+            ),
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":"1800"}"#,
+            ),
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":null}"#,
+            ),
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Basic"}"#,
+            ),
+            (
+                200,
+                r#"{"access_token":" new-access","refresh_token":"new-refresh"}"#,
+            ),
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh "}"#,
+            ),
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","token_type":null}"#,
+            ),
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":18446744073709551615}"#,
+            ),
+            (200, "not json"),
+        ] {
+            let error = local_zendesk_refresh(status, body)
+                .await
+                .0
+                .expect_err(body)
+                .to_string();
+            assert!(!error.contains("secret-access") && !error.contains("secret-refresh"));
+        }
+    }
+
+    #[tokio::test]
+    async fn zendesk_refresh_revocation_is_classified_without_echoing_provider_text() {
+        for (status, body, revoked) in [
+            (
+                400,
+                r#"{"error":"invalid_grant","error_description":"secret-refresh revoked"}"#,
+                true,
+            ),
+            (401, r#"{"error":"invalid_grant"}"#, true),
+            (500, r#"{"error":"invalid_grant"}"#, false),
+            (
+                400,
+                r#"{"error":"invalid_grant","error_description":"not in a reasonable timeframe secret-refresh"}"#,
+                false,
+            ),
+            (
+                400,
+                r#"{"error":"invalid_client","error_description":"secret-client"}"#,
+                false,
+            ),
+            (
+                400,
+                r#"{"error":"secret-error-code","error_description":"secret-refresh"}"#,
+                false,
+            ),
+        ] {
+            let error = local_zendesk_refresh(status, body).await.0.expect_err(body);
+            assert_eq!(error.is::<CredentialRevoked>(), revoked, "{status}: {body}");
+            assert!(!format!("{error:#}").contains("secret"));
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_refresh_keeps_optional_rotation_and_default_lifetime() {
+        let (url, seen) = stub_endpoint(200, r#"{"access_token":"legacy-access"}"#).await;
+        let config = RefreshConfig {
+            endpoint: TokenEndpoint::Fixed {
+                url: Box::leak(url.into_boxed_str()),
+                alternates: &[],
+            },
+            ..GOOGLE_REFRESH
+        };
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let (access, expires, rotated) = refresh_access_token(
+            &config,
+            "old",
+            Some("client"),
+            Some("secret"),
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(access, "legacy-access");
+        assert_eq!(rotated, None);
+        assert!((before + 3600..=before + 3605).contains(&expires));
+        let body = &seen.lock().unwrap()[0];
+        assert!(body.contains("grant_type=refresh_token"));
+        assert!(!body.contains("expires_in"));
+    }
+
+    /// Docker Hub's "Create access token": the username and the stored
+    /// personal access token go as `identifier` / `secret`, and the minted
+    /// JWT comes back as `access_token`, its own `exp` (less a minute) the
+    /// expiry.
+    #[tokio::test]
+    async fn docker_hub_mints_with_the_access_token_endpoint() {
+        // A JWT whose payload is {"exp":4102444800}.
+        const JWT: &str = "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln";
+        let (url, seen) = stub_endpoint(
+            200,
+            r#"{"access_token":"eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln"}"#,
+        )
+        .await;
+
+        let (token, expires_at) = refresh_docker_hub_token(&url, "octo", "dckr_pat_x")
+            .await
+            .expect("minted");
+
+        assert_eq!(token, JWT);
+        assert_eq!(expires_at, 4_102_444_800 - 60);
+        let sent: serde_json::Value =
+            serde_json::from_str(&seen.lock().expect("lock")[0]).expect("json body");
+        assert_eq!(
+            sent,
+            serde_json::json!({ "identifier": "octo", "secret": "dckr_pat_x" })
+        );
+    }
+
+    /// Its one documented refusal, a 401, is a revoked token; a rate limit or
+    /// an outage is not.
+    #[tokio::test]
+    async fn docker_hub_refuses_for_good_only_with_a_401() {
+        for (status, revoked) in [(401, true), (429, false), (503, false)] {
+            let (url, _) =
+                stub_endpoint(status, r#"{"errinfo":null,"message":"unauthorized"}"#).await;
+            let err = refresh_docker_hub_token(&url, "octo", "dckr_pat_x")
+                .await
+                .expect_err("refused");
+            assert_eq!(is_revoked(&err), revoked, "{status}: {err}");
+        }
+    }
+
+    /// A non-JSON answer (a proxy's HTML page, an empty 401) is classified
+    /// by its status alone, never treated as a parse failure.
+    #[tokio::test]
+    async fn a_client_credentials_401_without_a_body_is_a_dead_secret() {
+        let (url, _) = stub_endpoint(401, "").await;
+        let err = refresh_via_client_credentials(&url, "id", "rotated")
+            .await
+            .expect_err("refused");
+        assert!(is_revoked(&err), "{err}");
+
+        let (url, _) = stub_endpoint(502, "<html>Bad Gateway</html>").await;
+        let err = refresh_via_client_credentials(&url, "id", "secret")
+            .await
+            .expect_err("refused");
+        assert!(!is_revoked(&err), "{err}");
     }
 }

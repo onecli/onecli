@@ -20,9 +20,9 @@ interface Props {
  *
  * Resolved on the SERVER wherever possible. The client redirect it replaces
  * could only run after the agent list query resolved, so every arrival here
- * (an agent card, a pasted link, the crumb switcher) rendered an empty content
- * pane first — and if that query was slow, errored, or served a cache without
- * this agent, the pane just stayed empty. Reading the one field the decision
+ * (a pasted link, the crumb switcher) rendered an empty content pane first —
+ * and if that query was slow, errored, or served a cache without this agent,
+ * the pane just stayed empty. Reading the one field the decision
  * needs, `kind`, turns the index into a real redirect that never paints.
  *
  * The client component stays as the fallback for the case the server cannot

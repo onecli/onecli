@@ -38,7 +38,7 @@ const item = (
   agentId: "ag-1",
   agentName: "Donna",
   summary: 'connect "AcmeCRM"',
-  offersAlwaysAllow: false,
+  standingChoice: false,
   conversationId: "conv-1",
   createdAt: new Date().toISOString(),
   expiresAt: new Date(Date.now() + 3_600_000).toISOString(),

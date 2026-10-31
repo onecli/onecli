@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   supervisorMessageSchema,
   type SupervisorMessage,
+  type SupervisorWorkItem,
 } from "@onecli/agent-protocol";
 import { createConnection } from "node:net";
 import {
@@ -567,6 +568,21 @@ describe("supervisor loop end-to-end (fake harness, stdio transport)", () => {
     await until(() => resultOf("t2") !== undefined, "t2");
     expect(resultOf("t2")!.sessionRef).toBe(ref1);
     expect(fake.sessionStarts).toEqual([{}, { resumeSessionRef: ref1 }]);
+    // The resumed session is TOLD its tools changed: its own earlier turns
+    // would otherwise outvote the new list.
+    const promptOf = (turnId: string) =>
+      messages
+        .filter(
+          (m): m is Extract<SupervisorMessage, { kind: "event" }> =>
+            m.kind === "event" &&
+            m.turnId === turnId &&
+            m.event.type === "text.delta",
+        )
+        .map((m) => (m.event as { text: string }).text)
+        .join("");
+    expect(promptOf("t2")).toMatch(
+      /Note: your tools changed since earlier in this conversation\. Now available: [^.]*message_agent[^.]*\. Earlier statements about not having them are outdated\./,
+    );
 
     // The same roster again: nothing is stale, the session is reused.
     syncPeers(3, [{ name: "Ray" }]);
@@ -576,6 +592,8 @@ describe("supervisor loop end-to-end (fake harness, stdio transport)", () => {
     );
     await until(() => resultOf("t3") !== undefined, "t3");
     expect(fake.sessionStarts).toHaveLength(2);
+    // No change, no note (and the earlier one does not repeat).
+    expect(promptOf("t3")).not.toContain("your tools changed");
 
     // The last peer leaves: the tool leaves with it.
     syncPeers(4, []);
@@ -584,6 +602,106 @@ describe("supervisor loop end-to-end (fake harness, stdio transport)", () => {
     expect(readFileSync(join(homeDir, "CLAUDE.md"), "utf8")).not.toContain(
       "Other agents",
     );
+
+    input.write('{"kind":"shutdown"}\n');
+    input.end();
+    await run;
+  });
+
+  it("a read grant added MID-SESSION changes nothing: read_conversation is listed from the start, so no session restarts", async () => {
+    // read_conversation / send_as_me are listed with any live presence
+    // (a zero-grant read answers needs_access with a card), so grant
+    // counts no longer move the tool set and must not respawn sessions.
+    const homeDir = mkdtempSync(join(tmpdir(), "supervisor-grant-"));
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const store = createFakeSessionStore();
+    const fake = createFakeHarness({ store });
+    const run = runSupervisor(
+      {
+        homeDir,
+        model: undefined,
+        effort: undefined,
+        instructions: undefined,
+        agentName: "Ada",
+        channels: [
+          {
+            provider: "slack",
+            status: "active",
+            handle: "ada",
+            workspaceName: "Acme",
+          },
+        ],
+        peers: [],
+        connections: [],
+        harness: "fake",
+        runnerWsUrl: undefined,
+        bootstrapToken: undefined,
+        sandboxId: undefined,
+        outboundAttachments: false,
+      },
+      fake,
+      createStdioTransport(input, output),
+    );
+    const messages: SupervisorMessage[] = [];
+    const readAll = () => {
+      for (;;) {
+        const chunk = output.read()?.toString();
+        if (!chunk) return;
+        for (const line of chunk.trim().split("\n")) {
+          if (line)
+            messages.push(supervisorMessageSchema.parse(JSON.parse(line)));
+        }
+      }
+    };
+    const until = async (predicate: () => boolean, label: string) => {
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        readAll();
+        if (predicate()) return;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      throw new Error(`timed out waiting for ${label}`);
+    };
+    const resultOf = (turnId: string) =>
+      messages.find(
+        (m): m is Extract<SupervisorMessage, { kind: "turn.result" }> =>
+          m.kind === "turn.result" && m.turnId === turnId,
+      );
+    const syncChannels = (generation: number, readable: number) =>
+      input.write(
+        `${JSON.stringify({ kind: "skills.changed", generation, part: 1, of: 1, files: [], prune: [], channels: [{ provider: "slack", status: "active", handle: "ada", workspaceName: "Acme", readableConversations: readable }] })}\n`,
+      );
+    const synced = (n: number) =>
+      messages.filter((m) => m.kind === "home.synced").length === n;
+
+    await until(() => messages.some((m) => m.kind === "ready"), "ready");
+    expect(await advertisedTools()).toContain("read_conversation");
+    input.write(
+      `${JSON.stringify({ kind: "turn.deliver", turnId: "t1", conversationId: "cv", message: "hello" })}\n`,
+    );
+    await until(() => resultOf("t1") !== undefined, "t1");
+    const ref1 = resultOf("t1")!.sessionRef;
+
+    syncChannels(2, 1);
+    await until(() => synced(1), "home.synced");
+    expect(await advertisedTools()).toContain("read_conversation");
+
+    input.write(
+      `${JSON.stringify({ kind: "turn.deliver", turnId: "t2", conversationId: "cv", message: "read #general" })}\n`,
+    );
+    await until(() => resultOf("t2") !== undefined, "t2");
+    expect(ref1).toBeTruthy();
+    expect(fake.sessionStarts).toEqual([{}]);
+
+    // Same grant count again: tool set unchanged, nothing restarts.
+    syncChannels(3, 1);
+    await until(() => synced(2), "second home.synced");
+    input.write(
+      `${JSON.stringify({ kind: "turn.deliver", turnId: "t3", conversationId: "cv", message: "still?" })}\n`,
+    );
+    await until(() => resultOf("t3") !== undefined, "t3");
+    expect(fake.sessionStarts).toHaveLength(1);
 
     input.write('{"kind":"shutdown"}\n');
     input.end();
@@ -699,6 +817,354 @@ describe("supervisor loop end-to-end (fake harness, stdio transport)", () => {
     await run;
   });
 
+  it("brief edits during a turn defer restart, clear and name-only changes invalidate, and repeated no-op saves do not", async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), "supervisor-brief-"));
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const fake = createFakeHarness({ store: createFakeSessionStore() });
+    const run = runSupervisor(
+      {
+        homeDir,
+        model: undefined,
+        effort: undefined,
+        instructions: "count in roman numerals",
+        agentName: "Ada",
+        channels: [],
+        peers: [],
+        connections: [],
+        harness: "fake",
+        runnerWsUrl: undefined,
+        bootstrapToken: undefined,
+        sandboxId: undefined,
+        outboundAttachments: false,
+      },
+      fake,
+      createStdioTransport(input, output),
+    );
+    const messages: SupervisorMessage[] = [];
+    const readAll = () => {
+      for (;;) {
+        const chunk = output.read()?.toString();
+        if (!chunk) return;
+        for (const line of chunk.trim().split("\n")) {
+          if (line)
+            messages.push(supervisorMessageSchema.parse(JSON.parse(line)));
+        }
+      }
+    };
+    const until = async (predicate: () => boolean, label: string) => {
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        readAll();
+        if (predicate()) return;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      throw new Error(`timed out waiting for ${label}`);
+    };
+    const resultOf = (turnId: string) =>
+      messages.find(
+        (m): m is Extract<SupervisorMessage, { kind: "turn.result" }> =>
+          m.kind === "turn.result" && m.turnId === turnId,
+      );
+    const syncInstructions = (
+      generation: number,
+      instructions: string,
+      agentName = "Ada",
+    ) =>
+      input.write(
+        `${JSON.stringify({ kind: "skills.changed", generation, part: 1, of: 1, files: [], prune: [], instructions, agentName })}\n`,
+      );
+    const synced = (n: number) =>
+      messages.filter((m) => m.kind === "home.synced").length === n;
+
+    try {
+      await until(() => messages.some((m) => m.kind === "ready"), "ready");
+
+      input.write(
+        `${JSON.stringify({ kind: "turn.deliver", turnId: "t1", conversationId: "cv", message: "hello" })}\n`,
+      );
+      await until(() => resultOf("t1") !== undefined, "t1");
+      const ref1 = resultOf("t1")!.sessionRef;
+      expect(ref1).toEqual(expect.any(String));
+      expect(ref1).not.toBe("");
+
+      // Save during a real streaming turn, without interrupting it.
+      input.write(
+        `${JSON.stringify({ kind: "turn.deliver", turnId: "slow", conversationId: "cv", message: '@fake:v1 {"steps":[{"op":"sleep","ms":400},{"op":"text","text":"original answer"}]}' })}\n`,
+      );
+      await until(
+        () => messages.some((m) => m.kind === "event" && m.turnId === "slow"),
+        "stream started",
+      );
+      expect(resultOf("slow")).toBeUndefined();
+      syncInstructions(2, "the number 11 is the most important number");
+      await until(() => synced(1), "home.synced");
+      expect(resultOf("slow")).toBeUndefined();
+      expect(fake.sessionStarts).toEqual([{}]);
+      await until(() => resultOf("slow") !== undefined, "slow result");
+      expect(resultOf("slow")).toMatchObject({
+        status: "done",
+        sessionRef: ref1,
+      });
+      expect(
+        messages.flatMap((m) =>
+          m.kind === "event" &&
+          m.turnId === "slow" &&
+          m.event.type === "text.delta"
+            ? [m.event.text]
+            : [],
+        ),
+      ).toEqual(["original answer"]);
+      expect(readFileSync(join(homeDir, "CLAUDE.md"), "utf8")).toContain(
+        "the number 11 is the most important number",
+      );
+
+      // The live conversation's next turn restarts its session on the same
+      // ref, and the turn's prompt carries the brief-change note ahead of the
+      // user's message (the fake echoes its prompt, so the delta is proof).
+      input.write(
+        `${JSON.stringify({ kind: "turn.deliver", turnId: "t2", conversationId: "cv", message: "best number?" })}\n`,
+      );
+      await until(() => resultOf("t2") !== undefined, "t2");
+      expect(resultOf("t2")!.sessionRef).toBe(ref1);
+      expect(fake.sessionStarts).toEqual([{}, { resumeSessionRef: ref1 }]);
+      const noteDelta = messages
+        .flatMap((m) =>
+          m.kind === "event" && m.event.type === "text.delta"
+            ? [m.event.text]
+            : [],
+        )
+        .find((text) => text.includes("best number?"));
+      expect(noteDelta).toContain("your operator just updated your brief");
+
+      // The same brief re-sent (a settings-form no-op save): nothing is
+      // stale, the session is reused.
+      syncInstructions(3, "the number 11 is the most important number");
+      await until(() => synced(2), "second home.synced");
+      input.write(
+        `${JSON.stringify({ kind: "turn.deliver", turnId: "t3", conversationId: "cv", message: "still?" })}\n`,
+      );
+      await until(() => resultOf("t3") !== undefined, "t3");
+      expect(fake.sessionStarts).toHaveLength(2);
+
+      const promptOf = (turnId: string) =>
+        messages
+          .flatMap((m) =>
+            m.kind === "event" &&
+            m.turnId === turnId &&
+            m.event.type === "text.delta"
+              ? [m.event.text]
+              : [],
+          )
+          .join("");
+      expect(promptOf("t3")).not.toContain(
+        "your operator just updated your brief",
+      );
+      for (const [generation, instructions, agentName] of [
+        [4, "", "Ada"],
+        [5, "", "Grace"],
+        [6, "", "Grace"],
+        [7, "", "Grace"],
+      ] as const) {
+        syncInstructions(generation, instructions, agentName);
+        await until(() => synced(generation - 1), "brief sync");
+        const turnId = `save-${generation}`;
+        input.write(
+          `${JSON.stringify({ kind: "turn.deliver", turnId, conversationId: "cv", message: "hello" })}\n`,
+        );
+        await until(() => resultOf(turnId) !== undefined, turnId);
+        expect(resultOf(turnId)!.sessionRef).toBe(ref1);
+        if (generation <= 5)
+          expect(promptOf(turnId)).toContain(
+            "your operator just updated your brief",
+          );
+        else
+          expect(promptOf(turnId)).not.toContain(
+            "your operator just updated your brief",
+          );
+        expect(fake.sessionStarts).toHaveLength(Math.min(generation, 5) - 1);
+      }
+      const doc = readFileSync(join(homeDir, "CLAUDE.md"), "utf8");
+      expect(doc).not.toContain("the number 11");
+      expect(doc).toContain("Grace");
+    } finally {
+      input.write('{"kind":"shutdown"}\n');
+      input.end();
+      await run;
+    }
+  });
+
+  it.each(["together", "brief first", "brief last"] as const)(
+    "preserves independent surface notes (%s) for every live conversation, once",
+    async (order) => {
+      const homeDir = mkdtempSync(join(tmpdir(), "supervisor-surfaces-"));
+      const input = new PassThrough();
+      const output = new PassThrough();
+      const fake = createFakeHarness({ store: createFakeSessionStore() });
+      const run = runSupervisor(
+        {
+          homeDir,
+          model: undefined,
+          effort: undefined,
+          instructions: "Old brief",
+          agentName: "Ada",
+          channels: [],
+          peers: [],
+          connections: [],
+          harness: "fake",
+          runnerWsUrl: undefined,
+          bootstrapToken: undefined,
+          sandboxId: undefined,
+          outboundAttachments: false,
+        },
+        fake,
+        createStdioTransport(input, output),
+      );
+      const messages: SupervisorMessage[] = [];
+      const until = async (predicate: () => boolean) => {
+        const deadline = Date.now() + 10_000;
+        while (Date.now() < deadline) {
+          const chunk = output.read()?.toString();
+          if (chunk)
+            for (const line of chunk.trim().split("\n")) {
+              if (line)
+                messages.push(supervisorMessageSchema.parse(JSON.parse(line)));
+            }
+          if (predicate()) return;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        throw new Error("timed out waiting for supervisor");
+      };
+      const resultOf = (turnId: string) =>
+        messages.find(
+          (m): m is Extract<SupervisorMessage, { kind: "turn.result" }> =>
+            m.kind === "turn.result" && m.turnId === turnId,
+        );
+      const promptOf = (turnId: string) =>
+        messages
+          .flatMap((m) =>
+            m.kind === "event" &&
+            m.turnId === turnId &&
+            m.event.type === "text.delta"
+              ? [m.event.text]
+              : [],
+          )
+          .join("");
+      const deliver = async (conversationId: string, turnId: string) => {
+        input.write(
+          `${JSON.stringify({ kind: "turn.deliver", conversationId, turnId, message: "hello" })}\n`,
+        );
+        await until(() => resultOf(turnId) !== undefined);
+        return resultOf(turnId)!.sessionRef;
+      };
+      let generation = 0;
+      const sync = async (
+        surface: Partial<
+          Extract<SupervisorWorkItem, { kind: "skills.changed" }>
+        >,
+      ) => {
+        generation += 1;
+        input.write(
+          `${JSON.stringify({ kind: "skills.changed", generation, part: 1, of: 1, files: [], prune: [], ...surface })}\n`,
+        );
+        await until(() =>
+          messages.some(
+            (m) => m.kind === "home.synced" && m.generation === generation,
+          ),
+        );
+      };
+      try {
+        await until(() => messages.some((m) => m.kind === "ready"));
+        const refs = [await deliver("a", "a1"), await deliver("b", "b1")];
+        for (const ref of refs) {
+          expect(ref).toEqual(expect.any(String));
+          expect(ref).not.toBe("");
+        }
+        expect(refs[0]).not.toBe(refs[1]);
+        const surfaces = {
+          channels: [
+            {
+              provider: "slack",
+              status: "active" as const,
+              handle: "ada",
+              workspaceName: "Acme",
+            },
+          ],
+          peers: [{ name: "Ray" }],
+          connections: [
+            { provider: "notion", name: "Notion", label: null, host: null },
+          ],
+        };
+        if (order === "together")
+          await sync({ ...surfaces, instructions: "New brief" });
+        else if (order === "brief first") {
+          await sync({ instructions: "Intermediate brief" });
+          await sync({ instructions: "New brief" });
+          await sync(surfaces);
+        } else {
+          await sync(surfaces);
+          await sync({ instructions: "Intermediate brief" });
+          await sync({ instructions: "New brief" });
+        }
+        // Repeated changes remain bounded per surface, with the latest facts.
+        await sync({
+          ...surfaces,
+          channels: [{ ...surfaces.channels[0]!, status: "disabled" }],
+          connections: [
+            { provider: "github", name: "GitHub", label: null, host: null },
+          ],
+        });
+        await sync({ instructions: "Newest brief" });
+        expect(fake.sessionStarts).toEqual([{}, {}]);
+        expect(await advertisedTools()).toContain("message_agent");
+        const doc = readFileSync(join(homeDir, "CLAUDE.md"), "utf8");
+        for (const text of ["Newest brief", "Ray", "GitHub"])
+          expect(doc).toContain(text);
+        for (const [index, conversationId] of ["a", "b"].entries()) {
+          const turnId = `${conversationId}2`;
+          expect(await deliver(conversationId, turnId)).toBe(refs[index]);
+          const prompt = promptOf(turnId);
+          expect(
+            prompt.match(/your operator just updated your brief/g),
+          ).toHaveLength(1);
+          expect(prompt.match(/Your Slack app/g)).toHaveLength(1);
+          expect(prompt).toContain("Your Slack app was just removed");
+          expect(prompt).not.toContain("attached and live again");
+          expect(prompt.match(/GitHub is now connected/g)).toHaveLength(1);
+          expect(prompt).toContain("Notion is no longer available");
+          expect(await deliver(conversationId, `${conversationId}3`)).toBe(
+            refs[index],
+          );
+          expect(promptOf(`${conversationId}3`)).not.toContain(
+            "[Platform notice]",
+          );
+          expect(promptOf(`${conversationId}3`)).not.toContain(
+            "Your Slack app",
+          );
+          expect(promptOf(`${conversationId}3`)).not.toContain(
+            "GitHub is now connected",
+          );
+          expect(promptOf(`${conversationId}3`)).not.toContain(
+            "Notion is no longer available",
+          );
+          expect(promptOf(`${conversationId}3`)).not.toContain(
+            "your operator just updated your brief",
+          );
+        }
+        expect(fake.sessionStarts).toEqual([
+          {},
+          {},
+          { resumeSessionRef: refs[0] },
+          { resumeSessionRef: refs[1] },
+        ]);
+      } finally {
+        input.write('{"kind":"shutdown"}\n');
+        input.end();
+        await run;
+      }
+    },
+  );
+
   it("prepends delivery-only context to the harness prompt — and only when present", async () => {
     const homeDir = mkdtempSync(join(tmpdir(), "supervisor-"));
     const input = new PassThrough();
@@ -762,6 +1228,70 @@ describe("supervisor loop end-to-end (fake harness, stdio transport)", () => {
     );
     // Turn 2: no context, no stray separator — the message alone.
     expect(deltas[1]).toBe("Fake answer to: thanks");
+  });
+
+  it("an ephemeral turn runs on a fresh session and leaves none behind", async () => {
+    // A memory review's conversation is a series of unrelated runs: each
+    // must start clean, never resume (or reuse) another run's transcript.
+    // The first turn here is an ordinary one: a review delivered without
+    // the flag during a rollout leaves a live session behind, which the
+    // next flagged review must not inherit. MUTATION-PROOF: drop the
+    // up-front release in `sessionFor` and r1 reuses "before"'s session;
+    // drop the release in the finally and "after" reuses r2's. Either way
+    // a start goes missing.
+    const homeDir = mkdtempSync(join(tmpdir(), "supervisor-ephemeral-"));
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const fake = createFakeHarness();
+    const run = runSupervisor(
+      {
+        homeDir,
+        model: undefined,
+        effort: undefined,
+        instructions: undefined,
+        agentName: undefined,
+        channels: [],
+        peers: [],
+        connections: [],
+        harness: "fake",
+        runnerWsUrl: undefined,
+        bootstrapToken: undefined,
+        sandboxId: undefined,
+        outboundAttachments: false,
+      },
+      fake,
+      createStdioTransport(input, output),
+    );
+
+    const deliver = (turnId: string, extra: Record<string, unknown> = {}) =>
+      input.write(
+        `${JSON.stringify({ kind: "turn.deliver", turnId, conversationId: "review", message: "review", ...extra })}\n`,
+      );
+    deliver("before");
+    deliver("r1", { ephemeralSession: true, resumeSessionRef: "ignored" });
+    deliver("r2", { ephemeralSession: true });
+    deliver("after");
+    input.write('{"kind":"shutdown"}\n');
+    input.end();
+    await run;
+
+    const messages: SupervisorMessage[] = (output.read()?.toString() ?? "")
+      .trim()
+      .split("\n")
+      .map((line: string) => supervisorMessageSchema.parse(JSON.parse(line)));
+    const results = messages.flatMap((m) =>
+      m.kind === "turn.result" ? [m] : [],
+    );
+    expect(results.map((r) => r.status)).toEqual([
+      "done",
+      "done",
+      "done",
+      "done",
+    ]);
+    // Four starts, none of them a resume (r1's ref is ignored): nothing was
+    // reused across the review boundary in either direction.
+    expect(fake.sessionStarts).toEqual([{}, {}, {}, {}]);
+    expect(new Set(results.map((r) => r.sessionRef)).size).toBe(4);
   });
 });
 

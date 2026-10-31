@@ -28,8 +28,9 @@ const log = logger.child({ component: "attachment-service" });
  * path. Bytes go exclusively through the AttachmentBlobStore provider seam —
  * nothing else in the codebase may read or write the `data` column.
  *
- * Lifecycle: a door (web upload / Slack fetch) creates a `pending` row (or a
- * byteless `failed` row for a fetch that never yielded bytes), and the
+ * Lifecycle: a door (web upload / Slack fetch) reserves an `uploading` row,
+ * then marks it `pending` only once its blob is ready (or creates a byteless
+ * `failed` row for a fetch that never yielded bytes). The
  * turn-create TRANSACTION binds the rows to their turn. The bind being
  * transactional with the turn row is load-bearing, not hygiene: `createTurn`
  * signals the runner poll before it returns, and both the dispatch composer
@@ -110,45 +111,109 @@ export const createPendingAttachment = async (input: CreateAttachmentInput) => {
     );
   }
 
-  const pending = await db.conversationAttachment.count({
-    where: { conversationId: input.conversationId, status: "pending" },
-  });
-  if (pending >= MAX_PENDING_ATTACHMENTS_PER_CONVERSATION) {
-    throw new ServiceError(
-      "CONFLICT",
-      "Too many unsent uploads in this conversation. Send or wait a moment.",
-    );
-  }
-
-  const row = await db.conversationAttachment.create({
-    data: {
-      conversationId: input.conversationId,
-      userId: input.userId,
-      source: input.source,
-      name: sanitizeAttachmentName(input.name),
-      // Bounded, not just lowercased: the wire's manifest schema caps
-      // mimeType at 100 chars, and the Slack door takes this straight from a
-      // provider payload — an over-long type would make the supervisor drop
-      // the whole frame (the file silently absent).
-      mimeType: normalizeMimeType(input.mimeType),
-      sizeBytes: input.bytes.byteLength,
-      sha256: createHash("sha256").update(input.bytes).digest("hex"),
-      status: "pending",
+  // Reserve capacity across processes before writing bytes. Uploading rows
+  // count toward the cap, but cannot be evicted or bound by another tab.
+  const mine = {
+    conversationId: input.conversationId,
+    userId: input.userId,
+    turnId: null,
+    direction: "inbound",
+  };
+  const { row, removed } = await db.$transaction(
+    async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`pending-attachment:${JSON.stringify([input.conversationId, input.userId])}`}))`;
+      const pending = await tx.conversationAttachment.count({
+        where: { ...mine, status: { in: ["pending", "uploading"] } },
+      });
+      const excess = pending - MAX_PENDING_ATTACHMENTS_PER_CONVERSATION + 1;
+      const oldest =
+        excess > 0
+          ? await tx.conversationAttachment.findMany({
+              where: { ...mine, status: "pending" },
+              orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+              select: { id: true },
+              take: excess,
+            })
+          : [];
+      const removed = await removePendingRows(
+        tx,
+        oldest.map(({ id }) => id),
+        mine,
+      );
+      if (removed.length < excess) {
+        // A concurrent bind may have saved a selected row and freed its slot.
+        // Recount after DELETE's lock wait before refusing an all-active batch.
+        const remaining = await tx.conversationAttachment.count({
+          where: { ...mine, status: { in: ["pending", "uploading"] } },
+        });
+        if (remaining >= MAX_PENDING_ATTACHMENTS_PER_CONVERSATION) {
+          throw new ServiceError(
+            "UNPROCESSABLE",
+            "Too many files are uploading. Wait for them to finish and try again.",
+          );
+        }
+      }
+      const row = await tx.conversationAttachment.create({
+        data: {
+          conversationId: input.conversationId,
+          userId: input.userId,
+          source: input.source,
+          name: sanitizeAttachmentName(input.name),
+          // Bounded, not just lowercased: the wire's manifest schema caps
+          // mimeType at 100 chars, and the Slack door takes this straight from a
+          // provider payload — an over-long type would make the supervisor drop
+          // the whole frame (the file silently absent).
+          mimeType: normalizeMimeType(input.mimeType),
+          sizeBytes: input.bytes.byteLength,
+          sha256: createHash("sha256").update(input.bytes).digest("hex"),
+          status: "uploading",
+        },
+        select: attachmentMetaSelect,
+      });
+      return { row, removed };
     },
-    select: attachmentMetaSelect,
-  });
+    {
+      maxWait: 10_000,
+      timeout: 15_000,
+      isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+    },
+  );
+  await cleanupRemovedPayloads(removed);
 
   try {
     await putBlobAndRecordRef(row.id, input.conversationId, input.bytes);
+    return await db.conversationAttachment.update({
+      where: {
+        id: row.id,
+        conversationId: input.conversationId,
+        userId: input.userId,
+        status: "uploading",
+        turnId: null,
+      },
+      data: { status: "pending" },
+      select: attachmentMetaSelect,
+    });
   } catch (err) {
     // A metadata row without bytes must not linger as sendable.
-    await db.conversationAttachment
-      .delete({ where: { id: row.id } })
-      .catch(() => {});
+    try {
+      const removed = await db.$queryRaw<
+        Array<{ id: string; storageRef: string | null }>
+      >`
+        DELETE FROM conversation_attachments
+        WHERE id = ${row.id} AND conversation_id = ${input.conversationId}
+          AND user_id IS NOT DISTINCT FROM ${input.userId}
+          AND status = 'uploading' AND turn_id IS NULL
+        RETURNING id, storage_ref AS "storageRef"
+      `;
+      await cleanupRemovedPayloads(removed);
+    } catch (rollbackErr) {
+      log.warn(
+        { attachmentId: row.id, err: rollbackErr },
+        "pending attachment rollback failed",
+      );
+    }
     throw err;
   }
-
-  return row;
 };
 
 /**
@@ -170,10 +235,25 @@ const putBlobAndRecordRef = async (
     bytes,
   );
   if (storageRef !== null) {
-    await db.conversationAttachment.update({
-      where: { id: attachmentId },
-      data: { storageRef },
-    });
+    try {
+      await db.conversationAttachment.update({
+        where: { id: attachmentId },
+        data: { storageRef },
+      });
+    } catch (err) {
+      // The metadata may have been removed while the external put ran.
+      // Do not orphan the object whose ref never reached the database.
+      // A failed update can have an ambiguous commit outcome. Only clean
+      // the new object here when the metadata is demonstrably gone.
+      const existing = await db.conversationAttachment.findUnique({
+        where: { id: attachmentId },
+        select: { id: true },
+      });
+      if (!existing) {
+        await cleanupRemovedPayloads([{ id: attachmentId, storageRef }]);
+      }
+      throw err;
+    }
   }
 };
 
@@ -420,8 +500,8 @@ export const createOutboundAttachment = async (
  * (`pending` → `bound`). Byteless `failed` rows — a channel message's
  * over-cap or unfetchable files — carry no bytes and never enter the wire
  * manifest, so they ride along beyond that cap: capping them here would make
- * a 6-file Slack message abort the whole transaction and lose the message,
- * text included.
+ * an over-cap Slack message abort the whole transaction and lose the
+ * message, text included.
  */
 export const bindAttachmentsToTurn = async (
   tx: Prisma.TransactionClient,
@@ -506,11 +586,17 @@ export interface TurnAttachmentPlan {
 /**
  * Compose the dispatch-time view of one turn's attachments: the wire manifest
  * (deliverable rows only) and the context note that tells the agent where
- * the files landed — plus honest mentions of fetches that failed. Metadata
+ * the files landed, plus honest mentions of fetches that failed. Metadata
  * only; the runner pulls bytes separately.
+ *
+ * `maxFiles` is the manifest bound of the runner this goes to (an older
+ * runner parses a smaller one than `MAX_ATTACHMENTS_PER_MESSAGE`).
+ * Deliverable files past it are not sent; the note names each one so the
+ * agent can ask for it instead of silently missing it.
  */
 export const planTurnAttachments = async (
   turnId: string,
+  maxFiles: number,
 ): Promise<TurnAttachmentPlan> => {
   // INBOUND only. The agent's own send_file rows bind to the same turn, and
   // a re-dispatch (runner restart mid-turn) must not hand the agent its own
@@ -530,9 +616,11 @@ export const planTurnAttachments = async (
   });
   if (rows.length === 0) return { manifest: [], note: null };
 
-  const deliverable = rows.filter(
+  const allDeliverable = rows.filter(
     (row) => row.status === "bound" && row.sha256.length === 64,
   );
+  const deliverable = allDeliverable.slice(0, maxFiles);
+  const heldBack = allDeliverable.slice(maxFiles);
   const names = dedupeAttachmentNames(deliverable.map((row) => row.name));
   const manifest = deliverable.map((row, i) => ({
     id: row.id,
@@ -560,6 +648,14 @@ export const planTurnAttachments = async (
       ...failed.map(
         (row) =>
           `The user also attached "${row.name}" but it could not be retrieved (${row.error ?? "fetch failed"}) — tell them if it matters.`,
+      ),
+    );
+  }
+  if (heldBack.length > 0) {
+    lines.push(
+      ...heldBack.map(
+        (row) =>
+          `The user also attached "${row.name}" but it could not be delivered with this message. If it matters, ask them to send it again in a separate message.`,
       ),
     );
   }
@@ -743,6 +839,43 @@ export const getAttachmentBytesForRunner = async (
 };
 
 /**
+ * A file a person sent THIS agent, found by the path it landed at in the
+ * agent's home: `attachments/<turn-id>/<name>`, with or without the
+ * `/workspace/` home prefix the turn's note names it by. The name resolves
+ * exactly as delivery wrote it (`planTurnAttachments`: the turn's bound
+ * inbound files, deduped in order), so a renamed duplicate is found under
+ * its landed name. Fenced to the agent's own conversations: an agent can
+ * never read another agent's attachment by guessing a path. Null on any
+ * miss.
+ */
+export const getAgentAttachmentBytesByPath = async (
+  agentId: string,
+  path: string,
+): Promise<Buffer | null> => {
+  const match = /^(?:\/workspace\/)?attachments\/([^/]+)\/([^/]+)$/.exec(
+    path.trim(),
+  );
+  if (!match) return null;
+  const [, turnId, name] = match;
+  const rows = await db.conversationAttachment.findMany({
+    where: {
+      turnId,
+      status: "bound",
+      direction: "inbound",
+      conversation: { agentId },
+    },
+    orderBy: { createdAt: "asc" },
+    select: { id: true, storageRef: true, name: true, sha256: true },
+  });
+  const deliverable = rows.filter((row) => row.sha256.length === 64);
+  const names = dedupeAttachmentNames(deliverable.map((row) => row.name));
+  const at = names.findIndex((landed) => landed === name);
+  const row = deliverable[at];
+  if (!row) return null;
+  return getAttachmentStore().get({ id: row.id, storageRef: row.storageRef });
+};
+
+/**
  * Poll-time sweep: uploads nobody ever sent. Bounded and non-fatal like its
  * sibling sweeps. Rows go FIRST (status-fenced), then the removed rows'
  * external payloads best-effort: a crash between the two leaves an orphaned
@@ -750,26 +883,53 @@ export const getAttachmentBytesForRunner = async (
  */
 export const sweepStalePendingAttachments = async (): Promise<number> => {
   const cutoff = new Date(Date.now() - PENDING_ATTACHMENT_TTL_MS);
-  const stale = await db.conversationAttachment.findMany({
-    where: { status: "pending", createdAt: { lt: cutoff } },
-    select: { id: true, storageRef: true },
-    take: 200,
-  });
-  if (stale.length === 0) return 0;
+  const removed = await db.$queryRaw<
+    Array<{ id: string; storageRef: string | null }>
+  >`
+    DELETE FROM conversation_attachments
+    WHERE id IN (
+      SELECT id FROM conversation_attachments
+      WHERE status IN ('pending', 'uploading') AND turn_id IS NULL
+        AND direction = 'inbound' AND created_at < ${cutoff}
+      ORDER BY created_at, id LIMIT 200
+    ) AND status IN ('pending', 'uploading') AND turn_id IS NULL
+      AND direction = 'inbound' AND created_at < ${cutoff}
+    RETURNING id, storage_ref AS "storageRef"
+  `;
+  await cleanupRemovedPayloads(removed);
+  const count = removed.length;
+  if (count > 0) log.info({ count }, "swept stale pending attachments");
+  return count;
+};
 
-  // Delete the ROWS first, status-fenced: a row that got bound to a turn
-  // between the read above and now is left alone, so its payload is never
-  // deleted out from under a live turn. Only rows this sweep actually removed
-  // get their external payload cleaned up (the Postgres arm is a no-op — the
-  // cascade already took the bytes).
-  const staleIds = stale.map((row) => row.id);
-  const removed = await db.conversationAttachment.findMany({
-    where: { id: { in: staleIds }, status: "pending" },
-    select: { id: true, storageRef: true },
-  });
-  const { count } = await db.conversationAttachment.deleteMany({
-    where: { id: { in: removed.map((row) => row.id) }, status: "pending" },
-  });
+/**
+ * Delete unsent attachment rows, then their external payloads. Rows go FIRST,
+ * status-fenced: a row bound to a turn since the caller read it is left
+ * alone, so its payload is never deleted out from under a live turn. Only
+ * rows actually removed get their payload cleaned up (the Postgres arm is a
+ * no-op: the cascade already took the bytes).
+ */
+const removePendingRows = async (
+  tx: Prisma.TransactionClient,
+  ids: string[],
+  owner: { conversationId: string; userId: string | null },
+): Promise<Array<{ id: string; storageRef: string | null }>> => {
+  if (ids.length === 0) return [];
+  // DELETE rechecks the predicate after a competing bind's row lock releases.
+  // RETURNING is the only authoritative list of payloads safe to remove.
+  return tx.$queryRaw`
+    DELETE FROM conversation_attachments
+    WHERE id IN (${Prisma.join(ids)}) AND status = 'pending'
+      AND turn_id IS NULL AND direction = 'inbound'
+      AND conversation_id = ${owner.conversationId}
+      AND user_id IS NOT DISTINCT FROM ${owner.userId}
+    RETURNING id, storage_ref AS "storageRef"
+  `;
+};
+
+const cleanupRemovedPayloads = async (
+  removed: { id: string; storageRef: string | null }[],
+): Promise<void> => {
   const external = removed.filter((row) => row.storageRef !== null);
   if (external.length > 0) {
     await getAttachmentStore()
@@ -778,8 +938,6 @@ export const sweepStalePendingAttachments = async (): Promise<number> => {
         log.warn({ err }, "external attachment payload cleanup failed"),
       );
   }
-  if (count > 0) log.info({ count }, "swept stale pending attachments");
-  return count;
 };
 
 /**

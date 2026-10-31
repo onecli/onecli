@@ -7,6 +7,12 @@ import {
   regenerateApiKey,
 } from "../services/api-key-service";
 import {
+  AUDIT_ACTIONS,
+  AUDIT_SERVICES,
+  AUDIT_SOURCE,
+  recordAuditEvent,
+} from "../services/audit-service";
+import {
   createSshKey,
   deleteSshKey,
   listSshKeys,
@@ -87,11 +93,21 @@ export const userRoutes = () => {
     return c.json({ apiKey });
   });
 
-  // POST /user/api-key/regenerate
+  // POST /user/api-key/regenerate: rotates the caller's personal key for this
+  // workspace. Audited: it is a credential lifecycle event (the old key stops
+  // working at once), and the dashboard's API Key page and the CLI share
+  // this one door.
   app.post("/api-key/regenerate", identity, async (c) => {
     const auth = c.get("auth");
-    const result = await regenerateApiKey(auth.userId, {
-      workspaceId: requireWorkspaceId(auth),
+    const workspaceId = requireWorkspaceId(auth);
+    const result = await regenerateApiKey(auth.userId, { workspaceId });
+    await recordAuditEvent({
+      workspaceId,
+      userId: auth.userId,
+      userEmail: auth.userEmail,
+      action: AUDIT_ACTIONS.REGENERATE,
+      service: AUDIT_SERVICES.API_KEY,
+      source: AUDIT_SOURCE.API,
     });
     return c.json(result);
   });

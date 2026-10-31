@@ -16,6 +16,7 @@ const HOST = "circleback.ai";
 
 export const circlebackPermissions: AppPermissionDefinition = {
   provider: "circleback",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

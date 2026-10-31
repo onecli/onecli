@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import type { AgentKind } from "@/lib/api/types";
 import { act, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -20,7 +21,7 @@ vi.hoisted(() => {
 const state = vi.hoisted(() => ({
   params: new URLSearchParams(),
   availability: "ready" as string,
-  agents: [] as { id: string; kind: string; name: string }[],
+  agents: [] as { id: string; kind: AgentKind; name: string }[],
   agentsPending: false,
   org: { byoLegacy: false, byoEnabled: false } as
     | { byoLegacy: boolean; byoEnabled: boolean }
@@ -40,18 +41,8 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: mocks.replace, push: vi.fn() }),
   usePathname: () => "/w/w1/agents",
 }));
-// The roster's cards are not what this suite is about (and they read the route
-// and format timestamps) — same stand-in the sibling suite uses.
-vi.mock("./agent-card", () => ({
-  AgentCard: ({ agent }: { agent: { name: string } }) => (
-    <div>{agent.name}</div>
-  ),
-}));
 vi.mock("@/hooks/use-agents", () => ({
   useAgents: () => ({ data: state.agents, isPending: state.agentsPending }),
-}));
-vi.mock("@/hooks/use-grants", () => ({
-  useGrantsSummary: () => ({ data: [] }),
 }));
 vi.mock("@/hooks/use-hosted-availability", () => ({
   useHostedAvailability: () => state.availability,

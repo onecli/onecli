@@ -16,6 +16,7 @@ import { useAgentGrants } from "@/hooks/use-grants";
 import { useConnections } from "@/hooks/use-connections";
 import { useAppPermissionDefinitions } from "@/hooks/use-app-permissions";
 import { useEffectiveCredentials } from "@/lib/api/policy-visibility";
+import { defaultGrantConsent } from "@/lib/api/default-grant";
 import { useManageConnectionState } from "@/hooks/use-manage-connection-state";
 import { ConnectionGrantRow } from "./connection-grant-row";
 import { ManagePermissionsDialog } from "./manage-permissions-dialog";
@@ -28,10 +29,9 @@ import { ManagePermissionsDialog } from "./manage-permissions-dialog";
  * agent — because the reader arrived from "this agent lacks access", already
  * knowing which agent.
  *
- * Toggling on writes the default attach (the card's stated consent contract:
- * reads allowed, writes and anything else needing approval; full access for
- * an app with no tool list); the agent page's Apps section remains the place
- * to narrow tools afterwards.
+ * Toggling on writes the default attach (`defaultConnectionGrant`), the
+ * consent line below states it per app; the agent page's Apps section
+ * remains the place to narrow tools afterwards.
  * The rows ARE the agent page's rows — ConnectionGrantRow, fed the same
  * per-connection derivation as AppsTab — so every law that surface enforces
  * (org-granted locked on, org-blocked frozen in the ON direction but still
@@ -110,16 +110,11 @@ export const AttachConnectionDialog = ({
   const credentialByConnection = new Map(
     (credentialsQuery.data?.connections ?? []).map((e) => [e.id, e]),
   );
-  const hasCatalog = (definitions ?? []).some((d) => d.provider === provider);
-  // What turning an account on grants: the default attach, or full access
-  // for an app with no tool list to split on (`defaultConnectionGrant`).
-  // Said only once the catalog is known, so a loading catalog never reads
-  // as "full access".
-  const grantLine = !definitionsKnown
-    ? ""
-    : hasCatalog
-      ? " Reads are allowed. Writes and anything else need your approval."
-      : " It gets full access.";
+  const catalog = (definitions ?? []).find((d) => d.provider === provider);
+  // What turning an account on grants (`defaultGrantConsent`). Said only
+  // once the catalog is known, so a loading catalog never reads as "full
+  // access".
+  const grantLine = definitionsKnown ? ` ${defaultGrantConsent(catalog)}` : "";
   // Until the pool resolves the dialog cannot know whether it is a Connect
   // or an Attach dialog, so the header names only the app: a cold deep-link
   // landing must not say "Attach" and then flip to "Connect" (the exact
@@ -155,15 +150,11 @@ export const AttachConnectionDialog = ({
                   // connect carries this agent, so the new account is on
                   // for it alone.
                   <>
-                    Connecting turns the account on for {who}, not for your
-                    other agents.{grantLine} Adjust access anytime from the
-                    agent&apos;s Connections section.
+                    Only {who} gets access.{grantLine}
                   </>
                 ) : (
                   <>
-                    Turn on the {appName} accounts {who} should be able to use.
-                    Turning one on applies immediately.{grantLine} Adjust access
-                    anytime from the agent&apos;s Connections section.
+                    Turn on the {appName} accounts {who} should use.{grantLine}
                   </>
                 )}
               </DialogDescription>
@@ -213,8 +204,11 @@ export const AttachConnectionDialog = ({
           ) : (
             // Bounded like every sibling list dialog (the reflection dialog's
             // exact scroller) — a many-account pool must not outgrow the
-            // viewport and strand the top rows or the footer.
-            <div className="max-h-[min(24rem,50vh)] min-w-0 divide-y overflow-y-auto overscroll-contain">
+            // viewport and strand the top rows or the footer. The row's ⋮
+            // overhangs the row's edge (a negative margin), so the list
+            // borrows a gutter from the dialog's padding: the ⋮ and its focus
+            // ring fit without a sideways scroll, and the rows stay put.
+            <div className="-mr-3 max-h-[min(24rem,50vh)] min-w-0 divide-y overflow-y-auto overscroll-contain pr-3">
               {pool.map((connection) => {
                 const grant = grantByConnection.get(connection.id);
                 const credential = credentialByConnection.get(connection.id);
@@ -235,7 +229,7 @@ export const AttachConnectionDialog = ({
                     credentialOrgBlocked={
                       credential?.kind === "connection" && credential.orgBlocked
                     }
-                    hasCatalog={hasCatalog}
+                    hasCatalog={catalog !== undefined}
                     onManage={() => setManageId(connection.id)}
                   />
                 );

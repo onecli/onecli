@@ -37,6 +37,10 @@ impl ApprovalSummary {
         if self.refs.iter().any(|r| r.id == row.value) {
             return;
         }
+        if let Some(range) = self.fallback.as_mut() {
+            self.details.drain(range.clone());
+            *range = 0..0;
+        }
         self.details.insert(0, row);
         // Every row moved down one: each record keeps naming its own row.
         for r in &mut self.refs {
@@ -555,6 +559,35 @@ mod tests {
         let subject = s.subject.unwrap();
         assert_eq!(subject.row, 2);
         assert_eq!(subject.url, s.details[2].url);
+    }
+
+    #[test]
+    fn fallback_records_survive_comparison_and_a_link_replaces_only_ids() {
+        let path = "/repos/acme/web/issues/42";
+        let body = br#"{"state":"closed"}"#;
+        let mut s = super::super::generic::summarize(&super::super::SummaryRequest {
+            method: "PATCH",
+            path,
+            content_type: Some("application/json"),
+            body: Some(body),
+        });
+        s.apply_current(body, br#"{"state":"open"}"#);
+        assert!(s
+            .details
+            .iter()
+            .any(|d| d.label == "Issue" && d.value == "42"));
+        s.link_path_record("github", "api.github.com", "PATCH", path);
+        assert_eq!(s.details[0].value, "acme/web#42");
+        assert_eq!(s.details.iter().filter(|d| d.label == "Issue").count(), 1);
+        assert!(s
+            .details
+            .iter()
+            .any(|d| d.label == "Endpoint" && d.value == path));
+        assert!(s.details.iter().any(|d| d.value == "open → closed"));
+        assert!(s.is_generic());
+        let wire = serde_json::to_value(&s).unwrap();
+        assert!(wire.get("fallback").is_none());
+        assert!(wire.get("generic").is_none());
     }
 
     #[test]

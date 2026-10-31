@@ -7,7 +7,7 @@ import type {
   AdapterWorkItem,
 } from "@onecli/agent-protocol";
 import type { AdapterConfig } from "./config";
-import type { ControlPlaneClient } from "./control-plane";
+import { ControlPlaneError, type ControlPlaneClient } from "./control-plane";
 import { createApprovalsManager } from "./approvals";
 import { mirrorFinishedTurn, mirrorFollowUpReply } from "./mirror";
 import {
@@ -45,6 +45,11 @@ interface PresenceRuntime {
   credential: string | null;
   socket: ProviderTransport | null;
 }
+
+/** The pause before re-sending an event the control plane answered 409 for
+ * (still processing elsewhere). Four of them outlast a dead holder's claim
+ * lease (two minutes), so the last retry can take the event over. */
+const IN_FLIGHT_RETRY_MS = 45_000;
 
 export interface AdapterDeps {
   config: AdapterConfig;
@@ -98,9 +103,11 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
 
   // ── The socket pump ─────────────────────────────────────────────────────
 
-  /** Ingest with bounded retry — the envelope is acked, so a dropped message
-   * is gone unless we re-attempt. Idempotent by eventId (control-plane dedupe),
-   * so a retry that races a slow success is a harmless `duplicate`. */
+  /** Ingest with bounded retry: the envelope is acked, so a dropped message
+   * is gone unless we re-attempt. Idempotent by eventId (control-plane
+   * ledger), so a retry that races a slow success is a harmless `duplicate`,
+   * and a 409 (the same event still processing elsewhere) waits out a claim
+   * that may be a dead replica's: the longer schedule spans its lease. */
   const ingestWithRetry = async (
     runtime: PresenceRuntime,
     input: { event: unknown; eventId: string },
@@ -121,7 +128,8 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
           log("ingest failed after retries", { err: String(err) });
           return;
         }
-        await sleep(delay);
+        const inFlight = err instanceof ControlPlaneError && err.status === 409;
+        await sleep(inFlight ? IN_FLIGHT_RETRY_MS : delay);
         delay = Math.min(delay * 2, 8_000);
       }
     }
@@ -197,6 +205,7 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
             approvalId: decision.approvalId,
             decision: decision.decision,
             clickerExternalUserId: decision.clickerExternalUserId,
+            ...(decision.choice !== undefined && { choice: decision.choice }),
           })
           .catch((err: unknown) =>
             log("action decision forward failed", { err }),

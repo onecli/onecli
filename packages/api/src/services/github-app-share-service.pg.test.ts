@@ -233,6 +233,25 @@ const credsOf = async (id: string) => {
 describe.skipIf(!PROOF_URL)(
   "GitHub App installations: one connection per org",
   () => {
+    it("names the connections already reaching a workspace, its own before the org's", async () => {
+      // The same installation connected at the org level AND in WS_A: an
+      // agent page in WS_A switches on WS_A's own row first.
+      const orgRow = await seedOriginal({ organizationId: ORG }, "111", "acme");
+      const ownRow = await seedOriginal({ workspaceId: WS_A }, "111", "acme");
+
+      const forA = await share.listSharedInstallations(
+        caller({ workspaceId: WS_A }),
+      );
+      expect(forA).toHaveLength(1);
+      expect(forA[0]?.connectedHereIds).toEqual([ownRow.id, orgRow.id]);
+
+      // WS_B only inherits the org row; WS_A's own row never leaks to it.
+      const forB = await share.listSharedInstallations(
+        caller({ workspaceId: WS_B }),
+      );
+      expect(forB[0]?.connectedHereIds).toEqual([orgRow.id]);
+    });
+
     it("lists the org's installations and whether each already reaches the caller", async () => {
       await seedOriginal({ workspaceId: WS_A }, "111", "acme");
       const forB = await share.listSharedInstallations(

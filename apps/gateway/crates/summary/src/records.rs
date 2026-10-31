@@ -193,14 +193,47 @@ impl ApprovalSummary {
             let Some(name) = name_of(&r.id).map(str::trim).filter(|n| !n.is_empty()) else {
                 continue;
             };
-            if let Some(d) = self.details.get_mut(r.detail_index) {
-                d.value = match r.named {
-                    Named::WithId => clamp(&format!("{name} ({})", r.id), MAX_VALUE_LEN),
-                    Named::Alone => clamp(name, MAX_VALUE_LEN),
-                };
-            }
-            r.name = Some(clamp(name, MAX_VALUE_LEN));
+            Self::name_ref(r, &mut self.details, name);
         }
+    }
+
+    /// Reuse names already read with the changed records' current values.
+    /// Creates carry request-chosen names, not names read from the provider.
+    /// Match both type and id, just as the name read does.
+    pub fn name_refs_from_bulk(&mut self) {
+        let Some(bulk) = self
+            .bulk
+            .as_ref()
+            .filter(|b| b.kind != super::bulk::BulkKind::Create)
+        else {
+            return;
+        };
+        for r in &mut self.refs {
+            if r.name.is_some() || r.object != bulk.object {
+                continue;
+            }
+            let Some(name) = bulk
+                .rows
+                .iter()
+                .find(|row| row.id == r.id)
+                .and_then(|row| row.name.as_deref())
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+            else {
+                continue;
+            };
+            Self::name_ref(r, &mut self.details, name);
+        }
+    }
+
+    fn name_ref(r: &mut RecordRef, details: &mut [super::ApprovalDetail], name: &str) {
+        if let Some(d) = details.get_mut(r.detail_index) {
+            d.value = match r.named {
+                Named::WithId => clamp(&format!("{name} ({})", r.id), MAX_VALUE_LEN),
+                Named::Alone => clamp(name, MAX_VALUE_LEN),
+            };
+        }
+        r.name = Some(clamp(name, MAX_VALUE_LEN));
     }
 
     /// The change table names the records its values point at, as the

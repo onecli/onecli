@@ -11,11 +11,13 @@ import { GitHubAppConnectDialog } from "./github-app-connect-dialog";
 const mocks = vi.hoisted(() => ({
   apiGet: vi.fn<(path: string) => Promise<unknown>>(),
   apiPost: vi.fn<(path: string, body: unknown) => Promise<unknown>>(),
+  apiPut: vi.fn<(path: string, body: unknown) => Promise<unknown>>(),
 }));
 
 vi.mock("@/lib/api/client", () => ({
   apiGet: mocks.apiGet,
   apiPost: mocks.apiPost,
+  apiPut: mocks.apiPut,
   apiPatch: vi.fn(),
   apiDelete: vi.fn(),
 }));
@@ -44,19 +46,38 @@ const wrap = (ui: ReactNode) => (
   </QueryClientProvider>
 );
 
-const renderDialog = (installation = INSTALLATION, agentId?: string) => {
+const renderDialog = (
+  installation: Record<string, unknown> = INSTALLATION,
+  agentId?: string,
+  grantedConnectionIds: string[] = [],
+) => {
   const onConnected = vi.fn();
   const onInstallNew = vi.fn();
   mocks.apiGet.mockImplementation(async (path: string) => {
     // Sharing is admin-only: the installations list waits on this answer.
     if (path === "/v1/org/membership") return { isAdmin: true };
     if (path.endsWith("/installations")) return [installation];
+    if (agentId && path === `/v1/agents/${agentId}/grants`)
+      return {
+        agentId,
+        mode: "grants",
+        connections: grantedConnectionIds.map((connectionId) => ({
+          connectionId,
+        })),
+        secrets: [],
+      };
     throw new Error(`unexpected GET ${path}`);
   });
   mocks.apiPost.mockResolvedValue({
     id: "conn-new",
     provider: "github-app",
     label: "acme",
+  });
+  mocks.apiPut.mockResolvedValue({
+    agentId,
+    mode: "grants",
+    connections: [],
+    secrets: [],
   });
   render(
     wrap(
@@ -76,6 +97,50 @@ const renderDialog = (installation = INSTALLATION, agentId?: string) => {
 afterEach(() => vi.clearAllMocks());
 
 describe("GitHubAppConnectDialog", () => {
+  const HERE = {
+    ...INSTALLATION,
+    origin: "organization",
+    connectedHere: 1,
+    connectedHereIds: ["conn-ws", "conn-org"],
+  };
+
+  it("on an agent page, turns an already-connected account on for the agent", async () => {
+    const user = userEvent.setup();
+    const { onConnected } = renderDialog(HERE, "agent-1");
+    const row = await screen.findByRole("button", { name: /acme/ });
+    expect(screen.getByText(/turn it on for this agent/)).toBeTruthy();
+    await user.click(row);
+    await waitFor(() =>
+      expect(mocks.apiPut).toHaveBeenCalledWith(
+        "/v1/agents/agent-1/grants/connections/conn-ws",
+        { access: "default" },
+      ),
+    );
+    // No second connection is built.
+    expect(mocks.apiPost).not.toHaveBeenCalled();
+    await waitFor(() => expect(onConnected).toHaveBeenCalledWith("conn-ws"));
+  });
+
+  it("says so when the agent already has it on", async () => {
+    renderDialog(HERE, "agent-1", ["conn-org"]);
+    expect(await screen.findByText("Already on for this agent")).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: /acme/ }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
+  it("on the Connections page the row stays informational", async () => {
+    renderDialog(HERE);
+    expect(
+      await screen.findByText("Already available here · turn it on per agent"),
+    ).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: /acme/ }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
   it("lists the org's accounts and offers a new install", async () => {
     renderDialog();
     expect(await screen.findByText("acme")).toBeTruthy();

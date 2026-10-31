@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const dockerPermissions: AppPermissionDefinition = {
   provider: "docker",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

@@ -14,6 +14,7 @@ import {
   homeRelativePathSchema,
   syncFrameByteLength,
 } from "@onecli/agent-protocol";
+import { cleanSkillDescription } from "../validations/skills";
 import { GITHUB_API_HEADERS } from "./github-app";
 
 /** Standard: lowercase letters, digits and single hyphens, ≤64. */
@@ -245,11 +246,16 @@ const fetchBlobText = async (
   return decodeUtf8Text(Buffer.from(data.content, "base64"));
 };
 
-/** Strict UTF-8 decode; binary (or NUL-bearing) bytes answer null. */
+/** Strict UTF-8 decode; binary (or NUL-bearing) bytes answer null. A
+ * leading byte-order mark is KEPT (`ignoreBOM`): the text is written back
+ * out as a file, which must land byte-for-byte as it was (XML schemas often
+ * carry one). SKILL.md parsing strips it itself. */
 export const decodeUtf8Text = (bytes: Uint8Array): string | null => {
   if (bytes.includes(0)) return null;
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+      bytes,
+    );
   } catch {
     return null;
   }
@@ -362,16 +368,27 @@ export const markDuplicateNames = (skills: RepoSkill[]): RepoSkill[] => {
   });
 };
 
+/** A SKILL.md's frontmatter block, on BOM-less LF text. */
+const FRONTMATTER_BLOCK = /^---\n([\s\S]*?)\n---(?:\n|$)/;
+
+const normalizeSkillMd = (text: string): string =>
+  text.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+
+/** A SKILL.md's body: the text after its frontmatter block (LF endings). */
+export const stripSkillFrontmatter = (text: string): string =>
+  normalizeSkillMd(text).replace(FRONTMATTER_BLOCK, "");
+
 /**
  * The two frontmatter fields the standard requires. A deliberately small
  * reader (no YAML dependency): plain, quoted, and folded/literal block
- * scalars (`>`, `>-`, `|`, `|-`) for `name` and `description`.
+ * scalars (`>`, `>-`, `|`, `|-`) for `name` and `description`. The
+ * description comes back as stored: one clean line (cleanSkillDescription),
+ * or null when nothing printable is left.
  */
 export const parseSkillFrontmatter = (
   text: string,
 ): { name: string | null; description: string | null } => {
-  const normalized = text.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
-  const match = /^---\n([\s\S]*?)\n---(?:\n|$)/.exec(normalized);
+  const match = FRONTMATTER_BLOCK.exec(normalizeSkillMd(text));
   if (!match?.[1]) return { name: null, description: null };
   const lines = match[1].split("\n");
   const read = (key: string): string | null => {
@@ -395,7 +412,12 @@ export const parseSkillFrontmatter = (
     const value = quoted ? (quoted[2] ?? "") : raw;
     return value.trim() || null;
   };
-  return { name: read("name"), description: read("description") };
+  const description = read("description");
+  return {
+    name: read("name"),
+    description:
+      description === null ? null : cleanSkillDescription(description) || null,
+  };
 };
 
 /** Why a skill can't be added (standard checks), or null. */

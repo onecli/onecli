@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { getApp } from "@onecli/api/apps/registry";
 import { describeScopes } from "@onecli/api/apps/missing-permissions";
 import { checkAppConfigExists } from "@/lib/actions/app-config";
+import { getReconnectPrefill } from "@/lib/actions/reconnect-prefill";
 import { ConnectFlow } from "../_components/connect-flow";
 import { ConnectLayout } from "../_components/connect-layout";
 import { ConnectUpdated } from "../_components/connect-updated";
@@ -104,6 +105,12 @@ export default async function ConnectPage({ params, searchParams }: Props) {
       ? apiKeyMethod.fields
       : undefined;
 
+  // Reconnecting a database: start from what was typed last time.
+  const prefill =
+    connectionId && app.database
+      ? await getReconnectPrefill(provider, connectionId, orgId)
+      : null;
+
   return (
     <ConnectFlow
       app={{
@@ -112,6 +119,7 @@ export default async function ConnectPage({ params, searchParams }: Props) {
         icon: app.icon,
         darkIcon: app.darkIcon,
         connectionType: app.connectionMethod.type,
+        database: app.database,
         labelHint: app.labelHint,
         connectNote: app.connectNote,
         setupGuideUrl: app.setupGuideUrl,
@@ -134,6 +142,7 @@ export default async function ConnectPage({ params, searchParams }: Props) {
       status={status === "success" || status === "error" ? status : undefined}
       errorMessage={message}
       connectionId={connectionId}
+      prefill={prefill ?? undefined}
       connectedId={connected}
       agentName={agent_name}
       agentId={agent_id}

@@ -9,7 +9,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@onecli/ui/components/select";
-import { withWorkspacePrefix } from "@/lib/navigation";
+import {
+  AGENT_CREATE_PARAM,
+  AGENT_CREATE_PRIMARY,
+  withWorkspacePrefix,
+} from "@/lib/navigation";
 
 const NEW_AGENT = "__new";
 
@@ -55,7 +59,12 @@ export const AgentContextSelect = ({
         value={value}
         onValueChange={(v) =>
           v === NEW_AGENT
-            ? router.push(withWorkspacePrefix(pathname, "/agents"))
+            ? router.push(
+                withWorkspacePrefix(
+                  pathname,
+                  `/agents?${AGENT_CREATE_PARAM}=${AGENT_CREATE_PRIMARY}`,
+                ),
+              )
             : onChange(v)
         }
       >

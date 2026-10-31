@@ -11,45 +11,19 @@
 //! Logging only. The forwarded request keeps its real query string or it
 //! would fail upstream, so callers mask the copy bound for `tracing` and never
 //! the value they send. Request telemetry is already safe: it stores the
-//! query-stripped path.
+//! query-stripped path. Which names count is [`summary::is_url_credential`]'s
+//! call, the one list the approval card's query rows mask by too.
 
 use std::borrow::Cow;
 
-use percent_encoding::percent_decode_str;
-
 /// Shown in place of a masked value.
 const MASK: &str = "***";
-
-/// Name fragments that mark a credential in a URL query on top of the secret
-/// keys a body is masked by ([`summary::is_sensitive_key`]): request
-/// signatures (`sig`, `X-Amz-Signature`), `X-Amz-Credential`, embedded auth
-/// tokens (`tempauth`, `authtoken`), OAuth `code`, and session handles that
-/// authorize on their own (`session_id`, a resumable upload's `upload_id`).
-const URL_CREDENTIAL_FRAGMENTS: [&str; 6] =
-    ["sig", "auth", "code", "credential", "session", "upload_id"];
-
-/// Whether a query parameter's name looks like it carries a credential.
-///
-/// Substring-matched on the decoded, lowercased name, so a provider's new
-/// `*_token` or `*_secret` is covered the day it appears, and any name ending
-/// in `key` is one (Google's and Trello's `key`, `x-api-key`, Azure API
-/// Management's `subscription-key`).
-/// Deliberately over-inclusive: masking a harmless `next_token` cursor or a
-/// `sort_key` costs a little debuggability, a missed credential costs a leak.
-fn is_credential_param(name: &str) -> bool {
-    let name = percent_decode_str(name)
-        .decode_utf8_lossy()
-        .to_ascii_lowercase();
-    name.ends_with("key")
-        || summary::is_sensitive_key(&name)
-        || URL_CREDENTIAL_FRAGMENTS.iter().any(|f| name.contains(f))
-}
 
 /// The name of a `name=value` query pair when that name marks a credential.
 fn credential_name(pair: &str) -> Option<&str> {
     pair.split_once('=')
         .map(|(name, _)| name)
-        .filter(|name| is_credential_param(name))
+        .filter(|name| summary::is_url_credential(name))
 }
 
 /// `url` (a full URL or a bare path-and-query) with the value of every

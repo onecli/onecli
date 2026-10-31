@@ -193,6 +193,13 @@ pub async fn mitm(
                         // approving the request could only forward a dead token.
                         Ok(ResolveResult::NeedsReconnect(connection)) => {
                             info!(host = %host, connection_id = %connection.id, provider = %connection.provider, "connection needs reconnect; request not forwarded");
+                            super::hooks::record_needs_reconnect(
+                                &ctx,
+                                hostname,
+                                failed.method.as_str(),
+                                &failed.path,
+                                failed.start,
+                            );
                             Ok(response::connection_needs_reconnect(
                                 &connection,
                                 ctx.workspace_id.as_deref(),
@@ -288,6 +295,9 @@ pub struct ResolvedRules {
     /// The kind of credential the workspace holds for this host but this agent
     /// was not granted (`ConnectResponse::access_restricted`).
     pub access_restricted: Option<crate::connect::RestrictedCredential>,
+    /// A granted secret for this host could not be read
+    /// (`ConnectResponse::credential_unavailable`).
+    pub credential_unavailable: Option<crate::connect::SecretKind>,
     /// Ready-to-use interception data when the resolved connection has a
     /// cached token that should be served instead of forwarding.
     pub intercept_token: Option<InterceptToken>,
@@ -599,6 +609,7 @@ async fn resolve_rules(
             policy_rules_v2: resp.policy_rules_v2,
             available_apps: resp.available_apps,
             access_restricted: resp.access_restricted,
+            credential_unavailable: resp.credential_unavailable,
             intercept_token,
             plan: resp.plan,
             rewrite_host,

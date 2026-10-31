@@ -1,20 +1,28 @@
 import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  MAX_ATTACHMENTS_PER_MESSAGE,
   SESSION_RESUME_GRACE_MS,
   TURN_FAILURE_CODES,
+  sandboxResourceProfileId,
 } from "@onecli/agent-protocol";
 import type {
   RunnerEvent,
   RunnerSandboxChannel,
   RunnerWorkItem,
   SandboxStartPayload,
+  SandboxStartResources,
   WorkItem,
 } from "@onecli/agent-protocol";
 import type { RunnerConfig } from "./config";
+import { loadConfig } from "./config";
 import { ControlPlaneError } from "./control-plane";
 import type { ControlPlaneClient } from "./control-plane";
-import { ImageUnavailableError, SandboxCapacityError } from "./backend/types";
+import {
+  ImageUnavailableError,
+  SandboxCapacityError,
+  WakeCapacityTimeoutError,
+} from "./backend/types";
 import { createFakeBackend, type FakeBackend } from "./backend/fake";
 import {
   createRunner,
@@ -23,6 +31,8 @@ import {
   type Runner,
 } from "./runner";
 import type { RunnerWsServer } from "./ws/server";
+import { createDockerBackend } from "./backend/docker/docker-backend";
+import type { EngineTransport } from "./backend/docker/engine-client";
 
 /**
  * The runner loop against the fake backend — no daemon, no images, no
@@ -50,12 +60,7 @@ const config: RunnerConfig = {
   sandboxExtraHosts: [],
   orphanReap: true,
   orphanGraceSeconds: 3600,
-  sandboxManagerUrl: null,
-  sandboxManagerToken: null,
   sessionKey: null,
-  cloudParkWaitSeconds: 120,
-  cloudWakeWaitSeconds: 900,
-  cloudImageWaitSeconds: 240,
   lifecycleConcurrency: 1,
   portApi: null,
   noProxyLoopback: true,
@@ -228,6 +233,384 @@ const drive = async (): Promise<void> => {
   await runner.tick(0);
   await runner.settle();
 };
+
+describe("self-host Docker compatibility", () => {
+  const dockerRunner = async (runnerConfig: RunnerConfig = config) => {
+    const calls: Array<{ method: string; path: string; body?: unknown }> = [];
+    const lifecycle: string[] = [];
+    const transport: EngineTransport = {
+      async request({ method, path, body }) {
+        const parsedBody: unknown =
+          typeof body === "string" ? JSON.parse(body) : undefined;
+        calls.push({
+          method,
+          path,
+          ...(parsedBody !== undefined && { body: parsedBody }),
+        });
+        if (method === "POST" && path.includes("/containers/create"))
+          lifecycle.push("create");
+        if (method === "PUT" && path.includes("/archive?"))
+          lifecycle.push("files");
+        if (method === "POST" && path.endsWith("/start"))
+          lifecycle.push("start");
+        if (method === "DELETE" && path.includes("/containers/"))
+          lifecycle.push("remove");
+        if (path.endsWith("/json"))
+          throw new Error("unexpected container inspection");
+        const answer =
+          path === "/version"
+            ? { ApiVersion: "1.44" }
+            : path.includes("/networks?") || path.includes("/containers/json?")
+              ? []
+              : { Id: "docker-compat-1" };
+        return {
+          statusCode: 200,
+          body: {
+            text: async () => JSON.stringify(answer),
+            json: async () => answer,
+            dump: async () => {},
+          },
+        };
+      },
+      close: async () => {},
+    };
+    const docker = createDockerBackend({
+      runnerId: "r-1",
+      installationId: "inst-test",
+      socketPath: "/not-used",
+      network: "onecli-sandboxes",
+      networkInternal: true,
+      transport,
+    });
+    await docker.prepare();
+    calls.length = 0;
+    const register = vi.fn(controlPlane.register);
+    runner = createRunner({
+      config: runnerConfig,
+      backend: docker,
+      wsServer,
+      controlPlane: {
+        ...controlPlane,
+        register,
+        recordSpawn: async (sandboxId, spawn) => {
+          lifecycle.push("record");
+          return controlPlane.recordSpawn(sandboxId, spawn);
+        },
+      },
+    });
+    return { calls, docker, lifecycle, register };
+  };
+
+  it.each([
+    { RUNNER_TOKEN: "rnr_test" },
+    {
+      RUNNER_TOKEN: "rnr_test",
+      RUNNER_SANDBOX_CPUS: "1.5",
+      RUNNER_SANDBOX_MEMORY_MB: "3072",
+      RUNNER_SANDBOX_PIDS: "256",
+    },
+    {
+      RUNNER_TOKEN: "rnr_test",
+      RUNNER_SANDBOX_CPUS: "0.05",
+      RUNNER_SANDBOX_MEMORY_MB: "64",
+    },
+    { RUNNER_TOKEN: "rnr_test", RUNNER_SANDBOX_CPUS: "1.0005" },
+  ])(
+    "preserves default/custom registration, container limits and start order: %j",
+    async (env) => {
+      const runnerConfig = loadConfig(env);
+      const { calls, docker, lifecycle, register } =
+        await dockerRunner(runnerConfig);
+      try {
+        await runner.start();
+        expect(register.mock.calls[0]?.[0].capabilities).toEqual({
+          maxSandboxes: runnerConfig.maxSandboxes,
+          backend: "docker",
+          homeDurability: "resident",
+          steerMessages: true,
+          sendNow: true,
+          attachments: true,
+          steerAttachments: true,
+          maxAttachmentsPerMessage: MAX_ATTACHMENTS_PER_MESSAGE,
+          desktopControl: true,
+          outboundAttachments: true,
+        });
+        calls.length = 0;
+        queued.push(startItem());
+        await drive();
+        expect(
+          calls.find((call) => call.path.includes("/containers/create"))?.body,
+        ).toMatchObject({
+          HostConfig: {
+            NanoCpus: Math.round(runnerConfig.limits.cpus * 1e9),
+            Memory: runnerConfig.limits.memoryMb * 1024 * 1024,
+            PidsLimit: runnerConfig.limits.pids,
+            NetworkMode: "onecli-sandboxes",
+            SecurityOpt: ["no-new-privileges"],
+            CapDrop: ["ALL"],
+            RestartPolicy: { Name: "no" },
+          },
+        });
+        expect(
+          calls.find((call) => call.path.includes("/containers/create"))?.body,
+        ).not.toHaveProperty("HostConfig.Runtime");
+        expect(
+          calls.find((call) => call.path.includes("/containers/create"))?.body,
+        ).not.toHaveProperty("HostConfig.Devices");
+        expect(calls.some((call) => call.path.endsWith("/json"))).toBe(false);
+        expect(lifecycle).toEqual(["create", "files", "record", "start"]);
+        expect(spawns).toHaveLength(1);
+        expect(spawns[0]).not.toHaveProperty("resourceObservation");
+        expect(posted.some((event) => "resourceObservation" in event)).toBe(
+          false,
+        );
+        expect(docker.resourceSupport).toBeUndefined();
+        expect(docker.resourceObservation).toBeUndefined();
+      } finally {
+        await runner.stop();
+      }
+    },
+  );
+
+  it("retains spawn rejection cleanup without starting the container or inspecting resources", async () => {
+    const { calls, lifecycle } = await dockerRunner();
+    spawnAccepted = false;
+    queued.push(startItem());
+    await drive();
+    expect(lifecycle).toEqual(["create", "files", "record", "remove"]);
+    expect(calls.some((call) => call.path.endsWith("/json"))).toBe(false);
+    expect(posted).toEqual([]);
+  });
+
+  it("retains spawn error cleanup without starting the container", async () => {
+    controlPlane.recordSpawn = async () => {
+      throw new Error("spawn unavailable");
+    };
+    const { lifecycle } = await dockerRunner();
+    queued.push(startItem());
+    await drive();
+    expect(lifecycle).toEqual(["create", "files", "record", "remove"]);
+    expect(posted).toContainEqual(
+      expect.objectContaining({
+        status: "failed",
+        error: expect.stringContaining("spawn unavailable"),
+      }),
+    );
+  });
+
+  it("keeps absent-resource payload hashes byte-identical to the pre-profile runner", () => {
+    // Computed using payloadHash at merge base 624d503c0190f31f9675f3c06a48eec123b5e310.
+    expect(payloadHash(payload())).toBe(
+      "ae98ea31b8a69fb7361f48c6d7f3c0a00ad5aedf59d033fb96bc127c2bd35413",
+    );
+    expect(payloadHash(payload({ resources: undefined }))).toBe(
+      payloadHash(payload()),
+    );
+  });
+});
+
+describe("legacy resource configuration", () => {
+  it.each([
+    { cpuMillicores: 2001, memoryMiB: 4096, homeGiB: 40 },
+    { cpuMillicores: 2000, memoryMiB: 4097, homeGiB: 40 },
+    { cpuMillicores: 2000, memoryMiB: 4096, homeGiB: 41 },
+  ])(
+    "rejects out-of-bounds stale work before touching an existing home or agent: %o",
+    async (profile) => {
+      queued.push(startItem());
+      await drive();
+      const existingRef = backend.sandboxes.get("sb-1")?.containerRef;
+      const stop = vi.spyOn(backend, "stopSandbox");
+      const provision = vi.spyOn(backend, "provisionHome");
+      runner = createRunner({
+        config,
+        backend: {
+          ...backend,
+          resourceSupport: {
+            cpu: true,
+            memory: true,
+            homeProvision: true,
+          },
+          resourceBounds: {
+            min: { cpuMillicores: 100, memoryMiB: 128, homeGiB: 1 },
+            max: { cpuMillicores: 2000, memoryMiB: 4096, homeGiB: 40 },
+          },
+        },
+        controlPlane,
+        wsServer,
+      });
+      queued.push(
+        startItem("sb-1", {
+          resources: {
+            profile,
+            profileId: sandboxResourceProfileId(profile),
+            hasOverrides: true,
+            overrideAxes: ["cpu", "memory", "home"],
+          },
+        }),
+      );
+      await drive();
+      expect(stop).not.toHaveBeenCalled();
+      expect(provision).not.toHaveBeenCalled();
+      expect(backend.sandboxes.get("sb-1")?.containerRef).toBe(existingRef);
+      expect(backend.sandboxes.get("sb-1")?.running).toBe(true);
+      expect(posted).toContainEqual(
+        expect.objectContaining({
+          kind: "sandbox.status",
+          sandboxId: "sb-1",
+          status: "failed",
+          error: expect.stringContaining("supported bounds"),
+        }),
+      );
+    },
+  );
+
+  // A managed home's profile names the home's OWN baseline. On a backend
+  // that cannot provision homes (profiles on, homes at a fixed size: default
+  // 40, every older home 20), a profile AT the baseline is the size the home
+  // already has, never a quota demand, so the start must go through; a size
+  // that is neither the default nor the baseline, or an explicit home
+  // override, is still refused.
+  it.each([
+    {
+      name: "at the home's baseline (20 of a 40 default)",
+      resources: {
+        profile: { cpuMillicores: 2000, memoryMiB: 4096, homeGiB: 20 },
+        profileId: "2000:4096:20",
+        hasOverrides: false,
+        overrideAxes: [],
+        baselineHomeGiB: 20,
+      },
+      starts: true,
+    },
+    {
+      name: "at the backend default with no baseline (a blank sandbox)",
+      resources: {
+        profile: { cpuMillicores: 2000, memoryMiB: 4096, homeGiB: 40 },
+        profileId: "2000:4096:40",
+        hasOverrides: false,
+        overrideAxes: [],
+      },
+      starts: true,
+    },
+    {
+      name: "a size that is neither the default nor the baseline",
+      resources: {
+        profile: { cpuMillicores: 2000, memoryMiB: 4096, homeGiB: 30 },
+        profileId: "2000:4096:30",
+        hasOverrides: false,
+        overrideAxes: [],
+        baselineHomeGiB: 20,
+      },
+      starts: false,
+    },
+    {
+      name: "an explicit home override, even one equal to the baseline",
+      resources: {
+        profile: { cpuMillicores: 2000, memoryMiB: 4096, homeGiB: 20 },
+        profileId: "2000:4096:20",
+        hasOverrides: true,
+        overrideAxes: ["home"],
+        baselineHomeGiB: 20,
+      },
+      starts: false,
+    },
+  ] as const)(
+    "on a backend without homeProvision, $name -> starts=$starts",
+    async ({ resources, starts }) => {
+      runner = createRunner({
+        config: { ...config, limits: { cpus: 2, memoryMb: 4096, pids: 512 } },
+        backend: {
+          ...backend,
+          defaultHomeGiB: 40,
+          resourceSupport: {
+            cpu: true,
+            memory: true,
+            homeProvision: false,
+          },
+          resourceBounds: {
+            min: { cpuMillicores: 100, memoryMiB: 128, homeGiB: 1 },
+            max: { cpuMillicores: 64_000, memoryMiB: 262_144, homeGiB: 40 },
+          },
+        },
+        controlPlane,
+        wsServer,
+      });
+      queued.push(
+        startItem("sb-1", {
+          resources: {
+            ...resources,
+            overrideAxes: [...resources.overrideAxes],
+          },
+        }),
+      );
+      await drive();
+      if (starts) {
+        expect(backend.sandboxes.get("sb-1")?.running).toBe(true);
+        expect(posted).not.toContainEqual(
+          expect.objectContaining({
+            kind: "sandbox.status",
+            sandboxId: "sb-1",
+            status: "failed",
+          }),
+        );
+      } else {
+        expect(backend.sandboxes.get("sb-1")).toBeUndefined();
+        expect(posted).toContainEqual(
+          expect.objectContaining({
+            kind: "sandbox.status",
+            sandboxId: "sb-1",
+            status: "failed",
+            error: expect.stringContaining("home disk quotas"),
+          }),
+        );
+      }
+    },
+  );
+
+  it.each([
+    { cpus: 0.05, memoryMb: 64, pids: 512 },
+    { cpus: 1.0005, memoryMb: 2048, pids: 512 },
+  ])(
+    "does not advertise rounded or out-of-bounds defaults for $cpus CPUs / $memoryMb MiB",
+    async (limits) => {
+      const register = vi.fn(async () => ({
+        runnerId: "r-1",
+        replicaId: "copy-1",
+      }));
+      const spy = createRunner({
+        config: { ...config, limits },
+        backend: {
+          ...backend,
+          defaultHomeGiB: 20,
+          resourceSupport: {
+            cpu: true,
+            memory: true,
+            homeProvision: false,
+          },
+        },
+        controlPlane: { ...controlPlane, register },
+        wsServer,
+      });
+      try {
+        await spy.start();
+        expect(register).toHaveBeenCalledWith(
+          expect.objectContaining({
+            capabilities: expect.not.objectContaining({
+              resourceProfilesV1: true,
+            }),
+          }),
+        );
+        queued.push(startItem());
+        await spy.tick(0);
+        await spy.settle();
+        expect(backend.sandboxes.get("sb-1")?.spec.limits).toEqual(limits);
+      } finally {
+        await spy.stop();
+      }
+    },
+  );
+});
 
 describe("start", () => {
   it("provisions a home, creates the container, and starts it", async () => {
@@ -502,6 +885,50 @@ describe("start", () => {
       kind: "sandbox.status",
       status: "failed",
       reasonCode: "image_unavailable",
+    });
+  });
+
+  it("reports a wake HELD for capacity as a `starting` progress event with reasonCode waiting_for_capacity, then starts normally", async () => {
+    backend.holdNextWake(["waiting_for_capacity"]);
+    queued.push(startItem("sb-1", { workspaceId: "ws-1" }));
+    await drive();
+
+    const statuses = posted.filter((event) => event.kind === "sandbox.status");
+    const held = statuses.find(
+      (event) => "reasonCode" in event && event.reasonCode !== undefined,
+    );
+    expect(held).toMatchObject({
+      kind: "sandbox.status",
+      sandboxId: "sb-1",
+      status: "starting",
+      homeRef: "fake-home-sb-1",
+      reasonCode: "waiting_for_capacity",
+    });
+    // The hold is progress, never a failure: no `failed` report, and the
+    // start reaches the create with the container ref reported as usual.
+    expect(statuses.some((event) => event.status === "failed")).toBe(false);
+    expect(
+      statuses.some((event) => "containerRef" in event && event.containerRef),
+    ).toBe(true);
+  });
+
+  it("a hold that outlives the capacity ceiling is the typed capacity error: classified at_capacity, the honest copy, never start_failed", async () => {
+    backend.failNext(
+      "create",
+      new WakeCapacityTimeoutError(
+        "fake-home-sb-1",
+        "waiting_for_capacity",
+        900,
+      ),
+    );
+    queued.push(startItem());
+    await drive();
+
+    expect(posted.at(-1)).toMatchObject({
+      kind: "sandbox.status",
+      status: "failed",
+      reasonCode: "at_capacity",
+      error: expect.stringContaining("waiting_for_capacity"),
     });
   });
 
@@ -2038,6 +2465,9 @@ describe("registration", () => {
         // And ahead of a mid-run follow-up: only such a runner is handed a
         // follow-up WITH files to steer into a live run.
         steerAttachments: true,
+        // And for the manifest bound: the control plane never hands a
+        // runner more files per message than its own wire parses.
+        maxAttachmentsPerMessage: MAX_ATTACHMENTS_PER_MESSAGE,
         // And for `desktop.control`: the claim arm hands a controller change
         // only to a runner that forwards it.
         desktopControl: true,
@@ -2192,6 +2622,17 @@ describe("turn delivery", () => {
     expect(delivered.get("sb-1")?.[0]).toMatchObject({
       resumeSessionRef: "sess-abc",
     });
+  });
+
+  it("forwards the fresh-session flag of a background turn, and only then", async () => {
+    connected.add("sb-1");
+    queued.push(turnItem({ ephemeralSession: true }));
+    queued.push(turnItem({ turnId: "t-2" }));
+    await drive();
+
+    const [review, ordinary] = delivered.get("sb-1") ?? [];
+    expect(review).toMatchObject({ ephemeralSession: true });
+    expect(ordinary).not.toHaveProperty("ephemeralSession");
   });
 
   it("gives a turn back once when its socket closes while its files are pulled", async () => {
@@ -2726,6 +3167,80 @@ describe("home sync fan-out", () => {
 describe("the lifecycle executor (step 4)", () => {
   const sleep = (ms: number) =>
     new Promise((resolve) => setTimeout(resolve, ms));
+
+  it("does not absorb a resource-changed start, and passes each profile to provisioning and wake before create", async () => {
+    const received: Array<{
+      operation: string;
+      resources?: SandboxStartResources;
+    }> = [];
+    const profiled = {
+      ...backend,
+      resourceSupport: {
+        cpu: true,
+        memory: true,
+        homeProvision: true,
+      },
+      async provisionHome(
+        sandboxId: string,
+        resources?: SandboxStartResources,
+      ) {
+        received.push({ operation: "provision", resources });
+        return backend.provisionHome(sandboxId, resources);
+      },
+      async wakeHome(
+        ref: string,
+        workspaceId?: string,
+        resources?: SandboxStartResources,
+      ) {
+        received.push({ operation: "wake", resources });
+        return backend.wakeHome(ref, workspaceId, resources);
+      },
+      async createSandbox(spec: Parameters<typeof backend.createSandbox>[0]) {
+        received.push({ operation: "create", resources: spec.resources });
+        return backend.createSandbox(spec);
+      },
+    };
+    runner = createRunner({
+      config,
+      backend: profiled,
+      controlPlane,
+      wsServer,
+    });
+    const first = {
+      profile: { cpuMillicores: 1000, memoryMiB: 2048, homeGiB: 20 },
+      profileId: "1000:2048:20",
+      hasOverrides: false,
+    };
+    const second = {
+      profile: { cpuMillicores: 2000, memoryMiB: 4096, homeGiB: 20 },
+      profileId: "2000:4096:20",
+      hasOverrides: true,
+    };
+    const release = backend.holdNext("create");
+    queued.push(startItem("sb-1", { resources: first }));
+    await runner.tick(0);
+    await vi.waitFor(() => expect(received).toHaveLength(3));
+    queued.push(startItem("sb-1", { resources: second }));
+    await runner.tick(0);
+    release();
+    await runner.settle();
+    expect(received).toEqual([
+      { operation: "provision", resources: first },
+      { operation: "wake", resources: first },
+      { operation: "create", resources: first },
+      { operation: "provision", resources: second },
+      { operation: "wake", resources: second },
+      { operation: "create", resources: second },
+    ]);
+    expect(backend.sandboxes.get("sb-1")?.containerRef).toBe(
+      "fake-container-2",
+    );
+    expect(backend.sandboxes.get("sb-1")?.spec.limits).toEqual({
+      cpus: 2,
+      memoryMb: 4096,
+      pids: config.limits.pids,
+    });
+  });
 
   it("runs different sandboxes' starts CONCURRENTLY when the semaphore allows", async () => {
     runner = createRunner({

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   MoreHorizontal,
   RefreshCcw,
@@ -76,17 +76,15 @@ interface AgentActionsMenuProps {
       externalId?: string;
     }[];
   };
-  /** The agent page's "Details" entry: the agent's facts as a dialog. Omitted
-   * by the list card, whose row already shows them. */
-  onDetails?: () => void;
+  /** The agent page's "Details" entry: the agent's facts as a dialog. */
+  onDetails: () => void;
   /** Open Activity narrowed to this agent (its runs and requests). */
-  onViewActivity?: () => void;
-  /** Detail-page hook: navigate away after a successful delete. */
-  onDeleted?: () => void;
+  onViewActivity: () => void;
+  /** Navigate away after a successful delete. */
+  onDeleted: () => void;
 }
 
-/** The agent kebab — one implementation shared by the list card and the agent
- * detail page header, so the action set can never drift between them. */
+/** The agent kebab in the agent page header. */
 export const AgentActionsMenu = ({
   agent,
   onDetails,
@@ -122,8 +120,25 @@ export const AgentActionsMenu = ({
       onSuccess: () => setRestartDialogOpen(false),
     });
 
-  const handleDelete = () =>
-    deleteMutation.mutate(agent.id, { onSuccess: () => onDeleted?.() });
+  // `mutateAsync`, not a per-call `onSuccess`: the delete invalidates the
+  // agent list, the agent page swaps to its not-found state and unmounts
+  // this menu, and React Query drops per-call callbacks of an unmounted
+  // observer, which left the user stranded on "Agent not found". The
+  // promise settles regardless. Errors are already toasted by the hook.
+  // The ref guards a double click landing before `isPending` re-renders the
+  // button disabled: the second call would 404 and toast a false failure.
+  const deleting = useRef(false);
+  const handleDelete = () => {
+    if (deleting.current) return;
+    deleting.current = true;
+    deleteMutation
+      .mutateAsync(agent.id)
+      .then(() => onDeleted())
+      .catch(() => undefined)
+      .finally(() => {
+        deleting.current = false;
+      });
+  };
 
   const handleRename = () => {
     if (!newName.trim()) return;
@@ -143,18 +158,14 @@ export const AgentActionsMenu = ({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          {onDetails && (
-            <DropdownMenuItem onSelect={onDetails}>
-              <Info className="size-4" />
-              Details
-            </DropdownMenuItem>
-          )}
-          {onViewActivity && (
-            <DropdownMenuItem onSelect={onViewActivity}>
-              <History className="size-4" />
-              View activity
-            </DropdownMenuItem>
-          )}
+          <DropdownMenuItem onSelect={onDetails}>
+            <Info className="size-4" />
+            Details
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={onViewActivity}>
+            <History className="size-4" />
+            View activity
+          </DropdownMenuItem>
           <DropdownMenuItem
             onSelect={() => {
               setNewName(agent.name);

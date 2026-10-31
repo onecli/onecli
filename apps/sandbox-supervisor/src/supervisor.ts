@@ -25,20 +25,20 @@ import {
   toWireEvent,
 } from "./answer";
 import { log } from "./log";
-import {
-  isProviderRefusal,
-  isModelEndpointNotFound,
-  isTranscriptRejected,
-  isTrialCreditExhausted,
-} from "./provider-refusal";
+import { terminalErrorClass } from "./provider-refusal";
 import { renderHome, type RenderInputs } from "./home/renderer";
 import { applyHomeSync } from "./home/materializer";
+import { createPgFilesWriter } from "./databases";
+import { gatewayFromProxyUrl } from "./open-proxy";
 import {
   createAttachmentAssembler,
   pruneStaleAttachments,
   readMaterializedAttachment,
 } from "./home/attachments";
-import { startPlatformTools } from "./platform-tools";
+import {
+  startPlatformTools,
+  type PlatformToolDefinition,
+} from "./platform-tools";
 import { attachmentsFragment } from "./capabilities/attachments";
 import { agentsTools } from "./capabilities/agents";
 import { channelsChangeNote, channelsTools } from "./capabilities/channels";
@@ -204,6 +204,13 @@ const MAX_STEER_INBOX = 20;
  */
 const MAX_REPORTED_STEERS = 16;
 
+type SurfaceChange =
+  | "channels changed"
+  | "peers changed"
+  | "connections changed"
+  | "brief changed"
+  | "tools changed";
+
 interface ConversationRuntime {
   session?: HarnessSession;
   /** Tail of the per-conversation chain; every turn awaits the previous. */
@@ -278,7 +285,7 @@ interface ConversationRuntime {
    * it changed, in the model's most recent input, where two turns of "my
    * app was removed" would otherwise win over the doc (observed live).
    */
-  surfaceNote?: string;
+  surfaceNotes?: Partial<Record<SurfaceChange, string>>;
 }
 
 export const runSupervisor = async (
@@ -356,6 +363,11 @@ export const runSupervisor = async (
   };
   const rendered = renderHome(config.homeDir, renderInputs);
   log("info", "home rendered", { files: rendered.files });
+  // libpq's view of the attached databases, kept in step with every render.
+  const writePgFiles = createPgFilesWriter(
+    gatewayFromProxyUrl(process.env.HTTPS_PROXY),
+  );
+  writePgFiles(renderInputs.connections);
 
   // Attachment files from prior turns age out at boot (mtime-based, bounded
   // sweep) — the volume is durable and per-turn dirs would otherwise grow
@@ -523,32 +535,39 @@ export const runSupervisor = async (
     onResend: sendAddonReport,
   });
 
+  // Resolved per bridge startup (jcode spawns a bridge per session), so a
+  // session started after a mid-run presence change advertises the tools
+  // that change brought — the doc and the tools move together.
+  const currentPlatformTools = (): PlatformToolDefinition[] => [
+    ...cronsTools,
+    ...webhooksTools,
+    ...memoryTools,
+    // The messaging tools follow the channels section's condition: present
+    // exactly when a LIVE presence exists — read from the SAME mutable
+    // render inputs the home sync refreshes, never from boot config, so
+    // the fragment and the tools can never disagree.
+    ...channelsTools(renderInputs.channels),
+    // message_agent follows the agents section's condition the same way.
+    ...agentsTools(renderInputs.peers),
+    // list_apps is unconditional: grants change independently of this
+    // process, and the live tool is how a turn re-checks between syncs.
+    ...connectionsTools,
+    ...createProcessTools(processes),
+    ...(config.previews ? previewsTools : []),
+    ...(addon?.tools ?? []),
+    ...(config.outboundAttachments ? sendFile.tools : []),
+    // The skills tools follow their fragment's condition exactly: no
+    // skillsDir, no skills capability — teaching and tools arrive together.
+    ...(harness.capabilities.skillsDir ? skillsTools : []),
+  ];
+  /** The advertised tool NAMES, order-free: what a live session captured. */
+  const toolNamesKey = (): string =>
+    currentPlatformTools()
+      .map((definition) => definition.name)
+      .sort()
+      .join(",");
   const platformTools = await startPlatformTools({
-    // Resolved per bridge startup (jcode spawns a bridge per session), so a
-    // session started after a mid-run presence change advertises the tools
-    // that change brought — the doc and the tools move together.
-    tools: () => [
-      ...cronsTools,
-      ...webhooksTools,
-      ...memoryTools,
-      // The messaging tools follow the channels section's condition: present
-      // exactly when a LIVE presence exists — read from the SAME mutable
-      // render inputs the home sync refreshes, never from boot config, so
-      // the fragment and the tools can never disagree.
-      ...channelsTools(renderInputs.channels),
-      // message_agent follows the agents section's condition the same way.
-      ...agentsTools(renderInputs.peers),
-      // list_apps is unconditional: grants change independently of this
-      // process, and the live tool is how a turn re-checks between syncs.
-      ...connectionsTools,
-      ...createProcessTools(processes),
-      ...(config.previews ? previewsTools : []),
-      ...(addon?.tools ?? []),
-      ...(config.outboundAttachments ? sendFile.tools : []),
-      // The skills tools follow their fragment's condition exactly: no
-      // skillsDir, no skills capability — teaching and tools arrive together.
-      ...(harness.capabilities.skillsDir ? skillsTools : []),
-    ],
+    tools: currentPlatformTools,
     send: (message) => transport.send(message),
     activeTurn,
   });
@@ -604,9 +623,39 @@ export const runSupervisor = async (
     connections: readonly AgentConnectionWire[],
   ): string =>
     connections
-      .map((c) => `${c.provider}|${c.label ?? ""}|${c.host ?? ""}`)
+      .map(
+        (c) =>
+          `${c.provider}|${c.label ?? ""}|${c.host ?? ""}|${c.database?.connectionId ?? ""}`,
+      )
       .sort()
       .join("\n");
+
+  /**
+   * The transcript half of a tool-set change: a resumed session re-reads
+   * its own earlier "I don't have a tool for that" turns, and those beat a
+   * fresh tool list (observed live: send_as_me listed, the model kept
+   * refusing). One line naming what came and went, delivered once.
+   */
+  const toolsChangeNote = (before: string, after: string): string | null => {
+    const was = new Set(before ? before.split(",") : []);
+    const now = new Set(after ? after.split(",") : []);
+    const added = [...now].filter((n) => !was.has(n));
+    const removed = [...was].filter((n) => !now.has(n));
+    const parts: string[] = [];
+    if (added.length > 0) {
+      parts.push(
+        `Now available: ${added.join(", ")}. Earlier statements about not having them are outdated.`,
+      );
+    }
+    if (removed.length > 0) {
+      parts.push(
+        `No longer available: ${removed.join(", ")}. Don't call them.`,
+      );
+    }
+    return parts.length > 0
+      ? `Note: your tools changed since earlier in this conversation. ${parts.join(" ")}`
+      : null;
+  };
 
   /**
    * Every live session captured a doc and a tool list that just went stale.
@@ -614,12 +663,20 @@ export const runSupervisor = async (
    * A conversation with a turn in flight keeps running — the flag is read
    * only at the next turn's start, so nothing in progress is disturbed.
    */
-  const markSessionsStale = (reason: string, note: string | null): void => {
+  const markSessionsStale = (
+    reason: SurfaceChange,
+    note: string | null,
+  ): void => {
     let count = 0;
     for (const runtime of conversations.values()) {
       if (runtime.session) {
         runtime.surfaceStale = true;
-        if (note) runtime.surfaceNote = note;
+        if (note) {
+          // Keep one latest note per surface: distinct changes must coexist,
+          // while repeated syncs cannot grow pending context without bound.
+          runtime.surfaceNotes ??= {};
+          runtime.surfaceNotes[reason] = note;
+        }
         count += 1;
       }
     }
@@ -722,15 +779,34 @@ export const runSupervisor = async (
   };
 
   /**
+   * Let go of the conversation's live session: the adapter drops its hold
+   * on the ref, and the next turn starts (or resumes) afresh. Never called
+   * with a turn in flight (the adapter refuses that).
+   */
+  const releaseSession = async (runtime: ConversationRuntime) => {
+    await runtime.session?.release?.();
+    runtime.session = undefined;
+    runtime.surfaceStale = false;
+  };
+
+  /**
    * Sessions start lazily, on a conversation's first turn — so a sandbox is
    * deliverable as soon as its home exists, and a container holding ten
    * idle conversations pays for none of them.
+   *
+   * An EPHEMERAL turn (`turn.deliver.ephemeralSession`) never reuses or
+   * resumes: whatever this conversation still holds is let go first, and
+   * the fresh session it starts is let go when the turn ends (`runTurn`'s
+   * finally). Its conversation is a series of unrelated runs, and each must
+   * start clean.
    */
   const sessionFor = async (
     runtime: ConversationRuntime,
     conversationId: string,
     resumeSessionRef: string | undefined,
+    ephemeral: boolean,
   ): Promise<HarnessSession> => {
+    if (ephemeral && runtime.session) await releaseSession(runtime);
     if (runtime.session && runtime.surfaceStale) {
       // The doc and tool list this session captured are out of date. Drop
       // it and start over on its own ref: resume keeps the transcript, and
@@ -744,9 +820,7 @@ export const runSupervisor = async (
       resumeSessionRef = runtime.session.sessionRef ?? resumeSessionRef;
       // Let the adapter drop its live hold on the ref first, or the resume
       // below would be refused as a duplicate and mint a memoryless session.
-      await runtime.session.release?.();
-      runtime.session = undefined;
-      runtime.surfaceStale = false;
+      await releaseSession(runtime);
     }
     if (runtime.session) return runtime.session;
     // jcode lists this bridge's tools ASYNCHRONOUSLY after a session
@@ -851,26 +925,17 @@ export const runSupervisor = async (
      * harness whose last words mention a rate limit is still a dead harness.
      * `harness_busy` and `harness_no_terminal` come only from the terminal
      * error EVENT's code (the adapter mints them; the catch arm's raw throw
-     * never does), and outrank the provider-refusal prose match. A rejected
-     * transcript is checked before the refusal shapes too: its 400 must
-     * never read as a key problem (#1194). A model-endpoint 404 comes last:
-     * a 404 whose body also names a refusal (a quota page behind a proxy)
-     * keeps the more actionable key copy.
+     * never does), and outrank every class read off the raw text
+     * (`terminalErrorClass` owns that order).
      */
     const classify = (raw: string | undefined): string | undefined =>
       failureCode(runtime) ??
       (terminalErrorCode === TURN_FAILURE_CODES.harnessBusy ||
       terminalErrorCode === TURN_FAILURE_CODES.harnessNoTerminal
         ? terminalErrorCode
-        : raw && isTranscriptRejected(raw)
-          ? TURN_FAILURE_CODES.transcriptRejected
-          : raw && isTrialCreditExhausted(raw)
-            ? TURN_FAILURE_CODES.trialCreditExhausted
-            : raw && isProviderRefusal(raw)
-              ? TURN_FAILURE_CODES.modelProviderError
-              : raw && isModelEndpointNotFound(raw)
-                ? TURN_FAILURE_CODES.modelEndpointNotFound
-                : undefined);
+        : raw
+          ? terminalErrorClass(raw)
+          : undefined);
 
     /**
      * Which of the agent's words this turn keeps as its answer (answer.ts:
@@ -963,7 +1028,9 @@ export const runSupervisor = async (
       const session = await sessionFor(
         runtime,
         item.conversationId,
-        item.resumeSessionRef,
+        // An ephemeral turn never resumes, whatever ref came with it.
+        item.ephemeralSession ? undefined : item.resumeSessionRef,
+        item.ephemeralSession === true,
       );
 
       // An abort that landed while the session was starting applies to this
@@ -992,8 +1059,10 @@ export const runSupervisor = async (
       // string, which jcode turns into an empty text block the model API
       // rejects with a 400 (verified in v0.71.1; v0.81.1 still passes the
       // content through verbatim, no filtering).
-      const surfaceNote = runtime.surfaceNote;
-      runtime.surfaceNote = undefined;
+      const surfaceNote = Object.values(runtime.surfaceNotes ?? {}).join(
+        "\n\n",
+      );
+      runtime.surfaceNotes = undefined;
       const context = [surfaceNote, item.context]
         .filter((part): part is string => Boolean(part))
         .join("\n\n");
@@ -1229,6 +1298,17 @@ export const runSupervisor = async (
           .catch((error: unknown) =>
             log("warn", "defensive abort failed", { error: String(error) }),
           );
+      }
+      // An ephemeral turn's session ends with it (see `sessionFor`). After
+      // the defensive abort, so nothing is left running under it, and
+      // awaited for the same reason: the conversation's next turn must find
+      // the session gone, not racing away.
+      if (item.ephemeralSession && runtime.session) {
+        await releaseSession(runtime).catch((error: unknown) =>
+          log("warn", "ephemeral session release failed", {
+            error: String(error),
+          }),
+        );
       }
       // THE TURN-END SAFETY NET. Background work left running with nothing
       // armed to report it completes invisibly: the running row keeps the
@@ -1592,6 +1672,9 @@ export const runSupervisor = async (
             const beforePeers = peersKey(renderInputs.peers);
             const beforeConnections = connectionsKey(renderInputs.connections);
             const beforeConnectionList = [...renderInputs.connections];
+            const beforeTools = toolNamesKey();
+            const beforeInstructions = renderInputs.instructions;
+            const beforeAgentName = renderInputs.agentName;
             await applySync(
               config.homeDir,
               item,
@@ -1599,30 +1682,51 @@ export const runSupervisor = async (
               (message) => transport.send(message),
               harvester,
             );
+            // Unconditional: the writer skips content that did not change,
+            // and a channels change in the same sync must not starve it.
+            writePgFiles(renderInputs.connections);
             if (surfaceKey(renderInputs.channels) !== before) {
               markSessionsStale(
                 "channels changed",
                 channelsChangeNote(beforePresences, renderInputs.channels),
               );
-            } else if (peersKey(renderInputs.peers) !== beforePeers) {
-              // No conversation note: nothing here misleads a session the
-              // way a removed-then-restored app did; the re-rendered doc
-              // and tool list are the whole change.
+            }
+            if (peersKey(renderInputs.peers) !== beforePeers) {
+              // No conversation note of its own: a tool that came or went
+              // with the roster is named by the tools note below.
               markSessionsStale("peers changed", null);
-            } else if (
+            }
+            if (
               connectionsKey(renderInputs.connections) !== beforeConnections
             ) {
               // A live session read the old connected-apps list (or an old
               // bound host) — restart it so it calls the right place.
-              // The note is the transcript half: a restarted session still
-              // reads its own earlier "X isn't connected" turns, and a
-              // re-rendered doc loses to them (the Granola incident).
+              // The note corrects stale claims in the resumed transcript.
               markSessionsStale(
                 "connections changed",
                 connectionsChangeNote(
                   beforeConnectionList,
                   renderInputs.connections,
                 ),
+              );
+            }
+            // The tool list a live session captured, whatever moved it.
+            // jcode lists the bridge's tools once per session and does not
+            // handle `notifications/tools/list_changed`, and a resumed
+            // session re-reads its own earlier "I don't have that tool"
+            // turns, so the restart carries a line naming what changed.
+            const toolsNote = toolsChangeNote(beforeTools, toolNamesKey());
+            if (toolsNote) markSessionsStale("tools changed", toolsNote);
+            if (
+              renderInputs.instructions !== beforeInstructions ||
+              renderInputs.agentName !== beforeAgentName
+            ) {
+              // Resuming preserves the transcript, including the old brief.
+              markSessionsStale(
+                "brief changed",
+                "Note: your operator just updated your brief (or your name). " +
+                  "The version in your instructions doc is now current and " +
+                  "supersedes the earlier brief or name in this conversation.",
               );
             }
           })

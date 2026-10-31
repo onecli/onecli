@@ -24,6 +24,12 @@ export {
 } from "./types";
 
 export { initSession, getSessionProvider } from "./session";
+export {
+  type SandboxLifecycleHooks,
+  type StartResourcesDecision,
+  initSandboxLifecycleHooks,
+  getSandboxLifecycleHooks,
+} from "./hooks/sandbox-lifecycle-hooks";
 export { initCrypto, getCrypto } from "./crypto";
 export { initSshCa, getSshCa } from "./ssh-ca";
 export { type EventBus } from "../services/event-bus";

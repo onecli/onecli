@@ -172,6 +172,26 @@ describe("parseSkillFrontmatter", () => {
       description: null,
     });
   });
+
+  it("hands back the description as one clean line (library and zip imports)", () => {
+    const bel = String.fromCharCode(0x07);
+    const rlo = String.fromCharCode(0x202e);
+    expect(
+      parseSkillFrontmatter(
+        `---\nname: a\ndescription: Use${bel} it${rlo} for\treleases\n---\n`,
+      ),
+    ).toEqual({ name: "a", description: "Use it for releases" });
+    // A literal block keeps its line breaks in YAML; a description is one line.
+    expect(
+      parseSkillFrontmatter(
+        "---\nname: a\ndescription: |\n  one\n  two\n---\n",
+      ),
+    ).toEqual({ name: "a", description: "one two" });
+    // Nothing printable left reads as no description at all.
+    expect(
+      parseSkillFrontmatter(`---\nname: a\ndescription: "${bel}${rlo}"\n---\n`),
+    ).toEqual({ name: "a", description: null });
+  });
 });
 
 describe("skillProblem", () => {
@@ -242,6 +262,13 @@ describe("decodeUtf8Text", () => {
       null,
     );
     expect(decodeUtf8Text(new Uint8Array([0xff, 0xfe, 0xfd]))).toBe(null);
+  });
+
+  it("keeps a byte-order mark, so the text writes back byte-exact", () => {
+    const bytes = Buffer.from("\uFEFF<?xml?>", "utf8");
+    const text = decodeUtf8Text(bytes);
+    expect(text).toBe("\uFEFF<?xml?>");
+    expect(Buffer.from(text ?? "", "utf8").equals(bytes)).toBe(true);
   });
 });
 

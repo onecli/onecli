@@ -23,11 +23,14 @@ import {
 /** How much of a long detail value (e.g. an email body) the card shows. */
 const DETAIL_CLAMP_CLASS = "line-clamp-4";
 
-/** What the settled record says about how the approval ended. */
+/** What the settled record says about how the approval ended. "Unknown" is
+ * all this browser saw (the request left the list) until the API's record
+ * says how. */
 const SETTLED_COPY: Record<SettledOutcome, string> = {
   approved: "Approved",
   denied: "Denied",
-  decided: "Decided",
+  unknown: "No longer waiting",
+  cancelled: "Cancelled · the agent stopped waiting",
   expired: "Expired (no response) · denied",
   replaced: "Replaced by your message",
 };
@@ -166,6 +169,7 @@ export const InlineApprovalItem = ({
             <ApprovalPreview
               kind={approval.summary?.kind}
               bulk={approval.summary?.bulk}
+              titled={!!approval.summary?.subject}
               details={details}
               className="px-4 pb-3"
             />

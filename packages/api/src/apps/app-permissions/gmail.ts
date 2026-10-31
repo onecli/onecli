@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const gmailPermissions: AppPermissionDefinition = {
   provider: "gmail",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

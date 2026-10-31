@@ -5,8 +5,11 @@ import { initRoleResolver } from "../providers";
 import { activityPageSchema } from "../validations/request-logs";
 import {
   buildActivityWhere,
+  getDatabaseRequestView,
   getMatchedRuleScope,
   getRequestLogs,
+  getStatement,
+  type RequestLogEntry,
 } from "./request-log-service";
 
 const dbState = vi.hoisted(() => ({
@@ -42,6 +45,73 @@ describe("getMatchedRuleScope", () => {
   it("is null when the row records no scope at all (legacy rows)", () => {
     expect(getMatchedRuleScope(withScope(undefined))).toBeNull();
     expect(getMatchedRuleScope({ extraData: null } as never)).toBeNull();
+  });
+});
+
+describe("getStatement", () => {
+  const withData = (
+    extraData: unknown,
+  ): Pick<RequestLogEntry, "extraData"> => ({
+    extraData,
+  });
+
+  it("reads a database row's normalized statement", () => {
+    const log = withData({ statement: "SELECT * FROM t WHERE a = $1" });
+    expect(getStatement(log as RequestLogEntry)).toBe(
+      "SELECT * FROM t WHERE a = $1",
+    );
+  });
+
+  it("is null for HTTP rows and malformed values", () => {
+    for (const extraData of [null, {}, { statement: "" }, { statement: 3 }]) {
+      expect(getStatement(withData(extraData) as RequestLogEntry)).toBeNull();
+    }
+  });
+});
+
+describe("getDatabaseRequestView", () => {
+  const row = (
+    over: Partial<
+      Pick<RequestLogEntry, "provider" | "host" | "path" | "extraData">
+    > = {},
+  ) => ({
+    provider: "postgres",
+    host: "conn-1.postgres.onecli.invalid",
+    path: "/sql/read",
+    extraData: { connection_label: "Orders", statement: "SELECT $1" },
+    ...over,
+  });
+
+  it("shows a database row by kind, connection and statement", () => {
+    expect(getDatabaseRequestView(row())).toEqual({
+      kind: "READ",
+      connection: "Orders",
+      statement: "SELECT $1",
+    });
+  });
+
+  it("shortens a legacy generated `db on host` label", () => {
+    expect(
+      getDatabaseRequestView(
+        row({
+          path: "/sql/write",
+          extraData: { connection_label: "orders on db.example.com" },
+        }),
+      ),
+    ).toEqual({ kind: "WRITE", connection: "orders", statement: null });
+  });
+
+  it("leaves HTTP rows alone, including a look-alike host", () => {
+    // An agent's HTTP request to a host that merely contains the zone is
+    // logged with that host as its provider: it must keep its host and path.
+    const spoof = "conn-1.postgres.onecli.invalid.example.com";
+    for (const log of [
+      row({ provider: spoof, host: spoof }),
+      row({ host: spoof }),
+      row({ provider: "github", host: "api.github.com" }),
+      row({ path: "/sql/drop" }),
+    ])
+      expect(getDatabaseRequestView(log)).toBeNull();
   });
 });
 

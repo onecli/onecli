@@ -1,4 +1,22 @@
 export {
+  sandboxResourceProfileSchema,
+  sandboxResourceSupportSchema,
+  sandboxResourceBoundsSchema,
+  sandboxResourceProfileWithinBounds,
+  sandboxStartResourcesSchema,
+  sandboxResourceObservationSchema,
+  sandboxResourceProfileId,
+} from "./sandbox-resources";
+export type {
+  SandboxResourceProfile,
+  SandboxResourceSupport,
+  SandboxResourceBounds,
+  SandboxStartResources,
+  SandboxResources,
+  SandboxResourceObservation,
+} from "./sandbox-resources";
+
+export {
   agentEventSchema,
   approvalPendingEventSchema,
   errorEventSchema,
@@ -73,6 +91,7 @@ export {
   MAX_ATTACHMENT_NAME_CHARS,
   MAX_ATTACHMENT_ROWS_PER_MESSAGE,
   MAX_ATTACHMENTS_PER_MESSAGE,
+  LEGACY_RUNNER_ATTACHMENTS_PER_MESSAGE,
   MAX_OUTBOUND_ATTACHMENT_BYTES,
   MAX_OUTBOUND_ATTACHMENT_BYTES_PER_CONVERSATION_DAY,
   MAX_OUTBOUND_ATTACHMENTS_PER_TURN,
@@ -119,21 +138,27 @@ export { cleanLabel, customConnectionLabel, isBareHostname } from "./text";
 
 export {
   AGENT_CHANNEL_PRESENCE_STATUSES,
+  AGENT_DATABASE_ENGINES,
   MAX_AGENT_CHANNEL_PRESENCES,
   MAX_AGENT_CONNECTION_API_HOST_CHARS,
   MAX_AGENT_CONNECTION_API_HOSTS,
   MAX_AGENT_CONNECTION_DOCS_URL_CHARS,
   MAX_AGENT_CONNECTION_ENDPOINT_CHARS,
   MAX_AGENT_CONNECTION_ENDPOINTS,
+  MAX_AGENT_CONNECTION_ID_CHARS,
   MAX_AGENT_CONNECTION_LABEL_CHARS,
   MAX_AGENT_CONNECTION_NAME_CHARS,
   MAX_AGENT_CONNECTIONS,
   MAX_AGENT_PEERS,
+  SANDBOX_PG_PASS_FILE,
+  SANDBOX_PG_SERVICE_FILE,
   MAX_PROCESS_COMMAND_CHARS,
   MAX_PROCESS_NAME_CHARS,
   MAX_PROCESS_TAIL_WIRE_CHARS,
+  MAX_SYNC_FILE_CHUNKS,
   MAX_SYNC_PART_BYTES,
   MAX_SYNC_PARTS,
+  SYNC_FILE_CHUNK_RAW_BYTES,
   MAX_TOOL_ARGS_CHARS,
   MAX_TOOL_ERROR_CHARS,
   MAX_TOOL_RESULT_CHARS,
@@ -155,6 +180,7 @@ export {
   workItemSchema,
   homeRelativePathSchema,
   homeSyncFileSchema,
+  homeSyncBlobSchema,
   SESSION_RESUME_BUDGET,
   SESSION_RESUME_GRACE_MS,
   MAX_LISTENING_PORTS_WIRE,
@@ -164,6 +190,8 @@ export {
   PORT_STREAM_WINDOW_BYTES,
   DESKTOP_VIEW_PORT,
   DESKTOP_CONTROL_PORT,
+  DESKTOP_CLIPBOARD_MAX_BYTES,
+  DESKTOP_CLIPBOARD_MAX_WIRE_BYTES,
   MAX_DESKTOP_CONTROLLER_NAME_CHARS,
   listeningPortsSchema,
   portNumberSchema,
@@ -180,6 +208,7 @@ export type {
   ProcessState,
   WatchOrigin,
   HomeSyncFile,
+  HomeSyncBlob,
 } from "./transport";
 export type {
   SequencedFrame,
@@ -261,6 +290,9 @@ export type {
 // The channel-adapter ↔ control-plane wire (step 6). Not agent protocol —
 // see the header note in channel-wire.ts — but the same shared-zod pattern.
 export {
+  ACTION_CHOICE_PREFIX,
+  actionChoiceOf,
+  actionChoiceSchema,
   adapterActionDecisionRequestSchema,
   adapterActionDecisionResponseSchema,
   adapterCardFollowUpActionRequestSchema,
@@ -282,6 +314,8 @@ export {
   adapterMentionResolveResponseSchema,
   adapterPresenceSchema,
   adapterPromptClaimResponseSchema,
+  adapterPromptOutcomeSchema,
+  adapterPromptOutcomesResponseSchema,
   adapterReachDecisionRequestSchema,
   adapterReachDecisionResponseSchema,
   adapterRegisterRequestSchema,
@@ -317,6 +351,7 @@ export type {
   AdapterIngestResponse,
   AdapterLink,
   AdapterPresence,
+  AdapterPromptOutcome,
   AdapterReachDecisionRequest,
   AdapterReachDecisionResponse,
   AdapterRegisterRequest,

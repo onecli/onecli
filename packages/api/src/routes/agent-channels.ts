@@ -36,11 +36,6 @@ import {
 import { getResourceHooks } from "../providers";
 import { invalidateGatewayCache } from "../lib/gateway-invalidate";
 import {
-  deleteContact,
-  listContacts,
-  setContactPolicy,
-} from "../services/channels/send-message-service";
-import {
   forgetLink,
   listPeers,
   resumePairConversation,
@@ -48,9 +43,13 @@ import {
 } from "../services/channels/agent-link-service";
 import {
   actionApprovalDecisionSchema,
-  contactPolicySchema,
+  linkPolicySchema,
 } from "../validations/channels";
 import type { ChannelProviderId } from "../services/channels/types";
+import {
+  forgetSendAsPreference,
+  listSendAsPreferences,
+} from "../services/channels/choose-sender-service";
 import {
   attachPresenceSchema,
   channelTransportSchema,
@@ -466,13 +465,16 @@ export const agentChannelRoutes = () => {
 
   // GET /agents/:agentId/approvals — the agent's one-shot action approvals
   // (the dashboard's pending list + history). Workspace-fenced at the
-  // query inside the service; ?status narrows.
+  // query inside the service; a personal ask lists only to its decider;
+  // ?status narrows.
   app.get("/:agentId/approvals", async (c) => {
-    const workspaceId = requireWorkspaceId(c.get("auth"));
+    const a = c.get("auth");
+    const workspaceId = requireWorkspaceId(a);
     const status = c.req.query("status");
     const approvals = await listActionApprovals({
       workspaceId,
       agentId: c.req.param("agentId"),
+      viewerUserId: a.userId,
       ...(status &&
       (ACTION_APPROVAL_STATUSES as readonly string[]).includes(status)
         ? { status: status as ActionApprovalStatus }
@@ -526,6 +528,7 @@ export const agentChannelRoutes = () => {
       decision: body.data.decision,
       deciderUserId: a.userId,
       ...(body.data.reason !== undefined && { reason: body.data.reason }),
+      ...(body.data.choice !== undefined && { choice: body.data.choice }),
     });
     if (result.kind === "refused") {
       throw new ServiceError("NOT_FOUND", result.message);
@@ -619,55 +622,6 @@ export const agentChannelRoutes = () => {
     return c.json(result);
   });
 
-  // GET /agents/:agentId/contacts — the agent's outbound address book
-  // (send_message's standing decisions). Workspace-fenced in the service.
-  app.get("/:agentId/contacts", async (c) => {
-    const workspaceId = requireWorkspaceId(c.get("auth"));
-    const contacts = await listContacts({
-      workspaceId,
-      agentId: c.req.param("agentId"),
-    });
-    return c.json({ contacts });
-  });
-
-  // PUT /agents/:agentId/contacts/:contactId — flip the policy. `ask` is
-  // the revoke direction (the row survives; the standing permission goes).
-  app.put("/:agentId/contacts/:contactId", async (c) => {
-    const a = c.get("auth");
-    const workspaceId = requireWorkspaceId(a);
-    const body = contactPolicySchema.safeParse(await parseBody(c.req.raw));
-    if (!body.success) {
-      throw new ServiceError(
-        "UNPROCESSABLE",
-        body.error.issues[0]?.message ?? "Invalid body",
-      );
-    }
-    const result = await setContactPolicy({
-      workspaceId,
-      agentId: c.req.param("agentId"),
-      contactId: c.req.param("contactId"),
-      policy: body.data.policy,
-      deciderUserId: a.userId,
-    });
-    if (!result) {
-      throw new ServiceError("NOT_FOUND", "This contact no longer exists.");
-    }
-    await recordAuditEvent({
-      workspaceId,
-      userId: a.userId,
-      userEmail: a.userEmail,
-      action: AUDIT_ACTIONS.UPDATE,
-      service: AUDIT_SERVICES.CHANNEL,
-      source: AUDIT_SOURCE.API,
-      metadata: {
-        agentId: c.req.param("agentId"),
-        contactId: result.id,
-        contactPolicy: result.policy,
-      },
-    });
-    return c.json(result);
-  });
-
   // GET /agents/:agentId/links — the agent's peers (PR 5b): every other
   // hosted agent it may message, with both sides' standing decision and the
   // pair conversation once they have talked. Workspace-fenced in the service.
@@ -681,13 +635,13 @@ export const agentChannelRoutes = () => {
   });
 
   // PUT /agents/:agentId/links/:peerAgentId — set THIS agent's side of the
-  // relationship. Same three words as a contact (ask / allow / blocked), so
-  // the same body schema; `ask` is the revoke direction here too. The peer
-  // may live in another workspace by design: only `agentId` is fenced.
+  // relationship: Always allow or Never (a pair with no answer yet asks
+  // once, on the first message). The peer may live in another workspace by
+  // design: only `agentId` is fenced.
   app.put("/:agentId/links/:peerAgentId", async (c) => {
     const a = c.get("auth");
     const workspaceId = requireWorkspaceId(a);
-    const body = contactPolicySchema.safeParse(await parseBody(c.req.raw));
+    const body = linkPolicySchema.safeParse(await parseBody(c.req.raw));
     if (!body.success) {
       throw new ServiceError(
         "UNPROCESSABLE",
@@ -785,31 +739,40 @@ export const agentChannelRoutes = () => {
     return c.body(null, 204);
   });
 
-  // DELETE /agents/:agentId/contacts/:contactId — remove the row entirely
-  // (back to the ask-by-default pristine state).
-  app.delete("/:agentId/contacts/:contactId", async (c) => {
+  // GET /agents/:agentId/send-as-preferences — the CALLER's own remembered
+  // senders on this agent ("agent" | "you"), per recipient (Contacts shows
+  // them; nobody else's are ever listed).
+  app.get("/:agentId/send-as-preferences", async (c) => {
     const a = c.get("auth");
     const workspaceId = requireWorkspaceId(a);
-    const removed = await deleteContact({
-      workspaceId,
-      agentId: c.req.param("agentId"),
-      contactId: c.req.param("contactId"),
+    const agent = await db.agent.findFirst({
+      where: { id: c.req.param("agentId"), workspaceId },
+      select: { id: true },
     });
-    if (!removed) {
-      throw new ServiceError("NOT_FOUND", "This contact no longer exists.");
-    }
-    await recordAuditEvent({
+    if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
+    return c.json({
+      preferences: await listSendAsPreferences(agent.id, a.userId),
+    });
+  });
+
+  // DELETE /agents/:agentId/send-as-preferences/:recipientRef — forget the
+  // caller's own sender for one recipient: the next send there asks again.
+  app.delete("/:agentId/send-as-preferences/:recipientRef", async (c) => {
+    const a = c.get("auth");
+    const workspaceId = requireWorkspaceId(a);
+    const agent = await db.agent.findFirst({
+      where: { id: c.req.param("agentId"), workspaceId },
+      select: { id: true },
+    });
+    if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
+    const removed = await forgetSendAsPreference({
       workspaceId,
+      agentId: agent.id,
       userId: a.userId,
       userEmail: a.userEmail,
-      action: AUDIT_ACTIONS.DELETE,
-      service: AUDIT_SERVICES.CHANNEL,
-      source: AUDIT_SOURCE.API,
-      metadata: {
-        agentId: c.req.param("agentId"),
-        contactId: c.req.param("contactId"),
-      },
+      recipientRef: c.req.param("recipientRef"),
     });
+    if (!removed) throw new ServiceError("NOT_FOUND", "No send-as choice");
     return c.body(null, 204);
   });
 

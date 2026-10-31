@@ -109,6 +109,8 @@ export const queryKeys = {
     // and must not trust that entry across org switches.
     all: () => ["org", ...scope()] as const,
     membership: () => [...queryKeys.org.all(), "membership"] as const,
+    connectionTestOrganization: () =>
+      [...queryKeys.org.all(), "connection-test-organization"] as const,
   },
   orgMembers: {
     all: () => ["org-members", ...scope()] as const,
@@ -139,7 +141,8 @@ export const queryKeys = {
       [...queryKeys.grants.secrets(), secretId] as const,
   },
   connections: {
-    all: () => ["connections", ...scope()] as const,
+    root: () => ["connections"] as const,
+    all: () => [...queryKeys.connections.root(), ...scope()] as const,
     list: (pageScope: PageScope = "workspace") =>
       [...queryKeys.connections.all(), "list", pageScope] as const,
     byProvider: (provider: string) =>
@@ -228,6 +231,11 @@ export const queryKeys = {
   installInfo: {
     all: () => ["install-info", ...scope()] as const,
   },
+  // The caller's personal workspace API key (Workspace Settings → API Key).
+  // Install embeds the same key, so a regenerate invalidates installInfo too.
+  workspaceApiKey: {
+    all: () => ["workspace-api-key", ...scope()] as const,
+  },
   userPlan: {
     all: () => ["user-plan", ...scope()] as const,
   },
@@ -245,6 +253,8 @@ export const queryKeys = {
     list: () => [...queryKeys.approvals.all(), "list"] as const,
     channel: (workspaceId: string) =>
       [...queryKeys.approvals.all(), "channel", workspaceId] as const,
+    alerts: (workspaceId: string) =>
+      [...queryKeys.approvals.all(), "alerts", workspaceId] as const,
     outcomes: (agentId: string, ids: readonly string[]) =>
       [...queryKeys.approvals.all(), "outcomes", agentId, ...ids] as const,
   },
@@ -341,12 +351,12 @@ export const queryKeys = {
     org: () => [...queryKeys.channels.all(), "org"] as const,
     orgAgents: (provider: string) =>
       [...queryKeys.channels.all(), "org-agents", provider] as const,
-    // The agent's one-shot action approvals (the channels page section).
-    contacts: (agentId: string) =>
-      [...queryKeys.channels.all(), "contacts", agentId] as const,
     // The agent's peers (PR 5b): other agents and both sides' standing.
     peers: (agentId: string) =>
       [...queryKeys.channels.all(), "peers", agentId] as const,
+    // The caller's remembered senders per recipient (send-as choice).
+    sendAs: (agentId: string) =>
+      [...queryKeys.channels.all(), "send-as", agentId] as const,
     // "Connect your Slack" read grants (licensed).
     slackRead: (agentId: string) =>
       [...queryKeys.channels.all(), "slack-read", agentId] as const,
@@ -361,7 +371,11 @@ export const queryKeys = {
   },
   billing: {
     all: () => ["billing", ...scope()] as const,
-    planUsage: () => [...queryKeys.billing.all(), "planUsage"] as const,
+    // Plan usage is cached per org scope by `usePlanUsage` (a route key, not
+    // `scope()`), so this is the prefix that reaches every scope's copy:
+    // writes that change a quota count (agent create / delete) invalidate it,
+    // and the create gates read their quota off it.
+    planUsage: () => ["billing", "planUsage"] as const,
     subscriptionStatus: () =>
       [...queryKeys.billing.all(), "subscriptionStatus"] as const,
     paymentIssue: () => [...queryKeys.billing.all(), "paymentIssue"] as const,

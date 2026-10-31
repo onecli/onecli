@@ -5,6 +5,11 @@ import {
   type AdapterWorkItem,
   type AdapterWorkTurn,
 } from "@onecli/agent-protocol";
+import {
+  BLOCKED_BY_POLICY_MESSAGE,
+  GATEWAY_UNAVAILABLE_MESSAGE,
+  MODEL_KEY_UNREADABLE_MESSAGE,
+} from "@onecli/api/validations/conversation";
 import { ControlPlaneError, type ControlPlaneClient } from "./control-plane";
 import {
   dropDanglingLeadIn,
@@ -313,6 +318,24 @@ describe("what gets posted", () => {
     expect(posted.map((call) => call.form.text)).toEqual([
       ':stopwatch: Watch on "tests"\nTests passed &lt;ok&gt;',
     ]);
+  });
+
+  it("never mirrors a platform resume prompt (source approval): only the agent's answer posts", async () => {
+    const controlPlane = createFakeControlPlane(transcriptWith("Sent to Sam."));
+
+    await mirror({
+      controlPlane,
+      workItem: item({
+        source: "approval",
+        userId: null,
+        message:
+          "Sent as Helper to Sam. Already delivered: don't send it again. Confirm in one short line.",
+      }),
+    });
+
+    const texts = slack.callsTo("chat.postMessage").map((c) => c.form.text);
+    expect(texts).toEqual(["Sent to Sam."]);
+    expect(texts.join("\n")).not.toMatch(/Already delivered|one short line/);
   });
 
   it("posts only the answer for a provider-sourced turn", async () => {
@@ -1751,6 +1774,90 @@ describe("what gets posted", () => {
     expect(posted[0]?.form.text).toBe("No key &lt;yet&gt;.");
     expect("blocks" in posted[0]!.form).toBe(false);
   });
+
+  it("posts the attach-key card when the key exists but is not attached", async () => {
+    // The gateway's `access_restricted` on a model call: the workspace holds
+    // a key this agent was not given. Same card family, the attach verb.
+    const controlPlane = createFakeControlPlane(transcriptWith(null));
+
+    await mirror({
+      controlPlane,
+      modelsUrl: "https://app.example.com/w/ws1/agents/ag1/models",
+      workItem: item({
+        source: "slack",
+        error: "This agent doesn't have access to your model key yet.",
+        errorCode: "model_key_not_attached",
+      }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    const blocks = JSON.parse(posted[0]!.form.blocks!) as {
+      type: string;
+      text?: { text: string };
+      elements?: { text?: { text: string }; url?: string }[];
+    }[];
+    expect(blocks[0]?.text?.text).toBe(
+      "*This agent doesn't have access to your model key*",
+    );
+    const button = blocks.find((b) => b.type === "actions")?.elements?.[0];
+    expect(button?.url).toBe("https://app.example.com/w/ws1/agents/ag1/models");
+    expect(button?.text?.text).toBe("Attach the key");
+  });
+
+  it("posts the re-enter card when the agent's key could not be read", async () => {
+    // The gateway's `credential_unavailable`: the agent HAS the key, but its
+    // saved value could not be read. Same card family, the re-enter verb,
+    // and never the usage-limit wording of a provider refusal.
+    const controlPlane = createFakeControlPlane(transcriptWith(null));
+
+    await mirror({
+      controlPlane,
+      modelsUrl: "https://app.example.com/w/ws1/agents/ag1/models",
+      workItem: item({
+        source: "slack",
+        error: MODEL_KEY_UNREADABLE_MESSAGE,
+        errorCode: "model_key_unreadable",
+      }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    const blocks = JSON.parse(posted[0]!.form.blocks!) as {
+      type: string;
+      text?: { text: string };
+      elements?: { text?: { text: string }; url?: string }[];
+    }[];
+    expect(blocks[0]?.text?.text).toBe(
+      "*OneCLI couldn't read this agent's model key*",
+    );
+    expect(posted[0]!.form.blocks).not.toMatch(/usage limit/i);
+    const button = blocks.find((b) => b.type === "actions")?.elements?.[0];
+    expect(button?.url).toBe("https://app.example.com/w/ws1/agents/ag1/models");
+    expect(button?.text?.text).toBe("Re-enter the key");
+  });
+
+  it.each([
+    ["blocked_by_policy", BLOCKED_BY_POLICY_MESSAGE],
+    ["gateway_unavailable", GATEWAY_UNAVAILABLE_MESSAGE],
+  ])(
+    "posts the canonical sentence for %s as plain text, no card",
+    async (errorCode, error) => {
+      const controlPlane = createFakeControlPlane(transcriptWith(null));
+
+      await mirror({
+        controlPlane,
+        modelsUrl: "https://app.example.com/w/ws1/agents/ag1/models",
+        workItem: item({ source: "slack", error, errorCode }),
+      });
+
+      const posted = slack.callsTo("chat.postMessage");
+      expect(posted).toHaveLength(1);
+      expect(posted[0]?.form.text).toBe(error);
+      // No fix is a click away, so there is no button to offer.
+      expect("blocks" in posted[0]!.form).toBe(false);
+    },
+  );
 
   it("posts the provider-error card — headline, context line, and a button to the Models page", async () => {
     // The supervisor now produces `model_provider_error` and finishTurn's

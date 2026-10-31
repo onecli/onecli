@@ -5,6 +5,7 @@ const HOST = "api.clay.com";
 
 export const clayPermissions: AppPermissionDefinition = {
   provider: "clay",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

@@ -55,6 +55,19 @@ describe("record links on approval cards (wire-level)", () => {
         url: "https://github.com/acme/web/issues/42",
       });
 
+      expect(
+        row.summary?.details.filter((detail) => detail.label === "Issue"),
+      ).toHaveLength(1);
+      expect(
+        row.summary?.details.filter(
+          (detail) => detail.value === "42" || detail.value === "acme/web#42",
+        ),
+      ).toHaveLength(1);
+      expect(row.summary?.details).toContainEqual({
+        label: "Endpoint",
+        value: "/repos/acme/web/issues/42",
+      });
+
       await decideApproval(gw, cx.ids.apiKey, row.id, "deny");
       expect((await held).status).toBe(403);
     },

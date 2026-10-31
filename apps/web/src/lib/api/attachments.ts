@@ -31,12 +31,14 @@ export const uploadAttachment = async (
 export const fetchAttachmentBlob = async (
   conversationId: string,
   attachmentId: string,
+  signal?: AbortSignal,
 ): Promise<Blob> => {
   const res = await apiFetch(
     conversationPath(
       conversationId,
       `/attachments/${encodeURIComponent(attachmentId)}`,
     ),
+    { signal },
   );
   if (!res.ok) throw await refusal(res);
   return res.blob();

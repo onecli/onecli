@@ -47,6 +47,8 @@ import type { PageScope } from "@/lib/api";
 import { connectionAccessLevelLabel } from "@onecli/api/apps/access-level";
 import {
   connectionTags,
+  connectsAsSuperuser,
+  displayConnectionLabel,
   extractBoundHost,
   extractLabel,
 } from "@onecli/api/lib/connection-display";
@@ -55,6 +57,7 @@ import {
   githubOrgAccessSummary,
 } from "@onecli/api/lib/github-org-access";
 import { GitHubOrgAccessNotice } from "./github-org-access-notice";
+import { SuperuserNotice } from "./superuser-notice";
 import { MissingPermissionsNotice } from "@/lib/components/missing-permissions-notice";
 import { ConnectionAgentRows } from "./connection-agent-rows";
 import { RenameConnectionDialog } from "./rename-connection-dialog";
@@ -65,6 +68,10 @@ import {
 } from "@/lib/github-settings-popup";
 import type { AccountCardConnection } from "./account-card-connection";
 import { accountTypeLabel } from "@/lib/connections/account-type-label";
+import { getApp } from "@onecli/api/apps/registry";
+import { DatabaseConnectionDetails } from "@/lib/connections/database-connection-details";
+import { DatabaseTargetLine } from "@/lib/connections/database-target-line";
+import { TestConnection } from "@/lib/connections/test-connection";
 
 /** A refused login: nothing (including a repo edit) works until reconnect. */
 const needsReconnectFor = (c: AccountCardConnection) => !!c.reauthRequiredAt;
@@ -115,7 +122,7 @@ export const ConnectionAccountCard = ({
   const [reposOpen, setReposOpen] = useState(false);
 
   const displayName =
-    connection.label ??
+    displayConnectionLabel(connection.label, connection.metadata) ??
     extractLabel(connection.metadata ?? undefined) ??
     "Unknown account";
 
@@ -127,8 +134,12 @@ export const ConnectionAccountCard = ({
     connection.provider,
     connection.metadata,
   );
-  const tags = connectionTags(connection.metadata);
   const boundHost = extractBoundHost(connection.metadata);
+  // A host-bound app may also tag its account id (Snowflake does), which the
+  // host line already shows: repeating it only crowds the card.
+  const tags = connectionTags(connection.metadata).filter(
+    (tag) => !boundHost?.toLowerCase().startsWith(`${tag.toLowerCase()}.`),
+  );
   const needsReconnect = !!connection.reauthRequiredAt;
   const missing = connection.missingPermissions ?? [];
   // A refused login outranks it: nothing works until that reconnect anyway.
@@ -177,6 +188,7 @@ export const ConnectionAccountCard = ({
             )}
             <div className="min-w-0">
               <p className="text-sm font-medium truncate">{displayName}</p>
+              <DatabaseTargetLine metadata={connection.metadata} />
               {boundHost && (
                 <a
                   href={`https://${boundHost}`}
@@ -216,7 +228,7 @@ export const ConnectionAccountCard = ({
                     &middot; Shared{" "}
                   </span>
                 )}
-                <span className="text-muted-foreground/60">
+                <span className="text-muted-foreground/60 whitespace-nowrap">
                   &middot;{" "}
                   {new Date(connection.connectedAt).toLocaleDateString(
                     "en-US",
@@ -319,8 +331,16 @@ export const ConnectionAccountCard = ({
               }
             />
           ))}
-
-        {tags.length > 0 && (
+        {connectsAsSuperuser(connection.metadata) && <SuperuserNotice />}
+        {getApp(connection.provider)?.database ? (
+          <DatabaseConnectionDetails tags={tags}>
+            <TestConnection
+              connectionId={connection.id}
+              pageScope={pageScope}
+              hasElevatedAccess={connectsAsSuperuser(connection.metadata)}
+            />
+          </DatabaseConnectionDetails>
+        ) : tags.length > 0 ? (
           <div className="flex flex-wrap gap-1.5">
             {tags.map((tag) => (
               <Badge key={tag} variant="secondary" className="text-xs">
@@ -328,7 +348,7 @@ export const ConnectionAccountCard = ({
               </Badge>
             ))}
           </div>
-        )}
+        ) : null}
         {isWorkspacePage && <ConnectionAgentRows connection={connection} />}
         {canPromote && (
           <button

@@ -37,8 +37,11 @@ import {
   memorySearchArgsSchema,
 } from "../validations/memories";
 import {
+  SKILL_DESCRIPTION_MAX_LENGTH,
+  cleanSkillDescription,
   skillCreateArgsSchema,
   skillDeleteArgsSchema,
+  skillImportArgsSchema,
   skillListArgsSchema,
   skillUpdateArgsSchema,
 } from "../validations/skills";
@@ -47,17 +50,32 @@ import {
   findRecipientArgsSchema,
   messageAgentArgsSchema,
   readConversationArgsSchema,
+  deleteMyMessageArgsSchema,
+  editMyMessageArgsSchema,
+  listMyRepliesArgsSchema,
+  editMyReplyArgsSchema,
+  deleteMyReplyArgsSchema,
+  sendAsMeArgsSchema,
   sendMessageArgsSchema,
 } from "../validations/recipients";
-import { getConversationReader } from "../providers/hooks/conversation-reader";
+import {
+  getConversationReader,
+  getConversationSender,
+  type ActAsYouOutcome,
+} from "../providers/hooks/conversation-reader";
 import { enterpriseLicenseMessage } from "../lib/entitlements-guard";
-import { requestSend } from "./channels/send-message-service";
+import { sendMessageWithSender } from "./channels/choose-sender-service";
 import { proposeCustomConnection } from "./custom-connection-proposal-service";
+import { requestAppConnection } from "./app-connection-request-service";
+import { requestAppConnectionArgsSchema } from "../validations/app-connection-request";
 import {
   completeTask,
   requestCommunicate,
 } from "./channels/agent-link-service";
-import { createOutboundAttachment } from "./attachment-service";
+import {
+  createOutboundAttachment,
+  getAgentAttachmentBytesByPath,
+} from "./attachment-service";
 import {
   connectionsForRender,
   customConnectionsForRender,
@@ -69,6 +87,11 @@ import {
 import { getAgentDesktop } from "../providers/hooks/agent-desktop";
 import { removedPresenceNotice } from "./channels/agent-channel-service";
 import {
+  deleteOwnReply,
+  editOwnReply,
+  listOwnReplies,
+} from "./channels/own-replies-service";
+import {
   anchorRecipient,
   findChannels,
   findPeople,
@@ -76,9 +99,14 @@ import {
 import {
   createSkill,
   deleteAgentSkillByName,
+  importAgentSkills,
   listSkillsReachingAgent,
   updateAgentSkillByName,
+  type ImportedSkillOutcome,
+  type SkillCreator,
 } from "./skill-service";
+import { importSkillZip, type SkillZipResult } from "./skill-import";
+import { ZipError } from "../lib/zip";
 import { libraryNamesForAgent } from "./skill-library-service";
 import {
   AUDIT_ACTIONS,
@@ -102,13 +130,6 @@ import { logger } from "../lib/logger";
 import { dashboardUrl } from "../lib/dashboard-url";
 
 const log = logger.child({ component: "platform-tools" });
-
-/** send_message's promise about replies: a reply to this message reaches
- * the agent with what it sent and where it was asked from
- * (`buildSentContext`), so the agent passes the answer on itself instead of
- * telling anyone to check back later. */
-const REPLY_COMES_BACK =
-  "If they reply, you'll be told what you sent them and where it was asked from; pass the answer on then. Don't ask anyone to check back later.";
 
 /**
  * The control-plane end of the platform-tool channel (step 7, §3.7).
@@ -307,6 +328,37 @@ const resolveContext = (
   );
 
 /**
+ * Who is asking, for a tool that may act AS a person (read_conversation,
+ * send_as_me, edit/delete_my_message, send_message's sender choice). The
+ * reader is VERIFIED: only a private audience (the person's own thread, or
+ * a schedule's run attributed to its creator: the provenance purpose)
+ * resolves to someone; a forged or shared context resolves to nobody,
+ * which only ever narrows. The origin anchors any card it raises, so the
+ * decision lands where it was asked.
+ */
+const actAsYouCaller = async (
+  identity: ToolIdentity,
+  request: RunnerToolCallRequest,
+) => {
+  const context = await resolveContext(identity, request, "provenance");
+  return {
+    agentId: identity.agentId,
+    readerUserId: await resolveConversationReader({
+      agentId: identity.agentId,
+      conversationId: context.originConversationId,
+      turnUserId: context.createdByUserId,
+    }),
+    askerUserId: context.createdByUserId,
+    originConversationId: context.originConversationId,
+    originTurnId: context.turnId,
+  };
+};
+
+/** An act-as-you seam's answer, as the tool door returns it. */
+const fromOutcome = (outcome: ActAsYouOutcome): RunnerToolCallResponse =>
+  outcome.ok ? { ok: true, result: outcome.result } : toolError(outcome.error);
+
+/**
  * The webhook tools' gate: the calling turn's verified anchor when its
  * speaker owns the PRIVATE thread with this agent it ran in, else null.
  * Webhook history holds outside content that reached this agent for its
@@ -375,10 +427,150 @@ const auditAsCreator = async (
   });
 };
 
+/** An own-reply edit or delete, audited under the person whose turn asked
+ * (ids only, never the message text). */
+const auditOwnReply = (
+  identity: ToolIdentity,
+  context: ToolContext,
+  action: (typeof AUDIT_ACTIONS)["UPDATE" | "DELETE"],
+  metadata: { presenceId: string; messageId: string },
+): Promise<void> =>
+  auditAsCreator(
+    identity,
+    context.createdByUserId,
+    action,
+    AUDIT_SERVICES.CHANNEL,
+    { ...metadata, conversationId: context.originConversationId ?? "" },
+  );
+
 const toolError = (message: string): RunnerToolCallResponse => ({
   ok: false,
   error: message,
 });
+
+/** The skill row's author for an agent-made write: the human whose ask the
+ * turn carried, email denormalized (the memory-revision convention) so
+ * "whose ask this write carried" survives that user's deletion, which
+ * SetNulls the FK. */
+const skillCreatorFor = async (
+  createdByUserId: string | null,
+): Promise<SkillCreator> => {
+  if (!createdByUserId) return { userId: null, email: null };
+  const user = await db.user.findUnique({
+    where: { id: createdByUserId },
+    select: { email: true },
+  });
+  return { userId: createdByUserId, email: user?.email ?? null };
+};
+
+/** Entries a skill_import result lists in full; the rest are counted. */
+const MAX_IMPORT_LISTED = 10;
+const MAX_IMPORT_DESCRIPTION_CHARS = 200;
+/**
+ * What a skill_import result may serialize to. It must reach the transcript
+ * whole: the runner cuts any event string past 16,000 characters
+ * (MAX_EVENT_TEXT_CHARS), and the harness trims an MCP result past about
+ * 32,000 UTF-8 bytes (jcode: 8,000 tokens at 4 bytes each). Listing nothing
+ * fits by construction: at most MAX_SKILLS_PER_AGENT skills, each a short
+ * name, a clipped description of plain text (cleanSkillDescription: no
+ * control character, so nothing escapes past 2 characters) and a bounded
+ * summary.
+ */
+const IMPORT_RESULT_MAX_CHARS = 15_000;
+const IMPORT_RESULT_MAX_BYTES = 30_000;
+
+const resultFits = (
+  result: unknown,
+  maxChars: number,
+  maxBytes: number,
+): boolean => {
+  const serialized = JSON.stringify(result);
+  return (
+    serialized.length <= maxChars && Buffer.byteLength(serialized) <= maxBytes
+  );
+};
+
+/** The skill_import result: every skill saved, with as many left-out files
+ * and problems listed as fit whole; the counts always say how many. The
+ * saved row's id stays out: the agent addresses skills by name. */
+const skillImportResult = (
+  imported: ImportedSkillOutcome[],
+  problems: SkillZipResult["problems"],
+) => {
+  const listing = (listed: number) => ({
+    imported: imported.map((skill) => ({
+      name: skill.name,
+      description: cleanSkillDescription(
+        skill.description,
+        MAX_IMPORT_DESCRIPTION_CHARS,
+      ),
+      files: skill.files,
+      bytes: skill.bytes,
+      groups: skill.groups,
+      skipped: skill.skipped.slice(0, listed),
+      skippedCount: skill.skipped.length,
+      replaced: skill.replaced,
+    })),
+    problems: problems.slice(0, listed),
+    problemCount: problems.length,
+    note:
+      imported.length > 0
+        ? "Each skill materializes into your skills directory within seconds, with its folders and runnable scripts as in the zip. Tell the person in one or two plain sentences what was added; the chat shows them the details."
+        : "Nothing was imported. Tell the person why in plain words, from the problems listed.",
+  });
+  const fits = (result: unknown) =>
+    resultFits(result, IMPORT_RESULT_MAX_CHARS, IMPORT_RESULT_MAX_BYTES);
+  let listed = MAX_IMPORT_LISTED;
+  while (listed > 0 && !fits(listing(listed))) listed -= 1;
+  return listing(listed);
+};
+
+/**
+ * What a skill_list result may serialize to: under the runner's tool-result
+ * refusal (MAX_TOOL_RESULT_CHARS) with room to spare, and under the
+ * harness's MCP trim (as for skill_import). An agent can reach 10 own, 20
+ * organization and 50 library skills, each with a 1,024-character
+ * description: about 95,000 characters, so descriptions are clipped (all to
+ * one length, down to none at all) until the list fits, and the note says
+ * so. The names, scopes and repos alone stay far below both limits.
+ */
+const SKILL_LIST_MAX_CHARS = MAX_TOOL_RESULT_CHARS - 4_000;
+const SKILL_LIST_MAX_BYTES = 30_000;
+const SKILL_LIST_CLIP_STEP = 32;
+
+interface SkillListEntry {
+  name: string;
+  scope: string;
+  description: string;
+  enabled: boolean;
+  editable: boolean;
+  repo?: string;
+}
+
+const SKILL_LIST_NOTE =
+  "When the same name exists as both your own skill and an organization skill, yours wins. Library skills come from your organization's Git repo, win over any same-named skill, and are changed only in that repo. Disabled skills are not materialized.";
+
+const skillListResult = (entries: SkillListEntry[]) => {
+  const listing = (max: number) => ({
+    skills: entries.map((entry) => ({
+      ...entry,
+      // Clean (rows stored before every door cleaned) and clipped to `max`
+      // without splitting a surrogate pair.
+      description: cleanSkillDescription(entry.description, max),
+    })),
+    note:
+      max >= SKILL_DESCRIPTION_MAX_LENGTH
+        ? SKILL_LIST_NOTE
+        : `${SKILL_LIST_NOTE} Descriptions are shortened here to fit; each skill's full description is in its SKILL.md.`,
+  });
+  const fits = (result: unknown) =>
+    resultFits(result, SKILL_LIST_MAX_CHARS, SKILL_LIST_MAX_BYTES);
+  let max = SKILL_DESCRIPTION_MAX_LENGTH;
+  while (max > 0 && !fits(listing(max))) {
+    max = Math.max(0, max - SKILL_LIST_CLIP_STEP);
+  }
+  return listing(max);
+};
 
 /** A library skill (from the org's Git repo) is never written through the
  * agent's tools: its owners change it in the repo. */
@@ -502,61 +694,82 @@ const clipContentToResultBudget = (
 };
 
 /**
+ * A per-sandbox token bucket. In-process by design (DoS mitigation, not
+ * accounting) and keyed only AFTER the identity fence, so the map is bounded
+ * by real sandboxes. `now` lets a test drive the clock without mocking
+ * `Date`; production callers pass none.
+ */
+const sandboxPacer = (capacity: number, refillPerSecond: number) => {
+  const buckets = new Map<string, { tokens: number; last: number }>();
+  return {
+    take: (sandboxId: string, now: number = Date.now()): boolean => {
+      const bucket = buckets.get(sandboxId) ?? { tokens: capacity, last: now };
+      // `Math.max(0, …)` on the elapsed: `Date.now()` is wall-clock, so an NTP
+      // step-back or a VM pause/resume on the API host can hand us a negative
+      // delta. Without the floor that SUBTRACTS tokens (no lower clamp),
+      // locking a sandbox out for the length of the step. Time going
+      // backwards must never spend tokens, only fail to add them.
+      const elapsedMs = Math.max(0, now - bucket.last);
+      bucket.tokens = Math.min(
+        capacity,
+        bucket.tokens + (elapsedMs / 1000) * refillPerSecond,
+      );
+      bucket.last = now;
+      const allowed = bucket.tokens >= 1;
+      if (allowed) bucket.tokens -= 1;
+      // Evict a bucket that has refilled to the brim (the sandbox is idle or
+      // gone): keeping it would let the map grow by every sandbox EVER seen
+      // over a long-lived api-server, not the live set. A returning sandbox
+      // just starts full again, which is exactly a full bucket's meaning.
+      if (bucket.tokens >= capacity) {
+        buckets.delete(sandboxId);
+      } else {
+        buckets.set(sandboxId, bucket);
+      }
+      return allowed;
+    },
+    reset: (): void => buckets.clear(),
+  };
+};
+
+/**
  * Pacing for the file-write door (per sandbox): a hostile or looping
  * supervisor could otherwise mint a 100k-content revision (plus a home
  * re-push) as fast as it can round-trip. Burst covers a boot harvest of a
- * realistic edit set; the refill covers a diligent agent. In-process by
- * design — this is DoS mitigation, not accounting — and keyed only AFTER the
- * identity fence, so the map is bounded by real sandboxes.
+ * realistic edit set; the refill covers a diligent agent.
  */
 export const MEMORY_WRITE_BUCKET_CAPACITY = 20;
 export const MEMORY_WRITE_REFILL_PER_SECOND = 0.5;
 
-interface WriteBucket {
-  tokens: number;
-  last: number;
-}
+const memoryWritePacer = sandboxPacer(
+  MEMORY_WRITE_BUCKET_CAPACITY,
+  MEMORY_WRITE_REFILL_PER_SECOND,
+);
 
-const memoryWriteBuckets = new Map<string, WriteBucket>();
+/** Exported as a test seam. */
+export const takeMemoryWriteToken = memoryWritePacer.take;
 
-/** Exported as a test seam (the `now` parameter lets a test drive the clock
- * without mocking `Date`); production callers pass no `now`. */
-export const takeMemoryWriteToken = (
-  sandboxId: string,
-  now: number = Date.now(),
-): boolean => {
-  const bucket = memoryWriteBuckets.get(sandboxId) ?? {
-    tokens: MEMORY_WRITE_BUCKET_CAPACITY,
-    last: now,
-  };
-  // `Math.max(0, …)` on the elapsed: `Date.now()` is wall-clock, so an NTP
-  // step-back or a VM pause/resume on the API host can hand us a negative
-  // delta — without the floor that SUBTRACTS tokens (no lower clamp), locking
-  // a sandbox out of memory writes for the length of the step. Time going
-  // backwards must never spend tokens, only fail to add them.
-  const elapsedMs = Math.max(0, now - bucket.last);
-  bucket.tokens = Math.min(
-    MEMORY_WRITE_BUCKET_CAPACITY,
-    bucket.tokens + (elapsedMs / 1000) * MEMORY_WRITE_REFILL_PER_SECOND,
-  );
-  bucket.last = now;
-  const allowed = bucket.tokens >= 1;
-  if (allowed) bucket.tokens -= 1;
-  // Evict a bucket that has refilled to the brim (the sandbox is idle or gone):
-  // keeping it would let the map grow by every sandbox EVER seen over a
-  // long-lived api-server, not the live set. A returning sandbox just starts
-  // full again — which is exactly a full bucket's meaning.
-  if (bucket.tokens >= MEMORY_WRITE_BUCKET_CAPACITY) {
-    memoryWriteBuckets.delete(sandboxId);
-  } else {
-    memoryWriteBuckets.set(sandboxId, bucket);
-  }
-  return allowed;
-};
+/**
+ * Pacing for skill_import (per sandbox): one call reads a zip of up to
+ * 10 MB, unpacks up to 50 MB, saves it in one transaction and re-pushes the
+ * agent's home, so a looping agent must not repeat it as fast as it can
+ * round-trip. The burst covers a person sending a few zips in a row.
+ */
+export const SKILL_IMPORT_BUCKET_CAPACITY = 5;
+export const SKILL_IMPORT_REFILL_PER_SECOND = 1 / 20;
+
+const skillImportPacer = sandboxPacer(
+  SKILL_IMPORT_BUCKET_CAPACITY,
+  SKILL_IMPORT_REFILL_PER_SECOND,
+);
+
+/** Exported as a test seam. */
+export const takeSkillImportToken = skillImportPacer.take;
 
 /** Test seam: pacing state must not leak between suites. */
-export const resetMemoryWritePacing = (): void => {
-  memoryWriteBuckets.clear();
+export const resetSandboxPacing = (): void => {
+  memoryWritePacer.reset();
+  skillImportPacer.reset();
 };
 
 /**
@@ -950,19 +1163,10 @@ export const executePlatformTool = async (
           args.data.name,
         );
         if (createRefusal) return toolError(createRefusal);
-        // Denormalize the via-user's email into the row (the memory-revision
-        // convention): "whose ask this write carried" must survive that
-        // user's deletion, which SetNulls the FK.
-        const viaUser = context.createdByUserId
-          ? await db.user.findUnique({
-              where: { id: context.createdByUserId },
-              select: { email: true },
-            })
-          : null;
         const skill = await createSkill(
           identity.workspaceId,
           { ...args.data, agentId: identity.agentId },
-          { userId: context.createdByUserId, email: viaUser?.email ?? null },
+          await skillCreatorFor(context.createdByUserId),
         );
         await auditAsCreator(
           identity,
@@ -994,31 +1198,28 @@ export const executePlatformTool = async (
         const libraryNames = new Set(library.map((s) => s.name));
         return {
           ok: true,
-          result: {
-            skills: [
-              ...skills
-                .filter((skill) => !libraryNames.has(skill.name))
-                .map((skill) => ({
-                  name: skill.name,
-                  scope: skill.scope,
-                  description: skill.description,
-                  enabled: skill.enabled,
-                  // Editable = yours: only agent-tier rows answer
-                  // skill_update/skill_delete; the rest are managed in the
-                  // dashboard.
-                  editable: skill.scope === "agent",
-                })),
-              ...library.map((skill) => ({
+          result: skillListResult([
+            ...skills
+              .filter((skill) => !libraryNames.has(skill.name))
+              .map((skill) => ({
                 name: skill.name,
-                scope: "library",
+                scope: skill.scope,
                 description: skill.description,
-                enabled: true,
-                editable: false,
-                repo: skill.repo,
+                enabled: skill.enabled,
+                // Editable = yours: only agent-tier rows answer
+                // skill_update/skill_delete; the rest are managed in the
+                // dashboard.
+                editable: skill.scope === "agent",
               })),
-            ],
-            note: "When the same name exists as both your own skill and an organization skill, yours wins. Library skills come from your organization's Git repo, win over any same-named skill, and are changed only in that repo. Disabled skills are not materialized.",
-          },
+            ...library.map((skill) => ({
+              name: skill.name,
+              scope: "library",
+              description: skill.description,
+              enabled: true,
+              editable: false,
+              repo: skill.repo,
+            })),
+          ]),
         };
       }
 
@@ -1057,6 +1258,78 @@ export const executePlatformTool = async (
               : `Updated. Your home re-syncs within seconds${skill.enabled ? "" : "; a disabled skill's files leave your skills directory"}.`,
           },
         };
+      }
+
+      case "skill_import": {
+        const args = skillImportArgsSchema.safeParse(request.args);
+        if (!args.success) {
+          return toolError(args.error.issues[0]?.message ?? "Invalid input");
+        }
+        if (!takeSkillImportToken(request.sandboxId)) {
+          return toolError(
+            "Skill imports are being paced. Try again in a minute.",
+          );
+        }
+        const bytes = await getAgentAttachmentBytesByPath(
+          identity.agentId,
+          args.data.path,
+        );
+        if (!bytes) {
+          return toolError(
+            `No file the person sent you is at "${args.data.path}". Use the zip's path exactly as their message names it.`,
+          );
+        }
+        let read: SkillZipResult;
+        try {
+          read = await importSkillZip(bytes);
+        } catch (err) {
+          if (err instanceof ZipError) {
+            return toolError(
+              `${err.message}. A skill zip holds a folder with a SKILL.md inside.`,
+            );
+          }
+          throw err;
+        }
+        const libraryNames = new Set(
+          (
+            await libraryNamesForAgent(
+              identity.agentId,
+              identity.organizationId,
+            )
+          ).map((s) => s.name),
+        );
+        const importable = read.skills.filter((s) => !libraryNames.has(s.name));
+        const problems = [
+          ...read.problems,
+          ...read.skills
+            .filter((s) => libraryNames.has(s.name))
+            .map((s) => ({
+              folder: s.folder,
+              reason: `"${s.name}" comes from your organization's skill library and can only change there`,
+            })),
+        ];
+        const context = await resolveContext(identity, request, "provenance");
+        const imported = await importAgentSkills(
+          identity.workspaceId,
+          identity.agentId,
+          importable,
+          await skillCreatorFor(context.createdByUserId),
+        );
+        for (const skill of imported) {
+          await auditAsCreator(
+            identity,
+            context.createdByUserId,
+            skill.replaced ? AUDIT_ACTIONS.UPDATE : AUDIT_ACTIONS.CREATE,
+            AUDIT_SERVICES.SKILL,
+            {
+              skillId: skill.id,
+              name: skill.name,
+              files: String(skill.files),
+              source: "zip",
+            },
+          );
+        }
+        return { ok: true, result: skillImportResult(imported, problems) };
       }
 
       case "skill_delete": {
@@ -1202,38 +1475,18 @@ export const executePlatformTool = async (
         }
         const removedNotice = await removedPresenceNotice(identity.agentId);
         if (removedNotice) return toolError(removedNotice);
-        // Provenance-verified origin: the approval's outcome notice lands on
-        // the calling turn, so the model hears the decision where it asked.
-        // A forged context degrades to no anchor, never to authority.
-        const context = await resolveContext(identity, request, "provenance");
-        const outcome = await requestSend({
-          agentId: identity.agentId,
-          to: args.data.to,
-          text: args.data.text,
-          originConversationId: context.originConversationId,
-          originTurnId: context.turnId,
-        });
-        return {
-          ok: true,
-          result:
-            outcome.kind === "sent"
-              ? {
-                  status: "sent",
-                  to: outcome.to,
-                  note: `Delivered. ${REPLY_COMES_BACK}`,
-                }
-              : outcome.kind === "busy"
-                ? {
-                    status: "not_sent",
-                    to: outcome.to,
-                    note: `Not sent. An earlier message to ${outcome.to} is still waiting for the owner's approval, and only one can wait at a time. This message was dropped, not queued. Once the decision arrives as a notice here, send it again if it still matters.`,
-                  }
-                : {
-                    status: "held",
-                    to: outcome.to,
-                    note: `Waiting for the workspace owner's approval; the decision arrives as a notice in this conversation. ${REPLY_COMES_BACK} If you mention it, one short line (e.g. "Sent for approval, I'll pass on the answer."); don't explain the approval process.`,
-                  },
-        };
+        // The verified person asking in their own chat may be offered the
+        // sender choice, and a blocked contact raises a card for them there
+        // (no reader = a shared place: as the agent, or a refusal). The
+        // origin anchors the card, so the decision lands where it was asked.
+        return fromOutcome(
+          await sendMessageWithSender({
+            ...(await actAsYouCaller(identity, request)),
+            to: args.data.to,
+            text: args.data.text,
+            sendAs: args.data.sendAs,
+          }),
+        );
       }
 
       case "read_conversation": {
@@ -1245,30 +1498,136 @@ export const executePlatformTool = async (
         if (!reader) {
           return toolError(enterpriseLicenseMessage("granular_access"));
         }
-        // The audience fence keys on a VERIFIED reader. Provenance purpose
-        // keeps an automation conversation (a schedule's run) so it can be
-        // attributed to the schedule's creator; a forged or missing context
-        // resolves to nobody, which only ever narrows what can be read.
+        return fromOutcome(
+          await reader.read({
+            ...(await actAsYouCaller(identity, request)),
+            ...(args.data.conversation && {
+              conversation: args.data.conversation,
+            }),
+            ...(args.data.sinceHours && { sinceHours: args.data.sinceHours }),
+            ...(args.data.thread && { threadRef: args.data.thread }),
+            ...(args.data.before && { before: args.data.before }),
+            ...(args.data.limit && { limit: args.data.limit }),
+          }),
+        );
+      }
+
+      case "send_as_me": {
+        const args = sendAsMeArgsSchema.safeParse(request.args);
+        if (!args.success) {
+          return toolError(args.error.issues[0]?.message ?? "Invalid input");
+        }
+        const sender = getConversationSender();
+        if (!sender) {
+          return toolError(enterpriseLicenseMessage("granular_access"));
+        }
+        return fromOutcome(
+          await sender.send({
+            ...(await actAsYouCaller(identity, request)),
+            conversation: args.data.conversation,
+            text: args.data.text,
+          }),
+        );
+      }
+
+      case "edit_my_message": {
+        const args = editMyMessageArgsSchema.safeParse(request.args);
+        if (!args.success) {
+          return toolError(args.error.issues[0]?.message ?? "Invalid input");
+        }
+        const sender = getConversationSender();
+        if (!sender) {
+          return toolError(enterpriseLicenseMessage("granular_access"));
+        }
+        return fromOutcome(
+          await sender.edit({
+            ...(await actAsYouCaller(identity, request)),
+            ...args.data,
+          }),
+        );
+      }
+
+      case "delete_my_message": {
+        const args = deleteMyMessageArgsSchema.safeParse(request.args);
+        if (!args.success) {
+          return toolError(args.error.issues[0]?.message ?? "Invalid input");
+        }
+        const sender = getConversationSender();
+        if (!sender) {
+          return toolError(enterpriseLicenseMessage("granular_access"));
+        }
+        return fromOutcome(
+          await sender.delete({
+            ...(await actAsYouCaller(identity, request)),
+            ...args.data,
+          }),
+        );
+      }
+
+      // The agent's own replies. The conversation and turn are the calling
+      // turn's own (provenance-verified, never model-supplied ids), so only
+      // the thread it answered in is reachable.
+      case "list_my_replies": {
+        const args = listMyRepliesArgsSchema.safeParse(request.args ?? {});
+        if (!args.success)
+          return toolError("list_my_replies takes no arguments");
+        const removedNotice = await removedPresenceNotice(identity.agentId);
+        if (removedNotice) return toolError(removedNotice);
         const context = await resolveContext(identity, request, "provenance");
-        const readerUserId = await resolveConversationReader({
+        const replies = await listOwnReplies({
           agentId: identity.agentId,
           conversationId: context.originConversationId,
-          turnUserId: context.createdByUserId,
+          turnId: context.turnId,
         });
-        const outcome = await reader.read({
+        return { ok: true, result: { replies } };
+      }
+
+      case "edit_my_reply": {
+        const args = editMyReplyArgsSchema.safeParse(request.args);
+        if (!args.success) {
+          return toolError(args.error.issues[0]?.message ?? "Invalid input");
+        }
+        const removedNotice = await removedPresenceNotice(identity.agentId);
+        if (removedNotice) return toolError(removedNotice);
+        const context = await resolveContext(identity, request, "provenance");
+        const { presenceId } = await editOwnReply({
           agentId: identity.agentId,
-          readerUserId,
-          ...(args.data.conversation && {
-            conversation: args.data.conversation,
-          }),
-          ...(args.data.sinceHours && { sinceHours: args.data.sinceHours }),
-          ...(args.data.thread && { threadRef: args.data.thread }),
-          ...(args.data.before && { before: args.data.before }),
-          ...(args.data.limit && { limit: args.data.limit }),
+          conversationId: context.originConversationId,
+          turnId: context.turnId,
+          ...args.data,
         });
-        return outcome.ok
-          ? { ok: true, result: outcome.result }
-          : toolError(outcome.error);
+        await auditOwnReply(identity, context, AUDIT_ACTIONS.UPDATE, {
+          presenceId,
+          messageId: args.data.messageId,
+        });
+        return {
+          ok: true,
+          result: { status: "edited", messageId: args.data.messageId },
+        };
+      }
+
+      case "delete_my_reply": {
+        const args = deleteMyReplyArgsSchema.safeParse(request.args);
+        if (!args.success) {
+          return toolError(args.error.issues[0]?.message ?? "Invalid input");
+        }
+        const removedNotice = await removedPresenceNotice(identity.agentId);
+        if (removedNotice) return toolError(removedNotice);
+        const context = await resolveContext(identity, request, "provenance");
+        const { presenceId } = await deleteOwnReply({
+          agentId: identity.agentId,
+          conversationId: context.originConversationId,
+          turnId: context.turnId,
+          ...args.data,
+        });
+        await auditOwnReply(identity, context, AUDIT_ACTIONS.DELETE, {
+          presenceId,
+          messageId: args.data.messageId,
+        });
+        return {
+          ok: true,
+          result: { status: "deleted", messageId: args.data.messageId },
+        };
       }
 
       case "message_agent": {
@@ -1391,7 +1750,7 @@ export const executePlatformTool = async (
         ]);
         const notes: string[] = [
           apps.length === 0
-            ? "No external apps are granted to you. They are connected and granted in the OneCLI dashboard."
+            ? "No external apps are granted to you. For a task that needs one, call request_app_connection with the app's name: it returns the link to show (the OneCLI chat renders it as a Connect button)."
             : "Call the host listed for each app (`host` for account-bound apps, else `apiHosts`); the gateway injects credentials. Before a first call, read the endpoint's required parameters and their formats in `docsUrl` or `specUrl`: never guess them.",
         ];
         if (customConnections.length > 0) {
@@ -1408,6 +1767,22 @@ export const executePlatformTool = async (
             ...(customConnections.length > 0 ? { customConnections } : {}),
             note: notes.join(" "),
           },
+        };
+      }
+
+      case "request_app_connection": {
+        // The built-in app's own connect door, minted without a doomed API
+        // call: the chat turns its link into the Connect card. Fenced on the
+        // resolved identity alone (this agent's grants, this tenant's pool).
+        const args = requestAppConnectionArgsSchema.safeParse(
+          request.args ?? {},
+        );
+        if (!args.success) {
+          return toolError(args.error.issues[0]?.message ?? "Invalid input");
+        }
+        return {
+          ok: true,
+          result: await requestAppConnection(identity, args.data.app),
         };
       }
 

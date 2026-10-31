@@ -11,7 +11,7 @@ import {
   useApproveCustomConnection,
   useDecideChannelAction,
 } from "@/hooks/use-approvals";
-import { formatAge } from "./format-age";
+import { RequestedAtLabel } from "./requested-at-label";
 import { HostWithDomain } from "./host-with-domain";
 
 interface CustomConnectionApprovalRowProps {
@@ -101,9 +101,7 @@ export const CustomConnectionApprovalRow = ({
             {item.agentName} · asks you for an API key
           </p>
         </div>
-        <span className="text-muted-foreground shrink-0 text-xs tabular-nums">
-          {formatAge(item.createdAt)}
-        </span>
+        <RequestedAtLabel createdAt={item.createdAt} />
       </div>
 
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">

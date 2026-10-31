@@ -196,7 +196,7 @@ afterAll(async () => {
 });
 
 describe.skipIf(!PROOF_URL)("the agent speaks first (pg)", () => {
-  it("asks a keyed agent to greet live: one queued greeting turn, no user, first name in the instruction", async () => {
+  it("asks a keyed agent to greet live from a brief: one queued greeting turn, no user", async () => {
     const agentId = await seedAgent("keyed", { withKey: true });
     const thread = await conversations.ensureDirectConversation(
       WORKSPACE,
@@ -213,8 +213,14 @@ describe.skipIf(!PROOF_URL)("the agent speaks first (pg)", () => {
       status: "queued",
       userId: null,
     });
-    expect(turns[0]!.message).toContain("Tomer");
-    expect(turns[0]!.message).not.toContain("Levi");
+    const message = turns[0]!.message;
+    // A brief for the agent's own words, never a script it recites.
+    expect(message).toContain("in your own words");
+    expect(message).not.toContain("word for word");
+    expect(message).toContain(`${USER}@example.com`);
+    expect(message).toContain("as agent,");
+    expect(message).toContain("connecting their Gmail");
+    expect(message).not.toMatch(/GitHub|Slack/);
   });
 
   it("says NOTHING for a keyless agent: no greeting it cannot answer, no canned words in its bubble", async () => {
@@ -391,30 +397,25 @@ describe.skipIf(!PROOF_URL)("the agent speaks first (pg)", () => {
     });
   });
 
-  it("bounds the name it splices into the model instruction", async () => {
-    // `updateProfile` accepts 1..255 chars of anything, and that string
-    // lands inside platform-authored text the model reads. Control
-    // characters are stripped and the first name is capped.
-    const noisy = `${"A".repeat(200)}\u0007 Levi`;
-    await db.user.update({ where: { id: USER }, data: { name: noisy } });
-    try {
-      const agentId = await seedAgent("noisy", { withKey: true });
-      const thread = await conversations.ensureDirectConversation(
-        WORKSPACE,
-        agentId,
-        USER,
-      );
+  it("bounds the agent name it splices into the model instruction", async () => {
+    // An agent name is user-controlled text that lands inside
+    // platform-authored text the model reads. Control characters are
+    // stripped and the first word is capped.
+    const agentId = await seedAgent("noisy", { withKey: true });
+    await db.agent.update({
+      where: { id: agentId },
+      data: { name: `${"A".repeat(200)}\u0007 Levi` },
+    });
+    const thread = await conversations.ensureDirectConversation(
+      WORKSPACE,
+      agentId,
+      USER,
+    );
 
-      await greeting.greetEmptyDirectThread(WORKSPACE, thread, USER);
+    await greeting.greetEmptyDirectThread(WORKSPACE, thread, USER);
 
-      const [turn] = await turnsOf(thread.id);
-      expect(turn!.message).not.toContain("\u0007");
-      expect(turn!.message).not.toContain("A".repeat(41));
-    } finally {
-      await db.user.update({
-        where: { id: USER },
-        data: { name: "Tomer Levi" },
-      });
-    }
+    const [turn] = await turnsOf(thread.id);
+    expect(turn!.message).not.toContain("\u0007");
+    expect(turn!.message).not.toContain("A".repeat(41));
   });
 });

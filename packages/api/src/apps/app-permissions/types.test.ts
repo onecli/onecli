@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   allGroupTools,
+  defaultOtherReads,
   toAppPermissionDefinitionSummary,
   wildcardCoversGroup,
   type AppPermissionDefinition,
@@ -103,6 +104,39 @@ describe("toAppPermissionDefinitionSummary", () => {
       toAppPermissionDefinitionSummary({ ...definition, unlisted: "block" })
         .unlisted,
     ).toBe("block");
+  });
+
+  it("carries the exhaustive flag only when the catalog sets one", () => {
+    expect(toAppPermissionDefinitionSummary(definition)).not.toHaveProperty(
+      "exhaustive",
+    );
+    expect(
+      toAppPermissionDefinitionSummary({
+        ...definition,
+        unlisted: "block",
+        exhaustive: true,
+      }).exhaustive,
+    ).toBe(true);
+  });
+
+  it("carries the unlisted-reads opt-in only when the catalog sets one", () => {
+    expect(toAppPermissionDefinitionSummary(definition)).not.toHaveProperty(
+      "unlistedReads",
+    );
+    expect(
+      toAppPermissionDefinitionSummary({
+        ...definition,
+        unlistedReads: "allow",
+      }).unlistedReads,
+    ).toBe("allow");
+  });
+});
+
+describe("defaultOtherReads", () => {
+  it("allows other reads only for a catalog that opted in", () => {
+    expect(defaultOtherReads({ unlistedReads: "allow" })).toBe("allow");
+    expect(defaultOtherReads({})).toBe("ask");
+    expect(defaultOtherReads(undefined)).toBe("ask");
   });
 });
 

@@ -5,9 +5,9 @@ import { cn } from "@onecli/ui/lib/utils";
 import type { HostedAvailability } from "@/lib/agents/availability";
 
 /**
- * The one agent-status element (§3.18 rule 1): rendered identically on the
- * agent card and the chat header, agent vocabulary only. A span, not a
- * disabled button, so it stays in the a11y tree with its label — same
+ * The one agent-status element (§3.18 rule 1): rendered identically in the
+ * agent page header and its Details dialog, agent vocabulary only. A span,
+ * not a disabled button, so it stays in the a11y tree with its label — same
  * rationale as the agents page's effective-access pill.
  *
  * It shows only what a user must act on or know: `working` (step 13's

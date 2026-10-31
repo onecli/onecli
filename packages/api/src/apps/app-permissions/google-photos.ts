@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const googlePhotosPermissions: AppPermissionDefinition = {
   provider: "google-photos",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

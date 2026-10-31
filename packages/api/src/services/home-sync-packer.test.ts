@@ -5,8 +5,8 @@ import {
 import { describe, expect, it, vi } from "vitest";
 import {
   LIBRARY_MANIFEST_BUDGET_BYTES,
-  fitLibraryToSync,
-  libraryManifestBytes,
+  fitSkillsToSync,
+  skillManifestBytes,
   packSyncParts,
   type SyncFinalExtras,
 } from "./home-sync-service";
@@ -102,14 +102,15 @@ describe("packSyncParts", () => {
   });
 });
 
-describe("fitLibraryToSync", () => {
+describe("fitSkillsToSync", () => {
   const libFiles = (name: string, count: number) =>
     Array.from({ length: count }, (_, i) => ({
       path: `.agents/skills/${name}/${i === 0 ? "SKILL.md" : `r/${"x".repeat(100)}${i}.md`}`,
       content: "c",
     }));
+  /** Library skills in the composer's leave-out order: last by name first. */
   const lib = (...names: string[]) =>
-    names.map((name) => ({ name, shadows: [] }));
+    names.map((name) => ({ name, shadows: [] })).reverse();
   const extras = (brief: number): Omit<SyncFinalExtras, "prune"> => ({
     instructions: "i".repeat(brief),
     agentName: "a",
@@ -135,10 +136,10 @@ describe("fitLibraryToSync", () => {
   it("keeps everything when the final part fits", () => {
     const files = [...libFiles("alpha", 5), ...libFiles("beta", 5)];
     expect(
-      fitLibraryToSync({
+      fitSkillsToSync({
         agentId: "agent",
         files,
-        library: lib("alpha", "beta"),
+        skills: lib("alpha", "beta"),
         extras: extras(10),
         generation: 3,
         budget: BUDGET,
@@ -155,10 +156,10 @@ describe("fitLibraryToSync", () => {
     ];
     // 2,048-byte frames: the brief alone takes ~1 KB, so both library skills
     // (~650 bytes of manifest each) can't fit beside it.
-    const kept = fitLibraryToSync({
+    const kept = fitSkillsToSync({
       agentId: "agent",
       files,
-      library: lib("alpha", "beta"),
+      skills: lib("alpha", "beta"),
       extras: extras(1_000),
       generation: 3,
       budget: BUDGET,
@@ -186,10 +187,10 @@ describe("fitLibraryToSync", () => {
       big("gamma"),
       memory,
     ];
-    const kept = fitLibraryToSync({
+    const kept = fitSkillsToSync({
       agentId: "agent",
       files,
-      library: lib("alpha", "beta", "delta", "gamma"),
+      skills: lib("alpha", "beta", "delta", "gamma"),
       extras: extras(10),
       generation: 3,
       budget: BUDGET,
@@ -210,12 +211,12 @@ describe("fitLibraryToSync", () => {
   it("a left-out library skill gives its name back to the agent's own skill", () => {
     const own = { path: ".agents/skills/beta/SKILL.md", content: "MINE" };
     const files = [...libFiles("alpha", 6), ...libFiles("beta", 6)];
-    const kept = fitLibraryToSync({
+    const kept = fitSkillsToSync({
       agentId: "agent",
       files,
-      library: [
-        { name: "alpha", shadows: [] },
+      skills: [
         { name: "beta", shadows: [own] },
+        { name: "alpha", shadows: [] },
       ],
       extras: extras(1_000),
       generation: 3,
@@ -225,6 +226,36 @@ describe("fitLibraryToSync", () => {
     expect(kept.map((f) => f.path)).toEqual(
       [...kept.map((f) => f.path)].sort(),
     );
+  });
+
+  it("past the library, leaves the agent's own skills out too, never memory", () => {
+    // No library at all: two big user skills that can't both ride beside
+    // memory in a 3-part budget. The composer orders them largest first.
+    const user = (name: string, size: number) => ({
+      path: `.agents/skills/${name}/SKILL.md`,
+      content: "x".repeat(size),
+    });
+    const memory = { path: "memory/index.md", content: "m" };
+    const files = [
+      user("big", 1_800),
+      user("bigger", 1_900),
+      user("small", 10),
+      user("tiny", 10),
+      memory,
+    ];
+    const kept = fitSkillsToSync({
+      agentId: "agent",
+      files,
+      skills: [
+        { name: "bigger", shadows: [] },
+        { name: "big", shadows: [] },
+      ],
+      extras: extras(10),
+      generation: 3,
+      budget: { maxParts: 3, maxBytes: 2_048 },
+    });
+    expect(kept.map((f) => f.path)).toContain("memory/index.md");
+    expect(kept.some((f) => f.path.includes("/bigger/"))).toBe(false);
   });
 });
 
@@ -269,7 +300,7 @@ describe("the library's sync budget", () => {
     for (let i = 0; used < LIBRARY_MANIFEST_BUDGET_BYTES - perSkill; i += 1) {
       const name = `lib-${String(i).padStart(2, "0")}`;
       const path = `references/${"x".repeat(Math.max(1, perSkill - 40))}.md`;
-      used += libraryManifestBytes(name, [path]);
+      used += skillManifestBytes(name, [path]);
       paths.push(`.agents/skills/${name}/${path}`);
     }
     const bytes = syncFrameByteLength({

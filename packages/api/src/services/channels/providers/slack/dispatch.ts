@@ -356,7 +356,7 @@ type Admission =
  * hourly budget: every answer the agent was not @mentioned for counts and
  * is capped, so a busy channel can never become a runaway bill (@mentions
  * never reach here). Everything after this - the channel gate, the identity
- * lane, person blocks, the app-turn cap - runs unchanged in the group door.
+ * lane, the app-turn cap - runs unchanged in the group door.
  */
 const admitOverheard = async (
   presenceId: string,
@@ -401,8 +401,9 @@ const admitOverheard = async (
     return { ok: false, reason: "overheard-budget" };
   }
   // Called by NAME ("rafi, can you...") is the agent's even with no verdict;
-  // its PLACEMENT still comes from the judge when one answers in time.
-  const byName = callsByName(call.text, [
+  // its PLACEMENT still comes from the judge when one answers in time. Read
+  // from what was TYPED: a name inside a pasted table is data.
+  const byName = callsByName(call.typedText, [
     presence.agent.name,
     presence.identityName,
   ]);

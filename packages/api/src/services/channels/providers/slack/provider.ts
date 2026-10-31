@@ -8,16 +8,18 @@ import type {
   WaitingMessage,
 } from "../../types";
 import { dispatchSlackEvent } from "./dispatch";
+import { replyToSlackOutcome } from "./outcome-reply";
 import { invalidateInboundPresence } from "./inbound-cache";
 import { slackSharedApp } from "./shared-install-service";
 import { slackReach } from "./reach-card";
+import { slackOwnReplies } from "./own-replies";
 import { slackActionApprovalCard } from "./action-approval-card";
 import { settleSlackGatewayApprovalCard } from "./gateway-approval-card";
 import {
   BOT_EVENTS,
   botScopesFor,
   buildAgentManifest,
-  USER_READ_SCOPES,
+  USER_SCOPES,
   withAgentBotEvents,
   withSyncedAppName,
   withTombstoneName,
@@ -255,6 +257,10 @@ export const slackProvider: ChannelProvider = {
   // dispatch hook the generic ingest door calls by registry lookup.
   dispatchInbound: dispatchSlackEvent,
 
+  // The events transport's outcome replies (the socket adapter posts the
+  // same ones on its side).
+  replyToOutcome: replyToSlackOutcome,
+
   // A removed app must stop being admitted by the events route at once, not
   // after the verification cache's TTL (inbound-cache.ts).
   onPresenceRemoved: ({ externalId }) => invalidateInboundPresence(externalId),
@@ -263,6 +269,7 @@ export const slackProvider: ChannelProvider = {
   // address, the guest-speaker probe, and the platform-composed owner-DM
   // card - everything provider-shaped about space grants in one home.
   reach: slackReach,
+  ownReplies: slackOwnReplies,
 
   // The one-shot action-approval card (action-approval-card.ts): the
   // owner-DM prompt for a held privileged agent action.
@@ -645,7 +652,7 @@ export const slackProvider: ChannelProvider = {
     if (next) await manifestUpdate(accessToken, externalId, next);
   },
 
-  userReadScopes: USER_READ_SCOPES,
+  userReadScopes: USER_SCOPES,
 
   presenceEvents: {
     current: BOT_EVENTS,
@@ -766,9 +773,8 @@ export const slackProvider: ChannelProvider = {
   async sendMessage({ credentialsJson, to, text, mentions }) {
     const { botToken } = parseSlackPresenceCredentials(credentialsJson);
     if (!botToken) throw new Error("presence has no bot token");
-    // People AND apps are addressed via their DM channel (conversations.open
-    // is idempotent — it returns the existing IM; an app's bot user opens an
-    // IM the same way); channels post directly.
+    // People are addressed via their DM channel (conversations.open is
+    // idempotent: it returns the existing IM); channels post directly.
     const channel =
       to.kind === "channel"
         ? to.ref
@@ -827,6 +833,17 @@ export const slackProvider: ChannelProvider = {
       if (!cursor) break;
     }
     return members;
+  },
+
+  async checkCredential({ credentialsJson }) {
+    const { botToken } = parseSlackPresenceCredentials(credentialsJson);
+    // No bot token stored = nothing to probe (a half-set-up presence); the
+    // setup flow owns that state, not the liveness check.
+    if (!botToken) return;
+    // `auth.test` answers token_revoked / invalid_auth / account_inactive
+    // for a dead token: thrown as SlackApiError for the caller's dead-code
+    // rule. Cheap (Tier "special", no scopes).
+    await authTest(botToken);
   },
 
   async listChannels({ credentialsJson }) {

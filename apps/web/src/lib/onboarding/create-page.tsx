@@ -4,11 +4,11 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowRight,
-  Box,
   Check,
-  KeyRound,
   Loader2,
+  ShieldCheck,
   Sparkles,
+  UserRound,
 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
@@ -24,30 +24,32 @@ import { hostedCreateRefusalCopy } from "@/lib/agents/availability";
 import { nameToIdentifier } from "@/lib/agents/agent-identifier";
 import { agentChatPath } from "@/lib/navigation";
 import { useOnboarding } from "./onboarding-context";
-import { WelcomeVisual } from "./_components/welcome-visual";
+import { useScreenExit } from "./use-screen-exit";
+import { AppsMarquee } from "./_components/apps-marquee";
 
 /** The field opens filled, so nobody faces an empty required box. */
 const DEFAULT_AGENT_NAME = "Donna";
 
-/** The boot narrative IS the product pitch: while the sandbox provisions,
- * each line lands as a claim being kept, not marketing copy. Timings are
- * presentational — creation has already succeeded when this plays, and the
- * agent page queues turns sent before the sandbox is up. */
+/** The boot narrative, in plain words for people who are not engineers.
+ * Timings are presentational: creation has already succeeded when this
+ * plays, and the agent page queues turns sent before the sandbox is up.
+ * `{name}` is the agent's name. */
 const BOOT_LINES = [
-  { text: "Creating your agent", icon: Sparkles },
-  { text: "Provisioning an isolated sandbox", icon: Box },
+  { text: "Setting up {name}", icon: Sparkles },
+  { text: "Giving {name} a safe space of its own", icon: UserRound },
   {
-    text: "Zero credentials inside: keys stay in the gateway",
-    icon: KeyRound,
+    text: "Keeping your passwords safe",
+    icon: ShieldCheck,
   },
 ] as const;
 
 const BOOT_LINE_MS = 900;
 
-/** House entrance for each phase — keyed on the phase so a swap remounts and
- * replays it, instead of the content snapping in place. */
+/** Each phase's entrance, keyed on the phase so a swap remounts and replays
+ * it: a soft fade and a short rise, slow enough to read as a transition
+ * rather than a cut (matches FlowChrome). */
 const PHASE_ENTRANCE =
-  "motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2";
+  "motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-3 fill-mode-both duration-500 ease-out";
 
 /** The mission and the act of creating the first agent are ONE screen: the
  * picture makes the claim, the name field cashes it in. Three phases —
@@ -72,11 +74,19 @@ export default function CreatePage() {
 
   const [name, setName] = useState(DEFAULT_AGENT_NAME);
   const [nameTouched, setNameTouched] = useState(false);
+  // Eases the screen away before the hand-off to the chat.
+  const { leaving, leave } = useScreenExit();
   // Resume with a created agent skips the pitch and the form — the agent
   // exists, so the only remaining act is meeting it.
   const [phase, setPhase] = useState<"mission" | "form" | "booting">(
     createdAgentId ? "booting" : "mission",
   );
+  // The first screen arrives with the step itself, and the step frame
+  // (FlowChrome) already fades it in. Only later in-step swaps (logos ->
+  // name -> getting ready) play their own entrance, so the two never stack.
+  const [firstPhase] = useState(phase);
+  const entrance = (p: typeof phase) =>
+    p === firstPhase ? "" : PHASE_ENTRANCE;
   const [bootStep, setBootStep] = useState(
     createdAgentId ? BOOT_LINES.length : 0,
   );
@@ -173,26 +183,34 @@ export default function CreatePage() {
   // The created name is the truth once it exists (resume included); the
   // local field only covers the pre-creation renders of this screen.
   const bootingName = createdAgentName ?? name.trim();
+  const bootLineText = (text: string) => text.replaceAll("{name}", bootingName);
 
   return (
-    <div className="flex w-full flex-col items-center">
+    <div
+      className={cn(
+        "flex w-full flex-col items-center transition-[opacity,transform] duration-300 ease-in",
+        leaving && "pointer-events-none -translate-y-1 opacity-0",
+      )}
+    >
       {phase === "mission" ? (
         <div
           key="mission"
           className={cn(
             "flex w-full flex-col items-center text-center",
-            PHASE_ENTRANCE,
+            entrance("mission"),
           )}
         >
           <h1 className="font-serif text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
-            A sandboxed agent for every employee
+            Works with <span className="text-brand">all your tools</span>,
+            safely
           </h1>
-          <p className="text-muted-foreground mt-3 text-balance sm:text-lg">
-            It never holds your keys. They stay in the gateway, you stay in
-            control.
-          </p>
 
-          <WelcomeVisual className="mt-8" />
+          <AppsMarquee className="mt-10" />
+
+          <p className="text-muted-foreground mt-8 text-sm text-balance">
+            You decide what your agent can do.{" "}
+            <span className="text-brand font-medium">SOC 2 compliant</span>.
+          </p>
 
           <Button
             variant="brand"
@@ -209,7 +227,7 @@ export default function CreatePage() {
           key="form"
           className={cn(
             "flex w-full flex-col items-center text-center",
-            PHASE_ENTRANCE,
+            entrance("form"),
           )}
         >
           <h1 className="font-serif text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
@@ -264,10 +282,13 @@ export default function CreatePage() {
           </form>
         </div>
       ) : (
-        <div key="booting" className={cn("w-full max-w-sm", PHASE_ENTRANCE)}>
-          <div role="status" aria-label="Creating your agent">
+        <div
+          key="booting"
+          className={cn("w-full max-w-sm", entrance("booting"))}
+        >
+          <div role="status" aria-label={`Setting up ${bootingName}`}>
             <h1 className="text-center font-serif text-3xl font-semibold tracking-tight break-words text-balance sm:text-4xl">
-              {bootingName} is starting up
+              {bootingName} is getting ready
             </h1>
             {/* The visual list conveys progress via opacity only — this text
                 node is what actually changes, so the status region announces
@@ -275,7 +296,10 @@ export default function CreatePage() {
             <p className="sr-only">
               {ready
                 ? `${bootingName} is ready to meet you`
-                : BOOT_LINES[Math.min(shownStep, BOOT_LINES.length - 1)]?.text}
+                : bootLineText(
+                    BOOT_LINES[Math.min(shownStep, BOOT_LINES.length - 1)]
+                      ?.text ?? "",
+                  )}
             </p>
             <ul className="mt-8 space-y-4">
               {BOOT_LINES.map(({ text, icon: Icon }, i) => {
@@ -304,7 +328,7 @@ export default function CreatePage() {
                     <span
                       className={cn("text-sm", done && "text-muted-foreground")}
                     >
-                      {text}
+                      {bootLineText(text)}
                     </span>
                   </li>
                 );
@@ -320,10 +344,12 @@ export default function CreatePage() {
                 variant="brand"
                 size="lg"
                 className={PHASE_ENTRANCE}
-                onClick={() => void handleComplete(chatDestination)}
-                loading={completing}
+                onClick={() =>
+                  leave(() => void handleComplete(chatDestination))
+                }
+                loading={completing || leaving}
               >
-                Meet your agent
+                Meet {bootingName}
                 <ArrowRight className="size-4" aria-hidden />
               </Button>
             )}

@@ -67,6 +67,12 @@ const skillService = vi.hoisted(() => ({
   listSkillsReachingAgent: vi.fn(),
   updateAgentSkillByName: vi.fn(),
   deleteAgentSkillByName: vi.fn(),
+  importAgentSkills: vi.fn(),
+}));
+
+const skillZip = vi.hoisted(() => ({
+  attachmentBytes: vi.fn(),
+  importSkillZip: vi.fn(),
 }));
 
 const webhookService = vi.hoisted(() => ({
@@ -123,6 +129,16 @@ vi.mock("./skill-service", () => ({
   listSkillsReachingAgent: skillService.listSkillsReachingAgent,
   updateAgentSkillByName: skillService.updateAgentSkillByName,
   deleteAgentSkillByName: skillService.deleteAgentSkillByName,
+  importAgentSkills: skillService.importAgentSkills,
+}));
+
+vi.mock("./skill-import", () => ({
+  importSkillZip: skillZip.importSkillZip,
+}));
+
+vi.mock("./attachment-service", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./attachment-service")>()),
+  getAgentAttachmentBytesByPath: skillZip.attachmentBytes,
 }));
 
 // The GitHub library: no library skills unless a
@@ -138,6 +154,11 @@ vi.mock("./agent-connections-render", () => ({
   connectionsForRender: connectionsRender.connectionsForRender,
   customConnectionsForRender: connectionsRender.customConnectionsForRender,
 }));
+
+const appConnectionRequest = vi.hoisted(() => ({
+  requestAppConnection: vi.fn(),
+}));
+vi.mock("./app-connection-request-service", () => appConnectionRequest);
 
 const approvals = vi.hoisted(() => ({ requestActionApproval: vi.fn() }));
 
@@ -157,8 +178,12 @@ vi.mock("./audit-service", async (importOriginal) => ({
   recordAuditEvent: audit.recordAuditEvent,
 }));
 
-const { executePlatformTool, takeMemoryWriteToken, resetMemoryWritePacing } =
-  await import("./platform-tool-service");
+const {
+  executePlatformTool,
+  takeMemoryWriteToken,
+  takeSkillImportToken,
+  resetSandboxPacing,
+} = await import("./platform-tool-service");
 const { ServiceError } = await import("./errors");
 const { initAgentDesktop } = await import("../providers/hooks/agent-desktop");
 
@@ -455,6 +480,99 @@ describe("the skill tools", () => {
     expect(audit.recordAuditEvent).not.toHaveBeenCalled();
   });
 
+  it("skill_list shows stored descriptions clean", async () => {
+    const bel = String.fromCharCode(0x07);
+    const rlo = String.fromCharCode(0x202e);
+    skillService.listSkillsReachingAgent.mockResolvedValue([
+      {
+        ...SKILL,
+        fileCount: 0,
+        description: `Use${bel} it${rlo} for releases`,
+      },
+    ]);
+    const response = await call("skill_list", {});
+    const result = response.result as {
+      skills: { description: string }[];
+      note: string;
+    };
+    expect(result.skills[0]?.description).toBe("Use it for releases");
+    expect(result.note).not.toContain("shortened");
+  });
+
+  it("skill_list stays deliverable at every cap, saying when it shortened", async () => {
+    // 10 own + 20 organization + 50 library skills at the longest name,
+    // each with a 1,024-character description of 3-byte characters, and the
+    // longest repo name a library may have (200): about 95,000 characters
+    // and 250,000 bytes in full, past the runner's 64,000 refusal and the
+    // harness's MCP trim.
+    const long = "漢".repeat(1024);
+    const own = (i: number) => ({
+      ...SKILL,
+      id: `sk-a${i}`,
+      name: `${"a".repeat(60)}-${i}`,
+      description: long,
+      fileCount: 0,
+    });
+    skillService.listSkillsReachingAgent.mockResolvedValue([
+      ...Array.from({ length: 10 }, (_, i) => own(i)),
+      ...Array.from({ length: 20 }, (_, i) => ({
+        ...own(100 + i),
+        scope: "organization",
+      })),
+    ]);
+    library.names = Array.from({ length: 50 }, (_, i) => ({
+      name: `${"l".repeat(60)}-${i}`,
+      description: long,
+      repo: `${"o".repeat(39)}/${"r".repeat(160)}`,
+    }));
+    try {
+      const response = await call("skill_list", {});
+      expect(response.ok).toBe(true);
+      const serialized = JSON.stringify(response.result);
+      expect(serialized.length).toBeLessThanOrEqual(60_000);
+      expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(30_000);
+      const result = response.result as {
+        skills: { description: string }[];
+        note: string;
+      };
+      expect(result.skills).toHaveLength(80);
+      // Every description is shortened to one length, no skill dropped.
+      const lengths = new Set(result.skills.map((s) => s.description.length));
+      expect(lengths.size).toBe(1);
+      expect(result.note).toContain("full description is in its SKILL.md");
+    } finally {
+      library.names = [];
+    }
+  });
+
+  it("skill_list keeps as much of each description as fits", async () => {
+    // Every cap reached, with ordinary names, repos and ASCII descriptions.
+    const long = "d".repeat(1024);
+    skillService.listSkillsReachingAgent.mockResolvedValue(
+      Array.from({ length: 30 }, (_, i) => ({
+        ...SKILL,
+        id: `sk-b${i}`,
+        name: `skill-${i}`,
+        scope: i < 10 ? "agent" : "organization",
+        description: long,
+        fileCount: 0,
+      })),
+    );
+    library.names = Array.from({ length: 50 }, (_, i) => ({
+      name: `library-${i}`,
+      description: long,
+      repo: "acme/skills",
+    }));
+    try {
+      const response = await call("skill_list", {});
+      const result = response.result as { skills: { description: string }[] };
+      expect(result.skills).toHaveLength(80);
+      expect(result.skills[0]?.description.length).toBeGreaterThan(200);
+    } finally {
+      library.names = [];
+    }
+  });
+
   it("skill_update requires an actual change and audits real ones", async () => {
     const nothing = await call("skill_update", { name: "release-checklist" });
     expect(nothing.ok).toBe(false);
@@ -582,6 +700,167 @@ describe("the skill tools", () => {
   });
 });
 
+describe("skill_import", () => {
+  const outcome = (name: string, skipped: number) => ({
+    id: `sk-${name}`,
+    name,
+    description: "d".repeat(300),
+    files: 200,
+    bytes: 1024,
+    groups: { scripts: 3 },
+    skipped: Array.from({ length: skipped }, (_, i) => ({
+      path: `${"p".repeat(110)}/${i}`,
+      reason: "Clashes with another file of the same name",
+    })),
+    replaced: false,
+  });
+
+  beforeEach(() => {
+    resetSandboxPacing();
+    skillZip.attachmentBytes.mockResolvedValue(Buffer.from("zip"));
+  });
+
+  it("lists what fits whole on the transcript and counts the rest", async () => {
+    const names = Array.from({ length: 10 }, (_, i) => `skill-${i}`);
+    skillZip.importSkillZip.mockResolvedValue({ skills: [], problems: [] });
+    skillService.importAgentSkills.mockResolvedValue(
+      names.map((name) => outcome(name, 30)),
+    );
+    const response = await call("skill_import", {
+      path: "attachments/t-0/skills.zip",
+    });
+    expect(response.ok).toBe(true);
+    const serialized = JSON.stringify(response.result);
+    // The runner's per-string cut (16,000) never reaches it, so the chat
+    // can still read it back whole.
+    expect(serialized.length).toBeLessThanOrEqual(15_000);
+    expect(response.result).toMatchObject({
+      imported: expect.arrayContaining([
+        expect.objectContaining({ name: "skill-9", skippedCount: 30 }),
+      ]),
+    });
+    const listed = (response.result as { imported: { skipped: unknown[] }[] })
+      .imported[0]!.skipped.length;
+    expect(listed).toBeGreaterThan(0);
+    expect(listed).toBeLessThan(10);
+  });
+
+  it("keeps the full listing when it fits", async () => {
+    skillZip.importSkillZip.mockResolvedValue({ skills: [], problems: [] });
+    skillService.importAgentSkills.mockResolvedValue([outcome("one", 12)]);
+    const response = await call("skill_import", {
+      path: "attachments/t-0/one.zip",
+    });
+    expect(response.result).toMatchObject({
+      imported: [
+        expect.objectContaining({
+          description: "d".repeat(200),
+          skippedCount: 12,
+          skipped: expect.any(Array),
+        }),
+      ],
+      problemCount: 0,
+    });
+    expect(
+      (response.result as { imported: { skipped: unknown[] }[] }).imported[0]!
+        .skipped,
+    ).toHaveLength(10);
+  });
+
+  it("fits the transcript even when nothing is left to shed", async () => {
+    // The worst case of the old bound: ten skills at the longest name, the
+    // fullest summary, and stored descriptions of control characters (each
+    // escapes to 6 characters in JSON). It made 17,053 characters, past the
+    // runner's 16,000 cut, so the chat card could not render.
+    const control = Array.from({ length: 0x20 }, (_, code) =>
+      String.fromCharCode(code),
+    ).join("");
+    const groups = Object.fromEntries([
+      ...Array.from({ length: 6 }, (_, i) => [`${"k".repeat(39)}${i}`, 200]),
+      ["other", 200],
+    ]);
+    skillZip.importSkillZip.mockResolvedValue({ skills: [], problems: [] });
+    skillService.importAgentSkills.mockResolvedValue(
+      Array.from({ length: 10 }, (_, i) => ({
+        ...outcome(`${"n".repeat(63)}${i}`, 0),
+        description: control.repeat(7),
+        files: 201,
+        bytes: 10 * 1024 * 1024,
+        groups,
+      })),
+    );
+    const response = await call("skill_import", { path: "a.zip" });
+    expect(response.ok).toBe(true);
+    expect(JSON.stringify(response.result).length).toBeLessThanOrEqual(15_000);
+  });
+
+  it("shows clean descriptions and keeps the row ids to the audit", async () => {
+    const bel = String.fromCharCode(0x07);
+    const rlo = String.fromCharCode(0x202e);
+    skillZip.importSkillZip.mockResolvedValue({ skills: [], problems: [] });
+    skillService.importAgentSkills.mockResolvedValue([
+      { ...outcome("notes", 0), description: `Use${bel} it${rlo} for notes` },
+      { ...outcome("tone", 0), replaced: true },
+    ]);
+    const response = await call("skill_import", { path: "a.zip" });
+    const result = response.result as {
+      imported: Record<string, unknown>[];
+    };
+    expect(result.imported[0]).toMatchObject({
+      name: "notes",
+      description: "Use it for notes",
+    });
+    // The agent addresses skills by name: no row id in what it reads.
+    for (const skill of result.imported) {
+      expect(skill).not.toHaveProperty("id");
+    }
+    expect(audit.recordAuditEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "create",
+        service: "skill",
+        metadata: expect.objectContaining({
+          skillId: "sk-notes",
+          name: "notes",
+          agentId: "ag-1",
+          source: "zip",
+        }),
+      }),
+    );
+    expect(audit.recordAuditEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "update",
+        metadata: expect.objectContaining({ skillId: "sk-tone" }),
+      }),
+    );
+  });
+
+  it("names the path back when no sent file is there", async () => {
+    skillZip.attachmentBytes.mockResolvedValue(null);
+    const response = await call("skill_import", { path: "nope.zip" });
+    expect(response).toEqual({
+      ok: false,
+      error: expect.stringContaining('"nope.zip"'),
+    });
+    expect(skillService.importAgentSkills).not.toHaveBeenCalled();
+  });
+
+  it("paces a looping agent per sandbox, before any zip is read", async () => {
+    const now = Date.now();
+    for (let i = 0; i < 5; i += 1) {
+      expect(takeSkillImportToken("sb-1", now)).toBe(true);
+    }
+    const response = await call("skill_import", { path: "a.zip" });
+    expect(response).toEqual({
+      ok: false,
+      error: expect.stringContaining("paced"),
+    });
+    expect(skillZip.attachmentBytes).not.toHaveBeenCalled();
+    // Another sandbox is untouched, and the bucket refills with time.
+    expect(takeSkillImportToken("sb-2", now)).toBe(true);
+    expect(takeSkillImportToken("sb-1", now + 20_000)).toBe(true);
+  });
+});
+
 describe("the fence", () => {
   it("stays hint-free when the sandbox is not this runner's", async () => {
     state.sandbox = null;
@@ -614,7 +893,7 @@ describe("the fence", () => {
 });
 
 describe("the memory-write token bucket", () => {
-  beforeEach(() => resetMemoryWritePacing());
+  beforeEach(() => resetSandboxPacing());
 
   it("a BACKWARDS clock step never spends tokens — no lockout", () => {
     // MUTATION-PROOF (lens-3 catch): drop the `Math.max(0, …)` elapsed floor
@@ -687,11 +966,11 @@ describe("list_apps", () => {
     expect(res).toMatchObject({ ok: true, result: { apps: [granola] } });
   });
 
-  it("an empty grant set says so, and where it is changed", async () => {
+  it("an empty grant set says so, and how to ask for an app", async () => {
     connectionsRender.connectionsForRender.mockResolvedValue([]);
     const res = await call("list_apps", {});
     expect(res).toMatchObject({ ok: true, result: { apps: [] } });
-    expect(JSON.stringify(res)).toContain("OneCLI dashboard");
+    expect(JSON.stringify(res)).toContain("request_app_connection");
   });
 
   it("a sandbox this runner does not host learns nothing", async () => {
@@ -699,6 +978,39 @@ describe("list_apps", () => {
     const res = await call("list_apps", {});
     expect(res.ok).toBe(false);
     expect(connectionsRender.connectionsForRender).not.toHaveBeenCalled();
+  });
+});
+
+describe("request_app_connection", () => {
+  it("answers for the CALLING agent's resolved identity, never an argument", async () => {
+    appConnectionRequest.requestAppConnection.mockResolvedValue({
+      status: "connect",
+      app: "jira",
+    });
+    const res = await call("request_app_connection", { app: "Jira" });
+    expect(appConnectionRequest.requestAppConnection).toHaveBeenCalledWith(
+      { agentId: "ag-1", workspaceId: "p1", organizationId: "org-1" },
+      "Jira",
+    );
+    expect(res).toMatchObject({ ok: true, result: { status: "connect" } });
+  });
+
+  it("refuses extra arguments and a missing name, verbatim", async () => {
+    const extra = await call("request_app_connection", {
+      app: "jira",
+      agentId: "other",
+    });
+    expect(extra.ok).toBe(false);
+    const missing = await call("request_app_connection", {});
+    expect(missing.ok).toBe(false);
+    expect(appConnectionRequest.requestAppConnection).not.toHaveBeenCalled();
+  });
+
+  it("a sandbox this runner does not host learns nothing", async () => {
+    state.sandbox = null;
+    const res = await call("request_app_connection", { app: "jira" });
+    expect(res.ok).toBe(false);
+    expect(appConnectionRequest.requestAppConnection).not.toHaveBeenCalled();
   });
 });
 

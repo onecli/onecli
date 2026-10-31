@@ -324,9 +324,6 @@ export interface ResourceCounts {
   apps: number;
   llms: number;
   secrets: number;
-  /** How many of the workspace's agents are working in the background right
-   * now (step 13's held-awake signal). Optional for older APIs; absent = 0. */
-  agentsWorkingInBackground?: number;
 }
 
 export interface CreateAgentInput {
@@ -510,8 +507,7 @@ export interface PolicyRuleV2 {
 }
 
 // ── Attach-model grants (plans/project-attach-model.md, step 2) ─────────────
-// Hand-mirrored from packages/api/src/services/grants-service.ts and
-// grants-summary-service.ts.
+// Hand-mirrored from packages/api/src/services/grants-service.ts.
 
 /** A grant's session policy ("Resources"): which repositories/folders the
  * connection's injected credential may reach. One strict axis per provider. */
@@ -590,8 +586,10 @@ export type { UnlistedChoice };
 export type ConnectionGrantInput =
   | { access: "full"; resources?: GrantResources | null }
   /** The attach toggles: the server writes the product default for the
-   * provider (reads allowed, writes and requests outside the tool list
-   * needing approval; full access for an app with no tool list). */
+   * provider (`defaultConnectionGrant`: read tools allowed, writes needing
+   * approval, requests outside the tool list needing approval unless the
+   * catalog was checked safe for reads; full access for an app with no tool
+   * list). */
   | { access: "default"; resources?: GrantResources | null }
   | {
       access: "custom";
@@ -603,25 +601,6 @@ export type ConnectionGrantInput =
       otherWrites?: UnlistedChoice;
       resources?: GrantResources | null;
     };
-
-export type GrantsSummaryEntry =
-  | {
-      kind: "app";
-      provider: string;
-      connectionId: string;
-      label: string | null;
-    }
-  | { kind: "secret" | "llm"; id: string; name: string };
-
-export interface AgentGrantsSummary {
-  mode: "all" | "grants";
-  entries: GrantsSummaryEntry[];
-  total: number;
-}
-
-export interface AgentWithGrantsSummary extends Agent {
-  grantsSummary: AgentGrantsSummary;
-}
 
 /** The current organization (`GET /v1/org`). `byoLegacy` is the org's
  * creation world on cloud:
@@ -747,6 +726,7 @@ export type ConversationSource =
   | "cron"
   | "watch"
   | "eval"
+  | "memory_review"
   | "greeting";
 
 export interface Conversation {
@@ -867,11 +847,11 @@ export interface Turn {
   error: string | null;
   /**
    * A machine-readable reason beside `error`, set only when the UI must do
-   * more than print the sentence: `"no_model_key"` / `"model_provider_error"`
-   * attach the Models-page fix link, and the lifecycle codes render as a
-   * quiet notice instead of the red box — none of which can be decided by
-   * matching on prose. The full vocabulary is TURN_ERROR_CODES in
-   * @onecli/api's conversation validations.
+   * more than print the sentence: the key codes (`"no_model_key"`,
+   * `"model_provider_error"`, `"model_key_not_attached"`, ...) attach the
+   * matching Models-page fix, which cannot be decided by matching on prose.
+   * The full vocabulary is TURN_ERROR_CODES in @onecli/api's conversation
+   * validations.
    */
   errorCode: string | null;
   usage: TurnUsage | null;

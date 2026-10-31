@@ -71,14 +71,6 @@ export const useSecretAgentAccess = (secretId: string, enabled = true) =>
     enabled: enabled && secretId.length > 0,
   });
 
-/** The agents-list chips feed — keyed under the agents namespace so agent CRUD
- * invalidation reaches it (the policy-visibility spread trick). */
-export const useGrantsSummary = () =>
-  useQuery({
-    queryKey: [...queryKeys.agents.all(), "grants-summary"],
-    queryFn: grants.summary,
-  });
-
 /** Every view a grant write makes stale. Also for writes the SERVER makes on
  * the client's behalf: a connection created from an agent's context arrives
  * already granted to that agent (the API's connecting-agent grant). */

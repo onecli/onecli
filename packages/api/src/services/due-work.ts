@@ -19,12 +19,16 @@ import {
   AUTOMATION_SOURCES,
   FOLLOW_UP_EXPIRED_MESSAGE,
   STEERED_FOLLOW_UP_CONTEXT,
+  EVAL_SOURCE,
+  MEMORY_REVIEW_SOURCE,
+  PLATFORM_AUTHORED_SOURCES,
   TURN_CEILING_WARNING_MESSAGE,
   TURN_STALLED_MESSAGE,
   TURN_TIME_LIMIT_MESSAGE,
   isAutomationSource,
 } from "../validations/conversation";
 import { logger } from "../lib/logger";
+import { LLM_PROVIDER_IDS } from "../llm/registry";
 import {
   channelHeldBy,
   lifecycleFreeFor,
@@ -34,6 +38,8 @@ import {
   getAgentDesktop,
   type AgentDesktopPush,
 } from "../providers/hooks/agent-desktop";
+import { isPlatformJobRun } from "./platform-jobs";
+import { getSandboxLifecycleHooks } from "../providers/hooks/sandbox-lifecycle-hooks";
 
 const log = logger.child({ component: "due-work" });
 
@@ -244,6 +250,9 @@ export interface DueTurn {
   agentId: string;
   message: string;
   resumeSessionRef: string | null;
+  /** Run on a fresh harness session that ends with the turn (a platform
+   * job's run: see the claim mapping). Absent = the conversation's session. */
+  ephemeralSession?: true;
   /**
    * When this turn's claim-latency clock started — the same
    * COALESCE(retried_at, promoted_at, created_at) the turn-budget sweeps
@@ -332,6 +341,7 @@ interface ClaimedTurnRow {
   /** Same shape as sandbox_id: correlated, nullable in principle only. */
   agent_id: string | null;
   message: string;
+  source: string;
   harness_session_ref: string | null;
   waited_since: Date;
 }
@@ -445,6 +455,9 @@ export const claimDueWork = async (
   );
 
   return db.$transaction(async (tx) => {
+    // A hosted extension may AND a hold into the start arm; without a hook
+    // the slot renders as nothing and the query reads as before the seam.
+    const hooks = getSandboxLifecycleHooks();
     // The claim is a CTE, deliberately — NOT `WHERE id IN (SELECT … LIMIT n
     // FOR UPDATE SKIP LOCKED)`. That form looks equivalent and is not: the
     // locking clause makes the subplan un-hashable, so Postgres re-runs it per
@@ -456,6 +469,7 @@ export const claimDueWork = async (
       WITH claimed AS (
         SELECT s.id FROM sandboxes s
         WHERE s.runner_id = ${runnerId}
+          ${hooks.startHold?.() ?? Prisma.empty}
           ${lifecycleFreeFor(replicaId)}
           AND (
             s.status = 'unprovisioned'
@@ -940,6 +954,7 @@ export const claimDueWork = async (
         (SELECT c.agent_id FROM conversations c
           WHERE c.id = t.conversation_id) AS agent_id,
         t.message,
+        t.source,
         (SELECT c.harness_session_ref FROM conversations c
           WHERE c.id = t.conversation_id) AS harness_session_ref,
         -- The claim-latency clock (step 6 telemetry): the same expression
@@ -1049,7 +1064,11 @@ export const claimDueWork = async (
                 sandboxId: row.sandbox_id,
                 agentId: row.agent_id,
                 message: row.message,
-                resumeSessionRef: row.harness_session_ref,
+                // A platform job's run never resumes its conversation's
+                // session and never leaves one behind (platform-jobs, rule 1).
+                ...(isPlatformJobRun(row.source)
+                  ? { resumeSessionRef: null, ephemeralSession: true as const }
+                  : { resumeSessionRef: row.harness_session_ref }),
                 waitedSince: row.waited_since,
               },
             ]
@@ -1851,6 +1870,179 @@ export const parkUnstartableClaim = async (
       },
     });
   });
+};
+
+// ── Memory reviews ──────────────────────────────────────────────────────
+
+/** Reviews started per pass — its own budget, like CRON_FIRE_LIMIT. */
+const MEMORY_REVIEW_LIMIT = 10;
+/** A long, busy session is reviewed this many human turns in, rather than
+ * only once it finally goes quiet. */
+export const MEMORY_REVIEW_MAX_PENDING_TURNS = 20;
+/** A review needs at least this many SUBSTANTIVE human turns waiting. One
+ * stray message is rarely worth a model call, and short bursts of real
+ * content accumulate (pending counts since the last review) until they
+ * reach it — the in-turn memory rule covers the same session meanwhile. */
+const MEMORY_REVIEW_MIN_SUBSTANTIVE_TURNS = 3;
+/** A turn is substantive at this many non-whitespace characters. Measured
+ * on a real heavy session, it drops exactly the filler that teaches
+ * nothing ("continue", "go on", "ok", "yes", "try again", "you there?")
+ * while keeping short corrections — language-agnostic, no word list. */
+const MEMORY_REVIEW_SUBSTANTIVE_CHARS = 10;
+/** How far back a review looks. Bounds the candidate scan to
+ * `turns(status, updated_at)`'s recent tail, and every count and excerpt to
+ * the same window: a conversation reviewed for the first time is reviewed
+ * on its recent work, never on its whole history. */
+export const MEMORY_REVIEW_WINDOW_SECONDS = 6 * 60 * 60;
+
+/**
+ * What a review learns from: a message a workspace MEMBER typed that reached
+ * the agent. Both halves are fences.
+ *
+ * - A member (`user_id` set, platform sources excluded). A Slack guest, an
+ *   app in a shared channel and a peer agent carry no platform identity, so
+ *   their words never become standing memory on their own: an outsider must
+ *   not be able to plant "how we do things here" in the agent through a
+ *   review it never asked for (memory poisoning). The agent can still save
+ *   what they say in-turn, under its own judgment.
+ * - Reached the agent: a finished turn, or a follow-up the live run took in
+ *   (`joined`). A correction typed while the agent was working rides a
+ *   follow-up row, and it is exactly what a review is for.
+ *
+ * One definition, shared by the dueness query below and the excerpt
+ * (memory-review-service), so the two can never disagree about which
+ * messages count. Prisma's `notIn` wants a mutable array, hence the copy.
+ */
+export const memoryReviewPersonTurn = {
+  status: { in: ["done", "joined"] },
+  userId: { not: null },
+  source: { notIn: [...PLATFORM_AUTHORED_SOURCES] },
+} satisfies Prisma.TurnWhereInput;
+
+export interface DueMemoryReview {
+  conversationId: string;
+  agentId: string;
+  workspaceId: string;
+}
+
+interface DueMemoryReviewRow {
+  conversation_id: string;
+  agent_id: string;
+  workspace_id: string;
+}
+
+/**
+ * Conversations owed a memory review: messages a member typed
+ * (`memoryReviewPersonTurn`) that no review has seen yet, at least
+ * MEMORY_REVIEW_MIN_SUBSTANTIVE_TURNS of them substantive (so filler-only
+ * stretches never cost a model call), in a conversation that has gone quiet
+ * for `idleSeconds` or piled up MEMORY_REVIEW_MAX_PENDING_TURNS of them,
+ * with nothing in flight.
+ *
+ * Two cost fences on the agent:
+ *
+ * - Its sandbox is RUNNING. A review never wakes a parked box, and the idle
+ *   window sits under the park window so the quiet conversation is still
+ *   warm.
+ * - It holds an LLM key of its own: a provider-typed secret in its
+ *   workspace or org. Without one, the agent either runs on the hosted
+ *   deployment's trial credit, which a background turn the person never
+ *   asked for must not spend (their next real message would hit the cap),
+ *   or has no key at all, and its review would only fail at door 1. A
+ *   coarse pool check, like the trial credit's own eligibility rule: a key
+ *   that exists but is not granted to this agent passes here, and door 1
+ *   still refuses the turn.
+ *
+ * "Seen" needs no new column: it is the newest turn in the agent's hidden
+ * review conversation for this one (`source` memory_review, `externalRef` =
+ * the reviewed id), failed reviews included. Two pollers racing the same
+ * review collide on the one-active-turn index; the loser's CONFLICT is
+ * benign.
+ *
+ * A read, not a claim: firing lives in memory-review-service (the cron
+ * split: this module owns dueness only).
+ */
+export const findDueMemoryReviews = async (
+  idleSeconds: number,
+): Promise<DueMemoryReview[]> => {
+  const now = Date.now();
+  const windowStart = new Date(now - MEMORY_REVIEW_WINDOW_SECONDS * 1000);
+  const idleBefore = new Date(now - idleSeconds * 1000);
+  const person = Prisma.sql`
+    t.status IN (${Prisma.join(memoryReviewPersonTurn.status.in)})
+    AND t.user_id IS NOT NULL
+    AND t.source NOT IN (${Prisma.join(memoryReviewPersonTurn.source.notIn)})
+  `;
+  // Pair (agent-to-agent) conversations hold no person to learn about, and
+  // an eval conversation is a test question, not the person's working day.
+  const notReviewable = Prisma.join([
+    ...AUTOMATION_SOURCES,
+    "agent",
+    EVAL_SOURCE,
+  ]);
+  const rows = await db.$queryRaw<DueMemoryReviewRow[]>`
+    WITH recent AS (
+      SELECT t.conversation_id, max(t.updated_at) AS last_at
+      FROM turns t
+      WHERE ${person}
+        AND t.updated_at > ${windowStart}
+      GROUP BY t.conversation_id
+    )
+    SELECT c.id AS conversation_id, c.agent_id, a.workspace_id
+    FROM recent
+    JOIN conversations c ON c.id = recent.conversation_id
+    JOIN agents a ON a.id = c.agent_id
+    JOIN workspaces w ON w.id = a.workspace_id
+    JOIN sandboxes s ON s.agent_id = c.agent_id
+    LEFT JOIN LATERAL (
+      SELECT max(r.created_at) AS reviewed_at
+      FROM conversations rc
+      JOIN turns r ON r.conversation_id = rc.id
+      WHERE rc.agent_id = c.agent_id
+        AND rc.source = ${MEMORY_REVIEW_SOURCE}
+        AND rc.external_ref = c.id
+    ) rv ON true
+    CROSS JOIN LATERAL (
+      SELECT count(*)::int AS pending,
+        count(*) FILTER (
+          -- Only the head is measured: the answer is settled within a few
+          -- hundred chars, and this runs every pass over pasted bulk lists.
+          WHERE length(regexp_replace(left(t.message, 256), '[[:space:]]', '', 'g'))
+            >= ${MEMORY_REVIEW_SUBSTANTIVE_CHARS}
+        )::int AS substantive
+      FROM turns t
+      WHERE t.conversation_id = c.id
+        AND ${person}
+        -- Since the last review, never further back than the window
+        -- (GREATEST ignores the NULL of a never-reviewed conversation).
+        AND t.created_at > GREATEST(${windowStart}, rv.reviewed_at)
+    ) p
+    WHERE a.kind = 'hosted'
+      AND s.status = 'running'
+      AND c.source NOT IN (${notReviewable})
+      AND p.substantive >= ${MEMORY_REVIEW_MIN_SUBSTANTIVE_TURNS}
+      AND (recent.last_at < ${idleBefore} OR p.pending >= ${MEMORY_REVIEW_MAX_PENDING_TURNS})
+      AND NOT EXISTS (
+        SELECT 1 FROM turns x
+        WHERE x.conversation_id = c.id
+          AND x.status IN (${Prisma.join([...ACTIVE_TURN_STATUSES])})
+      )
+      AND EXISTS (
+        SELECT 1 FROM secrets k
+        WHERE k.type IN (${Prisma.join(LLM_PROVIDER_IDS)})
+          AND (
+            k.workspace_id = a.workspace_id
+            OR (k.scope = 'organization' AND k.organization_id = w.organization_id)
+          )
+      )
+    ORDER BY recent.last_at ASC
+    LIMIT ${MEMORY_REVIEW_LIMIT}
+  `;
+  return rows.map((row) => ({
+    conversationId: row.conversation_id,
+    agentId: row.agent_id,
+    workspaceId: row.workspace_id,
+  }));
 };
 
 // ── The wait-for-work signal ────────────────────────────────────────────

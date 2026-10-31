@@ -251,5 +251,27 @@ describe.skipIf(!PROOF_URL)(
         "api-key",
       );
     });
+
+    it("PRECEDENCE: two same-scope keys resolve to the lower id, matching the gateway", async () => {
+      // Two Anthropic keys in ONE workspace: the container must be told the
+      // auth mode of the key the gateway injects, and the gateway breaks the
+      // tie on the lower id. Insert the higher id FIRST so an order left to
+      // Postgres would return it.
+      await db.secret.create({
+        data: secret(`${P}z-oauth`, { authMode: "oauth" }),
+      });
+      await db.secret.create({
+        data: secret(`${P}a-apikey`, { authMode: "api-key" }),
+      });
+      await grant(`${P}g-z`, `${P}z-oauth`);
+      await grant(`${P}g-a`, `${P}a-apikey`);
+
+      const picked = await route.findInjectableSecretOfType(
+        await resolve(),
+        "anthropic",
+        { id: true },
+      );
+      expect(picked?.id).toBe(`${P}a-apikey`);
+    });
   },
 );

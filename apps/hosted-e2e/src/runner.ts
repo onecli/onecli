@@ -155,9 +155,6 @@ export const startTestRunner = async (
     sandboxExtraHosts: [`${opts.config.hostGatewayHost}:host-gateway`],
     orphanReap: opts.orphanReap ?? true,
     orphanGraceSeconds: opts.orphanGraceSeconds ?? 3600,
-    // Cloud-backend settings — inert here: hosted-e2e is the DOCKER path.
-    sandboxManagerUrl: null,
-    sandboxManagerToken: null,
     sessionKey: opts.sessionKey ?? null,
     // No preview relay in the e2e: the port API stays closed.
     portApi: null,
@@ -165,9 +162,6 @@ export const startTestRunner = async (
     // THROUGH the gateway (that is the injection proof), so loopback must
     // stay proxied here; real sandboxes exempt it.
     noProxyLoopback: false,
-    cloudParkWaitSeconds: 120,
-    cloudWakeWaitSeconds: 900,
-    cloudImageWaitSeconds: 240,
   };
 
   const docker = createDockerBackend({

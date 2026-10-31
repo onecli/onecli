@@ -28,6 +28,7 @@ import {
 } from "@/hooks/use-grants";
 import { optimisticKey } from "@/hooks/use-optimistic-mutation";
 import { usePinnedPlacement } from "@/hooks/use-stable-placement";
+import { displayConnectionLabel } from "@onecli/api/lib/connection-display";
 import { ManageAgentPermissions } from "./manage-agent-permissions";
 import type { AccountCardConnection } from "./account-card-connection";
 
@@ -156,14 +157,16 @@ export const ConnectionAgentRows = ({
   );
   const visible = expanded ? sorted : sorted.slice(0, VISIBLE_ROWS);
   const hidden = sorted.length - Math.min(sorted.length, VISIBLE_ROWS);
-  const accountName = connection.label ?? connection.provider;
+  const accountName =
+    displayConnectionLabel(connection.label, connection.metadata) ??
+    connection.provider;
 
   const toggle = (agentId: string, agentName: string, next: boolean) => {
     placement.pin(agentId);
     if (next) {
-      // The product default every attach toggle writes: reads allowed,
-      // writes and anything else need approval. The toast is the door to
-      // narrow it, so it shows at once, with the switch.
+      // The product default every attach toggle writes (the server's
+      // `defaultConnectionGrant`). The toast is the door to narrow it, so it
+      // shows at once, with the switch.
       attach.mutate({
         connectionId: connection.id,
         agentId,

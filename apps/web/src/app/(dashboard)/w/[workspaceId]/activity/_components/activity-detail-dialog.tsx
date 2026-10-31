@@ -13,7 +13,7 @@ import {
 } from "@onecli/ui/components/tooltip";
 import { StatusBadge } from "./status-badge";
 import { MethodBadge } from "./method-badge";
-import { ProviderIcon } from "./provider-icon";
+import { ProviderLabel } from "./provider-label";
 import { hasJsonData } from "@onecli/api/lib/format";
 import {
   isBlockedRequest,
@@ -24,6 +24,8 @@ import {
   getConnectionLabel,
   getMatchedRuleName,
   getMatchedRuleScope,
+  getStatement,
+  getDatabaseRequestView,
   type RequestLogEntry,
 } from "@onecli/api/services/request-log-service";
 
@@ -56,6 +58,8 @@ export const ActivityDetailDialog = ({
   const matchedRuleName = log ? getMatchedRuleName(log) : null;
   const matchedRuleScope = log ? getMatchedRuleScope(log) : null;
   const connectionLabel = log ? getConnectionLabel(log) : null;
+  const statement = log ? getStatement(log) : null;
+  const db = log ? getDatabaseRequestView(log) : null;
   // Rule attributions below are PLAIN TEXT since step 6: they used to link to
   // the workspace policy page, which no longer exists — and a workspace member
   // cannot edit the rule anyway (org guardrails and compiled grants are the
@@ -63,40 +67,54 @@ export const ActivityDetailDialog = ({
 
   return (
     <Dialog open={!!log} onOpenChange={() => onClose()}>
-      <DialogContent>
+      <DialogContent aria-describedby={undefined}>
         <DialogHeader>
           <DialogTitle>Request Details</DialogTitle>
         </DialogHeader>
         {log && (
           <div>
-            <Row label="Method">
-              <MethodBadge method={log.method} />
-            </Row>
-            <Row label="Host">
-              <span className="font-medium">{log.host}</span>
-            </Row>
-            <Row label="Path">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span className="max-w-[280px] truncate font-mono text-xs block text-right cursor-default">
-                    {log.path || "/"}
+            {db ? (
+              // A database row: what kind of statement and on which
+              // connection, never the synthetic policy host and path.
+              <>
+                <Row label="Kind">
+                  <MethodBadge method={db.kind} />
+                </Row>
+                <Row label="Connection">
+                  <span className="block max-w-[280px] truncate text-right font-medium">
+                    {db.connection ?? "PostgreSQL"}
                   </span>
-                </TooltipTrigger>
-                <TooltipContent
-                  side="bottom"
-                  className="max-w-sm break-all font-mono text-xs"
-                >
-                  {log.path || "/"}
-                </TooltipContent>
-              </Tooltip>
-            </Row>
+                </Row>
+              </>
+            ) : (
+              <>
+                <Row label="Method">
+                  <MethodBadge method={log.method} />
+                </Row>
+                <Row label="Host">
+                  <span className="font-medium">{log.host}</span>
+                </Row>
+                <Row label="Path">
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="max-w-[280px] truncate font-mono text-xs block text-right cursor-default">
+                        {log.path || "/"}
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent
+                      side="bottom"
+                      className="max-w-sm break-all font-mono text-xs"
+                    >
+                      {log.path || "/"}
+                    </TooltipContent>
+                  </Tooltip>
+                </Row>
+              </>
+            )}
             <Row label="Provider">
-              <div className="flex items-center gap-1.5">
-                <ProviderIcon provider={log.provider} size={14} />
-                <span>{log.provider}</span>
-              </div>
+              <ProviderLabel provider={log.provider} />
             </Row>
-            {connectionLabel && (
+            {connectionLabel && !db && (
               <Row label="Account">
                 <span>{connectionLabel}</span>
               </Row>
@@ -165,7 +183,22 @@ export const ActivityDetailDialog = ({
                 {new Date(log.createdAt).toLocaleString()}
               </span>
             </Row>
-            {hasJsonData(log.extraData) && !blockedByRule && (
+            {statement && (
+              // A database statement, literals already hidden by the gateway.
+              <div className="mt-3 space-y-1.5">
+                <span className="text-muted-foreground text-xs font-medium">
+                  Statement
+                </span>
+                <pre
+                  tabIndex={0}
+                  aria-label="SQL statement"
+                  className="bg-muted focus-visible:ring-ring max-h-64 overflow-auto rounded-md p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere] focus-visible:ring-2 focus-visible:outline-none"
+                >
+                  {statement}
+                </pre>
+              </div>
+            )}
+            {hasJsonData(log.extraData) && !blockedByRule && !db && (
               <div className="mt-3 space-y-1.5">
                 <span className="text-muted-foreground text-xs font-medium">
                   Extra Data

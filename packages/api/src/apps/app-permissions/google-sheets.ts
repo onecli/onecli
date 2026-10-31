@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const googleSheetsPermissions: AppPermissionDefinition = {
   provider: "google-sheets",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

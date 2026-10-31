@@ -9,7 +9,7 @@ import {
   stackToGrant,
 } from "@onecli/api/services/grants-compile";
 import { describe, expect, it } from "vitest";
-import { defaultGrantAccess } from "./default-grant";
+import { defaultGrantAccess, defaultGrantConsent } from "./default-grant";
 
 /**
  * The switch-on placeholder must be exactly what the agent page reads back
@@ -68,5 +68,35 @@ describe("defaultGrantAccess", () => {
 
   it("an app with no catalog gets full access, like the server", () => {
     expect(defaultGrantAccess(undefined)).toEqual(readBack("no-such-provider"));
+  });
+});
+
+/** What the consent line must say for a grant the server actually stores. */
+const expectedConsent = (
+  grant: ReturnType<typeof readBack>,
+  exhaustive = false,
+): string =>
+  grant.access === "full"
+    ? "It gets full access."
+    : grant.otherReads === "allow" || exhaustive
+      ? "Writes need your approval."
+      : "Writes, and reads that could expose secrets, need your approval.";
+
+describe("defaultGrantConsent", () => {
+  const definitions = getAppPermissionDefinitions();
+
+  it.each(definitions.map((def) => [def.provider, def] as const))(
+    "%s: states what the server stores, never less approval",
+    (provider, def) => {
+      expect(defaultGrantConsent(toAppPermissionDefinitionSummary(def))).toBe(
+        // An exhaustive catalog has no reads outside its tools: its stored
+        // catch-all can match nothing, so it is no approval to promise.
+        expectedConsent(readBack(provider), def.exhaustive === true),
+      );
+    },
+  );
+
+  it("says full access for an app with no catalog", () => {
+    expect(defaultGrantConsent(undefined)).toBe("It gets full access.");
   });
 });

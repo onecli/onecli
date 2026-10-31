@@ -1,6 +1,10 @@
 import type { Prisma } from "@onecli/db";
 import { getAppPermissionDefinition } from "../apps/app-permissions";
-import { methodsOf, type AppTool } from "../apps/app-permissions/types";
+import {
+  defaultOtherReads,
+  methodsOf,
+  type AppTool,
+} from "../apps/app-permissions/types";
 import {
   catalogBlocksUnlisted,
   catalogToolIds,
@@ -58,15 +62,18 @@ const defaultUnlisted = (provider: string): UnlistedChoice =>
 
 /**
  * What a new attach writes: read tools allowed, every write/delete tool and
- * every request outside the tool list needing approval (AWS included: Needs
- * approval is a valid catch-all there, only Always allow is not), so a fresh
- * connection never changes anything without a human saying yes. An app with
- * no catalog has no tool list to split on, so it keeps full access.
+ * every other write (a request outside the tool list that isn't a GET/HEAD)
+ * needing approval, so a fresh connection never changes anything without a
+ * human saying yes. Other reads (GET/HEAD outside the tool list) are allowed
+ * only for a catalog checked safe (`defaultOtherReads`), and need approval
+ * everywhere else: on some APIs a GET returns a credential or runs code. An
+ * app with no catalog has no tool list to split on, so it keeps full access.
  */
 export const defaultConnectionGrant = (
   provider: string,
 ): ConnectionGrantInput => {
-  const groups = getAppPermissionDefinition(provider)?.groups ?? [];
+  const def = getAppPermissionDefinition(provider);
+  const groups = def?.groups ?? [];
   const toolsOf = (category: "read" | "write") =>
     sorted(
       groups
@@ -81,7 +88,7 @@ export const defaultConnectionGrant = (
     access: "custom",
     allow,
     ask,
-    otherReads: "ask",
+    otherReads: defaultOtherReads(def),
     otherWrites: "ask",
   };
 };

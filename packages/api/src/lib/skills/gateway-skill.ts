@@ -9,7 +9,7 @@ description: >-
 compatibility: Only active when HTTPS_PROXY contains aoc_ (automatic when launched via \`onecli run\`)
 metadata:
   author: onecli
-  version: "0.9.0"
+  version: "0.10.0"
 ---`;
 
 const FRONTMATTER_BROAD = `---
@@ -23,7 +23,7 @@ description: >-
 compatibility: Only active when HTTPS_PROXY contains aoc_ (automatic when launched via \`onecli run\`)
 metadata:
   author: onecli
-  version: "0.9.0"
+  version: "0.10.0"
 ---`;
 
 const SKILL_BODY = `
@@ -168,9 +168,10 @@ request. Make that one card for the reviewer:
   so ONE approval for the whole list, and the reviewer's card shows every
   record with its current and new value and flags the ones that overwrite
   an existing value. One record type per call. Each record sets only its
-  own fields. For more than 200, send one bulk update per 200 and say how
-  many approvals to expect ("450 contacts: 3 approvals"). Tell the user the
-  count up front.
+  own fields, so records needing different fields still go in ONE call,
+  never one call per set of fields. For more than 200, send one bulk update
+  per 200 and say how many approvals to expect ("450 contacts: 3
+  approvals"). Tell the user the count up front.
   Tag each of those calls with \`X-OneCLI-Batch: <new id per call>\`,
   \`X-OneCLI-Batch-Label: <what the task is> (2 of 3)\` and
   \`X-OneCLI-Batch-Total: 1\`, so each card says which part it is and how
@@ -200,7 +201,9 @@ request. Make that one card for the reviewer:
 - Send one group's requests in parallel, all of it at once, so the
   reviewer sees them on one card. Wait until that group is decided before
   sending the next. Don't send them one after another waiting on each
-  approval.
+  approval. Set a total only when you send that many at once: if your
+  calls run one at a time (each waiting on its approval), use ONE bulk call
+  where the API has one, or tag no total.
 - Check that you sent every request of the group before you wait: the
   number started must equal the group's size. A shell \`while read\`
   loop over a file skips its last line when the file has no trailing
@@ -288,6 +291,20 @@ First classify the gateway error code, not just its HTTP status:
   why, give them the \`connect_url\` (it walks them through the fix), and
   retry once they confirm. Requests outside that organization are
   unaffected.
+- GitHub through a **GitHub App** connection acts as an installation, not a
+  person. List what it can reach with \`GET /installation/repositories\`.
+  Address an organization's repositories under \`/orgs/<org>/...\` (create
+  one with \`POST /orgs/<org>/repos\`). Never use the personal \`/user/...\`
+  paths (\`GET /user/repos\`, \`POST /user/repos\`): an installation cannot
+  act as a user, and GitHub refuses them, sometimes with a misleading 403
+  "Rate Limit Exceeded".
+  A 403 "Resource not accessible by integration" means the app was not
+  granted a permission it needs here. GitHub names it in the
+  \`X-Accepted-GitHub-Permissions\` response header (creating a repository
+  takes "Repository creation" or "Administration", write). Do not retry:
+  tell the user which permission is missing; it is added in the GitHub
+  App's settings and then approved by whoever installed it (an organization
+  owner, for an organization).
 - \`access_restricted\` means OneCLI already has a credential for this
   service, but this agent is not switched on for it. Do not retry, and do not
   ask the user to connect the service again. Show the user the \`manage_url\`
@@ -295,6 +312,11 @@ First classify the gateway error code, not just its HTTP status:
   turns the existing access on for this agent. When the error also carries a
   \`connect_url\`, offer it after, only for a user who wants a different
   account. Retry once the user confirms access is on.
+- \`credential_unavailable\` means this agent HAS the credential, but OneCLI
+  could not read its stored value, so the request went out without it. Do
+  not ask the user to connect or attach anything. Show them the
+  \`manage_url\` as a bare URL on its own line: it opens the page where they
+  re-enter the value. Retry once they confirm.
 
 For other authentication or connection failures (401, 403, or a gateway
 error such as \`app_not_connected\`):
@@ -315,9 +337,11 @@ request. If the retry still fails, ask if they need help with the setup.
 ## Connecting a Service With No Built-in App
 
 Do this **on your own initiative**, whenever a task needs a service that is
-not a built-in OneCLI app (check \`list_apps\` and the error's \`connect_url\`
-first). It applies whether the user asked for a connection directly or just
-asked for something that needs one (e.g. "check my AcmeCRM deals"), and
+not a built-in OneCLI app. When you have \`request_app_connection\`, call it
+first: a custom connection is only for a service it answers
+\`no_builtin_app\` for (an error's \`connect_url\` already means the app is
+built in). It applies whether the user asked for a connection directly or
+just asked for something that needs one (e.g. "check my AcmeCRM deals"), and
 it applies to any service, not only ones the user names. Do not wait for the
 user to tell you to research the API or how to set it up. When you have the
 \`propose_custom_connection\` tool:
@@ -352,10 +376,12 @@ propose one, and whenever the user asks to connect or reconnect something,
 call \`list_apps\` first and go by what it returns right now. If the user asks
 to connect a service that \`list_apps\` no longer shows, propose it again.
 
-If the tool refuses because the service is a built-in app, ask the user to
-connect that app in the OneCLI dashboard instead. Without the tool, still do
-the research and give the user the exact values to enter in the OneCLI
-dashboard.
+If \`propose_custom_connection\` refuses because the service is a built-in
+app, call \`request_app_connection\` with that app and show the user the link
+it returns (the OneCLI chat renders it as a Connect button). Never offer an
+API key, an API token or a custom connection for a built-in app. Without
+\`propose_custom_connection\`, still do the research and give the user the
+exact values to enter in the OneCLI dashboard.
 
 ## MCP Servers Through Gateway
 

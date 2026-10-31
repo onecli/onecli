@@ -24,6 +24,7 @@ import {
   getAdapterConfig,
   getAdapterWork,
   heartbeatAdapter,
+  listToolApprovalCardOutcomes,
   listUnsettledToolApprovalCards,
   recordToolApprovalCardMessage,
   registerAdapter,
@@ -50,6 +51,7 @@ import {
   stopFromCard,
 } from "../services/channels/channel-ingestion-service";
 import { reconcileSpaceMemberships } from "../services/channels/space-membership-service";
+import { checkChannelConnectionsDaily } from "../services/channels/channel-health-service";
 import { processChannelCleanups } from "../services/channels/channel-cleanup-service";
 import { syncPresenceEvents } from "../services/channels/presence-events-service";
 import {
@@ -74,6 +76,7 @@ import {
   adapterIngestSchema,
   adapterPromptClaimSchema,
   adapterPromptMessageSchema,
+  adapterPromptOutcomesQuerySchema,
   adapterPromptSettleSchema,
   adapterReachDecisionSchema,
 } from "../validations/channels";
@@ -488,6 +491,28 @@ export const channelAdapterRoutes = () => {
     });
   });
 
+  // GET /channel-adapter/prompts/outcomes?ids=a,b — how the approvals behind
+  // this adapter's own cards ended, so a card that left the pending set is
+  // labelled from the record, never guessed. A read: never audited.
+  app.get("/prompts/outcomes", async (c) => {
+    const query = parsed(
+      adapterPromptOutcomesQuerySchema.safeParse(c.req.query()),
+      "Invalid outcomes query",
+    );
+    const outcomes = await listToolApprovalCardOutcomes(
+      c.get("channelAdapter").adapterId,
+      query.ids,
+    );
+    // The ending and the place only: never the upstream's result or time.
+    return c.json({
+      outcomes: outcomes.map((o) => ({
+        approvalId: o.approvalId,
+        outcome: o.outcome,
+        ...(o.via && { via: o.via }),
+      })),
+    });
+  });
+
   // POST /channel-adapter/cursor — compare-and-set a link's mirror cursor.
   app.post("/cursor", async (c) => {
     const body = parsed(
@@ -566,6 +591,17 @@ export const channelAdapterRoutes = () => {
       })
       .catch((err: unknown) =>
         log.warn({ err }, "space membership reconcile failed"),
+      );
+    // The DAILY connection check rides this hourly call: each tick probes
+    // the next batch of live presences until the day's lap is done. A
+    // revoked token that produces no event still flips its presence, so the
+    // bell's "lost connection" alert can fire.
+    void checkChannelConnectionsDaily()
+      .then((result) => {
+        if (!result.skipped) log.info(result, "daily channel connection check");
+      })
+      .catch((err: unknown) =>
+        log.warn({ err }, "daily channel connection check failed"),
       );
     return c.json(await rotateStaleIntegrations());
   });

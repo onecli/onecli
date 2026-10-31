@@ -5,8 +5,8 @@ import { proofDatabaseUrl } from "../../testing/pg-proof";
  * The bell's channel-arm listing (4d): pending action approvals + reach
  * asks in ONE workspace, age-merged. Pinned properties:
  *  - both kinds appear, tagged, oldest first;
- *  - settled/expired rows never appear (and legacy denied/revoked reach
- *    spellings read as settled);
+ *  - settled/expired rows never appear (a blocked reach row stays off the
+ *    bell);
  *  - the workspace fence: a FOREIGN workspace's rows are invisible (the
  *    planted negative control).
  */
@@ -128,7 +128,7 @@ describe.skipIf(!PROOF_URL)("workspace pending channel approvals (4d)", () => {
         cardRefs: [],
       },
     });
-    // Pending reach ask (newer) + a legacy-denied one (settled, hidden).
+    // Pending reach ask (newer) + a blocked one (settled, hidden).
     await db.agentReachGrant.create({
       data: {
         agentId,
@@ -147,9 +147,9 @@ describe.skipIf(!PROOF_URL)("workspace pending channel approvals (4d)", () => {
         integrationId: integration.id,
         provider: "slack",
         subjectKind: "space",
-        externalRef: "C-DENIED",
-        subjectLabel: "#denied-room",
-        state: "denied",
+        externalRef: "C-BLOCKED",
+        subjectLabel: "#blocked-room",
+        state: "blocked",
         cardRefs: [],
       },
     });
@@ -169,13 +169,13 @@ describe.skipIf(!PROOF_URL)("workspace pending channel approvals (4d)", () => {
     const items = await svc.listWorkspacePendingChannelApprovals(WORKSPACE);
     expect(items).toHaveLength(2);
     // Oldest first: the hour-old action approval leads. `test.wab` has no
-    // registered handler, so it offers no always-allow (the bell row hides
-    // the third button); send_message's registration does.
+    // registered handler, so it asks no standing question (the bell row
+    // reads Approve / Reject); send_message's registration does.
     expect(items[0]).toMatchObject({
       kind: "action",
       summary: 'send @Tomer: "hello"',
       agentName: "wab agent main",
-      offersAlwaysAllow: false,
+      standingChoice: false,
       // No asking conversation on this hold: the bell only, never inline.
       conversationId: null,
     });
@@ -186,7 +186,9 @@ describe.skipIf(!PROOF_URL)("workspace pending channel approvals (4d)", () => {
       externalRef: "C-WAB",
     });
     expect(items.map((i) => JSON.stringify(i)).join()).not.toContain("foreign");
-    expect(items.map((i) => JSON.stringify(i)).join()).not.toContain("denied");
+    expect(items.map((i) => JSON.stringify(i)).join()).not.toContain(
+      "blocked-room",
+    );
 
     // The foreign workspace sees ONLY its own.
     const foreign =

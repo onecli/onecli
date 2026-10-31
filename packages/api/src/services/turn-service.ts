@@ -43,6 +43,7 @@ import {
   bindAttachmentsToTurn,
   firstAttachmentName,
 } from "./attachment-service";
+import { isPlatformJobRun } from "./platform-jobs";
 
 const log = logger.child({ component: "turn-service" });
 
@@ -248,6 +249,13 @@ export interface TurnOrigin {
    * door derives it from the provider's own event, never from client input.
    */
   sourceThreadId?: string | null;
+  /**
+   * The provider event that created this turn (a channel door's own event
+   * id; see `Turn.sourceEventId`). Door-stamped like `sourceThreadId`, never
+   * from client input. Stored on the row so a redelivered event whose first
+   * processing died after the turn landed finds it instead of adding one.
+   */
+  sourceEventId?: string;
 }
 
 /**
@@ -259,13 +267,19 @@ export interface TurnOrigin {
  * thread. Shared by `createTurn` and the send door's follow-up arm, so the
  * two arms can never disagree about the same origin (a follow-up landing in
  * a busy direct thread is fenced exactly like the turn it joins).
+ *
+ * A platform job's conversation takes that job's own runs and nothing else,
+ * and the job's source is refused anywhere else (platform-jobs, rule 3):
+ * what is written there decides the job's dueness, so a person speaking in
+ * it could silence another thread's runs. NOT_FOUND, like every other
+ * refusal here.
  */
-export const requireConversationFor = (
+export const requireConversationFor = async (
   workspaceId: string,
   conversationId: string,
   origin: TurnOrigin,
-) =>
-  origin.userId === null
+) => {
+  const conversation = await (origin.userId === null
     ? origin.directWake
       ? requireDirectWakeConversation(
           workspaceId,
@@ -273,7 +287,35 @@ export const requireConversationFor = (
           origin.directWake.agentId,
         )
       : requireSystemConversation(workspaceId, conversationId)
-    : requireConversation(workspaceId, conversationId, origin.userId);
+    : requireConversation(workspaceId, conversationId, origin.userId));
+  if (
+    (isPlatformJobRun(conversation.source) ||
+      isPlatformJobRun(origin.source)) &&
+    conversation.source !== origin.source
+  ) {
+    throw new ServiceError("NOT_FOUND", "Conversation not found");
+  }
+  return conversation;
+};
+
+/**
+ * The turn a channel event already created for this agent, found by the
+ * door-stamped `sourceEventId` (null when there is none): how a redelivered
+ * event whose first run died after the turn committed finds it.
+ */
+export const findTurnBySourceEvent = (input: {
+  agentId: string;
+  source: TurnSource;
+  sourceEventId: string;
+}) =>
+  db.turn.findFirst({
+    where: {
+      sourceEventId: input.sourceEventId,
+      source: input.source,
+      conversation: { agentId: input.agentId },
+    },
+    select: turnSelect,
+  });
 
 /**
  * Create a turn row, binding its attachments in the SAME transaction when the
@@ -304,6 +346,9 @@ const createTurnRowWithAttachments = async (
     ...data,
     ...(origin.sourceThreadId != null && {
       sourceThreadId: origin.sourceThreadId,
+    }),
+    ...(origin.sourceEventId !== undefined && {
+      sourceEventId: origin.sourceEventId,
     }),
   };
   if (!attachmentIds || attachmentIds.length === 0) {
@@ -414,7 +459,10 @@ export const createTurn = async (
     // A message is engagement: a box already up has its clocks restarted
     // now, not only once the turn's first event lands (a queued turn behind
     // a long-running one could otherwise sit inside a closing cap window).
-    await markSandboxEngaged(db, { agentId: conversation.agentId });
+    // A platform job's run is not (platform-jobs, rule 2).
+    if (!isPlatformJobRun(origin.source)) {
+      await markSandboxEngaged(db, { agentId: conversation.agentId });
+    }
     // Wake any held runner poll so a queued turn dispatches now rather than
     // after the next re-check.
     signalWork();
@@ -1192,14 +1240,17 @@ export const requestSendNow = async (
  * every other conversation on its runner — which in a single-runner install is
  * every tenant. `Sandbox.agentId` is `@unique`, so this resolves to at most one
  * row and "the agent that owns this sandbox" is exact.
+ *
+ * Returns the turn's source on a match (the caller's engagement decision
+ * needs it, and the row is already in hand), null when the fence refuses.
  */
 const turnBelongsToReporter = async (
   tx: Prisma.TransactionClient,
   reporter: ReporterIdentity,
   conversationId: string,
   turnId: string,
-): Promise<boolean> => {
-  const turn = await tx.turn.findFirst({
+): Promise<{ source: string } | null> =>
+  tx.turn.findFirst({
     where: {
       id: turnId,
       conversationId,
@@ -1209,10 +1260,8 @@ const turnBelongsToReporter = async (
         },
       },
     },
-    select: { id: true },
+    select: { source: true },
   });
-  return turn !== null;
-};
 
 /**
  * Settle steered follow-ups the run CONSUMED as `joined`. Called from two
@@ -1286,7 +1335,13 @@ export const applyTurnEvents = async (
   const clean = events.map(storable);
 
   const published = await db.$transaction(async (tx) => {
-    if (!(await turnBelongsToReporter(tx, reporter, conversationId, turnId))) {
+    const owned = await turnBelongsToReporter(
+      tx,
+      reporter,
+      conversationId,
+      turnId,
+    );
+    if (!owned) {
       log.warn(
         { ...reporter, conversationId, turnId },
         "ignoring turn events from a sandbox that does not host this turn",
@@ -1347,11 +1402,14 @@ export const applyTurnEvents = async (
 
     // A turn producing events is a live conversation: keep the idle reaper
     // away from a sandbox that is mid-answer, and restart the background
-    // cap's clock (a turn IS engagement).
+    // cap's clock (a turn IS engagement). Except a platform job's run
+    // (platform-jobs, rule 2).
     // By primary key: the fence above already proved this sandbox hosts the
     // turn, so walking agent → conversations → some(id) would be a
     // three-level correlated subquery to reach a row we already have.
-    await markSandboxEngaged(tx, { id: reporter.sandboxId });
+    if (!isPlatformJobRun(owned.source)) {
+      await markSandboxEngaged(tx, { id: reporter.sandboxId });
+    }
 
     return numbered;
   });
@@ -1376,14 +1434,16 @@ export const applyTurnEvents = async (
  * load-bearing twice over — a heartbeat for a turn a sweep already failed is
  * an orphan's, and an orphan must move neither the stall clock nor the idle
  * clock — which is why `sandbox.lastActiveAt` is stamped only when the turn
- * row matched.
+ * row matched. A platform job's run moves the stall clock and never the
+ * idle one (platform-jobs, rule 2).
  */
 export const applyTurnProgress = async (
   reporter: ReporterIdentity,
   conversationId: string,
   turnId: string,
 ): Promise<void> => {
-  const { count } = await db.turn.updateMany({
+  // One fenced statement: the stamp, and the source the idle decision needs.
+  const [turn] = await db.turn.updateManyAndReturn({
     where: {
       id: turnId,
       conversationId,
@@ -1395,8 +1455,9 @@ export const applyTurnProgress = async (
       },
     },
     data: { lastProgressAt: new Date() },
+    select: { source: true },
   });
-  if (count === 0) return;
+  if (!turn || isPlatformJobRun(turn.source)) return;
   await markSandboxEngaged(db, { id: reporter.sandboxId });
 };
 

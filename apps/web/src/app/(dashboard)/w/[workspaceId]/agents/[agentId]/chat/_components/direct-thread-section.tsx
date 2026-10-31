@@ -11,6 +11,7 @@ import { queryKeys } from "@/lib/api/keys";
 import { ApiError } from "@/lib/api/client";
 import {
   activeTurn,
+  isAddKeyCode,
   isJoiningTurn,
   resendableKeylessTurn,
 } from "@/lib/chat/turns";
@@ -35,7 +36,8 @@ import { useCreateThenAttachSecret } from "@/hooks/use-create-then-attach-secret
 import { SecretDialog } from "@/app/(dashboard)/w/[workspaceId]/connections/_components/secret-dialog";
 import type { TurnsPage } from "@/lib/api";
 import { ChatThread } from "./chat-thread";
-import { Composer } from "./composer";
+import { Composer, type ComposerHandle } from "./composer";
+import { FileDropZone } from "./file-drop-zone";
 import { OfflineBanner } from "./offline-banner";
 
 // The agent's hosted desktop (hosted platform only). Lazy, so its code never
@@ -78,6 +80,8 @@ export const DirectThreadSection = () => {
   // shows it (the hosted platform, with previews).
   const hasDesktop = useHasDesktop();
   const dock = useRef<DesktopDockHandle>(null);
+  /** Files dropped anywhere on the pane stage in the composer. */
+  const composer = useRef<ComposerHandle>(null);
   // The chat renders into this node, never straight into the frame: the
   // theater moves the node, not the React subtree, so draft text, staged
   // files and scroll state survive.
@@ -142,8 +146,8 @@ export const DirectThreadSection = () => {
       // read as failure. Say so; name the manual step when files are why.
       const lastOwn = [...fresh].reverse().find((turn) => turn.userId !== null);
       toast.success(
-        (lastOwn?.errorCode === "no_model_key" ||
-          lastOwn?.errorCode === "trial_credit_exhausted") &&
+        lastOwn &&
+          isAddKeyCode(lastOwn.errorCode) &&
           lastOwn.attachments.length > 0
           ? "Model key connected. Re-send your message to include its files."
           : "Model key connected.",
@@ -213,7 +217,13 @@ export const DirectThreadSection = () => {
       <div ref={chatHome} className="flex min-h-0 min-w-0 flex-1 flex-col" />
       {chatHost &&
         createPortal(
-          <>
+          <FileDropZone
+            onFiles={
+              footer
+                ? (files) => composer.current?.stageFiles(files)
+                : undefined
+            }
+          >
             <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
               {children}
               {hasDesktop && (
@@ -231,7 +241,7 @@ export const DirectThreadSection = () => {
               )}
             </div>
             {footer}
-          </>,
+          </FileDropZone>,
           chatHost,
         )}
     </div>
@@ -336,6 +346,7 @@ export const DirectThreadSection = () => {
       )}
 
       <Composer
+        ref={composer}
         onSend={(outgoing) => send(outgoing, active === undefined)}
         uploadFile={(file) => uploadAttachment.mutateAsync(file)}
         sendPending={sendMessage.isPending}

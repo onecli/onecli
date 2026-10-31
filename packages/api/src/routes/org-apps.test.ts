@@ -398,7 +398,10 @@ describe("with the standard boot wiring", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ success: true });
+    expect(await res.json()).toEqual({
+      success: true,
+      connectionId: store.connections[0]?.id,
+    });
     expect(store.connections).toHaveLength(1);
     expect(store.connections[0]).toMatchObject({
       organizationId: "org-1",
@@ -417,13 +420,45 @@ describe("with the standard boot wiring", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ success: true });
+    expect(await res.json()).toEqual({
+      success: true,
+      connectionId: store.connections[0]?.id,
+    });
     expect(store.connections[0]).toMatchObject({
       organizationId: "org-1",
       scope: "organization",
       provider: "keyapp",
     });
   });
+
+  it.each([
+    { path: "/v1/org/apps/keyapp/connect", legacy: false },
+    { path: "/v1/apps/keyapp/connect", legacy: true },
+  ])(
+    "returns the same resolved ID for duplicate and reconnect at $path",
+    async ({ path, legacy }) => {
+      const headers = {
+        ...orgKeyHeaders,
+        ...(legacy ? { "x-organization-id": "org-1" } : {}),
+      };
+      for (const connectionId of [undefined, undefined, "conn-1"]) {
+        const res = await app.request(path, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            fields: { apiKey: "secret-not-in-response" },
+            connectionId,
+          }),
+        });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({
+          success: true,
+          connectionId: "conn-1",
+        });
+        expect(store.connections).toHaveLength(1);
+      }
+    },
+  );
 
   it("RBAC: an org key held by a mere member dies at authentication", async () => {
     // With roles enforced, the org-key admin re-check refuses the key itself

@@ -34,7 +34,7 @@ interface GetStartedPickerProps {
 // then land wherever `getStartedPath` says — that workspace's existing agent,
 // or the create flow when it has none. Only asks what the URL cannot answer —
 // the workspace — and a single visible workspace skips even that. A router,
-// not a content surface: the create form itself lives on the roster.
+// not a content surface: the create form itself opens on the agents page.
 export const GetStartedPicker = ({
   organizationId,
   onOpenChange,

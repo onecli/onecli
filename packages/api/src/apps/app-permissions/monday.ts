@@ -10,6 +10,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const mondayPermissions: AppPermissionDefinition = {
   provider: "monday",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

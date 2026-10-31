@@ -160,10 +160,7 @@ export type ConnectionMethod =
     }
   | {
       type: "credentials_import";
-      fields: (DirectConnectField & {
-        /** When set, field is only shown when this group is active (e.g., "service_account"). */
-        group?: string;
-      })[];
+      fields: ConnectFormField[];
       exchangeCredentials: (
         fields: Record<string, string>,
       ) => Promise<OAuthExchangeResult>;
@@ -172,15 +169,18 @@ export type ConnectionMethod =
        *  them first — before `exchangeCredentials` runs. */
       serverFields?: ServerField[];
       /** Optional file import to auto-fill fields from a JSON file. */
-      fileImport?: {
-        /** Button label (e.g., "Import from credentials file"). */
-        label: string;
-        /** File input accept filter (e.g., ".json,application/json"). */
-        accept: string;
-        /** Maps JSON keys in the file to field names in the form. */
-        keyMap: Record<string, string>;
-      };
+      fileImport?: ConnectFileImport;
     };
+
+/** A credentials file the connect form can read to fill its fields. */
+export interface ConnectFileImport {
+  /** Button label (e.g., "Import from credentials file"). */
+  label: string;
+  /** File input accept filter (e.g., ".json,application/json"). */
+  accept: string;
+  /** Maps JSON keys in the file to field names in the form. */
+  keyMap: Record<string, string>;
+}
 
 /** A field of a direct-connect form (`api_key` or `credentials_import`). */
 export interface DirectConnectField {
@@ -204,6 +204,28 @@ export interface DirectConnectField {
   /** Pre-selected choice for an `options` field; must be one of its
    *  values. Submitted even if the user never opens the dropdown. */
   defaultValue?: string;
+  /** Shown (and submitted) only while another field holds this value, e.g.
+   *  a CA certificate only when the server certificate is verified. */
+  showWhen?: { field: string; value: string };
+  /** A text file the user picks instead of pasting (a PEM certificate):
+   *  rendered as an upload button that reads the file into the value. */
+  fileUpload?: { accept: string; label: string };
+}
+
+/** Whether a field is on the form for these values: always, unless its
+ *  `showWhen` names another field's value that is not set. The form renders
+ *  and submits only these, and the server stores only these. */
+export const isConnectFieldShown = (
+  field: Pick<DirectConnectField, "showWhen">,
+  values: Record<string, string>,
+): boolean =>
+  !field.showWhen || values[field.showWhen.field] === field.showWhen.value;
+
+/** Any direct-connect field as the connect form renders it: a
+ *  `credentials_import` field may belong to a group of alternatives. */
+export interface ConnectFormField extends DirectConnectField {
+  /** When set, field is only shown when this group is active (e.g., "service_account"). */
+  group?: string;
 }
 
 export interface OAuthConfigFieldOption {
@@ -211,6 +233,9 @@ export interface OAuthConfigFieldOption {
   value: string;
   /** What the user sees on the toggle. */
   label: string;
+  /** Shown under the control, as a warning, only while this option is
+   *  chosen (e.g. what "No encryption" exposes). */
+  warning?: string;
 }
 
 export interface OAuthConfigField {
@@ -229,6 +254,9 @@ export interface OAuthConfigField {
    *  Submitted with the config even if the user never touches the control. */
   defaultValue?: string;
 }
+
+/** A database wire protocol the gateway's database front door speaks. */
+export type DatabaseEngine = "postgres";
 
 /**
  * A short note shown in the connect window above the Connect button, for a
@@ -276,6 +304,10 @@ export interface AppDefinition {
    */
   apiSpecUrl?: string;
   connectNote?: ConnectNote;
+  /** A database app: agents reach it through the gateway's database front
+   *  door with a database client, never over HTTP. The engine names the
+   *  wire protocol the front door speaks for it. */
+  database?: { engine: DatabaseEngine };
   /** The app's OneCLI setup guide, `https://onecli.sh/docs/integrations/<id>`.
    *  The one docs link every connect surface shows, rendered as "Follow the
    *  {app} setup guide". Set it only once the page exists; a link to a page

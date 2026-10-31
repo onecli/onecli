@@ -2,9 +2,8 @@
 
 import { ChevronRight, Loader2 } from "lucide-react";
 import {
-  activityForTool,
+  activityForToolCall,
   bareToolName,
-  finishedActivityForTool,
 } from "@onecli/agent-protocol/activity";
 import {
   Collapsible,
@@ -58,9 +57,7 @@ export const ToolCallRow = ({
         />
       )}
       <span className="shrink-0">
-        {running
-          ? activityForTool(tool.name)
-          : finishedActivityForTool(tool.name)}
+        {activityForToolCall(tool.name, tool.input, running, tool)}
       </span>
       {preview && (
         <code

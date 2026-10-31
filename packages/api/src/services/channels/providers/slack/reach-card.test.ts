@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { reachCardBlocks, slackReach } from "./reach-card";
+import { approvedNoticeText, reachCardBlocks, slackReach } from "./reach-card";
 
 /**
  * The gate-hardening card behaviors (PR 4a):
@@ -60,5 +60,33 @@ describe("verifySubject — fail-open contract without a credential", () => {
         tenantExternalId: "T-ANY",
       }),
     ).resolves.toEqual({ ok: true });
+  });
+});
+
+describe("approvedNoticeText — the approved person's DM", () => {
+  it("names who approved and the agent", () => {
+    expect(
+      approvedNoticeText({ agentName: "Donna", decidedByName: "Olive Owner" }),
+    ).toBe(
+      "Olive Owner approved you. You can talk to me (Donna) now, just send your message again here.",
+    );
+  });
+
+  it("a decider with no name stays unnamed (never an email)", () => {
+    expect(
+      approvedNoticeText({ agentName: "Donna", decidedByName: null }),
+    ).toBe(
+      "You've been approved. You can talk to me (Donna) now, just send your message again here.",
+    );
+  });
+
+  it("flattens markup and newlines in names", () => {
+    const text = approvedNoticeText({
+      agentName: "Donna",
+      decidedByName: "*Olive*\n<!channel>",
+    });
+    expect(text).not.toContain("\n");
+    expect(text).not.toContain("*");
+    expect(text).not.toContain("<!channel>");
   });
 });

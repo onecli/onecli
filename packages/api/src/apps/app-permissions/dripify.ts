@@ -35,6 +35,7 @@ const tool = (
 
 export const dripifyPermissions: AppPermissionDefinition = {
   provider: "dripify",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

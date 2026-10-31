@@ -1,11 +1,23 @@
-import { db } from "@onecli/db";
-import { actionSupportsAlwaysAllow } from "./action-approval-service";
-import { normalizeState } from "./agent-reach-service";
+import { db, type Prisma } from "@onecli/db";
+import { isStandingChoice, isVisibleTo } from "./action-approval-service";
 import {
   CUSTOM_CONNECTION_ACTION,
   customConnectionProposalSchema,
   registrableDomainOf,
 } from "../../validations/custom-connection";
+import {
+  SLACK_ACCESS_ACTION,
+  slackAccessPayloadSchema,
+  type SlackAccessReason,
+} from "../../validations/slack-access";
+import {
+  CONTACT_BLOCKED_ACTION,
+  contactBlockedPayloadOf,
+} from "./send-message-service";
+import {
+  CHOOSE_SENDER_ACTION,
+  chooseSenderPayloadOf,
+} from "./choose-sender-service";
 import {
   WEBHOOK_UPDATE_ACTION,
   updateWebhookArgsSchema,
@@ -72,6 +84,72 @@ const webhookChangeView = (
   };
 };
 
+/** A "let the agent act as you in Slack" request, as the chat card renders
+ * it (no message text: the summary carries what the card says). */
+export interface SlackAccessView {
+  kind: "read" | "write";
+  reason: SlackAccessReason;
+  conversationLabel: string | null;
+}
+
+const slackAccessView = (
+  action: string,
+  payload: unknown,
+): SlackAccessView | null => {
+  if (action !== SLACK_ACCESS_ACTION) return null;
+  const parsed = slackAccessPayloadSchema.safeParse(payload);
+  if (!parsed.success) return null;
+  return {
+    kind: parsed.data.kind,
+    reason: parsed.data.reason,
+    conversationLabel:
+      parsed.data.conversationLabel ?? parsed.data.conversationQuery,
+  };
+};
+
+/** A send refused by a blocked contact, raised in the asking person's own
+ * chat: Allow / Don't send. */
+export interface ContactBlockedView {
+  recipientLabel: string;
+}
+
+const contactBlockedView = (
+  action: string,
+  payload: Prisma.JsonValue,
+): ContactBlockedView | null => {
+  if (action !== CONTACT_BLOCKED_ACTION) return null;
+  try {
+    const p = contactBlockedPayloadOf(payload);
+    return { recipientLabel: p.to.label };
+  } catch {
+    return null;
+  }
+};
+
+/** "Send as the agent or as you?": the card's preview and buttons. */
+export interface ChooseSenderView {
+  recipientLabel: string;
+  text: string;
+  agentName: string;
+}
+
+const chooseSenderView = (
+  action: string,
+  payload: Prisma.JsonValue,
+): ChooseSenderView | null => {
+  if (action !== CHOOSE_SENDER_ACTION) return null;
+  try {
+    const p = chooseSenderPayloadOf(payload);
+    return {
+      recipientLabel: p.recipient.label,
+      text: p.text,
+      agentName: p.agentName,
+    };
+  } catch {
+    return null;
+  }
+};
+
 /**
  * The approvals bell's CHANNEL arm (4d): every channel decision waiting on a
  * human in one workspace — pending one-shot action approvals and pending
@@ -89,10 +167,10 @@ export interface PendingActionApprovalItem {
   agentId: string;
   agentName: string;
   summary: string;
-  /** Whether "approve + always allow" is a real choice for this action (the
-   * registry's answer, the same one the Slack card asks). False = the row
-   * offers approve/reject only. */
-  offersAlwaysAllow: boolean;
+  /** The only answers are Always allow / Never: a standing question about
+   * who the agent wants to reach, never a one-off (the registry's answer,
+   * the same one the Slack card asks). */
+  standingChoice: boolean;
   /** The conversation the asking turn ran in, when the hold is anchored on
    * one: where the agent's chat renders the card inline. Null for holds
    * with no asking turn (e.g. the receiving side of a cross-workspace
@@ -106,6 +184,13 @@ export interface PendingActionApprovalItem {
   customConnection: CustomConnectionProposalView | null;
   /** Set for an agent's webhook change: the card shows the full change. */
   webhookChange: WebhookChangeView | null;
+  /** Set for a Slack access request (read_conversation / send_as_me
+   * needs_access): the chat renders a Connect or Allow card. */
+  slackAccess: SlackAccessView | null;
+  /** Set for a blocked contact's card (Allow / Don't send). */
+  contactBlocked: ContactBlockedView | null;
+  /** Set for a choose-sender card (As <Agent> / As me / Don't send). */
+  chooseSender: ChooseSenderView | null;
 }
 
 export interface PendingReachAskItem {
@@ -114,14 +199,18 @@ export interface PendingReachAskItem {
   agentId: string;
   agentName: string;
   provider: string;
-  /** "space" = a channel (three-way decision); "external_user" = a person
-   * (two-way). */
+  /** "space" = a channel (Everyone / Nobody); "external_user" = a person
+   * (Always allow / Never). */
   subjectKind: "space" | "external_user";
   /** Display label captured at ask time ("#general", a person's name) —
    * may be null on old rows; the ref is the fallback the UI shows. */
   subjectLabel: string | null;
   /** The decide door's address (PUT reach/:externalRef). */
   externalRef: string;
+  /** The provider tenant the subject lives in (Slack: the team id), so the
+   * bell can link to the channel. Not a secret: the same id backs the
+   * agent's "Open in Slack" link. */
+  tenantExternalId: string;
   /** ISO timestamp. */
   createdAt: string;
 }
@@ -133,6 +222,9 @@ export type PendingChannelApprovalItem =
 /** Oldest first: the longest-waiting ask is the one to surface. */
 export const listWorkspacePendingChannelApprovals = async (
   workspaceId: string,
+  /** The person looking. A PERSONAL ask ("act as you in Slack") is theirs
+   * alone to decide, so it shows only to them; omitted = no personal asks. */
+  viewerUserId?: string,
 ): Promise<PendingChannelApprovalItem[]> => {
   const [actions, asks] = await Promise.all([
     db.actionApproval.findMany({
@@ -162,47 +254,50 @@ export const listWorkspacePendingChannelApprovals = async (
         subjectKind: true,
         subjectLabel: true,
         externalRef: true,
-        state: true,
         createdAt: true,
         agent: { select: { name: true } },
+        integration: { select: { externalId: true } },
       },
     }),
   ]);
 
+  const visibleActions = actions.filter((a) =>
+    isVisibleTo(a.action, a.payload, viewerUserId),
+  );
   const items: PendingChannelApprovalItem[] = [
-    ...actions.map(
+    ...visibleActions.map(
       (a): PendingActionApprovalItem => ({
         kind: "action",
         id: a.id,
         agentId: a.agentId,
         agentName: a.agent.name,
         summary: a.summary,
-        offersAlwaysAllow: actionSupportsAlwaysAllow(a.action),
+        standingChoice: isStandingChoice(a.action),
         conversationId: a.conversationId,
         createdAt: a.createdAt.toISOString(),
         expiresAt: a.expiresAt.toISOString(),
         customConnection: customConnectionView(a.action, a.payload),
         webhookChange: webhookChangeView(a.action, a.payload),
+        slackAccess: slackAccessView(a.action, a.payload),
+        contactBlocked: contactBlockedView(a.action, a.payload),
+        chooseSender: chooseSenderView(a.action, a.payload),
       }),
     ),
-    ...asks
-      // A row in a non-pending normalized state (legacy spellings) never
-      // reaches the bell even if the raw column says otherwise.
-      .filter((g) => normalizeState(g.state ?? "pending") === "pending")
-      .map(
-        (g): PendingReachAskItem => ({
-          kind: "reach",
-          id: g.id,
-          agentId: g.agentId,
-          agentName: g.agent.name,
-          provider: g.provider,
-          subjectKind:
-            g.subjectKind === "external_user" ? "external_user" : "space",
-          subjectLabel: g.subjectLabel,
-          externalRef: g.externalRef,
-          createdAt: g.createdAt.toISOString(),
-        }),
-      ),
+    ...asks.map(
+      (g): PendingReachAskItem => ({
+        kind: "reach",
+        id: g.id,
+        agentId: g.agentId,
+        agentName: g.agent.name,
+        provider: g.provider,
+        subjectKind:
+          g.subjectKind === "external_user" ? "external_user" : "space",
+        subjectLabel: g.subjectLabel,
+        externalRef: g.externalRef,
+        tenantExternalId: g.integration.externalId,
+        createdAt: g.createdAt.toISOString(),
+      }),
+    ),
   ];
 
   return items.sort((a, b) => a.createdAt.localeCompare(b.createdAt));

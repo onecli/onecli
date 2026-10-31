@@ -1,17 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import {
-  Check,
-  ChevronDown,
-  Loader2,
-  MessagesSquare,
-  PauseCircle,
-  Play,
-  Slash,
-  ShieldCheck,
-  UserCheck,
-} from "lucide-react";
+import { Loader2, MessagesSquare, PauseCircle, Play } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -24,22 +14,16 @@ import {
   AlertDialogTitle,
 } from "@onecli/ui/components/alert-dialog";
 import { Badge } from "@onecli/ui/components/badge";
-import { Button, buttonVariants } from "@onecli/ui/components/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@onecli/ui/components/dropdown-menu";
+import { buttonVariants } from "@onecli/ui/components/button";
 import type { AgentPeer } from "@/lib/api";
 import {
   useForgetPeer,
   useResumePeer,
   useSetPeerPolicy,
 } from "@/hooks/use-channels";
+import { TriStateControl } from "../../_components/tri-state-control";
 import { ContactRowFrame } from "./contact-row-frame";
+import { AgentAvatar } from "@/lib/agents/_components/agent-avatar";
 import { PeerConversationDialog } from "./peer-conversation-dialog";
 
 interface PeerRowProps {
@@ -48,43 +32,9 @@ interface PeerRowProps {
   peer: AgentPeer;
 }
 
-type Policy = AgentPeer["myPolicy"];
-
-/** One policy's face: the badge word and the menu line. */
-const POLICIES: Record<
-  Policy,
-  {
-    badge: string;
-    badgeClass: string;
-    Icon: typeof Check;
-    menu: string;
-    hint: string;
-  }
-> = {
-  allow: {
-    badge: "Allowed",
-    badgeClass:
-      "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-    Icon: UserCheck,
-    menu: "Allow",
-    hint: "No approval needed.",
-  },
-  ask: {
-    badge: "Asks you first",
-    badgeClass: "",
-    Icon: ShieldCheck,
-    menu: "Ask me first",
-    hint: "You approve each conversation.",
-  },
-  blocked: {
-    badge: "Blocked",
-    badgeClass:
-      "border-destructive/30 bg-destructive/10 text-destructive dark:text-red-400",
-    Icon: Slash,
-    menu: "Block",
-    hint: "No messages either way.",
-  },
-};
+/** A pair has ONE setting, two answers: the app-permission icons. With no
+ *  answer yet (`ask`) neither is pressed: the first message asks you once. */
+const OPTIONS = ["allow", "never"] as const;
 
 /**
  * One peer agent's row (PR 5b): THIS agent's side of the pair as the
@@ -113,15 +63,14 @@ export const PeerRow = ({ agentId, agentName, peer }: PeerRowProps) => {
     peer.myPolicy !== "ask" ||
     peer.theirPolicy !== "ask" ||
     peer.conversationId !== null;
-  const mine = POLICIES[peer.myPolicy];
   const label = peer.workspaceName
     ? `${peer.name} · ${peer.workspaceName}`
     : peer.name;
 
-  const choose = (policy: Policy) => {
+  const choose = (policy: "allow" | "blocked") => {
     if (policy === peer.myPolicy) return;
-    // Instant: the badge shows the new standing on click; a failure puts it
-    // back and says why. Never frozen while saving.
+    // Instant: the icon moves on click; a failure puts it back and says
+    // why. Never frozen while saving.
     setPolicy.mutate({ peerAgentId: peer.agentId, policy });
   };
 
@@ -146,6 +95,9 @@ export const PeerRow = ({ agentId, agentName, peer }: PeerRowProps) => {
     <>
       <ContactRowFrame
         label={label}
+        leading={
+          <AgentAvatar agent={{ name: peer.name, imageUrl: peer.imageUrl }} />
+        }
         // The policy chooser never freezes the row (it is instant); a resume
         // in flight still does.
         disabled={resume.isPending}
@@ -193,72 +145,30 @@ export const PeerRow = ({ agentId, agentName, peer }: PeerRowProps) => {
                 Paused
               </Badge>
             )}
-            {/* The OTHER owner's word, only when it is not the default: two
-                "Asks you first" badges side by side would read as one setting. */}
-            {peer.theirPolicy !== "ask" && (
+            {/* The OTHER owner's answer, only when it says Never: the pair
+                stays silent whatever this side picks. */}
+            {peer.theirPolicy === "blocked" && (
               <Badge
                 variant="outline"
                 className="text-muted-foreground shrink-0 font-normal"
               >
-                Their side: {POLICIES[peer.theirPolicy].badge.toLowerCase()}
+                Their side: never
               </Badge>
             )}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="gap-1.5 px-2"
-                  aria-label={`Whether ${agentName} and ${peer.name} may message each other: ${mine.badge.toLowerCase()}. Change`}
-                >
-                  <Badge variant="secondary" className={mine.badgeClass}>
-                    <mine.Icon className="size-3" aria-hidden />
-                    {mine.badge}
-                  </Badge>
-                  <ChevronDown
-                    className="text-muted-foreground size-3.5"
-                    aria-hidden
-                  />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-72">
-                <DropdownMenuLabel className="font-normal text-pretty">
-                  <span translate="no">{agentName}</span> and{" "}
-                  <span translate="no">{peer.name}</span>
-                </DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                {(["allow", "ask", "blocked"] as const).map((policy) => (
-                  <DropdownMenuItem
-                    key={policy}
-                    onSelect={() => choose(policy)}
-                    className="items-start gap-2"
-                  >
-                    <Check
-                      className={`mt-0.5 size-3.5 shrink-0 ${peer.myPolicy === policy ? "" : "invisible"}`}
-                      aria-hidden
-                    />
-                    <span className="min-w-0">
-                      <span className="block text-sm">
-                        {POLICIES[policy].menu}
-                      </span>
-                      <span className="text-muted-foreground block text-xs text-pretty">
-                        {POLICIES[policy].hint}
-                      </span>
-                    </span>
-                  </DropdownMenuItem>
-                ))}
-                {peer.theirPolicy !== "allow" && (
-                  <>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuLabel className="text-muted-foreground text-xs font-normal text-pretty">
-                      {peer.theirPolicy === "blocked"
-                        ? `Blocked on ${peer.name}’s side.`
-                        : `${peer.name}’s side must allow too.`}
-                    </DropdownMenuLabel>
-                  </>
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <TriStateControl
+              label={`Can ${agentName} and ${peer.name} message each other`}
+              options={OPTIONS}
+              value={
+                peer.myPolicy === "allow"
+                  ? "allow"
+                  : peer.myPolicy === "blocked"
+                    ? "never"
+                    : "ask"
+              }
+              onSelect={(choice) =>
+                choose(choice === "allow" ? "allow" : "blocked")
+              }
+            />
           </>
         }
       />

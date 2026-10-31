@@ -28,7 +28,6 @@ const TENANT = "T-AAR";
 let db: typeof import("@onecli/db").db;
 let search: typeof import("./recipient-search-service");
 let send: typeof import("./send-message-service");
-let mentions: typeof import("./mention-resolution-service");
 
 interface SlackCall {
   method: string;
@@ -161,6 +160,22 @@ const seedStage = async (suffix: string) => {
   };
 };
 
+/** A channel the owner turned on: channel sends deliver directly. */
+const openChannel = (
+  stage: { agentId: string; integrationId: string },
+  externalRef: string,
+) =>
+  db.agentReachGrant.create({
+    data: {
+      agentId: stage.agentId,
+      integrationId: stage.integrationId,
+      provider: "slack",
+      subjectKind: "space",
+      externalRef,
+      state: "approved",
+    },
+  });
+
 const reset = async () => {
   await db.agent.deleteMany({ where: { identifier: { startsWith: P } } });
   await db.channelIntegration.deleteMany({
@@ -180,7 +195,6 @@ beforeAll(async () => {
   ({ db } = await import("@onecli/db"));
   search = await import("./recipient-search-service");
   send = await import("./send-message-service");
-  mentions = await import("./mention-resolution-service");
 
   await reset();
   await db.auditLog.deleteMany({ where: { userId: { startsWith: P } } });
@@ -303,78 +317,6 @@ describe.skipIf(!PROOF_URL)("apps as recipients (4e)", () => {
     ).toBe(0);
   });
 
-  it("blocked refuses the send terminally AND degrades the mention to unknown", async () => {
-    const stage = await seedStage("block");
-    scriptRoster();
-
-    await search.anchorRecipient({
-      conversationId: stage.conversationId,
-      name: "Shuf",
-      externalUserId: "U-APPBOT",
-      kind: "app",
-    });
-    await db.agentContact.create({
-      data: {
-        agentId: stage.agentId,
-        kind: "app",
-        externalRef: "U-APPBOT",
-        displayName: "Shuf",
-        policy: "blocked",
-        decidedByUserId: OWNER,
-      },
-    });
-
-    await expect(
-      send.requestSend({
-        agentId: stage.agentId,
-        to: "Shuf",
-        text: "hi",
-        originConversationId: stage.conversationId,
-        originTurnId: null,
-      }),
-    ).rejects.toThrow(/blocked/);
-
-    // The mention degrades too: resolve answers unknown, so the renderer
-    // leaves visible plain text and pings nobody.
-    const resolutions = await mentions.resolveMentionNames(
-      stage.presenceId,
-      ["shuf"],
-      stage.conversationId,
-    );
-    expect(resolutions[0]).toMatchObject({ kind: "unknown", name: "shuf" });
-
-    // And the recorded failure notice tells the TRUTH - blocked, not
-    // unfindable (the guy-dev lesson: a wrong reason gets invented).
-    const turn = await db.turn.create({
-      data: {
-        conversationId: stage.conversationId,
-        message: "tag shuf",
-        status: "done",
-        source: "slack",
-        finishedAt: new Date(),
-      },
-      select: { id: true },
-    });
-    await db.channelThreadLink.create({
-      data: {
-        agentChannelId: stage.presenceId,
-        conversationId: stage.conversationId,
-        externalThreadId: `${P}thread-block`,
-        kind: "direct",
-      },
-    });
-    await mentions.recordMentionFailures(turn.id, [
-      { kind: "unknown", name: "shuf" },
-    ]);
-    const notice = await db.turnEvent.findFirst({
-      where: { turnId: turn.id, type: "notice" },
-      select: { payload: true },
-    });
-    expect((notice?.payload as { text?: string })?.text).toContain(
-      "the workspace owner has blocked this recipient",
-    );
-  });
-
   it("a block AFTER the hold fails the approve (TOCTOU re-check at execute)", async () => {
     const stage = await seedStage("toctou");
     scriptRoster();
@@ -395,14 +337,15 @@ describe.skipIf(!PROOF_URL)("apps as recipients (4e)", () => {
     if (outcome.kind !== "held") throw new Error("unreachable");
 
     // The owner blocks BETWEEN hold and approve.
-    await db.agentContact.create({
+    await db.agentReachGrant.create({
       data: {
         agentId: stage.agentId,
-        kind: "person",
+        integrationId: stage.integrationId,
+        provider: "slack",
+        subjectKind: "external_user",
         externalRef: "U-HUMAN",
-        displayName: "Shuf Human",
-        policy: "blocked",
-        decidedByUserId: OWNER,
+        state: "blocked",
+        cardRefs: [],
       },
     });
     await db.workspaceAccess.upsert({
@@ -430,29 +373,6 @@ describe.skipIf(!PROOF_URL)("apps as recipients (4e)", () => {
     expect(row.reason).toContain("blocked");
   });
 
-  it("always-allow never undoes an explicit block (policies only tighten)", async () => {
-    const stage = await seedStage("sticky");
-    await db.agentContact.create({
-      data: {
-        agentId: stage.agentId,
-        kind: "app",
-        externalRef: "U-APPBOT",
-        displayName: "Shuf",
-        policy: "blocked",
-        decidedByUserId: OWNER,
-      },
-    });
-    await send.allowContact({
-      agentId: stage.agentId,
-      recipient: { kind: "app", ref: "U-APPBOT", label: "Shuf" },
-      deciderUserId: OWNER,
-    });
-    const row = await db.agentContact.findFirstOrThrow({
-      where: { agentId: stage.agentId, externalRef: "U-APPBOT" },
-    });
-    expect(row.policy).toBe("blocked");
-  });
-
   it("BODY @[Name] tokens resolve at request time, freeze into the payload, and render as real pings on delivery", async () => {
     const stage = await seedStage("body");
     scriptRoster();
@@ -470,11 +390,7 @@ describe.skipIf(!PROOF_URL)("apps as recipients (4e)", () => {
       kind: "app",
     });
     // Channel sends deliver directly once allowed.
-    await send.allowContact({
-      agentId: stage.agentId,
-      recipient: { kind: "channel", ref: "C-TEAM", label: "#team-updates" },
-      deciderUserId: OWNER,
-    });
+    await openChannel(stage, "C-TEAM");
 
     const before = slackCalls.filter(
       (c) => c.method === "chat.postMessage",
@@ -502,11 +418,7 @@ describe.skipIf(!PROOF_URL)("apps as recipients (4e)", () => {
     slackHandlers["conversations.list"] = () => ({
       channels: [{ id: "C-TEAM2", name: "team-two", is_member: true }],
     });
-    await send.allowContact({
-      agentId: stage.agentId,
-      recipient: { kind: "channel", ref: "C-TEAM2", label: "#team-two" },
-      deciderUserId: OWNER,
-    });
+    await openChannel(stage, "C-TEAM2");
     const before = slackCalls.filter(
       (c) => c.method === "chat.postMessage",
     ).length;

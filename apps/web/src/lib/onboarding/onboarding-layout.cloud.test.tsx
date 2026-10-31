@@ -76,7 +76,7 @@ beforeEach(() => {
   replace.mockReset();
   getSubscriptionStatus.mockReset().mockResolvedValue({ status: "free" });
   checkOnboardingComplete.mockReset().mockResolvedValue(false);
-  getActiveWorkspacePath.mockReset().mockResolvedValue("/w/p1/overview");
+  getActiveWorkspacePath.mockReset().mockResolvedValue("/w/p1");
   getOnboardingProgress.mockReset().mockResolvedValue(emptyProgress);
 });
 
@@ -96,7 +96,7 @@ describe("onboarding layout boot (billing edition)", () => {
   it("bounces a completed user to the dashboard — onboarding has no return door", async () => {
     checkOnboardingComplete.mockResolvedValue(true);
     render(<OnboardingLayout>step</OnboardingLayout>);
-    await waitFor(() => expect(replace).toHaveBeenCalledWith("/w/p1/overview"));
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/w/p1"));
     expect(screen.queryByTestId("flow")).toBeNull();
   });
 
@@ -122,6 +122,6 @@ describe("onboarding layout boot (billing edition)", () => {
   it("bounces a paid-org user to the dashboard", async () => {
     getSubscriptionStatus.mockResolvedValue({ status: "team" });
     render(<OnboardingLayout>step</OnboardingLayout>);
-    await waitFor(() => expect(replace).toHaveBeenCalledWith("/w/p1/overview"));
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/w/p1"));
   });
 });
