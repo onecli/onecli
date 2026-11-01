@@ -230,6 +230,22 @@ fn content_length_at_most(headers: &hyper::HeaderMap, max: usize) -> bool {
         .is_some_and(|n| n <= max)
 }
 
+/// Canonical GitHub release downloads, not API assets, Git or release pages.
+fn is_github_release_head(method: &hyper::Method, host: &str, path: &str) -> bool {
+    if method != hyper::Method::HEAD
+        || !common::util::strip_port(host).eq_ignore_ascii_case("github.com")
+    {
+        return false;
+    }
+    let path = path.split('?').next().unwrap_or(path);
+    let segments: Vec<_> = path.split('/').collect();
+    matches!(
+        segments.as_slice(),
+        ["", owner, repo, "releases", "download", tag, asset]
+            if [owner, repo, tag, asset].iter().all(|s| !s.is_empty() && **s != "." && **s != "..")
+    )
+}
+
 // ── Request forwarding ──────────────────────────────────────────────────
 
 /// How much of a body the approval card reads when it must read it whole: a
@@ -1119,7 +1135,39 @@ pub async fn forward_request(
     for (name, value) in headers.iter() {
         upstream = upstream.header(name.clone(), value.clone());
     }
-    upstream = upstream.body(forward_body);
+    let mut upstream = upstream.build().map_err(|e| send_failure(e, &url))?;
+    // GitHub's authenticated release HEAD can produce a redirect that fails
+    // at the asset host. Try without Authorization first, after all guards
+    // and approval. Private releases may hide behind 404: retry only this
+    // bodyless HEAD, once, at the same URL with the approved headers.
+    let release_head_retry = if !has_body
+        && finalizer.is_none()
+        && headers.contains_key(hyper::header::AUTHORIZATION)
+        && is_github_release_head(&method, host, &path)
+        && is_github_release_head(&method, host, &upstream_path)
+        && is_github_release_head(&method, host, upstream.url().path())
+    {
+        upstream.try_clone()
+    } else {
+        None
+    };
+    *upstream.body_mut() = Some(forward_body);
+    if release_head_retry.is_some() {
+        upstream.headers_mut().remove(hyper::header::AUTHORIZATION);
+    }
+    let send = async {
+        let resp = http_client.execute(upstream).await?;
+        if matches!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
+        ) {
+            if let Some(retry) = release_head_retry {
+                drop(resp);
+                return http_client.execute(retry).await;
+            }
+        }
+        Ok(resp)
+    };
 
     // Bounded around `send()` alone. `send()` resolves once the response head
     // has been read, so this caps the wait for response headers (and the
@@ -1133,8 +1181,7 @@ pub async fn forward_request(
     // Without this bound, an upstream that accepts the request and then never
     // answers leaves the forwarding future pending forever while the client
     // sees only its own eventual timeout (issue #493).
-    let upstream_resp = match tokio::time::timeout(upstream_header_timeout(), upstream.send()).await
-    {
+    let upstream_resp = match tokio::time::timeout(upstream_header_timeout(), send).await {
         Ok(Ok(resp)) => resp,
         Ok(Err(e)) => {
             // The resolver refused every address this name resolved to;
@@ -1886,6 +1933,59 @@ fn send_failure(e: reqwest::Error, url: &str) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_release_head_matches_only_canonical_downloads() {
+        for host in ["github.com", "github.com:443", "GITHUB.COM"] {
+            for path in [
+                "/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl",
+                "/owner/repo/releases/download/v1%2F2/asset.zip?download=1",
+            ] {
+                assert!(is_github_release_head(&hyper::Method::HEAD, host, path));
+            }
+        }
+        for method in ["GET", "POST", "PUT", "DELETE", "OPTIONS", "head"] {
+            assert!(!is_github_release_head(
+                &method.parse().unwrap(),
+                "github.com",
+                "/owner/repo/releases/download/v1/asset.zip"
+            ));
+        }
+        for host in [
+            "api.github.com",
+            "objects.githubusercontent.com",
+            "raw.githubusercontent.com",
+            "github.com.example.org",
+            "example.org",
+        ] {
+            assert!(!is_github_release_head(
+                &hyper::Method::HEAD,
+                host,
+                "/owner/repo/releases/download/v1/asset.zip"
+            ));
+        }
+        for path in [
+            "/owner/repo.git/info/refs?service=git-upload-pack",
+            "/repos/owner/repo/releases/assets/1",
+            "/owner/repo/releases/latest/download/asset.zip",
+            "/owner/repo/releases/tag/v1",
+            "/owner/repo/releases/download/v1",
+            "/owner/repo/releases/download/v1/",
+            "//repo/releases/download/v1/asset.zip",
+            "/owner//releases/download/v1/asset.zip",
+            "/owner/repo/releases/download//asset.zip",
+            "/owner/repo/releases/download/v1/asset.zip/extra",
+            "/owner/repo/Releases/download/v1/asset.zip",
+            "/owner/repo/releases/download/../asset.zip",
+            "/owner/repo/releases/download/v1/..",
+            "/owner/repo?next=/releases/download/v1/asset.zip",
+        ] {
+            assert!(
+                !is_github_release_head(&hyper::Method::HEAD, "github.com", path),
+                "{path}"
+            );
+        }
+    }
 
     // ── is_forwarded_request_header ──────────────────────────────────────
 
@@ -3200,6 +3300,14 @@ mod tests {
         upstream: std::net::SocketAddr,
         rules: fn() -> ResolvedRules,
     ) -> std::net::SocketAddr {
+        github_gateway_for_host(upstream, rules, "api.github.com").await
+    }
+
+    async fn github_gateway_for_host(
+        upstream: std::net::SocketAddr,
+        rules: fn() -> ResolvedRules,
+        hostname: &'static str,
+    ) -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind gateway");
@@ -3219,15 +3327,16 @@ mod tests {
                     agent_identifier: None,
                     agent_token: "test-token".to_string(),
                 };
-                let host = format!("api.github.com:{}", upstream.port());
+                let host = format!("{hostname}:{}", upstream.port());
                 forward_request(
                     req,
                     &host,
                     &host,
                     "http",
                     reqwest::Client::builder()
+                        .no_proxy()
                         .redirect(reqwest::redirect::Policy::none())
-                        .resolve("api.github.com", upstream)
+                        .resolve(hostname, upstream)
                         .build()
                         .expect("client"),
                     &rules(),
@@ -3243,6 +3352,250 @@ mod tests {
                 .await;
         });
         gateway_addr
+    }
+
+    const RELEASE_PATH: &str =
+        "/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl?download=1";
+    const RELEASE_LOCATION: &str =
+        "https://objects.githubusercontent.com/release-asset?signature=unchanged";
+    const RELEASE_AUTH: &str = "Basic eC1hY2Nlc3MtdG9rZW46dGVzdC10b2tlbg==";
+
+    fn github_release_rules() -> ResolvedRules {
+        ResolvedRules {
+            injection_rules: vec![inject::InjectionRule {
+                path_pattern: "*".into(),
+                injections: vec![inject::Injection::SetHeader {
+                    name: "authorization".into(),
+                    value: RELEASE_AUTH.into(),
+                }],
+                secret: None,
+            }],
+            ..permissive_rules()
+        }
+    }
+
+    fn github_app_release_rules() -> ResolvedRules {
+        ResolvedRules {
+            body_transform: Some(apps::BodyTransform::GitHubCommitTrailer),
+            ..github_release_rules()
+        }
+    }
+
+    async fn release_upstream(
+        statuses: Vec<StatusCode>,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::sync::mpsc::UnboundedReceiver<Request<Bytes>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let statuses = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
+            statuses,
+        )));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let tx = tx.clone();
+                let statuses = statuses.clone();
+                tokio::spawn(async move {
+                    let service = hyper::service::service_fn(move |req: Request<Incoming>| {
+                        let tx = tx.clone();
+                        let statuses = statuses.clone();
+                        async move {
+                            let (parts, body) = req.into_parts();
+                            let body = body.collect().await.unwrap().to_bytes();
+                            tx.send(Request::from_parts(parts, body)).unwrap();
+                            let status = statuses
+                                .lock()
+                                .unwrap()
+                                .pop_front()
+                                .expect("unexpected replay");
+                            Ok::<_, std::convert::Infallible>(
+                                Response::builder()
+                                    .status(status)
+                                    .header("location", RELEASE_LOCATION)
+                                    .header("content-length", "5")
+                                    .body(Full::new(Bytes::from_static(b"asset")))
+                                    .unwrap(),
+                            )
+                        }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        (addr, rx)
+    }
+
+    #[tokio::test]
+    async fn github_release_head_is_anonymous_after_injection_and_client_auth() {
+        pin_test_header_timeout();
+        for rules in [
+            github_release_rules as fn() -> ResolvedRules,
+            github_app_release_rules,
+            permissive_rules,
+        ] {
+            for status in [StatusCode::OK, StatusCode::FOUND] {
+                let (upstream, mut seen) = release_upstream(vec![status]).await;
+                let gateway = github_gateway_for_host(upstream, rules, "github.com").await;
+                let response = reqwest::Client::builder()
+                    .no_proxy()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .unwrap()
+                    .head(format!("http://{gateway}{RELEASE_PATH}"))
+                    .header("authorization", "Bearer client-token")
+                    .header("x-release-probe", "preserved")
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), status);
+                assert_eq!(response.headers()["location"], RELEASE_LOCATION);
+                assert_eq!(response.headers()["content-length"], "5");
+                assert!(response.bytes().await.unwrap().is_empty());
+                let request = seen.recv().await.unwrap();
+                assert_eq!(request.method(), hyper::Method::HEAD);
+                assert_eq!(request.uri(), RELEASE_PATH);
+                assert!(!request.headers().contains_key("authorization"));
+                assert_eq!(request.headers()["x-release-probe"], "preserved");
+                assert!(seen.try_recv().is_err(), "must not follow the redirect");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn github_release_head_retries_private_assets_once_with_approved_auth() {
+        pin_test_header_timeout();
+        for rules in [
+            github_release_rules as fn() -> ResolvedRules,
+            github_app_release_rules,
+            permissive_rules,
+        ] {
+            for status in [
+                StatusCode::UNAUTHORIZED,
+                StatusCode::FORBIDDEN,
+                StatusCode::NOT_FOUND,
+            ] {
+                let (upstream, mut seen) = release_upstream(vec![status, StatusCode::FOUND]).await;
+                let gateway = github_gateway_for_host(upstream, rules, "github.com").await;
+                let response = reqwest::Client::builder()
+                    .no_proxy()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .unwrap()
+                    .head(format!("http://{gateway}{RELEASE_PATH}"))
+                    .header("authorization", "Bearer client-token")
+                    .header("x-release-probe", "preserved")
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::FOUND);
+                assert_eq!(response.headers()["location"], RELEASE_LOCATION);
+                let first = seen.recv().await.unwrap();
+                let retry = seen.recv().await.unwrap();
+                assert!(!first.headers().contains_key("authorization"));
+                assert_eq!(retry.method(), first.method());
+                assert_eq!(retry.uri(), first.uri());
+                assert!(retry.body().is_empty());
+                assert_eq!(retry.headers()["x-release-probe"], "preserved");
+                let expected = if rules().injection_rules.is_empty() {
+                    "Bearer client-token"
+                } else {
+                    RELEASE_AUTH
+                };
+                assert_eq!(retry.headers()["authorization"], expected);
+                assert!(seen.try_recv().is_err());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn github_release_head_does_not_retry_without_auth_or_on_other_errors() {
+        pin_test_header_timeout();
+        for (status, rules, expected) in [
+            (
+                StatusCode::NOT_FOUND,
+                permissive_rules as fn() -> ResolvedRules,
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                github_release_rules,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ] {
+            let (upstream, mut seen) = release_upstream(vec![status]).await;
+            let gateway = github_gateway_for_host(upstream, rules, "github.com").await;
+            let response = reqwest::Client::new()
+                .head(format!("http://{gateway}{RELEASE_PATH}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            assert!(!seen
+                .recv()
+                .await
+                .unwrap()
+                .headers()
+                .contains_key("authorization"));
+            assert!(seen.try_recv().is_err());
+        }
+        let (upstream, mut seen) =
+            release_upstream(vec![StatusCode::NOT_FOUND, StatusCode::NOT_FOUND]).await;
+        let gateway = github_gateway_for_host(upstream, github_release_rules, "github.com").await;
+        let response = reqwest::Client::new()
+            .head(format!("http://{gateway}{RELEASE_PATH}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(!seen
+            .recv()
+            .await
+            .unwrap()
+            .headers()
+            .contains_key("authorization"));
+        assert_eq!(
+            seen.recv().await.unwrap().headers()["authorization"],
+            RELEASE_AUTH
+        );
+        assert!(seen.try_recv().is_err(), "only one authenticated retry");
+    }
+
+    #[tokio::test]
+    async fn github_release_head_leaves_other_forwarded_requests_authenticated() {
+        pin_test_header_timeout();
+        for (method, host, path, body) in [
+            ("GET", "github.com", RELEASE_PATH, ""),
+            ("POST", "github.com", RELEASE_PATH, "body"),
+            ("HEAD", "api.github.com", RELEASE_PATH, ""),
+            ("HEAD", "objects.githubusercontent.com", RELEASE_PATH, ""),
+            ("HEAD", "example.org", RELEASE_PATH, ""),
+            ("HEAD", "github.com", "/owner/repo.git/info/refs", ""),
+            ("HEAD", "github.com", "/owner/repo/releases/tag/v1", ""),
+            ("HEAD", "github.com", RELEASE_PATH, "body"),
+        ] {
+            let (upstream, mut seen) = release_upstream(vec![StatusCode::OK]).await;
+            let gateway = github_gateway_for_host(upstream, github_release_rules, host).await;
+            let response = reqwest::Client::new()
+                .request(method.parse().unwrap(), format!("http://{gateway}{path}"))
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{method} {host}{path}");
+            if method == "GET" {
+                assert_eq!(response.text().await.unwrap(), "asset");
+            }
+            let request = seen.recv().await.unwrap();
+            assert_eq!(request.headers()["authorization"], RELEASE_AUTH);
+            assert_eq!(request.method().as_str(), method);
+            assert_eq!(request.uri(), path);
+            assert_eq!(request.body().as_ref(), body.as_bytes());
+            assert!(seen.try_recv().is_err());
+        }
     }
 
     #[tokio::test]
