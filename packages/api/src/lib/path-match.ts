@@ -184,13 +184,19 @@ const labelMatches = (hostLabel: string, patternLabel: string): boolean => {
 export const isLlmHost = (host: string): boolean => {
   const h = host.split(":")[0] ?? host;
   return (
-    h.includes("anthropic.com") ||
-    h.includes("openai.com") ||
-    h.includes("chatgpt.com") ||
-    h.includes("deepseek.com") ||
-    h.includes("groq.com") ||
-    h.includes("openrouter.ai") ||
-    h.includes("moonshot.cn") ||
-    h.includes("generativelanguage.googleapis.com")
+    isDomainOrSubdomain(h, "anthropic.com") ||
+    isDomainOrSubdomain(h, "openai.com") ||
+    isDomainOrSubdomain(h, "chatgpt.com") ||
+    isDomainOrSubdomain(h, "deepseek.com") ||
+    isDomainOrSubdomain(h, "groq.com") ||
+    isDomainOrSubdomain(h, "openrouter.ai") ||
+    isDomainOrSubdomain(h, "moonshot.cn") ||
+    isDomainOrSubdomain(h, "generativelanguage.googleapis.com")
   );
 };
+
+const isDomainOrSubdomain = (host: string, domain: string): boolean =>
+  asciiLower(host) === asciiLower(domain) ||
+  (host.length > domain.length &&
+    host[host.length - domain.length - 1] === "." &&
+    asciiLower(host.slice(host.length - domain.length)) === asciiLower(domain));
