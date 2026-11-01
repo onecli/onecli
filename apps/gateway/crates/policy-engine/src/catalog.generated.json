@@ -1720,6 +1720,17 @@
         "PUT"
       ]
     },
+    "get_current_user": {
+      "hosts": [
+        "api.cloudflare.com"
+      ],
+      "paths": [
+        "/client/v4/user"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
     "get_zone": {
       "hosts": [
         "api.cloudflare.com"
@@ -1839,6 +1850,17 @@
       ],
       "methods": [
         "PUT"
+      ]
+    },
+    "verify_token": {
+      "hosts": [
+        "api.cloudflare.com"
+      ],
+      "paths": [
+        "/client/v4/user/tokens/verify"
+      ],
+      "methods": [
+        "GET"
       ]
     },
     "write_all": {
