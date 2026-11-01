@@ -3352,6 +3352,17 @@
         "DELETE"
       ]
     },
+    "get_current_user": {
+      "hosts": [
+        "api.github.com"
+      ],
+      "paths": [
+        "/user"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
     "get_repo": {
       "hosts": [
         "api.github.com"
@@ -3530,6 +3541,17 @@
       ],
       "methods": [
         "DELETE"
+      ]
+    },
+    "get_current_user": {
+      "hosts": [
+        "api.github.com"
+      ],
+      "paths": [
+        "/user"
+      ],
+      "methods": [
+        "GET"
       ]
     },
     "get_repo": {
