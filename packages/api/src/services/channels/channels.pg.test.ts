@@ -8935,7 +8935,7 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
     });
     slackHandlers["reactions.add"] = () => ({ ok: true });
     slackHandlers["v1/messages"] = () => ({
-      content: [{ type: "text", text: "rocket" }],
+      content: [{ type: "text", text: "bulb" }],
     });
 
     const result = await dispatch.dispatchSlackEvent({
@@ -8955,10 +8955,10 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
       const row = await db.channelTurnReceipt.findUnique({
         where: { turnId },
       });
-      expect(row?.reaction).toBe("rocket");
+      expect(row?.reaction).toBe("bulb");
     });
     const add = slackCallsFor("reactions.add").at(-1)!;
-    expect(add.form.get("name")).toBe("rocket");
+    expect(add.form.get("name")).toBe("bulb");
     expect(add.form.get("timestamp")).toBe("1000.0001");
   });
 

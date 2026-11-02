@@ -24,10 +24,16 @@ import type { AgentCron } from "@/lib/api";
 
 const mutation = () => ({ mutate: vi.fn(), isPending: false });
 
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/w/ws-1/agents/ag-1/schedules",
+  useRouter: () => ({ push: vi.fn() }),
+}));
+
 vi.mock("@/hooks/use-crons", () => ({
   useCreateCron: mutation,
   useUpdateCron: mutation,
   useDeleteCron: mutation,
+  useParseWords: () => ({ data: undefined, isFetching: false }),
 }));
 
 const { CronDialog } = await import("./cron-dialog");
@@ -46,11 +52,14 @@ const cron = (overrides: Partial<AgentCron> = {}): AgentCron => ({
   prompt: LONG_PROMPT,
   schedule: "0 9 * * *",
   timezone: "America/Los_Angeles",
+  gate: null,
+  gateDescription: null,
   enabled: true,
   disabledReason: null,
   nextFireAt: "2026-08-08T09:00:00.000Z",
   lastFiredAt: null,
   lastOutcome: null,
+  running: false,
   consecutiveFailures: 0,
   createdAt: "2026-08-07T00:00:00.000Z",
   ...overrides,
@@ -120,7 +129,7 @@ describe("a dialog carrying a long prompt", () => {
     // and labelled, which is what a screen reader and a keyboard walk find.
     expect(screen.getByLabelText("Name")).toBeInTheDocument();
     expect(screen.getByLabelText("Timezone")).toBeInTheDocument();
-    expect(screen.getByLabelText("At")).toBeInTheDocument();
+    expect(screen.getByLabelText("When")).toBeInTheDocument();
     const body = dialogBody();
     expect(body).toContainElement(screen.getByLabelText("Name"));
     expect(body).toContainElement(screen.getByLabelText("Timezone"));

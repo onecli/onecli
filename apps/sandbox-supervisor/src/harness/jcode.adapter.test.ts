@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import {
   appendFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -389,6 +390,8 @@ beforeEach(() => {
   delete process.env.ONECLI_JCODE_BINARY;
   delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
   delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.CODEX_HOME;
+  delete process.env.OPENAI_API_KEY;
 });
 
 afterEach(() => {
@@ -526,6 +529,79 @@ describe("the connection model", () => {
 
       expect(state.launches).toHaveLength(1);
       expect(existsSync(planted)).toBe(false);
+    });
+  });
+
+  describe("the OpenAI ChatGPT (Codex) login", () => {
+    /**
+     * Launch once with the given grant env against a home whose durable
+     * `openai-auth.json` still holds an account from an EARLIER grant.
+     * Returns the env the adapter handed `launchInstance` and the store path.
+     */
+    const launchWithStaleStore = async (grant: Record<string, string>) => {
+      Object.assign(process.env, grant);
+      const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+      const jcodeHome = join(homeDir, ".jcode-home");
+      mkdirSync(jcodeHome, { recursive: true });
+      const store = join(jcodeHome, "openai-auth.json");
+      writeFileSync(store, '{"openai_accounts":[{"label":"stale"}]}');
+      await createJcodeHarness().startSession({ homeDir });
+      const options = state.launches[0]?.options as {
+        env?: Record<string, string>;
+      };
+      return { env: options.env ?? {}, store };
+    };
+
+    it("seeds jcode's own store with the placeholder, 0600, and pins OpenAI", async () => {
+      const { env, store } = await launchWithStaleStore({
+        CODEX_HOME: "/home/node/.codex",
+      });
+      // Without it the runtime reads no OpenAI login at all.
+      expect(env.JCODE_PROVIDER).toBe("openai");
+      expect(env).not.toHaveProperty("JCODE_RUNTIME_PROVIDER");
+      expect(lstatSync(store).mode & 0o777).toBe(0o600);
+      const file = JSON.parse(readFileSync(store, "utf8"));
+      expect(file.active_openai_account).toBe("onecli");
+      expect(file.openai_accounts[0].refresh_token).toBe("onecli-managed");
+    });
+
+    it("an API-key grant drops a store an earlier login left", async () => {
+      const { env, store } = await launchWithStaleStore({
+        OPENAI_API_KEY: "placeholder",
+        CODEX_HOME: "/home/node/.codex",
+      });
+      // Left in place, the runtime would prefer the login over the key.
+      expect(existsSync(store)).toBe(false);
+      expect(env).not.toHaveProperty("JCODE_PROVIDER");
+    });
+
+    it("an Anthropic grant keeps its own pin, beside a ChatGPT login", async () => {
+      // Both keys granted: Anthropic wins the session, the login is still
+      // available for an OpenAI model the user picks.
+      const { env, store } = await launchWithStaleStore({
+        ANTHROPIC_API_KEY: "placeholder",
+        CODEX_HOME: "/home/node/.codex",
+      });
+      expect(env.JCODE_RUNTIME_PROVIDER).toBe("claude-api");
+      expect(env).not.toHaveProperty("JCODE_PROVIDER");
+      expect(existsSync(store)).toBe(true);
+    });
+
+    it("unlinks a planted symlink at the store path, never its target", async () => {
+      process.env.CODEX_HOME = "/home/node/.codex";
+      const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+      const jcodeHome = join(homeDir, ".jcode-home");
+      mkdirSync(jcodeHome, { recursive: true });
+      const outside = join(mkdtempSync(join(tmpdir(), "jcode-out-")), "keep");
+      writeFileSync(outside, "precious");
+      symlinkSync(outside, join(jcodeHome, "openai-auth.json"));
+
+      await createJcodeHarness().startSession({ homeDir });
+
+      expect(lstatSync(join(jcodeHome, "openai-auth.json")).isFile()).toBe(
+        true,
+      );
+      expect(readFileSync(outside, "utf8")).toBe("precious");
     });
   });
 

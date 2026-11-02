@@ -79,6 +79,12 @@ const selectHarness = (config: SupervisorConfig): Harness => {
 
 const main = async (): Promise<void> => {
   const config = loadConfig();
+  // The runner channel's bootstrap token is single-use and lives in `config`
+  // from here on. Every process this one starts (the harness, the agent's
+  // shells, background processes, a schedule's check) inherits this
+  // environment, and none of them may hold the platform's channel
+  // credential, spent or not.
+  delete process.env.SANDBOX_WS_TOKEN;
   const harness = selectHarness(config);
 
   log("info", "supervisor starting", {

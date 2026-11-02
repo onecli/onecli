@@ -67,10 +67,11 @@ describe("draftFromSchedule", () => {
 
 describe("describeSchedule", () => {
   it.each([
-    ["0 9 * * *", "Daily at 09:00"],
+    ["0 9 * * *", "Every day at 09:00"],
     ["30 7 * * 1-5", "Weekdays at 07:30"],
-    ["5 18 * * 1", "Mondays at 18:05"],
-    ["0 */6 * * *", "Cron 0 */6 * * *"],
+    ["5 18 * * 1", "Every Mon at 18:05"],
+    ["0 */6 * * *", "Every 6 hours"],
+    ["0 9 1 1 *", "Cron 0 9 1 1 *"],
   ])("%s reads %j", (schedule, text) => {
     expect(describeSchedule(schedule)).toBe(text);
   });

@@ -1331,6 +1331,206 @@
       ]
     }
   },
+  "bitbucket": {
+    "approve_pull_request": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/pullrequests/*/approve"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "comment_pull_request": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/pullrequests/*/comments/"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_branch": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/refs/branches/"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_pull_request": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/pullrequests/"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "decline_pull_request": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/pullrequests/*/decline"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_branch": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/refs/branches/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_pull_request": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/pullrequests/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_repository": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/",
+        "/2.0/repositories/*/*/src/",
+        "/2.0/repositories/*/*/src/*",
+        "/2.0/repositories/*/*/commits/",
+        "/2.0/repositories/*/*/commits/*",
+        "/2.0/repositories/*/*/commit/*",
+        "/2.0/repositories/*/*/refs/",
+        "/2.0/repositories/*/*/refs/*",
+        "/2.0/repositories/*/*/diff/*",
+        "/2.0/repositories/*/*/diffstat/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_user": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/user"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "git_clone": {
+      "hosts": [
+        "bitbucket.org"
+      ],
+      "paths": [
+        "/*/*/git-upload-pack"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "git_push": {
+      "hosts": [
+        "bitbucket.org"
+      ],
+      "paths": [
+        "/*/*/git-receive-pack"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_pipelines": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/pipelines/",
+        "/2.0/repositories/*/*/pipelines/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_pull_requests": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/pullrequests/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_repositories": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_workspaces": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/user/workspaces"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "merge_pull_request": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/pullrequests/*/merge"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_pull_request": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/pullrequests/*/"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    }
+  },
   "circleback": {
     "create_action_item": {
       "hosts": [

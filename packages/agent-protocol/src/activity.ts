@@ -166,6 +166,7 @@ const TOOL_PHRASES: Record<string, ToolPhrase> = {
     done: "Checked its schedule",
   },
   cancel_task: { running: "Cancelling a task", done: "Cancelled a task" },
+  update_task: { running: "Updating a task", done: "Updated a task" },
   list_webhooks: {
     running: "Checking its webhooks",
     done: "Checked its webhooks",
@@ -268,6 +269,15 @@ const OWN_REPLY_FAILED: Record<string, string> = {
   delete_my_reply: "Couldn't delete its reply",
 };
 
+/** An own-reply change in a named conversation: its line once done, and
+ * the verb a held or waiting one names (a message sent as the person goes
+ * through their approval, so "Deleted" would claim what has not happened).
+ * Neutral "a message": it may be the agent's post or one sent as you. */
+const OWN_REPLY_ELSEWHERE: Record<string, { done: string; what: string }> = {
+  edit_my_reply: { done: "Edited a message", what: "edit a message" },
+  delete_my_reply: { done: "Deleted a message", what: "delete a message" },
+};
+
 /** One string field of a JSON object, flattened and capped (untrusted). */
 const fieldOf = (raw: string | undefined, key: string): string | null => {
   if (!raw) return null;
@@ -283,6 +293,19 @@ const fieldOf = (raw: string | undefined, key: string): string | null => {
       : flat;
   } catch {
     return null;
+  }
+};
+
+/** How many files a send_message input carries (`files` paths). */
+const filesOf = (raw: string | undefined): number => {
+  if (!raw) return 0;
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (value === null || typeof value !== "object") return 0;
+    const files: unknown = Reflect.get(value, "files");
+    return Array.isArray(files) ? files.length : 0;
+  } catch {
+    return 0;
   }
 };
 
@@ -337,11 +360,41 @@ export const activityForToolCall = (
   if (ownReplyFailed && !running && result?.isError === true) {
     return ownReplyFailed;
   }
+  const elsewhere = OWN_REPLY_ELSEWHERE[bare];
+  const where = elsewhere ? fieldOf(input, "conversation") : null;
+  if (elsewhere && where && !running && result?.isError !== true) {
+    switch (outcomeOf(result?.output, false)) {
+      case "held":
+        return `Waiting for your approval: ${elsewhere.what} in ${where}`;
+      case "needs_input":
+        return `Needs your input: ${elsewhere.what} in ${where}`;
+      default:
+        return `${elsewhere.done} in ${where}`;
+    }
+  }
   if (!SEND_TOOLS.has(bare)) return base;
   const target = targetOf(bare, input);
   const words = ACTION_WORDS[bare]!;
   const to = (prep: string) => (target ? ` ${prep} ${target}` : "");
   const prep = bare === "send_as_me" || bare === "send_message" ? "to" : "in";
+  // send_message with files: "Sending 2 files to #x", then the outcome.
+  const fileCount = bare === "send_message" ? filesOf(input) : 0;
+  if (fileCount > 0) {
+    const files = `${fileCount} file${fileCount === 1 ? "" : "s"}`;
+    if (running) return `Sending ${files}${to("to")}`;
+    if (result) {
+      switch (outcomeOf(result.output, result.isError === true)) {
+        case "held":
+          return `Waiting for approval: send ${files}${to("to")}`;
+        case "failed":
+          return `Couldn't send ${files}${to("to")}`;
+        case "done":
+          return `Sent ${files}${to("to")}`;
+        default:
+          break;
+      }
+    }
+  }
   if (!running && result) {
     const outcome = outcomeOf(result.output, result.isError === true);
     switch (outcome) {
@@ -356,6 +409,9 @@ export const activityForToolCall = (
       case "done":
         break;
     }
+  }
+  if (bare === "send_message" && !running && target) {
+    if (fieldOf(input, "thread")) return `Posted in a thread in ${target}`;
   }
   if (!AS_YOU_TOOLS.has(bare) || !target) return base;
   return `${base}${to(prep)}`;

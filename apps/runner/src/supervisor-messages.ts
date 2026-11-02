@@ -125,6 +125,8 @@ export interface OutboundFile {
   mimeType: string;
   sha256: string;
   caption?: string;
+  /** "send" = staged for send_message; absent = attach to the reply. */
+  purpose?: "send";
   bytes: Buffer;
 }
 
@@ -452,6 +454,7 @@ export const createSupervisorMessageHandler = ({
       mimeType: part.mimeType,
       sha256: part.sha256,
       ...(part.caption !== undefined && { caption: part.caption }),
+      ...(part.purpose !== undefined && { purpose: part.purpose }),
       bytes,
     });
   };

@@ -4,6 +4,7 @@ import { mentionNamesOf, normalizeMentionName } from "@onecli/channels";
 import { getCrypto } from "../../providers";
 import { ServiceError } from "../errors";
 import {
+  onActionAbandoned,
   registerActionHandler,
   requestActionApproval,
 } from "./action-approval-service";
@@ -15,6 +16,19 @@ import { channelProvider, isChannelProviderId } from "./registry";
 import { logger } from "../../lib/logger";
 import { cleanLabel } from "../../lib/format";
 import { previousRunStartedAt } from "../turn-service";
+import { threadRefSchema, type ThreadRef } from "../../validations/recipients";
+import {
+  FileUploadUnavailableError,
+  ThreadNotInConversationError,
+} from "./errors";
+import {
+  deleteStagedAttachments,
+  findStagedAttachments,
+  formatAttachmentSize,
+  markStagedAttachmentsSent,
+  readStagedAttachments,
+  type StagedAttachmentRef,
+} from "../attachment-service";
 import {
   decideReachGrant,
   ensurePersonGrant,
@@ -50,6 +64,10 @@ const log = logger.child({ component: "send-message" });
 
 /** The action key in 4b's registry — the wire-stable handler name. */
 export const SEND_MESSAGE_ACTION = "channel.send_message";
+
+/** send_message WITH files: always its own one-off card (approve sends
+ * this message and these files, once; never a standing answer). */
+export const SEND_FILES_ACTION = "channel.send_files";
 
 /** A send refused because the contact is blocked (Can talk with = Never),
  * raised in the asking person's own chat: "Let <Agent> message <Name>?"
@@ -111,7 +129,29 @@ interface SendPayload {
    * pre-extension rows: their tokens degrade to plain text, the old
    * behavior. */
   mentions?: Record<string, string>;
+  /** The existing thread to post in (send_message `thread`), frozen with
+   * the text. Absent = a new top-level message. */
+  thread?: ThreadRef;
+  /** Staged files (send_message `files`), frozen by id with the name and
+   * size the card showed. Read from storage only at approve time. */
+  files?: StagedAttachmentRef[];
 }
+
+/** The optional parts of a frozen send payload (thread, files), read on
+ * their own: each is absent or well-formed, never a guess. */
+const frozenExtrasSchema = z.object({
+  thread: threadRefSchema.optional(),
+  files: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        name: z.string(),
+        sizeBytes: z.number().int().nonnegative(),
+      }),
+    )
+    .min(1)
+    .optional(),
+});
 
 /** Validate-then-narrow (never cast-first): the frozen row is the only
  * JSON boundary, and a malformed row must fail the approval loudly. */
@@ -152,10 +192,15 @@ const payloadOf = (raw: Prisma.JsonValue): SendPayload => {
       frozenMentions[name] = id;
     }
   }
+  const frozen = frozenExtrasSchema.safeParse(raw);
+  if (!frozen.success) throw new Error("malformed send payload");
+  const { thread, files } = frozen.data;
   return {
     to: { kind, ref, label },
     text,
     ...(frozenMentions ? { mentions: frozenMentions } : {}),
+    ...(thread ? { thread } : {}),
+    ...(files ? { files } : {}),
   };
 };
 
@@ -386,11 +431,27 @@ const executeSend = async (
   }
   const provider = channelProvider(presence.provider);
   const credentialsJson = await getCrypto().decrypt(presence.credentials);
+  // Files are read from storage only now, after the approve: still staged
+  // and still this agent's (a deleted conversation took them with it).
+  let files: { name: string; bytes: Uint8Array }[] | undefined;
+  if (payload.files) {
+    const read = await readStagedAttachments(
+      agentId,
+      payload.files.map((f) => f.id),
+    );
+    if (!read) {
+      throw new ServiceError(
+        "UNPROCESSABLE",
+        "The files are no longer available (they were removed or expired). Nothing was sent.",
+      );
+    }
+    files = read;
+  }
   const intro = authority.manager
     ? null
     : await firstContactIntro(agentId, presence.id, payload.to);
 
-  let delivered: { externalThreadId: string };
+  let delivered: { externalThreadId: string; messageRef?: string };
   try {
     // The provider addresses the recipient and renders the text natively,
     // with the mention map FROZEN at request time: body @[Name] tokens ping
@@ -403,8 +464,26 @@ const executeSend = async (
       ...(payload.mentions && {
         mentions: new Map(Object.entries(payload.mentions)),
       }),
+      ...(payload.thread && { thread: payload.thread }),
+      ...(files && { files }),
     });
   } catch (err) {
+    if (err instanceof ThreadNotInConversationError) {
+      throw new ServiceError("UNPROCESSABLE", threadMismatch(payload.to.label));
+    }
+    if (err instanceof FileUploadUnavailableError) {
+      // Never the token, never the bytes: only Slack's own refusal code.
+      log.warn(
+        { agentId, code: err.code },
+        "send_message files refused by the provider",
+      );
+      throw new ServiceError(
+        "UNPROCESSABLE",
+        err.code === "missing_scope"
+          ? `This agent's ${provider.displayName} app needs the files:write permission; reinstall it. Nothing was sent.`
+          : `${provider.displayName} refused the files (${err.code}). Nothing was sent.`,
+      );
+    }
     // A refusal that means the app itself is gone (deleted on the provider's
     // side, a missed uninstall webhook) flips the presence here — the
     // outbound half of removal detection — and the agent hears why.
@@ -422,8 +501,10 @@ const executeSend = async (
   await recordSentMessage({
     agentChannelId: presence.id,
     externalThreadId: delivered.externalThreadId,
+    messageRef: delivered.messageRef ?? null,
     recipientLabel: payload.to.label,
     text: payload.text,
+    fileNames: (payload.files ?? []).map((f) => f.name),
     originConversationId: authority.originConversationId,
     originTurnId: authority.originTurnId,
   }).catch((err: unknown) =>
@@ -463,7 +544,8 @@ const firstContactIntro = async (
     db.actionApproval.findFirst({
       where: {
         agentId,
-        action: SEND_MESSAGE_ACTION,
+        // Text or files: either one already introduced the agent.
+        action: { in: [SEND_MESSAGE_ACTION, SEND_FILES_ACTION] },
         status: "executed",
         AND: [
           { payload: { path: ["to", "kind"], equals: to.kind } },
@@ -551,6 +633,7 @@ registerActionHandler(
         to: payload.to,
         text: payload.text,
         ...(payload.mentions && { mentions: payload.mentions }),
+        ...(payload.thread && { thread: payload.thread }),
       },
       {
         manager: await managerKindOf(approval.agentId, payload.to.ref),
@@ -592,6 +675,47 @@ registerActionHandler(
     },
   },
 );
+
+/**
+ * send_message with files: a one-off card (Approve / Reject), decided by
+ * the workspace's ordinary deciders. Approve sends exactly the frozen
+ * message and files; the recipient's setting is re-read (a Never set since
+ * the card went out refuses it), and nothing is uploaded before then.
+ */
+registerActionHandler(SEND_FILES_ACTION, async (approval) => {
+  const payload = payloadOf(approval.payload);
+  const files = payload.files ?? [];
+  await executeSend(approval.agentId, payload, {
+    manager:
+      payload.to.kind === "person"
+        ? await managerKindOf(approval.agentId, payload.to.ref)
+        : null,
+    originConversationId: approval.conversationId,
+    originTurnId: approval.originTurnId,
+  });
+  // Delivered: the staged rows are spent (bytes dropped, never re-sendable).
+  await markStagedAttachmentsSent(
+    approval.agentId,
+    files.map((f) => f.id),
+  ).catch((err: unknown) =>
+    log.warn(
+      { agentId: approval.agentId, err: String(err) },
+      "retiring sent staged files failed",
+    ),
+  );
+  return `Sent ${filesCount(files.length)} to ${payload.to.label}.`;
+});
+
+onActionAbandoned(SEND_FILES_ACTION, async (approval) => {
+  // Rejected, expired or failed: the staged files will never go, so they
+  // are deleted now rather than waiting out the stale-staged sweep. A
+  // superseded card is never abandoned (this action has no supersede key).
+  const ids = frozenExtrasSchema
+    .safeParse(approval.payload)
+    .data?.files?.map((f) => f.id);
+  if (ids?.length) await deleteStagedAttachments(approval.agentId, ids);
+  return null;
+});
 
 /** Can talk with = Always allow, through the reach door (audited, decider
  * stamped), forced like the Contacts control: the blocked card's Allow and
@@ -732,6 +856,10 @@ export const requestSend = async (input: {
   /** The verified person asking in their own chat (null = a shared place):
    * a blocked contact raises a card for them instead of a dead end. */
   readerUserId?: string | null;
+  /** send_message `thread`, parsed at the tool door. */
+  thread?: ThreadRef;
+  /** Staged files (send_message `files`): the calling turn's own. */
+  attachmentIds?: readonly string[];
 }): Promise<SendOutcome> => {
   const text = input.text.trim();
   if (!text)
@@ -743,11 +871,42 @@ export const requestSend = async (input: {
     );
   }
 
+  // Files first: they must be this turn's own staged files, or nothing
+  // else is looked at.
+  let files: StagedAttachmentRef[] | undefined;
+  if (input.attachmentIds && input.attachmentIds.length > 0) {
+    const staged =
+      input.originConversationId && input.originTurnId
+        ? await findStagedAttachments({
+            agentId: input.agentId,
+            conversationId: input.originConversationId,
+            turnId: input.originTurnId,
+            ids: input.attachmentIds,
+          })
+        : null;
+    if (!staged) {
+      throw new ServiceError(
+        "UNPROCESSABLE",
+        "Those files can't be sent from here. Pass the paths in files while you are answering a message. Nothing was sent.",
+      );
+    }
+    files = staged;
+  }
+
   const recipient = await resolveSendRecipient(
     input.agentId,
     input.to,
     input.originConversationId,
   );
+  // A channel link is checked now, before any card; a bare id or a DM
+  // thread is checked by the provider at post time (inside the open DM).
+  if (
+    input.thread?.channel &&
+    recipient.kind === "channel" &&
+    input.thread.channel !== recipient.ref
+  ) {
+    throw new ServiceError("UNPROCESSABLE", threadMismatch(recipient.label));
+  }
 
   // BODY mentions, resolved NOW and frozen into the payload: the mirror's
   // own resolve walk (anchors → directory; a blocked person may still be
@@ -783,6 +942,8 @@ export const requestSend = async (input: {
     to: recipient,
     text,
     ...(mentions ? { mentions } : {}),
+    ...(input.thread ? { thread: input.thread } : {}),
+    ...(files ? { files } : {}),
   };
 
   const policy = await recipientPolicyOf(input.agentId, recipient);
@@ -797,7 +958,10 @@ export const requestSend = async (input: {
       ? await managerKindOf(input.agentId, recipient.ref)
       : null;
   if (isRefused(policy, manager)) {
-    if (recipient.kind === "person" && input.readerUserId) {
+    // A blocked person may be allowed by the one asking in their own chat
+    // (a card for them); files never take that door: they go only through
+    // their own one-off card, and Never stays never.
+    if (!files && recipient.kind === "person" && input.readerUserId) {
       return {
         kind: "blocked",
         to: recipient.label,
@@ -814,9 +978,23 @@ export const requestSend = async (input: {
     throw new ServiceError(
       "UNPROCESSABLE",
       recipient.kind === "channel"
-        ? `The workspace owner turned you off in ${recipient.label}: you can't post there. Don't retry.`
-        : `The workspace owner has blocked messaging ${recipient.label}. Don't retry. ${BLOCKED_HINT}`,
+        ? `The workspace owner turned you off in ${recipient.label}: you can't post there. Nothing was sent. Don't retry. Change it in Contacts.`
+        : `The workspace owner has blocked messaging ${recipient.label}. Nothing was sent. Don't retry. ${BLOCKED_HINT}`,
     );
+  }
+  if (files) {
+    // Files to another conversation ALWAYS ask first, whatever the
+    // recipient's setting: the card names every file, and approving sends
+    // this message with these files, once (never a standing answer).
+    const held = await requestActionApproval({
+      agentId: input.agentId,
+      conversationId: input.originConversationId,
+      originTurnId: input.originTurnId,
+      action: SEND_FILES_ACTION,
+      payload: payload as unknown as Prisma.InputJsonValue,
+      summary: sendFilesSummary(recipient, text, files),
+    });
+    return { kind: "held", to: recipient.label, approvalId: held.id };
   }
   if (policy === "allow" || manager) {
     await executeSend(input.agentId, payload, {
@@ -873,6 +1051,48 @@ export const requestSend = async (input: {
   return { kind: "held", to: recipient.label, approvalId: held.id };
 };
 
+/** "2 files" / "1 file". */
+const filesCount = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
+
+/** The files card's words: server-built, every file named with its size,
+ * then the exact message. */
+const sendFilesSummary = (
+  to: SendRecipient,
+  text: string,
+  files: readonly StagedAttachmentRef[],
+): string => {
+  const list = files
+    .map(
+      (f) => `${cleanLabel(f.name, 80)} (${formatAttachmentSize(f.sizeBytes)})`,
+    )
+    .join(", ");
+  return `send ${filesCount(files.length)} to ${to.label}: ${list}. Message: "${text}"`;
+};
+
+/** The model's line when a thread is not in the recipient's conversation. */
+const threadMismatch = (label: string) =>
+  `That thread isn't in ${label}. Nothing was sent.`;
+
+/**
+ * May the agent talk with this recipient right now, by its Contacts "Can
+ * talk with" setting alone (Always allow, or the agent's manager)? Never
+ * and no answer yet both say no. Changing the agent's own messages
+ * elsewhere needs this AND a caller allowed to ask (own-replies-service);
+ * no card is ever raised.
+ */
+export const canTalkWith = async (
+  agentId: string,
+  recipient: SendRecipient,
+): Promise<boolean> => {
+  const policy = await recipientPolicyOf(agentId, recipient);
+  const manager =
+    recipient.kind === "person"
+      ? await managerKindOf(agentId, recipient.ref)
+      : null;
+  if (isRefused(policy, manager)) return false;
+  return policy === "allow" || manager !== null;
+};
+
 /** Is this recipient blocked for the agent's own messages (Never, and not
  * a workspace owner)? Read fresh: a remembered "send as the agent" whose
  * setting was set to Never since is forgotten. */
@@ -907,10 +1127,16 @@ const requestContactBlocked = async (input: {
         { payload: { path: ["text"], equals: input.payload.text } },
       ],
     },
-    select: { id: true },
-    take: 1,
+    select: { id: true, payload: true },
   });
-  if (pending[0]) return pending[0].id;
+  // The same send, thread included: the same words into another thread
+  // (or the top level) are a different message.
+  const same = pending.find(
+    (row) =>
+      frozenExtrasSchema.safeParse(row.payload).data?.thread?.ts ===
+      input.payload.thread?.ts,
+  );
+  if (same) return same.id;
   const ask = await personalAskOf(input.agentId, input.readerUserId);
   const held = await requestActionApproval({
     agentId: input.agentId,
@@ -953,11 +1179,15 @@ export const personalAskOf = async (
 
 // ── The reply side: "you messaged this person for someone" ─────────────────
 
-/** How long a delivered send can still frame a reply (the ledger's
- * retention too: an older row can never be shown, so it is pruned), how
- * many one note shows, and how much of each text. */
+/** The ledger's retention: a reply this late can still be framed by what
+ * was sent (older rows can never be shown, so they are pruned). */
 const SENT_CONTEXT_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
-const SENT_CONTEXT_MAX = 3;
+/** Everything the agent posted into a conversation this recently is shown
+ * there whether or not the model ran since, so a follow-up in a new thread
+ * of the same channel still knows "the file you just shared". */
+const SENT_RECENT_MS = 24 * 60 * 60 * 1000;
+/** How many sends one note shows, and how much of each text. */
+const SENT_CONTEXT_MAX = 10;
 const SENT_CONTEXT_TEXT_CHARS = 500;
 
 /**
@@ -971,8 +1201,11 @@ const SENT_CONTEXT_TEXT_CHARS = 500;
 const recordSentMessage = async (input: {
   agentChannelId: string;
   externalThreadId: string;
+  messageRef: string | null;
   recipientLabel: string;
   text: string;
+  /** Names of attached files (send_message `files`), names only. */
+  fileNames?: readonly string[];
   originConversationId: string | null;
   originTurnId: string | null;
 }): Promise<void> => {
@@ -992,8 +1225,10 @@ const recordSentMessage = async (input: {
     data: {
       agentChannelId: input.agentChannelId,
       externalThreadId: input.externalThreadId,
+      messageRef: input.messageRef,
       recipientLabel: input.recipientLabel,
       text: input.text,
+      fileNames: [...(input.fileNames ?? [])],
       originConversationId: input.originConversationId,
       originUserId: originTurn?.userId ?? null,
     },
@@ -1023,11 +1258,14 @@ const recordSentMessage = async (input: {
  * what they meant, and whoever wanted the answer never heard back.
  *
  * Scope, deliberately tight:
- *  - only sends whose reply address is THIS conversation's thread link,
+ *  - only sends into THIS conversation's channel or DM (any thread of it),
  *    on the same presence, so another person's DM (or another agent's app
  *    in the same Slack workspace) never hears about it;
- *  - only those delivered since the model last ran here (news for one run,
- *    `previousRunStartedAt`), within the 3-day window, the newest 3;
+ *  - what is new since the model last ran here (`previousRunStartedAt`,
+ *    within the 3-day ledger window: a late reply is still framed), plus
+ *    everything from the last 24 hours even if the model already saw it
+ *    (so "share that file in #x" works from a new thread); the newest 10,
+ *    with the names of any files attached;
  *  - never a send asked from this very conversation (a reply to it lands
  *    there anyway);
  *  - carries only words the recipient already received plus the display
@@ -1045,25 +1283,54 @@ export const buildSentContext = async (
 ): Promise<string | null> => {
   const link = await db.channelThreadLink.findUnique({
     where: { conversationId },
-    select: { agentChannelId: true, externalThreadId: true },
+    select: {
+      agentChannelId: true,
+      externalThreadId: true,
+      agentChannel: { select: { provider: true } },
+    },
   });
   if (!link) return null;
 
+  // News since the model last ran here (3-day window), or anything from the
+  // last 24 hours, whichever reaches further back.
   const lastRun = await previousRunStartedAt(conversationId, before);
-  const windowStart = before.getTime() - SENT_CONTEXT_WINDOW_MS;
-  const since = new Date(Math.max(windowStart, lastRun?.getTime() ?? 0));
+  const since = new Date(
+    Math.min(
+      before.getTime() - SENT_RECENT_MS,
+      Math.max(
+        before.getTime() - SENT_CONTEXT_WINDOW_MS,
+        lastRun?.getTime() ?? 0,
+      ),
+    ),
+  );
+  // The conversation's channel (or DM) through the provider's own address
+  // codec, so a new thread of the same channel matches too; a provider
+  // without one matches its exact address, as before.
+  const space =
+    (isChannelProviderId(link.agentChannel.provider)
+      ? channelProvider(link.agentChannel.provider).reach?.spaceOf(
+          link.externalThreadId,
+        )
+      : undefined) || link.externalThreadId;
 
   const sent = await db.channelSentMessage.findMany({
     where: {
       agentChannelId: link.agentChannelId,
-      externalThreadId: link.externalThreadId,
+      OR: [
+        { externalThreadId: space },
+        { externalThreadId: { startsWith: `${space}:` } },
+      ],
       // Sent before this message was: a message cannot answer something
       // sent after it.
       createdAt: { gt: since, lte: before },
       // `not` alone would also drop rows with no origin.
-      OR: [
-        { originConversationId: null },
-        { originConversationId: { not: conversationId } },
+      AND: [
+        {
+          OR: [
+            { originConversationId: null },
+            { originConversationId: { not: conversationId } },
+          ],
+        },
       ],
     },
     // The newest few (most likely what is being answered), shown oldest
@@ -1073,6 +1340,7 @@ export const buildSentContext = async (
     select: {
       recipientLabel: true,
       text: true,
+      fileNames: true,
       originUser: { select: { name: true } },
     },
   });
@@ -1083,11 +1351,15 @@ export const buildSentContext = async (
     const origin = person
       ? `a conversation with ${person}`
       : "another conversation";
-    return `- From ${origin}, you sent ${cleanLabel(row.recipientLabel)}: "${cleanLabel(row.text, SENT_CONTEXT_TEXT_CHARS)}"`;
+    const files = row.fileNames.map((n) => cleanLabel(n, 120)).filter(Boolean);
+    const attached = files.length
+      ? ` (with ${files.length === 1 ? "file" : "files"} ${files.join(", ")}: to share it again, pass its path in your home directory in send_message's files)`
+      : "";
+    return `- From ${origin}, you sent ${cleanLabel(row.recipientLabel)}: "${cleanLabel(row.text, SENT_CONTEXT_TEXT_CHARS)}"${attached}`;
   });
   return [
-    "Messages you sent into this conversation from elsewhere (the person writing now may be answering one):",
+    'What you posted here, asked from elsewhere (the person writing now may be answering one, or referring to it as "that" or "the file"):',
     ...lines,
-    "If this message answers one, thank them briefly, then pass the answer back with send_message to the person who wanted it. If it doesn't, carry on as usual. Don't ask the person here what they meant.",
+    "If this message answers one, thank them briefly, then pass the answer back with send_message to the person who wanted it. If they refer to something you posted (e.g. \"share it in #x\"), it's one of these: act on it. Otherwise carry on as usual. Don't ask the person here what they meant.",
   ].join("\n");
 };

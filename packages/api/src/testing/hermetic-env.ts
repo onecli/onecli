@@ -50,6 +50,17 @@
  *     previous file added, put back ones it changed or deleted. The
  *     runner's own bookkeeping (`VITEST*`, `TEST`) is left to vitest.
  *
+ *  6. The pg project only (`pg-proof-env.setup.ts`): right after the reset,
+ *     in the same synchronous step, point `DATABASE_URL` back at the opted-in
+ *     proof database (`pinProofDatabaseUrl`). Every pg suite sets exactly
+ *     that URL in its own `beforeAll`, so this adds no reach. What it closes
+ *     is the gap between files: work a suite started but never awaited (a
+ *     detached poll) can query the shared Prisma client after the suite's
+ *     `$disconnect`. With `DATABASE_URL` deleted, Prisma's lazy reconnect
+ *     fails and the singleton stays broken for every later file in the fork
+ *     ("Environment variable not found: DATABASE_URL" across ~50 suites).
+ *     With the URL kept, the stray query just reconnects.
+ *
  * This module must stay dependency-free: importing anything from `src/`
  * here would freeze `lib/env.ts` before the normalization runs.
  */
@@ -213,6 +224,8 @@ export const AMBIENT_HAZARD_VARS: readonly string[] = [
   "ATTIO_CLIENT_SECRET",
   "ATLASSIAN_CLIENT_ID",
   "ATLASSIAN_CLIENT_SECRET",
+  "BITBUCKET_CLIENT_ID",
+  "BITBUCKET_CLIENT_SECRET",
   "DROPBOX_CLIENT_ID",
   "DROPBOX_CLIENT_SECRET",
   "FATHOM_CLIENT_ID",
@@ -351,4 +364,16 @@ export const normalizeTestEnv = (env: NodeJS.ProcessEnv): void => {
   env.NODE_ENV = "test";
   env.GATEWAY_CA_PEM_FILE = HERMETIC_CA_PEM_SENTINEL;
   env[HERMETIC_MARKER_VAR] = "1";
+};
+
+/**
+ * The pg project's step after the reset (module doc, step 6): keep
+ * `DATABASE_URL` on the opted-in proof database between files, so a query a
+ * previous suite left running reconnects instead of breaking the shared
+ * Prisma client for the rest of the fork. A no-op without a proof database
+ * (the suites skip then), so an ambient `DATABASE_URL` is never revived.
+ */
+export const pinProofDatabaseUrl = (env: NodeJS.ProcessEnv): void => {
+  const url = env.POLICY_PROOF_DATABASE_URL;
+  if (url !== undefined && url !== "") env.DATABASE_URL = url;
 };

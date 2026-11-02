@@ -146,7 +146,11 @@ export const buildSandboxStartPayload = async (
   }
 
   const { config } = result;
-  const resolved = resolveAgentModel(agent, result.llmCredential.provider);
+  const resolved = resolveAgentModel(
+    agent,
+    result.llmCredential.provider,
+    result.llmCredential.authMode,
+  );
   // The agent's channel presences, for the supervisor's `channels` section
   // (where it can be reached, which messaging tools exist) — current truth
   // at dispatch, like everything else in this payload.

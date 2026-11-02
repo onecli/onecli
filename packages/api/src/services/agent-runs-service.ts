@@ -370,6 +370,8 @@ export const listRuns = async (
           source: "webhook",
           externalRef: query.webhookId,
         }),
+        // Same for a schedule: its runs are its own `cron` conversation.
+        ...(query.cronId && { source: "cron", externalRef: query.cronId }),
       },
       status: query.failedOnly
         ? { in: ["failed", "aborted"] }

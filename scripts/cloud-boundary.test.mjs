@@ -258,7 +258,7 @@ const CLOUD_IMPLEMENTATION_TERMS = [
   /\bip-target registration\b/i,
   /\b(found|seen) (live )?on dev\b|\b(after boot|ran) on dev\b|\bdev ran on\b|\bon dev:/i,
   /#1300\b/,
-  /(^|[^\w#&])#(803|1335|1375|1401|1470)\b/,
+  /(^|[^\w#&])#(803|1335|1375|1401|1470|1495)\b/,
   // The hosted agent desktop is licensed hosted-platform code: its plan and
   // the screen server it runs are named only inside ee/ and cloud-only dirs.
   /\bplans\/desktop-takeover\b/,

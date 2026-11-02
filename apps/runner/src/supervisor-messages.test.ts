@@ -626,6 +626,25 @@ describe("the file.part arm (send_file)", () => {
     expect("caption" in uploaded[1]!).toBe(false);
   });
 
+  it("carries a staged run's purpose through, and omits it for a reply's file", async () => {
+    // A runner that dropped it would attach a send_message file to the
+    // reply instead (the reason `stagedAttachments` is advertised).
+    const bytes = Buffer.from("x");
+    const uploaded: OutboundFile[] = [];
+    const capture = {
+      uploadAttachment: async (_sb: string, file: OutboundFile) => {
+        uploaded.push(file);
+        return { ok: true, attachmentId: "a" };
+      },
+    };
+    drive(partsFor("up-s", bytes, { purpose: "send" }), capture);
+    await settle();
+    expect(uploaded[0]?.purpose).toBe("send");
+    drive(partsFor("up-r", bytes), capture);
+    await settle();
+    expect("purpose" in uploaded[1]!).toBe(false);
+  });
+
   it("CHECKSUM: a run whose bytes do not hash to the declared sha is refused and never relayed", async () => {
     const bytes = Buffer.from("real bytes");
     const relayed = vi.fn(async () => ({ ok: true, attachmentId: "a" }));

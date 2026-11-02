@@ -1,8 +1,10 @@
 import {
   conversationsHistory,
+  conversationsOpen,
   conversationsReplies,
   deleteMessage,
   markdownToMrkdwn,
+  messageByTs,
   unpackThreadAddress,
   updateBlocksMessage,
   type SlackHistoryMessage,
@@ -31,11 +33,14 @@ import { parseSlackPresenceCredentials } from "./types";
  * nor accepted.
  */
 
-/** `bot_message` is how an icon-customized post comes back; every other
- * subtype is bookkeeping (joins, edits, broadcasts) or a file share. */
+/** `bot_message` is how an icon-customized post comes back; `file_share`
+ * is a message the agent sent WITH files (send_message `files`: its text is
+ * the share's comment, editable like any reply). Every other subtype is
+ * bookkeeping (joins, edits, broadcasts). */
 const REPLY_SUBTYPES: ReadonlySet<string | undefined> = new Set([
   undefined,
   "bot_message",
+  "file_share",
 ]);
 
 /** The web mirror's attribution prefix (`webAttribution` in the adapter):
@@ -52,10 +57,19 @@ const MAX_PAGES = 10;
 const tsToMs = (ts: string): number => Number(ts) * 1000;
 const msToTs = (ms: number): string => (ms / 1000).toFixed(6);
 
-const isPlainReply = (m: SlackHistoryMessage, t: OwnReplyTarget): boolean =>
+/** Slack attaches a `rich_text` block to every plain-text post on its own
+ * (it renders the mrkdwn), so a plain reply carries only those. A card is
+ * built from section/context/actions/... blocks and has at least one other. */
+const isRichTextBlock = (b: unknown): boolean =>
+  typeof b === "object" && b !== null && "type" in b && b.type === "rich_text";
+
+export const isPlainReply = (
+  m: SlackHistoryMessage,
+  t: OwnReplyTarget,
+): boolean =>
   (m.app_id ? m.app_id === t.externalId : m.user === t.identityRef) &&
   REPLY_SUBTYPES.has(m.subtype) &&
-  (m.blocks === undefined || m.blocks.length === 0) &&
+  (m.blocks ?? []).every(isRichTextBlock) &&
   !(m.text ?? "").startsWith(WEB_MIRROR_PREFIX);
 
 const toReply = (m: SlackHistoryMessage): OwnReply => ({
@@ -133,7 +147,24 @@ const messageAt = async (
   return page.messages.find((m) => m.ts === ts) ?? null;
 };
 
+/** The message as one of the agent's own replies, or null when it is not
+ * its plain reply from `since` on. */
+const ownReplyOf = (
+  message: SlackHistoryMessage | null,
+  input: OwnReplyTarget & { since: number },
+): OwnReply | null => {
+  if (!message || !isPlainReply(message, input)) return null;
+  const reply = toReply(message);
+  return reply.sentAt >= input.since ? reply : null;
+};
+
 export const slackOwnReplies: NonNullable<ChannelProvider["ownReplies"]> = {
+  async directWith(input) {
+    const { botToken } = parseSlackPresenceCredentials(input.credentialsJson);
+    if (!botToken) throw new Error("Slack presence has no bot token");
+    // conversations.open is idempotent: it returns the existing IM.
+    return (await conversationsOpen(botToken, input.personRef)).channel.id;
+  },
   async list(input) {
     const messages = await messagesSince(input, msToTs(input.since));
     return (
@@ -147,10 +178,18 @@ export const slackOwnReplies: NonNullable<ChannelProvider["ownReplies"]> = {
   },
 
   async find(input) {
-    const message = await messageAt(input, input.messageId);
-    if (!message || !isPlainReply(message, input)) return null;
-    const reply = toReply(message);
-    return reply.sentAt >= input.since ? reply : null;
+    return ownReplyOf(await messageAt(input, input.messageId), input);
+  },
+
+  async findAnywhere(input) {
+    return ownReplyOf(
+      await messageByTs(
+        botTokenOf(input),
+        addressOf(input).channel,
+        input.messageId,
+      ),
+      input,
+    );
   },
 
   async edit(input) {

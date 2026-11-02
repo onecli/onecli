@@ -33,9 +33,11 @@ mod record_links;
 mod records;
 mod redact;
 
+mod bitbucket;
 pub mod bulk;
 mod change;
 mod generic;
+mod git;
 mod github;
 mod gmail;
 mod google_calendar;
@@ -323,6 +325,7 @@ static OUTLOOK_MAIL: outlook_mail::OutlookMail = outlook_mail::OutlookMail;
 static OUTLOOK_CALENDAR: outlook_calendar::OutlookCalendar = outlook_calendar::OutlookCalendar;
 static SALESFORCE: salesforce::Salesforce = salesforce::Salesforce;
 static ZOOM: zoom::Zoom = zoom::Zoom;
+static BITBUCKET: bitbucket::Bitbucket = bitbucket::Bitbucket;
 static GOOGLE_SHEETS: google_sheets::GoogleSheets = google_sheets::GoogleSheets;
 static GOOGLE_DRIVE: google_drive::GoogleDrive = google_drive::GoogleDrive;
 static TWILIO: twilio::Twilio = twilio::Twilio;
@@ -346,6 +349,7 @@ fn summarizer(provider: &str) -> Option<&'static dyn RequestSummarizer> {
         "google-drive" => Some(&GOOGLE_DRIVE),
         "twilio" => Some(&TWILIO),
         "zendesk" => Some(&ZENDESK),
+        "bitbucket" => Some(&BITBUCKET),
         _ => None,
     }
 }
@@ -395,8 +399,10 @@ pub fn summarize_request(
         content_type,
         body,
     };
-    summarizer(provider)
-        .and_then(|s| s.summarize(&req))
+    // A git push/clone is binary on the wire for every host (GitHub, GitLab,
+    // Bitbucket): say what it does, never dump the pack.
+    git::summarize(&req)
+        .or_else(|| summarizer(provider).and_then(|s| s.summarize(&req)))
         .unwrap_or_else(|| generic::summarize(&req))
 }
 

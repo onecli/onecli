@@ -11,6 +11,7 @@ import { SegmentedFilter, type SegmentOption } from "./segmented-filter";
 import { LiveToggle } from "./live-toggle";
 import { RunsTable } from "./runs-table";
 import { WebhookFilterChip } from "./webhook-filter-chip";
+import { ScheduleFilterChip } from "./schedule-filter-chip";
 
 /**
  * Activity's Runs tab: every question an agent in this workspace answered,
@@ -51,9 +52,11 @@ const EMPTY: Record<RunsView, string> = {
 export const RunsTab = ({
   agentId,
   webhookId,
+  cronId,
   view,
   onViewChange,
   onClearWebhook,
+  onClearSchedule,
   onViewNetwork,
 }: {
   /** Narrow to one agent (from the URL). */
@@ -62,23 +65,30 @@ export const RunsTab = ({
    * with an agent and the Webhooks filter, so the URL cannot combine it with
    * a filter it contradicts. */
   webhookId?: string;
+  /** Narrow to one of that agent's schedules (its "History"), under the
+   * Scheduled filter only, the same rule as a webhook. */
+  cronId?: string;
   /** The segmented filter, kept in the URL so a link can open a view. */
   view: RunsView;
   onViewChange: (view: RunsView) => void;
   /** Widen back from one webhook to all of the agent's webhook runs. */
   onClearWebhook?: () => void;
+  /** Widen back from one schedule to all of the agent's scheduled runs. */
+  onClearSchedule?: () => void;
   /** Show Network narrowed to this run's agent and time window. */
   onViewNetwork: (run: RunListItem) => void;
 }) => {
   const [open, setOpen] = useState<RunListItem | null>(null);
   const oneWebhook =
     agentId && webhookId && view === "webhook" ? webhookId : undefined;
+  const oneSchedule = agentId && cronId && view === "cron" ? cronId : undefined;
   const list = useRunsList({
     ...(agentId && { agentId }),
     ...(view === "failed"
       ? { failed: true }
       : view !== "all" && { source: view }),
     ...(oneWebhook && { webhookId: oneWebhook }),
+    ...(oneSchedule && { cronId: oneSchedule }),
   });
 
   const rows = list.pages.flatMap((page) => page.runs);
@@ -99,6 +109,13 @@ export const RunsTab = ({
               agentId={agentId}
               webhookId={oneWebhook}
               onClear={onClearWebhook}
+            />
+          )}
+          {agentId && oneSchedule && onClearSchedule && (
+            <ScheduleFilterChip
+              agentId={agentId}
+              cronId={oneSchedule}
+              onClear={onClearSchedule}
             />
           )}
         </div>

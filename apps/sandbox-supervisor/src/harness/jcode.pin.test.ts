@@ -37,9 +37,11 @@ vi.mock("@1jehuang/jcode-sdk", () => ({
 }));
 
 const {
+  buildOpenAiOAuthPlaceholder,
   cleanJcodeKnowledgeStores,
   cleanJcodeUpdaterState,
   createJcodeHarness,
+  hasOpenAiOAuthGrant,
   resolveAnthropicCredential,
   resolveJcodeBinary,
 } = await import("./jcode");
@@ -101,6 +103,72 @@ describe("resolveJcodeBinary", () => {
     // …and a resolved-but-deleted one (the image prunes the npm binary).
     sdk.bundled = join(outside, "deleted-bundled");
     expect(() => resolveJcodeBinary()).toThrow("No jcode runtime");
+  });
+});
+
+describe("hasOpenAiOAuthGrant", () => {
+  // The control plane marks a ChatGPT (Codex) login with CODEX_HOME and an
+  // API-key grant with OPENAI_API_KEY (container-config-service).
+  it.each([
+    {
+      name: "a Codex login grant",
+      env: { CODEX_HOME: "/home/node/.codex" },
+      expected: true,
+    },
+    {
+      name: "an API-key grant",
+      env: { OPENAI_API_KEY: "placeholder" },
+      expected: false,
+    },
+    {
+      name: "both set: the API key wins",
+      env: { OPENAI_API_KEY: "placeholder", CODEX_HOME: "/home/node/.codex" },
+      expected: false,
+    },
+    {
+      name: "no OpenAI grant",
+      env: { ANTHROPIC_API_KEY: "placeholder" },
+      expected: false,
+    },
+    {
+      name: "empty values count as unset",
+      env: { CODEX_HOME: "" },
+      expected: false,
+    },
+    {
+      name: "an empty API key does not mask a Codex login",
+      env: { OPENAI_API_KEY: "", CODEX_HOME: "/home/node/.codex" },
+      expected: true,
+    },
+  ])("$name", ({ env, expected }) => {
+    expect(hasOpenAiOAuthGrant(env)).toBe(expected);
+  });
+});
+
+describe("buildOpenAiOAuthPlaceholder", () => {
+  const claims = (jwt: string) =>
+    JSON.parse(Buffer.from(jwt.split(".")[1] ?? "", "base64url").toString());
+
+  it("is jcode's own openai-auth.json shape, with one active account", () => {
+    const file = JSON.parse(buildOpenAiOAuthPlaceholder());
+    expect(file.active_openai_account).toBe("onecli");
+    expect(file.openai_accounts).toHaveLength(1);
+    const [account] = file.openai_accounts;
+    expect(account.label).toBe("onecli");
+    expect(account.refresh_token).toBe("onecli-managed");
+    expect(account.account_id).toBe("onecli-managed");
+  });
+
+  it("never expires and carries only placeholder claims (no credential)", () => {
+    const [account] = JSON.parse(buildOpenAiOAuthPlaceholder()).openai_accounts;
+    expect(account.expires_at).toBe(4102444800000);
+    for (const jwt of [account.access_token, account.id_token]) {
+      expect(claims(jwt)).toEqual({
+        exp: 4102444800,
+        "https://api.openai.com/auth": { chatgpt_account_id: "onecli-managed" },
+      });
+      expect(jwt.split(".")[2]).toBe("onecli-managed");
+    }
   });
 });
 

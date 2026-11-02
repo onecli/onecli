@@ -429,7 +429,7 @@ const agentRunModel = async (
   if (!agent) return null;
   const credential = await resolveAgentLlmCredential(agent, organizationId);
   return credential
-    ? resolveAgentModel(agent, credential.provider).model
+    ? resolveAgentModel(agent, credential.provider, credential.authMode).model
     : null;
 };
 

@@ -1,8 +1,8 @@
-import Image from "next/image";
 import Link from "next/link";
 import { MailX } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
+import { BrandLogo } from "@/lib/components/brand-logo";
 import type { UnavailableInvitationReason } from "@onecli/api/services/invitation-service";
 import { JoinResumeSignIn } from "./join-resume-sign-in";
 
@@ -62,24 +62,7 @@ export const JoinUnavailable = ({
   const resumes = !signedIn && reason === "accepted";
   return (
     <div className="flex min-h-svh flex-col items-center justify-center px-4">
-      <div className="mb-8">
-        <Image
-          src="/onecli-full-logo.png"
-          alt="OneCLI"
-          width={140}
-          height={40}
-          priority
-          className="dark:hidden"
-        />
-        <Image
-          src="/onecli-full-logo-dark.png"
-          alt="OneCLI"
-          width={140}
-          height={40}
-          priority
-          className="hidden dark:block"
-        />
-      </div>
+      <BrandLogo />
 
       <Card className="w-full max-w-md p-8">
         <div className="flex flex-col items-center space-y-4 text-center">

@@ -1,5 +1,8 @@
+import { z } from "zod";
 import {
   cleanLabel,
+  MAX_OUTBOUND_ATTACHMENT_BYTES,
+  MAX_OUTBOUND_ATTACHMENTS_PER_TURN,
   type AgentChannelPresenceWire,
 } from "@onecli/agent-protocol";
 import { NO_REPLY_TOKEN } from "@onecli/agent-protocol/text";
@@ -104,7 +107,10 @@ const platformNamesOf = (
 ): string =>
   [...new Set(presences.map((p) => displayOf(p.provider).name))].join(joiner);
 
-const liveSection = (live: AgentChannelPresenceWire[]): string => {
+const liveSection = (
+  live: AgentChannelPresenceWire[],
+  stagedFiles: boolean,
+): string => {
   const platformList = platformNamesOf(live, " and ");
   const lines: string[] = [];
 
@@ -146,7 +152,15 @@ const liveSection = (live: AgentChannelPresenceWire[]): string => {
     "- Channels work the same way: a channel result's mention form renders as a clickable channel link in your reply.",
     `- Results marked kind: app are ${platformList} apps. Write @[app] with your message in a channel reply to invoke the app right there. Only write @[app] when you intend to invoke it; as prose, use the bare name.`,
     "",
-    "send_message reaches people and channels directly, outside the current conversation, on your own initiative or when asked. Use the recipient's exact name (a find_recipient result or the Mentionable list); #channel-name reaches a channel.",
+    "send_message reaches people and channels directly, outside the current conversation, on your own initiative or when asked. Use the recipient's exact name (a find_recipient result or the Mentionable list); #channel-name reaches a channel. To post in an existing thread, pass its link or message id as thread.",
+    "You can post in a channel without being mentioned, including from a schedule, wherever Can talk with you is allowed; never tell people you must be tagged to post.",
+  );
+  if (stagedFiles) {
+    lines.push(
+      `To send a file somewhere else (another channel, a person's DM, a thread), pass its path in send_message's files with the message text; send_file only attaches to the reply you are writing. Files always come back "held": a card lists each file with its size and nothing is uploaded until someone approves it, so never say the files were sent before the notice says so. Files go only as you, never with sendAs "you". send_file and send_message files share the per-reply limit of ${MAX_OUTBOUND_ATTACHMENTS_PER_TURN} files.`,
+    );
+  }
+  lines.push(
     "",
     '- "sent" = delivered. "held" = the workspace owner was asked first; the decision arrives as a notice at the start of a later turn, so never promise to report the decision on your own. "not_sent" = an earlier message to that recipient is still waiting, so this one was dropped; send it again after the decision if it still matters.',
     '- "needs_access" with blocked: true = that contact is blocked from talking with you; a card in this chat asks the person you are talking to (you) whether to allow it (Allow or Don\'t send). Say so in one short line; if they allow it, the message is sent and you continue automatically. A block only affects send_message, never send_as_me.',
@@ -154,7 +168,7 @@ const liveSection = (live: AgentChannelPresenceWire[]): string => {
     "- A reply from the person you messaged reaches you with what you sent them and where it was asked from; pass the answer on yourself with send_message. Never ask anyone to check back later for it.",
     '- Who sends: send_message takes sendAs. Leave it "ask" (the default) unless the person named who sends: "you" only when they explicitly said to send it as them ("as me", "from me"), "agent" when they said to send it as you ("as yourself", "as <your name>"). Naming it also becomes their usual for that recipient. Never ask them yourself who should send; the platform does.',
     '- "needs_choice" = a card in this chat asks the person you are talking to one question: how you should message that person, as you or as them (or Don\'t send). Say so in one short line, addressed as "you", and don\'t send it again. Their pick is the approval and is saved in their Contacts: after it the platform sends (or shows only a connect step), then you get the outcome. Wait for it and never ask them again about the same message.',
-    '- remembered: true = it went with their usual sender for that recipient; mention it briefly when you confirm (e.g. "Sent as you to Sam (your usual for Sam, say \'as <your name>\' to switch)"). preferenceUpdated: true = they just switched; confirm in one line (e.g. "Switched: I\'ll send to Sam as <your name> from now on").',
+    "- After a send, confirm in one short line saying who it came from and where it landed, as the result's landed note says. A DM sent as you lands in YOUR DM with that person, not in the asker's own DM with them. Never comment on usual senders or defaults.",
     "- Never save a memory that refuses or restricts what the person asked you to do with their own account; their current request wins over earlier memories.",
   );
   lines.push(
@@ -167,13 +181,15 @@ const liveSection = (live: AgentChannelPresenceWire[]): string => {
   );
   lines.push(
     "",
-    "edit_my_message and delete_my_message change a message you sent as that person: pass the messageId from the send_as_me result. They work only on messages you sent as them in the last 24 hours, never anything else. delete_my_message always asks them first (it comes back held), so never say it was deleted until the notice arrives.",
+    "edit_my_message and delete_my_message change a message you just sent as that person: pass the conversation and messageId from the send_as_me result (anything you find with list_my_replies goes through edit_my_reply and delete_my_reply instead). They work only on messages you sent as them in the last 24 hours, never anything else. delete_my_message always asks them first (it comes back held), so never say it was deleted until the notice arrives.",
     "If read_conversation or send_as_me is refused because you can only act as someone in their own private chat with you, relay that refusal as written: they should ask in the web chat or a DM with you. Never say you lack the tool, and never call it impersonation.",
     'Acting as a person (read_conversation, send_as_me, edit_my_message, delete_my_message, and sendAs "you") is an Enterprise feature. If one is refused because it needs a OneCLI Enterprise license (or a higher plan), say so plainly in one short line: this workspace can\'t let you read or write as them yet. Then offer what you can do instead (send it as you).',
   );
   lines.push(
     "",
-    `To fix one of YOUR OWN replies in the Slack conversation you are in right now (a wrong answer, a typo, something the person asks you to take back), call list_my_replies to get its messageId, then edit_my_reply (replaces the whole text) or delete_my_reply. They only reach your own replies from the last 24 hours in this same conversation, never anyone else's messages, and never cards or approval prompts. The change itself is the answer: the person sees the message change or disappear, so do NOT announce it. When editing or deleting was all they asked for, your whole reply must be exactly ${NO_REPLY_TOKEN} (nothing is posted). Only write a reply when there is something else to say, or when the edit or delete failed (then say so in one short line). When someone points out a mistake in your last answer, prefer editing it over posting a correction underneath. These are for replies you posted as yourself; edit_my_message and delete_my_message are only for messages you sent as a person.`,
+    `To fix one of YOUR OWN replies in the Slack conversation you are in right now (a wrong answer, a typo, something the person asks you to take back), call list_my_replies to get its messageId, then edit_my_reply (replaces the whole text) or delete_my_reply. They only reach your own replies from the last 24 hours in this same conversation, never anyone else's messages, and never cards or approval prompts. The change itself is the answer: the person sees the message change or disappear, so do NOT announce it. When editing or deleting was all they asked for, your whole reply must be exactly ${NO_REPLY_TOKEN} (nothing is posted). Only write a reply when there is something else to say, or when the edit or delete failed (then say so in one short line). When someone points out a mistake in your last answer, prefer editing it over posting a correction underneath.`,
+    "",
+    "To change a message you sent somewhere else (a channel or person you messaged with send_message, as yourself or as the person), pass conversation ('#channel-name' or the person's name, exactly as you used with send_message) to list_my_replies, then edit_my_reply or delete_my_reply with a messageId from that list, whichever sentAs it shows. A change to a message sent as the person may come back held (they confirm in a card first): never say it changed until the notice arrives. Only messages from the last 24 hours, never cards. If a lookup is refused or the list is empty, say so in one short line and ask; never retry with name variations or other tools.",
   );
   return lines.join("\n");
 };
@@ -200,6 +216,7 @@ const removedSection = (removed: AgentChannelPresenceWire[]): string => {
  */
 export const channelsFragment = (
   presences: readonly AgentChannelPresenceWire[],
+  options: { stagedFiles?: boolean } = {},
 ): CapabilityFragment | null => {
   if (presences.length === 0) return null;
   const live = presences.filter(isLive);
@@ -208,7 +225,7 @@ export const channelsFragment = (
     title: "Where you talk",
     body:
       live.length > 0
-        ? liveSection(live)
+        ? liveSection(live, options.stagedFiles === true)
         : removedSection(presences.filter((p) => !isLive(p))),
   };
 };
@@ -251,20 +268,88 @@ export const channelsChangeNote = (
 };
 
 /**
+ * Reads and streams send_message `files` as staged attachments (send-file's
+ * containment and caps), answering their ids by `deadline`. Present only
+ * when the runner relays a file's purpose; absent = the parameter is not
+ * offered.
+ */
+export type StageFiles = (
+  paths: readonly string[],
+  context: { conversationId: string; turnId: string } | null,
+  deadline: number,
+) => Promise<
+  { ok: true; attachmentIds: string[] } | { ok: false; error: string }
+>;
+
+/** The `files` half of send_message's args (the rest is the control
+ * plane's to check): a non-empty list of paths, within the per-reply cap. */
+const sendFilesArgsSchema = z
+  .object({
+    files: z
+      .array(z.string().min(1))
+      .min(1)
+      .max(MAX_OUTBOUND_ATTACHMENTS_PER_TURN)
+      .optional(),
+  })
+  .loose();
+
+/**
+ * send_message's local step when it carries `files`: refuse what can never
+ * go before a byte leaves (sendAs "you", a bad path, over the caps), else
+ * stage each file and forward the call with `attachmentIds` in place of
+ * the paths. Without files the args pass through untouched.
+ */
+const prepareSendMessage =
+  (stageFiles: StageFiles) =>
+  async (
+    args: unknown,
+    context: { conversationId: string; turnId: string } | null,
+    deadline: number,
+  ): Promise<{ ok: true; args: unknown } | { ok: false; error: string }> => {
+    // Not an object at all: the control plane's own schema answers it.
+    if (args === null || typeof args !== "object" || !("files" in args)) {
+      return { ok: true, args };
+    }
+    const parsed = sendFilesArgsSchema.safeParse(args);
+    if (!parsed.success) {
+      return {
+        ok: false,
+        error: `files must be a list of 1 to ${MAX_OUTBOUND_ATTACHMENTS_PER_TURN} file paths. Nothing was sent.`,
+      };
+    }
+    const { files, ...rest } = parsed.data;
+    if (!files) return { ok: true, args: rest };
+    if (rest.sendAs === "you") {
+      return {
+        ok: false,
+        error:
+          'Sending files as you isn\'t supported yet; send them as yourself (sendAs "agent") or without files. Nothing was sent.',
+      };
+    }
+    const staged = await stageFiles(files, context, deadline);
+    if (!staged.ok) return staged;
+    return { ok: true, args: { ...rest, attachmentIds: staged.attachmentIds } };
+  };
+
+const SEND_FILES_LIMITS = `Up to ${MAX_OUTBOUND_ATTACHMENTS_PER_TURN} files, ${Math.floor(MAX_OUTBOUND_ATTACHMENT_BYTES / (1024 * 1024))}MB each`;
+
+/**
  * The messaging tools — present exactly when a LIVE presence exists. The
  * descriptions name the platform so the model connects "send on Slack" to
  * the tool, not to the gateway.
  */
 export const channelsTools = (
   presences: readonly AgentChannelPresenceWire[],
+  options: { stageFiles?: StageFiles } = {},
 ): PlatformToolDefinition[] => {
   const live = presences.filter(isLive);
   if (live.length === 0) return [];
   const platforms = platformNamesOf(live, " or ");
+  const stageFiles = options.stageFiles;
   return [
     {
       name: "send_message",
-      description: `Send a message to a person (DM) or a channel in your ${platforms} workspace, outside this conversation. Delivery may need the workspace owner's one-time approval: the result says "sent" (delivered), "held" (owner asked; the decision arrives as a notice in this conversation), or "not_sent" (an earlier message to them still waits; this one was dropped), or "needs_choice" (a card asks the person whether to send as you or as them; say so in one short line). Use the exact name from find_recipient or the Mentionable list; prefix # for a channel.`,
+      description: `Send a message to a person (DM) or a channel in your ${platforms} workspace, outside this conversation. Delivery may need the workspace owner's one-time approval: the result says "sent" (delivered), "held" (owner asked; the decision arrives as a notice in this conversation), or "not_sent" (an earlier message to them still waits; this one was dropped), or "needs_choice" (a card asks the person whether to send as you or as them; say so in one short line). Use the exact name from find_recipient or the Mentionable list; prefix # for a channel. To post in an existing thread, pass its link or message id as thread.${stageFiles ? ` To send files from your home directory with the message, pass their paths as files: it always comes back "held" (a card lists each file and nothing is uploaded until someone approves), and files go only as you, never with sendAs "you". ${SEND_FILES_LIMITS}.` : ""}`,
       inputSchema: {
         type: "object",
         properties: {
@@ -284,9 +369,23 @@ export const channelsTools = (
             description:
               'Who it comes from. "ask" (default): the platform asks the person (or uses their usual for this recipient). "you": as the person you are talking to, only when they explicitly said so. "agent": as you, when they said so.',
           },
+          thread: {
+            type: "string",
+            description:
+              "Optional. To post in an existing thread, pass its link (https://<workspace>.slack.com/archives/<channel>/p…) or message id. The thread must be in the `to` conversation. Omit for a new message.",
+          },
+          ...(stageFiles && {
+            files: {
+              type: "array",
+              items: { type: "string" },
+              maxItems: MAX_OUTBOUND_ATTACHMENTS_PER_TURN,
+              description: `Optional. Files to send with the message: paths under /workspace (absolute or relative to your home). ${SEND_FILES_LIMITS}. Always held for approval first; never with sendAs "you".`,
+            },
+          }),
         },
         required: ["to", "text"],
       },
+      ...(stageFiles && { prepare: prepareSendMessage(stageFiles) }),
     },
     {
       name: "find_recipient",
@@ -325,17 +424,31 @@ export const channelsTools = (
 const listMyRepliesTool: PlatformToolDefinition = {
   name: "list_my_replies",
   description:
-    "List your own recent replies (last 24 hours) in the Slack conversation you are in right now, newest first, each with its messageId and text. Cards and approval prompts are not listed. Use before edit_my_reply or delete_my_reply.",
-  inputSchema: { type: "object", properties: {} },
+    "List your own recent messages (last 24 hours) in the Slack conversation you are in right now, newest first, each with its messageId, text, and sentAs. With conversation ('#channel' or a person's name, the same name you used with send_message), lists everything you sent there: your own posts (sentAs 'agent') AND messages you sent as the person (sentAs 'you'). Cards and approval prompts are not listed. Use before edit_my_reply or delete_my_reply. An empty list or a refusal is final: never retry with another spelling.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      conversation: {
+        type: "string",
+        description:
+          "Optional. Another conversation you posted in: '#channel-name' or a person's name. Omit for the conversation you are in now.",
+      },
+    },
+  },
 };
 
 const editMyReplyTool: PlatformToolDefinition = {
   name: "edit_my_reply",
   description:
-    "Edit one of your own replies (last 24 hours) in the Slack conversation you are in right now. Get the messageId from list_my_replies. Replaces the whole message.",
+    "Edit one of your own messages (last 24 hours) from list_my_replies, in the conversation you are in now or in conversation. Works for both sentAs 'agent' and 'you' (pass the same conversation you listed with). Replaces the whole message. sentAs 'you' may come back held (the person confirms first), so never say it changed until the notice arrives.",
   inputSchema: {
     type: "object",
     properties: {
+      conversation: {
+        type: "string",
+        description:
+          "Optional. Another conversation you posted in: '#channel-name' or a person's name. Omit for the conversation you are in now.",
+      },
       messageId: {
         type: "string",
         description: "The messageId from list_my_replies.",
@@ -353,10 +466,15 @@ const editMyReplyTool: PlatformToolDefinition = {
 const deleteMyReplyTool: PlatformToolDefinition = {
   name: "delete_my_reply",
   description:
-    "Delete one of your own replies (last 24 hours) in the Slack conversation you are in right now. Get the messageId from list_my_replies.",
+    "Delete one of your own messages (last 24 hours) from list_my_replies, in the conversation you are in now or in conversation. sentAs 'agent' is deleted at once; sentAs 'you' comes back held (the person approves in a card first), so never say it was deleted until the notice arrives.",
   inputSchema: {
     type: "object",
     properties: {
+      conversation: {
+        type: "string",
+        description:
+          "Optional. Another conversation you posted in: '#channel-name' or a person's name. Omit for the conversation you are in now.",
+      },
       messageId: {
         type: "string",
         description: "The messageId from list_my_replies.",

@@ -138,6 +138,26 @@ export const agentWebhookRunsPath = (
     `/activity?${new URLSearchParams({ tab: "runs", agent: agentId, view: "webhook", webhook: webhookId }).toString()}`,
   );
 
+/** Activity's Runs tab narrowed to ONE schedule's runs (its "History"). */
+export const agentScheduleRunsPath = (
+  currentPathname: string,
+  agentId: string,
+  cronId: string,
+): string =>
+  withWorkspacePrefix(
+    currentPathname,
+    `/activity?${new URLSearchParams({ tab: "runs", agent: agentId, view: "cron", schedule: cronId }).toString()}`,
+  );
+
+/** The agent's chat with a message ready to finish and send (`?draft=`,
+ * read once by the chat). */
+export const agentChatDraftPath = (
+  currentPathname: string,
+  agentId: string,
+  draft: string,
+): string =>
+  `${agentSectionPath(currentPathname, agentId, "chat")}?draft=${encodeURIComponent(draft)}`;
+
 /**
  * Where "Get Started" lands: the workspace's agents page with its create flow
  * already open (`?new=1`). Creating the first agent IS getting started — the

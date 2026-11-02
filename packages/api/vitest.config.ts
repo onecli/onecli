@@ -20,14 +20,14 @@ const ONPREM_LANE_SKIPS =
 
 export default defineConfig({
   test: {
-    // Normalizes the ambient shell env to the clean-CI baseline before each
-    // test file's module graph loads — see src/testing/hermetic-env.ts.
-    setupFiles: ["./src/testing/hermetic-env.setup.ts"],
     projects: [
       {
         extends: true,
         test: {
           name: "unit",
+          // Normalizes the ambient shell env to the clean-CI baseline before
+          // each test file's module graph loads (src/testing/hermetic-env.ts).
+          setupFiles: ["./src/testing/hermetic-env.setup.ts"],
           exclude: [...configDefaults.exclude, ...PG_PROOF_SUITES],
         },
       },
@@ -41,9 +41,17 @@ export default defineConfig({
         // time, is the isolation the schema does not give them; the unit
         // project keeps full parallelism. (`singleFork` is honored per
         // project; the root-level `fileParallelism` is not.)
+        //
+        // Its setup is the same reset PLUS the proof database kept in
+        // DATABASE_URL between files, as one step (hermetic-env.ts, step 6):
+        // a query a suite left running after its `$disconnect` would
+        // otherwise break the shared Prisma client for every later file.
+        // Per project, not root: a project's setupFiles are appended to the
+        // root's, which would split the two steps across files.
         extends: true,
         test: {
           name: "pg",
+          setupFiles: ["./src/testing/pg-proof-env.setup.ts"],
           include: PG_PROOF_SUITES,
           exclude: [...configDefaults.exclude, ...ONPREM_LANE_SKIPS],
           poolOptions: { forks: { singleFork: true } },

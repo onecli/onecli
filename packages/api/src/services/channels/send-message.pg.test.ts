@@ -782,6 +782,43 @@ describe.skipIf(!PROOF_URL)("send_message (4c)", () => {
     ).toBe(0);
   });
 
+  it("an earlier delivered FILES send to the person counts as first contact: no intro line", async () => {
+    const stage = await seedStage("intro-files");
+    scriptSlack();
+    // A files send to this person was approved and delivered before.
+    await db.actionApproval.create({
+      data: {
+        agentId: stage.agentId,
+        action: send.SEND_FILES_ACTION,
+        status: "executed",
+        summary: "send 1 file to Olive Owner",
+        payload: {
+          to: { kind: "person", ref: "U-OWNER", label: "Olive Owner" },
+          text: "the report",
+          files: [{ id: "att-1", name: "report.csv", sizeBytes: 8 }],
+        },
+        expiresAt: new Date(Date.now() + 60_000),
+      },
+    });
+    const outcome = await send.requestSend({
+      agentId: stage.agentId,
+      to: "Olive Owner",
+      text: "one more thing",
+      originConversationId: stage.conversationId,
+      originTurnId: stage.turnId,
+    });
+    if (outcome.kind !== "held") throw new Error("expected a held send");
+    const preDecide = slackCallsFor("chat.postMessage").length;
+    await approvals.decideActionApproval({
+      approvalId: outcome.approvalId,
+      decision: "approve",
+      deciderUserId: OWNER,
+    });
+    const [post] = slackCallsFor("chat.postMessage").slice(preDecide);
+    // MUTATION-PROOF: count only SEND_MESSAGE_ACTION and the intro returns.
+    expect(post?.form.get("text")).toBe("one more thing");
+  });
+
   it("holds for an undecided recipient, then approve delivers the FROZEN text to the FROZEN recipient", async () => {
     const stage = await seedStage("hold");
     scriptSlack();
@@ -1443,7 +1480,7 @@ describe.skipIf(!PROOF_URL)(
       );
     });
 
-    it("news for one RUN: a platform-written turn does not consume it; the model's next run does", async () => {
+    it("last 24 HOURS: still shown after the model ran; never a send made after the message", async () => {
       const stage = await askingStage("relay-window");
       await approve(await sendToDana(stage, "is the demo still on?"));
       const dm = await replyConversation(
@@ -1452,37 +1489,103 @@ describe.skipIf(!PROOF_URL)(
         "D-IM-U-DANA",
       );
 
-      // A record the platform wrote into the DM after the send (never ran a
-      // model). MUTATION-PROOF: window on "any earlier turn" and the reply
-      // below loses its note.
-      await db.turn.create({
-        data: {
-          conversationId: dm,
-          message: "[platform record]",
-          status: "done",
-          source: "greeting",
-          startedAt: new Date(),
-          finishedAt: new Date(),
-        },
-      });
       const reply = await replyTurn(dm);
       expect(await send.buildSentContext(dm, reply.createdAt)).toContain(
         "is the demo still on?",
       );
 
-      // Once the model has run the reply, a later message is not re-told.
+      // The model running here no longer hides it: within 24h a later
+      // message still sees what was posted (a follow-up "share that" works).
       await markRan(dm, reply.id);
       await db.turn.update({
         where: { id: reply.id },
         data: { status: "done", finishedAt: new Date() },
       });
       const later = await replyTurn(dm, "thanks!");
+      expect(await send.buildSentContext(dm, later.createdAt)).toContain(
+        "is the demo still on?",
+      );
+
+      // Older than 24h and already seen by the model: gone. MUTATION-PROOF:
+      // widen SENT_RECENT_MS, or drop the last-run bound.
+      await db.channelSentMessage.updateMany({
+        where: { text: "is the demo still on?" },
+        data: { createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000) },
+      });
       expect(await send.buildSentContext(dm, later.createdAt)).toBeNull();
 
       // A send made AFTER a message was written cannot be what it answers.
       // MUTATION-PROOF: drop the `lte: before` bound and this reads it.
       await approve(await sendToDana(stage, "one more thing"));
       expect(await send.buildSentContext(dm, later.createdAt)).toBeNull();
+    });
+
+    it("a reply up to 3 days late is still framed when the model has not run there since", async () => {
+      const stage = await askingStage("relay-late");
+      await approve(await sendToDana(stage, "can you review the deck?"));
+      const dm = await replyConversation(
+        stage.agentId,
+        stage.presenceId,
+        "D-IM-U-DANA",
+      );
+      // Sent 2 days ago; the answer comes in only now.
+      await db.channelSentMessage.updateMany({
+        where: { text: "can you review the deck?" },
+        data: { createdAt: new Date(Date.now() - 48 * 60 * 60 * 1000) },
+      });
+      const reply = await replyTurn(dm, "done, looks good");
+      // MUTATION-PROOF: window on SENT_RECENT_MS alone and this is lost.
+      expect(await send.buildSentContext(dm, reply.createdAt)).toContain(
+        "can you review the deck?",
+      );
+
+      // Past the 3-day ledger window: gone, run or no run.
+      await db.channelSentMessage.updateMany({
+        where: { text: "can you review the deck?" },
+        data: { createdAt: new Date(Date.now() - 73 * 60 * 60 * 1000) },
+      });
+      expect(await send.buildSentContext(dm, reply.createdAt)).toBeNull();
+    });
+
+    it("a NEW thread in the same channel sees what the agent posted there, with its file names", async () => {
+      const stage = await askingStage("relay-newthread");
+      // A post the agent made into #design from elsewhere (its DM), with a
+      // file, recorded the way delivery records it.
+      await db.channelSentMessage.create({
+        data: {
+          agentChannelId: stage.presenceId,
+          externalThreadId: "C-DESIGN",
+          messageRef: "1793500000.000100",
+          recipientLabel: "#design",
+          text: "The new logo draft",
+          fileNames: ["logo_draft.png"],
+          originConversationId: stage.conversationId,
+        },
+      });
+      // Someone starts a NEW thread in #design and refers to it.
+      const thread = await replyConversation(
+        stage.agentId,
+        stage.presenceId,
+        "C-DESIGN:1793500100.000200",
+        "group",
+      );
+      const ask = await replyTurn(thread, "share that logo in #marketing");
+      const note = await send.buildSentContext(thread, ask.createdAt);
+      expect(note).toContain("The new logo draft");
+      expect(note).toContain("logo_draft.png");
+
+      // Another channel never hears about it. MUTATION-PROOF: match on a
+      // bare prefix without the ':' and C-DESIGN2 would leak in.
+      const other = await replyConversation(
+        stage.agentId,
+        stage.presenceId,
+        "C-DESIGN2:1793500200.000300",
+        "group",
+      );
+      const otherTurn = await replyTurn(other, "hello");
+      expect(
+        await send.buildSentContext(other, otherTurn.createdAt),
+      ).toBeNull();
     });
 
     it("only the recipient's own thread on the same presence: never another DM, another presence, or the asking conversation", async () => {
@@ -1924,6 +2027,64 @@ describe.skipIf(!PROOF_URL)("send_message to a blocked contact", () => {
     expect(resume?.message).toMatch(
       /^Sent as smp agent blocked-allow to Dana Guest: "hi from Alex"/,
     );
+  });
+
+  it("a send into a thread keeps the thread through the card: Allow posts under the thread's root", async () => {
+    const stage = await blockedStage("blocked-thread");
+    const root = "1781870000.616161";
+    slackHandlers["conversations.replies"] = (call) =>
+      call.form.get("channel") === "D-IM-U-DANA" && call.form.get("ts") === root
+        ? { messages: [{ ts: root, text: "question" }] }
+        : { ok: false, error: "thread_not_found" };
+    const out = await send.requestSend({
+      agentId: stage.agentId,
+      to: "Dana Guest",
+      text: "answer in thread",
+      thread: { ts: root, channel: null },
+      originConversationId: stage.directId,
+      originTurnId: null,
+      readerUserId: READER,
+    });
+    if (out.kind !== "blocked") throw new Error("expected a card");
+    expect(slackCallsFor("chat.postMessage")).toHaveLength(0);
+    const decided = await approvals.decideActionApproval({
+      approvalId: out.approvalId,
+      decision: "approve",
+      choice: "allow",
+      deciderUserId: READER,
+    });
+    expect(decided).toMatchObject({ kind: "decided", status: "executed" });
+    const [post] = slackCallsFor("chat.postMessage");
+    expect(post?.form.get("channel")).toBe("D-IM-U-DANA");
+    expect(post?.form.get("thread_ts")).toBe(root);
+  });
+
+  it("the same words into another thread (or the top level) are another send: never folded into the pending card", async () => {
+    const stage = await blockedStage("blocked-thread-dedupe");
+    const ask = (thread?: string) =>
+      send.requestSend({
+        agentId: stage.agentId,
+        to: "Dana Guest",
+        text: "same words",
+        ...(thread && { thread: { ts: thread, channel: null } }),
+        originConversationId: stage.directId,
+        originTurnId: null,
+        readerUserId: READER,
+      });
+    const a = await ask("1781870000.000001");
+    const again = await ask("1781870000.000001");
+    const b = await ask("1781870000.000002");
+    const top = await ask();
+    if (
+      a.kind !== "blocked" ||
+      again.kind !== "blocked" ||
+      b.kind !== "blocked" ||
+      top.kind !== "blocked"
+    ) {
+      throw new Error("expected cards");
+    }
+    expect(again.approvalId).toBe(a.approvalId);
+    expect(new Set([a.approvalId, b.approvalId, top.approvalId]).size).toBe(3);
   });
 
   it("Don't send rejects: nothing sent, Dana stays blocked, the resume says not sent", async () => {

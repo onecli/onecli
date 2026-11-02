@@ -1,7 +1,11 @@
 import { isDeadCredentialError } from "@onecli/channels";
 import { ServiceError } from "../../../errors";
 import { logger } from "../../../../lib/logger";
-import { DeadIntegrationCredentialError } from "../../errors";
+import {
+  DeadIntegrationCredentialError,
+  FileUploadUnavailableError,
+  ThreadNotInConversationError,
+} from "../../errors";
 import type {
   ChannelProvider,
   PresenceIdentity,
@@ -53,7 +57,10 @@ import {
   reactionsAdd,
   reactionsRemove,
   rotateConfigToken,
+  isSlackUploadDegrade,
+  shareFilesWithText,
   SlackApiError,
+  threadRootOf,
   turnStopButton,
   usersInfo,
   botsInfo,
@@ -770,7 +777,7 @@ export const slackProvider: ChannelProvider = {
     });
   },
 
-  async sendMessage({ credentialsJson, to, text, mentions }) {
+  async sendMessage({ credentialsJson, to, text, mentions, thread, files }) {
     const { botToken } = parseSlackPresenceCredentials(credentialsJson);
     if (!botToken) throw new Error("presence has no bot token");
     // People are addressed via their DM channel (conversations.open is
@@ -786,15 +793,60 @@ export const slackProvider: ChannelProvider = {
       text,
       mentions ? { mentions: new Map(mentions) } : undefined,
     );
-    const posted = await postMessage(botToken, { channel, text: rendered });
+    // A thread must live in the conversation the recipient resolved to: a
+    // link names its channel, and any id is looked up THERE, which also
+    // turns a reply's id into its thread's root (Slack's `thread_ts` rule).
+    // Checked before anything posts.
+    let threadTs: string | undefined;
+    if (thread) {
+      const root =
+        thread.channel && thread.channel !== channel
+          ? null
+          : await threadRootOf(botToken, channel, thread.ts);
+      if (!root) throw new ThreadNotInConversationError();
+      threadTs = root;
+    }
+    if (files?.length) {
+      // Text and files as ONE message: the files share with the text as
+      // its comment, in the channel or the thread's ROOT (Slack's
+      // `thread_ts` rule, resolved above). An install that cannot take
+      // files (no files:write, uploads off) is refused before the share
+      // completes, so nothing is posted.
+      const shared = await shareFilesWithText(botToken, {
+        channel,
+        ...(threadTs && { threadTs }),
+        text: rendered,
+        files,
+      }).catch((err: unknown) => {
+        throw err instanceof SlackApiError && isSlackUploadDegrade(err.code)
+          ? new FileUploadUnavailableError(err.code)
+          : err;
+      });
+      // Same address shapes as a plain post; a share whose ts could not be
+      // read back addresses the channel itself (it IS posted, never again).
+      const rootTs = threadTs ?? shared.ts;
+      return {
+        externalThreadId:
+          to.kind === "channel" && rootTs
+            ? groupThreadId(shared.channel, rootTs)
+            : shared.channel,
+        ...(shared.ts && { messageRef: shared.ts }),
+      };
+    }
+    const posted = await postMessage(botToken, {
+      channel,
+      text: rendered,
+      ...(threadTs && { threadTs }),
+    });
     // The address a reply arrives on (the inbound codec's own shapes): a DM
     // answer comes back as the IM itself; a channel answer that mentions
-    // the agent comes back as the thread this post roots.
+    // the agent comes back as the thread this post roots or joined.
     return {
       externalThreadId:
         to.kind === "channel"
-          ? groupThreadId(posted.channel, posted.ts)
+          ? groupThreadId(posted.channel, threadTs ?? posted.ts)
           : posted.channel,
+      messageRef: posted.ts,
     };
   },
 

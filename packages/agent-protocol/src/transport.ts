@@ -39,6 +39,14 @@ export const MAX_TOOL_ERROR_CHARS = 2_000;
  */
 export const MAX_TURN_CONTEXT_CHARS = 16_000;
 
+/** Bound for a scheduled task's gate command (one shell line or a script
+ * path, not a program). Shared by the control plane's zod and the wire. */
+export const MAX_CRON_GATE_CHARS = 2_000;
+
+/** Bound for the gate's plain-words description (what a person reads).
+ * Shared by the control plane's zod and the agent's tool schema. */
+export const MAX_CRON_GATE_DESCRIPTION_CHARS = 200;
+
 // The sync byte budget lives in sync-budget.ts (a leaf module — memory-file
 // needs it too, and transport imports memory-file's caps; see its header).
 // Imported for local use (the memory.write byte belt below) AND re-exported
@@ -552,6 +560,12 @@ export const workItemSchema = z.discriminatedUnion("kind", [
      */
     context: z.string().max(MAX_TURN_CONTEXT_CHARS).optional(),
     /**
+     * A scheduled task's gate command, run before the harness (gate.ts). An
+     * OLD supervisor image strips it (non-strict parse) and runs the agent
+     * every fire: the cost, never the outcome, regresses.
+     */
+    gate: z.string().max(MAX_CRON_GATE_CHARS).optional(),
+    /**
      * The turn's user attachments, metadata only — the bytes arrived ahead
      * of this frame as `attachment.part`s on the same ordered socket. The
      * supervisor uses it to pick inline-vision images off the disk; an OLD
@@ -1027,6 +1041,15 @@ export const supervisorMessageSchema = z
       sizeBytes: z.number().int().positive().max(MAX_OUTBOUND_ATTACHMENT_BYTES),
       sha256: z.string().regex(/^[0-9a-f]{64}$/),
       caption: z.string().max(MAX_OUTBOUND_CAPTION_CHARS).optional(),
+      /**
+       * What the file is for. Absent = attach it to the calling turn's reply
+       * (send_file). "send" = STAGE it: stored under the same fence and caps
+       * but never shown under the reply, waiting for a send_message that
+       * names it (files to another conversation). Only sent to a runner
+       * advertising `stagedAttachments`: an older one strips the key and
+       * would attach the file to the reply instead.
+       */
+      purpose: z.literal("send").optional(),
       part: z.number().int().positive(),
       of: z.number().int().positive(),
       dataBase64: z

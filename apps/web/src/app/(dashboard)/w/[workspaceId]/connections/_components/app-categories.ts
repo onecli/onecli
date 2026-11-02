@@ -45,6 +45,7 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   // Development
   github: "development",
   "github-app": "development",
+  bitbucket: "development",
   docker: "development",
   vercel: "development",
   cloudflare: "development",

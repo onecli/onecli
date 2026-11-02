@@ -1706,7 +1706,7 @@ describe.skipIf(!PROOF_URL)("act as you: read & write modes", () => {
       expect(JSON.stringify(audits)).not.toContain("fixed");
     });
 
-    it("refuses a message it never recorded, one older than 24h, another person's, and a shared turn", async () => {
+    it("refuses a message it never recorded, one older than 24h, and another person's", async () => {
       const { stage, messageId } = await sentOne("edit-refuse");
       const refusal = /only change messages I sent as you in the last 24 hours/;
       // Never recorded.
@@ -1716,25 +1716,19 @@ describe.skipIf(!PROOF_URL)("act as you: read & write modes", () => {
         text: "x",
       });
       expect(String((res as { error: string }).error)).toMatch(refusal);
-      // Another person's token (Jordan, own writable grant) can't touch it.
+      // Another person's token (Jordan, own writable grant) can't touch it,
+      // in their own chat or from a shared one.
       await connectWritable(stage.presenceId, JORDAN, "U0JORDAN", JORDAN_TOKEN);
-      res = await tool(stage, "edit_my_message", JORDAN, {
-        conversation: "#weekly-reports",
-        messageId,
-        text: "x",
-      });
-      expect(res.ok).toBe(false);
-      // A shared turn: the private-chat refusal.
-      res = await tool(
-        stage,
-        "delete_my_message",
-        ALEX,
-        { conversation: "#weekly-reports", messageId },
-        "channel",
-      );
-      expect(String((res as { error: string }).error)).toMatch(
-        /only act as Alex in their own private chat/,
-      );
+      for (const where of ["direct", "channel"] as const) {
+        res = await tool(
+          stage,
+          "edit_my_message",
+          JORDAN,
+          { conversation: "#weekly-reports", messageId, text: "x" },
+          where,
+        );
+        expect(String((res as { error: string }).error)).toMatch(refusal);
+      }
       // Older than 24h.
       await db.agentSentAsUser.updateMany({
         where: { messageTs: messageId },
@@ -1748,6 +1742,54 @@ describe.skipIf(!PROOF_URL)("act as you: read & write modes", () => {
       expect(String((res as { error: string }).error)).toMatch(refusal);
       expect(callsFor("chat.update")).toHaveLength(0);
       expect(callsFor("chat.delete")).toHaveLength(0);
+      expect(
+        await db.actionApproval.count({ where: { agentId: stage.agentId } }),
+      ).toBe(0);
+    });
+
+    it("asked from a shared place, even an allowed edit waits on a card in the person's own DM; nothing lands in the shared chat", async () => {
+      const { stage, messageId } = await sentOne("edit-shared");
+      const res = await tool(
+        stage,
+        "edit_my_message",
+        ALEX,
+        { conversation: "#weekly-reports", messageId, text: "fixed" },
+        "channel",
+      );
+      expect(res).toMatchObject({
+        ok: true,
+        result: {
+          status: "held",
+          note: expect.stringContaining("in your own DM with me"),
+        },
+      });
+      expect(callsFor("chat.update")).toHaveLength(0);
+      const approval = await db.actionApproval.findFirstOrThrow({
+        where: { agentId: stage.agentId, action: "slack_edit_as_user" },
+        select: { id: true, conversationId: true, originTurnId: true },
+      });
+      // Anchored nowhere: no outcome note or resume reaches the channel.
+      expect(approval).toMatchObject({
+        conversationId: null,
+        originTurnId: null,
+      });
+      const approvals = await approvalsMod();
+      expect(
+        await approvals.decideActionApproval({
+          approvalId: approval.id,
+          decision: "approve",
+          deciderUserId: ADMIN,
+        }),
+      ).toMatchObject({ kind: "refused" });
+      expect(
+        await approvals.decideActionApproval({
+          approvalId: approval.id,
+          decision: "approve",
+          deciderUserId: ALEX,
+        }),
+      ).toMatchObject({ status: "executed" });
+      const [upd] = callsFor("chat.update");
+      expect(upd!.auth).toBe(`Bearer ${ALEX_TOKEN}`);
     });
 
     it("writeMode never: needs_access (write_off), nothing changed", async () => {
@@ -1791,10 +1833,11 @@ describe.skipIf(!PROOF_URL)("act as you: read & write modes", () => {
       expect(callsFor("chat.update")).toHaveLength(1);
     });
 
-    it("delete is always held (even on allow), shows the text, only the granter decides, approve deletes", async () => {
+    it("delete is always held (even on allow), shows the whole text, only the granter decides, approve deletes", async () => {
       const { stage, messageId } = await sentOne("delete");
-      handlers["conversations.history"] = () => ({
-        messages: [{ ts: messageId, user: "U0ALEX", text: "original" }],
+      const long = `original ${"x".repeat(400)}`;
+      handlers["conversations.replies"] = () => ({
+        messages: [{ ts: messageId, user: "U0ALEX", text: long }],
       });
       const res = await tool(stage, "delete_my_message", ALEX, {
         conversation: "#weekly-reports",
@@ -1802,10 +1845,11 @@ describe.skipIf(!PROOF_URL)("act as you: read & write modes", () => {
       });
       expect(res).toMatchObject({ ok: true, result: { status: "held" } });
       expect(callsFor("chat.delete")).toHaveLength(0);
-      const hist = callsFor("conversations.history").at(-1)!;
-      expect(hist.auth).toBe(`Bearer ${ALEX_TOKEN}`);
-      expect(hist.form.get("latest")).toBe(messageId);
-      expect(hist.form.get("inclusive")).toBe("true");
+      const read = callsFor("conversations.replies").at(-1)!;
+      expect(read.auth).toBe(`Bearer ${ALEX_TOKEN}`);
+      expect(read.form.get("ts")).toBe(messageId);
+      expect(read.form.get("latest")).toBe(messageId);
+      expect(read.form.get("inclusive")).toBe("true");
       const approval = await db.actionApproval.findFirstOrThrow({
         where: { agentId: stage.agentId, action: "slack_delete_as_user" },
         select: { id: true, summary: true },
@@ -1869,6 +1913,78 @@ describe.skipIf(!PROOF_URL)("act as you: read & write modes", () => {
       }),
     ).toMatchObject({ status: "failed" });
     expect(callsFor("chat.postMessage")).toHaveLength(0);
+  });
+
+  it("send_as_me on ask: the same words held for two threads are two asks, and each posts under its own root", async () => {
+    script();
+    handlers["chat.postMessage"] = () => ({
+      channel: "C0REPORTS",
+      ts: nextTs(),
+    });
+    handlers["conversations.replies"] = (c) => ({
+      messages: [{ ts: c.form.get("ts"), text: "root" }],
+    });
+    const stage = await seedAgent("send-two-threads");
+    await connectWritable(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
+    await grantAs(stage.agentId, ALEX, "C0REPORTS");
+    await setModes(stage.agentId, ALEX, "C0REPORTS", { writeMode: "ask" });
+    const sendIn = async (thread: string) => {
+      const ctx = await stage.conversation("direct", ALEX);
+      return platformTools.executePlatformTool(`${P}runner-${stage.suffix}`, {
+        sandboxId: `${P}sb-${stage.suffix}`,
+        tool: "send_message",
+        args: { to: "#weekly-reports", text: "same", sendAs: "you", thread },
+        ...ctx,
+      });
+    };
+    handlers["conversations.list"] = () => ({
+      channels: [{ id: "C0REPORTS", name: "weekly-reports", is_member: true }],
+      response_metadata: { next_cursor: "" },
+    });
+    const { integrationId } = await db.agentChannel.findUniqueOrThrow({
+      where: { id: stage.presenceId },
+      select: { integrationId: true },
+    });
+    await db.agentReachGrant.create({
+      data: {
+        agentId: stage.agentId,
+        integrationId,
+        provider: "slack",
+        subjectKind: "space",
+        externalRef: "C0REPORTS",
+        subjectLabel: "#weekly-reports",
+        state: "approved",
+        cardRefs: [],
+      },
+    });
+    for (const thread of ["1781870000.000011", "1781870000.000022"]) {
+      expect(await sendIn(thread)).toMatchObject({
+        ok: true,
+        result: { status: "held" },
+      });
+    }
+    const pending = await db.actionApproval.findMany({
+      where: {
+        agentId: stage.agentId,
+        action: "slack_send_as_user",
+        status: "pending",
+      },
+      orderBy: { createdAt: "asc" },
+      select: { id: true },
+    });
+    expect(pending).toHaveLength(2);
+    const approvals =
+      await import("../../services/channels/action-approval-service");
+    for (const row of pending) {
+      await approvals.decideActionApproval({
+        approvalId: row.id,
+        decision: "approve",
+        deciderUserId: ALEX,
+      });
+    }
+    expect(
+      callsFor("chat.postMessage").map((c) => c.form.get("thread_ts")),
+    ).toEqual(["1781870000.000011", "1781870000.000022"]);
   });
 
   describe("needs_access: a card instead of a dead end", () => {
@@ -2179,6 +2295,87 @@ describe.skipIf(!PROOF_URL)("act as you: read & write modes", () => {
       expect(callsFor("chat.postMessage")).toHaveLength(2);
     });
 
+    it("a write access card keeps the thread: allowing it posts under the thread's root, and a root that is gone fails the approval", async () => {
+      script();
+      handlers["chat.postMessage"] = () => ({
+        channel: "C0REPORTS",
+        ts: nextTs(),
+      });
+      const root = "1781870000.515151";
+      let rootExists = true;
+      handlers["conversations.replies"] = (c) =>
+        rootExists && c.form.get("ts") === root
+          ? { messages: [{ ts: root, text: "kickoff" }] }
+          : { ok: false, error: "thread_not_found" };
+      const stage = await seedAgent("na-thread");
+      // send_message resolves the channel with the bot and needs the agent
+      // allowed there (sendAs "you" still goes through the same lookup).
+      handlers["conversations.list"] = () => ({
+        channels: [
+          { id: "C0REPORTS", name: "weekly-reports", is_member: true },
+        ],
+        response_metadata: { next_cursor: "" },
+      });
+      const { integrationId } = await db.agentChannel.findUniqueOrThrow({
+        where: { id: stage.presenceId },
+        select: { integrationId: true },
+      });
+      await db.agentReachGrant.create({
+        data: {
+          agentId: stage.agentId,
+          integrationId,
+          provider: "slack",
+          subjectKind: "space",
+          externalRef: "C0REPORTS",
+          subjectLabel: "#weekly-reports",
+          state: "approved",
+          cardRefs: [],
+        },
+      });
+      await connectWritable(stage.presenceId, ALEX, "U0ALEX", ALEX_TOKEN);
+      await grantAs(stage.agentId, ALEX, "C0REPORTS");
+      await setModes(stage.agentId, ALEX, "C0REPORTS", { writeMode: "never" });
+      const ctx = await stage.conversation("direct", ALEX);
+      const sendInThread = (text: string, thread: string) =>
+        platformTools.executePlatformTool(`${P}runner-${stage.suffix}`, {
+          sandboxId: `${P}sb-${stage.suffix}`,
+          tool: "send_message",
+          args: { to: "#weekly-reports", text, sendAs: "you", thread },
+          ...ctx,
+        });
+      const approvals = await approvalsMod();
+      const decideNewest = async () => {
+        const pending = (await accessRows(stage.agentId)).find(
+          (r) => r.status === "pending",
+        )!;
+        return approvals.decideActionApproval({
+          approvalId: pending.id,
+          decision: "approve",
+          deciderUserId: ALEX,
+        });
+      };
+      const first = await sendInThread(
+        "in thread",
+        `https://acme-example.slack.com/archives/C0REPORTS/p${root.replace(".", "")}`,
+      );
+      expect(first).toMatchObject({
+        ok: true,
+        result: { status: "needs_access", reason: "write_off" },
+      });
+      expect(await decideNewest()).toMatchObject({ status: "executed" });
+      const [post] = callsFor("chat.postMessage");
+      expect(post!.auth).toBe(`Bearer ${ALEX_TOKEN}`);
+      expect(post!.form.get("thread_ts")).toBe(root);
+
+      // The thread is deleted while the card waits: approving fails, and
+      // nothing posts at the top level instead.
+      await setModes(stage.agentId, ALEX, "C0REPORTS", { writeMode: "never" });
+      await sendInThread("second", root);
+      rootExists = false;
+      expect(await decideNewest()).toMatchObject({ status: "failed" });
+      expect(callsFor("chat.postMessage")).toHaveLength(1);
+    });
+
     it("send_as_me renders @[Name] as a real mention, even for someone the agent's contacts block", async () => {
       script();
       handlers["chat.postMessage"] = () => ({
@@ -2447,7 +2644,10 @@ describe.skipIf(!PROOF_URL)("send_message: choose who sends", () => {
       sendAs: "agent",
     });
     expect(switched).toMatchObject({
-      result: { status: "sent", sendAs: "agent", preferenceUpdated: true },
+      result: { status: "sent", sendAs: "agent" },
+    });
+    expect(switched).not.toMatchObject({
+      result: { preferenceUpdated: true },
     });
     expect(posts()[2]!.auth).toBe("Bearer xoxb-bot");
     expect(await pref(stage.agentId)).toEqual({ sendAs: "agent" });
@@ -2603,6 +2803,88 @@ describe.skipIf(!PROOF_URL)("send_message: choose who sends", () => {
       }),
     ).toBe(0);
     expect(connect.payload).toMatchObject({ consented: true });
+  });
+
+  it("a thread survives the whole chain (choose sender -> connect -> send) and lands under its root", async () => {
+    const stage = await stageWithChannel("cs-thread");
+    const root = "1781870000.424242";
+    const reply = "1781870000.434343";
+    // Read with the person's own token once connected: the reply resolves
+    // to its thread's root inside #weekly-reports.
+    handlers["conversations.replies"] = (c) =>
+      c.form.get("channel") === "C0REPORTS" && c.form.get("ts") === reply
+        ? { messages: [{ ts: reply, thread_ts: root, text: "+1" }] }
+        : { ok: false, error: "thread_not_found" };
+    await tool(stage, "direct", ALEX, { thread: reply });
+    const [row] = await chooseRows(stage.agentId);
+    await (
+      await approvals()
+    ).decideActionApproval({
+      approvalId: row!.id,
+      decision: "approve",
+      choice: "you",
+      deciderUserId: ALEX,
+    });
+    const connect = await db.actionApproval.findFirstOrThrow({
+      where: { agentId: stage.agentId, action: "slack_access_request" },
+      select: { id: true, payload: true },
+    });
+    expect(connect.payload).toMatchObject({
+      thread: { ts: reply, channel: null },
+    });
+    await svc.completeConnect({
+      state: {
+        kind: "slack-user-read",
+        workspaceId: WORKSPACE,
+        agentId: stage.agentId,
+        presenceId: stage.presenceId,
+        userId: ALEX,
+        issuedAt: Date.now(),
+        nonce: "n",
+      } as never,
+      code: "c",
+      redirectUri: "http://x",
+      exchange: async () => ({
+        team: { id: TEAM },
+        authed_user: {
+          id: "U0ALEX",
+          access_token: ALEX_TOKEN,
+          scope: "channels:history,chat:write",
+        },
+      }),
+      isActiveMember: async () => true,
+    });
+    expect(posts()).toHaveLength(1);
+    expect(posts()[0]!.auth).toBe(`Bearer ${ALEX_TOKEN}`);
+    expect(posts()[0]!.form.get("thread_ts")).toBe(root);
+  });
+
+  it("only a delivered send says where it landed: a held one does not", async () => {
+    const stage = await stageWithChannel("cs-landed");
+    await writable(stage);
+    await svc.upsertGrant({
+      workspaceId: WORKSPACE,
+      agentId: stage.agentId,
+      userId: ALEX,
+      externalRef: "C0REPORTS",
+      writeMode: "ask",
+    });
+    const held = await tool(stage, "direct", ALEX, { sendAs: "you" });
+    expect(held).toMatchObject({ ok: true, result: { status: "held" } });
+    expect(
+      (held as { result: Record<string, unknown> }).result.landed,
+    ).toBeUndefined();
+    const sent = await tool(stage, "direct", ALEX, {
+      text: "as the agent",
+      sendAs: "agent",
+    });
+    expect(sent).toMatchObject({
+      ok: true,
+      result: {
+        status: "sent",
+        landed: expect.stringContaining("#weekly-reports"),
+      },
+    });
   });
 
   /** Sam is anchored in Alex's chat and blocked (Can talk with = Never). */

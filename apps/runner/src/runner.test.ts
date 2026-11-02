@@ -334,6 +334,7 @@ describe("self-host Docker compatibility", () => {
           maxAttachmentsPerMessage: MAX_ATTACHMENTS_PER_MESSAGE,
           desktopControl: true,
           outboundAttachments: true,
+          stagedAttachments: true,
         });
         calls.length = 0;
         queued.push(startItem());
@@ -1100,6 +1101,33 @@ describe("stop", () => {
     expect(posted).toEqual([
       { kind: "sandbox.status", sandboxId: "sb-ghost", status: "stopped" },
     ]);
+  });
+
+  it("reports failed, never silence, when the backend dies before the stop", async () => {
+    // The pre-try hole this guards (the start path's twin): `listSandboxes`
+    // ran OUTSIDE the stop's failure reporting, so a backend unreachable for
+    // exactly that call threw out of the work item, nothing was posted, and
+    // the sandbox sat `stopping` with its container still up. Its live
+    // supervisor then kept the stale-claim clock fresh, so the control
+    // plane never re-dispatched it either: stuck until a human noticed.
+    queued.push(startItem());
+    await drive();
+    posted.length = 0;
+    backend.failNext("list", new Error("TypeError: fetch failed"));
+
+    queued.push({ kind: "sandbox.stop", sandboxId: "sb-1" });
+    await drive();
+
+    expect(posted).toEqual([
+      {
+        kind: "sandbox.status",
+        sandboxId: "sb-1",
+        status: "failed",
+        error: "Error: TypeError: fetch failed",
+      },
+    ]);
+    // The container is still up: the report is the truth, not a cover-up.
+    expect(backend.sandboxes.get("sb-1")?.running).toBe(true);
   });
 });
 
@@ -2474,6 +2502,8 @@ describe("registration", () => {
         // And for the reverse direction: the supervisor is offered send_file
         // only when its runner can relay the bytes.
         outboundAttachments: true,
+        // And relays a file's purpose, so send_message may stage files.
+        stagedAttachments: true,
       },
     });
     await spy.stop();
@@ -2633,6 +2663,17 @@ describe("turn delivery", () => {
     const [review, ordinary] = delivered.get("sb-1") ?? [];
     expect(review).toMatchObject({ ephemeralSession: true });
     expect(ordinary).not.toHaveProperty("ephemeralSession");
+  });
+
+  it("forwards a scheduled run's gate, and only then", async () => {
+    connected.add("sb-1");
+    queued.push(turnItem({ gate: "bash check.sh" }));
+    queued.push(turnItem({ turnId: "t-2" }));
+    await drive();
+
+    const [gated, ordinary] = delivered.get("sb-1") ?? [];
+    expect(gated).toMatchObject({ gate: "bash check.sh" });
+    expect(ordinary).not.toHaveProperty("gate");
   });
 
   it("gives a turn back once when its socket closes while its files are pulled", async () => {
