@@ -39,7 +39,12 @@ import {
 import { logger } from "../lib/logger";
 import { stripControl } from "../lib/text";
 import {
+  GATE_WAKE_NOTICE_PREFIX,
+  isNoReply,
+} from "@onecli/agent-protocol/text";
+import {
   attachmentMetaSelect,
+  NOT_IN_REPLY_STATUSES,
   bindAttachmentsToTurn,
   firstAttachmentName,
 } from "./attachment-service";
@@ -169,6 +174,9 @@ const turnSelect = {
   createdAt: true,
   // Metadata only (attachmentMetaSelect) — bytes never ride a turn payload.
   attachments: {
+    // A file staged for send_message is not part of this reply: it goes to
+    // another conversation, through its own approval.
+    where: { status: { notIn: NOT_IN_REPLY_STATUSES } },
     select: attachmentMetaSelect,
     orderBy: { createdAt: "asc" as const },
   },
@@ -1071,6 +1079,19 @@ export const abortTurn = async (
       // one: it takes everything, even a follow-up handed over on a run
       // the cold-boot revival rolled back to `queued`.
       await sweepFollowUps();
+      // And no `finishTurn` either, so the automation it belonged to (a
+      // schedule's run stopped before it began) settles here, exactly as an
+      // in-flight stop does at its close.
+      await settleAutomationRun({
+        conversationId: turn.conversationId,
+        turnId: turn.id,
+        status: "aborted",
+      }).catch((err) =>
+        log.error(
+          { err, turnId: turn.id, conversationId: turn.conversationId },
+          "automation settle failed after a queued stop",
+        ),
+      );
       return { aborted: true, delivered: false };
     }
 
@@ -1933,6 +1954,7 @@ const settleAutomationRun = async (
       name: true,
       originConversationId: true,
       consecutiveFailures: true,
+      gate: true,
     },
   });
   if (!cron) return; // schedule deleted while its last run was in flight
@@ -1959,11 +1981,11 @@ const settleAutomationRun = async (
       },
     });
   } else {
-    // Aborted = a human stopped it. An outcome worth showing, but not a
-    // symptom of a broken schedule — no failure count, no delivery.
+    // Aborted = a person stopped it. Its own outcome, not a symptom of a
+    // broken schedule: no failure count, no delivery.
     await db.agentCron.update({
       where: { id: cron.id },
-      data: { lastOutcome: "failed" },
+      data: { lastOutcome: "stopped" },
     });
     return;
   }
@@ -1973,9 +1995,32 @@ const settleAutomationRun = async (
   await materializeAutomationDelivery(
     cron.originConversationId,
     `Scheduled run "${cleanAutomationName(cron.name)}"`,
-    await runReport(input),
+    await cronReport(input, cron.gate !== null),
     "cron",
   );
+};
+
+/**
+ * A cron run's report. A run its check WOKE is never silent: the check is
+ * the deterministic decision that something happened, so if the agent still
+ * answered `[no reply]` (it re-judged the condition), the person gets the
+ * check's own output. Only a gated cron honors the wake notice.
+ */
+const cronReport = async (
+  input: AutomationSettleInput,
+  gated: boolean,
+): Promise<string> => {
+  const report = await runReport(input);
+  if (!gated || !isNoReply(report)) return report;
+  const notices = await db.turnEvent.findMany({
+    where: { turnId: input.turnId, type: "notice" },
+    orderBy: { seq: "asc" },
+    select: { payload: true },
+  });
+  const found = notices
+    .map((n) => String((n.payload as { text?: unknown }).text ?? ""))
+    .find((text) => text.startsWith(GATE_WAKE_NOTICE_PREFIX));
+  return found ? found.trim() : report;
 };
 
 /**
@@ -2051,6 +2096,10 @@ const settleWebhookRun = async (
  *
  * Same seq discipline as `applyTurnEvents`: the conversation-row lock makes
  * seq order commit order, and the publish happens after commit.
+ *
+ * A run that answered exactly `[no reply]` decided there was nothing worth
+ * surfacing (a gated watcher's quiet tick): it delivers nothing. A failure
+ * report never reads as the token, so failures always arrive.
  */
 export const materializeAutomationDelivery = async (
   originConversationId: string,
@@ -2059,6 +2108,7 @@ export const materializeAutomationDelivery = async (
   /** The delivery turn's source — the mirror keys its per-run shape on it. */
   source: "cron" | "watch" | "webhook",
 ): Promise<void> => {
+  if (isNoReply(report)) return;
   await materializeBornDoneTurn(originConversationId, {
     message: header,
     source,

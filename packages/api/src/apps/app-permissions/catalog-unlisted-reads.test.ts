@@ -87,6 +87,33 @@ const SENSITIVE_READS: Record<string, SensitiveRead[]> = {
       why: "returns group CI/CD variable values",
     },
   ],
+  bitbucket: [
+    {
+      host: "api.bitbucket.org",
+      path: "/2.0/repositories/acme/web/pipelines_config/variables",
+      why: "returns repository Pipelines variables (unsecured values in clear)",
+    },
+    {
+      host: "api.bitbucket.org",
+      path: "/2.0/repositories/acme/web/deployments_config/environments/%7Be1%7D/variables",
+      why: "returns deployment environment variables (unsecured values in clear)",
+    },
+    {
+      host: "api.bitbucket.org",
+      path: "/2.0/workspaces/acme/pipelines-config/variables",
+      why: "returns workspace Pipelines variables (unsecured values in clear)",
+    },
+    {
+      host: "api.bitbucket.org",
+      path: "/2.0/repositories/acme/web/deploy-keys",
+      why: "lists the repository's deploy keys",
+    },
+    {
+      host: "api.bitbucket.org",
+      path: "/2.0/repositories/acme/web/hooks",
+      why: "lists webhooks, whose target URLs can embed credentials",
+    },
+  ],
   supabase: [
     {
       host: "api.supabase.com",

@@ -24,6 +24,7 @@ import {
   MAX_PREVIEW_RELAUNCHES,
   MAX_SYNC_PART_BYTES,
   MAX_SYNC_PARTS,
+  MAX_CRON_GATE_CHARS,
   MAX_TURN_CONTEXT_CHARS,
   MAX_DESKTOP_CONTROLLER_NAME_CHARS,
   agentChannelPresenceSchema,
@@ -164,6 +165,14 @@ export const runnerCapabilitiesSchema = z
      * a file that never left. Absent = false.
      */
     outboundAttachments: z.boolean().optional(),
+    /**
+     * This runner relays a `file.part` run's `purpose` (the
+     * `x-onecli-file-purpose` header), so a file staged for send_message is
+     * stored WITHOUT attaching to the reply. The supervisor offers
+     * send_message `files` only under such a runner: an older one drops the
+     * key and the file would land under the reply. Absent = false.
+     */
+    stagedAttachments: z.boolean().optional(),
     /**
      * This runner parses the `desktop.control` work item and forwards
      * `desktop.state`. Same all-or-nothing reason as `steerMessages`: the
@@ -459,6 +468,8 @@ export const runnerWorkItemSchema = z
       /** Delivery-only prompt context (step 8) — see the transport schema's
        * field of the same name; the runner forwards it verbatim. */
       context: z.string().max(MAX_TURN_CONTEXT_CHARS).optional(),
+      /** A scheduled task's gate; see the transport schema's field. */
+      gate: z.string().max(MAX_CRON_GATE_CHARS).optional(),
       /** The turn's user attachments. Sent only to runners that advertised
        * `capabilities.attachments`. */
       attachments: messageAttachmentsSchema,
@@ -1011,6 +1022,8 @@ export const RUNNER_ATTACHMENT_HEADERS = {
   name: "x-onecli-file-name",
   sha256: "x-onecli-file-sha256",
   caption: "x-onecli-file-caption",
+  /** "send" = stage for send_message (never under the reply); absent = reply. */
+  purpose: "x-onecli-file-purpose",
 } as const;
 
 /** The header set, parsed. `name` and `caption` are percent-encoded on the
@@ -1022,6 +1035,7 @@ export const runnerAttachmentUploadHeadersSchema = z.object({
   name: z.string().min(1).max(255),
   sha256: z.string().regex(/^[0-9a-f]{64}$/),
   caption: z.string().max(MAX_OUTBOUND_CAPTION_CHARS).optional(),
+  purpose: z.literal("send").optional(),
 });
 export type RunnerAttachmentUploadHeaders = z.infer<
   typeof runnerAttachmentUploadHeadersSchema

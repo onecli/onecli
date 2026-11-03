@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { AgentChannelPresenceWire } from "@onecli/agent-protocol";
+import {
+  MAX_OUTBOUND_ATTACHMENTS_PER_TURN,
+  type AgentChannelPresenceWire,
+} from "@onecli/agent-protocol";
 import { channelsFragment, channelsTools } from "./channels";
 
 const live: AgentChannelPresenceWire = {
@@ -69,8 +72,8 @@ describe("channelsFragment", () => {
       '"you" only when they explicitly said to send it as them',
     );
     expect(body).toContain('"needs_choice" = a card in this chat asks');
-    expect(body).toContain("remembered: true");
-    expect(body).toContain("preferenceUpdated: true");
+    expect(body).toContain("where it landed");
+    expect(body).not.toContain("preferenceUpdated");
     expect(body).toContain('prefer send_message with sendAs "you"');
     expect(body).toContain(
       "Never save a memory that refuses or restricts what the person asked you to do with their own account; their current request wins over earlier memories.",
@@ -188,15 +191,42 @@ describe("channelsTools", () => {
     expect(channelsTools([removed])).toEqual([]);
   });
 
-  it("the input schemas are the control plane's contract: to+text, query(+kind)", () => {
+  it("the input schemas are the control plane's contract: to+text(+thread), query(+kind)", () => {
     const [send, find] = channelsTools([live]);
     expect(send!.inputSchema).toMatchObject({
       required: ["to", "text"],
+      properties: { thread: { type: "string" } },
     });
     expect(find!.inputSchema).toMatchObject({
       required: ["query"],
       properties: { kind: { enum: ["person", "channel"] } },
     });
+  });
+
+  it("own messages elsewhere: one consistent route (list_my_replies -> edit/delete_my_reply), and a held change is never claimed", () => {
+    const body = flat(channelsFragment([live])!.body);
+    expect(body).toContain("pass conversation ('#channel-name'");
+    expect(body).toContain("whichever sentAs it shows");
+    expect(body).toContain(
+      "anything you find with list_my_replies goes through edit_my_reply and delete_my_reply instead",
+    );
+    // The old contradiction: "only for messages you sent as a person" next
+    // to "don't reach for edit_my_message for those".
+    expect(body).not.toContain("are only for messages you sent as a person");
+    expect(body).not.toContain("don't reach for edit_my_message");
+    const tools = channelsTools([live]);
+    for (const name of [
+      "list_my_replies",
+      "edit_my_reply",
+      "delete_my_reply",
+    ]) {
+      expect(tools.find((t) => t.name === name)!.inputSchema).toMatchObject({
+        properties: { conversation: { type: "string" } },
+      });
+    }
+    expect(
+      tools.find((t) => t.name === "edit_my_reply")!.description,
+    ).toContain("never say it changed until the notice arrives");
   });
 
   it("read_conversation is listed (and taught) with ANY live presence, even with zero grants", () => {
@@ -264,7 +294,9 @@ describe("channelsTools", () => {
     expect(body).toContain("posts as you, through your own app");
     expect(body).toContain("A read may come back held");
     // Edit/delete ride along with send_as_me, scoped to its own messages.
-    expect(body).toContain("pass the messageId from the send_as_me result");
+    expect(body).toContain(
+      "pass the conversation and messageId from the send_as_me result",
+    );
     expect(body).toContain("in the last 24 hours");
     expect(body).toContain("delete_my_message always asks them first");
     const names = channelsTools([readOnly]).map((t) => t.name);
@@ -275,5 +307,129 @@ describe("channelsTools", () => {
         .inputSchema,
     ).toMatchObject({ required: ["conversation", "messageId", "text"] });
     expect(channelsTools([removed])).toEqual([]);
+  });
+});
+
+describe("send_message files", () => {
+  const sendMessage = (stageFiles?: Parameters<typeof channelsTools>[1]) =>
+    channelsTools([live], stageFiles).find((t) => t.name === "send_message")!;
+  const properties = (t: ReturnType<typeof sendMessage>) =>
+    (t.inputSchema as { properties: Record<string, unknown> }).properties;
+  const CONTEXT = { conversationId: "cv-1", turnId: "t-1" };
+  const DEADLINE = Date.now() + 60_000;
+
+  it("is offered only when the runner can stage files", () => {
+    expect(properties(sendMessage())).not.toHaveProperty("files");
+    expect(sendMessage().prepare).toBeUndefined();
+    const t = sendMessage({
+      stageFiles: async () => ({ ok: true, attachmentIds: [] }),
+    });
+    expect(properties(t)).toHaveProperty("files");
+    expect(t.description).toContain('always comes back "held"');
+  });
+
+  it("stages the paths (by the call's deadline) and forwards attachmentIds in their place", async () => {
+    const seen: { paths: string[]; deadline: number }[] = [];
+    const t = sendMessage({
+      stageFiles: async (paths, _context, deadline) => {
+        seen.push({ paths: [...paths], deadline });
+        return { ok: true, attachmentIds: ["att-1"] };
+      },
+    });
+    expect(
+      await t.prepare!(
+        { to: "#x", text: "hi", files: ["a.csv"] },
+        CONTEXT,
+        DEADLINE,
+      ),
+    ).toEqual({
+      ok: true,
+      args: { to: "#x", text: "hi", attachmentIds: ["att-1"] },
+    });
+    expect(seen).toEqual([{ paths: ["a.csv"], deadline: DEADLINE }]);
+  });
+
+  it("passes a plain send through untouched", async () => {
+    const t = sendMessage({
+      stageFiles: async () => {
+        throw new Error("never");
+      },
+    });
+    const args = { to: "#x", text: "hi" };
+    expect(await t.prepare!(args, CONTEXT, DEADLINE)).toEqual({
+      ok: true,
+      args,
+    });
+  });
+
+  it('refuses sendAs "you" with files before reading or uploading anything', async () => {
+    let called = false;
+    const t = sendMessage({
+      stageFiles: async () => {
+        called = true;
+        return { ok: true, attachmentIds: [] };
+      },
+    });
+    const out = await t.prepare!(
+      { to: "#x", text: "hi", sendAs: "you", files: ["a.csv"] },
+      CONTEXT,
+      DEADLINE,
+    );
+    expect(out).toMatchObject({
+      ok: false,
+      error: expect.stringContaining(
+        "Sending files as you isn't supported yet",
+      ),
+    });
+    expect(called).toBe(false);
+  });
+
+  it("a staging refusal is the tool's answer", async () => {
+    const t = sendMessage({
+      stageFiles: async () => ({
+        ok: false,
+        error: "a.csv: No file. Nothing was sent.",
+      }),
+    });
+    expect(
+      await t.prepare!(
+        { to: "#x", text: "hi", files: ["a.csv"] },
+        CONTEXT,
+        DEADLINE,
+      ),
+    ).toEqual({ ok: false, error: "a.csv: No file. Nothing was sent." });
+  });
+
+  it("refuses a malformed or over-cap files list before staging", async () => {
+    let called = false;
+    const t = sendMessage({
+      stageFiles: async () => {
+        called = true;
+        return { ok: true, attachmentIds: [] };
+      },
+    });
+    const tooMany = Array.from(
+      { length: MAX_OUTBOUND_ATTACHMENTS_PER_TURN + 1 },
+      (_, i) => `f${i}.csv`,
+    );
+    for (const files of [[], "a.csv", [1], [""], tooMany]) {
+      expect(
+        (await t.prepare!({ to: "#x", text: "hi", files }, CONTEXT, DEADLINE))
+          .ok,
+      ).toBe(false);
+    }
+    expect(called).toBe(false);
+  });
+
+  it("is taught in the channels section exactly when the tool takes files", () => {
+    const teaching = "pass its path in send_message's files";
+    expect(flat(channelsFragment([live])!.body)).not.toContain(teaching);
+    expect(
+      flat(channelsFragment([live], { stagedFiles: true })!.body),
+    ).toContain(teaching);
+    // No live presence = no send_message, so no teaching either.
+    expect(
+      flat(channelsFragment([removed], { stagedFiles: true })!.body),
+    ).not.toContain(teaching);
   });
 });

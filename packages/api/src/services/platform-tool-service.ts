@@ -14,6 +14,7 @@ import {
   deleteCron,
   listCrons,
   nextFireOrNull,
+  updateCronAsAgent,
 } from "./agent-cron-service";
 import {
   getMemoryByKey,
@@ -28,6 +29,7 @@ import {
 import {
   cancelTaskArgsSchema,
   scheduleTaskArgsSchema,
+  updateTaskArgsSchema,
 } from "../validations/crons";
 import { isAutomationSource } from "../validations/conversation";
 import {
@@ -428,20 +430,26 @@ const auditAsCreator = async (
 };
 
 /** An own-reply edit or delete, audited under the person whose turn asked
- * (ids only, never the message text). */
+ * (ids only, never the message text): the asking conversation, and the
+ * one changed when it is elsewhere. */
 const auditOwnReply = (
   identity: ToolIdentity,
-  context: ToolContext,
+  caller: { askerUserId: string | null; originConversationId: string | null },
   action: (typeof AUDIT_ACTIONS)["UPDATE" | "DELETE"],
-  metadata: { presenceId: string; messageId: string },
+  metadata: {
+    presenceId: string;
+    messageId: string;
+    conversationRef: string | null;
+  },
 ): Promise<void> =>
-  auditAsCreator(
-    identity,
-    context.createdByUserId,
-    action,
-    AUDIT_SERVICES.CHANNEL,
-    { ...metadata, conversationId: context.originConversationId ?? "" },
-  );
+  auditAsCreator(identity, caller.askerUserId, action, AUDIT_SERVICES.CHANNEL, {
+    presenceId: metadata.presenceId,
+    messageId: metadata.messageId,
+    conversationId: caller.originConversationId ?? "",
+    ...(metadata.conversationRef && {
+      conversationRef: metadata.conversationRef,
+    }),
+  });
 
 const toolError = (message: string): RunnerToolCallResponse => ({
   ok: false,
@@ -886,6 +894,7 @@ export const executeAttachmentUpload = async (
       caption: headers.caption ?? null,
       bytes,
       declaredSha256: headers.sha256,
+      ...(headers.purpose && { purpose: headers.purpose }),
     });
     if (!stored.ok) return { ok: false, error: stored.error };
 
@@ -911,6 +920,7 @@ export const executeAttachmentUpload = async (
           sizeBytes: String(stored.meta.sizeBytes),
           sha256: headers.sha256,
           direction: "outbound",
+          ...(headers.purpose === "send" && { staged: "true" }),
         },
       );
     } catch (auditError) {
@@ -1008,13 +1018,53 @@ export const executePlatformTool = async (
               name: cron.name,
               schedule: cron.schedule,
               timezone: cron.timezone,
+              ...(cron.gate && { gate: cron.gate }),
+              ...(cron.gateDescription && {
+                gateDescription: cron.gateDescription,
+              }),
               enabled: cron.enabled,
               ...(cron.disabledReason && {
                 disabledReason: cron.disabledReason,
               }),
               nextFireAt: cron.nextFireAt.toISOString(),
+              ...(cron.running && { running: true }),
               ...(cron.lastOutcome && { lastOutcome: cron.lastOutcome }),
             })),
+          },
+        };
+      }
+
+      case "update_task": {
+        const args = updateTaskArgsSchema.safeParse(request.args);
+        if (!args.success) {
+          return toolError(args.error.issues[0]?.message ?? "Invalid input");
+        }
+        const { cronId, ...update } = args.data;
+        const context = await resolveContext(identity, request);
+        const cron = await updateCronAsAgent(
+          identity.workspaceId,
+          identity.agentId,
+          cronId,
+          update,
+        );
+        await auditAsCreator(
+          identity,
+          context.createdByUserId,
+          AUDIT_ACTIONS.UPDATE,
+          AUDIT_SERVICES.CRON,
+          { cronId: cron.id, name: cron.name },
+        );
+        return {
+          ok: true,
+          result: {
+            cronId: cron.id,
+            name: cron.name,
+            schedule: cron.schedule,
+            ...(cron.gate && { gate: cron.gate }),
+            ...(cron.gateDescription && {
+              gateDescription: cron.gateDescription,
+            }),
+            nextFireAt: cron.nextFireAt.toISOString(),
           },
         };
       }
@@ -1485,6 +1535,10 @@ export const executePlatformTool = async (
             to: args.data.to,
             text: args.data.text,
             sendAs: args.data.sendAs,
+            ...(args.data.thread && { thread: args.data.thread }),
+            ...(args.data.attachmentIds && {
+              attachmentIds: args.data.attachmentIds,
+            }),
           }),
         );
       }
@@ -1570,16 +1624,31 @@ export const executePlatformTool = async (
       case "list_my_replies": {
         const args = listMyRepliesArgsSchema.safeParse(request.args ?? {});
         if (!args.success)
-          return toolError("list_my_replies takes no arguments");
+          return toolError(
+            "list_my_replies takes only an optional conversation",
+          );
         const removedNotice = await removedPresenceNotice(identity.agentId);
         if (removedNotice) return toolError(removedNotice);
-        const context = await resolveContext(identity, request, "provenance");
+        const caller = await actAsYouCaller(identity, request);
         const replies = await listOwnReplies({
           agentId: identity.agentId,
-          conversationId: context.originConversationId,
-          turnId: context.turnId,
+          conversationId: caller.originConversationId,
+          turnId: caller.originTurnId,
+          readerUserId: caller.readerUserId,
+          askerUserId: caller.askerUserId,
+          ...(args.data.conversation && {
+            conversation: args.data.conversation,
+          }),
         });
-        return { ok: true, result: { replies } };
+        return {
+          ok: true,
+          result: {
+            replies,
+            ...(replies.length === 0 && {
+              note: "None in the last 24 hours. Don't retry with another name; tell the person in one short line.",
+            }),
+          },
+        };
       }
 
       case "edit_my_reply": {
@@ -1589,16 +1658,22 @@ export const executePlatformTool = async (
         }
         const removedNotice = await removedPresenceNotice(identity.agentId);
         if (removedNotice) return toolError(removedNotice);
-        const context = await resolveContext(identity, request, "provenance");
-        const { presenceId } = await editOwnReply({
+        const caller = await actAsYouCaller(identity, request);
+        const change = await editOwnReply({
           agentId: identity.agentId,
-          conversationId: context.originConversationId,
-          turnId: context.turnId,
+          conversationId: caller.originConversationId,
+          turnId: caller.originTurnId,
+          readerUserId: caller.readerUserId,
+          askerUserId: caller.askerUserId,
           ...args.data,
         });
-        await auditOwnReply(identity, context, AUDIT_ACTIONS.UPDATE, {
-          presenceId,
+        // Sent as the person: the act-as-you seam audited (and maybe held)
+        // it; its answer goes back verbatim.
+        if (change.via === "you") return fromOutcome(change.outcome);
+        await auditOwnReply(identity, caller, AUDIT_ACTIONS.UPDATE, {
+          presenceId: change.presenceId,
           messageId: args.data.messageId,
+          conversationRef: change.conversationRef,
         });
         return {
           ok: true,
@@ -1613,16 +1688,22 @@ export const executePlatformTool = async (
         }
         const removedNotice = await removedPresenceNotice(identity.agentId);
         if (removedNotice) return toolError(removedNotice);
-        const context = await resolveContext(identity, request, "provenance");
-        const { presenceId } = await deleteOwnReply({
+        const caller = await actAsYouCaller(identity, request);
+        const change = await deleteOwnReply({
           agentId: identity.agentId,
-          conversationId: context.originConversationId,
-          turnId: context.turnId,
+          conversationId: caller.originConversationId,
+          turnId: caller.originTurnId,
+          readerUserId: caller.readerUserId,
+          askerUserId: caller.askerUserId,
           ...args.data,
         });
-        await auditOwnReply(identity, context, AUDIT_ACTIONS.DELETE, {
-          presenceId,
+        // Sent as the person: the act-as-you seam audited and held it; its
+        // answer goes back verbatim.
+        if (change.via === "you") return fromOutcome(change.outcome);
+        await auditOwnReply(identity, caller, AUDIT_ACTIONS.DELETE, {
+          presenceId: change.presenceId,
           messageId: args.data.messageId,
+          conversationRef: change.conversationRef,
         });
         return {
           ok: true,

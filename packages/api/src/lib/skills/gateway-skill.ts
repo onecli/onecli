@@ -9,7 +9,7 @@ description: >-
 compatibility: Only active when HTTPS_PROXY contains aoc_ (automatic when launched via \`onecli run\`)
 metadata:
   author: onecli
-  version: "0.10.0"
+  version: "0.11.0"
 ---`;
 
 const FRONTMATTER_BROAD = `---
@@ -23,7 +23,7 @@ description: >-
 compatibility: Only active when HTTPS_PROXY contains aoc_ (automatic when launched via \`onecli run\`)
 metadata:
   author: onecli
-  version: "0.10.0"
+  version: "0.11.0"
 ---`;
 
 const SKILL_BODY = `
@@ -305,6 +305,19 @@ First classify the gateway error code, not just its HTTP status:
   tell the user which permission is missing; it is added in the GitHub
   App's settings and then approved by whoever installed it (an organization
   owner, for an organization).
+- **Bitbucket Cloud**: the REST API is \`https://api.bitbucket.org/2.0/\`
+  (repositories under \`/repositories/<workspace>/<repo_slug>/...\`; find
+  the user's workspaces with \`GET /user/workspaces\`, then list one's
+  repositories with \`GET /repositories/<workspace>\`). Clone and push over
+  HTTPS as \`https://bitbucket.org/<workspace>/<repo>.git\` with no
+  credentials in the URL: the gateway signs git in. A 403 "Your credentials
+  lack one or more required privilege scopes" means the Bitbucket OAuth
+  consumer was not granted that scope (creating a repository takes
+  \`repository:admin\` and deleting one \`repository:delete\`, which OneCLI
+  does not request). Do not retry: tell the user which scope is missing; it
+  is added on the consumer in the Bitbucket workspace settings, and the
+  account is then reconnected. Bitbucket removed its issue tracker: track
+  work in Jira instead.
 - \`access_restricted\` means OneCLI already has a credential for this
   service, but this agent is not switched on for it. Do not retry, and do not
   ask the user to connect the service again. Show the user the \`manage_url\`

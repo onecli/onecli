@@ -262,6 +262,8 @@ export const queryKeys = {
     all: () => ["crons", ...scope()] as const,
     agent: (agentId: string) =>
       [...queryKeys.crons.all(), "agent", agentId] as const,
+    parse: (agentId: string, text: string, timezone: string) =>
+      [...queryKeys.crons.all(), "parse", agentId, timezone, text] as const,
   },
   webhooks: {
     all: () => ["webhooks", ...scope()] as const,
@@ -318,6 +320,8 @@ export const queryKeys = {
     all: () => ["runs", ...scope()] as const,
     list: (filter: object) =>
       [...queryKeys.runs.all(), "list", filter] as const,
+    newest: (agentId: string, cronId: string) =>
+      [...queryKeys.runs.all(), "newest", agentId, cronId] as const,
     detail: (agentId: string, turnId: string) =>
       [...queryKeys.runs.all(), "detail", agentId, turnId] as const,
   },

@@ -1335,19 +1335,28 @@ model TurnEvent {
 // (source "cron", externalRef = this row's id — that unique pair is what
 // makes one persistent run-conversation per cron race-safe for free).
 model AgentCron {
-  id       String @id @default(uuid())
-  agentId  String @map("agent_id")
+  id              String  @id @default(uuid())
+  agentId         String  @map("agent_id")
   // Short label; shows in the dashboard, the delivery header, and the
   // context-bridge note, so the user can tell schedules apart.
-  name     String
+  name            String
   // The stored run instruction, fired verbatim (behind the scheduled-run
   // header) as the turn message.
-  prompt   String
+  prompt          String
   // 5-field cron expression, read in `timezone` (an IANA zone name). The
   // expression is validated by the same library that computes occurrences
   // (croner), so a row that exists is always advanceable.
-  schedule String
-  timezone String
+  schedule        String
+  timezone        String
+  // Optional shell command the sandbox runs BEFORE the agent on each fire
+  // (no model, no tokens). Empty stdout or {"wakeAgent": false} ends the run
+  // quietly; anything else wakes the agent with the output; a nonzero exit
+  // fails the run. Null = every fire runs the agent.
+  gate            String?
+  // The gate in plain words, written by the agent alongside it ("a new
+  // board deck appears in Dropbox"). It is what a person sees; the command
+  // is the agent's implementation detail.
+  gateDescription String? @map("gate_description")
 
   // The pause switch (user-controlled). Auto-disable ALSO clears this and
   // records why in disabledReason — "authorization" (the creator lost workspace
@@ -2408,6 +2417,14 @@ model ChannelSentMessage {
   // Null when no signed-in person did (a guest, the agent's own initiative,
   // an automation run). SetNull: a deleted user's name never lingers here.
   originUserId         String?  @map("origin_user_id")
+  // The posted message's own provider id (Slack: its ts), so the agent can
+  // later edit or delete exactly what it sent. Null on rows from before it
+  // was recorded.
+  messageRef           String?  @map("message_ref")
+  // Names of the files attached to this send (send_message `files`), so the
+  // agent's "what you posted here" note can say what was shared. Names only,
+  // never contents. Empty for text-only sends and older rows.
+  fileNames            String[] @default([]) @map("file_names")
   createdAt            DateTime @default(now()) @map("created_at")
 
   agentChannel       AgentChannel  @relation(fields: [agentChannelId], references: [id], onDelete: Cascade)

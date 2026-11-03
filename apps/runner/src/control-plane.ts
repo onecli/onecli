@@ -126,6 +126,7 @@ export interface ControlPlaneClient {
       mimeType: string;
       sha256: string;
       caption?: string;
+      purpose?: "send";
       bytes: Buffer;
     },
   ): Promise<RunnerAttachmentUploadResponse>;
@@ -409,6 +410,10 @@ export const createControlPlaneClient = ({
         [RUNNER_ATTACHMENT_HEADERS.sha256]: file.sha256,
         ...(file.caption !== undefined && {
           [RUNNER_ATTACHMENT_HEADERS.caption]: encodeURIComponent(file.caption),
+        }),
+        // A staged file (send_message `files`) never attaches to the reply.
+        ...(file.purpose !== undefined && {
+          [RUNNER_ATTACHMENT_HEADERS.purpose]: file.purpose,
         }),
       };
       // Binary, so not through `call`. 60s: 25 MB over a slow link, bounded

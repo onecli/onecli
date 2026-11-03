@@ -754,6 +754,32 @@ const SHARE_TS_TRIES = 15;
 const SHARE_TS_DELAY_MS = 300;
 
 /**
+ * The ts of the message a completed share posted into `channel`: Slack's
+ * upload never answers with it, so it is read back from the file's shares
+ * (`files.info`, `files:read`), polling briefly while the share settles.
+ * Throws when it cannot be read; the share IS posted either way.
+ */
+const sharedMessageTs = async (
+  botToken: string,
+  fileId: string,
+  channel: string,
+): Promise<string> => {
+  for (let i = 0; i < SHARE_TS_TRIES; i++) {
+    const info = await slackCall(
+      "files.info",
+      { token: botToken, form: { file: fileId }, retry5xx: true },
+      fileSharesResponse,
+    );
+    const shares = info.file.shares;
+    const ts =
+      shares?.public?.[channel]?.[0]?.ts ?? shares?.private?.[channel]?.[0]?.ts;
+    if (ts) return ts;
+    await new Promise((r) => setTimeout(r, SHARE_TS_DELAY_MS));
+  }
+  throw new Error("the share never appeared on the file");
+};
+
+/**
  * The share POSTED its message, but Slack never said which one (no
  * `files:read` to read it back, or the share never showed up on the file).
  * The card is in the channel: the caller must NOT post it again.
@@ -834,23 +860,65 @@ export const shareFileWithBlocks = async (
   // From here the card is in the channel: every failure is "posted, ts
   // unknown", never a reason to post again.
   try {
-    for (let i = 0; i < SHARE_TS_TRIES; i++) {
-      const info = await slackCall(
-        "files.info",
-        { token: botToken, form: { file: ticket.file_id }, retry5xx: true },
-        fileSharesResponse,
-      );
-      const shares = info.file.shares;
-      const ts =
-        shares?.public?.[input.channel]?.[0]?.ts ??
-        shares?.private?.[input.channel]?.[0]?.ts;
-      if (ts) return { channel: input.channel, ts };
-      await new Promise((r) => setTimeout(r, SHARE_TS_DELAY_MS));
-    }
-    throw new Error("the share never appeared on the file");
+    return {
+      channel: input.channel,
+      ts: await sharedMessageTs(botToken, ticket.file_id, input.channel),
+    };
   } catch (err) {
     throw new SharedMessageUnknownError(err);
   }
+};
+
+/**
+ * Slack refusals that mean "this workspace/install cannot take the file",
+ * today and on retry. Slack's own codes, verbatim
+ * (files.getUploadURLExternal / files.completeUploadExternal docs).
+ * `invalid_arguments` is here because the client maps an empty file to it.
+ * Shared by the reply mirror (degrade to links) and send_message's files
+ * (a clear refusal, nothing posted).
+ */
+const UPLOAD_DEGRADE_CODES: ReadonlySet<string> = new Set([
+  "missing_scope",
+  "file_uploads_disabled",
+  "file_uploads_except_images_disabled",
+  "file_type_not_allowed",
+  "file_upload_size_restricted",
+  "storage_limit_reached",
+  "user_is_external_guest",
+  "not_allowed_token_type",
+  "invalid_arguments",
+]);
+export const isSlackUploadDegrade = (code: string): boolean =>
+  UPLOAD_DEGRADE_CODES.has(code);
+
+/**
+ * ONE message carrying text AND files (send_message with `files`): every
+ * file is uploaded, then shared together with the text as the share's
+ * `initial_comment`, in a channel or thread (`threadTs` must be the thread's
+ * ROOT, Slack's rule). The posted message's ts is read back like
+ * `shareFileWithBlocks` does; null when it cannot be read (the message IS
+ * posted: the caller must never post again).
+ */
+export const shareFilesWithText = async (
+  botToken: string,
+  input: {
+    channel: string;
+    threadTs?: string;
+    text: string;
+    files: readonly SlackUploadFile[];
+  },
+): Promise<{ channel: string; ts: string | null }> => {
+  const { fileIds } = await uploadFiles(botToken, {
+    channel: input.channel,
+    ...(input.threadTs && { threadTs: input.threadTs }),
+    initialComment: input.text,
+    files: input.files,
+  });
+  const first = fileIds[0];
+  const ts = first
+    ? await sharedMessageTs(botToken, first, input.channel).catch(() => null)
+    : null;
+  return { channel: input.channel, ts };
 };
 
 /**
@@ -1382,6 +1450,51 @@ export const conversationsReplies = (
     },
     historyResponse,
   );
+
+/**
+ * One message by its ts, at the top level or inside a thread, or null when
+ * the conversation has no such message. `conversations.replies` takes a
+ * thread's parent or any reply as `ts` (an unthreaded message comes back
+ * alone); `limit: 2` leaves room for the parent, which leads a thread page
+ * whatever the bounds say.
+ */
+export const messageByTs = async (
+  token: string,
+  channel: string,
+  ts: string,
+): Promise<SlackHistoryMessage | null> => {
+  try {
+    const page = await conversationsReplies(token, {
+      channel,
+      ts,
+      oldest: ts,
+      latest: ts,
+      inclusive: true,
+      limit: 2,
+    });
+    return page.messages.find((m) => m.ts === ts) ?? null;
+  } catch (err) {
+    if (err instanceof SlackApiError && err.code === "thread_not_found") {
+      return null;
+    }
+    throw err;
+  }
+};
+
+/**
+ * The thread a message belongs to, by its root's ts: the message's own ts
+ * when it is (or could start) a thread, its parent's when it is a reply.
+ * Slack asks a reply to name the parent, never another reply
+ * (`chat.postMessage` `thread_ts`). Null = no such message in `channel`.
+ */
+export const threadRootOf = async (
+  token: string,
+  channel: string,
+  ts: string,
+): Promise<string | null> => {
+  const message = await messageByTs(token, channel, ts);
+  return message ? (message.thread_ts ?? message.ts) : null;
+};
 
 /**
  * Revoke a token at Slack (`auth.revoke`) - the disconnect's provider half,

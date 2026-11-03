@@ -10,6 +10,8 @@ import {
   oauthUserAccess,
   postMessage,
   SlackApiError,
+  messageByTs,
+  threadRootOf,
   userConversationInfo,
   usersConversations,
   usersInfo,
@@ -58,6 +60,7 @@ import { parseSlackPresenceCredentials } from "../../services/channels/providers
 import {
   READ_MAX_LIMIT,
   READ_MAX_LOOKBACK_HOURS,
+  type ThreadRef,
 } from "../../validations/recipients";
 import { assertCanUseGranularAccess } from "../services/quota-service";
 import { bumpHomeForAgent } from "../../services/home-sync-service";
@@ -1162,6 +1165,7 @@ const heldSendPayload = z.object({
   granterUserId: z.string().min(1),
   granterExternalUserId: z.string().min(1),
   text: z.string().min(1).max(4000),
+  threadTs: z.string().optional(),
 });
 
 /** The one person who decides a held read/send: the granter (their Slack
@@ -1276,11 +1280,18 @@ const accessSummary = (agentName: string, p: SlackAccessPayload): string => {
 
 /** What the agent tells the person the card is for, addressed to them (by
  * name: the agent says "you (<Name>)", never someone else). */
-const accessNote = (reason: SlackAccessReason, name: string | null): string => {
+const accessNote = (
+  reason: SlackAccessReason,
+  name: string | null,
+  anchored: boolean,
+): string => {
   const you = name ? `you (${name})` : "you";
+  const where = anchored ? "in this chat" : "in your own DM with me";
   return CONNECT_REASONS.has(reason)
-    ? `A card in this chat asks ${you} to connect your Slack. Tell the person you are talking to, in one short line, that the card is for them ("you"), never for the recipient or anyone else; ask again after they connect.`
-    : `A card in this chat asks ${you} to allow it; once allowed, the result arrives as a notice in this conversation. Tell the person you are talking to so in one short line, addressing them as "you", never as the recipient.`;
+    ? `A card ${where} asks ${you} to connect your Slack. Tell the person you are talking to, in one short line, that the card is for them ("you"), never for the recipient or anyone else; ask again after they connect.`
+    : anchored
+      ? `A card in this chat asks ${you} to allow it; once allowed, the result arrives as a notice in this conversation. Tell the person you are talking to so in one short line, addressing them as "you", never as the recipient.`
+      : `Nothing has changed yet: a card in your own DM with me asks ${you} to allow it, and the result won't arrive here. Tell the person so in one short line, addressing them as "you", never as the recipient.`;
 };
 
 /** Open (or reuse) the person's access request and answer needs_access.
@@ -1300,6 +1311,7 @@ const requestAccess = async (
       x.reason,
       normalize(x.conversationQuery ?? ""),
       x.text ?? "",
+      x.thread?.ts ?? "",
     ].join("|");
   const pending = await db.actionApproval.findMany({
     where: {
@@ -1352,6 +1364,7 @@ const requestAccess = async (
       note: accessNote(
         payload.reason,
         await userDisplayName(payload.readerUserId),
+        origin.conversationId !== null,
       ),
     },
   };
@@ -1366,7 +1379,7 @@ const notSharedRequest = async (
   reader: { userId: string; externalUserId: string; mine: Mine },
   kind: "read" | "write",
   asked: Asked,
-  text?: string,
+  write?: { text: string; thread?: ThreadRef },
 ) => {
   let found: Picked<MyConversation>;
   try {
@@ -1391,7 +1404,8 @@ const notSharedRequest = async (
     conversationQuery: asked.name,
     conversationRef: asked.ref ?? found.item.ref,
     conversationLabel: found.item.name,
-    ...(text && { text }),
+    ...(write && { text: write.text }),
+    ...(write?.thread && { thread: write.thread }),
   });
 };
 
@@ -1436,6 +1450,7 @@ const settleConnectRequests = async (
         conversation: p.conversationQuery,
         ...(p.conversationRef && { conversationRef: p.conversationRef }),
         text: p.text,
+        ...(p.thread && { thread: p.thread }),
         originConversationId: origin?.conversationId ?? null,
         originTurnId: origin?.originTurnId ?? null,
         ...(p.consented && { consented: true }),
@@ -1826,12 +1841,37 @@ const renderAsPersonText = async (
   return markdownToMrkdwn(text, { mentions });
 };
 
-/** Post with the granter's token. Throws a model-readable Error. */
+/**
+ * The thread's root in `channel`, with the granter's token: null when the
+ * link names another conversation, or the id is not a message there.
+ * Throws a model-readable Error on a Slack refusal (nothing is sent).
+ */
+const threadRootAsGranter = async (
+  accessToken: string,
+  channel: string,
+  thread: ThreadRef,
+): Promise<string | null> => {
+  if (thread.channel && thread.channel !== channel) return null;
+  try {
+    return await threadRootOf(accessToken, channel, thread.ts);
+  } catch (err) {
+    throw new Error(
+      `Couldn't look up that thread (Slack: ${readFailureCode(err)}).`,
+    );
+  }
+};
+
+/**
+ * Post with the granter's token, into `threadTs`'s thread when given (a
+ * root already resolved in this conversation). Throws a model-readable
+ * Error.
+ */
 const postAsGranter = async (
   grant: ToolGrant,
   agentId: string,
   text: string,
   conversationId: string | null = null,
+  threadTs?: string,
 ) => {
   const label = grantName(grant);
   const credential = await decryptUserCredential(grant.userToken.credentials);
@@ -1845,6 +1885,7 @@ const postAsGranter = async (
     ({ ts } = await postMessage(credential.accessToken, {
       channel: grant.externalRef,
       text: await renderAsPersonText(agentId, text, conversationId),
+      ...(threadTs && { threadTs }),
     }));
   } catch (err) {
     if (await dropDeadToken({ id: grant.userToken.id, agentId }, err)) {
@@ -1995,6 +2036,7 @@ export const sendAsUser = async (input: SendInput): Promise<SendOutcome> => {
       conversationRef: asked.ref ?? conv?.ref ?? null,
       conversationLabel: conv?.label ?? null,
       text: input.text,
+      ...(input.thread && { thread: input.thread }),
       ...(input.consented && { consented: true }),
     });
   if (!reader?.mine) return access("not_connected", null);
@@ -2033,7 +2075,7 @@ export const sendAsUser = async (input: SendInput): Promise<SendOutcome> => {
       },
       "write",
       asked,
-      input.text,
+      { text: input.text, ...(input.thread && { thread: input.thread }) },
     );
   }
   if (modeOf(grant.writeMode) === "never") {
@@ -2043,6 +2085,32 @@ export const sendAsUser = async (input: SendInput): Promise<SendOutcome> => {
     });
   }
   const label = grantName(grant);
+  // The thread must be in this very conversation: a link names its channel,
+  // and any id is looked up there with their token, which also turns a
+  // reply's id into its thread's root (Slack's `thread_ts` rule).
+  let threadTs: string | undefined;
+  if (input.thread) {
+    let root: string | null;
+    try {
+      root = await threadRootAsGranter(
+        reader.mine.accessToken,
+        grant.externalRef,
+        input.thread,
+      );
+    } catch (err) {
+      return {
+        ok: false,
+        error: `${err instanceof Error ? err.message : String(err)} Nothing was sent.`,
+      };
+    }
+    if (!root) {
+      return {
+        ok: false,
+        error: `That thread isn't in ${label}. Nothing was sent.`,
+      };
+    }
+    threadTs = root;
+  }
   if (modeOf(grant.writeMode) === "ask") {
     const held = await requestActionApproval({
       agentId: input.agentId,
@@ -2054,6 +2122,7 @@ export const sendAsUser = async (input: SendInput): Promise<SendOutcome> => {
         granterUserId: grant.userToken.userId,
         granterExternalUserId: grant.userToken.externalUserId,
         text: input.text,
+        ...(threadTs && { threadTs }),
       },
       summary: `Send to ${label} as ${granterName(grant)}: "${cleanLabel(input.text, 300)}"`,
     });
@@ -2074,6 +2143,7 @@ export const sendAsUser = async (input: SendInput): Promise<SendOutcome> => {
       input.agentId,
       input.text,
       input.originConversationId,
+      threadTs,
     );
   } catch (err) {
     return {
@@ -2131,42 +2201,62 @@ const auditOwnMessage = async (
   });
 };
 
-/** The record of a message THIS agent sent as THIS person in THIS
- * conversation, still inside the window. Null = not ours to touch. */
-const findOwnMessage = (
+/** The send_as_me ledger rows of this agent, as this reader, in this
+ * conversation, inside the edit window (optionally one message). */
+const ownSendsWhere = (
   agentId: string,
   grant: ToolGrant,
-  messageTs: string,
-  now: Date = new Date(),
-) =>
+  messageTs?: string,
+) => ({
+  agentId,
+  grantId: grant.id,
+  userTokenId: grant.userToken.id,
+  channelRef: grant.externalRef,
+  createdAt: { gte: new Date(Date.now() - OWN_MESSAGE_WINDOW_MS) },
+  ...(messageTs && { messageTs }),
+});
+
+/** The record of a message THIS agent sent as THIS person in THIS
+ * conversation, still inside the window. Null = not ours to touch. */
+const findOwnMessage = (agentId: string, grant: ToolGrant, messageTs: string) =>
   db.agentSentAsUser.findFirst({
-    where: {
-      agentId,
-      grantId: grant.id,
-      userTokenId: grant.userToken.id,
-      channelRef: grant.externalRef,
-      messageTs,
-      createdAt: { gte: new Date(now.getTime() - OWN_MESSAGE_WINDOW_MS) },
-    },
+    where: ownSendsWhere(agentId, grant, messageTs),
     select: { id: true },
   });
 
+/** Where a held edit/delete is decided and its outcome lands: the person's
+ * own private chat, or (asked from a shared place) only their DM card,
+ * anchored to no conversation so nothing about it reaches the shared one. */
+type OwnMessageOrigin = {
+  conversationId: string | null;
+  turnId: string | null;
+  shared: boolean;
+};
+
 /**
- * The shared fence for edit/delete: a verified reader, their OWN grant for
- * the named conversation, and a recorded send_as_me message by this agent
- * with their token there in the last 24h. Anything else gets the same
- * refusal (the message is not confirmed to exist).
+ * The shared fence for edit/delete: the person's OWN grant for the named
+ * conversation and a recorded send_as_me message by this agent with their
+ * token there in the last 24h. The person is the verified reader of a
+ * private turn, or, in a shared place, whoever typed the turn (their
+ * change then always waits on their own DM card). Anything else gets the
+ * same refusal (the message is not confirmed to exist).
  */
 const resolveOwnMessage = async (
   input: OwnMessageInput,
   op: "edit" | "delete",
 ): Promise<
   | { kind: "done"; outcome: SendOutcome }
-  | { kind: "ok"; grant: ToolGrant; credential: { accessToken: string } }
+  | {
+      kind: "ok";
+      grant: ToolGrant;
+      credential: { accessToken: string };
+      origin: OwnMessageOrigin;
+    }
 > => {
   const nothing =
     op === "edit" ? "Nothing was changed." : "Nothing was deleted.";
-  if (input.readerUserId === null) {
+  const readerUserId = input.readerUserId ?? input.askerUserId ?? null;
+  if (readerUserId === null) {
     return {
       kind: "done",
       outcome: {
@@ -2175,6 +2265,7 @@ const resolveOwnMessage = async (
       },
     };
   }
+  const shared = input.readerUserId === null;
   const presence = await toolPresence(input.agentId);
   if (!presence) {
     return {
@@ -2186,7 +2277,6 @@ const resolveOwnMessage = async (
     kind: "done" as const,
     outcome: { ok: false as const, error: NOT_MY_MESSAGE },
   };
-  const readerUserId = input.readerUserId;
   const reader = await readerToken(presence, input.agentId, readerUserId);
   if (!reader?.mine) return refuse;
   const mine = await db.agentReadGrant.findMany({
@@ -2195,7 +2285,11 @@ const resolveOwnMessage = async (
     },
     select: toolGrantSelect,
   });
-  const asked: Asked = { name: input.conversation.trim(), exact: true };
+  const asked: Asked = {
+    name: input.conversation.trim(),
+    ...(input.conversationRef && { ref: input.conversationRef }),
+    exact: true,
+  };
   const grant = matchGrant(mine, asked);
   if (
     !grant ||
@@ -2203,10 +2297,13 @@ const resolveOwnMessage = async (
   ) {
     return refuse;
   }
-  const origin = {
-    conversationId: input.originConversationId,
-    turnId: input.originTurnId,
-  };
+  const origin: OwnMessageOrigin = shared
+    ? { conversationId: null, turnId: null, shared }
+    : {
+        conversationId: input.originConversationId,
+        turnId: input.originTurnId,
+        shared,
+      };
   const access = (reason: SlackAccessReason) =>
     requestAccess(presence, input.agentId, origin, {
       readerUserId,
@@ -2228,7 +2325,22 @@ const resolveOwnMessage = async (
     kind: "ok",
     grant,
     credential: { accessToken: reader.mine.accessToken },
+    origin,
   };
+};
+
+/** The model's line for a held edit/delete: where the card is, and where
+ * (if anywhere) the decision arrives. */
+const heldOwnNote = (
+  grant: ToolGrant,
+  op: "edit" | "delete",
+  origin: OwnMessageOrigin,
+): string => {
+  const lead =
+    op === "delete" ? "Deleting always needs your approval: a card" : "A card";
+  return origin.shared
+    ? `Nothing has changed yet. ${lead} in your own DM with me asks you (${granterName(grant)}) to confirm it; the decision won't arrive here. Address the person as "you", never "them". Say so in one short line.`
+    : `${lead} in this chat asks you (${granterName(grant)}) to approve it; the decision arrives as a notice in this conversation. Address the person as "you", never "them". If you mention it, one short line.`;
 };
 
 /** Run a Slack write with the granter's token; model-readable errors. */
@@ -2287,26 +2399,21 @@ const performDelete = async (
   });
 };
 
-/** The message's current text (for the delete card), with the granter's
- * token. Best effort: null when it can't be read. */
+/** The message's current text, whole and decoded, with the granter's
+ * token: at the top level or inside a thread. Best effort: null when it
+ * can't be read (deleted, or a Slack refusal). */
 const messageTextOf = async (
   accessToken: string,
   channel: string,
   ts: string,
 ): Promise<string | null> => {
   try {
-    const page = await conversationsHistory(accessToken, {
-      channel,
-      latest: ts,
-      inclusive: true,
-      limit: 1,
-    });
-    const m = page.messages.find((x) => x.ts === ts);
-    return m?.text
-      ? cleanLabel(await decodeSlackTokens(m.text, async () => null), 300)
+    const message = await messageByTs(accessToken, channel, ts);
+    return message?.text
+      ? await decodeSlackTokens(message.text, async () => null)
       : null;
   } catch (err) {
-    log.warn({ err, channel }, "reading a message to delete failed");
+    log.warn({ err, channel }, "reading a message sent as a person failed");
     return null;
   }
 };
@@ -2323,20 +2430,21 @@ const heldEditPayload = heldOwnPayload.extend({
 
 /**
  * The `edit_my_message` tool's body: allow edits now, ask holds for the
- * person, never answers with an access card.
+ * person, and so does any edit asked from a shared place (the person
+ * confirms in their own DM).
  */
 export const editAsUser = async (
   input: OwnMessageInput & { text: string },
 ): Promise<SendOutcome> => {
   const found = await resolveOwnMessage(input, "edit");
   if (found.kind === "done") return found.outcome;
-  const { grant } = found;
+  const { grant, origin } = found;
   const label = grantName(grant);
-  if (modeOf(grant.writeMode) === "ask") {
+  if (origin.shared || modeOf(grant.writeMode) === "ask") {
     const held = await requestActionApproval({
       agentId: input.agentId,
-      conversationId: input.originConversationId,
-      originTurnId: input.originTurnId,
+      conversationId: origin.conversationId,
+      originTurnId: origin.turnId,
       action: SLACK_EDIT_ACTION,
       payload: {
         grantId: grant.id,
@@ -2361,7 +2469,7 @@ export const editAsUser = async (
         status: "held",
         conversation: label,
         messageId: input.messageId,
-        note: `A card in this chat asks you (${granterName(grant)}) to approve it; the decision arrives as a notice in this conversation. Address the person as "you", never "them". If you mention it, one short line.`,
+        note: heldOwnNote(grant, "edit", origin),
       },
     };
   }
@@ -2371,7 +2479,7 @@ export const editAsUser = async (
       input.agentId,
       input.messageId,
       input.text,
-      input.originConversationId,
+      origin.conversationId,
     );
   } catch (err) {
     return {
@@ -2391,6 +2499,110 @@ export const editAsUser = async (
   };
 };
 
+/** The reader's grant for one recipient (a channel id, or the person a DM
+ * is with), on this agent's licensed presence, or null. */
+const ownGrantFor = async (
+  agentId: string,
+  readerUserId: string,
+  recipientRef: string,
+) => {
+  const presence = await toolPresence(agentId);
+  if (!presence) return null;
+  const mine = await db.agentReadGrant.findMany({
+    where: {
+      userToken: { agentChannelId: presence.id, userId: readerUserId },
+    },
+    select: toolGrantSelect,
+  });
+  const grant = matchGrant(mine, {
+    name: recipientRef,
+    ref: recipientRef,
+    exact: true,
+  });
+  return grant ? { presence, grant } : null;
+};
+
+/**
+ * The messages this agent sent AS the reader in the last 24h to one
+ * recipient (`list_my_replies`' "as you" half): the send_as_me ledger,
+ * fenced to the reader's OWN grant for that conversation, each read back
+ * whole with their token, at the top level or inside a thread (a deleted
+ * message drops out). Never throws: a missing token, license, or Slack
+ * failure lists nothing.
+ */
+export const listOwnAsUser = async (input: {
+  agentId: string;
+  readerUserId: string | null;
+  recipientRef: string;
+}): Promise<{ messageId: string; text: string; sentAt: number }[]> => {
+  if (!input.readerUserId) return [];
+  try {
+    const own = await ownGrantFor(
+      input.agentId,
+      input.readerUserId,
+      input.recipientRef,
+    );
+    if (!own) return [];
+    const reader = await readerToken(
+      own.presence,
+      input.agentId,
+      input.readerUserId,
+    );
+    if (!reader?.mine) return [];
+    const rows = await db.agentSentAsUser.findMany({
+      where: ownSendsWhere(input.agentId, own.grant),
+      orderBy: { createdAt: "desc" },
+      take: 20,
+      select: { messageTs: true, createdAt: true },
+    });
+    const out: { messageId: string; text: string; sentAt: number }[] = [];
+    for (const row of rows) {
+      const text = await messageTextOf(
+        reader.mine.accessToken,
+        own.grant.externalRef,
+        row.messageTs,
+      );
+      if (text === null) continue;
+      out.push({
+        messageId: row.messageTs,
+        text,
+        sentAt: row.createdAt.getTime(),
+      });
+    }
+    return out;
+  } catch (err) {
+    log.warn({ err, agentId: input.agentId }, "listing own as-user failed");
+    return [];
+  }
+};
+
+/** Whether this agent sent `messageId` AS the reader to that recipient in
+ * the last 24h: one ledger read, no Slack call. Never throws. */
+export const isOwnAsUser = async (input: {
+  agentId: string;
+  readerUserId: string | null;
+  recipientRef: string;
+  messageId: string;
+}): Promise<boolean> => {
+  if (!input.readerUserId) return false;
+  try {
+    const own = await ownGrantFor(
+      input.agentId,
+      input.readerUserId,
+      input.recipientRef,
+    );
+    if (!own) return false;
+    return (
+      (await db.agentSentAsUser.count({
+        where: ownSendsWhere(input.agentId, own.grant, input.messageId),
+      })) > 0
+    );
+  } catch (err) {
+    log.warn({ err, agentId: input.agentId }, "checking own as-user failed");
+    return false;
+  }
+};
+
 /**
  * The `delete_my_message` tool's body: ALWAYS held for the person (even
  * with writing on allow); the card shows what would be deleted.
@@ -2400,7 +2612,7 @@ export const deleteAsUser = async (
 ): Promise<SendOutcome> => {
   const found = await resolveOwnMessage(input, "delete");
   if (found.kind === "done") return found.outcome;
-  const { grant } = found;
+  const { grant, origin } = found;
   const label = grantName(grant);
   const current = await messageTextOf(
     found.credential.accessToken,
@@ -2409,8 +2621,8 @@ export const deleteAsUser = async (
   );
   const held = await requestActionApproval({
     agentId: input.agentId,
-    conversationId: input.originConversationId,
-    originTurnId: input.originTurnId,
+    conversationId: origin.conversationId,
+    originTurnId: origin.turnId,
     action: SLACK_DELETE_ACTION,
     payload: {
       grantId: grant.id,
@@ -2419,7 +2631,7 @@ export const deleteAsUser = async (
       messageTs: input.messageId,
     },
     summary: current
-      ? `Delete your message in ${label}: "${current}"`
+      ? `Delete your message in ${label}: "${cleanLabel(current, 300)}"`
       : `Delete your message in ${label}`,
   });
   await auditOwnMessage(
@@ -2436,7 +2648,7 @@ export const deleteAsUser = async (
       status: "held",
       conversation: label,
       messageId: input.messageId,
-      note: `Deleting always needs your approval: a card in this chat asks you (${granterName(grant)}). Address the person as "you", never "them". The decision arrives as a notice in this conversation. If you mention it, one short line.`,
+      note: heldOwnNote(grant, "delete", origin),
     },
   };
 };
@@ -2521,7 +2733,8 @@ registerActionHandler(
 
 /** A held send/edit/delete is about one message: the same person, the
  * same conversation, and the same message (an edit/delete's ts, or a
- * send's exact text). */
+ * send's exact text and thread; a top-level send keeps the key it always
+ * had). */
 const heldMessageKey = (payload: unknown) => {
   const p = z
     .object({
@@ -2529,13 +2742,15 @@ const heldMessageKey = (payload: unknown) => {
       grantId: z.string(),
       messageTs: z.string().optional(),
       text: z.string().optional(),
+      threadTs: z.string().optional(),
     })
     .safeParse(payload);
   return p.success
     ? [
         p.data.granterUserId,
         p.data.grantId,
-        p.data.messageTs ?? `text:${p.data.text ?? ""}`,
+        p.data.messageTs ??
+          `text:${p.data.text ?? ""}${p.data.threadTs ? `@${p.data.threadTs}` : ""}`,
       ].join("|")
     : null;
 };
@@ -2553,6 +2768,7 @@ registerActionHandler(
       approval.agentId,
       payload.text,
       approval.conversationId,
+      payload.threadTs,
     );
     await auditSend(grant, approval.agentId, "sent", approval.id);
     return `Sent to ${grantName(grant)}.`;
@@ -2667,11 +2883,24 @@ registerActionHandler(
       );
     }
     if (!p.text) return `Writing in ${grantName(grant)} is now allowed.`;
+    // The frozen thread, re-resolved in the conversation now granted: a
+    // root that is gone fails the approval, never a top-level post.
+    const threadTs = p.thread
+      ? await threadRootAsGranter(
+          reader.mine.accessToken,
+          grant.externalRef,
+          p.thread,
+        )
+      : undefined;
+    if (threadTs === null) {
+      throw new Error(`That thread isn't in ${grantName(grant)} anymore.`);
+    }
     await postAsGranter(
       grant,
       approval.agentId,
       p.text,
       approval.conversationId,
+      threadTs,
     );
     await auditSend(grant, approval.agentId, "sent", approval.id);
     return {

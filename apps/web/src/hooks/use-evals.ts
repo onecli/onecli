@@ -25,6 +25,14 @@ export const useEvals = (agentId: string) =>
   useQuery({
     queryKey: queryKeys.evals.agent(agentId),
     queryFn: () => evals.view(agentId),
+    // While the newest run is going, keep its status fresh (the Schedules
+    // row shows it), then stop.
+    refetchInterval: (query) => {
+      const latest = query.state.data?.runs[0];
+      return latest && isActiveEvalRun(latest.status)
+        ? ACTIVE_RUN_POLL_MS
+        : false;
+    },
   });
 
 /**

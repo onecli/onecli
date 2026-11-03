@@ -418,6 +418,19 @@ describe("file.part + file.result (send_file wire)", () => {
     ).toBe(false);
   });
 
+  it("carries an optional purpose (send = staged), and refuses any other", () => {
+    expect(
+      supervisorMessageSchema.parse({ ...part, purpose: "send" }),
+    ).toMatchObject({
+      purpose: "send",
+    });
+    for (const purpose of ["reply", "elsewhere"]) {
+      expect(
+        supervisorMessageSchema.safeParse({ ...part, purpose }).success,
+      ).toBe(false);
+    }
+  });
+
   it("a legal chunk frame stays under the runner WS's 256KB ceiling", () => {
     const maxFrame = {
       ...part,

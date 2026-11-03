@@ -446,6 +446,83 @@ describe.skipIf(!PROOF_URL)("agent webhooks", () => {
     expect(text).not.toContain("no detail was reported");
     expect(text).not.toContain("invalid_request_error");
   });
+
+  it("[no reply] delivers nothing on a done run, but a FAILED run with the same text still reports", async () => {
+    const closeWith = async (status: "done" | "failed") => {
+      const { agentId, originId } = await seedAgent();
+      const hook = await create(agentId, originId);
+      await hooks.receiveWebhook(
+        tokenOf(hook.url),
+        meetingEvent,
+        "application/json",
+      );
+      const conversation = await db.conversation.findFirstOrThrow({
+        where: { agentId, source: "webhook" },
+        select: { id: true },
+      });
+      const turn = await db.turn.findFirstOrThrow({
+        where: { conversationId: conversation.id },
+        select: { id: true },
+      });
+      await db.turnEvent.create({
+        data: {
+          conversationId: conversation.id,
+          turnId: turn.id,
+          seq: 1,
+          type: "text",
+          payload: { type: "text", text: "**[No Reply]**" },
+        },
+      });
+      const runnerId = `${P}runner-quiet-${status}`;
+      await db.runner.create({
+        data: {
+          id: runnerId,
+          name: "quiet",
+          token: `rnr_${P}quiet-${status}`,
+          capabilities: {},
+        },
+      });
+      const sandbox = await db.sandbox.create({
+        data: { agentId, runnerId, status: "running" },
+        select: { id: true },
+      });
+      await db.turn.update({
+        where: { id: turn.id },
+        data: { status: "running", startedAt: new Date() },
+      });
+      try {
+        await turns.finishTurn({
+          reporter: { runnerId, sandboxId: sandbox.id },
+          conversationId: conversation.id,
+          turnId: turn.id,
+          status,
+        });
+      } finally {
+        await db.sandbox.delete({ where: { id: sandbox.id } });
+        await db.runner.delete({ where: { id: runnerId } });
+      }
+      return {
+        outcome: (
+          await db.agentWebhook.findUniqueOrThrow({
+            where: { id: hook.id },
+          })
+        ).lastOutcome,
+        deliveries: await db.turn.findMany({
+          where: { conversationId: originId, source: "webhook" },
+          select: { id: true },
+        }),
+      };
+    };
+
+    // The token tolerates case and markdown emphasis, as in channels.
+    const quiet = await closeWith("done");
+    expect(quiet.outcome).toBe("ok");
+    expect(quiet.deliveries).toHaveLength(0);
+
+    const failed = await closeWith("failed");
+    expect(failed.outcome).toBe("failed");
+    expect(failed.deliveries).toHaveLength(1);
+  });
   it("webhook_runs and the runs list narrow to ONE webhook, fenced to its workspace", async () => {
     const { agentId, originId } = await seedAgent();
     const notes = await create(agentId, originId);

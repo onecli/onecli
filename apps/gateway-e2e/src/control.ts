@@ -81,13 +81,6 @@ export const pendingApprovals = async (
 ): Promise<ReadonlyArray<PendingApproval>> =>
   fetchPending(gw, apiKey, "/v1/approvals/pending");
 
-/** The org feed, polled with a bare `oc_org_` key (no workspace header). */
-export const pendingOrgApprovals = async (
-  gw: GatewayHandle,
-  orgApiKey: string,
-): Promise<ReadonlyArray<PendingApproval>> =>
-  fetchPending(gw, orgApiKey, "/v1/org/approvals/pending");
-
 export interface DecisionResult {
   readonly status: number;
   readonly body: unknown;

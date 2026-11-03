@@ -18,6 +18,9 @@ pub enum AuthStrategy {
     Bearer,
     /// `Authorization: Basic base64("x-access-token:{token}")`
     BasicXAccessToken,
+    /// `Authorization: Basic base64("x-token-auth:{token}")` — Bitbucket
+    /// Cloud's git-over-HTTPS form for an OAuth access token.
+    BasicXTokenAuth,
     /// `Authorization: Zoho-oauthtoken {token}` — Zoho's OAuth header scheme.
     ZohoOauthtoken,
     /// `Authorization: Token token={token}` — PagerDuty's REST API key scheme.
@@ -377,6 +380,23 @@ static GITLAB_REFRESH: RefreshConfig = RefreshConfig {
     client_secret_env: "GITLAB_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::Body,
+    max_lifetime_secs: None,
+    stale_token_error_codes: &[],
+};
+
+/// Refresh config for Bitbucket Cloud OAuth (Basic client auth, form body).
+/// Bitbucket rotates refresh tokens on every use; `proxy::refresh` stores
+/// the rotated one.
+static BITBUCKET_REFRESH: RefreshConfig = RefreshConfig {
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://bitbucket.org/site/oauth2/access_token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
+    client_id_env: "BITBUCKET_CLIENT_ID",
+    client_secret_env: "BITBUCKET_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Form,
+    client_auth: ClientCredentialMethod::BasicAuth,
     max_lifetime_secs: None,
     stale_token_error_codes: &[],
 };
@@ -1696,6 +1716,35 @@ static APP_PROVIDERS: &[AppProvider] = &[
             credential_host_field: None,
         }],
         refresh: Some(&GITLAB_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "bitbucket",
+        display_name: "Bitbucket",
+        host_rules: &[
+            // REST API 2.0.
+            HostRule {
+                pattern: HostPattern::Exact("api.bitbucket.org"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            // git over HTTPS (clone/fetch/push).
+            HostRule {
+                pattern: HostPattern::Exact("bitbucket.org"),
+                path_prefix: None,
+                strategy: AuthStrategy::BasicXTokenAuth,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: Some(&BITBUCKET_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
         credential_params: &[],
@@ -3127,6 +3176,9 @@ pub fn build_app_injections(provider: &str, hostname: &str, token: &str) -> Vec<
                 value: format!("Basic {encoded}"),
             }]
         }
+        AuthStrategy::BasicXTokenAuth => {
+            vec![basic_credentials_header(&format!("x-token-auth:{token}"))]
+        }
         AuthStrategy::ZohoOauthtoken => vec![Injection::SetHeader {
             name: "authorization".to_string(),
             value: format!("Zoho-oauthtoken {token}"),
@@ -3181,6 +3233,9 @@ pub fn build_app_injection_rules(
                         name: "authorization".to_string(),
                         value: format!("Basic {encoded}"),
                     }]
+                }
+                AuthStrategy::BasicXTokenAuth => {
+                    vec![basic_credentials_header(&format!("x-token-auth:{token}"))]
                 }
                 AuthStrategy::ZohoOauthtoken => vec![Injection::SetHeader {
                     name: "authorization".to_string(),
@@ -5375,6 +5430,66 @@ mod tests {
     fn gitlab_refresh_uses_form_body_format() {
         let config = refresh_config("gitlab").expect("gitlab should have refresh config");
         assert!(matches!(config.body_format, TokenBodyFormat::Form));
+    }
+
+    // ── Bitbucket ─────────────────────────────────────────────────────
+
+    #[test]
+    fn provider_for_host_bitbucket_api_and_git() {
+        assert_eq!(
+            provider_for_host("api.bitbucket.org"),
+            Some(("bitbucket", "Bitbucket"))
+        );
+        assert_eq!(
+            provider_for_host("bitbucket.org"),
+            Some(("bitbucket", "Bitbucket"))
+        );
+        // A look-alike host never matches.
+        assert_eq!(provider_for_host("evilbitbucket.org"), None);
+        assert_eq!(provider_for_host("bitbucket.org.example.com"), None);
+        assert!(build_app_injections("bitbucket", "evilbitbucket.org", "bb-tok").is_empty());
+    }
+
+    #[test]
+    fn bitbucket_api_uses_bearer() {
+        let injections = build_app_injections("bitbucket", "api.bitbucket.org", "bb-tok");
+        assert_eq!(
+            injections,
+            vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer bb-tok".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn bitbucket_git_uses_x_token_auth_basic() {
+        let injections = build_app_injections("bitbucket", "bitbucket.org", "bb-tok");
+        let b64 = base64::engine::general_purpose::STANDARD;
+        assert_eq!(
+            injections,
+            vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: format!("Basic {}", b64.encode("x-token-auth:bb-tok")),
+            }]
+        );
+    }
+
+    #[test]
+    fn bitbucket_refresh_is_form_with_basic_client_auth() {
+        let config = refresh_config("bitbucket").expect("bitbucket refreshes");
+        assert_eq!(
+            config
+                .endpoint_for_connection(&serde_json::json!({}))
+                .as_deref(),
+            Some("https://bitbucket.org/site/oauth2/access_token")
+        );
+        assert!(matches!(config.body_format, TokenBodyFormat::Form));
+        assert!(matches!(
+            config.client_auth,
+            ClientCredentialMethod::BasicAuth
+        ));
+        assert_eq!(config.client_id_env, "BITBUCKET_CLIENT_ID");
     }
 
     #[test]

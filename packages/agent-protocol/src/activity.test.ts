@@ -266,9 +266,73 @@ describe("activityForToolCall: a finished send says what really happened", () =>
       activityForToolCall("list_my_replies", undefined, false, { output: "" }),
     ).toBe("Looked at its own replies");
   });
+  it("names the conversation for changes and thread posts elsewhere", () => {
+    const there = '{"conversation":"#x","messageId":"1.2"}';
+    expect(
+      activityForToolCall("edit_my_reply", there, false, out("edited")),
+    ).toBe("Edited a message in #x");
+    expect(
+      activityForToolCall("delete_my_reply", there, false, out("deleted")),
+    ).toBe("Deleted a message in #x");
+    expect(
+      activityForToolCall("edit_my_reply", there, false, {
+        output: "no",
+        isError: true,
+      }),
+    ).toBe("Couldn't edit its reply");
+    expect(activityForToolCall("delete_my_reply", there, true)).toBe(
+      "Deleting its reply",
+    );
+    expect(
+      activityForToolCall(
+        "send_message",
+        '{"to":"#x","text":"hi","thread":"1.2"}',
+        false,
+        out("sent"),
+      ),
+    ).toBe("Posted in a thread in #x");
+  });
+  it("a change elsewhere that waits on the person never claims it happened", () => {
+    const there = '{"conversation":"#x","messageId":"1.2"}';
+    expect(
+      activityForToolCall("delete_my_reply", there, false, out("held")),
+    ).toBe("Waiting for your approval: delete a message in #x");
+    expect(
+      activityForToolCall("edit_my_reply", there, false, out("held")),
+    ).toBe("Waiting for your approval: edit a message in #x");
+    expect(
+      activityForToolCall("edit_my_reply", there, false, out("needs_access")),
+    ).toBe("Needs your input: edit a message in #x");
+  });
   it("while running, the result is not consulted", () => {
     expect(activityForToolCall("send_as_me", asMe, true, out("held"))).toBe(
       "Sending as you to @Sam",
     );
+  });
+});
+
+describe("activityForToolCall: send_message with files", () => {
+  const withFiles = JSON.stringify({
+    to: "#proj-reports",
+    text: "here",
+    files: ["report.csv"],
+  });
+  const out = (status: string) => ({ output: JSON.stringify({ status }) });
+  it("names the file count and the target, and never says Sent while held", () => {
+    expect(activityForToolCall("send_message", withFiles, true)).toBe(
+      "Sending 1 file to #proj-reports",
+    );
+    expect(
+      activityForToolCall("send_message", withFiles, false, out("held")),
+    ).toBe("Waiting for approval: send 1 file to #proj-reports");
+    expect(
+      activityForToolCall("send_message", withFiles, false, out("sent")),
+    ).toBe("Sent 1 file to #proj-reports");
+    expect(
+      activityForToolCall("send_message", withFiles, false, {
+        output: "nope",
+        isError: true,
+      }),
+    ).toBe("Couldn't send 1 file to #proj-reports");
   });
 });

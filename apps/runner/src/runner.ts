@@ -481,6 +481,9 @@ export const createRunner = ({
     // supervisor the tool only when its runner advertises this, so an agent
     // is never offered a send_file that cannot land.
     outboundAttachments: true,
+    // This build relays a file run's `purpose`, so a file staged for
+    // send_message is stored without attaching to the reply.
+    stagedAttachments: true,
   });
 
   const report = async (events: RunnerEvent[]): Promise<void> => {
@@ -716,6 +719,8 @@ export const createRunner = ({
           // that predates the frame would drop it on validation and the
           // model would wait out a timeout for a file that never left.
           RUNNER_OUTBOUND_ATTACHMENTS: "1",
+          // And relays a file's `purpose`: send_message may carry files.
+          RUNNER_STAGED_ATTACHMENTS: "1",
           // Same rule for previews: preview_expose (and the fragment that
           // teaches it) only where this runner can carry port streams, i.e.
           // its port API is configured. Otherwise the agent would be taught
@@ -839,23 +844,29 @@ export const createRunner = ({
   };
 
   const stopSandbox = async (item: StopItem): Promise<RunnerEvent[]> => {
-    const snapshot = (await backend.listSandboxes()).find(
-      (candidate) => candidate.sandboxId === item.sandboxId,
-    );
-    const ref = snapshot?.containerRef ?? item.containerRef;
-
-    // Nothing to stop is the desired end state, not an error.
-    if (!ref) {
-      return [
-        {
-          kind: "sandbox.status",
-          sandboxId: item.sandboxId,
-          status: "stopped",
-        },
-      ];
-    }
-
+    // EVERYTHING that can touch the backend runs inside the try, the start
+    // path's law. The listing used to sit outside it: a backend unreachable
+    // for exactly that call threw out of the work item, nothing was posted,
+    // and the sandbox sat `stopping` with its container up, where its live
+    // supervisor kept the control plane's stale-claim clock fresh. Reported
+    // `failed`, the row rejoins the ordinary paced retry instead.
     try {
+      const snapshot = (await backend.listSandboxes()).find(
+        (candidate) => candidate.sandboxId === item.sandboxId,
+      );
+      const ref = snapshot?.containerRef ?? item.containerRef;
+
+      // Nothing to stop is the desired end state, not an error.
+      if (!ref) {
+        return [
+          {
+            kind: "sandbox.status",
+            sandboxId: item.sandboxId,
+            status: "stopped",
+          },
+        ];
+      }
+
       await stopContainer(item.sandboxId, ref);
       return [
         {
@@ -1029,6 +1040,7 @@ export const createRunner = ({
       // Delivery-only memory context (step 8) — forwarded verbatim; the
       // supervisor concatenates, the transcript never sees it.
       ...(item.context && { context: item.context }),
+      ...(item.gate && { gate: item.gate }),
       ...(item.attachments &&
         item.attachments.length > 0 && { attachments: item.attachments }),
     };

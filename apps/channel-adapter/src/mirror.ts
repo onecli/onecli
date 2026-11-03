@@ -424,6 +424,7 @@ const PROVIDER_DOMAINS: Record<string, string> = {
   "google-admin": "admin.google.com",
   "google-search-console": "search.google.com",
   "github-app": "github.com",
+  bitbucket: "bitbucket.org",
   "aws-role": "aws.amazon.com",
   aws: "aws.amazon.com",
   "microsoft-onenote": "onenote.com",

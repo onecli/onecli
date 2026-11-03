@@ -29,6 +29,8 @@ export const runsQuerySchema = z
     source: z.string().min(1).max(40).optional(),
     // One webhook's runs (its own conversation), for a webhook's "View runs".
     webhookId: z.string().min(1).max(100).optional(),
+    // One schedule's runs (its own conversation), for a schedule's "History".
+    cronId: z.string().min(1).max(100).optional(),
     userId: z.string().min(1).max(100).optional(),
     app: z.string().min(1).max(100).optional(),
     failed: z

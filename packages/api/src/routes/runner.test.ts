@@ -108,6 +108,7 @@ vi.mock("../services/attachment-service", () => ({
     sizeBytes: true,
     status: true,
   },
+  NOT_IN_REPLY_STATUSES: ["staged", "sent"],
   bindAttachmentsToTurn: services.bindAttachmentsToTurn,
   firstAttachmentName: services.firstAttachmentName,
 }));

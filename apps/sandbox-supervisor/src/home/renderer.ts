@@ -78,6 +78,11 @@ export interface RenderInputs {
    * after every static fragment.
    */
   channelsAfter?: string;
+  /**
+   * send_message can carry `files` (the runner stages them): the channels
+   * section then teaches it, beside the tool that takes it. Absent = no.
+   */
+  stagedFiles?: boolean;
 }
 
 const HEADER =
@@ -137,7 +142,9 @@ export const renderInstructionDoc = (inputs: RenderInputs): string => {
   // the registry's intended order (channels, then agents - both answer
   // "who can I reach"); null (an empty list) renders nothing.
   const derived = [
-    channelsFragment(inputs.channels),
+    channelsFragment(inputs.channels, {
+      stagedFiles: inputs.stagedFiles === true,
+    }),
     agentsFragment(inputs.peers),
   ].filter((fragment): fragment is CapabilityFragment => fragment !== null);
   const afterIndex = inputs.channelsAfter

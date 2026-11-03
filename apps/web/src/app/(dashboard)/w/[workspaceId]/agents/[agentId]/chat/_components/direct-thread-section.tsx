@@ -27,7 +27,7 @@ import { useHostedAvailability } from "@/hooks/use-hosted-availability";
 import { useHasDesktop } from "@/hooks/use-has-desktop";
 import { usePortalHost } from "@/hooks/use-portal-host";
 import dynamic from "next/dynamic";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { agentComputerPath, agentSectionPath } from "@/lib/navigation";
 import type { DesktopDockHandle } from "@/ee/desktop/desktop-dock";
 import { useAgentPageAgent } from "../../_components/agent-page-frame";
@@ -82,6 +82,15 @@ export const DirectThreadSection = () => {
   const dock = useRef<DesktopDockHandle>(null);
   /** Files dropped anywhere on the pane stage in the composer. */
   const composer = useRef<ComposerHandle>(null);
+  // `?draft=` opens the chat with a message ready to finish and send (the
+  // schedule dialog's "Change" link). From the router, not window.location:
+  // on an in-app navigation the first render still sees the old URL there.
+  // Read once, then dropped from the URL so a reload never re-seeds it.
+  const searchParams = useSearchParams();
+  const [draft] = useState(() => searchParams.get("draft") ?? undefined);
+  useEffect(() => {
+    if (draft) router.replace(pathname);
+  }, [draft, pathname, router]);
   // The chat renders into this node, never straight into the frame: the
   // theater moves the node, not the React subtree, so draft text, staged
   // files and scroll state survive.
@@ -359,6 +368,7 @@ export const DirectThreadSection = () => {
         }
         onStop={active ? () => abortTurn.mutate(active.id) : undefined}
         stopPending={abortTurn.isPending}
+        initialDraft={draft}
         autoFocus
       />
     </>,

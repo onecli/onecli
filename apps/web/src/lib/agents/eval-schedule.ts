@@ -1,6 +1,7 @@
 import type { EvalScheduleOutcome } from "@onecli/api/validations/evals";
 import type { EvalSchedule } from "@/lib/api";
 import { formatTimestamp } from "@/lib/format-timestamp";
+import { cronToHuman } from "./human-schedule";
 
 /**
  * The eval schedule's presets and their cron expressions, pure so the
@@ -74,19 +75,11 @@ export const draftFromSchedule = (
   };
 };
 
-const PRESET_LABEL: Record<FixedPreset, string> = {
-  daily: "Daily",
-  weekdays: "Weekdays",
-  weekly: "Mondays",
-};
-
-/** "Daily at 09:00" for the presets, the expression for anything else. */
-export const describeSchedule = (schedule: string): string => {
-  const preset = parsePreset(schedule);
-  return preset
-    ? `${PRESET_LABEL[preset.preset]} at ${preset.time}`
-    : `Cron ${schedule}`;
-};
+/** The eval schedule in the same words as every other schedule (the
+ * Schedules list puts them side by side); the expression for a shape the
+ * describer does not name. */
+export const describeSchedule = (schedule: string): string =>
+  cronToHuman(schedule) ?? `Cron ${schedule}`;
 
 const LAST_OUTCOME_LABEL: Record<EvalScheduleOutcome, string> = {
   started: "Last scheduled run started",

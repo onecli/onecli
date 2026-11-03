@@ -9,6 +9,7 @@ import type { ChannelPostTarget } from "../targets";
 // async, so a retried post can never sit inside Slack's 3s ack window; and
 // a 429 is pre-execution, so no double-post is possible.
 import {
+  isSlackUploadDegrade,
   postBlocksMessage,
   postMessage,
   SlackApiError,
@@ -223,27 +224,6 @@ const modelKeyCard = async (
     ...targetForm(input),
   });
 };
-
-/**
- * Slack refusals that mean "this workspace/install cannot take the file",
- * today and on retry — the mirror's degrade set. Slack's own codes, verbatim
- * (files.getUploadURLExternal / files.completeUploadExternal docs).
- * `invalid_arguments` is here because the client maps an empty file to it
- * (a zero-byte file cannot be shared; the web still shows the row).
- */
-const UPLOAD_DEGRADE_CODES: ReadonlySet<string> = new Set([
-  "missing_scope",
-  "file_uploads_disabled",
-  "file_uploads_except_images_disabled",
-  "file_type_not_allowed",
-  "file_upload_size_restricted",
-  "storage_limit_reached",
-  "user_is_external_guest",
-  "not_allowed_token_type",
-  "invalid_arguments",
-]);
-const isUploadDegrade = (code: string): boolean =>
-  UPLOAD_DEGRADE_CODES.has(code);
 
 /** The degrade line's tail when the files are LINKED: what the link does. */
 export const FILES_LINKED_LINE = "Click a file to download it from OneCLI.";
@@ -499,7 +479,10 @@ export const slackMirrorPosts: MirrorPosts = {
         // a line per file that names it and points at the web thread, where
         // the file already is. Anything else (transport, 5xx after the
         // cursor advanced) rethrows into the mirror's loud log.
-        if (!(err instanceof SlackApiError) || !isUploadDegrade(err.code)) {
+        if (
+          !(err instanceof SlackApiError) ||
+          !isSlackUploadDegrade(err.code)
+        ) {
           throw err;
         }
         unavailable.unshift(

@@ -253,6 +253,8 @@ export interface DueTurn {
   /** Run on a fresh harness session that ends with the turn (a platform
    * job's run: see the claim mapping). Absent = the conversation's session. */
   ephemeralSession?: true;
+  /** A scheduled run's gate command (agent_crons.gate). */
+  gate?: string;
   /**
    * When this turn's claim-latency clock started — the same
    * COALESCE(retried_at, promoted_at, created_at) the turn-budget sweeps
@@ -343,6 +345,7 @@ interface ClaimedTurnRow {
   message: string;
   source: string;
   harness_session_ref: string | null;
+  gate: string | null;
   waited_since: Date;
 }
 
@@ -957,6 +960,12 @@ export const claimDueWork = async (
         t.source,
         (SELECT c.harness_session_ref FROM conversations c
           WHERE c.id = t.conversation_id) AS harness_session_ref,
+        -- A scheduled run's gate (the supervisor runs it before the agent).
+        -- Read at dispatch, so an edit applies to the next run.
+        (SELECT ac.gate FROM conversations c
+           JOIN agent_crons ac ON ac.id = c.external_ref
+          WHERE c.id = t.conversation_id AND c.source = 'cron'
+            AND t.source = 'cron') AS gate,
         -- The claim-latency clock (step 6 telemetry): the same expression
         -- the turn-budget sweeps measure from — a promoted follow-up or an
         -- auto-retried turn deliberately restarts it.
@@ -1069,6 +1078,7 @@ export const claimDueWork = async (
                 ...(isPlatformJobRun(row.source)
                   ? { resumeSessionRef: null, ephemeralSession: true as const }
                   : { resumeSessionRef: row.harness_session_ref }),
+                ...(row.gate && { gate: row.gate }),
                 waitedSince: row.waited_since,
               },
             ]

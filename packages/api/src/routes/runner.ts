@@ -54,6 +54,7 @@ import {
   getAttachmentBytesForRunner,
   planTurnAttachments,
   sweepExpiredAttachments,
+  sweepStaleStagedAttachments,
   sweepStalePendingAttachments,
 } from "../services/attachment-service";
 import { sweepSshSessions } from "../services/ssh-service";
@@ -324,6 +325,9 @@ const runPollSweeps = async (): Promise<void> => {
     await sweepExpiredAttachments().catch((err: unknown) =>
       log.warn({ err }, "attachment retention sweep failed"),
     );
+    await sweepStaleStagedAttachments().catch((err: unknown) =>
+      log.warn({ err }, "staged attachment sweep failed"),
+    );
   }
   // SSH sessions a crashed terminator abandoned:
   // lease-expired rows are closed here so the per-agent cap and the audit
@@ -488,6 +492,7 @@ export const runnerRoutes = () => {
               }),
               ...(due.ephemeralSession && { ephemeralSession: true }),
               ...(combinedContext && { context: combinedContext }),
+              ...(due.gate && { gate: due.gate }),
               ...(plan && plan.manifest.length > 0
                 ? { attachments: plan.manifest }
                 : {}),
@@ -851,6 +856,7 @@ export const runnerRoutes = () => {
       name: decode(h(RUNNER_ATTACHMENT_HEADERS.name)),
       sha256: h(RUNNER_ATTACHMENT_HEADERS.sha256),
       caption: decode(h(RUNNER_ATTACHMENT_HEADERS.caption)),
+      purpose: h(RUNNER_ATTACHMENT_HEADERS.purpose),
     });
     if (!parsedHeaders.success) {
       return c.json(

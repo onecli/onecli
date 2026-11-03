@@ -213,7 +213,7 @@ describe("custom connection proposals", () => {
         "You never see the key",
         "**Never** ask them to paste a key into the chat",
         "one read-only GET",
-        'version: "0.10.0"',
+        'version: "0.11.0"',
       ]) {
         expect(text).toContain(guidance);
       }
@@ -232,6 +232,23 @@ describe("custom connection proposals", () => {
         "`X-Accepted-GitHub-Permissions`",
         '"Repository creation" or "Administration", write',
         "approved by whoever installed it",
+      ]) {
+        expect(text).toContain(guidance);
+      }
+    },
+  );
+
+  it.each([undefined, "claude", "hermes"])(
+    "teaches Bitbucket's API base, credential-free git, and the missing-scope stop (%s)",
+    (agent) => {
+      const text = getGatewaySkill(agent).replace(/\s+/g, " ");
+      for (const guidance of [
+        "`https://api.bitbucket.org/2.0/`",
+        "`GET /user/workspaces`",
+        "`https://bitbucket.org/<workspace>/<repo>.git` with no credentials in the URL",
+        "lack one or more required privilege scopes",
+        "`repository:admin` and deleting one `repository:delete`, which OneCLI does not request",
+        "Do not retry: tell the user which scope is missing",
       ]) {
         expect(text).toContain(guidance);
       }

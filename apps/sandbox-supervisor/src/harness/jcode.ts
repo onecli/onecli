@@ -203,6 +203,66 @@ export const resolveAnthropicCredential = (
 };
 
 /**
+ * Whether the agent's OpenAI grant is a ChatGPT (Codex) OAuth login.
+ *
+ * The control plane marks that grant with `CODEX_HOME` (and a Codex-format
+ * placeholder `auth.json` there), never `OPENAI_API_KEY`. jcode does NOT read
+ * the Codex file on its own: external logins need a per-path trust decision
+ * on the machine. So without a placeholder in jcode's OWN store
+ * (`openai-auth.json`), an agent granted only a Codex login boots with no
+ * provider at all ("OpenAI: not configured"). An API key wins when both are
+ * present, matching the Anthropic arm; empty values count as unset.
+ */
+export const hasOpenAiOAuthGrant = (env: NodeJS.ProcessEnv): boolean =>
+  !env.OPENAI_API_KEY && Boolean(env.CODEX_HOME);
+
+/** The OAuth sentinel the gateway recognizes: its synthetic refresh answers
+ *  `auth.openai.com/oauth/token` for this refresh token and nothing else
+ *  (default_interceptions::codex_oauth_refresh). */
+const OPENAI_OAUTH_SENTINEL = "onecli-managed";
+
+/** 2100-01-01. A future expiry keeps jcode from ever refreshing early. */
+const PLACEHOLDER_EXPIRY_SECS = 4102444800;
+
+/**
+ * jcode's own OpenAI OAuth store, holding a never-expiring PLACEHOLDER
+ * account (never a credential). jcode reads the expiry and the ChatGPT
+ * account id from the JWT claims, so the tokens are unsigned JWTs carrying
+ * only those claims. On each request the gateway REPLACES `authorization`
+ * with the grant's real access token and sets `chatgpt-account-id`, exactly
+ * as for the Codex placeholder. Probed against the pinned runtime: with this
+ * file `jcode auth status` reports `openai available · OAuth`, without it
+ * `not configured`.
+ */
+export const buildOpenAiOAuthPlaceholder = (): string => {
+  const segment = (value: object) =>
+    Buffer.from(JSON.stringify(value)).toString("base64url");
+  const token = [
+    segment({ alg: "none", typ: "JWT" }),
+    segment({
+      exp: PLACEHOLDER_EXPIRY_SECS,
+      "https://api.openai.com/auth": {
+        chatgpt_account_id: OPENAI_OAUTH_SENTINEL,
+      },
+    }),
+    OPENAI_OAUTH_SENTINEL,
+  ].join(".");
+  return `${JSON.stringify({
+    openai_accounts: [
+      {
+        label: "onecli",
+        access_token: token,
+        refresh_token: OPENAI_OAUTH_SENTINEL,
+        id_token: token,
+        account_id: OPENAI_OAUTH_SENTINEL,
+        expires_at: PLACEHOLDER_EXPIRY_SECS * 1000,
+      },
+    ],
+    active_openai_account: "onecli",
+  })}\n`;
+};
+
+/**
  * The agent's POSIX home under the workspace volume — byte-equal with the
  * agent image's contract (docker/agent-entrypoint.sh's export,
  * agent.Dockerfile `usermod -d`, AGENT_POSIX_HOME). Derived from homeDir, NEVER from
@@ -2350,6 +2410,23 @@ export const createJcodeHarness = (): Harness => {
       rmSync(join(jcodeHome, "auth.json"), { recursive: true, force: true });
     }
 
+    // Same law for an OpenAI ChatGPT (Codex) login: seed jcode's own store
+    // with the placeholder (see buildOpenAiOAuthPlaceholder), or remove one
+    // an earlier boot left on the durable home when the grant changed.
+    const openAiOAuth = hasOpenAiOAuthGrant(process.env);
+    if (openAiOAuth) {
+      writeManagedFile(
+        join(jcodeHome, "openai-auth.json"),
+        buildOpenAiOAuthPlaceholder(),
+        0o600,
+      );
+    } else {
+      rmSync(join(jcodeHome, "openai-auth.json"), {
+        recursive: true,
+        force: true,
+      });
+    }
+
     const launched = await launchInstance({
       workingDir: homeDir,
       jcodeHome,
@@ -2394,7 +2471,11 @@ export const createJcodeHarness = (): Harness => {
         // bypassing `StartSessionOptions` — so a caller passing a different
         // model would get a launch env and a session model that disagree.
         // `setModel` in `applyPreferences` is the single door.
-        ...(anthropic.oauthStub ? { JCODE_PROVIDER: "claude" } : {}),
+        ...(anthropic.oauthStub
+          ? { JCODE_PROVIDER: "claude" }
+          : !anthropic.route && openAiOAuth
+            ? { JCODE_PROVIDER: "openai" }
+            : {}),
         // The credential-route pin (see resolveAnthropicCredential). Read by
         // every Anthropic runtime the daemon constructs, so a session
         // resumed from either route lands on the route the grant names.

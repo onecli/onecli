@@ -22,6 +22,7 @@ import type {
 // The id union lives in @onecli/channels (both runtimes key on it); the
 // api re-exports it so its ~50 existing import sites keep one path.
 import type { ChannelProviderId } from "@onecli/channels";
+import type { ThreadRef } from "../../validations/recipients";
 
 export {
   CHANNEL_PROVIDER_IDS,
@@ -648,7 +649,21 @@ export interface ChannelProvider {
     to: { kind: "person" | "channel"; ref: string };
     text: string;
     mentions?: ReadonlyMap<string, string>;
-  }): Promise<{ externalThreadId: string }>;
+    /** Post inside this existing thread: `ts` names any message in it (the
+     * provider resolves the thread's root); `channel`, set when the agent
+     * named it by link, must be the recipient's own conversation. A thread
+     * that is not in that conversation throws
+     * `ThreadNotInConversationError` before anything posts. */
+    thread?: ThreadRef;
+    /** Files to share WITH the text, as one message (send_message `files`).
+     * A provider that cannot take them throws `FileUploadUnavailableError`
+     * before anything posts. */
+    files?: readonly { name: string; bytes: Uint8Array }[];
+  }): Promise<{
+    externalThreadId: string;
+    /** The posted message's own id (Slack: its ts), for a later edit. */
+    messageRef?: string;
+  }>;
 
   /**
    * The provider's member roster for `find_recipient`: everyone the presence
@@ -707,6 +722,14 @@ export interface ChannelProvider {
     find(
       input: OwnReplyTarget & { messageId: string; since: number },
     ): Promise<OwnReply | null>;
+    /** One of the agent's plain posts ANYWHERE in the target's conversation
+     * (its top level or inside any thread there) sent at or after `since`,
+     * or null. For a conversation the agent names: the caller has already
+     * decided who may reach it, so the thread fence of `find` does not
+     * apply. */
+    findAnywhere(
+      input: OwnReplyTarget & { messageId: string; since: number },
+    ): Promise<OwnReply | null>;
     /** Replace a reply's whole text. `text` is the platform's markdown,
      * rendered natively like `sendMessage`, with `mentions` resolved. */
     edit(
@@ -717,6 +740,13 @@ export interface ChannelProvider {
       },
     ): Promise<void>;
     remove(input: OwnReplyTarget & { messageId: string }): Promise<void>;
+    /** The agent's own DM with one person (provider id), opened through
+     * the provider when it has none on record: the address its sends to
+     * that person landed in. */
+    directWith(input: {
+      credentialsJson: string;
+      personRef: string;
+    }): Promise<string>;
   };
 
   /**
