@@ -976,7 +976,14 @@ export const supersedeActionApprovals = async (
 /** The dashboard list — workspace-fenced by the caller's route. A
  * PERSONAL action (its `decidedBy`: "act as you in Slack") carries that
  * person's own data in its summary and outcome (an approved read's result
- * IS the outcome), so it is listed only to them: the bell's rule. */
+ * IS the outcome), so it is listed only to them: the bell's rule.
+ *
+ * Each row names where it was asked (`conversationId`, `originTurnId`), so
+ * an API client can put the card in that thread. Only when the viewer could
+ * open that conversation themselves: an ordinary ask raised in a teammate's
+ * DIRECT thread still lists to the whole workspace, but which private
+ * thread it came from is the conversation fence's to disclose, not this
+ * list's (null for everyone but the thread's owner). */
 export const listActionApprovals = async (input: {
   workspaceId: string;
   agentId: string;
@@ -1000,13 +1007,26 @@ export const listActionApprovals = async (input: {
       expiresAt: true,
       createdAt: true,
       payload: true,
+      conversationId: true,
+      originTurnId: true,
+      conversation: { select: { direct: true, userId: true } },
     },
     orderBy: { createdAt: "desc" },
     take: 50,
   });
-  return rows.flatMap(({ payload, ...row }) =>
-    isVisibleTo(row.action, payload, input.viewerUserId) ? [row] : [],
-  );
+  return rows.flatMap(({ payload, conversation, ...row }) => {
+    if (!isVisibleTo(row.action, payload, input.viewerUserId)) return [];
+    const origin =
+      conversation &&
+      (!conversation.direct || conversation.userId === input.viewerUserId);
+    return [
+      {
+        ...row,
+        conversationId: origin ? row.conversationId : null,
+        originTurnId: origin ? row.originTurnId : null,
+      },
+    ];
+  });
 };
 
 // ── Settlement: cards + the outcome notice ─────────────────────────────────
