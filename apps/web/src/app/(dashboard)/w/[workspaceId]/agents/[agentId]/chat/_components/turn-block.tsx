@@ -39,10 +39,14 @@ import { isSkillImportTool, parseSkillImport } from "@/lib/chat/skill-import";
  * which is why the error line prefers it over the folded one.
  */
 
-const waitingCopy = (turn: Turn): string =>
-  turn.status === "queued" || turn.status === "dispatched"
-    ? "Waking the agent…"
-    : "Thinking…";
+/**
+ * The caption before the agent reports any activity of its own. ONE word for
+ * every lifecycle state, deliberately: a turn still `queued` or `dispatched`
+ * is a machine waking up, and telling the person so made the agent read as
+ * asleep. The lifecycle still rides the line as `data-turn-status`, for
+ * support, never as copy.
+ */
+const WAITING_COPY = "Thinking…";
 
 /** Turn.errorCode values whose fix is a link away on the agent's Models
  *  page, with the label saying WHICH fix: no key at all, a key the provider
@@ -147,10 +151,10 @@ export const TurnBlock = ({
   // The live caption: what the agent is doing right now. Shown while it is
   // NOT talking — when narration is streaming, the words themselves are the
   // better signal, and a caption above a growing sentence reads as clutter.
-  // Falls back to the lifecycle copy before the agent reports any activity
-  // (waking a sandbox can take a moment, and a blank row reads as broken).
+  // Falls back to the waiting copy before the agent reports any activity
+  // (a blank row reads as broken).
   const activityText = working
-    ? (rendered?.activity ?? waitingCopy(turn))
+    ? (rendered?.activity ?? WAITING_COPY)
     : undefined;
   // The tail only counts when it has visible words: a model emitting a bare
   // newline before its first tool call must not blank the caption row.
@@ -253,6 +257,7 @@ export const TurnBlock = ({
                   <ActivityLine
                     text={activityText}
                     visuallyHidden={captionRepeatsHeader}
+                    turnStatus={turn.status}
                   />
                 )}
               </div>

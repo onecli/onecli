@@ -11,16 +11,18 @@
 //! Registered as `"salesforce"` in [`super::summarizer`] and
 //! [`super::record_resolver`].
 
+use serde::de::IgnoredAny;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use super::bulk::{
     BulkChange, BulkField, BulkKind, BulkRow, CellOp, MAX_BULK_FIELDS, MAX_BULK_ROWS,
 };
+use super::json_prefix::{Cursor, Read, Stop, TextLen};
 use super::redact::{is_sensitive_key, redact_string};
 use super::{
-    human_size, humanize_key, json_object, ApprovalSummary, ContextField, CurrentRecord,
-    RecordResolver, SummaryRequest, Target,
+    human_size, humanize_key, json_object, one_line, ApprovalSummary, ContextField, CurrentRecord,
+    RecordResolver, SummaryRequest, Target, MAX_VALUE_LEN,
 };
 
 pub(super) struct Salesforce;
@@ -34,7 +36,8 @@ impl super::RequestSummarizer for Salesforce {
     /// rule or card (`proxy::method_override`), so the request line is what
     /// Salesforce runs.
     fn summarize(&self, req: &SummaryRequest<'_>) -> Option<ApprovalSummary> {
-        if let Some(s) = bulk_write(req)
+        if let Some(s) = bulk_upload(req)
+            .or_else(|| bulk_write(req))
             .or_else(|| bulk_delete(req))
             .or_else(|| composite_updates(req))
             .or_else(|| flow_write(req))
@@ -46,7 +49,7 @@ impl super::RequestSummarizer for Salesforce {
         let object_label = api_label(object);
         match (req.method_upper().as_str(), rest.as_slice()) {
             ("POST", []) if object == "ContentDocumentLink" => Some(attach_file(req)),
-            ("POST", []) if object == "ContentVersion" => Some(upload_file(req)),
+            ("POST", []) if object == "ContentVersion" => upload_file(req),
             ("POST", []) => {
                 let mut s = ApprovalSummary::new(format!("Create {object_label}"));
                 let standard_lookups = push_body_fields(&mut s, req);
@@ -377,6 +380,12 @@ fn is_composite_path(path: &str) -> bool {
     data_resource(path) == Some("composite")
 }
 
+/// A request that may be a multi-file upload: an sObject Collections create
+/// (only its body says whether every record is a `ContentVersion`).
+pub(super) fn may_upload_files(method: &str, path: &str) -> bool {
+    method.eq_ignore_ascii_case("POST") && is_collections_path(path)
+}
+
 /// A request that writes a whole list of records (an sObject Collections
 /// update or create, or a Composite call), whose card reads its body whole.
 pub(super) fn is_bulk_write(method: &str, path: &str) -> bool {
@@ -573,6 +582,277 @@ fn plural(label: &str, count: usize) -> String {
     } else {
         format!("{label}s")
     }
+}
+
+/// Files one upload card lists before it closes with "+N more": a long
+/// batch stays readable and well inside every card's budget, and the rest
+/// are counted, never dropped silently.
+const MAX_UPLOAD_ROWS: usize = 20;
+
+/// What an upload card says of a fact the gateway's read stopped before:
+/// the body is too big to read whole, so it is never guessed.
+const NOT_READ: &str = "Not read (the request is too big to read whole)";
+/// A file row's value when the cut fell before the file's location.
+const RECORD_NOT_READ: &str = "Record not read (the request is too big to read whole)";
+
+/// One `ContentVersion` record (a file being uploaded) as a card shows it,
+/// read from the record's JSON object whether whole or cut: the small
+/// fields name the file and say where it lands, and the base64 is only
+/// measured, never copied. Salesforce reads object and field names
+/// case-insensitively, and so does this. A field set twice reads as its
+/// last value, as `serde_json` (and so every other card) reads it.
+#[derive(Default)]
+struct UploadedFile {
+    /// `PathOnClient`, else `Title`: what the file is called.
+    name: Option<String>,
+    title: Option<String>,
+    /// `FirstPublishLocationId`: the record, user or library it is first
+    /// published to (Salesforce's own default when absent: the uploader's
+    /// library).
+    location: Option<String>,
+    /// `ContentDocumentId`: a new version of an existing file.
+    replaces: Option<String>,
+    /// Decoded size; a lower bound when `at_least`.
+    size: Option<usize>,
+    at_least: bool,
+    /// The record's object closed before the body's end: every field it
+    /// sets was read.
+    complete: bool,
+}
+
+impl UploadedFile {
+    /// The fields of the record object at the cursor, into `out`, which is
+    /// `complete` once the object closed; a cut inside it keeps the fields
+    /// read so far and is `Ok` too. `Err` when it is not an object of plain
+    /// fields. `typed` asks for the `attributes.type` a Collections record
+    /// carries: anything but `ContentVersion` is `Bad`, and a cut before the
+    /// type is known is `Cut` (the record is not claimed as a file).
+    fn read(cur: &mut Cursor<'_>, typed: bool, out: &mut Self) -> Read<()> {
+        let mut items = cur.enter(b'{')?;
+        let mut is_file = !typed;
+        loop {
+            match cur.next(&mut items) {
+                Ok(true) => {}
+                Ok(false) if is_file => {
+                    out.complete = true;
+                    return Ok(());
+                }
+                Ok(false) => return Err(Stop::Bad),
+                Err(Stop::Cut) if is_file => return Ok(()),
+                Err(stop) => return Err(stop),
+            }
+            let key = match cur.key() {
+                Ok(key) => key,
+                Err(Stop::Cut) if is_file => return Ok(()),
+                Err(stop) => return Err(stop),
+            };
+            let text = |cur: &mut Cursor<'_>| -> Read<Option<String>> {
+                Ok(cur
+                    .value::<Option<String>>()?
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty()))
+            };
+            let read = match key.to_ascii_lowercase().as_str() {
+                "attributes" if typed => cur.value::<Attributes>().and_then(|a| {
+                    if a.kind.eq_ignore_ascii_case("ContentVersion") {
+                        is_file = true;
+                        Ok(())
+                    } else {
+                        Err(Stop::Bad)
+                    }
+                }),
+                "pathonclient" => text(cur).map(|v| out.name = v),
+                "title" => text(cur).map(|v| out.title = v),
+                "firstpublishlocationid" => text(cur).map(|v| out.location = v),
+                "contentdocumentid" => text(cur).map(|v| out.replaces = v),
+                "versiondata" => match cur.value::<Option<TextLen>>() {
+                    Ok(len) => {
+                        out.size = len.map(|l| l.0 / 4 * 3);
+                        Ok(())
+                    }
+                    Err(Stop::Cut) => {
+                        out.size = cur.open_string_len().map(|l| l / 4 * 3);
+                        out.at_least = true;
+                        Err(Stop::Cut)
+                    }
+                    Err(stop) => Err(stop),
+                },
+                _ => cur.value::<IgnoredAny>().map(drop),
+            };
+            match read {
+                Ok(()) => {}
+                Err(Stop::Cut) if is_file => return Ok(()),
+                Err(stop) => return Err(stop),
+            }
+        }
+    }
+
+    /// What the file is called on a card: one line, bounded.
+    fn shown_name(&self) -> String {
+        let name = self.name.as_deref().or(self.title.as_deref());
+        one_line(name.unwrap_or("Unnamed file"), MAX_VALUE_LEN)
+    }
+
+    /// Where the file is first published (a record, a user's or a public
+    /// library), with the record's type when its id's prefix is a known one
+    /// (so the gateway can name and link it).
+    fn location(&self) -> Option<(Option<&'static str>, &str)> {
+        let id = self.location.as_deref()?;
+        Some((Salesforce.object_of(id), id))
+    }
+
+    /// A file row's value when no shared record is in the title: where the
+    /// file lands, as far as the body says.
+    fn push_row(&self, s: &mut ApprovalSummary) {
+        let name = self.shown_name();
+        match self.location() {
+            Some(location) => push_location(s, &name, location),
+            None if self.complete => s.push(name, "Not attached to a record yet"),
+            None => s.push(name, RECORD_NOT_READ),
+        }
+    }
+
+    /// A file row's value when every file lands on the one record the
+    /// title names: the file's size, as far as the body says.
+    fn push_size_row(&self, s: &mut ApprovalSummary) {
+        let size = self.shown_size().unwrap_or_else(|| {
+            if self.complete {
+                "Size unknown".to_string()
+            } else {
+                NOT_READ.to_string()
+            }
+        });
+        s.push(self.shown_name(), size);
+    }
+
+    /// The size as a card states it.
+    fn shown_size(&self) -> Option<String> {
+        let size = human_size(self.size?);
+        Some(if self.at_least {
+            format!("at least {size}")
+        } else {
+            size
+        })
+    }
+}
+
+/// A Collections record's `attributes`; its other keys (the binary part
+/// names of a multipart upload, a `url`) are not the card's.
+#[derive(Deserialize)]
+struct Attributes {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+/// Push a row naming where a file lands: a record of a known type (so the
+/// gateway can name and link it), else the id as written, on one line.
+fn push_location(s: &mut ApprovalSummary, label: &str, (object, id): (Option<&str>, &str)) {
+    match object {
+        Some(object) => s.push_record(label, object, id),
+        None => s.push(label, one_line(id, MAX_VALUE_LEN)),
+    }
+}
+
+/// The files of a Collections create (`{"allOrNone": …, "records": [{
+/// "attributes": {"type": "ContentVersion"}, "PathOnClient": …, "VersionData":
+/// "<base64>"}, …]}`), read as far as the body goes, and whether it was read
+/// to its end. `None` unless every record read is a `ContentVersion` that
+/// uploads a new file: a list holding any other record type, or a new
+/// version of an existing file (`ContentDocumentId`), is a bulk create the
+/// list cards read instead.
+fn collection_uploads(body: &[u8]) -> Option<(Vec<UploadedFile>, bool)> {
+    let mut cur = Cursor::new(body);
+    let mut files = Vec::new();
+    let whole = (|| -> Read<()> {
+        let mut top = cur.enter(b'{')?;
+        while cur.next(&mut top)? {
+            if !cur.key()?.eq_ignore_ascii_case("records") {
+                cur.value::<IgnoredAny>()?;
+                continue;
+            }
+            let mut records = cur.enter(b'[')?;
+            while cur.next(&mut records)? {
+                let mut file = UploadedFile::default();
+                UploadedFile::read(&mut cur, true, &mut file)?;
+                if file.replaces.is_some() {
+                    return Err(Stop::Bad);
+                }
+                let complete = file.complete;
+                files.push(file);
+                if !complete {
+                    return Err(Stop::Cut);
+                }
+            }
+        }
+        cur.finish()
+    })();
+    match whole {
+        Ok(()) => Some((files, true)).filter(|(f, _)| !f.is_empty()),
+        Err(Stop::Cut) => Some((files, false)).filter(|(f, _)| !f.is_empty()),
+        Err(Stop::Bad) => None,
+    }
+}
+
+/// sObject Collections create of new files: an agent uploading several
+/// files in one request (`POST /composite/sobjects`, every record a
+/// `ContentVersion`). Each record carries its whole file as base64, so a
+/// real batch is megabytes and may outgrow the gateway's read: the card
+/// then lists every file before the cut, says "at least" of the count and
+/// the cut file's size, and says the rest of the body was not read. One row
+/// per file: the file as its label and the record it lands on as its value
+/// (named and linked later), or, when every file lands on one record, the
+/// size, with the record named once in the title from its own last row.
+/// Never the raw body, the base64, or a count it could not see.
+fn bulk_upload(req: &SummaryRequest<'_>) -> Option<ApprovalSummary> {
+    if !may_upload_files(req.method, req.path) {
+        return None;
+    }
+    let (files, whole) = collection_uploads(req.body?)?;
+    let count = files.len();
+    let mut s = ApprovalSummary::new(match (count, whole) {
+        (1, true) => "Upload file".to_string(),
+        (n, true) => format!("Upload {n} files"),
+        (n, false) => format!("Upload at least {n} {}", plural("file", n)),
+    });
+    let shared = shared_location(&files);
+    for file in files.iter().take(MAX_UPLOAD_ROWS) {
+        if shared.is_some() {
+            file.push_size_row(&mut s);
+        } else {
+            file.push_row(&mut s);
+        }
+    }
+    if count > MAX_UPLOAD_ROWS {
+        s.push("More", format!("+{} more files", count - MAX_UPLOAD_ROWS));
+    }
+    if !whole {
+        // What follows the cut may be more files or any other record: the
+        // row names the unread rest, never what it holds.
+        s.push("Rest of the request", NOT_READ);
+    }
+    if let Some(location) = shared {
+        // The record's own row, last: the title's record links to it and
+        // enrichment names it; cards that show the title's record drop this
+        // row, never a file's.
+        push_location(&mut s, "Attach to", location);
+        if let (Some(object), id) = location {
+            s.target = Some(Target::of(id, " to ", Some(api_label(object))));
+        }
+    }
+    Some(s)
+}
+
+/// The one place every file is published to, when they all share it (the
+/// 15- and 18-character spellings of an id are one record). A file cut
+/// before its location was read shares nothing.
+fn shared_location(files: &[UploadedFile]) -> Option<(Option<&'static str>, &str)> {
+    let first = files.first()?.location()?;
+    let record = Salesforce.canonical_id(first.1);
+    let same = |f: &UploadedFile| {
+        f.location()
+            .is_some_and(|(_, id)| Salesforce.canonical_id(id) == record)
+    };
+    files.iter().all(same).then_some(first)
 }
 
 /// sObject Collections write: `PATCH` updates up to 200 records, `POST`
@@ -871,68 +1151,74 @@ fn attach_file(req: &SummaryRequest<'_>) -> ApprovalSummary {
 /// `ContentVersion`: a file upload reads as one: the file's name, where it
 /// lands, and its size decoded from the base64 length (never the bytes).
 /// Real uploads outgrow the gateway's body peek, so the JSON is usually cut
-/// inside `VersionData`: the small string fields are then read from the
-/// prefix, and the size reads "at least".
-fn upload_file(req: &SummaryRequest<'_>) -> ApprovalSummary {
+/// inside `VersionData`: every field before the cut is read, the size
+/// reads "at least", and where the file lands is never guessed past the
+/// cut. `None` (the generic card) when the fields are not a JSON object.
+fn upload_file(req: &SummaryRequest<'_>) -> Option<ApprovalSummary> {
+    let mut file = UploadedFile::default();
+    UploadedFile::read(&mut Cursor::new(upload_fields(req)), false, &mut file).ok()?;
     let mut s = ApprovalSummary::new("Upload file");
-    let body = req.body.unwrap_or_default();
-    let obj = json_object(body);
-    let field = |k: &str| -> Option<String> {
-        let v = match &obj {
-            Some(o) => o.get(k).and_then(Value::as_str).map(str::to_string),
-            None => prefix_string_field(body, k),
-        };
-        v.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
-    };
-    let title = field("Title");
-    let path = field("PathOnClient");
-    if let Some(name) = path.as_deref().or(title.as_deref()) {
-        s.push("File", name);
+    if file.name.is_some() || file.title.is_some() {
+        s.push("File", file.shown_name());
     }
     // The Title only when it adds something: not the file name again, with
     // or without its extension ("DR Procedure" for "DR Procedure.pdf").
-    if let (Some(title), Some(path)) = (&title, &path) {
+    if let (Some(title), Some(path)) = (&file.title, &file.name) {
         let stem = path.rsplit_once('.').map(|(stem, _)| stem);
         if title != path && Some(title.as_str()) != stem {
-            s.push("Title", title);
+            s.push("Title", one_line(title, MAX_VALUE_LEN));
         }
     }
-    let parent =
-        field("FirstPublishLocationId").and_then(|id| Some((Salesforce.object_of(&id)?, id)));
-    if let Some((object, parent)) = parent {
-        s.push_record("Attach to", object, &parent);
-        s.target = Some(Target::of(&parent, " to ", Some(api_label(object))));
-    } else if let Some(doc) =
-        field("ContentDocumentId").filter(|id| Salesforce.object_of(id) == Some("ContentDocument"))
+    if let Some(location) = file.location() {
+        push_location(&mut s, "Attach to", location);
+        if let (Some(object), id) = location {
+            s.target = Some(Target::of(id, " to ", Some(api_label(object))));
+        }
+    } else if let Some(doc) = file
+        .replaces
+        .as_deref()
+        .filter(|id| Salesforce.object_of(id) == Some("ContentDocument"))
     {
         // A new VERSION of an existing file (Salesforce's "update a file"):
         // the file it replaces is the record the change lands on.
-        s.push_record("Replaces", "ContentDocument", &doc);
+        s.push_record("Replaces", "ContentDocument", doc);
         s.action = "Update file".into();
-        s.target = Some(Target::of(&doc, " ", None));
-    } else {
+        s.target = Some(Target::of(doc, " ", None));
+    } else if file.complete {
         // A bare upload: the record it's for comes in a later request.
         s.action = "Upload file (not attached to a record yet)".into();
+    } else {
+        s.push("Attach to", NOT_READ);
     }
-    let data_len = match &obj {
-        Some(o) => o.get("VersionData").and_then(Value::as_str).map(str::len),
-        None => prefix_open_string_len(body, "VersionData"),
-    };
-    if let Some(len) = data_len {
-        let size = human_size(len / 4 * 3);
-        s.push(
-            "Size",
-            if obj.is_some() {
-                size
-            } else {
-                format!("at least {size}")
-            },
-        );
+    if let Some(size) = file.shown_size() {
+        s.push("Size", size);
     }
     if s.details.is_empty() {
         push_body_fields(&mut s, req);
     }
-    s
+    Some(s)
+}
+
+/// Where a single upload's fields sit: the body itself, or, in a multipart
+/// upload, the content of its first part, where Salesforce takes the
+/// record's fields as JSON before the file's bytes. Anything else in that
+/// place is not read as fields (the card falls back to the generic one).
+fn upload_fields<'a>(req: &SummaryRequest<'a>) -> &'a [u8] {
+    let body = req.body.unwrap_or_default();
+    let multipart = req
+        .content_type
+        .is_some_and(|ct| ct.to_ascii_lowercase().starts_with("multipart/"));
+    if !multipart {
+        return body;
+    }
+    let after = |sep: &[u8]| {
+        body.windows(sep.len())
+            .position(|w| w == sep)
+            .map(|at| &body[at + sep.len()..])
+    };
+    after(b"\r\n\r\n")
+        .or_else(|| after(b"\n\n"))
+        .unwrap_or_default()
 }
 
 /// A create's parent record: the Account when there is one, else the first
@@ -1186,54 +1472,6 @@ fn sobject_path(base: &str) -> Option<(&str, Vec<&str>)> {
         return None;
     }
     Some((object, segs.collect()))
-}
-
-/// The value of a top-level `"key": "…"` string in a (possibly truncated)
-/// JSON prefix. Escapes are honored; `None` unless the string closes.
-fn prefix_string_field(body: &[u8], key: &str) -> Option<String> {
-    let start = value_start(body, key)?;
-    let mut i = start;
-    while i < body.len() {
-        match body[i] {
-            b'\\' => i += 2,
-            b'"' => return serde_json::from_slice(&body[start - 1..=i]).ok(),
-            _ => i += 1,
-        }
-    }
-    None
-}
-
-/// How much of a top-level `"key": "…"` a truncated prefix holds (the
-/// string need not close): a lower bound on the value's length.
-fn prefix_open_string_len(body: &[u8], key: &str) -> Option<usize> {
-    let rest = &body[value_start(body, key)?..];
-    Some(rest.iter().position(|b| *b == b'"').unwrap_or(rest.len()))
-}
-
-/// Index just past the opening quote of a TOP-LEVEL `"key": "`: the key is
-/// preceded (past whitespace) by `{` or `,`, so a `"Title"` quoted inside
-/// some other field's text never matches.
-fn value_start(body: &[u8], key: &str) -> Option<usize> {
-    let needle = format!("\"{key}\"");
-    let mut from = 0;
-    let at = loop {
-        let rel = body[from..]
-            .windows(needle.len())
-            .position(|w| w == needle.as_bytes())?;
-        let at = from + rel;
-        let before = body[..at].iter().rev().find(|b| !b.is_ascii_whitespace());
-        if matches!(before, Some(b'{' | b',')) {
-            break at;
-        }
-        from = at + 1;
-    };
-    let i = at
-        + needle.len()
-        + body[at + needle.len()..]
-            .iter()
-            .take_while(|b| b.is_ascii_whitespace() || **b == b':')
-            .count();
-    (body.get(i) == Some(&b'"')).then_some(i + 1)
 }
 
 /// Push the JSON body's fields: the record's name first, then contact points,
@@ -2444,6 +2682,262 @@ mod tests {
         assert_eq!(Salesforce.object_of("001'xx"), None);
     }
 
+    // ── Multi-file uploads (sObject Collections of ContentVersion) ────────
+
+    const COLLECTIONS: &str = "/services/data/v62.0/composite/sobjects";
+
+    /// One ContentVersion record as an agent writes it, with `kb` of base64.
+    fn version(title: &str, parent: &str, kb: usize) -> String {
+        format!(
+            r#"{{"attributes":{{"type":"ContentVersion"}},"Title":"{title}","PathOnClient":"{title}.pdf","FirstPublishLocationId":"{parent}","VersionData":"{}"}}"#,
+            "QUJD".repeat(kb * 256)
+        )
+    }
+
+    fn collection(records: &[String]) -> String {
+        format!(r#"{{"allOrNone":false,"records":[{}]}}"#, records.join(","))
+    }
+
+    fn bulk_upload_card(body: &[u8]) -> ApprovalSummary {
+        summarize_request(
+            "salesforce",
+            "POST",
+            COLLECTIONS,
+            Some("application/json"),
+            Some(body),
+        )
+    }
+
+    #[test]
+    fn a_multi_file_upload_reads_as_files_and_records_never_as_endpoint_and_body() {
+        // Several contracts, each to its own record, in one Collections
+        // create: it used to fall to the generic card ("Endpoint / Body")
+        // because the body outgrew the bulk read.
+        let body = collection(&[
+            version("Initech - MSA (signed)", "001fn00000InitAAAA", 480),
+            version("Globex - MSA", "001fn00000GlobAAAA", 420),
+            version("Umbrella - Order Form", "006fn00000UmbrAAAA", 520),
+        ]);
+        let s = bulk_upload_card(body.as_bytes());
+        assert_eq!(s.action, "Upload 3 files");
+        // One row per file, the file as its label and the record it lands
+        // on as its value: N files read as N lines on every surface.
+        assert_eq!(
+            rows(&s),
+            vec![
+                (
+                    "Initech - MSA (signed).pdf".into(),
+                    "Account · 001fn00000InitAAAA".into()
+                ),
+                (
+                    "Globex - MSA.pdf".into(),
+                    "Account · 001fn00000GlobAAAA".into()
+                ),
+                (
+                    "Umbrella - Order Form.pdf".into(),
+                    "Opportunity · 006fn00000UmbrAAAA".into()
+                ),
+            ]
+        );
+        // Every target record is named and linked by the gateway later.
+        assert_eq!(s.refs.len(), 3);
+        let text = s.render_text();
+        assert!(!text.contains("QUJD"), "never the file bytes");
+        assert!(!text.contains("Endpoint"), "never the generic card");
+        assert!(!text.contains("allOrNone"), "never the raw body");
+        // Spread over three records: no single record in the title.
+        let mut titled = s.clone();
+        titled.finalize_title();
+        assert_eq!(titled.action, "Upload 3 files");
+    }
+
+    #[test]
+    fn files_to_one_record_name_it_once_and_list_every_file() {
+        // Files all bound for one record: one row per file (its size), the
+        // record named once in the title from its own last row, the row a
+        // card showing the title drops (never a file's). The 15-character
+        // spelling of the id is the same record.
+        let body = collection(&[
+            version("Acme - Order Form", "006fn00000AcmeOAAA", 10),
+            version("Acme - DPA", "006fn00000AcmeO", 10),
+            version("Acme - Security Addendum", "006fn00000AcmeOAAA", 10),
+        ]);
+        let mut s = bulk_upload_card(body.as_bytes());
+        s.finalize_title();
+        assert_eq!(s.action, "Upload 3 files to Opportunity 006fn00000AcmeOAAA");
+        assert_eq!(
+            rows(&s),
+            vec![
+                ("Acme - Order Form.pdf".into(), "8 KB".into()),
+                ("Acme - DPA.pdf".into(), "8 KB".into()),
+                ("Acme - Security Addendum.pdf".into(), "8 KB".into()),
+                (
+                    "Attach to".into(),
+                    "Opportunity · 006fn00000AcmeOAAA".into()
+                ),
+            ]
+        );
+        assert_eq!(s.refs.len(), 1);
+        assert_eq!(s.subject.as_ref().map(|t| t.row), Some(3));
+    }
+
+    #[test]
+    fn a_cut_upload_names_what_it_read_and_never_states_a_count_it_did_not_see() {
+        // Bigger than the gateway's read: every file before the cut is
+        // named, the cut file's size is a lower bound, and the card says the
+        // rest was not read rather than claim the count it saw is all.
+        let body = collection(&[
+            version("Hooli - MSA", "001fn00000HoolAAAA", 200),
+            version("Hooli - DPA", "001fn00000HoolBAAA", 400),
+            r#"{"attributes":{"type":"Contact"},"LastName":"Never seen"}"#.into(),
+        ]);
+        let cut = &body.as_bytes()[..body.len() - 100_000];
+        let s = bulk_upload_card(cut);
+        assert_eq!(s.action, "Upload at least 2 files");
+        assert_eq!(
+            row(&s, "Hooli - MSA.pdf"),
+            Some("Account · 001fn00000HoolAAAA")
+        );
+        assert_eq!(
+            row(&s, "Hooli - DPA.pdf"),
+            Some("Account · 001fn00000HoolBAAA")
+        );
+        assert_eq!(row(&s, "Rest of the request"), Some(NOT_READ));
+        assert!(!s.render_text().contains("Endpoint"));
+        // Cut before any file's fields: no file card at all.
+        assert!(!bulk_upload_card(&body.as_bytes()[..40])
+            .action
+            .starts_with("Upload"));
+    }
+
+    #[test]
+    fn a_cut_inside_a_file_bounds_its_size_and_never_guesses_where_it_lands() {
+        // The cut file's own fields after its bytes were never read: the
+        // card says so instead of "not attached".
+        let data = "QUJD".repeat(40_000);
+        let body = format!(
+            r#"{{"records":[{{"attributes":{{"type":"ContentVersion"}},"PathOnClient":"one.pdf","FirstPublishLocationId":"001fn00000OneeAAAA","VersionData":"QUJD"}},{{"attributes":{{"type":"ContentVersion"}},"PathOnClient":"two.pdf","VersionData":"{data}","FirstPublishLocationId":"001fn00000TwooAAAA"}}]}}"#
+        );
+        let s = bulk_upload_card(&body.as_bytes()[..body.len() - 50_000]);
+        assert_eq!(s.action, "Upload at least 2 files");
+        assert_eq!(row(&s, "two.pdf"), Some(RECORD_NOT_READ));
+    }
+
+    #[test]
+    fn records_read_whole_whatever_their_key_order() {
+        // `attributes` after the fields is valid JSON: a Contact written
+        // that way still makes the list a bulk create, never a file card,
+        // cut or whole.
+        let late =
+            |ty: &str, fields: &str| format!(r#"{{{fields},"attributes":{{"type":"{ty}"}}}}"#);
+        let body = collection(&[
+            version("Pied Piper - MSA", "001fn00000PiedAAAA", 1),
+            late("Contact", r#""LastName":"Hidden""#),
+            version("Pied Piper - DPA", "001fn00000PiedAAAA", 300),
+        ]);
+        for read in [body.as_bytes(), &body.as_bytes()[..body.len() - 100_000]] {
+            let s = bulk_upload_card(read);
+            assert!(!s.action.starts_with("Upload"), "{}", s.action);
+        }
+        // And a file written that way is still a file.
+        let body = collection(&[late(
+            "ContentVersion",
+            r#""PathOnClient":"late.pdf","FirstPublishLocationId":"001fn00000LateAAAA","VersionData":"QUJD""#,
+        )]);
+        let s = bulk_upload_card(body.as_bytes());
+        assert_eq!(row(&s, "late.pdf"), Some("3 B"));
+        assert_eq!(row(&s, "Attach to"), Some("Account · 001fn00000LateAAAA"));
+    }
+
+    #[test]
+    fn a_mixed_collection_is_not_a_file_upload() {
+        // A Contact create in the same list: the bulk-create table owns it,
+        // so the file card never claims a non-file record.
+        let body = collection(&[
+            version("Vandelay - MSA", "001fn00000VandAAAA", 1),
+            r#"{"attributes":{"type":"Contact"},"LastName":"Reyes"}"#.into(),
+        ]);
+        let s = bulk_upload_card(body.as_bytes());
+        assert!(!s.action.starts_with("Upload"), "{}", s.action);
+    }
+
+    #[test]
+    fn new_versions_of_existing_files_are_not_new_uploads() {
+        // `ContentDocumentId` makes each record a new version of a file
+        // that exists: not "not attached", so the file card stays out.
+        let body = collection(&[
+            r#"{"attributes":{"type":"ContentVersion"},"PathOnClient":"v2.pdf","ContentDocumentId":"069fn000005ekPSAAY","VersionData":"QUJD"}"#.into(),
+            r#"{"attributes":{"type":"ContentVersion"},"PathOnClient":"w2.pdf","ContentDocumentId":"069fn000005ekPTAAY","VersionData":"QUJD"}"#.into(),
+        ]);
+        let s = bulk_upload_card(body.as_bytes());
+        assert!(!s.action.starts_with("Upload"), "{}", s.action);
+        assert!(!s.render_text().contains("Not attached"));
+    }
+
+    #[test]
+    fn a_file_for_a_record_of_unknown_type_shows_where_it_lands() {
+        // A custom object's record (its id prefix is not a known one) is
+        // still a place the file lands, never "not attached".
+        let body = collection(&[
+            version("Spec", "a0Xfn00000SpecAAAA", 1),
+            version("Plan", "a0Xfn00000PlanAAAA", 1),
+        ]);
+        let s = bulk_upload_card(body.as_bytes());
+        assert_eq!(row(&s, "Spec.pdf"), Some("a0Xfn00000SpecAAAA"));
+        assert_eq!(row(&s, "Plan.pdf"), Some("a0Xfn00000PlanAAAA"));
+    }
+
+    #[test]
+    fn an_upload_with_no_parent_says_so() {
+        let body = collection(&[
+            r#"{"attributes":{"type":"ContentVersion"},"Title":"Loose","PathOnClient":"loose.pdf","VersionData":"QUJD"}"#.to_owned(),
+        ]);
+        let s = bulk_upload_card(body.as_bytes());
+        assert_eq!(s.action, "Upload file");
+        assert_eq!(row(&s, "loose.pdf"), Some("Not attached to a record yet"));
+    }
+
+    #[test]
+    fn a_file_name_is_one_line_and_can_never_forge_a_row() {
+        // A name is agent-written: a line break in it must not read as a
+        // second row ("Approved by: …") in the text card or a chat card.
+        let body = collection(&[
+            version(r"ok\nApproved by: Security", "001fn00000OkkkAAAA", 1),
+            version("other", "001fn00000OthrAAAA", 1),
+        ]);
+        let s = bulk_upload_card(body.as_bytes());
+        assert_eq!(s.details[0].label, "ok Approved by: Security.pdf");
+        assert_eq!(s.render_text().lines().count(), 3);
+    }
+
+    #[test]
+    fn a_long_batch_lists_twenty_files_and_counts_the_rest() {
+        let records: Vec<String> = (1..=23)
+            .map(|n| version(&format!("Doc {n}"), "001fn00000BatcAAAA", 1))
+            .collect();
+        let s = bulk_upload_card(collection(&records).as_bytes());
+        assert_eq!(s.action, "Upload 23 files");
+        assert_eq!(row(&s, "More"), Some("+3 more files"));
+        assert_eq!(row(&s, "Doc 20.pdf"), Some("768 B"));
+        assert_eq!(row(&s, "Doc 21.pdf"), None);
+    }
+
+    #[test]
+    fn only_a_collections_create_may_upload_files() {
+        use super::super::may_upload_files;
+        // It reads up to the file-upload read; updates, Composite and other
+        // providers keep the bulk read.
+        assert!(may_upload_files("salesforce", "POST", COLLECTIONS));
+        assert!(may_upload_files("salesforce", "post", COLLECTIONS));
+        assert!(!may_upload_files("salesforce", "PATCH", COLLECTIONS));
+        assert!(!may_upload_files(
+            "salesforce",
+            "POST",
+            "/services/data/v62.0/composite"
+        ));
+        assert!(!may_upload_files("hubspot", "POST", COLLECTIONS));
+    }
+
     // ── Files ────────────────────────────────────────────────────────────
 
     #[test]
@@ -2507,10 +3001,58 @@ mod tests {
             "B".repeat(20_000)
         );
         let s = upload(&body.as_bytes()[..16 * 1024]);
-        assert_eq!(s.action, "Upload file (not attached to a record yet)");
+        assert_eq!(s.action, "Upload file");
         assert_eq!(row(&s, "File"), Some("deck.pdf"));
         assert_eq!(row(&s, "Title"), Some("Board deck \"Q3\""));
         assert!(row(&s, "Size").unwrap().starts_with("at least "));
+        // Where it lands could follow the bytes: never guessed past the cut.
+        assert_eq!(row(&s, "Attach to"), Some(NOT_READ));
+    }
+
+    #[test]
+    fn an_upload_read_whole_with_no_location_is_not_attached_yet() {
+        let s = upload(br#"{"PathOnClient":"deck.pdf","VersionData":"QUJD"}"#);
+        assert_eq!(s.action, "Upload file (not attached to a record yet)");
+        assert_eq!(row(&s, "Attach to"), None);
+    }
+
+    #[test]
+    fn an_upload_to_a_record_of_unknown_type_shows_where_it_lands() {
+        let s = upload(
+            br#"{"PathOnClient":"spec.pdf","FirstPublishLocationId":"a0Xfn00000SpecAAAA","VersionData":"QUJD"}"#,
+        );
+        assert_eq!(s.action, "Upload file");
+        assert_eq!(row(&s, "Attach to"), Some("a0Xfn00000SpecAAAA"));
+    }
+
+    #[test]
+    fn the_fields_of_a_multipart_upload_are_read_from_its_json_part() {
+        let body = "--b\r\nContent-Disposition: form-data; name=\"entity_content\"\r\nContent-Type: application/json\r\n\r\n{\"PathOnClient\":\"deck.pdf\",\"FirstPublishLocationId\":\"001fn00000cTWhpAAG\"}\r\n--b\r\nContent-Disposition: form-data; name=\"VersionData\"; filename=\"deck.pdf\"\r\n\r\n%PDF-1.4";
+        let s = summarize_request(
+            "salesforce",
+            "POST",
+            "/services/data/v60.0/sobjects/ContentVersion",
+            Some("multipart/form-data; boundary=b"),
+            Some(body.as_bytes()),
+        );
+        assert_eq!(row(&s, "File"), Some("deck.pdf"));
+        assert_eq!(row(&s, "Attach to"), Some("Account · 001fn00000cTWhpAAG"));
+    }
+
+    #[test]
+    fn a_multipart_upload_reads_fields_only_from_its_first_part() {
+        // A decoy JSON in a later part is not the record's fields: only
+        // the first part's content is, so this card claims nothing.
+        let body = "--b\r\nContent-Disposition: form-data; name=\"VersionData\"; filename=\"x.pdf\"\r\n\r\n%PDF-1.4\r\n--b\r\nContent-Disposition: form-data; name=\"entity_content\"\r\n\r\n{\"PathOnClient\":\"decoy.pdf\"}";
+        let s = summarize_request(
+            "salesforce",
+            "POST",
+            "/services/data/v60.0/sobjects/ContentVersion",
+            Some("multipart/form-data; boundary=b"),
+            Some(body.as_bytes()),
+        );
+        assert!(!s.render_text().contains("decoy.pdf"));
+        assert!(!s.action.starts_with("Upload"), "{}", s.action);
     }
 
     #[test]

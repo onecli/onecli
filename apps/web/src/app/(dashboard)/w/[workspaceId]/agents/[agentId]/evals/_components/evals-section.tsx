@@ -1,12 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import { CalendarClock, Loader2, Play } from "lucide-react";
+import { useSearchParams } from "next/navigation";
+import { CalendarClock, Loader2, Play, Square } from "lucide-react";
 import { toast } from "sonner";
 import { isActiveEvalRun } from "@onecli/api/validations/evals";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
-import { useEvals, useStartEvalRun } from "@/hooks/use-evals";
+import { useEvals, useStartEvalRun, useStopEvalRun } from "@/hooks/use-evals";
 import { RunDetailSheet } from "@/lib/agents/runs";
 import type { EvalQuestion } from "@/lib/api";
 import { useAgentPageAgent } from "../../_components/agent-page-frame";
@@ -30,7 +31,10 @@ export const EvalsSection = () => {
   const agent = useAgentPageAgent();
   const view = useEvals(agent.id);
   const start = useStartEvalRun(agent.id);
-  const [pickedRunId, setPickedRunId] = useState<string | null>(null);
+  const stop = useStopEvalRun(agent.id);
+  // A link to one run (a scheduled run's report) opens on it: `?run=<id>`.
+  const linkedRunId = useSearchParams().get("run");
+  const [pickedRunId, setPickedRunId] = useState<string | null>(linkedRunId);
   const [questionsOpen, setQuestionsOpen] = useState<boolean | null>(null);
   const [dialog, setDialog] = useState<QuestionDialogState>({
     open: false,
@@ -69,7 +73,10 @@ export const EvalsSection = () => {
   const latest = runs[0];
   const runId =
     runs.find((run) => run.id === pickedRunId)?.id ?? latest?.id ?? null;
-  const running = latest !== undefined && isActiveEvalRun(latest.status);
+  // The run Stop ends: the active one, by id (one per agent).
+  const activeRun =
+    latest !== undefined && isActiveEvalRun(latest.status) ? latest : null;
+  const running = activeRun !== null;
   const busy = start.isPending || running;
   const questionIds = new Set(questions.map((q) => q.id));
 
@@ -104,6 +111,22 @@ export const EvalsSection = () => {
               Schedule
             </Button>
           )}
+          {activeRun && (
+            <Button
+              size="sm"
+              variant="outline"
+              loading={stop.isPending}
+              onClick={() =>
+                stop.mutate(activeRun.id, {
+                  onSuccess: () => toast.success("Tests stopped"),
+                  onError: (error) => toast.error(error.message),
+                })
+              }
+            >
+              {!stop.isPending && <Square />}
+              Stop
+            </Button>
+          )}
           <Button
             size="sm"
             disabled={questions.length === 0}
@@ -135,6 +158,9 @@ export const EvalsSection = () => {
         </div>
         {runId ? (
           <RunResults
+            // Open rows and filters belong to one run: another run starts
+            // fresh.
+            key={runId}
             agentId={agent.id}
             runId={runId}
             appLabel={apps.appLabel}

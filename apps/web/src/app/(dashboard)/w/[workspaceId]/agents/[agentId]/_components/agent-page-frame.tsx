@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext } from "react";
+import { createContext, useContext, useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { AgentIcon } from "@/lib/agents/agent-icon";
@@ -12,7 +12,7 @@ import {
   isFullHeightAgentSection,
   isTheaterAgentSection,
 } from "@/lib/agents/agent-sections";
-import { useAgents } from "@/hooks/use-agents";
+import { useAgents, useWarmAgent } from "@/hooks/use-agents";
 import { AgentPageHeader } from "./agent-page-header";
 import { AgentSectionRail } from "./agent-section-rail";
 import { EmptyState } from "./empty-state";
@@ -83,6 +83,19 @@ export const AgentPageFrame = ({
   const { data: agents = [], isPending, isError, refetch } = useAgents();
   const agent = agents.find((a) => a.id === agentId);
   const section = matchAgentPage(pathname)?.section ?? "";
+
+  // A person on ANY section of a hosted agent's page is likely heading for
+  // its chat (or a section that needs the machine: Computer, SSH, Ports):
+  // warm it now, so the message they type after reading Schedules does not
+  // pay the boot. Once per agent per page load (the hook dedupes); a BYO
+  // agent has no machine and sends nothing.
+  const warm = useWarmAgent();
+  const agentIdentity = agent?.id;
+  const agentKind = agent?.kind;
+  useEffect(() => {
+    if (agentIdentity && agentKind)
+      warm({ id: agentIdentity, kind: agentKind });
+  }, [warm, agentIdentity, agentKind]);
 
   if (isPending)
     return isTheaterAgentSection(section) ? (

@@ -17,6 +17,9 @@ export const queryKeys = {
       [...queryKeys.agents.all(), "detail", agentId] as const,
     models: (agentId: string) =>
       [...queryKeys.agents.all(), "models", agentId] as const,
+    // The machine's lifecycle status (the onboarding boot screen's poll).
+    sandbox: (agentId: string) =>
+      [...queryKeys.agents.all(), "sandbox", agentId] as const,
     // Explicitly-targeted workspace (the org-level picker, the sidebar) —
     // keyed by that workspace, deliberately outside the URL-derived scope()
     // prefix. Under root(), so the namespace sweep still reaches it.
@@ -337,6 +340,8 @@ export const queryKeys = {
       [...queryKeys.evals.all(), "agent", agentId] as const,
     run: (agentId: string, runId: string) =>
       [...queryKeys.evals.all(), "run", agentId, runId] as const,
+    reportChannels: (agentId: string) =>
+      [...queryKeys.evals.all(), "report-channels", agentId] as const,
   },
   channels: {
     all: () => ["channels", ...scope()] as const,

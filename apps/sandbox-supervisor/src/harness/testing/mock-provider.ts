@@ -32,6 +32,10 @@ export interface ScriptedText {
   text: string;
   /** Stream as these chunks, one per interval — a deliberately long turn. */
   slow?: { chunks: string[]; intervalMs: number };
+  /** The finish reason the reply ends with; `stop` when absent. A safety
+   * stop after real text (`content_filter`) is a reply cut short, not an
+   * empty one. */
+  finishReason?: string;
   /** Recorded on the request entry so tests can await a specific route. */
   tag?: string;
 }
@@ -59,7 +63,24 @@ export interface ScriptedCut {
   tag?: string;
 }
 
-export type ScriptedResponse = ScriptedText | ScriptedToolCall | ScriptedCut;
+/**
+ * A reply with NO content at all, finished with `finishReason`: what a
+ * provider sends when the model declines (`content_filter`, the OpenAI-wire
+ * safety stop) or returns an empty answer (`stop`). The runtime ends the
+ * turn with nothing visible, which is the case the adapter must report
+ * instead of closing as a silent success.
+ */
+export interface ScriptedSilent {
+  kind: "silent";
+  finishReason: string;
+  tag?: string;
+}
+
+export type ScriptedResponse =
+  | ScriptedText
+  | ScriptedToolCall
+  | ScriptedCut
+  | ScriptedSilent;
 
 /**
  * Per-request director for scenario tests. Receives the LAST user message
@@ -226,6 +247,10 @@ const serveScripted = (
     res.write("data: [DONE]\n\n");
     res.end();
   };
+  if (scripted.kind === "silent") {
+    finish(scripted.finishReason);
+    return;
+  }
   if (scripted.kind === "tool_call") {
     if (scripted.textBefore)
       res.write(rawChunk({ content: scripted.textBefore }, null));
@@ -249,7 +274,7 @@ const serveScripted = (
   }
   if (!scripted.slow) {
     res.write(rawChunk({ content: scripted.text }, null));
-    finish("stop");
+    finish(scripted.finishReason ?? "stop");
     return;
   }
   const chunks = [...scripted.slow.chunks];

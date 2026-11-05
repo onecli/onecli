@@ -171,6 +171,16 @@ fn serialize_extra_data(event: &RequestEvent) -> Option<String> {
             obj["resolved_at"] = serde_json::json!(resolved_at);
             obj["approved_by"] = serde_json::json!(approved_by);
         }
+        // Its own key, never `approval_id`: that one names the single row a
+        // card settles from, and this request had no card of its own.
+        RequestDecision::ApprovedBySimilar {
+            ref approval_id,
+            ref approved_by,
+        } => {
+            obj["decision"] = serde_json::json!("approval_approved");
+            obj["approved_via_similar"] = serde_json::json!(approval_id);
+            obj["approved_by"] = serde_json::json!(approved_by);
+        }
         RequestDecision::BlockedByDefaultPolicy => {
             obj["decision"] = serde_json::json!("blocked_by_default_policy");
         }
@@ -652,6 +662,24 @@ mod tests {
                 serde_json::from_str(&serialize_extra_data(&ev).expect("extra data")).unwrap();
             assert_eq!(extra["card"], want);
         }
+    }
+
+    /// A window's request carries the opening approval under its own key,
+    /// never `approval_id` (that one names the row a card settles), and
+    /// still reads as approved, by whom.
+    #[test]
+    fn similar_window_requests_name_the_approval_that_opened_it() {
+        let mut ev = base_event();
+        ev.decision = crate::core::RequestDecision::ApprovedBySimilar {
+            approval_id: "ap1".into(),
+            approved_by: Some("u1".into()),
+        };
+        let extra: serde_json::Value =
+            serde_json::from_str(&serialize_extra_data(&ev).expect("extra data")).unwrap();
+        assert_eq!(extra["decision"], "approval_approved");
+        assert_eq!(extra["approved_via_similar"], "ap1");
+        assert_eq!(extra["approved_by"], "u1");
+        assert!(extra.get("approval_id").is_none());
     }
 
     /// A destination-guard refusal is un-injected (nothing was dialed) and

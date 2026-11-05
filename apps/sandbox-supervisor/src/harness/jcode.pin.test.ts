@@ -38,6 +38,7 @@ vi.mock("@1jehuang/jcode-sdk", () => ({
 
 const {
   buildOpenAiOAuthPlaceholder,
+  cleanJcodeCloudEnvironment,
   cleanJcodeKnowledgeStores,
   cleanJcodeUpdaterState,
   createJcodeHarness,
@@ -278,6 +279,64 @@ describe("cleanJcodeUpdaterState", () => {
       undefined,
     );
     expect(readFileSync(join(target, "keep.txt"), "utf8")).toBe("keep");
+  });
+});
+
+describe("cleanJcodeCloudEnvironment", () => {
+  // jcode (v1.0+) refuses EVERY bash command when any component of
+  // `<home>/cloud-environment/<sha>.json` is a symlink. These pin the boot
+  // heal for both components that sit on the agent-writable volume.
+  const isRealDir = (path: string) => {
+    const stat = lstatSync(path, { throwIfNoEntry: false });
+    return Boolean(stat?.isDirectory() && !stat.isSymbolicLink());
+  };
+
+  it("replaces a planted cloud-environment link and leaves its target alone", () => {
+    const target = join(outside, "elsewhere");
+    mkdirSync(target);
+    writeFileSync(join(target, "keep.json"), "keep");
+    symlinkSync(target, join(home, "cloud-environment"));
+    writeFileSync(join(home, "config.toml"), "#");
+
+    cleanJcodeCloudEnvironment(home);
+
+    expect(
+      lstatSync(join(home, "cloud-environment"), { throwIfNoEntry: false }),
+    ).toBe(undefined);
+    expect(readFileSync(join(target, "keep.json"), "utf8")).toBe("keep");
+    expect(existsSync(join(home, "config.toml"))).toBe(true);
+  });
+
+  it("clears a stale overlay the hosted agent never uses", () => {
+    mkdirSync(join(home, "cloud-environment"));
+    writeFileSync(join(home, "cloud-environment", "abc.json"), "{}");
+
+    cleanJcodeCloudEnvironment(home);
+
+    expect(existsSync(join(home, "cloud-environment"))).toBe(false);
+  });
+
+  it("makes a linked or missing home a real directory, target untouched", () => {
+    const linked = join(outside, "linked-home");
+    const target = join(outside, "real-target");
+    mkdirSync(target);
+    writeFileSync(join(target, "keep.txt"), "keep");
+    symlinkSync(target, linked);
+
+    cleanJcodeCloudEnvironment(linked);
+
+    expect(isRealDir(linked)).toBe(true);
+    expect(readFileSync(join(target, "keep.txt"), "utf8")).toBe("keep");
+
+    const fresh = join(outside, "fresh-home");
+    cleanJcodeCloudEnvironment(fresh);
+    expect(isRealDir(fresh)).toBe(true);
+  });
+
+  it("is idempotent on the steady state", () => {
+    expect(() => cleanJcodeCloudEnvironment(home)).not.toThrow();
+    expect(() => cleanJcodeCloudEnvironment(home)).not.toThrow();
+    expect(isRealDir(home)).toBe(true);
   });
 });
 

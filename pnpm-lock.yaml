@@ -232,8 +232,8 @@ importers:
   apps/sandbox-supervisor:
     dependencies:
       '@1jehuang/jcode-sdk':
-        specifier: 1.2.0
-        version: 1.2.0
+        specifier: 1.2.0-preview.136
+        version: 1.2.0-preview.136
       '@modelcontextprotocol/sdk':
         specifier: ^1.30.0
         version: 1.30.0(zod@4.3.6)
@@ -802,37 +802,37 @@ importers:
 
 packages:
 
-  '@1jehuang/jcode-darwin-arm64@1.2.0':
-    resolution: {integrity: sha512-iWnSyRFlyyel+cxtzHHegiP92kLy8v9BFyUe0tZ4VLvnAv7l+jWPDymGuIqFLqrqrTNXH1msrMkUQCLvjVsMPw==}
+  '@1jehuang/jcode-darwin-arm64@1.2.0-preview.136':
+    resolution: {integrity: sha512-ZTCDAYoMSQuYw16dHSTePKUlAu4HLWbldwimtUiQHQqtU0VO2QiKGO9amxj27NWbVyTQqqVkwyeRgizL9yH0bw==}
     cpu: [arm64]
     os: [darwin]
 
-  '@1jehuang/jcode-darwin-x64@1.2.0':
-    resolution: {integrity: sha512-ggTVLunYVYwcRVUGGNqiyPaZyBvVJZWOykR8kDLY37xjqr7mz2UqHeveOhDvl8HQz2fH0fPa8wB5WiPjKsHvRQ==}
+  '@1jehuang/jcode-darwin-x64@1.2.0-preview.136':
+    resolution: {integrity: sha512-CZKkjbrCJalM+QSkBnozwVUi7YlEhx/Z+mGx0ct8wPk4pIznsFmjxiSaOCFEVNTZ7t8Csf29vj47Z9VdMj9e+A==}
     cpu: [x64]
     os: [darwin]
 
-  '@1jehuang/jcode-linux-arm64@1.2.0':
-    resolution: {integrity: sha512-/9mjInCNjyERKcd8yfac0Yzxl8sAAyp1hA5FuQBD1QvBSjpbLETAR3jHUXDMEUN9z7BSKbKfs3S8uODT1tr4MA==}
+  '@1jehuang/jcode-linux-arm64@1.2.0-preview.136':
+    resolution: {integrity: sha512-ryA2XQCTWdEed01DjQ7Ac5+xiqF6ZTeWqWJ/gwyQGQ9bEMadnf/+3XMC2Gf9JFRDvQONlL7Cb8oMZxqKvWVVKA==}
     cpu: [arm64]
     os: [linux]
 
-  '@1jehuang/jcode-linux-x64@1.2.0':
-    resolution: {integrity: sha512-sdLmS3ZDtmpEbcAmYU8pHkUuj5wKl+jZqVUh6X6HKeSPiYpSlvJMCaoyq1IGH6KkUasl1QDEuHyJm3jHI9un1w==}
+  '@1jehuang/jcode-linux-x64@1.2.0-preview.136':
+    resolution: {integrity: sha512-774avKrd4HarqbbdwkiX3I/2NlzstYkFZgOXj1i6r+hPyBmS71ha1HPWtUJhLThdIiU318VFOC/U2sR+OjR7gw==}
     cpu: [x64]
     os: [linux]
 
-  '@1jehuang/jcode-sdk@1.2.0':
-    resolution: {integrity: sha512-XFBxYzr2Wcf+qJv4j5K+NHxC8AHUirXn4DqBn7jL6BWqSlkVdq1MgdJv0yNktrXhYMLC3S1Tj9EmpfDzE8uLaQ==}
+  '@1jehuang/jcode-sdk@1.2.0-preview.136':
+    resolution: {integrity: sha512-vzr45BWFsKl0u33iSqVyGuHOEcs+qDzyspRubxfT7n1DdIoCU4W5OE/kF/N9t78qrMk1NUwmIq0iZvOHgyxl6A==}
     engines: {node: '>=20'}
 
-  '@1jehuang/jcode-win32-arm64@1.2.0':
-    resolution: {integrity: sha512-sW/Z2ykJZXCA4yHqJVBKZDKlrPA+GxNHuRMg7jKTeNlB/HVriwpHgnP9wlvPRQ8Y9wsnHY3TVA5dIGWXox+2eQ==}
+  '@1jehuang/jcode-win32-arm64@1.2.0-preview.136':
+    resolution: {integrity: sha512-ovE6thYkwFAIq9Kz/35Tikbb1dkuJqt74A/m6Pi9NrRcoXpoFbhyhg7QbH0nRhJrJKE4UgGi5NvKzAdOoIERrg==}
     cpu: [arm64]
     os: [win32]
 
-  '@1jehuang/jcode-win32-x64@1.2.0':
-    resolution: {integrity: sha512-mGbWQk9zdciCFAl+Q9mYskwnj0Xv8cxEYOGYhDASLSrLF7ZshFobe27N+E4XGnItHmD5Pvo5K8kJlT8LcyiZBw==}
+  '@1jehuang/jcode-win32-x64@1.2.0-preview.136':
+    resolution: {integrity: sha512-fJfAvOMZQMSKgGgZzP53mVS3XHfuZ+jFWhH6sdJ50BEA7+Hn4Sx/yV0SAr/sP0+op2ZGdunRvCwlViIu0g+BpA==}
     cpu: [x64]
     os: [win32]
 
@@ -7354,33 +7354,33 @@ packages:
 
 snapshots:
 
-  '@1jehuang/jcode-darwin-arm64@1.2.0':
+  '@1jehuang/jcode-darwin-arm64@1.2.0-preview.136':
     optional: true
 
-  '@1jehuang/jcode-darwin-x64@1.2.0':
+  '@1jehuang/jcode-darwin-x64@1.2.0-preview.136':
     optional: true
 
-  '@1jehuang/jcode-linux-arm64@1.2.0':
+  '@1jehuang/jcode-linux-arm64@1.2.0-preview.136':
     optional: true
 
-  '@1jehuang/jcode-linux-x64@1.2.0':
+  '@1jehuang/jcode-linux-x64@1.2.0-preview.136':
     optional: true
 
-  '@1jehuang/jcode-sdk@1.2.0':
+  '@1jehuang/jcode-sdk@1.2.0-preview.136':
     dependencies:
       ajv: 8.20.0
     optionalDependencies:
-      '@1jehuang/jcode-darwin-arm64': 1.2.0
-      '@1jehuang/jcode-darwin-x64': 1.2.0
-      '@1jehuang/jcode-linux-arm64': 1.2.0
-      '@1jehuang/jcode-linux-x64': 1.2.0
-      '@1jehuang/jcode-win32-arm64': 1.2.0
-      '@1jehuang/jcode-win32-x64': 1.2.0
+      '@1jehuang/jcode-darwin-arm64': 1.2.0-preview.136
+      '@1jehuang/jcode-darwin-x64': 1.2.0-preview.136
+      '@1jehuang/jcode-linux-arm64': 1.2.0-preview.136
+      '@1jehuang/jcode-linux-x64': 1.2.0-preview.136
+      '@1jehuang/jcode-win32-arm64': 1.2.0-preview.136
+      '@1jehuang/jcode-win32-x64': 1.2.0-preview.136
 
-  '@1jehuang/jcode-win32-arm64@1.2.0':
+  '@1jehuang/jcode-win32-arm64@1.2.0-preview.136':
     optional: true
 
-  '@1jehuang/jcode-win32-x64@1.2.0':
+  '@1jehuang/jcode-win32-x64@1.2.0-preview.136':
     optional: true
 
   '@1password/sdk-core@0.4.0': {}

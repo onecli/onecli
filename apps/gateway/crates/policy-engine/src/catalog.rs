@@ -44,12 +44,10 @@ struct CatalogTool {
 
 type Catalog = HashMap<String, HashMap<String, CatalogTool>>;
 
-// Compile-time embed of the local generated catalog (this file's dir). The JSON
-// is the gateway's own build artifact — derived from the shared TS catalog by
-// `pnpm generate:catalog` and drift-checked (`ee/apps/catalog-json.test.ts`).
-// One generated catalog for every edition (shared + cloud providers), derived
-// from the TS registry by a generator script and drift-checked
-// by `catalog-json.test.ts`.
+// Compile-time embed of the local generated catalog (this file's dir): one
+// catalog for every edition (shared + cloud providers), derived from the TS
+// registry by `pnpm generate:catalog` and drift-checked by
+// `packages/api/src/apps/app-permissions/catalog-json.test.ts`.
 const CATALOG_JSON: &str = include_str!("catalog.generated.json");
 
 fn catalog() -> &'static Catalog {

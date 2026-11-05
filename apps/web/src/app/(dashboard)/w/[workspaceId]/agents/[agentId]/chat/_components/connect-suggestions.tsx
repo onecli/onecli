@@ -3,10 +3,8 @@
 import { memo, useRef, useState } from "react";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
-import { Plug } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@onecli/ui/components/button";
-import { cn } from "@onecli/ui/lib/utils";
 import {
   extractConnectSuggestions,
   type CardSuggestion,
@@ -54,8 +52,8 @@ import { ConnectSuggestionRow } from "./connect-suggestion-row";
  * agent, so the workspace pool alone says nothing about this one. A
  * connect started FROM this card carries this agent, so the new account
  * lands switched on for it alone (the API's connecting-agent grant), with
- * the same default and the same consent line as the "Connect an app"
- * picker; scoping down afterwards is exactly what Manage is for.
+ * the same default as the "Connect an app" picker; scoping down afterwards
+ * is exactly what Manage is for.
  */
 
 /** The card under an agent answer that carried connect links. Memoized on
@@ -67,7 +65,10 @@ import { ConnectSuggestionRow } from "./connect-suggestion-row";
 export const ConnectorSuggestions = memo(({ text }: { text: string }) => {
   const suggestions = extractConnectSuggestions(text);
   if (suggestions.length === 0) return null;
-  return <ConnectorSuggestionsCard suggestions={suggestions} />;
+  // The agent's own sentence above the card says why it is there, so the
+  // card is just the rows and the "Browse all apps" door, with no consent
+  // line: like the agent page's app picker, where Manage shows what landed.
+  return <ConnectorSuggestionsCard suggestions={suggestions} consent={false} />;
 });
 ConnectorSuggestions.displayName = "ConnectorSuggestions";
 
@@ -87,7 +88,7 @@ const NO_CHANNEL_SUGGESTIONS: ChannelSuggestion[] = [];
 export const ConnectorSuggestionsCard = ({
   suggestions,
   channels = NO_CHANNEL_SUGGESTIONS,
-  hideHeader = false,
+  consent = true,
   bare = false,
 }: {
   suggestions: CardSuggestion[];
@@ -96,9 +97,10 @@ export const ConnectorSuggestionsCard = ({
    * no longer in the app registry at all), so these rows carry their own
    * name/icon and link there instead of opening the connect popup. */
   channels?: ChannelSuggestion[];
-  /** Drop the "Apps that could help" header. The greeting already says why
-   * the card is there, so the header would repeat it. */
-  hideHeader?: boolean;
+  /** The consent line above the rows (what a new account may do), shown
+   * while a row offers Connect. On unless the caller opts out: the card
+   * under an agent answer, whose sentence above it introduces the card. */
+  consent?: boolean;
   /** Just the app rows: no consent line, no "browse all apps" footer. The
    * onboarding greeting's single Gmail row, where the message above it
    * already says what to do (its own "Add different tools" button is the
@@ -277,32 +279,13 @@ export const ConnectorSuggestionsCard = ({
           instead of shrinking to its longest line; `text-start` so a
           centered host (the empty-thread welcome) never centers its rows. */}
       <div className="bg-card w-full max-w-md divide-y overflow-hidden rounded-xl border text-start">
-        {/* The TITLE is what `hideHeader` drops (the greeting's own words
-            already say why the card is there). The CONSENT LINE is not part
-            of that trade: what a new account may do has to be said where the
-            click happens. Most of all on the greeting card, which is the
-            first connect UI a new user ever meets. */}
-        {!bare && (!hideHeader || hasUnconnected) && (
-          <div className="px-4 py-2.5">
-            {!hideHeader && (
-              <div className="flex items-center gap-2">
-                <Plug className="text-muted-foreground size-4" aria-hidden />
-                <span className="text-sm font-medium">
-                  Apps that could help
-                </span>
-              </div>
-            )}
-            {hasUnconnected && (
-              <p
-                className={cn(
-                  "text-muted-foreground text-xs text-pretty",
-                  !hideHeader && "mt-0.5",
-                )}
-              >
-                Only this agent gets access.{grantLine}
-              </p>
-            )}
-          </div>
+        {/* What a NEW account may do, said where the Connect click happens:
+            most of all on the welcome card, the first connect UI a new user
+            ever meets. */}
+        {!bare && consent && hasUnconnected && (
+          <p className="text-muted-foreground px-4 py-2.5 text-xs text-pretty">
+            Only this agent gets access.{grantLine}
+          </p>
         )}
         {rows.map(({ suggestion, state }) => (
           <ConnectSuggestionRow

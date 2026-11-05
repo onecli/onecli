@@ -145,10 +145,9 @@ export const AttachConnectionDialog = ({
             {known && (
               <DialogDescription>
                 {connectFirst ? (
-                  // The consent line every connect door states where the
-                  // click happens (the in-chat card, the app picker): the
-                  // connect carries this agent, so the new account is on
-                  // for it alone.
+                  // The consent line, said where the click happens (as on
+                  // the welcome card): the connect carries this agent, so
+                  // the new account is on for it alone.
                   <>
                     Only {who} gets access.{grantLine}
                   </>

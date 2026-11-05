@@ -43,14 +43,8 @@ import type {
 import { useCreatePolicyRule, useUpdatePolicyRule } from "@/hooks/use-policy";
 import { useConnections } from "@/hooks/use-connections";
 import { useScopedSecrets } from "@/hooks/use-secrets";
-// The condition builder + org identity picker are edition seams: EE aliases
-// them to the real editors; the OSS modules are locked "available in OneCLI
-// Cloud" surfaces (conditions) or inert (the org picker — OSS mounts no org
-// scope).
 import { ConditionBuilder } from "@/lib/components/condition-builder";
-// Alias key on purpose (see editor-chrome's note): a relative import would
-// bypass the edition seam.
-import { OrgIdentityPicker } from "@/lib/policy-editor/identity-picker";
+import { OrgIdentityPicker } from "./_components/org-identity-picker";
 import {
   AppTargetFields,
   type AppTargetState,

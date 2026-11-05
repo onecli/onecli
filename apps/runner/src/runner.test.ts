@@ -1726,6 +1726,31 @@ describe("a supervisor socket closing", () => {
  * N copies never report, stop or reap the same object N times. The others
  * only serve sockets.
  */
+describe("where the substrate placed a sandbox (the read-only report's node)", () => {
+  it("is learned when the supervisor comes up, before any reconcile pass, and on a copy that is not the reconciler", async () => {
+    // Filled only by the reconcile pass (once a minute, reconciler copy
+    // only), the map would miss a home that froze in a box's first minute:
+    // reported with no node, never counted by the per-node brake.
+    // MUTATION-PROOF: make learnNode a no-op and the first expectation
+    // fails.
+    reconciler = false;
+    queued.push(startItem("sb-early"));
+    await drive();
+    backend.sandboxes.get("sb-early")!.node = "node-7.example.test";
+    expect(runner.nodeOf("sb-early")).toBeUndefined();
+
+    await runner.learnNode("sb-early");
+    expect(runner.nodeOf("sb-early")).toBe("node-7.example.test");
+
+    // A look that finds nothing (a backend with no node concept, a box
+    // already gone) never erases what is known.
+    backend.sandboxes.get("sb-early")!.node = undefined;
+    await runner.learnNode("sb-early");
+    await runner.learnNode("sb-unknown");
+    expect(runner.nodeOf("sb-early")).toBe("node-7.example.test");
+  });
+});
+
 describe("a copy that is not the reconciler", () => {
   it("reports, stops, reaps and sweeps nothing", async () => {
     // MUTATION-PROOF: ignore `reconciler: false` and every expect fails.
@@ -2674,6 +2699,17 @@ describe("turn delivery", () => {
     const [gated, ordinary] = delivered.get("sb-1") ?? [];
     expect(gated).toMatchObject({ gate: "bash check.sh" });
     expect(ordinary).not.toHaveProperty("gate");
+  });
+
+  it("forwards a conversation's context size, and only then", async () => {
+    connected.add("sb-1");
+    queued.push(turnItem({ contextTokens: 1_000_000 }));
+    queued.push(turnItem({ turnId: "t-2" }));
+    await drive();
+
+    const [sized, ordinary] = delivered.get("sb-1") ?? [];
+    expect(sized).toMatchObject({ contextTokens: 1_000_000 });
+    expect(ordinary).not.toHaveProperty("contextTokens");
   });
 
   it("gives a turn back once when its socket closes while its files are pulled", async () => {

@@ -50,9 +50,11 @@ import { compareToPrevious } from "./eval-comparison";
  * every run keeps a snapshot of its questions and results.
  *
  * The worker runs in the API process that accepted the run. If that process
- * dies (a deploy, a crash), the run stops making progress; the next run
- * request marks it failed once it has been idle for STALE_RUN_MS and no eval
- * turn of this agent is still active, so an agent is never locked out.
+ * dies (a deploy, a crash), the run stops making progress; it is marked
+ * failed once it has been idle for STALE_RUN_MS and no eval turn of this
+ * agent is still active (checked on every run request and every read of
+ * the run list), so an agent is never locked out. A person can also end a
+ * run at once with Stop (`stopRun`).
  */
 
 /** How long one question may run before it is stopped and scored an error. */
@@ -328,6 +330,9 @@ export const listRuns = async (
   agentId: string,
 ): Promise<EvalRunSummary[]> => {
   await requireHostedAgent(workspaceId, agentId);
+  // A run whose worker died (a deploy, a crash) is ended on read too, so
+  // the page never shows "Running" forever between run requests.
+  await db.$transaction((tx) => failStaleRuns(tx, workspaceId, agentId));
   const rows = await db.agentEvalRun.findMany({
     where: { agentId, agent: { workspaceId } },
     select: runSelect,
@@ -404,6 +409,54 @@ const failStaleRuns = async (
       error: "The run stopped making progress and was ended.",
     },
   });
+};
+
+/**
+ * Stop one run: the one the person is looking at, by id, so a Stop pressed
+ * on a run that just finished can never end the next one (a scheduled run
+ * that started meanwhile). The run is ended `failed` with "Stopped", its
+ * results so far kept, and any eval turn still going is aborted (one run
+ * per agent: an active eval turn is this run's). The worker's own writes
+ * are fenced on an active status, so a live worker stops at its next
+ * checkpoint instead of bringing the run back, and sends no report: a run
+ * a person stopped is not news (the cron rule). A run that already ended
+ * is a CONFLICT the caller can show.
+ */
+export const stopRun = async (
+  workspaceId: string,
+  agentId: string,
+  runId: string,
+  userId: string,
+): Promise<void> => {
+  await requireHostedAgent(workspaceId, agentId);
+  const stopped = await db.$transaction(async (tx) => {
+    await lockAgent(tx, workspaceId, agentId);
+    const run = await tx.agentEvalRun.findFirst({
+      where: { id: runId, agentId, agent: { workspaceId } },
+      select: { status: true },
+    });
+    if (!run) throw new ServiceError("NOT_FOUND", "Eval run not found");
+    const { count } = await tx.agentEvalRun.updateMany({
+      where: { id: runId, status: { in: [...ACTIVE_EVAL_RUN_STATUSES] } },
+      data: { status: "failed", finishedAt: new Date(), error: "Stopped" },
+    });
+    return count > 0;
+  });
+  if (!stopped)
+    throw new ServiceError("CONFLICT", "These tests already finished");
+
+  const turns = await db.turn.findMany({
+    where: {
+      source: EVAL_SOURCE,
+      status: { in: [...ACTIVE_TURN_STATUSES] },
+      conversation: { agentId, agent: { workspaceId }, source: EVAL_SOURCE },
+    },
+    select: { id: true },
+  });
+  for (const turn of turns)
+    await abortTurn(workspaceId, turn.id, userId).catch((err: unknown) =>
+      log.warn({ err, turnId: turn.id }, "could not stop an eval turn"),
+    );
 };
 
 /** A run was asked of an agent with no active test questions. Still the
@@ -501,6 +554,9 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * anything else (a database or runtime error) is shown generically, and its
  * detail stays in the server log, so no internal text lands on a run. */
 class RunError extends Error {}
+/** The run was ended outside the worker (Stop, or stale-run recovery): not
+ * a failure of this worker, and nothing for it to record or report. */
+class RunEndedError extends RunError {}
 const messageOf = (err: unknown) =>
   err instanceof ServiceError || err instanceof RunError
     ? err.message
@@ -645,8 +701,12 @@ const askQuestion = async (
     };
   } catch (err) {
     if (err instanceof UnsettledTurnError) throw err;
-    log.warn({ err, questionId: q.id }, "eval question failed");
-    // The turn may still be going: stop it before the next question.
+    // A run ended elsewhere (Stop, recovery) is not a failed question.
+    const ended = err instanceof RunEndedError;
+    if (!ended) log.warn({ err, questionId: q.id }, "eval question failed");
+    // The turn may still be going: stop it, before the next question, or,
+    // when the run was ended, so a turn created after Stop looked for active
+    // ones does not outlive it (nothing follows it, so no wait).
     if (result.turnId) {
       await abortTurn(ctx.workspaceId, result.turnId, ctx.userId).catch(
         (abortErr: unknown) =>
@@ -655,16 +715,19 @@ const askQuestion = async (
             "could not stop an eval turn after a failure",
           ),
       );
+      if (ended) throw err;
       if (!(await waitForTurn(result.turnId, ABORT_SETTLE_MS)))
         throw new UnsettledTurnError(messageOf(err));
     }
+    if (ended) throw err;
     return scoreAsError(messageOf(err));
   }
 };
 
 /** Ask every question in order, checkpointing as it goes. Every write is
- * guarded on the run still being active, so a run that recovery already
- * ended is never written back to life. */
+ * guarded on the run still being active, so a run that Stop or recovery
+ * already ended is never written back to life. Only a run this worker
+ * settled itself is reported: one ended elsewhere already says why. */
 const executeRun = async (
   ctx: RunContext,
   runId: string,
@@ -676,29 +739,51 @@ const executeRun = async (
       where: { id: runId, status: { in: [...ACTIVE_EVAL_RUN_STATUSES] } },
       data,
     });
-    if (count === 0) throw new RunError("The run was ended before it finished");
+    if (count === 0)
+      throw new RunEndedError("The run was ended before it finished");
   };
-  try {
-    await save({ status: "running", startedAt: new Date() });
-    for (const q of questions) {
-      const index = results.length;
-      const result = await askQuestion(ctx, q, async (checkpoint) => {
-        results[index] = checkpoint;
+  const settled = await (async () => {
+    try {
+      await save({ status: "running", startedAt: new Date() });
+      for (const q of questions) {
+        const index = results.length;
+        const result = await askQuestion(ctx, q, async (checkpoint) => {
+          results[index] = checkpoint;
+          await save({ results });
+        });
+        results[index] = result;
         await save({ results });
-      });
-      results[index] = result;
-      await save({ results });
+      }
+      await save({ status: "done", finishedAt: new Date() });
+      return true;
+    } catch (err) {
+      if (err instanceof RunEndedError) {
+        log.info({ runId }, "eval run was ended elsewhere; worker stopped");
+        return false;
+      }
+      log.error({ err, runId }, "eval run failed");
+      return save({
+        status: "failed",
+        finishedAt: new Date(),
+        error: messageOf(err),
+        results,
+      }).then(
+        () => true,
+        (saveErr: unknown) => {
+          if (!(saveErr instanceof RunEndedError))
+            log.error(
+              { err: saveErr, runId },
+              "could not record a failed eval run",
+            );
+          return false;
+        },
+      );
     }
-    await save({ status: "done", finishedAt: new Date() });
-  } catch (err) {
-    log.error({ err, runId }, "eval run failed");
-    await save({
-      status: "failed",
-      finishedAt: new Date(),
-      error: messageOf(err),
-      results,
-    }).catch((saveErr: unknown) =>
-      log.error({ err: saveErr, runId }, "could not record a failed eval run"),
-    );
-  }
+  })();
+  // Only a run this worker settled is reported (a no-op for a manual run;
+  // one ended elsewhere already says why). Never throws. Dynamic import:
+  // the delivery module reads runs through this one.
+  if (!settled) return;
+  const { deliverEvalRunReport } = await import("./eval-report-delivery");
+  await deliverEvalRunReport(ctx.workspaceId, ctx.agentId, runId);
 };

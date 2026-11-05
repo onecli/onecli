@@ -111,7 +111,7 @@ export interface ConditionSpec {
  *
  * The asymmetry worth knowing: an empty identity set means "any principal" for
  * a DECISION, but never matches for INJECTION selection
- * (`ee/policy_engine/inject_select.rs`).
+ * (`apps/gateway/crates/policy-engine/src/inject_select.rs`).
  */
 export type IdentitySpec =
   | "agent"

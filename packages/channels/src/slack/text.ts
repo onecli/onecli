@@ -46,6 +46,36 @@ export const clampLabel = (value: string): string =>
 export const normalizeLines = (value: string): string =>
   value.replace(/\r\n?|[\u{2028}\u{2029}]/gu, "\n");
 
+/** Slack's per-section text cap is 3,000 (a longer one rejects the WHOLE
+ * post, `invalid_blocks`): cut with headroom. */
+const SECTION_TEXT_LIMIT = 2900;
+
+/**
+ * Converted mrkdwn split into section-sized chunks, at a newline where one
+ * exists in the back half of the window. Never cut inside a `<url|label>`
+ * token (the tail half would render as literal angle-bracket soup): a
+ * still-open `<` before the cut moves the cut to just before it; a
+ * degenerate token longer than half the window keeps the hard cut.
+ */
+export const sectionChunks = (text: string): string[] => {
+  const chunks: string[] = [];
+  let rest = text;
+  while (rest.length > SECTION_TEXT_LIMIT) {
+    const window = rest.slice(0, SECTION_TEXT_LIMIT);
+    const newline = window.lastIndexOf("\n");
+    let cut = newline > SECTION_TEXT_LIMIT / 2 ? newline : SECTION_TEXT_LIMIT;
+    const open = rest.lastIndexOf("<", cut - 1);
+    if (open > SECTION_TEXT_LIMIT / 2) {
+      const close = rest.indexOf(">", open);
+      if (close === -1 || close >= cut) cut = open;
+    }
+    chunks.push(rest.slice(0, cut));
+    rest = rest.slice(cut).replace(/^\n/, "");
+  }
+  if (rest) chunks.push(rest);
+  return chunks;
+};
+
 /**
  * The user-mention token — Slack's `<@U…>` directive
  * (https://docs.slack.dev/messaging/formatting-message-text/).

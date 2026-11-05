@@ -120,6 +120,26 @@ export const useStartEvalRun = (agentId: string) => {
   });
 };
 
+/** Stop that one run (the one on screen): a press that lands after it
+ * ended never stops the next. */
+export const useStopEvalRun = (agentId: string) => {
+  const invalidate = useInvalidateEvals(agentId);
+  return useMutation({
+    mutationFn: (runId: string) => evals.stopRun(agentId, runId),
+    onSettled: invalidate,
+  });
+};
+
+/** Start a scheduled run now: results are sent where the schedule says.
+ * The run exists when this resolves, so one refresh shows it running. */
+export const useRunEvalScheduleNow = (agentId: string) => {
+  const invalidate = useInvalidateEvals(agentId);
+  return useMutation({
+    mutationFn: () => evals.runScheduleNow(agentId),
+    onSuccess: invalidate,
+  });
+};
+
 /** The schedule rides the evals view, so every write refreshes that. */
 export const useSaveEvalSchedule = (agentId: string) => {
   const invalidate = useInvalidateEvals(agentId);
@@ -129,6 +149,16 @@ export const useSaveEvalSchedule = (agentId: string) => {
     onSuccess: invalidate,
   });
 };
+
+/** Channels a scheduled run's results can go to. Asked only while the
+ * schedule dialog wants them (it asks the provider). */
+export const useEvalReportChannels = (agentId: string, enabled: boolean) =>
+  useQuery({
+    queryKey: queryKeys.evals.reportChannels(agentId),
+    queryFn: () => evals.reportChannels(agentId),
+    enabled,
+    staleTime: 60_000,
+  });
 
 export const useDeleteEvalSchedule = (agentId: string) => {
   const invalidate = useInvalidateEvals(agentId);

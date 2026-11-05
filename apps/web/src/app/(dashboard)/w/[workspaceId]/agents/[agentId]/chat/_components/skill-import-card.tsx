@@ -6,6 +6,7 @@ import { AlertTriangle, CheckCircle2 } from "lucide-react";
 import { agentSectionPath } from "@/lib/navigation";
 import { formatBytes } from "@/lib/format-bytes";
 import type { SkillImportCardData } from "@/lib/chat/skill-import";
+import { SkillFingerprint } from "@/lib/skills/skill-fingerprint";
 
 export interface SkillImportCardProps {
   data: SkillImportCardData;
@@ -68,6 +69,7 @@ export const SkillImportCard = ({ data }: SkillImportCardProps) => {
                   {skill.skippedCount > 3 && "…"}
                 </p>
               )}
+              <SkillFingerprint fingerprint={skill.fingerprint} />
             </div>
           </div>
         );

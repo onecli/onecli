@@ -5,9 +5,10 @@ import { Button } from "@onecli/ui/components/button";
 import { cn } from "@onecli/ui/lib/utils";
 import type { EvalSchedule } from "@/lib/api";
 import {
-  describeSchedule,
   describeScheduleState,
+  reportDestination,
 } from "@/lib/agents/eval-schedule";
+import { whenLabel } from "../../schedules/_components/schedule-grid";
 
 /**
  * The eval schedule at a glance, under the page header: when it runs next
@@ -31,7 +32,7 @@ export const ScheduleSummary = ({
         <div className="min-w-0 space-y-0.5">
           <p>
             <span className="font-medium">
-              {describeSchedule(schedule.schedule)}
+              {whenLabel(schedule.schedule) ?? schedule.schedule}
             </span>{" "}
             <span className="text-muted-foreground">({schedule.timezone})</span>
           </p>
@@ -43,6 +44,13 @@ export const ScheduleSummary = ({
           >
             {status}
             {last && <> · {last}</>}
+            {schedule.report && (
+              <>
+                {" "}
+                · Results to{" "}
+                {reportDestination(schedule.report, schedule.createdByViewer)}
+              </>
+            )}
           </p>
         </div>
       </div>

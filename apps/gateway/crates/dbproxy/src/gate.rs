@@ -305,6 +305,7 @@ impl Gate<'_> {
             raw_body: None,
             app: Some(self.engine.provider.to_string()),
             batch: None,
+            similar: None,
             created_at: now,
             expires_at: now + APPROVAL_TIMEOUT_SECS,
         };

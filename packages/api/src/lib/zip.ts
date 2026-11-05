@@ -22,8 +22,9 @@ export interface ZipEntry {
   isSymlink: boolean;
   /** Any of the Unix exec bits was set by the tool that made the zip. */
   executable: boolean;
-  /** Declared uncompressed size: a hint for early refusal only. */
-  declaredSize: number;
+  /** Declared uncompressed size: a hint for early refusal only. Null when
+   * the field defers to a ZIP64 record (`read` refuses those entries). */
+  declaredSize: number | null;
   /** Inflate this entry, refusing to produce more than `maxBytes`. */
   read: (maxBytes: number) => Promise<Buffer>;
 }
@@ -197,7 +198,7 @@ export const readZip = (buf: Buffer, maxEntries: number): ZipEntry[] => {
       isDirectory,
       isSymlink,
       executable: (mode & 0o111) !== 0,
-      declaredSize,
+      declaredSize: declaredSize === ZIP64_32 ? null : declaredSize,
       read,
     });
   }

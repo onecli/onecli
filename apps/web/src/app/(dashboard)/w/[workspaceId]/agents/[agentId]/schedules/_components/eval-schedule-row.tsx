@@ -24,10 +24,11 @@ import {
 import { Switch } from "@onecli/ui/components/switch";
 import {
   useDeleteEvalSchedule,
+  useRunEvalScheduleNow,
   useSaveEvalSchedule,
-  useStartEvalRun,
 } from "@/hooks/use-evals";
 import { ScheduleDialog } from "../../evals/_components/schedule-dialog";
+import { DisabledReason } from "./disabled-reason";
 import { CheckRunButton } from "./check-run-button";
 import { RunDot, type RunTone } from "./run-dot";
 import {
@@ -35,13 +36,14 @@ import {
   SCHEDULE_GRID,
   formatWhen,
   nextRunLabel,
+  whenLabel,
 } from "./schedule-grid";
 import { cn } from "@onecli/ui/lib/utils";
 import type { EvalRunSummary, EvalSchedule } from "@/lib/api";
 import { isActiveEvalRun } from "@onecli/api/validations/evals";
 import {
-  describeSchedule,
   describeScheduleState,
+  reportDestination,
 } from "@/lib/agents/eval-schedule";
 import { agentSectionPath } from "@/lib/navigation";
 
@@ -79,7 +81,9 @@ export const EvalScheduleRow = ({
   const pathname = usePathname();
   const remove = useDeleteEvalSchedule(agentId);
   const save = useSaveEvalSchedule(agentId);
-  const start = useStartEvalRun(agentId);
+  // Run now fires the SCHEDULE (a `scheduled` run), so its results go where
+  // the schedule sends them, exactly like a timed run.
+  const start = useRunEvalScheduleNow(agentId);
   // Keyed per open so the dialog starts from the saved schedule each time.
   const [dialog, setDialog] = useState({ open: false, key: 0 });
   const { status, alert } = describeScheduleState(schedule);
@@ -98,13 +102,19 @@ export const EvalScheduleRow = ({
         </Badge>
       </div>
       <span
-        title={schedule.timezone}
+        title={
+          schedule.report
+            ? `${schedule.schedule} · ${schedule.timezone} · Results to ${reportDestination(schedule.report, schedule.createdByViewer)}`
+            : `${schedule.schedule} · ${schedule.timezone}`
+        }
         className={cn(
           SCHEDULE_CELL,
           "font-medium text-emerald-700 dark:text-emerald-400",
         )}
       >
-        {describeSchedule(schedule.schedule)}
+        {whenLabel(schedule.schedule) ?? (
+          <span className="font-mono">{schedule.schedule}</span>
+        )}
       </span>
       {/* Same Next / Last cells as a cron row. Why it paused is a hover
           away; Last follows the newest eval run, however it was started. */}
@@ -148,21 +158,35 @@ export const EvalScheduleRow = ({
         )}
       </span>
       <div className="flex shrink-0 items-center justify-end gap-2">
-        <Button
-          variant="ghost"
-          size="xs"
-          disabled={start.isPending || running}
-          loading={start.isPending}
-          onClick={() =>
-            start.mutate(undefined, {
-              onSuccess: () => toast.success("Running the evals"),
-              onError: (error) => toast.error(error.message),
-            })
+        <DisabledReason
+          reason={
+            running
+              ? "Tests are running now."
+              : schedule.enabled
+                ? null
+                : schedule.disabledReason === "completed"
+                  ? "This schedule has no more runs. Edit it to set a new time."
+                  : schedule.disabledReason === "authorization"
+                    ? "Whoever set it up no longer has access. Save it again to run it as you."
+                    : "The schedule is paused. Turn it on to run it."
           }
         >
-          <Play className="size-3.5" />
-          Run now
-        </Button>
+          <Button
+            variant="ghost"
+            size="xs"
+            disabled={start.isPending || running || !schedule.enabled}
+            loading={start.isPending}
+            onClick={() =>
+              start.mutate(undefined, {
+                onSuccess: () => toast.success("Tests started"),
+                onError: (error) => toast.error(error.message),
+              })
+            }
+          >
+            <Play className="size-3.5" />
+            Run now
+          </Button>
+        </DisabledReason>
         <Switch
           size="sm"
           checked={schedule.enabled}

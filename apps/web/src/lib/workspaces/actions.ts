@@ -10,10 +10,7 @@ import {
   AUDIT_ACTIONS,
   AUDIT_SERVICES,
 } from "@onecli/api/services/audit-service";
-import {
-  activeMembershipWhere,
-  workspaceNameForOwner,
-} from "@onecli/api/services/organization-service";
+import { activeMembershipWhere } from "@onecli/api/services/organization-service";
 import { enforceSsoSession } from "@onecli/api/ee/sso/sso-enforcement";
 import { resolveOrgContext } from "@/lib/actions/resolve-user";
 import { setDefaultOrgCookie } from "@/lib/auth/set-active-scope";
@@ -206,42 +203,4 @@ export const getActiveOrganizationId = async (): Promise<string | null> => {
     return organizationId;
   }
   return getUserDefaultOrgId();
-};
-
-export const switchOrganizationAction = async (
-  organizationId: string,
-): Promise<ActionResult> => {
-  return safeAction(async () => {
-    const user = await requireUser();
-
-    const membership = await db.organizationMember.findUnique({
-      where: {
-        organizationId_userId: { organizationId, userId: user.id },
-      },
-      select: { organizationId: true, status: true },
-    });
-    if (!membership || membership.status === "suspended")
-      throw new Error("Not a member of this organization");
-
-    let workspace = await db.workspace.findFirst({
-      where: { organizationId, createdByUserId: user.id },
-      select: { id: true },
-      orderBy: { createdAt: "asc" },
-    });
-
-    if (!workspace) {
-      // Auto-created on first switch into the org — named after the owner
-      // (workspaceNameForOwner output always passes the create validator).
-      workspace = await createWorkspace(
-        user.id,
-        user.email,
-        workspaceNameForOwner(user.name, user.email),
-        organizationId,
-      );
-    }
-
-    await setDefaultOrgCookie(organizationId);
-
-    redirect(`/org/${organizationId}/workspaces`);
-  });
 };

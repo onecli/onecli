@@ -378,6 +378,17 @@ describe("Composer", () => {
     });
   });
 
+  it("holds Send disabled while a send is in flight, with no spinner", async () => {
+    // The box clears and the message shows at once, so a spinner beside
+    // the arrow only made the button jump.
+    const user = userEvent.setup();
+    render(<Composer {...baseProps} sendPending />);
+    await user.type(screen.getByRole("textbox", { name: "Message" }), "hi");
+    const send = screen.getByRole("button", { name: "Send message" });
+    expect(send).toBeDisabled();
+    expect(send.querySelectorAll("svg")).toHaveLength(1);
+  });
+
   it("keeps Send live BESIDE Stop while a turn is active", async () => {
     // The mid-run contract: a message sent while the agent works becomes a
     // follow-up that steers into the live turn — Send never yields.

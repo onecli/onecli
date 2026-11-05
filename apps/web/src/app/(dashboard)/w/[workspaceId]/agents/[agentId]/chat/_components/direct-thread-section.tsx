@@ -1,6 +1,13 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -22,6 +29,7 @@ import {
   type OutgoingMessage,
 } from "@/hooks/use-conversations";
 import { useUploadAttachment } from "@/hooks/use-attachments";
+import { ChatSendContext, type ChatSend } from "@/lib/chat/chat-send";
 import { useConversationTranscript } from "@/hooks/use-conversation-transcript";
 import { useHostedAvailability } from "@/hooks/use-hosted-availability";
 import { useHasDesktop } from "@/hooks/use-has-desktop";
@@ -116,10 +124,28 @@ export const DirectThreadSection = () => {
   // as this send does: a failed or reset send drops it, so history and other
   // tabs never pin.
   const [sentFresh, setSentFresh] = useState(false);
-  const send = (outgoing: OutgoingMessage, fresh: boolean) => {
-    setSentFresh(fresh);
-    sendMessage.mutate(outgoing);
-  };
+  const { mutate: mutateSend } = sendMessage;
+  const send = useCallback(
+    (outgoing: OutgoingMessage, fresh: boolean) => {
+      setSentFresh(fresh);
+      mutateSend(outgoing);
+    },
+    [mutateSend],
+  );
+  // What the person sends from the thread: the composer, and anything inside
+  // the thread that writes their next message for them (the app picker's
+  // custom-connection door, through ChatSendContext). Stable while the run
+  // state holds: the thread re-renders on every stream read, and a new
+  // context value would re-render every reader with it, memo or not.
+  const idle = active === undefined;
+  const sendNow = useCallback(
+    (outgoing: OutgoingMessage) => send(outgoing, idle),
+    [send, idle],
+  );
+  const chatSend = useCallback<ChatSend>(
+    (message) => sendNow({ message }),
+    [sendNow],
+  );
   const pinnedSend =
     sentFresh && (sendMessage.isPending || sendMessage.isSuccess);
 
@@ -315,29 +341,31 @@ export const DirectThreadSection = () => {
       {transcriptLoading ? (
         <ThreadSkeleton />
       ) : (
-        <ChatThread
-          turns={turns}
-          folded={folded}
-          pending={pending}
-          conversationId={conversationId}
-          modelsHref={agentSectionPath(pathname, agentId, "models")}
-          computerHref={hasDesktop ? computerHref : undefined}
-          onOpenComputer={
-            hasDesktop
-              ? (requestId) => {
-                  if (dock.current) dock.current.expand();
-                  else router.push(computerHref(requestId));
-                }
-              : undefined
-          }
-          agentName={agent.name}
-          agentId={agentId}
-          onConnectModelKey={() => setKeyDialogOpen(true)}
-          hasOlder={transcript.hasOlder}
-          loadingOlder={transcript.loadingOlder}
-          onLoadOlder={transcript.loadOlder}
-          pinnedSend={pinnedSend}
-        />
+        <ChatSendContext value={chatSend}>
+          <ChatThread
+            turns={turns}
+            folded={folded}
+            pending={pending}
+            conversationId={conversationId}
+            modelsHref={agentSectionPath(pathname, agentId, "models")}
+            computerHref={hasDesktop ? computerHref : undefined}
+            onOpenComputer={
+              hasDesktop
+                ? (requestId) => {
+                    if (dock.current) dock.current.expand();
+                    else router.push(computerHref(requestId));
+                  }
+                : undefined
+            }
+            agentName={agent.name}
+            agentId={agentId}
+            onConnectModelKey={() => setKeyDialogOpen(true)}
+            hasOlder={transcript.hasOlder}
+            loadingOlder={transcript.loadingOlder}
+            onLoadOlder={transcript.loadOlder}
+            pinnedSend={pinnedSend}
+          />
+        </ChatSendContext>
       )}
     </>,
     <>
@@ -356,7 +384,7 @@ export const DirectThreadSection = () => {
 
       <Composer
         ref={composer}
-        onSend={(outgoing) => send(outgoing, active === undefined)}
+        onSend={sendNow}
         uploadFile={(file) => uploadAttachment.mutateAsync(file)}
         sendPending={sendMessage.isPending}
         sendError={sendMessage.error}

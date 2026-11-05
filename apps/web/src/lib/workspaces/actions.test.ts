@@ -61,7 +61,6 @@ vi.mock("@onecli/api/services/audit-service", () => ({
 }));
 vi.mock("@onecli/api/services/organization-service", () => ({
   activeMembershipWhere: {},
-  workspaceNameForOwner: () => "x",
 }));
 vi.mock("@onecli/api/ee/sso/sso-enforcement", () => ({
   enforceSsoSession: async () => null,

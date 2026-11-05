@@ -282,6 +282,7 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
     input: {
       approvalId: string;
       decision: "approve" | "deny";
+      scope?: "similar";
       clickerExternalUserId: string;
     },
   ): Promise<void> => {
@@ -295,6 +296,7 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
         presenceId: runtime.presence.presenceId,
         approvalId: input.approvalId,
         decision: input.decision,
+        ...(input.scope && { scope: input.scope }),
         clickerExternalUserId: input.clickerExternalUserId,
       });
       const text = runtime.provider.decisionSettledText({

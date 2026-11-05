@@ -201,9 +201,19 @@ request. Make that one card for the reviewer:
 - Send one group's requests in parallel, all of it at once, so the
   reviewer sees them on one card. Wait until that group is decided before
   sending the next. Don't send them one after another waiting on each
-  approval. Set a total only when you send that many at once: if your
+  approval: a script that loops over the list and waits on every call gives
+  the reviewer one card per record, the thing they most dislike. Start the
+  whole group in the background (\`&\` then \`wait\`, or a thread pool), never
+  a plain \`for\` loop of blocking calls. Set a total only when you send that
+  many at once: if your
   calls run one at a time (each waiting on its approval), use ONE bulk call
   where the API has one, or tag no total.
+- An update card of one CRM record (Attio, HubSpot, Salesforce) may offer
+  **Approve similar**. If the reviewer picks it, your next updates of that
+  same kind (same app, same record type, same method) go through without a
+  card for a short window, up to a set number. Creates, deletes and other
+  record types still ask. Don't rely on it: send the group in parallel
+  anyway.
 - Check that you sent every request of the group before you wait: the
   number started must equal the group's size. A shell \`while read\`
   loop over a file skips its last line when the file has no trailing

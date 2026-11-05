@@ -7,6 +7,7 @@ import { cn } from "@onecli/ui/lib/utils";
 import { useOrgPrefix } from "@/lib/org-navigation";
 import { getPlanConfig, normalizePlan } from "@onecli/api/ee/billing/plans";
 import type { UsageOverview } from "@/ee/billing/api-request-actions";
+import { pct } from "@/ee/billing/format";
 
 const RING_SIZE = 44;
 const RING_STROKE = 3.5;
@@ -15,11 +16,6 @@ const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
 
 const formatLimit = (limit: number) =>
   limit === Infinity ? "Unlimited" : limit.toLocaleString("en-US");
-
-const pct = (current: number, limit: number) =>
-  limit === Infinity || limit === 0
-    ? 0
-    : Math.min((current / limit) * 100, 100);
 
 const UsageRing = ({
   percentage,

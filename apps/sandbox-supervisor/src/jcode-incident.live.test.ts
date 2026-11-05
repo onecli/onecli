@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, realpathSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import type {
   HarnessEvent,
@@ -29,6 +29,20 @@ const LIVE = Boolean(process.env.JCODE_LIVE_TEST);
 
 /** Injected into the managed config.toml by the writeManagedFile wrap. */
 let mockProviderToml = "";
+
+/** Every supervisor log line, for the scenarios that assert on what the
+ * adapter reported (the real log still prints). */
+const logged: { message: string; extra?: Record<string, unknown> }[] = [];
+vi.mock("./log", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./log")>();
+  return {
+    ...original,
+    log: (...args: Parameters<typeof original.log>) => {
+      logged.push({ message: args[1], ...(args[2] && { extra: args[2] }) });
+      original.log(...args);
+    },
+  };
+});
 
 // The adapter rewrites config.toml at instance launch — wrap the shared
 // managed write to add the mock provider profile and pin the default model
@@ -138,9 +152,12 @@ const stubHarvester = {
   stop: () => undefined,
 };
 
-/** A short /tmp home — the daemon binds a unix socket under it, and macOS's
- * /var/folders tmpdir overflows SUN_LEN (proven in the incident repro). */
-const shortHome = () => mkdtempSync("/tmp/ocl-");
+/** A short /tmp home: the daemon binds a unix socket under it, and macOS's
+ * /var/folders tmpdir overflows SUN_LEN (proven in the incident repro).
+ * Resolved to the real path, like the sandbox's real /workspace: macOS's
+ * /tmp is a symlink, and jcode (v1.0+) refuses every bash command when any
+ * component of its home's path is one. */
+const shortHome = () => mkdtempSync(`${realpathSync("/tmp")}/ocl-`);
 
 const supervisorConfig = (homeDir: string) => ({
   homeDir,
@@ -367,6 +384,77 @@ describe.skipIf(!LIVE)("the stuck-sandbox incident, fixed (live jcode)", () => {
       } finally {
         await second.dispose();
       }
+    });
+  }, 240_000);
+
+  it("the platform's context size reaches the real daemon, clamped to the model, on a fresh and a resumed session", async () => {
+    // What only the real daemon can say: that set_context_cap with OUR
+    // session id is answered (the id-less form hangs), which budget it
+    // actually applies (clamped to the model's own window), and that a
+    // session resumed in a fresh container takes a size like a new one.
+    const applied = () =>
+      logged
+        .filter((line) => line.message === "context size applied")
+        .map((line) => ({
+          tokens: line.extra?.tokens,
+          effectiveBudget: line.extra?.effectiveBudget,
+        }));
+    logged.length = 0;
+    await withMock(20_000, async () => {
+      const homeDir = shortHome();
+      const first = createJcodeHarness();
+      let ref: string | null | undefined;
+      try {
+        const session = await first.startSession({
+          homeDir,
+          model: "mock-model",
+        });
+        ref = session.sessionRef;
+        const events = [];
+        for await (const event of session.runTurn({
+          message: "go small",
+          contextTokens: 100_000,
+        })) {
+          events.push(event);
+        }
+        expect(events.at(-1)?.type).toBe("turn.done");
+      } finally {
+        await first.dispose();
+      }
+      // Answered by the real daemon, with the budget it applied.
+      expect(applied()).toEqual([
+        { tokens: 100_000, effectiveBudget: 100_000 },
+      ]);
+
+      // A fresh container resuming the same session takes a NEW size: the
+      // adapter's memory is per process, so a resumed session is always
+      // set again (it costs one daemon round trip, on the first turn).
+      const second = createJcodeHarness();
+      try {
+        const resumed = await second.startSession({
+          homeDir,
+          model: "mock-model",
+          ...(ref && { resumeSessionRef: ref }),
+        });
+        expect(resumed.sessionRef).toBe(ref);
+        const events = [];
+        for await (const event of resumed.runTurn({
+          message: "grow",
+          contextTokens: 1_000_000,
+        })) {
+          events.push(event);
+        }
+        expect(events.at(-1)?.type).toBe("turn.done");
+      } finally {
+        await second.dispose();
+      }
+      // jcode clamps the budget to the model's own window: an unlisted
+      // model (this mock) gets jcode's 200k default window, so asking 1M
+      // yields 200k. That clamp is why the platform needs no model table.
+      expect(applied()).toEqual([
+        { tokens: 100_000, effectiveBudget: 100_000 },
+        { tokens: 1_000_000, effectiveBudget: 200_000 },
+      ]);
     });
   }, 240_000);
 
@@ -756,3 +844,160 @@ const t0Streaming = async (
   }
   throw new Error("the long run never reached the mock provider");
 };
+
+describe.skipIf(!LIVE)(
+  "a turn the model leaves unanswered is never a silent success (live jcode)",
+  () => {
+    it.each([
+      ["content_filter", "model_refused"],
+      ["stop", "model_empty_response"],
+    ])(
+      "a reply that finishes %j with nothing in it closes failed as %s; the next turn answers normally",
+      async (finishReason, code) => {
+        // The production shape: the provider answers 200 with no content and
+        // a stop reason, the runtime ends the turn cleanly, and before this
+        // fix the turn closed `done` with no answer at all. Driven through
+        // the real runtime binary, so the frame the adapter reads is the one
+        // the runtime actually sends, not a hand-written copy of it.
+        //
+        // Silent for EVERY request until the follow-up question, not only the
+        // first: an empty non-safety stop is retried by the runtime itself
+        // with a continuation prompt (its own recovery, seen live), and only
+        // a model that stays empty through those retries reaches the signal.
+        // A model that answers on a retry is a normal `done`, as it should be.
+        const script: MockScript = ({ lastUser }) =>
+          lastUser.includes("normal question")
+            ? undefined
+            : { kind: "silent", finishReason, tag: "silent" };
+        await withMock(
+          20_000,
+          async (mock) => {
+            const t = createTransport();
+            const run = runSupervisor(
+              supervisorConfig(shortHome()),
+              createJcodeHarness(),
+              t.transport,
+              { memoryHarvester: stubHarvester },
+            );
+            try {
+              t.push(deliver("t-1", "cv-a", "say-nothing please"));
+              await t.until(
+                () => t.resultsOf("t-1").length > 0,
+                "the unanswered turn's result",
+                60_000,
+              );
+              const [first] = t.resultsOf("t-1");
+              expect(first!.result.status).toBe("failed");
+              expect(first!.result.errorCode).toBe(code);
+              expect(first!.result.error).toContain(finishReason);
+              expect(
+                mock.requests.some(
+                  (r) => r.kind === "scripted" && r.tag === "silent",
+                ),
+              ).toBe(true);
+
+              // The session is healthy: the next message gets a real answer.
+              t.push(deliver("t-2", "cv-a", "and now a normal question"));
+              await t.until(
+                () => t.resultsOf("t-2").length > 0,
+                "the follow-up turn's result",
+                60_000,
+              );
+              const [second] = t.resultsOf("t-2");
+              expect(second!.result.status).toBe("done");
+              expect(second!.result.errorCode).toBeUndefined();
+              expect(t.textOf("t-2")).toContain("Quick answer");
+            } finally {
+              t.push({ kind: "shutdown" });
+              await run;
+            }
+          },
+          script,
+        );
+      },
+      180_000,
+    );
+
+    it("a reply cut short by a safety stop AFTER real words keeps them: an answer, not a failure", async () => {
+      // The runtime raises the same signal for a safety stop that follows
+      // visible text (its notice fires on the stop reason alone). The person
+      // got words; failing the turn would replace them with a refusal notice
+      // and count a strike against a schedule that did answer.
+      const script: MockScript = () => ({
+        kind: "text",
+        text: "Here is the part I can help with.",
+        finishReason: "content_filter",
+        tag: "partial",
+      });
+      await withMock(
+        20_000,
+        async () => {
+          const t = createTransport();
+          const run = runSupervisor(
+            supervisorConfig(shortHome()),
+            createJcodeHarness(),
+            t.transport,
+            { memoryHarvester: stubHarvester },
+          );
+          try {
+            t.push(deliver("t-1", "cv-a", "a question"));
+            await t.until(
+              () => t.resultsOf("t-1").length > 0,
+              "the turn's result",
+              60_000,
+            );
+            const [result] = t.resultsOf("t-1");
+            expect(t.textOf("t-1")).toContain("the part I can help with");
+            expect(result!.result.status).toBe("done");
+            expect(result!.result.errorCode).toBeUndefined();
+          } finally {
+            t.push({ kind: "shutdown" });
+            await run;
+          }
+        },
+        script,
+      );
+    }, 180_000);
+
+    it("an empty reply the model recovers from on the runtime's own retry stays an ordinary answer", async () => {
+      // The other side of the line: the runtime retries an empty answer
+      // itself, and a model that answers on that retry produced a real reply.
+      // Reporting it as a failure would cry wolf on every transient blip.
+      let silentServed = 0;
+      const script: MockScript = () => {
+        if (silentServed > 0) return undefined; // the retry: a real answer
+        silentServed += 1;
+        return { kind: "silent", finishReason: "stop", tag: "silent" };
+      };
+      await withMock(
+        20_000,
+        async () => {
+          const t = createTransport();
+          const run = runSupervisor(
+            supervisorConfig(shortHome()),
+            createJcodeHarness(),
+            t.transport,
+            { memoryHarvester: stubHarvester },
+          );
+          try {
+            t.push(deliver("t-1", "cv-a", "a question"));
+            await t.until(
+              () => t.resultsOf("t-1").length > 0,
+              "the turn's result",
+              60_000,
+            );
+            const [result] = t.resultsOf("t-1");
+            expect(silentServed).toBe(1);
+            expect(result!.result.status).toBe("done");
+            expect(result!.result.errorCode).toBeUndefined();
+            expect(t.textOf("t-1")).toContain("Quick answer");
+          } finally {
+            t.push({ kind: "shutdown" });
+            await run;
+          }
+        },
+        script,
+      );
+    }, 180_000);
+  },
+);

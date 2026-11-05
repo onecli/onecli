@@ -195,6 +195,20 @@ test(
 // ── Comments in synced files ────────────────────────────────────────────────
 
 /**
+ * Names of the hosted sandbox's own setup that have no use anywhere in the
+ * shared product, code included: the filesystem shared under its home, its
+ * home device, and the hosted nodes' DNS names. Unlike the prose terms below,
+ * these are matched in the WHOLE text (strings and fixtures too), because
+ * fixtures are exactly where they slipped in: a test that copies a real
+ * mount table or node name publishes it.
+ */
+const SUBSTRATE_LITERALS = [
+  /\bvirtiofs\b/i,
+  /\/dev\/agenthome\b/,
+  /\bec2\.internal\b/i,
+];
+
+/**
  * Terms that only ever describe OUR cloud's implementation — never product
  * behavior a self-hoster could see. Deliberately narrow (a backstop, not the
  * rule): generic words like "pod", "S3" or "load balancer" are legitimate in
@@ -257,8 +271,14 @@ const CLOUD_IMPLEMENTATION_TERMS = [
   /\bnetwork load balancer\b/i,
   /\bip-target registration\b/i,
   /\b(found|seen) (live )?on dev\b|\b(after boot|ran) on dev\b|\bdev ran on\b|\bon dev:/i,
+  /\b(read|observed|showed|shown|measured) (live )?on dev\b|\blive on dev\b/i,
+  // The hosted sandbox's own setup, named. Shared prose says "a backend" or
+  // "another mount", and fixtures use neutral values (`/dev/sdb`,
+  // `node-1.example.test`).
+  /\bkata guests?\b/i,
+  ...SUBSTRATE_LITERALS,
   /#1300\b/,
-  /(^|[^\w#&])#(803|1335|1375|1401|1470|1495)\b/,
+  /(^|[^\w#&])#(803|834|1335|1375|1401|1412|1470|1495)\b/,
   // The hosted agent desktop is licensed hosted-platform code: its plan and
   // the screen server it runs are named only inside ee/ and cloud-only dirs.
   /\bplans\/desktop-takeover\b/,
@@ -459,5 +479,82 @@ test(
     assert.equal(flagged[0].line, 2);
     assert.equal(flagged[1].line, 5);
     assert.equal(flagged[2].line, 7);
+
+    // The prose terms this guard grew for the read-only-home scrub: each is
+    // caught in a comment, and the neutral fixtures that replaced them are not.
+    const prose = await commentsOf(
+      "y.ts",
+      "// The table read live on dev after an ext4 error\n" +
+        "// The shape a Kata guest's table has\n" +
+        "// the honest #834 copy, and a rule written after #1412\n" +
+        "// a 6.15+ kernel, another mount of the home's path underneath\n" +
+        "// see jcode#834 upstream\n",
+    );
+    const hits = prose.filter(({ text }) =>
+      CLOUD_IMPLEMENTATION_TERMS.some((re) => re.test(text)),
+    );
+    assert.deepEqual(
+      hits.map(({ line }) => line),
+      [1, 2, 3],
+    );
+  },
+);
+
+test(
+  "no synced file names the hosted sandbox's setup, strings included",
+  { skip: !inCloudRepo },
+  () => {
+    const findings = [];
+    for (const file of syncedFiles()) {
+      if (COMMENT_SCAN_EXEMPT.includes(file) || isAppliedMigration(file))
+        continue;
+      let source;
+      try {
+        source = readFileSync(path(file), "utf8");
+      } catch {
+        continue;
+      }
+      source.split("\n").forEach((text, i) => {
+        const hit = SUBSTRATE_LITERALS.find((re) => re.test(text));
+        if (hit)
+          findings.push(
+            `${file}:${i + 1} ${hit} — ${text.trim().slice(0, 120)}`,
+          );
+      });
+    }
+    assert.deepEqual(
+      findings,
+      [],
+      "synced files name the hosted sandbox's own setup; use a neutral fixture (`/dev/sdb`, `node-1.example.test`):\n" +
+        findings.join("\n"),
+    );
+  },
+);
+
+test(
+  "the substrate literal guard catches what it claims to (negative control)",
+  { skip: !inCloudRepo },
+  () => {
+    const caught = [
+      '"none /workspace virtiofs rw,nodev,relatime 0 0",',
+      "`/dev/agenthome ${homeDir} ext4 ${options} 0 0`,",
+      '{ nodeOf: () => "ip-10-0-0-1.ec2.internal" },',
+    ];
+    const allowed = [
+      '"tmpfs /workspace tmpfs rw,nodev,relatime 0 0",',
+      "`/dev/sdb ${homeDir} ext4 ${options} 0 0`,",
+      '{ nodeOf: () => "node-1.example.test" },',
+      "const agentHome = agentHomeDir(process.env);",
+    ];
+    for (const line of caught)
+      assert.ok(
+        SUBSTRATE_LITERALS.some((re) => re.test(line)),
+        `missed: ${line}`,
+      );
+    for (const line of allowed)
+      assert.ok(
+        !SUBSTRATE_LITERALS.some((re) => re.test(line)),
+        `false positive: ${line}`,
+      );
   },
 );

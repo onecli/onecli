@@ -341,6 +341,8 @@ export interface ImportedSkillOutcome {
   bytes: number;
   groups: Record<string, number>;
   skipped: { path: string; reason: string }[];
+  /** sha256 over the imported files (skillFingerprint). */
+  fingerprint: string;
   replaced: boolean;
 }
 
@@ -444,6 +446,7 @@ const saveImportedSkills = async (
           bytes: skill.bytes,
           groups: summarizeSkillFiles(skill.files),
           skipped: skill.skipped,
+          fingerprint: skill.fingerprint,
           replaced,
         });
         const priorId = prior.get(skill.name);

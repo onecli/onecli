@@ -1,7 +1,24 @@
 import { describe, expect, it } from "vitest";
 import { crc32, deflateRawSync } from "node:zlib";
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { importSkillZip, summarizeSkillFiles } from "./skill-import";
 import { ZipError } from "../lib/zip";
+import {
+  SKILL_LEAVE_OUT_RULES,
+  skillCheckCommand,
+} from "../lib/skill-import-rules";
 
 /**
  * A tiny ZIP writer for tests: each entry is deflated (or stored), with the
@@ -163,6 +180,17 @@ describe("importSkillZip", () => {
     ).rejects.toThrow("No SKILL.md found in this zip");
   });
 
+  it("finds no skill inside a folder the import leaves out, but one may be named like it", async () => {
+    const { skills } = await importSkillZip(
+      makeZip([
+        { path: "node_modules/pkg/SKILL.md", data: skillMd("pkg") },
+        { path: "lib/venv/tool/SKILL.md", data: skillMd("tool") },
+        { path: "venv/SKILL.md", data: skillMd("venv") },
+      ]),
+    );
+    expect(skills.map((s) => s.name)).toEqual(["venv"]);
+  });
+
   it("keeps binary files as bytes", async () => {
     const png = Buffer.from([
       0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0,
@@ -229,19 +257,194 @@ describe("importSkillZip", () => {
     ]);
   });
 
-  it("stops a zip bomb at the size cap instead of inflating it", async () => {
+  it("stops a zip bomb at the size cap and refuses the skill whole", async () => {
     const huge = Buffer.alloc(11 * 1024 * 1024, 0x61);
-    const skill = await onlySkill(
+    const { skills, problems } = await importSkillZip(
       makeZip([
         { path: "s/SKILL.md", data: skillMd("s") },
         // Declares 10 bytes, inflates to 11 MB.
         { path: "s/bomb.txt", data: huge, declaredSize: 10 },
       ]),
     );
-    expect(skill.files).toEqual([]);
-    expect(skill.skipped).toEqual([
-      { path: "bomb.txt", reason: "The skill would be larger than 10 MB" },
+    expect(skills).toEqual([]);
+    expect(problems).toEqual([
+      { folder: "s", reason: "The skill would be larger than 10 MB" },
     ]);
+  });
+
+  it("refuses a skill whole when a file declares more than the room left", async () => {
+    const { skills, problems } = await importSkillZip(
+      makeZip([
+        { path: "s/SKILL.md", data: skillMd("s") },
+        { path: "s/a.md", data: "a" },
+        { path: "s/big.bin", data: "x", declaredSize: 11 * 1024 * 1024 },
+      ]),
+    );
+    expect(skills).toEqual([]);
+    expect(problems).toEqual([
+      { folder: "s", reason: "The skill would be larger than 10 MB" },
+    ]);
+  });
+
+  it("leaves out generated files and dotenv files, saying why", async () => {
+    const skill = await onlySkill(
+      makeZip([
+        { path: "s/SKILL.md", data: skillMd("s") },
+        { path: "s/scripts/run.py", data: "print(1)" },
+        { path: "s/scripts/__pycache__/run.cpython-312.pyc", data: "" },
+        { path: "s/scripts/old.pyc", data: "" },
+        { path: "s/.venv/lib/x.py", data: "x" },
+        { path: "s/venv/lib/y.py", data: "y" },
+        { path: "s/.vscode/settings.json", data: "{}" },
+        { path: "s/.env", data: "KEY=1" },
+        { path: "s/config/.env.local", data: "KEY=1" },
+      ]),
+    );
+    expect(skill.files.map((f) => f.path)).toEqual(["scripts/run.py"]);
+    expect(skill.skipped).toEqual(
+      expect.arrayContaining([
+        {
+          path: "scripts/__pycache__/run.cpython-312.pyc",
+          reason: "Generated file",
+        },
+        { path: "scripts/old.pyc", reason: "Generated file" },
+        { path: ".venv/lib/x.py", reason: "Generated file" },
+        { path: "venv/lib/y.py", reason: "Generated file" },
+        { path: ".vscode/settings.json", reason: "Generated file" },
+        { path: ".env", reason: "Possible secrets file" },
+        { path: "config/.env.local", reason: "Possible secrets file" },
+      ]),
+    );
+  });
+
+  it("refuses a skill whole when its real files pass the file cap", async () => {
+    const files = Array.from({ length: 205 }, (_, i) => ({
+      path: `s/lib/f${String(i).padStart(3, "0")}.py`,
+      data: "x",
+    }));
+    const { skills, problems } = await importSkillZip(
+      makeZip([
+        { path: "s/SKILL.md", data: skillMd("s") },
+        ...files,
+        // Generated files never count toward the cap.
+        ...files.map((f) => ({
+          path: f.path.replace("lib/", "lib/__pycache__/") + "c",
+          data: "",
+        })),
+      ]),
+    );
+    expect(skills).toEqual([]);
+    expect(problems).toEqual([
+      {
+        folder: "s",
+        reason:
+          "A skill holds at most 200 files, SKILL.md included, and this one has 206, not counting the files left out. Remove some, then import again",
+      },
+    ]);
+  });
+
+  it("imports a library whose cache alone would have passed the cap", async () => {
+    const files = Array.from({ length: 150 }, (_, i) => ({
+      path: `s/vendor/m${i}.py`,
+      data: "x",
+    }));
+    const skill = await onlySkill(
+      makeZip([
+        { path: "s/SKILL.md", data: skillMd("s") },
+        ...files,
+        ...files.map((f) => ({
+          path: f.path.replace("vendor/", "vendor/__pycache__/") + "c",
+          data: "",
+        })),
+      ]),
+    );
+    expect(skill.files).toHaveLength(150);
+  });
+
+  it("fingerprints the skill the way shasum does on the folder", async () => {
+    const md = skillMd("s");
+    const skill = await onlySkill(
+      makeZip([
+        { path: "s/SKILL.md", data: md },
+        { path: "s/b.txt", data: "two" },
+        { path: "s/a/z.txt", data: "one" },
+        { path: "s/__pycache__/x.pyc", data: "ignored" },
+      ]),
+    );
+    const sha = (d: string) => createHash("sha256").update(d).digest("hex");
+    // `find . -type f | cut -c3- | LC_ALL=C sort | xargs shasum -a 256`
+    const listing =
+      `${sha(md)}  SKILL.md\n` +
+      `${sha("one")}  a/z.txt\n` +
+      `${sha("two")}  b.txt\n`;
+    expect(skill.fingerprint).toBe(sha(listing));
+  });
+
+  it("the check command recomputes the fingerprint on the source folder", async () => {
+    // A real folder holding a file for every leave-out rule (generated from
+    // the table, so a new rule is covered without touching this test) plus
+    // each path rule's edge: the check must reach the import's verdict on
+    // every one, or this fails.
+    const root = mkdtempSync(join(tmpdir(), "skill-check-"));
+    const folder = join(root, "demo");
+    const asName = (glob: string) => glob.replaceAll("*", "x");
+    const files: Record<string, string | Buffer> = {
+      "SKILL.md": skillMd("demo"),
+      "scripts/run.py": "print(1)\n",
+      "lib/venv.py": "kept: only a folder named venv is generated",
+      "refs/_under.md": "kept",
+      "a/b/c/d/e/six.md": "kept: six deep",
+      "assets/logo.bin": Buffer.from([0x89, 0x50, 0x4e, 0x47, 0]),
+      "empty.txt": "",
+      "a/b/c/d/e/f/seven.md": "too deep",
+      // 217 characters, past SKILL_FILE_PATH_MAX_LENGTH.
+      [`${"l".repeat(70)}/${"o".repeat(70)}/${"n".repeat(70)}/g.md`]: "long",
+      ".hidden/notes.md": "hidden folder",
+      "refs/my notes.md": "space",
+      "refs/café.md": "accent",
+      "refs/-dash.md": "dash",
+      ...Object.fromEntries(
+        SKILL_LEAVE_OUT_RULES.flatMap((rule) => [
+          ...rule.folders.map((f) => [`in-folder/${f}/inside.md`, "x"]),
+          ...rule.files.flatMap((f) => [
+            [`as-file/${asName(f)}`, "x"],
+            [`as-upper/${asName(f).toUpperCase()}`, "x"],
+          ]),
+        ]),
+      ),
+    };
+    try {
+      for (const [path, data] of Object.entries(files)) {
+        mkdirSync(dirname(join(folder, path)), { recursive: true });
+        writeFileSync(join(folder, path), data);
+      }
+      // What `zip -r demo.zip demo` stores: every file under the folder.
+      const entries = readdirSync(folder, { recursive: true, encoding: "utf8" })
+        .filter((path) => statSync(join(folder, path)).isFile())
+        .map((path) => ({
+          path: `demo/${path}`,
+          data: readFileSync(join(folder, path)),
+        }));
+      const skill = await onlySkill(makeZip(entries));
+      expect(skill.files.map((f) => f.path).sort()).toEqual([
+        "a/b/c/d/e/six.md",
+        "assets/logo.bin",
+        "empty.txt",
+        "lib/venv.py",
+        "refs/_under.md",
+        "scripts/run.py",
+      ]);
+      const check = () =>
+        execFileSync("sh", ["-c", skillCheckCommand(skill.fingerprint)], {
+          cwd: folder,
+          encoding: "utf8",
+        }).trim();
+      expect(check()).toBe("Matches the imported skill");
+      writeFileSync(join(folder, "scripts/run.py"), "print(2)\n");
+      expect(check()).toBe("Doesn't match the imported skill");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("leaves out a file whose bytes don't match its checksum", async () => {

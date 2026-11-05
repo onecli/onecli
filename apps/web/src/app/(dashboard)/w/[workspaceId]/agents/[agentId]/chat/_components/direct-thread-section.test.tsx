@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { conversations, grants, secrets } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import type { SavedSecret, Turn } from "@/lib/api";
+import { useChatSend } from "@/lib/chat/chat-send";
 import { DirectThreadSection } from "./direct-thread-section";
 
 // The unit here is the in-place key door: notice → dialog → create → attach
@@ -78,15 +79,33 @@ vi.mock("./chat-thread", () => ({
     onConnectModelKey?: () => void;
     pinnedSend?: boolean;
   }) => (
-    <button
-      data-testid="connect-key"
-      data-pinned-send={pinnedSend}
-      onClick={() => onConnectModelKey?.()}
-    >
-      connect key
-    </button>
+    <>
+      <button
+        data-testid="connect-key"
+        data-pinned-send={pinnedSend}
+        onClick={() => onConnectModelKey?.()}
+      >
+        connect key
+      </button>
+      <ChatSendProbe />
+    </>
   ),
 }));
+
+// Stands in for anything inside the thread that writes the person's next
+// message (the app picker's custom-connection door): it reads the send from
+// context, exactly as the picker does.
+const ChatSendProbe = () => {
+  const chatSend = useChatSend();
+  return (
+    <button
+      data-testid="chat-send-probe"
+      onClick={() => chatSend?.("connect AcmeCRM for me")}
+    >
+      probe
+    </button>
+  );
+};
 
 // The composer stub is one button that sends a fixed message through
 // `onSend` (composer.test.tsx covers the real textarea).
@@ -529,6 +548,29 @@ describe("the send pin", () => {
     await waitFor(() => expect(pinnedSend()).toBe("true"));
     reject(new Error("nope"));
     await waitFor(() => expect(pinnedSend()).toBe("false"));
+  });
+
+  it("hands the thread's own send to what renders inside it, pinned like the composer's", async () => {
+    // The app picker's custom-connection door sends through this context:
+    // without the provider it renders no door at all, and with a send that
+    // skipped the pin the request would scroll away like history.
+    arrange([turn({ status: "done", errorCode: null, error: null })]);
+    vi.mocked(conversations.sendMessage).mockReturnValue(
+      new Promise(() => undefined) as never,
+    );
+    renderSection();
+    await waitFor(() =>
+      expect(screen.getByTestId("chat-send-probe")).toBeInTheDocument(),
+    );
+    await userEvent.click(screen.getByTestId("chat-send-probe"));
+    await waitFor(() =>
+      expect(conversations.sendMessage).toHaveBeenCalledWith(
+        "conv-1",
+        "connect AcmeCRM for me",
+        undefined,
+      ),
+    );
+    await waitFor(() => expect(pinnedSend()).toBe("true"));
   });
 
   it("pins the model-key resend like any fresh send", async () => {

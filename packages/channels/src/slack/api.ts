@@ -313,12 +313,20 @@ export const postMessage = async (
     text: string;
     threadTs?: string;
     iconUrl?: string;
+    /** Colored side bars under the text: the only way a bot message gets
+     * one. Each is an attachment whose content is Block Kit `blocks` (the
+     * documented form; its `text`/`mrkdwn_in` fields are legacy). */
+    attachments?: readonly { color: string; blocks: readonly unknown[] }[];
   },
 ) => {
   const form = {
     channel: input.channel,
     text: input.text,
     ...(input.threadTs && { thread_ts: input.threadTs }),
+    ...(input.attachments &&
+      input.attachments.length > 0 && {
+        attachments: JSON.stringify(input.attachments),
+      }),
   };
   if (input.iconUrl && !iconlessMemoized(botToken)) {
     try {
@@ -1305,22 +1313,38 @@ const userConversation = z.object({
 });
 export type SlackUserConversation = z.infer<typeof userConversation>;
 
+/** The conversation kinds `users.conversations` can list (its `types`). */
+type SlackConversationType =
+  | "public_channel"
+  | "private_channel"
+  | "im"
+  | "mpim";
+
 /**
- * One page of the conversations the TOKEN'S USER is a member of
- * (`users.conversations`): channels, private channels, DMs and group DMs.
- * With a user token this is exactly "what this person can see" - the read
- * picker's universe. Scopes: channels:read, groups:read, im:read, mpim:read.
+ * One page of the conversations the TOKEN'S OWNER is a member of
+ * (`users.conversations`). With a person's token and the default types
+ * (channels, private channels, DMs and group DMs) it is exactly "what this
+ * person can see", the read picker's universe. Scopes: channels:read,
+ * groups:read, im:read, mpim:read. With a BOT token and `types` narrowed to
+ * channels it is the bot's own channels, usually one page even in a
+ * workspace of thousands, and needs only channels:read + groups:read.
  */
 export const usersConversations = (
-  userToken: string,
-  input: { cursor?: string; limit?: number } = {},
+  token: string,
+  input: {
+    cursor?: string;
+    limit?: number;
+    types?: readonly SlackConversationType[];
+  } = {},
 ) =>
   slackCall(
     "users.conversations",
     {
-      token: userToken,
+      token,
       form: {
-        types: "public_channel,private_channel,im,mpim",
+        types: (
+          input.types ?? ["public_channel", "private_channel", "im", "mpim"]
+        ).join(","),
         exclude_archived: "true",
         limit: String(input.limit ?? 200),
         ...(input.cursor && { cursor: input.cursor }),

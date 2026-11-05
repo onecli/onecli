@@ -14,6 +14,7 @@ context = { path = "../context" }
 db = { path = "../db" }
 ee = { path = "../ee/ee" }
 inject = { path = "../inject" }
+percent-encoding = { workspace = true }
 policy = { path = "../policy" }
 serde = { workspace = true }
 serde_json = { workspace = true }

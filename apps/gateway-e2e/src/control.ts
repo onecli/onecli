@@ -51,6 +51,12 @@ export interface PendingApproval {
   };
   /** The agent's batch tag (`X-OneCLI-Batch*`), when it sent one. */
   readonly batch?: { id: string; label?: string; total?: number };
+  /** The gateway's "Approve similar" offer, when this request has one. */
+  readonly similar?: {
+    label: string;
+    windowMinutes: number;
+    maxRequests: number;
+  } | null;
 }
 
 const authHeaders = (apiKey: string): Record<string, string> => ({
@@ -92,11 +98,12 @@ export const decideApproval = async (
   id: string,
   decision: "approve" | "deny",
   extraHeaders: Record<string, string> = {},
+  extraBody: Record<string, unknown> = {},
 ): Promise<DecisionResult> => {
   const res = await fetch(`${gw.origin}/v1/approvals/${id}/decision`, {
     method: "POST",
     headers: { ...authHeaders(apiKey), ...extraHeaders },
-    body: JSON.stringify({ decision }),
+    body: JSON.stringify({ decision, ...extraBody }),
   });
   return { status: res.status, body: await res.json().catch(() => null) };
 };

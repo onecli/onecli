@@ -34,9 +34,22 @@ export const stepSlugFromPathname = (pathname: string): StepSlug | null => {
 };
 
 /** The furthest step the user's saved progress supports — used by the index
- * resume redirect. A user with a created agent resumes on the create step,
- * which renders its finished boot screen with the "meet your agent" door. */
+ * resume redirect. The agent is created at the WELCOME step (as the default
+ * name), so an agent's mere existence proves nothing about where the person
+ * was; a name OTHER than the default is what the name step wrote, and a
+ * resume past it lands on the create step's boot screen with the "meet your
+ * agent" door. */
 export const stepPathForProgress = (progress: OnboardingProgress): string => {
-  if (progress.createdAgentId) return onboardingPath("create");
+  if (nameStepPassed(progress)) return onboardingPath("create");
   return onboardingPath("welcome");
 };
+
+/** The agent's name until the person picks one. */
+export const DEFAULT_AGENT_NAME = "Donna";
+
+/** Whether the name step was completed: the flow's agent exists AND carries
+ * a name the person gave it (the welcome-step create uses the default). */
+export const nameStepPassed = (progress: OnboardingProgress): boolean =>
+  Boolean(progress.createdAgentId) &&
+  progress.agentName !== null &&
+  progress.agentName !== DEFAULT_AGENT_NAME;

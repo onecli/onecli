@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   abortTurn: vi.fn(),
   getEvalRunEvidence: vi.fn(),
   judgeAnswer: vi.fn(),
+  deliverEvalRunReport: vi.fn(),
   loadAgentForLlm: vi.fn(),
   resolveAgentLlmCredential: vi.fn(),
 }));
@@ -49,12 +50,19 @@ vi.mock("./agent-runs-service", () => ({
 vi.mock("./eval-judge", () => ({
   judgeAnswer: mocks.judgeAnswer,
 }));
+// What is sent where is proven on pg (eval-report-delivery); here, only
+// WHETHER the worker hands a run over.
+vi.mock("./eval-report-delivery", () => ({
+  deliverEvalRunReport: mocks.deliverEvalRunReport,
+}));
 vi.mock("./llm-credential-service", () => ({
   loadAgentForLlm: mocks.loadAgentForLlm,
   resolveAgentLlmCredential: mocks.resolveAgentLlmCredential,
 }));
 vi.mock("../lib/logger", () => ({
-  logger: { child: () => ({ error: vi.fn(), warn: vi.fn() }) },
+  logger: {
+    child: () => ({ error: vi.fn(), warn: vi.fn(), info: vi.fn() }),
+  },
 }));
 
 import { NoEvalQuestionsError, listRuns, startRun } from "./agent-eval-service";
@@ -527,5 +535,28 @@ describe("the worker", () => {
     await finish();
     expect(mocks.createTurn).toHaveBeenCalledTimes(1);
     expect(saved.status).toBe("running");
+  });
+
+  it("reports a run it settled, but never one ended elsewhere (a person's Stop)", async () => {
+    await start();
+    await finish();
+    expect(mocks.deliverEvalRunReport).toHaveBeenCalledWith(
+      "workspace",
+      "agent",
+      "run1",
+    );
+
+    mocks.deliverEvalRunReport.mockClear();
+    runActive = true;
+    mocks.createTurn.mockImplementation(async () => {
+      runActive = false; // Stop landed while the question was asked
+      return { id: "turn1" };
+    });
+    await start();
+    await finish();
+    expect(mocks.deliverEvalRunReport).not.toHaveBeenCalled();
+    // The question's turn is stopped too: Stop may have looked for active
+    // turns before this one existed.
+    expect(mocks.abortTurn).toHaveBeenCalledWith("workspace", "turn1", "user");
   });
 });

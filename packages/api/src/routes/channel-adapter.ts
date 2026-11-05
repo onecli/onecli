@@ -82,6 +82,7 @@ import {
 } from "../validations/channels";
 import { transcriptQuerySchema } from "../validations/conversation";
 import { logger } from "../lib/logger";
+import { parseBody, parsed } from "../lib/request-body";
 
 const log = logger.child({ component: "channel-adapter-routes" });
 
@@ -92,29 +93,6 @@ const log = logger.child({ component: "channel-adapter-routes" });
  * family (`channelAdapterAuth`); this surface never accepts a user key or an
  * `rnr_` token, and a `cha_` token never reaches the general `/v1` surface.
  */
-
-const parseBody = async (raw: Request) =>
-  await raw
-    .clone()
-    .json()
-    .catch(() => null);
-
-const parsed = <T>(
-  result: {
-    success: boolean;
-    data?: T;
-    error?: { issues: { message?: string }[] };
-  },
-  fallback: string,
-): T => {
-  if (!result.success || result.data === undefined) {
-    throw new ServiceError(
-      "UNPROCESSABLE",
-      result.error?.issues[0]?.message ?? fallback,
-    );
-  }
-  return result.data;
-};
 
 const iso = (value: Date | null): string | null =>
   value ? value.toISOString() : null;

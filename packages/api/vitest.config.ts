@@ -3,6 +3,7 @@ import {
   API_LANE_ENV,
   laneInvariantPgSuites,
 } from "./src/testing/lane-invariant";
+import { PG_PROOF_HOOK_TIMEOUT_MS } from "./src/testing/pg-proof";
 
 /** The `*.pg.test.ts` proof suites (see src/testing/pg-proof.ts). */
 const PG_PROOF_SUITES = ["src/**/*.pg.test.ts"];
@@ -48,12 +49,16 @@ export default defineConfig({
         // otherwise break the shared Prisma client for every later file.
         // Per project, not root: a project's setupFiles are appended to the
         // root's, which would split the two steps across files.
+        //
+        // Hooks get more than the 10 s default: each suite loads its subject
+        // inside `beforeAll` (see PG_PROOF_HOOK_TIMEOUT_MS in pg-proof.ts).
         extends: true,
         test: {
           name: "pg",
           setupFiles: ["./src/testing/pg-proof-env.setup.ts"],
           include: PG_PROOF_SUITES,
           exclude: [...configDefaults.exclude, ...ONPREM_LANE_SKIPS],
+          hookTimeout: PG_PROOF_HOOK_TIMEOUT_MS,
           poolOptions: { forks: { singleFork: true } },
         },
       },
