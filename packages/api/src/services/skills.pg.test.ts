@@ -589,6 +589,7 @@ describe.skipIf(!PROOF_URL)("folder skills from a zip (pg)", () => {
     content: "# Tools\n\nRun ./run.",
     bytes: 0,
     skipped: [],
+    fingerprint: "f".repeat(64),
     files: [
       {
         path: "run",

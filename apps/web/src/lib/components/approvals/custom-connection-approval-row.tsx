@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Eye, EyeOff, KeyRound, Loader2 } from "lucide-react";
+import { CircleHelp, Eye, EyeOff, KeyRound, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
@@ -12,7 +12,6 @@ import {
   useDecideChannelAction,
 } from "@/hooks/use-approvals";
 import { RequestedAtLabel } from "./requested-at-label";
-import { HostWithDomain } from "./host-with-domain";
 
 interface CustomConnectionApprovalRowProps {
   item: PendingActionApprovalItem & {
@@ -20,30 +19,27 @@ interface CustomConnectionApprovalRowProps {
       PendingActionApprovalItem["customConnection"]
     >;
   };
+  /** The bell lists every agent's asks; the chat thread is one agent's. The
+   * new key is switched on for the asking agent, so the bell names it. */
+  showAgent?: boolean;
 }
 
-const MASK = "••••••";
-
-/** Client-side guard (the server checks too): only an https docs link is
- * clickable; anything else (javascript:, http:, garbage) is plain text. */
-const isHttpsUrl = (url: string) => {
-  try {
-    return new URL(url).protocol === "https:";
-  } catch {
-    return false;
-  }
-};
+/** OneCLI's own guide, never the agent's docs link: nothing the agent chose
+ * is clickable on this card. */
+const CUSTOM_CONNECTIONS_DOCS_URL =
+  "https://onecli.sh/docs/integrations/custom-connections";
 
 /**
  * An agent-proposed custom connection, reviewed and approved WITH the key.
- * The agent researched where and how the key goes; the person checks that
- * in plain words (the host's real domain highlighted, the header rendered
- * with the key masked) and types the key here. The key goes straight to
- * the approve route and is never shown back, stored client-side, or put in
- * the chat. Decline goes through the ordinary decide door.
+ * Kept short on purpose: the app's name, the real domain the key is sent
+ * to, the key field, and OneCLI's guide behind "Need help?". The key goes
+ * straight to the approve route and is never shown back, stored
+ * client-side, or put in the chat. Decline goes through the ordinary decide
+ * door.
  */
 export const CustomConnectionApprovalRow = ({
   item,
+  showAgent = false,
 }: CustomConnectionApprovalRowProps) => {
   const proposal = item.customConnection;
   const approve = useApproveCustomConnection(item.agentId);
@@ -53,7 +49,6 @@ export const CustomConnectionApprovalRow = ({
 
   const busy = approve.isPending;
   const hasKey = value.trim().length > 0;
-  const headerPreview = `${proposal.headerName}: ${proposal.valueFormat.replace("{value}", MASK)}`;
 
   const onApprove = () =>
     approve.mutate(
@@ -97,52 +92,15 @@ export const CustomConnectionApprovalRow = ({
             <KeyRound aria-hidden="true" className="size-4 shrink-0" />
             Connect {proposal.name}?
           </p>
-          <p className="text-muted-foreground truncate text-xs">
-            {item.agentName} · asks you for an API key
-          </p>
+          {showAgent && (
+            <p className="text-muted-foreground truncate text-xs">
+              <span translate="no">{item.agentName}</span> · asks you for an API
+              key
+            </p>
+          )}
         </div>
         <RequestedAtLabel createdAt={item.createdAt} />
       </div>
-
-      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-        <dt className="text-muted-foreground">Sent to</dt>
-        <dd className="min-w-0 break-all" data-testid="cc-host">
-          <HostWithDomain
-            host={proposal.hostPattern}
-            domain={proposal.registrableDomain}
-          />
-          {proposal.pathPattern && (
-            <span className="text-muted-foreground font-mono">
-              {proposal.pathPattern}
-            </span>
-          )}
-        </dd>
-        <dt className="text-muted-foreground">As</dt>
-        <dd className="min-w-0 font-mono break-all" data-testid="cc-header">
-          {headerPreview}
-        </dd>
-        {proposal.docsUrl && (
-          <>
-            <dt className="text-muted-foreground">Docs</dt>
-            <dd className="min-w-0 break-all">
-              {isHttpsUrl(proposal.docsUrl) ? (
-                <a
-                  href={proposal.docsUrl}
-                  target="_blank"
-                  rel="noopener noreferrer nofollow"
-                  className="focus-visible:ring-ring/50 rounded-sm underline underline-offset-2 outline-none hover:no-underline focus-visible:ring-[3px]"
-                >
-                  {proposal.docsUrl}
-                </a>
-              ) : (
-                <span data-testid="cc-docs-text">{proposal.docsUrl}</span>
-              )}
-            </dd>
-          </>
-        )}
-        <dt className="text-muted-foreground">Why</dt>
-        <dd className="min-w-0 break-words">{proposal.reason}</dd>
-      </dl>
 
       <p className="text-foreground text-xs" data-testid="cc-destination">
         Your key will be sent to{" "}
@@ -176,29 +134,43 @@ export const CustomConnectionApprovalRow = ({
         </Button>
       </div>
 
-      <div className="flex items-center justify-end gap-1.5">
-        <Button
-          type="button"
-          variant="outline"
-          size="xs"
-          disabled={busy}
-          onClick={onDecline}
-        >
-          Decline
+      <div className="flex items-center justify-between gap-1.5">
+        <Button asChild variant="ghost" size="xs">
+          <a
+            href={CUSTOM_CONNECTIONS_DOCS_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-muted-foreground hover:text-foreground"
+          >
+            <CircleHelp aria-hidden="true" className="size-3.5" />
+            Need help?
+            <span className="sr-only">(opens in a new tab)</span>
+          </a>
         </Button>
-        <Button type="submit" size="xs" disabled={!hasKey || busy}>
-          {approve.isPending ? (
-            <>
-              <Loader2
-                aria-hidden="true"
-                className="size-3 animate-spin motion-reduce:hidden"
-              />
-              Connecting…
-            </>
-          ) : (
-            "Approve"
-          )}
-        </Button>
+        <div className="flex items-center gap-1.5">
+          <Button
+            type="button"
+            variant="outline"
+            size="xs"
+            disabled={busy}
+            onClick={onDecline}
+          >
+            Decline
+          </Button>
+          <Button type="submit" size="xs" disabled={!hasKey || busy}>
+            {approve.isPending ? (
+              <>
+                <Loader2
+                  aria-hidden="true"
+                  className="size-3 animate-spin motion-reduce:hidden"
+                />
+                Connecting…
+              </>
+            ) : (
+              "Approve"
+            )}
+          </Button>
+        </div>
       </div>
     </form>
   );

@@ -29,7 +29,7 @@ vi.mock("next/navigation", () => ({
 type CardProps = {
   suggestions: { app: { id: string }; kind: string }[];
   channels: { id: string }[];
-  hideHeader: boolean;
+  consent?: boolean;
   bare: boolean;
 };
 
@@ -53,7 +53,8 @@ describe("<GreetingConnectCard variant='welcome' /> (any new agent's empty threa
       new Set(["connect"]),
     );
     expect(props.channels.map((c) => c.id)).toEqual([GREETING_CHANNEL.id]);
-    expect(props.hideHeader).toBe(true);
+    // The full card: its consent line stays on.
+    expect(props.consent).toBeUndefined();
     expect(props.bare).toBe(false);
     expect(useAgentChannels).toHaveBeenCalledWith("agent-1");
   });
@@ -93,7 +94,6 @@ describe("<GreetingConnectCard variant='greeting' /> (under the onboarding agent
     expect(GREETING_APP_IDS).toEqual(["gmail"]);
     expect(props.suggestions.map((s) => s.app.id)).toEqual(["gmail"]);
     expect(props.channels).toEqual([]);
-    expect(props.hideHeader).toBe(true);
     expect(props.bare).toBe(true);
     // An empty id disables the channels query: no doomed request.
     expect(useAgentChannels).toHaveBeenCalledWith("");

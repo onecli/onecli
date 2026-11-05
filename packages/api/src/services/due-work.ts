@@ -256,6 +256,12 @@ export interface DueTurn {
   /** A scheduled run's gate command (agent_crons.gate). */
   gate?: string;
   /**
+   * The conversation's chosen context size (conversations.context_tokens),
+   * BEFORE the credential's limit: the dispatch clamps it. Absent = the
+   * default size.
+   */
+  contextTokens?: number;
+  /**
    * When this turn's claim-latency clock started — the same
    * COALESCE(retried_at, promoted_at, created_at) the turn-budget sweeps
    * use. Server-side telemetry only (the claim-wait log line → a
@@ -263,6 +269,10 @@ export interface DueTurn {
    * test fakes that predate it stay valid.
    */
   waitedSince?: Date;
+  /** This delivery picks a turn back up after its sandbox died mid-run
+   * (`resumeInterruptedTurns`): a started turn the platform re-queued. The
+   * dispatch frames it for the agent (`RESUMED_TURN_CONTEXT`). */
+  resumed?: true;
 }
 
 /** Someone asked an in-flight turn to stop. */
@@ -346,7 +356,11 @@ interface ClaimedTurnRow {
   source: string;
   harness_session_ref: string | null;
   gate: string | null;
+  /** The conversation's chosen context size (context fit); null = default. */
+  context_tokens: number | null;
   waited_since: Date;
+  /** retried_at AND started_at both set: a resumed run (see `DueTurn`). */
+  resumed: boolean;
 }
 
 interface AbortRow {
@@ -966,10 +980,17 @@ export const claimDueWork = async (
            JOIN agent_crons ac ON ac.id = c.external_ref
           WHERE c.id = t.conversation_id AND c.source = 'cron'
             AND t.source = 'cron') AS gate,
+        -- The conversation's chosen context size (context fit). Read at
+        -- dispatch, so a size the job just chose rides the very next turn.
+        (SELECT c.context_tokens FROM conversations c
+          WHERE c.id = t.conversation_id) AS context_tokens,
         -- The claim-latency clock (step 6 telemetry): the same expression
         -- the turn-budget sweeps measure from — a promoted follow-up or an
         -- auto-retried turn deliberately restarts it.
-        COALESCE(t.retried_at, t.promoted_at, t.created_at) AS waited_since
+        COALESCE(t.retried_at, t.promoted_at, t.created_at) AS waited_since,
+        -- A started turn the platform re-queued after its sandbox died
+        -- (resumeInterruptedTurns); a cold revival never started.
+        (t.retried_at IS NOT NULL AND t.started_at IS NOT NULL) AS resumed
     `;
 
     // SEND NOW: a waiting follow-up the person asked the run
@@ -1079,7 +1100,11 @@ export const claimDueWork = async (
                   ? { resumeSessionRef: null, ephemeralSession: true as const }
                   : { resumeSessionRef: row.harness_session_ref }),
                 ...(row.gate && { gate: row.gate }),
+                ...(row.context_tokens !== null && {
+                  contextTokens: row.context_tokens,
+                }),
                 waitedSince: row.waited_since,
+                ...(row.resumed && { resumed: true as const }),
               },
             ]
           : [],

@@ -702,12 +702,44 @@ model Sandbox {
   activeHomeGrowthOperation   SandboxHomeGrowthOperation?  @relation("ActiveSandboxHomeGrowth", fields: [activeHomeGrowthOperationId, id], references: [id, sandboxId], onDelete: Restrict)
   homeGrowthOperations        SandboxHomeGrowthOperation[] @relation("SandboxHomeGrowthHistory")
   sshSessions                 SshSession[]
+  homeReadOnlyEvents          SandboxHomeReadOnlyEvent[]
 
   @@index([runnerId])
   @@index([channelReplicaId])
   @@index([ownerReplicaId])
   @@index([runnerId, resourceReconcileAfter])
   @@map("sandboxes")
+}
+
+// One sandbox stop caused by its home going read-only (the supervisor's
+// `home_read_only`, forwarded by the runner). The hosted platform's restart
+// budget for that failure reads these rows: each sandbox gets a few automatic
+// restarts a day with a growing wait before each, and a burst of them on one
+// machine (or across the fleet) holds every automatic restart until it
+// clears, because that is a platform incident restarts would only feed. A
+// self-hosted deployment never writes them (no hook).
+//
+// `holdUntil` is the earliest the NEXT automatic start of this sandbox may
+// happen; NULL means the budget is spent (held until a person starts it, or
+// the 24 h window lets it go). `organizationId` and `node` are what the
+// fleet brakes count: distinct ORGANIZATIONS, because the report starts in
+// tenant code and one tenant must never be able to hold everyone else's
+// restarts; `node` is the substrate's own placement, never the guest's word.
+model SandboxHomeReadOnlyEvent {
+  id             String    @id @default(uuid())
+  sandboxId      String    @map("sandbox_id")
+  organizationId String    @map("organization_id")
+  node           String?
+  holdUntil      DateTime? @map("hold_until")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  sandbox Sandbox @relation(fields: [sandboxId], references: [id], onDelete: Cascade)
+
+  // The per-sandbox budget (its own last 24 h) and the start arm's hold.
+  @@index([sandboxId, createdAt])
+  // The fleet brakes (everything in the last 10 min, by node).
+  @@index([createdAt])
+  @@map("sandbox_home_read_only_events")
 }
 
 // ── Sandbox home operations ──────────────────────────────────────────────
@@ -1053,13 +1085,13 @@ model SshCertMint {
 // to `startSession({ resumeSessionRef })` so a later turn resumes THIS
 // conversation rather than someone else's.
 model Conversation {
-  id                String   @id @default(uuid())
-  agentId           String   @map("agent_id")
+  id                     String    @id @default(uuid())
+  agentId                String    @map("agent_id")
   // Where the conversation comes from. `externalRef` is that source's own id
   // (a Slack thread ts, a cron id, a peer agent's id for "agent") — the pair
   // is what keeps sources apart.
-  source            String   @default("web") // "web" | "slack" | "cron" | "watch" | "agent"
-  externalRef       String?  @map("external_ref")
+  source                 String    @default("web") // "web" | "slack" | "cron" | "watch" | "agent"
+  externalRef            String?   @map("external_ref")
   // The direct thread's owner (step 6's per-user amendment to §3.18): a
   // user's conversation with an agent is ONE thread no matter the surface —
   // their web chat and their Slack DM read and write this same row — and each
@@ -1069,7 +1101,7 @@ model Conversation {
   // Turn's one-active lock below. A CHECK (also migration-only) guarantees a
   // direct row always carries its owner; group/source conversations leave
   // this null. Cascade: a deleted user takes their private threads with them.
-  userId            String?  @map("user_id")
+  userId                 String?   @map("user_id")
   // True = a user's direct thread (see userId above). Only the get-or-create
   // door mints direct rows; POST /v1/conversations cannot set this.
   //
@@ -1077,16 +1109,16 @@ model Conversation {
   // meaning — the web and provider surfaces share the thread by design, which
   // is exactly what `source`/`externalRef` keep APART for every other
   // conversation.
-  direct            Boolean  @default(false)
-  title             String?
+  direct                 Boolean   @default(false)
+  title                  String?
   // Opaque, adapter-defined (§3.6). Null until the first turn starts a session.
-  harnessSessionRef String?  @map("harness_session_ref")
+  harnessSessionRef      String?   @map("harness_session_ref")
   // The transcript's monotonic cursor, handed out by an atomic increment on
   // THIS row. The row lock is held to commit, so per conversation `seq` order
   // is commit order — which is what makes "fetch history, then tail from the
   // last seq" lossless. A global sequence would not: values are assigned at
   // nextval time, so a lower seq can commit later and be tailed past forever.
-  lastSeq           Int      @default(0) @map("last_seq")
+  lastSeq                Int       @default(0) @map("last_seq")
   // THE APP-TURN CAP (PR 5a). Apps ride the same channel gate humans do; the
   // one thing they add is that they never get bored, so two automations can
   // answer each other forever. `appTurnStreak` counts consecutive
@@ -1096,9 +1128,21 @@ model Conversation {
   // standing lift), the cap is a constant in app-turn-cap-service, and there
   // is no timer: people meter loops by being present. Defaults inert:
   // nothing changes for a conversation no app ever speaks in.
-  appTurnStreak     Int      @default(0) @map("app_turn_streak")
-  createdAt         DateTime @default(now()) @map("created_at")
-  updatedAt         DateTime @updatedAt @map("updated_at")
+  appTurnStreak          Int       @default(0) @map("app_turn_streak")
+  // THE CONTEXT SIZE this conversation runs at, in tokens: how much of the
+  // conversation the harness keeps in the model's view before it starts
+  // summarizing. Chosen by the platform itself (the context-fit platform
+  // job), never by a person or the agent, from the conversation's own
+  // recent turns. Null = the default size. A CHECK (migration-only) holds it
+  // to the ladder in `context-fit-rule.ts`. `contextTokensChangedAt` is the
+  // job's cooldown clock and evidence boundary (only turns created after it
+  // ran at the size); `contextFitCheckedAt` is when the job last looked, so
+  // a conversation is read again only after a turn finishes past it.
+  contextTokens          Int?      @map("context_tokens")
+  contextTokensChangedAt DateTime? @map("context_tokens_changed_at")
+  contextFitCheckedAt    DateTime? @map("context_fit_checked_at")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
 
   agent           Agent                    @relation(fields: [agentId], references: [id], onDelete: Cascade)
   user            User?                    @relation("ConversationOwner", fields: [userId], references: [id], onDelete: Cascade)
@@ -3293,6 +3337,19 @@ model AgentEvalSchedule {
   lastFiredAt DateTime? @map("last_fired_at")
   // started | skipped_busy | skipped_no_questions | failed
   lastOutcome String?   @map("last_outcome")
+
+  // Where a scheduled run's results are sent when it finishes. Null = not
+  // sent (the run is only in Results). "chat" = the schedule creator's
+  // direct thread with the agent (mirrored to their Slack DM when linked);
+  // "channel" = a provider channel the agent's bot is in, posted by the
+  // platform with no model turn. The channel ref is checked against the
+  // presence at save time; the label is that check's name, for display.
+  reportTo           String? @map("report_to")
+  reportChannelRef   String? @map("report_channel_ref")
+  reportChannelLabel String? @map("report_channel_label")
+  // always | changes (something broke or got fixed) | failures (anything
+  // not passing). A run that failed outright is always sent.
+  reportWhen         String  @default("always") @map("report_when")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")

@@ -385,6 +385,20 @@ describe("sequenced frames (the resumable channel)", () => {
     ]);
   });
 
+  it("acks a liveness heartbeat like any sequenced frame: the ack IS the supervisor's proof the socket is attached", async () => {
+    // The supervisor's half-open-socket watchdog (`CHANNEL_LIVENESS`) waits
+    // for this ack; a runner that swallowed the frame unacked would make
+    // every idle sandbox redial on the timeout.
+    const { ws } = await firstConnect();
+    await nextItem(ws!);
+    ws!.send(JSON.stringify({ seq: 1, message: { kind: "heartbeat" } }));
+    expect(await nextItem(ws!)).toEqual({ kind: "ack", seq: 1 });
+    await settle();
+    expect(received).toEqual([
+      { sandboxId: "sb-1", message: { kind: "heartbeat" } },
+    ]);
+  });
+
   it("drops non-JSON and invalid frames instead of crashing", async () => {
     const { ws } = await firstConnect();
     await nextItem(ws!);

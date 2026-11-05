@@ -13,17 +13,18 @@
 #   old) plus a dynamic libssl. The build PROVES the fit below. The build
 #   stages here and the agent base image share the same Node pin.
 # - The jcode RUNTIME is vendored from the pinned GitHub release and
-#   checksum-verified, NOT taken from npm: the npm platform packages lag
-#   upstream (they still ship the broken v0.67.1), and the runtime
+#   checksum-verified, NOT taken from npm: the npm platform packages are a
+#   second, unverified copy (they lagged upstream for months, once shipping a
+#   broken v0.67.1), and the runtime
 #   self-updates by default — checking on every process start and exec()ing
 #   itself mid-run when a newer release exists, which killed every fresh
 #   agent's first turn. The pin is three parts: this vendored binary
 #   (ONECLI_JCODE_BINARY), JCODE_NO_AUTO_UPDATE baked below, and the
 #   supervisor deleting the updater's builds/ dirs from persistent volumes
 #   at boot (harness/jcode.ts). @1jehuang/jcode-sdk stays as the CLIENT
-#   library only (its wire protocol major is 1 across 0.67.x–0.94.x);
-#   its bundled npm binary is deleted from the final image so a
-#   misconfiguration fails loudly instead of silently running 0.67.1.
+#   library only (its wire protocol major is 1 across 0.67.x through
+#   1.0.0-preview); its bundled npm binary is deleted from the final image so
+#   the vendored, checksum-verified one is the only jcode that can run.
 # - pnpm install must NEVER use --omit=optional: other packages' optional
 #   deps must still resolve normally (the jcode binaries are pruned
 #   explicitly, afterwards, by path).
@@ -72,15 +73,15 @@ RUN pnpm install --frozen-lockfile
 # own updater verified only opportunistically, and it is disabled anyway).
 FROM base AS jcode-runtime
 ARG TARGETARCH
-ARG JCODE_VERSION=v0.94.0
+ARG JCODE_VERSION=v1.0.0-preview.136
 RUN apt-get update \
   && apt-get install -y --no-install-recommends curl ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 RUN case "$TARGETARCH" in \
     arm64) ASSET="jcode-linux-aarch64"; \
-      SHA="cb1a96c2da17ee8c0c5321253612650503e47629f7910eadc37d513d9b14d840";; \
+      SHA="892fb2da280c1d8a289521282bd766e20642493067a262a0246fa640c6a75046";; \
     amd64) ASSET="jcode-linux-x86_64"; \
-      SHA="e471f61e661612cfd6da5e9c1bb8238fab0c63c3ebc96c648439816649478c1b";; \
+      SHA="7ecbf2fd936d4b0c2c44b2491c41db12178923744d77fe60dd64aa2da97bb383";; \
     *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1;; \
   esac \
   && curl -fsSL -o /tmp/jcode.tar.gz \
@@ -241,11 +242,11 @@ ENV ONECLI_JCODE_BINARY=/opt/jcode/jcode
 COPY --from=nix-dist /opt/nix-dist /opt/nix-dist
 COPY docker/onecli-nix-install /usr/local/bin/onecli-nix-install
 RUN chmod 0755 /usr/local/bin/onecli-nix-install
-# Drop the npm-bundled v0.67.1 binary so nothing can silently fall back to
-# it; the SDK's JS client library stays. Hoisted layout: the platform
+# Drop the npm-bundled binary so nothing can silently fall back to an
+# unverified copy; the SDK's JS client library stays. Hoisted layout: the platform
 # packages sit directly under node_modules/@1jehuang/. Assert the glob
-# actually matched (plain ls fails the build on a miss) — a layout change
-# must fail HERE, not silently resurrect the stale binary.
+# actually matched (plain ls fails the build on a miss): a layout change
+# must fail HERE, not silently leave a second binary behind.
 RUN ls /app/node_modules/@1jehuang/jcode-linux-*/bin/jcode > /dev/null \
   && rm /app/node_modules/@1jehuang/jcode-linux-*/bin/jcode
 

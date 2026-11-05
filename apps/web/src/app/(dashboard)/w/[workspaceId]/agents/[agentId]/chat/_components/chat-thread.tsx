@@ -14,8 +14,8 @@ import { isActiveTurn, isFollowUpRow } from "@/lib/chat/turns";
 import { ApprovalTimelineSlot } from "./approval-timeline-slot";
 import { useApprovalTimeline } from "./approval-timeline";
 import { useApprovalCards } from "./use-approval-cards";
-import { useActionApprovalCards } from "./use-action-approval-cards";
-import { InlineActionApproval } from "./inline-action-approval";
+import { useChannelApprovalCards } from "./use-channel-approval-cards";
+import { InlineChannelApproval } from "./inline-channel-approval";
 import { slotAfterTurns } from "./slot-after-turns";
 import { EmptyThreadWelcome } from "./empty-thread-welcome";
 import { FollowingViewport } from "./following-viewport";
@@ -136,9 +136,9 @@ export const ChatThread = ({
     useApprovalTimeline(useApprovalCards(replaced)),
     pinnedRowId,
   );
-  const actions = slotAfterTurns(
+  const channelCards = slotAfterTurns(
     rows,
-    useActionApprovalCards(agentId, conversationId),
+    useChannelApprovalCards(agentId, conversationId),
     pinnedRowId,
   );
 
@@ -205,8 +205,8 @@ export const ChatThread = ({
                 <ApprovalTimelineSlot
                   entries={cards.afterTurn.get(turn.id) ?? []}
                 />
-                {actions.afterTurn.get(turn.id)?.map((card) => (
-                  <InlineActionApproval key={card.item.id} item={card.item} />
+                {channelCards.afterTurn.get(turn.id)?.map((card) => (
+                  <InlineChannelApproval key={card.item.id} item={card.item} />
                 ))}
               </MessageScrollerItem>
             ))}
@@ -224,12 +224,15 @@ export const ChatThread = ({
             )}
             {/* Cards newer than every turn — including ones raised by a
                 background watch/cron with no turn running at all. */}
-            {(cards.atEnd.length > 0 || actions.atEnd.length > 0) && (
+            {(cards.atEnd.length > 0 || channelCards.atEnd.length > 0) && (
               <MessageScrollerItem messageId="approvals">
                 <div className="flex flex-col gap-3">
                   <ApprovalTimelineSlot entries={cards.atEnd} />
-                  {actions.atEnd.map((card) => (
-                    <InlineActionApproval key={card.item.id} item={card.item} />
+                  {channelCards.atEnd.map((card) => (
+                    <InlineChannelApproval
+                      key={card.item.id}
+                      item={card.item}
+                    />
                   ))}
                 </div>
               </MessageScrollerItem>

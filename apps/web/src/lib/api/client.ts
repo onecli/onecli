@@ -104,19 +104,42 @@ export const apiPost = async <T>(
   return res.json();
 };
 
-export const apiPatch = async <T>(path: string, body: unknown): Promise<T> => {
+/** A POST whose success is `204 No Content` (a hint, an idempotent verb):
+ * nothing to parse, so nothing is. */
+export const apiPostNoContent = async (
+  path: string,
+  body: unknown = {},
+): Promise<void> => {
+  const res = await apiFetch(path, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await refusal(res);
+};
+
+export const apiPatch = async <T>(
+  path: string,
+  body: unknown,
+  init?: RequestInit,
+): Promise<T> => {
   const res = await apiFetch(path, {
     method: "PATCH",
     body: JSON.stringify(body),
+    ...init,
   });
   if (!res.ok) throw await refusal(res);
   return res.json();
 };
 
-export const apiPut = async <T>(path: string, body: unknown): Promise<T> => {
+export const apiPut = async <T>(
+  path: string,
+  body: unknown,
+  init?: RequestInit,
+): Promise<T> => {
   const res = await apiFetch(path, {
     method: "PUT",
     body: JSON.stringify(body),
+    ...init,
   });
   if (!res.ok) throw await refusal(res);
   return res.json();

@@ -32,6 +32,8 @@ export interface ImportedSkill {
   bytes: number;
   groups: Record<string, number>;
   skipped: { path: string; reason: string }[];
+  /** sha256 over the imported files: what the check command recomputes. */
+  fingerprint: string;
   replaced: boolean;
 }
 

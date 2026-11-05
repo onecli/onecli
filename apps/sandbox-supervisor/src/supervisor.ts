@@ -12,6 +12,7 @@ import {
   type AttachmentManifestEntry,
   type BackgroundedTool,
   type Harness,
+  type HarnessEvent,
   type HarnessSession,
   type SupervisorTransport,
   type TurnImage,
@@ -35,8 +36,10 @@ import { log } from "./log";
 import { terminalErrorClass } from "./provider-refusal";
 import { renderHome, type RenderInputs } from "./home/renderer";
 import { applyHomeSync } from "./home/materializer";
+import { watchHomeReadOnly } from "./home/read-only-watch";
 import { createPgFilesWriter } from "./databases";
 import { gatewayFromProxyUrl } from "./open-proxy";
+import { desktopSessionEnv } from "./desktop";
 import {
   createAttachmentAssembler,
   pruneStaleAttachments,
@@ -67,6 +70,7 @@ import {
 } from "./capabilities/port-streams";
 import { startPortDiscovery } from "./capabilities/port-discovery";
 import type { SupervisorAddon, SupervisorAddonHost } from "./addons";
+import type { CapabilityFragment } from "./home/renderer";
 import { machineFragment } from "./capabilities/machine";
 import { memoryFragment, memoryTools } from "./capabilities/memory";
 import { previewsFragment, previewsTools } from "./capabilities/previews";
@@ -216,7 +220,8 @@ type SurfaceChange =
   | "peers changed"
   | "connections changed"
   | "brief changed"
-  | "tools changed";
+  | "tools changed"
+  | "desktop ready";
 
 interface ConversationRuntime {
   session?: HarnessSession;
@@ -305,10 +310,28 @@ export const runSupervisor = async (
     memoryHarvester?: MemoryHarvester;
     /** A capability the entrypoint added for this sandbox (addons.ts). */
     addon?: SupervisorAddon;
+    /**
+     * What the boot is still bringing up (the desktop, index.ts), handed in
+     * unawaited so the runner channel and the ready signal never wait for
+     * it. Until it settles: the harness prepares only its files, turns and
+     * preview relaunches wait (they spawn children that must inherit
+     * `DISPLAY`), and the machine doc says no desktop. When it settles:
+     * the doc is re-rendered with the display, the addon (whose tools and
+     * fragments depend on it) is bound, the harness launches, and the
+     * waiting work proceeds, in that order. Never rejects. Mutually
+     * exclusive with `addon` (that one is bound from the start).
+     */
+    pending?: Promise<{ addon?: SupervisorAddon }>;
+    /** The home's mount table reader (tests); `/proc/self/mounts` otherwise. */
+    readMounts?: () => string;
+    /** How often the home's mount table is read (tests). */
+    homeWatchIntervalMs?: number;
   },
 ): Promise<void> => {
   const applySync = deps?.applySync ?? applyHomeSync;
-  const addon = deps?.addon;
+  // `let`: a boot-time addon is bound when `deps.pending` settles. Every
+  // reader below reads it at use time, never captures it.
+  let addon = deps?.addon;
   // send_message `files` (and its teaching) only where the runner relays a
   // file's purpose: an older one would attach a staged file to the reply.
   const stagedFiles =
@@ -316,6 +339,45 @@ export const runSupervisor = async (
   // MUTABLE on purpose (step 9): a home sync's final part carries fresh
   // instructions/agentName and re-renders from this same holder — a dashboard
   // brief edit reaches the docs mid-run.
+  //
+  // The static fragments are a function of the two boot facts that may
+  // still be settling (`deps.pending`): the display and the addon. Built
+  // here once, and once more when the boot settles (`bindBoot`).
+  const staticFragments = (): CapabilityFragment[] => [
+    connectionsFragment(harness.capabilities.skillsDir),
+    cronsFragment,
+    // Unconditional like crons: webhooks are a hosted-agent platform
+    // property, and the tools answer "none yet" when there are none.
+    webhooksFragment,
+    memoryFragment,
+    // The channels section (where the agent can be talked to, and the
+    // send_message/find_recipient teaching) is spliced in HERE by the
+    // renderer when the agent holds a presence — standing surface truth,
+    // beside memory and ahead of the machine sections.
+    processesFragment,
+    // Unconditional like connections: what survives sleep/relaunch is a
+    // substrate property. The browsing bullet follows the desktop the
+    // supervisor brought up: read at build time, so a desktop still coming
+    // up (`deps.pending`) reads as none until `bindBoot` rebuilds this.
+    machineFragment(process.env.DISPLAY ?? null),
+    // After machine: it extends "what is here" with "how a person sees
+    // it". Fragment and preview_expose arrive together, and only where
+    // the runner carries port streams.
+    ...(config.previews ? [previewsFragment] : []),
+    // A deployment's addon, after the machine sections it extends. Its
+    // fragments are fixed once bound, like its tools below.
+    ...(addon?.fragments ?? []),
+    // Unconditional like connections: receiving files is a platform
+    // property (every harness can read a file), not an adapter capability.
+    attachmentsFragment,
+    // SENDING files (Tier 3) needs a runner that relays them; the fragment
+    // and its tool arrive together and only then — an agent must never be
+    // taught a tool it does not have.
+    ...(config.outboundAttachments ? [sendFileFragment] : []),
+    ...(harness.capabilities.skillsDir
+      ? [skillsFragment(harness.capabilities.skillsDir)]
+      : []),
+  ];
   const renderInputs: RenderInputs = {
     instructions: config.instructions,
     agentName: config.agentName,
@@ -336,40 +398,7 @@ export const runSupervisor = async (
     // bullet depends on the adapter. Connections is fragment-only (no
     // tools); skills — fragment AND its skill_* tools — is present only
     // when the adapter declares a skills directory.
-    fragments: [
-      connectionsFragment(harness.capabilities.skillsDir),
-      cronsFragment,
-      // Unconditional like crons: webhooks are a hosted-agent platform
-      // property, and the tools answer "none yet" when there are none.
-      webhooksFragment,
-      memoryFragment,
-      // The channels section (where the agent can be talked to, and the
-      // send_message/find_recipient teaching) is spliced in HERE by the
-      // renderer when the agent holds a presence — standing surface truth,
-      // beside memory and ahead of the machine sections.
-      processesFragment,
-      // Unconditional like connections: what survives sleep/relaunch is a
-      // substrate property. The browsing bullet follows the desktop the
-      // supervisor brought up (index.ts exports DISPLAY before this runs).
-      machineFragment(process.env.DISPLAY ?? null),
-      // After machine: it extends "what is here" with "how a person sees
-      // it". Fragment and preview_expose arrive together, and only where
-      // the runner carries port streams.
-      ...(config.previews ? [previewsFragment] : []),
-      // A deployment's addon, after the machine sections it extends. Its
-      // fragments are fixed at boot, like its tools below.
-      ...(addon?.fragments ?? []),
-      // Unconditional like connections: receiving files is a platform
-      // property (every harness can read a file), not an adapter capability.
-      attachmentsFragment,
-      // SENDING files (Tier 3) needs a runner that relays them; the fragment
-      // and its tool arrive together and only then — an agent must never be
-      // taught a tool it does not have.
-      ...(config.outboundAttachments ? [sendFileFragment] : []),
-      ...(harness.capabilities.skillsDir
-        ? [skillsFragment(harness.capabilities.skillsDir)]
-        : []),
-    ],
+    fragments: staticFragments(),
     channelsAfter: memoryFragment.id,
     // send_message `files` is taught inside the channels section, which
     // exists exactly when send_message does.
@@ -445,14 +474,20 @@ export const runSupervisor = async (
   // as ordinary background processes: the same spawn, caps, frames and
   // keep-awake as a process_start. No watch is armed — a server has no
   // "done" to report, and a platform-armed one would only add noise. The
-  // viewer meanwhile sits on the relay's auto-refreshing page.
-  for (const { port, command } of config.previewRelaunch ?? []) {
-    const started = processes.start({ command, name: `preview:${port}` }, null);
-    log(started.ok ? "info" : "warn", "preview app relaunch", {
-      port,
-      ...(started.error && { error: started.error }),
-    });
-  }
+  // viewer meanwhile sits on the relay's auto-refreshing page. Once the
+  // boot has settled (`bootSettled` below): an app inherits `DISPLAY`.
+  const relaunchPreviewApps = () => {
+    for (const { port, command } of config.previewRelaunch ?? []) {
+      const started = processes.start(
+        { command, name: `preview:${port}` },
+        null,
+      );
+      log(started.ok ? "info" : "warn", "preview app relaunch", {
+        port,
+        ...(started.error && { error: started.error }),
+      });
+    }
+  };
 
   const conversations = new Map<string, ConversationRuntime>();
 
@@ -541,11 +576,16 @@ export const runSupervisor = async (
   };
   const sendAddonReport = () =>
     addon?.report?.((message) => transport.send(message));
+  // An addon's own listeners are the platform's (never offered as a share),
+  // like the open proxy: discovery must not list them. Held by reference,
+  // so a late-bound addon's ports join it (`bindBoot`).
+  const discoveryReserved = new Set([
+    ...reservedPorts,
+    ...(addon?.reservedPorts ?? []),
+  ]);
   const portDiscovery = startPortDiscovery({
     send: (message) => transport.send(message),
-    // An addon's own listeners are the platform's (never offered as a
-    // share), like the open proxy: discovery must not list them.
-    reservedPorts: new Set([...reservedPorts, ...(addon?.reservedPorts ?? [])]),
+    reservedPorts: discoveryReserved,
     onResend: sendAddonReport,
   });
 
@@ -587,6 +627,78 @@ export const runSupervisor = async (
     send: (message) => transport.send(message),
     activeTurn,
   });
+
+  /**
+   * What a session's shells must see beyond the harness's launch
+   * environment: the desktop's display and bus, known only once the boot
+   * settles. Empty until then (a session started before the desktop gets
+   * nothing, then `setEnv` once it is there).
+   */
+  let sessionEnv: Record<string, string> = {};
+
+  /**
+   * The boot, settled: what waited on `deps.pending` (the desktop) proceeds.
+   * The doc is re-rendered with the display (and the addon's fragments), the
+   * addon is bound (its tools are read per call through
+   * `currentPlatformTools`, its ports join the discovery fence), the
+   * display reaches every session (below), and preview apps relaunch. The
+   * harness is NOT launched here: it launched before `ready` (the first turn
+   * must never wait for a screen), and the display reaches its shells
+   * through the per-session environment instead of inheritance.
+   */
+  const bindBoot = (bound: { addon?: SupervisorAddon }): void => {
+    // A boot that settles after the run ended (a shutdown inside the
+    // desktop's start) starts nothing: the teardown below already ran, and
+    // an app launched now would outlive it and hold the process.
+    if (tearingDown) return;
+    if (bound.addon && !addon) {
+      addon = bound.addon;
+      for (const port of addon.reservedPorts) discoveryReserved.add(port);
+    }
+    const beforeTools = toolNamesKey();
+    renderInputs.fragments = staticFragments();
+    try {
+      renderHome(config.homeDir, renderInputs);
+    } catch (error) {
+      // The boot render above already succeeded on this home, so this is
+      // a transient write failure; the next home sync re-renders.
+      log("warn", "home re-render after the boot failed", {
+        error: String(error),
+      });
+    }
+    // THE DISPLAY REACHES THE SESSIONS. A session that started before the
+    // desktop (the first turn, deliberately) has shells with no `DISPLAY`;
+    // the environment the desktop exported is handed to each live session
+    // now (and to every session started from here on, `sessionFor`), so
+    // its next shell has a screen, mid-turn included. A harness that cannot
+    // scope an environment per session gets the restart below instead,
+    // which re-reads the inherited env too.
+    sessionEnv = desktopSessionEnv(process.env);
+    const displayArrived = Object.keys(sessionEnv).length > 0;
+    if (displayArrived) {
+      for (const runtime of conversations.values()) {
+        void runtime.session?.setEnv?.(sessionEnv).catch((error: unknown) =>
+          log("warn", "session environment not applied", {
+            error: String(error),
+          }),
+        );
+      }
+    }
+    // The doc now teaches the desktop, and the addon's tools exist: a
+    // session that captured the headless doc restarts on its next turn (the
+    // same door a home sync's surface change uses). Only on a real change:
+    // a desktop that never came up re-rendered the same doc, and a restart
+    // then would cost a turn its tool listing for nothing.
+    const toolsNote = toolsChangeNote(beforeTools, toolNamesKey());
+    if (toolsNote) {
+      markSessionsStale("tools changed", toolsNote);
+    } else if (displayArrived) {
+      markSessionsStale("desktop ready", null);
+    }
+    relaunchPreviewApps();
+  };
+  let bootSettled: Promise<void> = Promise.resolve();
+  let tearingDown = false;
 
   // The memory harvester (§3.8 write-back): watches `memory/` for
   // agent-authored bytes and uploads them — the platform stays the single
@@ -856,6 +968,9 @@ export const runSupervisor = async (
       // Anchoring, not authority: lets the adapter attribute session-scoped
       // harness events (a wake request between turns) to this conversation.
       context: { conversationId },
+      // The desktop's display and bus, when the boot has settled: a session
+      // started before that gets them through `setEnv` at `bindBoot`.
+      ...(Object.keys(sessionEnv).length > 0 && { env: sessionEnv }),
     });
     runtime.session = session;
     log("info", "harness session started", {
@@ -900,17 +1015,36 @@ export const runSupervisor = async (
    */
   let harnessDead = false;
 
+  /**
+   * The home went read-only under this sandbox (`home/read-only-watch.ts`).
+   * Like a dead harness it ends the run, but every turn it fails carries
+   * `home_read_only` instead of the death codes: the person needs the
+   * storage sentence, and the control plane needs to know a restart is
+   * what fixes it (and to budget that restart).
+   */
+  let homeReadOnly = false;
+
+  /** The raw `error` beside `home_read_only` on a turn the read-only stop
+   * ended cleanly (no harness error of its own): operator material for the
+   * logs and an older control plane, never what a person reads (the code
+   * maps to canonical copy). */
+  const HOME_READ_ONLY_TURN_ERROR =
+    "stopped: the agent's home is mounted read-only";
+
   /** The failure class for a failed `turn.result`, or undefined for an
    * ordinary (live-harness) failure. `streamStarted` supplies the phase:
    * pre-stream means the harness died before ANY observable work — the
    * control plane may revive that turn invisibly; post-stream deaths must
-   * stay visible (side effects may exist). */
+   * stay visible (side effects may exist). A read-only home outranks both:
+   * reviving a turn into it would fail the same way. */
   const failureCode = (runtime: ConversationRuntime): string | undefined =>
-    harnessDead
-      ? runtime.streamStarted
-        ? TURN_FAILURE_CODES.agentRestarted
-        : TURN_FAILURE_CODES.agentStartFailed
-      : undefined;
+    homeReadOnly
+      ? TURN_FAILURE_CODES.homeReadOnly
+      : harnessDead
+        ? runtime.streamStarted
+          ? TURN_FAILURE_CODES.agentRestarted
+          : TURN_FAILURE_CODES.agentStartFailed
+        : undefined;
 
   const runTurn = async (
     item: Extract<WorkItem, { kind: "turn.deliver" }>,
@@ -924,6 +1058,12 @@ export const runSupervisor = async (
      * one — `harness_busy` (the self-heal exhausting) or
      * `harness_no_terminal` (the post-accept deadline). */
     let terminalErrorCode: string | undefined;
+    /** The harness's word that this turn ended cleanly but UNANSWERED (the
+     * model wrote nothing visible: a refusal or an empty response), with the
+     * adapter's code and the harness's own explanation. */
+    let unanswered:
+      | Omit<Extract<HarnessEvent, { type: "turn.unanswered" }>, "type">
+      | undefined;
     /** Set on the failure arms: a turn that ended `failed` without a clean
      * terminal may have left the harness still executing its run — the
      * `finally` cancels it so an orphan can never burn for half an hour
@@ -1009,11 +1149,19 @@ export const runSupervisor = async (
     // cleared first in the `finally`. Frames buffering while the channel is
     // down are fine: the outbound cap drops oldest, and delivery after a
     // reconnect just stamps late.
+    //
+    // Each beat also carries the session the turn runs in, once there is
+    // one: the control plane keeps it as the conversation's resume handle,
+    // so a sandbox that dies mid-turn (and never sends `turn.result`) can
+    // still be resumed in the same session.
     const beat = () =>
       transport.send({
         kind: "progress",
         turnId: item.turnId,
         conversationId: item.conversationId,
+        ...(runtime.session?.sessionRef && {
+          sessionRef: runtime.session.sessionRef,
+        }),
       });
     const progressTimer = setInterval(
       beat,
@@ -1044,9 +1192,19 @@ export const runSupervisor = async (
       // A scheduled task's gate runs here: after the home is in place (the
       // gate reads the agent's files), before any harness session exists,
       // so a quiet tick costs no model call at all. Quiet ends the turn as a
-      // `[no reply]` answer, which the control plane delivers nowhere.
+      // `[no reply]` answer, which the control plane delivers nowhere. The
+      // gate spawns a shell that inherits THIS process's environment, so it
+      // alone still waits for the desktop (`bootSettled`, bounded by the
+      // desktop's own piece timeouts); an ordinary turn does not: its
+      // session's shells get the display through the session environment
+      // once it exists, and the first message must never wait for a screen.
       let message = item.message;
       if (item.gate) {
+        await bootSettled;
+        // A home that froze while this turn was parked on the boot: never
+        // run the check on it. The catch arm classes the failure read-only
+        // (`failureCode`), the same answer a session would have reached.
+        if (homeReadOnly) throw new Error(HOME_READ_ONLY_TURN_ERROR);
         const verdict = await runGate(item.gate, config.homeDir);
         if (verdict.kind === "wake") {
           // The check decided; the agent does not get a second vote. The
@@ -1156,6 +1314,9 @@ export const runSupervisor = async (
       for await (const event of session.runTurn({
         message: prompt,
         ...(images.length > 0 && { images }),
+        ...(item.contextTokens !== undefined && {
+          contextTokens: item.contextTokens,
+        }),
       })) {
         // Follow-ups that arrived before the harness accepted this turn's
         // message drain on the FIRST event — the earliest moment the
@@ -1260,6 +1421,9 @@ export const runSupervisor = async (
           terminalError = event.message;
           terminalErrorCode = event.code;
         }
+        if (event.type === "turn.unanswered") {
+          unanswered ??= { code: event.code, message: event.message };
+        }
       }
 
       // A stream that ended without a terminal event still said something.
@@ -1267,18 +1431,44 @@ export const runSupervisor = async (
 
       const followUps = followUpOutcomes(runtime);
       // `aborted` wins over `done`: an aborted stream ends cleanly, so the
-      // clean end tells us nothing about whether the user cancelled.
-      const status = wasAborted() ? "aborted" : sawCleanEnd ? "done" : "failed";
+      // clean end tells us nothing about whether the user cancelled. A
+      // read-only home outranks both: its stop is the platform's, and the
+      // turn did NOT finish (its writes were failing), whatever the stream
+      // said on its way out. A clean end the harness reported UNANSWERED
+      // closes `failed`: the model wrote nothing visible, and a `done` with no
+      // words is exactly the silence every surface must not show.
+      const unansweredEnd =
+        sawCleanEnd && !homeReadOnly && !wasAborted() ? unanswered : undefined;
+      const status = homeReadOnly
+        ? "failed"
+        : wasAborted()
+          ? "aborted"
+          : sawCleanEnd && !unansweredEnd
+            ? "done"
+            : "failed";
       // A stream that ended failed without throwing can still be a death —
       // the adapter's `close` rides the same teardown as the stream's end
       // with no ordering contract, so give `fail()` one macrotask to land
-      // before classifying (same law as the catch arm below).
-      if (status === "failed" && !harnessDead) {
+      // before classifying (same law as the catch arm below). An unanswered
+      // end is not one: the run finished, and its code is the adapter's.
+      if (status === "failed" && !harnessDead && !unansweredEnd) {
         await new Promise((resolve) => setImmediate(resolve));
       }
-      const errorCode =
-        status === "failed" ? classify(terminalError) : undefined;
-      uncleanFailure = status === "failed" && !harnessDead;
+      // The unanswered code is taken as the adapter minted it, never through
+      // `classify`: the run ended cleanly, so a harness that dies a moment
+      // later must not turn a model's refusal into a death (and a revival
+      // that would ask the same question again).
+      const errorCode = unansweredEnd
+        ? unansweredEnd.code
+        : status === "failed"
+          ? classify(terminalError)
+          : undefined;
+      const failureError = unansweredEnd
+        ? unansweredEnd.message
+        : (terminalError ??
+          (homeReadOnly ? HOME_READ_ONLY_TURN_ERROR : undefined));
+      // A clean end left nothing running to cancel.
+      uncleanFailure = status === "failed" && !harnessDead && !unansweredEnd;
       endedStatus = status;
       transport.send({
         kind: "turn.result",
@@ -1291,8 +1481,8 @@ export const runSupervisor = async (
         // failures keep this raw detail instead of closing with a NULL error.
         // Bound at the sender: an oversized terminal frame would be dropped.
         ...(status === "failed" &&
-          terminalError && {
-            error: terminalError.slice(0, MAX_TURN_RESULT_ERROR_CHARS),
+          failureError && {
+            error: failureError.slice(0, MAX_TURN_RESULT_ERROR_CHARS),
           }),
         ...(usage && { usage }),
         ...(runtime.session?.sessionRef && {
@@ -1315,15 +1505,16 @@ export const runSupervisor = async (
       if (!harnessDead) {
         await new Promise((resolve) => setImmediate(resolve));
       }
-      const errorCode = wasAborted() ? undefined : classify(String(error));
+      const errorCode =
+        wasAborted() && !homeReadOnly ? undefined : classify(String(error));
       uncleanFailure = !wasAborted() && !harnessDead;
-      endedStatus = wasAborted() ? "aborted" : "failed";
+      endedStatus = wasAborted() && !homeReadOnly ? "aborted" : "failed";
       const followUps = followUpOutcomes(runtime);
       transport.send({
         kind: "turn.result",
         turnId: item.turnId,
         conversationId: item.conversationId,
-        status: wasAborted() ? "aborted" : "failed",
+        status: endedStatus,
         // Sliced at the source, same law as above — a harness error can be
         // arbitrarily large, and this terminal frame must deliver.
         error: String(error).slice(0, MAX_TURN_RESULT_ERROR_CHARS),
@@ -1562,10 +1753,99 @@ export const runSupervisor = async (
     });
   });
 
+  if (deps?.pending) {
+    // Ready goes out NOW; what needed the desktop binds when it settles.
+    bootSettled = deps.pending.then(
+      (bound) => {
+        bindBoot(bound);
+        // The addon's first report: at ready for a boot-time addon, here
+        // for one bound late (never after the teardown: bindBoot bound
+        // nothing then). Every re-send beat repeats it after.
+        sendAddonReport();
+      },
+      // Never rejects by contract; a broken one must not strand turns.
+      (error: unknown) => {
+        log("warn", "boot did not settle; running without it", {
+          error: String(error),
+        });
+        bindBoot({});
+      },
+    );
+  } else {
+    // Nothing pending (tests, a caller that awaited its own boot): bound
+    // before ready, as the boot always was.
+    bindBoot({});
+  }
+
+  // The harness launches NOW, ahead of the first turn and without waiting
+  // for the desktop: its own runtime needs no screen, and its shells learn
+  // the display through the session environment once the boot settles
+  // (`bindBoot`). After the failure listener above exists, so a launch
+  // that dies at once is still reported; before `ready`, so the runner's
+  // first turn finds a daemon that is already up.
+  harness.prewarm?.(config.homeDir);
+
   transport.send({ kind: "ready", harness: harness.id });
   // An addon's report, once at ready (then on the re-send beat), so the
   // control plane hears it before anything reads it.
   sendAddonReport();
+
+  /**
+   * THE HOME GOING READ-ONLY TAKES THE SANDBOX WITH IT, the same way.
+   *
+   * ext4 remounted the home read-only after an IO error, and only a fresh
+   * boot mounts it writable again: every turn from here on would fail with
+   * the kernel's EROFS while the sandbox looks healthy from outside
+   * (observed live: hours of `Read-only file system (os error 30)` replies).
+   * Reported with its own code so the control plane can tell the person
+   * the truth and budget the restart; the rest is the death path above.
+   *
+   * Started AFTER `ready`: the control plane applies a `stopped` report
+   * only to a running sandbox, so a home already read-only at boot must be
+   * reported once the sandbox is running, or the report would be dropped.
+   */
+  let stopHomeWatch = (): void => undefined;
+  const homeFailed = new Promise<void>((resolve) => {
+    stopHomeWatch = watchHomeReadOnly(
+      config.homeDir,
+      () => {
+        // Before anything else, like the harness arm: in-flight turns
+        // classify off these flags.
+        homeReadOnly = true;
+        harnessDead = true;
+        log("error", "home is read-only; reporting the sandbox unhealthy", {
+          home: config.homeDir,
+        });
+        transport.send({
+          kind: "unhealthy",
+          reason: `the agent's home (${config.homeDir}) is mounted read-only`,
+          code: TURN_FAILURE_CODES.homeReadOnly,
+        });
+        // A live harness would run every in-flight turn to its end against
+        // a home that refuses each write. Stop them now: each reports
+        // `failed` with the read-only code (the status arm above), and the
+        // run's teardown waits for exactly those results.
+        for (const runtime of conversations.values()) {
+          if (runtime.activeTurnId && runtime.streamStarted) {
+            void runtime.session?.abort().catch((error: unknown) =>
+              log("warn", "stopping a turn on a read-only home failed", {
+                error: String(error),
+              }),
+            );
+          }
+        }
+        resolve();
+      },
+      {
+        ...(deps?.readMounts && { readMounts: deps.readMounts }),
+        ...(deps?.homeWatchIntervalMs && {
+          intervalMs: deps.homeWatchIntervalMs,
+        }),
+        onReadError: (error) =>
+          log("warn", "home mount check failed", { error: String(error) }),
+      },
+    );
+  });
 
   try {
     // An explicit iterator, not `for await`, so the read can be raced against
@@ -1578,7 +1858,9 @@ export const runSupervisor = async (
     // container that serves thousands of turns would accumulate thousands of
     // closures on a promise that, in the healthy case, never settles.
     const items = transport.incoming()[Symbol.asyncIterator]();
-    const failureSignal = harnessFailed.then(() => "harness-failed" as const);
+    const failureSignal = Promise.race([harnessFailed, homeFailed]).then(
+      () => "harness-failed" as const,
+    );
     for (;;) {
       const read = items.next();
       const next = await Promise.race([read, failureSignal]);
@@ -1859,6 +2141,9 @@ export const runSupervisor = async (
     // on the durable volume and the NEXT boot's harvest uploads it. The
     // durable volume, not a shutdown flush, is the tail guarantee.
   } finally {
+    tearingDown = true;
+    // The home watch next: a reading taken mid-teardown is no news.
+    stopHomeWatch();
     // The observer first — its next tick must not resurrect entries the
     // manager is about to drop.
     observer?.stop();

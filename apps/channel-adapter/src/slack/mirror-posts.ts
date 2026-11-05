@@ -15,11 +15,7 @@ import {
   SlackApiError,
   uploadFiles,
 } from "@onecli/channels/slack";
-import { markdownToMrkdwn } from "@onecli/channels/slack";
-
-/** Slack's per-section text cap is 3,000 — cut with headroom, at a newline
- * where one exists in the back half of the window. */
-const SECTION_TEXT_LIMIT = 2900;
+import { markdownToMrkdwn, sectionChunks } from "@onecli/channels/slack";
 
 /** Slack's per-message block ceiling, with headroom — a post past 50 blocks
  * is rejected whole (`invalid_blocks`). */
@@ -106,31 +102,6 @@ export const automationCaption = (title: string): string => {
     .replace(/[\uD800-\uDBFF]$/, "")
     .trimEnd();
   return `${clipped}…`;
-};
-
-const sectionChunks = (text: string): string[] => {
-  const chunks: string[] = [];
-  let rest = text;
-  while (rest.length > SECTION_TEXT_LIMIT) {
-    const window = rest.slice(0, SECTION_TEXT_LIMIT);
-    const newline = window.lastIndexOf("\n");
-    let cut = newline > SECTION_TEXT_LIMIT / 2 ? newline : SECTION_TEXT_LIMIT;
-    // Never cut inside a `<url|label>` token — the tail half would render as
-    // literal angle-bracket soup. A still-open `<` before the cut moves the
-    // cut to just before it; a degenerate token longer than half the window
-    // keeps the hard cut. (Newline cuts are safe by construction — the
-    // converter's URLs never contain whitespace — but the check is cheap and
-    // uniform.)
-    const open = rest.lastIndexOf("<", cut - 1);
-    if (open > SECTION_TEXT_LIMIT / 2) {
-      const close = rest.indexOf(">", open);
-      if (close === -1 || close >= cut) cut = open;
-    }
-    chunks.push(rest.slice(0, cut));
-    rest = rest.slice(cut).replace(/^\n/, "");
-  }
-  if (rest) chunks.push(rest);
-  return chunks;
 };
 
 /**

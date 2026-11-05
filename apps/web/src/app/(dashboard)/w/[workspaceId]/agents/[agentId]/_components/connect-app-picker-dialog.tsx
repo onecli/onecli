@@ -6,7 +6,11 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { getApp, getApps } from "@onecli/api/apps/registry";
 import type { AppDefinition } from "@onecli/api/apps/types";
-import { ChevronRight, Search } from "lucide-react";
+import {
+  MAX_CUSTOM_CONNECTION_LABEL_CHARS,
+  cleanLabel,
+} from "@onecli/agent-protocol/text";
+import { ChevronRight, KeyRound, Search } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -23,6 +27,7 @@ import {
   connectionsPath,
 } from "@/lib/navigation";
 import { withConnectLinkAgent } from "@/lib/connect-link-agent";
+import { useChatSend } from "@/lib/chat/chat-send";
 import { useInstance } from "@/hooks/use-instance";
 import { connectPopupHeight, openConnectPopup } from "@/lib/connect-popup";
 import { queryKeys } from "@/lib/api/keys";
@@ -36,6 +41,11 @@ import {
   useSharedGitHubInstallations,
 } from "@/hooks/use-github-app-share";
 import { GitHubAppConnectDialog } from "@/app/(dashboard)/w/[workspaceId]/connections/_components/github-app-connect-dialog";
+
+/** What the picker sends the agent when the catalog has no match: the agent
+ * researches the app's API and answers with a custom-connection card. */
+const customConnectionRequest = (name: string): string =>
+  `I want to connect ${name} as a custom connection with an API key.`;
 
 /**
  * The agent-scoped app picker: search the catalog, Connect opens the OAuth
@@ -65,6 +75,9 @@ export const ConnectAppPickerDialog = ({
   onConnected?: (connectionId: string) => void;
 }) => {
   const [query, setQuery] = useState("");
+  // Only inside an agent chat: there a search with no match can be handed
+  // to the agent as a custom connection.
+  const chatSend = useChatSend();
   const pathname = usePathname();
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -157,6 +170,18 @@ export const ConnectAppPickerDialog = ({
   const showSlack =
     instance?.entitled === true &&
     (!query.trim() || "slack".includes(query.trim().toLowerCase()));
+  // The search as an app name for a custom connection: control and invisible
+  // characters dropped, clipped to a connection name's length. Offered only
+  // in a chat, and only when no built-in app matches at all, including one
+  // the org hides here: the platform refuses a custom connection for a
+  // built-in app.
+  const customName = cleanLabel(query, MAX_CUSTOM_CONNECTION_LABEL_CHARS);
+  const offerCustom =
+    customName !== "" &&
+    !showSlack &&
+    !getApps().some((a) =>
+      a.name.toLowerCase().includes(customName.toLowerCase()),
+    );
   const hasSlackApp = (agent?.channels ?? []).some(
     (c) => c.provider === "slack" && c.status !== "pending_setup",
   );
@@ -286,6 +311,34 @@ export const ConnectAppPickerDialog = ({
               <p className="text-muted-foreground py-6 text-center text-sm">
                 No apps found.
               </p>
+            )}
+            {chatSend && offerCustom && (
+              <button
+                type="button"
+                onClick={() => {
+                  chatSend(customConnectionRequest(customName));
+                  onOpenChange(false);
+                }}
+                className="hover:bg-muted border-brand/30 bg-brand/5 mb-1 flex w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors"
+              >
+                <div className="bg-brand/10 text-brand flex size-9 shrink-0 items-center justify-center rounded-lg">
+                  <KeyRound className="size-4" aria-hidden />
+                </div>
+                <div className="min-w-0 flex-1">
+                  {/* Two lines, not one: truncated, the dialog's width cut
+                      the label at "custom conne…", hiding what it does. */}
+                  <p className="line-clamp-2 text-sm font-medium break-words">
+                    Connect &ldquo;{customName}&rdquo; as a custom connection
+                  </p>
+                  <p className="text-muted-foreground truncate text-xs">
+                    The agent finds its API and asks you for the key
+                  </p>
+                </div>
+                <ChevronRight
+                  className="text-muted-foreground size-4 shrink-0"
+                  aria-hidden
+                />
+              </button>
             )}
             {/* Always last, searching included: a search that finds nothing
                 is when someone wants to ask for the app. */}

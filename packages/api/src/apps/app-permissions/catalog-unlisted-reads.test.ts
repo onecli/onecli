@@ -21,6 +21,12 @@ import type { NewRule } from "../../services/policy-translation/types";
 // This catches both ways a default attach could leak: an opted-in catalog
 // whose API has such a GET, and a read TOOL broad enough to swallow one (a
 // raw `/projects/*` prefix covering `/projects/{id}/variables`).
+//
+// GitHub is the one opted-in catalog with such a GET: its secret scanning
+// alerts return the leaked secret, under `get_repo`'s `/repos/*/*` itself.
+// The gateway holds them whatever the grant allows, so they are pinned there
+// (`apps/gateway/crates/policy-engine/src/secret_reads.rs` and the
+// `grant-other-reads-writes` gateway e2e), not by this evaluator.
 
 /** A GET the default grant must hold, and the doc that says why. */
 interface SensitiveRead {

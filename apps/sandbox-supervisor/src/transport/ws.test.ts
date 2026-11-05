@@ -741,3 +741,173 @@ describe("resumable session", () => {
       });
   });
 });
+
+/**
+ * Channel liveness. A half-open socket (the runner process went away and
+ * no FIN reached the sandbox) emits neither `close` nor `error`, ever, and
+ * the WHATWG client has no ping event: without its own check the
+ * supervisor sits on a dead socket until the runner's reconcile reports
+ * the container dead (seen live: one sandbox of several after a runner
+ * restart). So, while
+ * it holds a session, the transport beats on a timer and expects the
+ * runner's ack for SOME frame within the timeout; past that it closes the
+ * socket itself and takes the ordinary reconnect path.
+ */
+describe("channel liveness", () => {
+  const session = (credential: string, ack = 0) =>
+    JSON.stringify({ kind: "session", credential, ack });
+  const kinds = (socket: FakeSocket) =>
+    socket.sent.map((raw) => {
+      const frame = JSON.parse(raw) as { message?: { kind: string } };
+      return frame.message?.kind;
+    });
+  const liveness = { intervalMs: 20_000, timeoutMs: 75_000 };
+  const setupWithLiveness = () => {
+    const sockets: FakeSocket[] = [];
+    const transport = createWsTransport({
+      url: "ws://runner:8484",
+      token: "boot-token",
+      sandboxId: "sb-1",
+      socketFactory: (url) => {
+        const socket = createFakeSocket(url);
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
+      },
+      minBackoffMs: 1,
+      maxBackoffMs: 2,
+      maxAttempts: Infinity,
+      liveness,
+    });
+    return { transport, sockets };
+  };
+
+  it("beats on the interval once a session is held, as a sequenced frame the runner acks", () => {
+    vi.useFakeTimers();
+    try {
+      const { sockets } = setupWithLiveness();
+      sockets[0]!.open();
+      sockets[0]!.emit(session("v1.k1.cred"));
+      vi.advanceTimersByTime(liveness.intervalMs);
+      expect(kinds(sockets[0]!)).toEqual(["heartbeat"]);
+      vi.advanceTimersByTime(liveness.intervalMs);
+      expect(kinds(sockets[0]!)).toEqual(["heartbeat", "heartbeat"]);
+      const frames = sockets[0]!.sent.map(
+        (raw) => JSON.parse(raw) as { seq: number },
+      );
+      expect(frames.map((f) => f.seq)).toEqual([1, 2]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never beats without a session: an old runner would drop the frame anyway", () => {
+    vi.useFakeTimers();
+    try {
+      const { sockets } = setupWithLiveness();
+      sockets[0]!.open();
+      vi.advanceTimersByTime(liveness.timeoutMs * 3);
+      expect(sockets[0]!.sent).toEqual([]);
+      expect(sockets.length).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes a socket that answers no ack for the timeout and reconnects with the session (the half-open socket)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { sockets } = setupWithLiveness();
+      sockets[0]!.open();
+      sockets[0]!.emit(session("v1.k1.cred"));
+      let closed = false;
+      sockets[0]!.close = () => {
+        closed = true;
+        // A half-open socket: close() reaches no peer, so the library
+        // reports the close only on its own timeout; model that as
+        // never, the worst case.
+        sockets[0]!.readyState = WebSocket.CLOSING;
+      };
+      // The watchdog runs on the beat interval, so the verdict lands on
+      // the first tick past the timeout: at most one interval late.
+      vi.advanceTimersByTime(liveness.timeoutMs);
+      expect(closed).toBe(false);
+      vi.advanceTimersByTime(liveness.intervalMs);
+      expect(closed).toBe(true);
+      // The reconnect does not wait for a close event that never comes.
+      await vi.advanceTimersByTimeAsync(5);
+      expect(sockets.length).toBe(2);
+      expect(sockets[1]!.url).toContain("session=v1.k1.cred");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an ack for ANY frame (a turn's event, not only a beat) resets the clock", () => {
+    vi.useFakeTimers();
+    try {
+      const { transport, sockets } = setupWithLiveness();
+      sockets[0]!.open();
+      sockets[0]!.emit(session("v1.k1.cred"));
+      let closed = false;
+      sockets[0]!.close = () => {
+        closed = true;
+      };
+      vi.advanceTimersByTime(liveness.timeoutMs - 10_000);
+      transport.send({ kind: "ready", harness: "h" });
+      const last = JSON.parse(sockets[0]!.sent.at(-1)!) as { seq: number };
+      sockets[0]!.emit(JSON.stringify({ kind: "ack", seq: last.seq }));
+      // Without the reset the next tick (at 80 s from the start) would
+      // have closed it; with it the clock restarts at 65 s.
+      vi.advanceTimersByTime(liveness.timeoutMs);
+      expect(closed).toBe(false);
+      vi.advanceTimersByTime(liveness.intervalMs);
+      expect(closed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("replays the real frames, never the swallowed beats, on the socket after a dead one", async () => {
+    vi.useFakeTimers();
+    try {
+      const { transport, sockets } = setupWithLiveness();
+      sockets[0]!.open();
+      sockets[0]!.emit(session("v1.k1.cred"));
+      sockets[0]!.close = () => {
+        sockets[0]!.readyState = WebSocket.CLOSING;
+      };
+      // Two beats go unanswered, then a real frame the dead socket also
+      // swallowed, then the verdict.
+      vi.advanceTimersByTime(liveness.intervalMs * 2);
+      transport.send({ kind: "ready", harness: "h" });
+      vi.advanceTimersByTime(liveness.timeoutMs);
+      await vi.advanceTimersByTimeAsync(5);
+      sockets[1]!.open();
+      sockets[1]!.emit(session("v1.k1.cred", 0));
+      const replayed = sockets[1]!.sent.map(
+        (raw) => JSON.parse(raw) as { seq: number; message: { kind: string } },
+      );
+      expect(replayed.map((f) => [f.seq, f.message.kind])).toEqual([
+        [3, "ready"],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops beating and never times out after close()", async () => {
+    vi.useFakeTimers();
+    try {
+      const { transport, sockets } = setupWithLiveness();
+      sockets[0]!.open();
+      sockets[0]!.emit(session("v1.k1.cred"));
+      const before = sockets[0]!.sent.length;
+      await transport.close();
+      vi.advanceTimersByTime(liveness.timeoutMs * 3);
+      expect(sockets[0]!.sent.length).toBe(before);
+      expect(sockets.length).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

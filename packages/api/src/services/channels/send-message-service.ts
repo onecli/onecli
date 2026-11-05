@@ -13,6 +13,7 @@ import { findChannels } from "./recipient-search-service";
 import { noteOutboundFailure } from "./agent-channel-service";
 import { authorizeChannelUser } from "./channel-ingestion-service";
 import { channelProvider, isChannelProviderId } from "./registry";
+import type { MessageSection } from "./types";
 import { logger } from "../../lib/logger";
 import { cleanLabel } from "../../lib/format";
 import { previousRunStartedAt } from "../turn-service";
@@ -1362,4 +1363,43 @@ export const buildSentContext = async (
     ...lines,
     "If this message answers one, thank them briefly, then pass the answer back with send_message to the person who wanted it. If they refer to something you posted (e.g. \"share it in #x\"), it's one of these: act on it. Otherwise carry on as usual. Don't ask the person here what they meant.",
   ].join("\n");
+};
+
+/**
+ * A PLATFORM post into a channel the agent's bot is in: a report the
+ * platform wrote (a scheduled eval run's results), not words the model
+ * chose, so there is no approval card. The channel's one setting still
+ * holds: Never refuses (fail closed), exactly as for the agent's own
+ * sends. Throws on any miss; the caller decides what a failed post means.
+ */
+export const postPlatformChannelMessage = async (
+  agentId: string,
+  channelRef: string,
+  text: string,
+  sections?: readonly MessageSection[],
+): Promise<void> => {
+  const to: SendRecipient = { kind: "channel", ref: channelRef, label: "" };
+  if ((await recipientPolicyOf(agentId, to)) === "blocked")
+    throw new Error("the channel is set to Never in Contacts");
+  const presence = await db.agentChannel.findFirst({
+    where: { agentId, status: "active" },
+    select: { id: true, provider: true, credentials: true },
+  });
+  if (!presence?.credentials)
+    throw new Error("no active channel presence to post from");
+  if (!isChannelProviderId(presence.provider))
+    throw new Error(`unknown channel provider "${presence.provider}"`);
+  const credentialsJson = await getCrypto().decrypt(presence.credentials);
+  try {
+    await channelProvider(presence.provider).sendMessage({
+      credentialsJson,
+      to: { kind: "channel", ref: channelRef },
+      text: text.slice(0, MAX_SEND_TEXT_CHARS),
+      // Sized by the provider: a section is split to its platform's limit.
+      ...(sections && { sections }),
+    });
+  } catch (err) {
+    await noteOutboundFailure(presence.id, err);
+    throw err;
+  }
 };

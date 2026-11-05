@@ -121,4 +121,10 @@ export const eePlatformLlm: PlatformLlmProvider = {
     configured() &&
     !pool.some(isLlmSecret) &&
     ownerTrustedForTrialCredit(owner),
+  /**
+   * A conversation on the trial credit never runs past the default 200k
+   * context: 1M would let one long thread spend the person's whole credit
+   * in a few messages. Their own key lifts it, with no other change.
+   */
+  trialMaxContextTokens: 200_000,
 };

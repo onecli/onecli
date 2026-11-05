@@ -7,6 +7,7 @@ import {
   supervisorMessageSchema,
   type SupervisorMessage,
   type SupervisorWorkItem,
+  type TurnInput,
 } from "@onecli/agent-protocol";
 import { createConnection } from "node:net";
 import {
@@ -1330,6 +1331,74 @@ describe("supervisor loop end-to-end (fake harness, stdio transport)", () => {
     );
     // Turn 2: no context, no stray separator — the message alone.
     expect(deltas[1]).toBe("Fake answer to: thanks");
+  });
+
+  it("hands the turn's context size to the harness, and nothing when the platform chose none", async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), "supervisor-"));
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const seen: TurnInput[] = [];
+    const harness = createFakeHarness();
+    const recording: typeof harness = {
+      ...harness,
+      startSession: async (options) => {
+        const session = await harness.startSession(options);
+        return {
+          ...session,
+          runTurn: (turn) => {
+            seen.push(turn);
+            return session.runTurn(turn);
+          },
+        };
+      },
+    };
+
+    const run = runSupervisor(
+      {
+        homeDir,
+        model: undefined,
+        effort: undefined,
+        instructions: undefined,
+        agentName: undefined,
+        channels: [],
+        peers: [],
+        connections: [],
+        harness: "fake",
+        runnerWsUrl: undefined,
+        bootstrapToken: undefined,
+        sandboxId: undefined,
+        outboundAttachments: false,
+      },
+      recording,
+      createStdioTransport(input, output),
+    );
+
+    input.write(
+      JSON.stringify({
+        kind: "turn.deliver",
+        turnId: "t1",
+        conversationId: "cv1",
+        message: "one",
+        contextTokens: 1_000_000,
+      }) + "\n",
+    );
+    input.write(
+      JSON.stringify({
+        kind: "turn.deliver",
+        turnId: "t2",
+        conversationId: "cv1",
+        message: "two",
+      }) + "\n",
+    );
+    input.write('{"kind":"shutdown"}\n');
+    input.end();
+    await run;
+
+    expect(seen.map((turn) => turn.contextTokens)).toEqual([
+      1_000_000,
+      undefined,
+    ]);
+    expect("contextTokens" in (seen[1] ?? {})).toBe(false);
   });
 
   it("an ephemeral turn runs on a fresh session and leaves none behind", async () => {

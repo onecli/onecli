@@ -202,7 +202,6 @@ export type {
   SkillPatch,
   SkillSummary,
 } from "./skills";
-export { appsPath } from "./scope";
 export type { PageScope } from "./scope";
 export type {
   LibrarySkill,
@@ -219,14 +218,7 @@ export type {
   AppToolGroupSummary,
   AppPermissionDefinitionSummary,
 } from "@onecli/api/apps/app-permissions/types";
-export {
-  apiGet,
-  apiPost,
-  apiPatch,
-  apiPut,
-  apiDelete,
-  ApiError,
-} from "./client";
+export { apiGet, apiPut, ApiError } from "./client";
 export { queryKeys } from "./keys";
 export type { RunAppCall, RunDetail, RunListItem, RunToolCall } from "./runs";
 export type { AgentRuntimeUsage, OrgRuntimeUsage } from "./usage";

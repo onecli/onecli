@@ -46,7 +46,7 @@ export const NewAgentRow = ({ agents, agentsPending }: NewAgentRowProps) => {
             // dialog and then, a beat later, mean another.
             disabled={!flow.ready}
             tooltip="New agent"
-            className="text-muted-foreground hover:text-foreground font-normal"
+            className="text-sidebar-foreground/70 hover:text-foreground font-normal"
           >
             <Plus aria-hidden />
             <span>New agent</span>

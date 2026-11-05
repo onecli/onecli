@@ -712,6 +712,7 @@ describe("skill_import", () => {
       path: `${"p".repeat(110)}/${i}`,
       reason: "Clashes with another file of the same name",
     })),
+    fingerprint: "e".repeat(64),
     replaced: false,
   });
 

@@ -39,6 +39,16 @@ export const MAX_TOOL_ERROR_CHARS = 2_000;
  */
 export const MAX_TURN_CONTEXT_CHARS = 16_000;
 
+/**
+ * Bound for a harness session handle where it leaves the sandbox's trust
+ * zone (the runner wire, and back on dispatch). Opaque to everything above
+ * the adapter; bounded because it lands on the conversation row. The
+ * supervisor wire does not enforce it (an oversized ref must not sink the
+ * frame it rides on, a heartbeat or a terminal report): the runner forwards
+ * a ref only when it fits, and drops it otherwise.
+ */
+export const MAX_SESSION_REF_CHARS = 500;
+
 /** Bound for a scheduled task's gate command (one shell line or a script
  * path, not a program). Shared by the control plane's zod and the wire. */
 export const MAX_CRON_GATE_CHARS = 2_000;
@@ -46,6 +56,13 @@ export const MAX_CRON_GATE_CHARS = 2_000;
 /** Bound for the gate's plain-words description (what a person reads).
  * Shared by the control plane's zod and the agent's tool schema. */
 export const MAX_CRON_GATE_DESCRIPTION_CHARS = 200;
+
+/**
+ * A conversation's context size on the wire: the tokens the harness keeps in
+ * the model's view. Bounded so a corrupt value can never ask for an absurd
+ * budget; the platform only ever sends one of its ladder sizes.
+ */
+export const contextTokensSchema = z.number().int().min(10_000).max(10_000_000);
 
 // The sync byte budget lives in sync-budget.ts (a leaf module — memory-file
 // needs it too, and transport imports memory-file's caps; see its header).
@@ -522,6 +539,27 @@ export const SESSION_RESUME_GRACE_MS =
   SESSION_RESUME_BUDGET.maxAttempts * SESSION_RESUME_BUDGET.maxBackoffMs +
   30_000;
 
+/**
+ * The supervisor's own liveness check on its channel. A half-open socket
+ * (the runner process went away without a FIN reaching the sandbox: a
+ * host restart, a kill, a load balancer that dropped the flow) delivers no
+ * `close` and no `error`, ever; the WHATWG client exposes no ping event
+ * either. So the supervisor sends a sequenced `heartbeat` every
+ * `intervalMs` while connected and expects the runner's ack for SOME frame
+ * within `timeoutMs` of the last one it heard; past that it closes the
+ * socket itself, which puts it on the ordinary reconnect path. Seen live:
+ * a runner restart closed every channel; all but one supervisor saw the
+ * close and were back within a minute, the last one never saw anything,
+ * kept running happily, and was reported dead by the fresh runner's 3 min
+ * inherited grace as "channelless" while healthy and idle. The timeout is
+ * under that grace by design, so a supervisor notices its dead socket and
+ * redials before the runner gives up on it.
+ */
+export const CHANNEL_LIVENESS = {
+  intervalMs: 20_000,
+  timeoutMs: 75_000,
+} as const;
+
 export const workItemSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("turn.deliver"),
@@ -565,6 +603,16 @@ export const workItemSchema = z.discriminatedUnion("kind", [
      * every fire: the cost, never the outcome, regresses.
      */
     gate: z.string().max(MAX_CRON_GATE_CHARS).optional(),
+    /**
+     * The context size this conversation runs at, chosen by the platform
+     * (context fit) and already clamped to what its credential allows. The
+     * supervisor applies it to the conversation's session before the turn.
+     * Absent = the session keeps the size it has (the harness's configured
+     * default for a session never sized). An OLD supervisor image strips it
+     * (non-strict parse) and the turn runs at the default: the fit, never
+     * the outcome, regresses.
+     */
+    contextTokens: contextTokensSchema.optional(),
     /**
      * The turn's user attachments, metadata only — the bytes arrived ahead
      * of this frame as `attachment.part`s on the same ordered socket. The
@@ -897,6 +945,15 @@ export const supervisorMessageSchema = z
       kind: z.literal("progress"),
       turnId: z.string().min(1),
       conversationId: z.string().min(1),
+      /**
+       * The harness session this turn is running in, once it has one. The
+       * same handle `turn.result` carries at the end, sent early so the
+       * control plane holds it while the turn is still running: a sandbox
+       * that dies mid-turn never sends its `turn.result`, and without the
+       * ref the turn could not resume where it stopped. Additive-optional:
+       * an old runner strips it and an old supervisor never sends it.
+       */
+      sessionRef: z.string().optional(),
     }),
     z.object({
       kind: z.literal("turn.result"),
@@ -1058,6 +1115,16 @@ export const supervisorMessageSchema = z
         .max(ATTACHMENT_CHUNK_BASE64_CHARS)
         .regex(/^[A-Za-z0-9+/]+={0,2}$/),
     }),
+    /**
+     * Channel liveness (`CHANNEL_LIVENESS`): sent on a timer while
+     * connected, carrying nothing. Its only value is the ack the runner
+     * answers every sequenced frame with: a supervisor that hears no ack
+     * for `timeoutMs` knows its socket is dead and redials. An old runner
+     * (no sessions) never sees one: a supervisor only sends it while it
+     * holds a session, and a bare `heartbeat` would fail its parse and be
+     * dropped, harmlessly.
+     */
+    z.object({ kind: z.literal("heartbeat") }),
     z.object({
       kind: z.literal("unhealthy"),
       /**
@@ -1072,6 +1139,15 @@ export const supervisorMessageSchema = z
        * a fresh container.
        */
       reason: z.string().max(MAX_UNHEALTHY_REASON_CHARS),
+      /**
+       * Why, as a machine code (`failure-codes.ts`), when the supervisor
+       * knows one: `home_read_only` today. Open bounded string, never an
+       * enum, like every code on these wires; additive-optional, so an old
+       * runner strips it and the report degrades to today's plain stop.
+       * Untrusted like everything a supervisor says: the control plane
+       * only ever uses it to pick copy and to budget THIS sandbox.
+       */
+      code: z.string().max(64).optional(),
     }),
     /** The dial succeeded; bytes may flow both ways. */
     z.object({

@@ -1,9 +1,9 @@
 /**
  * jcode's bash tool reports a non-zero exit status as text: it appends
  * `\n\nExit code: N` to the command's output and still returns a successful
- * tool result (verified against the pinned v0.94.0 source,
- * `tool/bash.rs` format_command_output). Exit 0, a command promoted to a
- * background task, and a signal kill append nothing.
+ * tool result (verified against the pinned v0.94.0 source, unchanged in
+ * v1.0.0-preview.136, `tool/bash.rs` format_command_output). Exit 0, a
+ * command promoted to a background task, and a signal kill append nothing.
  *
  * This module turns that vendor text into the protocol's `exitCode` field and
  * strips it from the output, so nothing above the adapter parses jcode's

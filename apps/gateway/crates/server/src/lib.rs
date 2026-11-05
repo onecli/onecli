@@ -649,6 +649,14 @@ async fn submit_approval_decision(
                 axum::Json(serde_json::json!({ "error": "reason_requires_deny" })),
             );
         }
+        // "Approve similar" qualifies an approve only.
+        let approve_similar = body.scope == Some(DecisionScope::Similar);
+        if approve_similar && body.decision != ApprovalDecision::Approve {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                axum::Json(serde_json::json!({ "error": "scope_requires_approve" })),
+            );
+        }
 
         // The org id is part of the Redis key. A lookup failure here would
         // otherwise degrade silently into an empty org and a guaranteed
@@ -712,12 +720,29 @@ async fn submit_approval_decision(
             }
         }
 
+        // The scope the CARD offered, read from the held request the gateway
+        // built: a client can ask for "similar", never say what it covers.
+        let similar_scope = match found {
+            Some(a) if approve_similar => match a.similar {
+                Some(scope) => Some(scope),
+                None => {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        axum::Json(serde_json::json!({ "error": "similar_not_offered" })),
+                    );
+                }
+            },
+            _ => None,
+        };
+
         info!(
             approval_id = %approval_id,
             decision = decision_str,
             reason = ?body.reason,
+            approve_similar,
             "approval decision submitted"
         );
+        let approver = auth.user_id.clone();
 
         let delivered = state
             .approval_store
@@ -734,6 +759,31 @@ async fn submit_approval_decision(
             .await;
 
         if delivered {
+            // Opened only once the decision landed: a lost race opens nothing.
+            if let Some(scope) = similar_scope {
+                let until = approval::similar::open(
+                    state.cache.as_ref(),
+                    &scope,
+                    &approval_id,
+                    Some(approver),
+                )
+                .await;
+                info!(
+                    approval_id = %approval_id,
+                    until,
+                    "approve similar: window opened"
+                );
+                return (
+                    StatusCode::OK,
+                    axum::Json(serde_json::json!({
+                        "success": true,
+                        "similar": {
+                            "label": scope.label,
+                            "until": approval::format_unix_ts(until),
+                        },
+                    })),
+                );
+            }
             (
                 StatusCode::OK,
                 axum::Json(serde_json::json!({ "success": true })),
@@ -766,6 +816,17 @@ struct DecisionBody {
     /// plain no. Optional: every existing client omits it.
     #[serde(default)]
     reason: Option<DenyReason>,
+    /// `similar`: approve this AND open the window the card offered (see
+    /// `approval::similar`). Optional: every existing client omits it.
+    #[serde(default)]
+    scope: Option<DecisionScope>,
+}
+
+/// What an approve covers beyond the one request.
+#[derive(serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum DecisionScope {
+    Similar,
 }
 
 /// Reject non-proxy, non-CONNECT requests to unknown routes with 400 Bad Request.
@@ -1622,6 +1683,7 @@ mod tests {
             raw_body: None,
             app: None,
             batch: None,
+            similar: None,
             created_at: 0,
             expires_at: u64::MAX,
         }

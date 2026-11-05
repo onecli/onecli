@@ -19,6 +19,7 @@ import {
   AUDIT_SOURCE,
   recordAuditEvent,
 } from "../services/audit-service";
+import { parseBody } from "../lib/request-body";
 
 /**
  * The org door of the skills surface (step 9): /v1/org/skills — a FREE
@@ -27,12 +28,6 @@ import {
  * where roles exist (the runners.ts posture — with RBAC off there is no role
  * resolver and membership is the only fence).
  */
-
-const parseBody = async (raw: Request) =>
-  await raw
-    .clone()
-    .json()
-    .catch(() => null);
 
 export const orgSkillRoutes = () => {
   const app = new Hono<ApiEnv>();

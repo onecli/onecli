@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentCron } from "@/lib/api";
 
@@ -124,7 +125,8 @@ describe("a dialog carrying a long prompt", () => {
     expect(prompt.className).toMatch(/max-h-/);
   });
 
-  it("still shows every field, prompt length notwithstanding", () => {
+  it("still shows every field, prompt length notwithstanding", async () => {
+    await userEvent.click(screen.getByRole("button", { name: /Advanced/ }));
     // The scroll region must not be a way to lose inputs: they are present
     // and labelled, which is what a screen reader and a keyboard walk find.
     expect(screen.getByLabelText("Name")).toBeInTheDocument();

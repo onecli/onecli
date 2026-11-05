@@ -175,6 +175,41 @@ export interface ToolContext {
 export type ContextPurpose = "origin" | "provenance";
 
 /**
+ * The chat an automation run reports to: its cron's, watch's or webhook's
+ * origin (`externalRef` is that row's id on a run conversation). Only a
+ * conversation of the same agent that is not itself an automation run, so
+ * an anchor can never chain from one hidden thread to another. Null when
+ * the automation has no chat, or for an automation kind with no origin
+ * (a memory review, a peer task).
+ */
+const automationOrigin = async (
+  agentId: string,
+  run: { source: string; externalRef: string | null },
+): Promise<string | null> => {
+  const ref = run.externalRef;
+  if (!ref) return null;
+  const where = { id: ref, agentId };
+  const select = { originConversationId: true } as const;
+  const row =
+    run.source === "cron"
+      ? await db.agentCron.findFirst({ where, select })
+      : run.source === "webhook"
+        ? await db.agentWebhook.findFirst({ where, select })
+        : run.source === "watch"
+          ? await db.processWatch.findFirst({
+              where: { id: ref, process: { sandbox: { agentId } } },
+              select,
+            })
+          : null;
+  if (!row?.originConversationId) return null;
+  const origin = await db.conversation.findFirst({
+    where: { id: row.originConversationId, agentId },
+    select: { id: true, source: true },
+  });
+  return origin && !isAutomationSource(origin.source) ? origin.id : null;
+};
+
+/**
  * Verify a claimed calling-turn context against a fenced agent, keeping only
  * what holds (anchoring, not authority — a forged context degrades delivery,
  * never authorization). Shared by the tool-call path and step 10's
@@ -190,7 +225,7 @@ export const resolveVerifiedContext = async (
   }
   const conversation = await db.conversation.findFirst({
     where: { id: claim.conversationId, agentId },
-    select: { id: true, source: true },
+    select: { id: true, source: true, externalRef: true },
   });
   if (!conversation) {
     log.warn(
@@ -199,20 +234,23 @@ export const resolveVerifiedContext = async (
     );
     return { originConversationId: null, createdByUserId: null, turnId: null };
   }
-  // An automation-sourced conversation (a cron/watch run) must never become
-  // an ORIGIN anchor: nothing renders those threads, so a watch anchored
-  // there delivers its report into a black hole — and the mistake chains
-  // (a wake turn arming the next watch at its own hidden conversation).
-  // Web and Slack conversations stay legal anchors; a rejected claim
-  // degrades to no anchor, exactly like a forged one. PROVENANCE consumers
-  // (memory revisions) keep the automation conversation — recording that a
-  // save came from a cron turn is honest, and nothing is delivered there.
+  // An automation-sourced conversation (a cron/watch/webhook run) never
+  // becomes an ORIGIN anchor itself: nothing renders those threads, so a
+  // watch anchored there would deliver its report into a black hole. The
+  // run's report has a chat, though: the one its schedule, watch or webhook
+  // reports to. Work the run starts (a long build it watches) reports there
+  // too, or a run that hands off to a watch is never heard from again.
+  // Anchoring only: no person typed the run, so it carries no creator and
+  // no turn, and a run whose automation has no chat stays unanchored.
+  // PROVENANCE consumers (memory revisions) keep the automation
+  // conversation: recording that a save came from a cron turn is honest,
+  // and nothing is delivered there.
   if (purpose === "origin" && isAutomationSource(conversation.source)) {
-    log.warn(
-      { agentId, conversationId: claim.conversationId },
-      "context claimed an automation conversation; ignoring it",
-    );
-    return { originConversationId: null, createdByUserId: null, turnId: null };
+    return {
+      originConversationId: await automationOrigin(agentId, conversation),
+      createdByUserId: null,
+      turnId: null,
+    };
   }
   if (!claim.turnId) {
     return {
@@ -481,8 +519,8 @@ const MAX_IMPORT_DESCRIPTION_CHARS = 200;
  * 32,000 UTF-8 bytes (jcode: 8,000 tokens at 4 bytes each). Listing nothing
  * fits by construction: at most MAX_SKILLS_PER_AGENT skills, each a short
  * name, a clipped description of plain text (cleanSkillDescription: no
- * control character, so nothing escapes past 2 characters) and a bounded
- * summary.
+ * control character, so nothing escapes past 2 characters), a bounded
+ * summary and a 64-character fingerprint.
  */
 const IMPORT_RESULT_MAX_CHARS = 15_000;
 const IMPORT_RESULT_MAX_BYTES = 30_000;
@@ -517,6 +555,7 @@ const skillImportResult = (
       groups: skill.groups,
       skipped: skill.skipped.slice(0, listed),
       skippedCount: skill.skipped.length,
+      fingerprint: skill.fingerprint,
       replaced: skill.replaced,
     })),
     problems: problems.slice(0, listed),

@@ -35,6 +35,7 @@ import {
   AUDIT_SOURCE,
   recordAuditEvent,
 } from "../services/audit-service";
+import { parseBody } from "../lib/request-body";
 
 /**
  * Org-level channel integrations: /v1/org/channels/* — a FREE surface
@@ -71,12 +72,6 @@ const requireSharedApp = (raw: string): ChannelSharedApp => {
   }
   return sharedApp;
 };
-
-const parseBody = async (raw: Request) =>
-  await raw
-    .clone()
-    .json()
-    .catch(() => null);
 
 export const orgChannelRoutes = () => {
   const app = new Hono<ApiEnv>();

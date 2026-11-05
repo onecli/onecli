@@ -187,10 +187,18 @@ scenario(
       (row) => row.channelConnectionId !== null,
       "the supervisor to connect",
     );
+    // The row is written by the control plane's claim, which B's upgrade
+    // awaits BEFORE it records the socket (ws/server.ts `admit` then
+    // `attach`), so the row alone can be a moment ahead of B. Wait for B's
+    // own view instead of reading it once.
+    await waitFor(
+      async () => f.b.hasConnection(cx.ids.sandbox),
+      (held) => held,
+      "copy B to hold the supervisor's socket",
+    );
     const booted = await channelRow(cx);
     expect(booted.ownerReplicaId).toBe(replicaA);
     expect(booted.channelReplicaId).toBe(replicaB);
-    expect(f.b.hasConnection(cx.ids.sandbox)).toBe(true);
     expect(f.a.hasConnection(cx.ids.sandbox)).toBe(false);
 
     // Both copies poll from here on: every turn still reaches B, because

@@ -2,11 +2,14 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { push, prefetch, saveOnboardingProgress } = vi.hoisted(() => ({
-  push: vi.fn(),
-  prefetch: vi.fn(),
-  saveOnboardingProgress: vi.fn().mockResolvedValue({ ok: true }),
-}));
+const { push, prefetch, saveOnboardingProgress, ensureAgent } = vi.hoisted(
+  () => ({
+    push: vi.fn(),
+    prefetch: vi.fn(),
+    saveOnboardingProgress: vi.fn().mockResolvedValue({ ok: true }),
+    ensureAgent: vi.fn(),
+  }),
+);
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push, prefetch, replace: vi.fn() }),
@@ -22,6 +25,7 @@ const onboarding = {
     agentName: null,
     createdAgentId: null,
   },
+  ensureAgent,
 };
 
 vi.mock("./onboarding-context", () => ({
@@ -34,8 +38,14 @@ describe("step 1: which messaging tool", () => {
   beforeEach(() => {
     push.mockClear();
     saveOnboardingProgress.mockClear();
+    ensureAgent.mockClear();
     onboarding.progress.messagingTool = null;
     onboarding.progress.messagingToolOther = null;
+  });
+
+  it("makes the agent exist the moment the flow opens, so its machine boots while the person reads", () => {
+    render(<WelcomePage />);
+    expect(ensureAgent).toHaveBeenCalled();
   });
 
   it("asks the question with Slack selected by default", () => {

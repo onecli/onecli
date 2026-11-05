@@ -1,5 +1,8 @@
 import { db } from "@onecli/db";
+import { getApp } from "../apps/registry";
+import { cleanLabel } from "../lib/format";
 import { logger } from "../lib/logger";
+import { writeConversationNotice } from "./conversation-notice";
 import { ServiceError } from "./errors";
 import { attachDefaultConnectionGrant } from "./grants-service";
 import { auditAutoGrants, autoAttachScope } from "./llm-autoattach-service";
@@ -78,6 +81,54 @@ export const resolveConnectingAgent = async (
   return raw;
 };
 
+/**
+ * Tell the person's own chat with the agent that a connection is now on for
+ * it, so they know they can ask for it. A connect from the Connections page
+ * otherwise leaves the chat silent. Anchored to their newest exchange in
+ * that thread (a notice rides a turn). A follow-up row still folded into a
+ * live run (`joining`/`joined`) is no anchor: the chat renders it inside its
+ * target's exchange, without notices. No thread or no turn yet = nothing to
+ * anchor to, and the greeting already offers the apps. Best-effort: the
+ * grant is what matters, and it already landed.
+ */
+const noteConnectedInChat = async (
+  agentId: string,
+  connectionId: string,
+  userId: string | null,
+): Promise<void> => {
+  if (!userId) return;
+  try {
+    const [connection, turn] = await Promise.all([
+      db.appConnection.findUnique({
+        where: { id: connectionId },
+        select: { provider: true, label: true },
+      }),
+      db.turn.findFirst({
+        where: {
+          conversation: { agentId, direct: true, userId },
+          status: { notIn: ["joining", "joined"] },
+        },
+        orderBy: { createdAt: "desc" },
+        select: { id: true, conversationId: true },
+      }),
+    ]);
+    if (!connection || !turn) return;
+    const appName = getApp(connection.provider)?.name ?? connection.provider;
+    // The label comes from the provider's account metadata: clean it before
+    // it lands in platform text the model reads on its next turn.
+    const label = connection.label ? cleanLabel(connection.label) : "";
+    const account = label ? ` (${label})` : "";
+    await writeConversationNotice({
+      conversationId: turn.conversationId,
+      turnId: turn.id,
+      level: "info",
+      text: `${appName}${account} is now connected. You can ask the agent to use it.`,
+    });
+  } catch (err) {
+    log.warn({ err, agentId, connectionId }, "connected notice skipped");
+  }
+};
+
 /** Turn a created (or re-added) workspace connection on for the agent the
  * connect started from. No agent = a workspace connect: nothing to grant.
  * Never throws (it logs and grants nothing instead). */
@@ -102,6 +153,7 @@ export const grantConnectingAgent = async (
         agentId,
         connectionId,
       });
+      await noteConnectedInChat(agentId, connectionId, userId);
     }
   } catch (err) {
     log.warn(

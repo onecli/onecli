@@ -7,6 +7,10 @@ import type { Turn } from "@/lib/api/types";
 import { queryKeys } from "@/lib/api/keys";
 import { ApiError } from "@/lib/api/client";
 import type { RenderedTurn } from "@/lib/chat/transcript";
+import {
+  MODEL_EMPTY_RESPONSE_MESSAGE,
+  MODEL_REFUSED_MESSAGE,
+} from "@onecli/api/validations/conversation";
 import { TurnBlock } from "./turn-block";
 
 // Only the connect-card wiring test below renders the card's subtree; the
@@ -940,16 +944,26 @@ describe("TurnBlock", () => {
     expect(screen.getByText("the stream's own error")).toBeInTheDocument();
   });
 
-  it("says it is waking before the agent runs, thinking once it does", () => {
+  it("says thinking from the first beat, whatever the lifecycle: a waking machine is never announced", () => {
     const { rerender } = render(
       <TurnBlock turn={turn({ status: "queued" })} rendered={undefined} />,
     );
-    expect(screen.getByText("Waking the agent…")).toBeInTheDocument();
+    expect(screen.getByText("Thinking…")).toBeInTheDocument();
+    expect(screen.queryByText(/waking/i)).toBeNull();
+    // The lifecycle still rides the line for support, as data, never copy.
+    expect(screen.getByText("Thinking…").closest("p")).toHaveAttribute(
+      "data-turn-status",
+      "queued",
+    );
 
     rerender(
       <TurnBlock turn={turn({ status: "running" })} rendered={undefined} />,
     );
     expect(screen.getByText("Thinking…")).toBeInTheDocument();
+    expect(screen.getByText("Thinking…").closest("p")).toHaveAttribute(
+      "data-turn-status",
+      "running",
+    );
   });
 
   it("marks an aborted turn as stopped", () => {
@@ -1166,6 +1180,42 @@ describe("a turn that could not run for a reason the reader can fix", () => {
     ).toBeNull();
   });
 
+  it.each([
+    ["model_refused", MODEL_REFUSED_MESSAGE],
+    ["model_empty_response", MODEL_EMPTY_RESPONSE_MESSAGE],
+  ])(
+    "an unanswered turn (%s) reads as its notice under the message, never an empty bubble",
+    (errorCode, message) => {
+      // The exact row the control plane stores, with the transcript the run
+      // left: started and a clean end, no text, no error event. Not a key
+      // problem, so no Models-page door; the sentence itself says what to do.
+      render(
+        <TurnBlock
+          turn={turn({ status: "failed", error: message, errorCode })}
+          rendered={rendered({ text: "", ended: true })}
+          modelsHref="/w/p1/agents/a1/models"
+        />,
+      );
+      expect(screen.getByRole("status")).toHaveTextContent(message);
+      expect(screen.queryByRole("link")).toBeNull();
+      expect(screen.queryByText(/stop_reason|guardrail/)).toBeNull();
+    },
+  );
+
+  it("the SAME turn closed `done` (the old outcome) renders nothing at all", () => {
+    // The before-state the fix exists for: a done turn with no words shows
+    // no reply and no notice. Kept as a pin so the failed close stays the
+    // only way a refusal becomes visible.
+    const { container } = render(
+      <TurnBlock
+        turn={turn({ status: "done" })}
+        rendered={rendered({ text: "", ended: true })}
+      />,
+    );
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(container).not.toHaveTextContent(/declined|empty answer/);
+  });
+
   it("offers the key check for a model-provider refusal — same door, its own label", () => {
     // A key EXISTS but the provider refused it (limit, expiry): the fix
     // lives on the same Models page, and the label says "check", not
@@ -1263,6 +1313,8 @@ describe("a turn that could not run for a reason the reader can fix", () => {
     ["turn_time_limit", "This turn reached its time limit."],
     ["blocked_by_policy", "A OneCLI policy stopped this request."],
     ["gateway_unavailable", "OneCLI couldn't reach the model provider."],
+    ["home_read_only", "The agent hit a storage problem and is restarting."],
+    ["home_read_only_held", "The agent could not restart by itself."],
     [null, "harness event stream ended unexpectedly"],
   ])(
     "renders a %s failure as a notice with its own sentence",
@@ -1471,7 +1523,9 @@ describe("a turn that could not run for a reason the reader can fix", () => {
         />
       </QueryClientProvider>,
     );
-    expect(screen.getByText("Apps that could help")).toBeInTheDocument();
+    // The card under an answer is the rows alone: the agent's sentence
+    // introduces it, so no consent line.
+    expect(screen.queryByText(/Only this agent gets access/)).toBeNull();
     expect(
       screen.getByRole("button", { name: "Connect Gmail" }),
     ).toBeInTheDocument();

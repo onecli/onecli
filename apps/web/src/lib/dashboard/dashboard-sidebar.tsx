@@ -141,7 +141,7 @@ export const DashboardSidebar = ({
               <SidebarMenuButton
                 asChild
                 size="sm"
-                className="text-muted-foreground hover:text-foreground"
+                className="text-sidebar-foreground/70 hover:text-foreground"
               >
                 <Link href={workspacesUrl}>
                   <ChevronLeft className="size-3.5" />

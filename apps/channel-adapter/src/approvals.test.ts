@@ -1206,6 +1206,22 @@ describe("the approval card", () => {
     expect(section).toMatch(/>_\+\d more_$/);
     expect(section).not.toContain("<".repeat(2));
   });
+
+  it("lists every row the gateway sent, so a 10-file upload names all 10 files", () => {
+    // A row cap of 8 used to cut files 9 and 10 (or half a file's rows)
+    // without a word; the section budget is the only bound now.
+    const files = Array.from({ length: 10 }, (_, i) => ({
+      label: `Contract ${i + 1}.pdf`,
+      value: `Account ${i + 1} (001${i})`,
+    }));
+    const blocks = approvalCardBlocks({
+      ...approval,
+      summary: { action: "Upload 10 files", details: files },
+    });
+    const section = (blocks[1] as { text: { text: string } }).text.text;
+    for (const f of files) expect(section).toContain(f.label);
+    expect(section).not.toMatch(/more_/);
+  });
 });
 
 describe("posting a card", () => {
@@ -3370,5 +3386,76 @@ describe("grouped Slack card: counts read right", () => {
     expect(JSON.stringify(live)).toContain("1 approval needed");
     const done = groupCardBlocks({ live: [], settled: [settledRow] });
     expect(JSON.stringify(done)).toContain("· 1 request\\n");
+  });
+});
+
+describe("Approve similar on a card", () => {
+  const update: PendingApproval = {
+    id: "ap-sim",
+    method: "PUT",
+    host: "api.attio.com",
+    path: "/v2/objects/companies/records/8422b746-59d3-4cfd-98f9-3b25dc9145d3",
+    agent: { id: "ag", name: "Sam's bot" },
+    summary: { action: "Update record", details: [] },
+  };
+  const buttons = (a: PendingApproval) =>
+    z
+      .array(
+        z.object({
+          type: z.string(),
+          elements: z
+            .array(
+              z.object({
+                action_id: z.string().optional(),
+                value: z.string().optional(),
+                text: z.unknown(),
+              }),
+            )
+            .optional(),
+        }),
+      )
+      .parse(approvalCardBlocks(a))
+      .filter((b) => b.type === "actions")
+      .flatMap((b) => b.elements ?? []);
+
+  it("shows the button only when the gateway offered it, valued with the id alone", () => {
+    expect(buttons(update).map((b) => b.action_id)).toEqual([
+      "channel_approve",
+      "channel_deny",
+    ]);
+    const offered = {
+      ...update,
+      similar: {
+        label: "Attio updates to companies",
+        windowMinutes: 15,
+        maxRequests: 100,
+      },
+    };
+    const els = buttons(offered);
+    expect(els.map((b) => b.action_id)).toEqual([
+      "channel_approve",
+      "channel_approve_similar",
+      "channel_deny",
+    ]);
+    expect(els[1]).toMatchObject({
+      value: "ap-sim",
+      text: { type: "plain_text", text: "Approve similar · 15 min" },
+    });
+    const card = JSON.stringify(approvalCardBlocks(offered));
+    expect(card).toContain(
+      "_Approve similar also allows up to 100 more Attio updates to companies from Sam's bot._",
+    );
+  });
+
+  it("escapes the label and agent name in the explanation", () => {
+    const card = JSON.stringify(
+      approvalCardBlocks({
+        ...update,
+        agent: { id: "ag", name: "<!channel>" },
+        similar: { label: "x <@U1> y", windowMinutes: 15, maxRequests: 100 },
+      }),
+    );
+    expect(card).not.toContain("<!channel>");
+    expect(card).not.toContain("<@U1>");
   });
 });
