@@ -24,6 +24,16 @@ import { logger } from "../lib/logger";
 const log = logger.child({ component: "attachment-service" });
 
 /**
+ * The one order a turn's files are read in. `created_at` has millisecond
+ * precision and files of one message are written in a burst, so ties are
+ * normal, and Postgres returns tied rows in no fixed order. The manifest,
+ * the de-duplicated names (`brief-2.pdf`) and the by-name read must all
+ * agree on which file is which, so the id breaks the tie.
+ */
+const ATTACHMENT_ORDER: Prisma.ConversationAttachmentOrderByWithRelationInput[] =
+  [{ createdAt: "asc" }, { id: "asc" }];
+
+/**
  * Conversation attachments: the metadata rows, their caps, and the ONE bind
  * path. Bytes go exclusively through the AttachmentBlobStore provider seam —
  * nothing else in the codebase may read or write the `data` column.
@@ -591,7 +601,7 @@ export const firstAttachmentName = async (
 ): Promise<string | null> => {
   const first = await db.conversationAttachment.findFirst({
     where: { turnId, direction: "inbound" },
-    orderBy: { createdAt: "asc" },
+    orderBy: ATTACHMENT_ORDER,
     select: { name: true },
   });
   return first?.name ?? null;
@@ -624,7 +634,7 @@ export const planTurnAttachments = async (
   // output back as if the person had attached it.
   const rows = await db.conversationAttachment.findMany({
     where: { turnId, direction: "inbound" },
-    orderBy: { createdAt: "asc" },
+    orderBy: ATTACHMENT_ORDER,
     select: {
       id: true,
       name: true,
@@ -892,7 +902,7 @@ export const getAgentAttachmentBytesByPath = async (
       direction: "inbound",
       conversation: { agentId },
     },
-    orderBy: { createdAt: "asc" },
+    orderBy: ATTACHMENT_ORDER,
     select: { id: true, storageRef: true, name: true, sha256: true },
   });
   const deliverable = rows.filter((row) => row.sha256.length === 64);

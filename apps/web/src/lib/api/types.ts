@@ -57,6 +57,25 @@ export interface CreatedAgent {
   llmKeys: string[];
 }
 
+/**
+ * `GET /v1/agents/:id/sandbox`: the machine's lifecycle status. The
+ * vocabulary is `SANDBOX_STATUSES` in @onecli/api's sandbox-service (a
+ * server module the client bundle must not import); `null` = no machine (a
+ * BYO agent) or a status this client does not know.
+ */
+export type SandboxStatus =
+  | "unprovisioned"
+  | "starting"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "failed"
+  | "maintenance";
+
+export interface AgentSandbox {
+  status: SandboxStatus | null;
+}
+
 export interface AgentDetail {
   id: string;
   name: string;
@@ -328,7 +347,9 @@ export interface ResourceCounts {
 
 export interface CreateAgentInput {
   name: string;
-  identifier: string;
+  /** Required for a BYO agent (the handle a machine is pinned to); a hosted
+   *  agent's is derived server-side from the name and follows renames. */
+  identifier?: string;
   /** Defaults to "byo" server-side. */
   kind?: AgentKind;
   /** Hosted only; server defaults it to "jcode". */
@@ -765,6 +786,10 @@ export interface TurnUsage {
   inputTokens: number;
   outputTokens: number;
   cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
+  /** The prompt the call carried, normalized by the harness for its
+   *  provider's cache accounting; absent when it could not tell. */
+  promptTokens?: number;
 }
 
 /** OUR effort scale — the harness adapter translates it (§3.5). */

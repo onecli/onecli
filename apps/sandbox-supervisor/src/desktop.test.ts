@@ -167,6 +167,97 @@ describe("a desktop layer", () => {
   }, 20_000);
 });
 
+describe("bootDesktop (the boot's desktop step, not awaited by the boot)", () => {
+  /** A start the test resolves or rejects by hand. */
+  const handStart = () => {
+    const closes: string[] = [];
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const start = () =>
+      new Promise<{
+        display: string;
+        dbusAddress: string | undefined;
+        close: () => void;
+      }>((res, rej) => {
+        resolve = () =>
+          res({
+            display: ":1",
+            dbusAddress: "unix:path=/tmp/fake-bus",
+            close: () => closes.push("closed"),
+          });
+        reject = rej;
+      });
+    return {
+      start,
+      closes,
+      resolve: () => resolve(),
+      reject: (error: Error) => reject(error),
+    };
+  };
+
+  it("returns at once; exports DISPLAY and the bus only once the desktop is up, and registers its close with the signal path", async () => {
+    const { bootDesktop, DISPLAY_FILE } = await import("./desktop");
+    const bin = fakeDesktopBin(join(tmp(), "log"));
+    const env: NodeJS.ProcessEnv = { PATH: bin };
+    const hand = handStart();
+    const registered: (() => void)[] = [];
+    rmSync(DISPLAY_FILE, { force: true });
+    try {
+      const boot = bootDesktop(
+        undefined,
+        (close) => registered.push(close),
+        env,
+        hand.start,
+      );
+      expect(registered).toHaveLength(1);
+      // Not up yet: nothing exported, nothing published.
+      expect(env.DISPLAY).toBeUndefined();
+      expect(existsSync(DISPLAY_FILE)).toBe(false);
+
+      hand.resolve();
+      expect(await boot.started).toBe(true);
+      expect(env.DISPLAY).toBe(":1");
+      expect(env.DBUS_SESSION_BUS_ADDRESS).toBe("unix:path=/tmp/fake-bus");
+      expect(readFileSync(DISPLAY_FILE, "utf8")).toBe(":1\n");
+
+      registered[0]?.();
+      expect(hand.closes).toEqual(["closed"]);
+    } finally {
+      rmSync(DISPLAY_FILE, { force: true });
+    }
+  });
+
+  it("a close that lands before the desktop is up takes it straight down and exports nothing", async () => {
+    const { bootDesktop } = await import("./desktop");
+    const bin = fakeDesktopBin(join(tmp(), "log"));
+    const env: NodeJS.ProcessEnv = { PATH: bin };
+    const hand = handStart();
+    const boot = bootDesktop(undefined, () => {}, env, hand.start);
+    boot.close();
+    hand.resolve();
+    expect(await boot.started).toBe(false);
+    expect(env.DISPLAY).toBeUndefined();
+    expect(hand.closes).toEqual(["closed"]);
+  });
+
+  it("a desktop that fails, or an image without one, settles false and never rejects", async () => {
+    const { bootDesktop } = await import("./desktop");
+    const bin = fakeDesktopBin(join(tmp(), "log"));
+    const failing = handStart();
+    const env: NodeJS.ProcessEnv = { PATH: bin };
+    const failed = bootDesktop(undefined, () => {}, env, failing.start);
+    failing.reject(new Error("desktop: the X server did not come up"));
+    expect(await failed.started).toBe(false);
+    expect(env.DISPLAY).toBeUndefined();
+
+    const absent = handStart();
+    const bare: NodeJS.ProcessEnv = { PATH: tmp() };
+    const none = bootDesktop(undefined, () => {}, bare, absent.start);
+    expect(await none.started).toBe(false);
+    expect(bare.DISPLAY).toBeUndefined();
+  });
+});
+
 describe("publishDisplay", () => {
   it("writes a fresh regular file, replacing a planted symlink rather than writing through it", async () => {
     const desktop = await import("./desktop");

@@ -208,6 +208,24 @@ describe("slack adapter-provider — interactivity classification", () => {
     expect(reaches).toEqual([]);
   });
 
+  it("routes Approve similar as an approve carrying the similar scope, with only the opaque id", () => {
+    const { approvals, reaches, deliver } = openWithSpies();
+    deliver({
+      type: "block_actions",
+      user: { id: "U-CLICKER" },
+      actions: [{ action_id: "channel_approve_similar", value: "appr-2" }],
+    });
+    expect(approvals).toEqual([
+      {
+        approvalId: "appr-2",
+        decision: "approve",
+        scope: "similar",
+        clickerExternalUserId: "U-CLICKER",
+      },
+    ]);
+    expect(reaches).toEqual([]);
+  });
+
   it("routes an action-approval card's Approve to onActionDecision with only the opaque approval id", () => {
     const { approvals, reaches, actions, deliver } = openWithSpies();
     deliver({

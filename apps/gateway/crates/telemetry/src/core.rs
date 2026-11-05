@@ -52,6 +52,13 @@ pub enum RequestDecision {
         /// The user who approved the request.
         approved_by: Option<String>,
     },
+    /// Let through without a card by an open "Approve similar" window
+    /// (`approval::similar`): `approval_id` is the card the reviewer approved
+    /// that opened it, `approved_by` who.
+    ApprovedBySimilar {
+        approval_id: String,
+        approved_by: Option<String>,
+    },
     BlockedByDefaultPolicy,
     /// The upstream refused an uncredentialed request and the gateway
     /// answered with its own guidance (`app_not_connected`,

@@ -46,6 +46,7 @@ import {
 import { RunDot, type RunTone } from "./run-dot";
 import { LastRunLink } from "./last-run-link";
 import { CheckRunButton } from "./check-run-button";
+import { DisabledReason } from "./disabled-reason";
 
 export interface CronRowProps {
   agentId: string;
@@ -171,37 +172,47 @@ export const CronRow = ({ agentId, cron, onEdit }: CronRowProps) => {
       </span>
 
       <div className="flex shrink-0 items-center justify-end gap-2">
-        <Button
-          variant="ghost"
-          size="xs"
-          // A finished one-shot can still be run again by hand; only a
-          // paused schedule (or one already running) can't.
-          disabled={
-            (!cron.enabled && cron.disabledReason !== "completed") ||
-            runNow.isPending ||
+        <DisabledReason
+          reason={
             cron.running
-          }
-          title={
-            cron.disabledReason === "completed"
-              ? "It already ran. Run now runs it once more."
-              : undefined
-          }
-          loading={runNow.isPending}
-          onClick={() =>
-            runNow.mutate(cron.id, {
-              onSuccess: () =>
-                toast.success(
-                  cron.disabledReason === "completed"
-                    ? `"${cron.name}" already ran. Running it once more`
-                    : `"${cron.name}" will run in a moment`,
-                ),
-              onError: (error) => toast.error(String(error.message)),
-            })
+              ? "It's running now."
+              : !cron.enabled && cron.disabledReason !== "completed"
+                ? "The schedule is paused. Turn it on to run it."
+                : null
           }
         >
-          <Play className="size-3.5" />
-          Run now
-        </Button>
+          <Button
+            variant="ghost"
+            size="xs"
+            // A finished one-shot can still be run again by hand; only a
+            // paused schedule (or one already running) can't.
+            disabled={
+              (!cron.enabled && cron.disabledReason !== "completed") ||
+              runNow.isPending ||
+              cron.running
+            }
+            title={
+              cron.disabledReason === "completed"
+                ? "It already ran. Run now runs it once more."
+                : undefined
+            }
+            loading={runNow.isPending}
+            onClick={() =>
+              runNow.mutate(cron.id, {
+                onSuccess: () =>
+                  toast.success(
+                    cron.disabledReason === "completed"
+                      ? `"${cron.name}" already ran. Running it once more`
+                      : `"${cron.name}" will run in a moment`,
+                  ),
+                onError: (error) => toast.error(String(error.message)),
+              })
+            }
+          >
+            <Play className="size-3.5" />
+            Run now
+          </Button>
+        </DisabledReason>
         <Switch
           size="sm"
           checked={cron.enabled}

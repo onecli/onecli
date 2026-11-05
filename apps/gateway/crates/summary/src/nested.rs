@@ -24,7 +24,7 @@ use std::hash::{Hash, Hasher};
 use serde_json::{Map, Value};
 
 use super::redact::{is_sensitive_key, looks_like_base64_blob};
-use super::{clamp, humanize_key, one_line, MAX_SNIPPET_LEN, MAX_VALUE_LEN};
+use super::{clamp, humanize_key, one_line, MAX_LABEL_LEN, MAX_SNIPPET_LEN, MAX_VALUE_LEN};
 
 /// Keys that only position or annotate an element for a builder UI.
 const NOISE_KEYS: &[&str] = &["locationX", "locationY", "processMetadataValues"];
@@ -69,8 +69,6 @@ const ITEM_NAME_KEYS: &[&str] = &[
 /// the walk says it is incomplete.
 const MAX_LEAVES: usize = 2_000;
 const MAX_DEPTH: usize = 12;
-/// A label longer than this is cut: rows stay one line on every surface.
-const MAX_LABEL_LEN: usize = 120;
 /// Past this many characters (or with a line break) a value reads as prose.
 /// The cards apply the same rule (`packages/api/src/lib/approval-text.ts`).
 const LONG_VALUE_CHARS: usize = 80;

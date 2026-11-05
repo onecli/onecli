@@ -16,6 +16,9 @@ const SlackAccessCard = dynamic(() =>
 
 interface ActionApprovalRowProps {
   item: PendingActionApprovalItem;
+  /** The bell (every agent's asks): cards that hide the agent in its own
+   * chat name it here. */
+  showAgent?: boolean;
 }
 
 /**
@@ -26,10 +29,18 @@ interface ActionApprovalRowProps {
  * server refuses for that action, so decline still works. A Slack access
  * request gets its Connect / Allow card.
  */
-export const ActionApprovalRow = ({ item }: ActionApprovalRowProps) => {
+export const ActionApprovalRow = ({
+  item,
+  showAgent = false,
+}: ActionApprovalRowProps) => {
   const { customConnection, slackAccess, contactBlocked, chooseSender } = item;
   if (customConnection) {
-    return <CustomConnectionApprovalRow item={{ ...item, customConnection }} />;
+    return (
+      <CustomConnectionApprovalRow
+        item={{ ...item, customConnection }}
+        showAgent={showAgent}
+      />
+    );
   }
   if (slackAccess) {
     return <SlackAccessCard item={{ ...item, slackAccess }} />;

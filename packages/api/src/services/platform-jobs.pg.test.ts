@@ -310,4 +310,44 @@ describe.skipIf(!PROOF_URL)("a second platform job gets every run rule", () => {
     });
     expect(stored.message).toBe("do the job");
   });
+
+  it("rule 1 again: a run whose sandbox dies mid-run is never resumed and its beat leaves no resume handle", async () => {
+    // A run never resumes a session, so its death closes it (the job's next
+    // pass re-runs it) instead of re-queueing it, and the heartbeat does not
+    // persist its session on the job's conversation either. MUTATION-PROOF:
+    // drop the job-run guard from `resumeInterruptedTurns` and this fails on
+    // `queued`; drop it from `applyTurnProgress` and it fails on the ref.
+    const { agentId, sandboxId } = await seedAgent("dies", minutesAgo(25));
+    const conv = await seedJobConversation(agentId);
+    const run = await fireRun(conv.id);
+    await dueWork.claimDueWork(RUNNER, 5);
+    const reporter = { sandboxId, runnerId: RUNNER };
+    await turnService.applyTurnEvents(reporter, conv.id, run.id, [
+      { type: "turn.started" },
+    ]);
+    await turnService.applyTurnProgress(
+      reporter,
+      conv.id,
+      run.id,
+      "run-session",
+    );
+
+    const sandboxes = await import("./sandbox-service");
+    await sandboxes.applyRunnerEvent(RUNNER, {
+      kind: "sandbox.status",
+      sandboxId,
+      status: "stopped",
+    });
+
+    const row = await db.turn.findUniqueOrThrow({
+      where: { id: run.id },
+      select: { status: true, retriedAt: true },
+    });
+    expect(row).toEqual({ status: "failed", retriedAt: null });
+    const stored = await db.conversation.findUniqueOrThrow({
+      where: { id: conv.id },
+      select: { harnessSessionRef: true },
+    });
+    expect(stored.harnessSessionRef).toBeNull();
+  });
 });

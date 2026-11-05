@@ -78,6 +78,11 @@ it("a new schedule asks the agent only once it has a name and a task, saving it 
   renderWith(null);
   expect(screen.queryByRole("switch")).toBeNull();
   expect(screen.queryByRole("textbox", { name: /check/i })).toBeNull();
+  // An ungated schedule keeps the option folded under Advanced.
+  expect(
+    screen.queryByRole("button", { name: "Create & set up with agent" }),
+  ).toBeNull();
+  await user.click(screen.getByRole("button", { name: /Advanced/ }));
   const ask = screen.getByRole("button", {
     name: "Create & set up with agent",
   });

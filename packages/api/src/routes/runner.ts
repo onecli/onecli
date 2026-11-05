@@ -19,7 +19,10 @@ import {
 import { readCappedBinaryBody } from "@onecli/channels";
 import { attachmentMimeSchema } from "../validations/attachments";
 import { runnerAuth, type RunnerEnv } from "../middleware/runner-auth";
-import { NO_MODEL_KEY_MESSAGE } from "../validations/conversation";
+import {
+  NO_MODEL_KEY_MESSAGE,
+  RESUMED_TURN_CONTEXT,
+} from "../validations/conversation";
 import {
   claimDueWork,
   expireWedgedFollowUps,
@@ -84,6 +87,7 @@ import {
   settleSweptTurns,
 } from "../services/turn-service";
 import { buildTurnContext } from "../services/turn-context-service";
+import { deliveredContextTokens } from "../services/llm-credential-service";
 import { MAX_TURN_CONTEXT_CHARS } from "@onecli/agent-protocol";
 import { activityForTool } from "@onecli/agent-protocol/activity";
 import type { AgentEvent } from "@onecli/agent-protocol";
@@ -478,8 +482,34 @@ export const runnerRoutes = () => {
               ? await planMessageAttachments(due.turnId, support.maxFiles)
               : null;
             // The note leads (the files belong to THIS message); the memory
-            // context follows; one slice holds the combined budget.
-            const combinedContext = joinContext(plan?.note, context);
+            // context follows; one slice holds the combined budget. A resumed
+            // run's frame goes first of all: it says what this whole delivery
+            // is, before anything it carries.
+            const combinedContext = joinContext(
+              due.resumed ? RESUMED_TURN_CONTEXT : null,
+              plan?.note,
+              context,
+            );
+
+            // The conversation's size (context fit), clamped to what the
+            // agent's credential allows: a trial-credit agent never runs
+            // past the deployment's limit, and its own key lifts it with no
+            // other change. A failed lookup ships the turn with no size, so
+            // its session keeps the size it already had, rather than
+            // blocking the turn or clamping blind: a blind clamp would make
+            // the harness summarize a paying conversation's context away on
+            // a database hiccup, while the trial's spend stays bounded by the
+            // gateway's own credit cap either way.
+            const contextTokens = await deliveredContextTokens(
+              due.agentId,
+              due.contextTokens,
+            ).catch((err: unknown) => {
+              log.warn(
+                { err, turnId: due.turnId },
+                "context limit lookup failed; the session keeps its current size",
+              );
+              return undefined;
+            });
 
             items.push({
               kind: "turn.deliver",
@@ -493,6 +523,7 @@ export const runnerRoutes = () => {
               ...(due.ephemeralSession && { ephemeralSession: true }),
               ...(combinedContext && { context: combinedContext }),
               ...(due.gate && { gate: due.gate }),
+              ...(contextTokens !== undefined && { contextTokens }),
               ...(plan && plan.manifest.length > 0
                 ? { attachments: plan.manifest }
                 : {}),
@@ -735,6 +766,7 @@ export const runnerRoutes = () => {
               { runnerId, sandboxId: event.sandboxId },
               event.conversationId,
               event.turnId,
+              event.sessionRef,
             );
             break;
           case "turn.finished":

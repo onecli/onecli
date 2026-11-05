@@ -25,6 +25,7 @@ import {
   AUDIT_SOURCE,
   recordAuditEvent,
 } from "../services/audit-service";
+import { parseBody } from "../lib/request-body";
 
 /**
  * The workspace door of the skills surface (step 9): /v1/skills. Lists the
@@ -36,12 +37,6 @@ import {
  * `recordAuditEvent`, never `withAudit`: the gateway reads no skill table
  * (the cron/memory rule).
  */
-
-const parseBody = async (raw: Request) =>
-  await raw
-    .clone()
-    .json()
-    .catch(() => null);
 
 /** Folder problems named in a refusal; the rest are counted. */
 const MAX_PROBLEMS_SHOWN = 5;

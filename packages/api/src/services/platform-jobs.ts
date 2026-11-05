@@ -129,3 +129,7 @@ export const platformJobRunsOf = (
 /** Whether this source is a platform job's run (rules 1 to 3 apply). */
 export const isPlatformJobRun = (source: string): boolean =>
   runsBySource.has(source);
+
+/** Every registered run source: the set-based form of `isPlatformJobRun`,
+ * for a write that must leave job runs out in its own `where`. */
+export const platformJobRunSources = (): string[] => [...runsBySource.keys()];

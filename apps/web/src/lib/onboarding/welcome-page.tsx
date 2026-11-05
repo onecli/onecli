@@ -28,7 +28,7 @@ const isMessagingToolId = (
  * must never hold the product hostage. */
 export default function WelcomePage() {
   const router = useRouter();
-  const { progress } = useOnboarding();
+  const { progress, ensureAgent } = useOnboarding();
   const [tool, setTool] = useState<MessagingToolId>(() =>
     isMessagingToolId(progress.messagingTool)
       ? progress.messagingTool
@@ -41,6 +41,13 @@ export default function WelcomePage() {
   useEffect(() => {
     router.prefetch(onboardingPath("create"));
   }, [router]);
+
+  // The agent is born the moment the flow opens, so its machine boots while
+  // the person reads and answers; the name step renames it. Idempotent and
+  // quiet inside the context.
+  useEffect(() => {
+    ensureAgent();
+  }, [ensureAgent]);
 
   const otherMissing = tool === "other" && other.trim().length === 0;
 

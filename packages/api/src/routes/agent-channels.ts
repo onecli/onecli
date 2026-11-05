@@ -65,6 +65,7 @@ import {
   AUDIT_SOURCE,
   recordAuditEvent,
 } from "../services/audit-service";
+import { parseBody } from "../lib/request-body";
 
 const log = logger.child({ component: "agent-channels" });
 
@@ -84,12 +85,6 @@ const parseProvider = (raw: string): ChannelProviderId => {
   }
   return raw;
 };
-
-const parseBody = async (raw: Request) =>
-  await raw
-    .clone()
-    .json()
-    .catch(() => null);
 
 export const agentChannelRoutes = () => {
   const app = new Hono<ApiEnv>();

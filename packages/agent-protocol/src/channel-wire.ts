@@ -352,6 +352,8 @@ export const adapterDecisionRequestSchema = z.object({
   presenceId: z.string().min(1),
   approvalId: z.string().min(1).max(500),
   decision: z.enum(["approve", "deny"]),
+  /** `similar`: the card's "Approve similar" button (approve only). */
+  scope: z.literal("similar").optional(),
   clickerExternalUserId: z.string().min(1).max(200),
 });
 export type AdapterDecisionRequest = z.infer<
@@ -359,7 +361,15 @@ export type AdapterDecisionRequest = z.infer<
 >;
 
 export const adapterDecisionResponseSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("decided"), decidedByName: z.string() }),
+  z.object({
+    kind: z.literal("decided"),
+    decidedByName: z.string(),
+    /** When an "Approve similar" window opened: what it covers and when it
+     *  closes (RFC 3339). */
+    similar: z
+      .object({ label: z.string(), until: z.iso.datetime({ offset: true }) })
+      .optional(),
+  }),
   z.object({ kind: z.literal("already_settled") }),
   z.object({ kind: z.literal("refused"), message: z.string() }),
   z.object({ kind: z.literal("unavailable"), message: z.string() }),

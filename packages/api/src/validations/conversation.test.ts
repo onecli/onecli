@@ -51,12 +51,70 @@ describe("TURN_FAILURE_COPY", () => {
     }
   });
 
+  it("tells a person the model declined, and offers the fixes that change what it sees", () => {
+    // The whole conversation goes to the model with every message, so an
+    // earlier part of it can keep provoking the refusal: rephrasing alone
+    // would loop the person forever. Shown in shared channels too, so it
+    // names the dashboard and no internals, and it never blames them.
+    const entry = conversation.TURN_FAILURE_COPY.model_refused;
+    expect(entry).toEqual({
+      code: "model_refused",
+      message: conversation.MODEL_REFUSED_MESSAGE,
+    });
+    const message = conversation.MODEL_REFUSED_MESSAGE;
+    expect(message).toContain("declined to answer");
+    expect(message).toMatch(/rephras/i);
+    expect(message).toContain("restarting the agent from its menu");
+    expect(message).toContain("different model");
+    expect(message).not.toMatch(
+      /sandbox|harness|guardrail|stop_reason|jcode|your fault|violat/i,
+    );
+  });
+
+  it("calls an empty answer temporary, never a refusal", () => {
+    // No safety stop behind it: telling the person to rephrase would blame
+    // their words for an upstream hiccup.
+    const entry = conversation.TURN_FAILURE_COPY.model_empty_response;
+    expect(entry).toEqual({
+      code: "model_empty_response",
+      message: conversation.MODEL_EMPTY_RESPONSE_MESSAGE,
+    });
+    const message = conversation.MODEL_EMPTY_RESPONSE_MESSAGE;
+    expect(message).toContain("Send your message again");
+    expect(message).not.toMatch(/declin|refus|rephras|sandbox|harness/i);
+  });
+
   it("names who can change a policy block without claiming its scope", () => {
     // An org rule or org budget is not a workspace admin's to change.
     const message = conversation.TURN_FAILURE_COPY.blocked_by_policy?.message;
     expect(message).toBe(conversation.BLOCKED_BY_POLICY_MESSAGE);
     expect(message).toContain("An admin can review it");
     expect(message).not.toMatch(/workspace admin/i);
+  });
+
+  it.each([
+    ["home_read_only", conversation.HOME_READ_ONLY_MESSAGE],
+    ["home_read_only_held", conversation.HOME_READ_ONLY_HELD_MESSAGE],
+  ])(
+    "gives a read-only home (%s) a human sentence, never the kernel's words",
+    (code, message) => {
+      // Shown in shared channels too: the person must never see
+      // "Read-only file system (os error 30)" or a word like "sandbox".
+      const entry = conversation.TURN_FAILURE_COPY[code];
+      expect(entry).toEqual({ code, message });
+      expect(message).toContain("storage problem");
+      expect(message).toContain("Its files are safe");
+      expect(message).not.toMatch(/read-only|os error|EROFS|sandbox/i);
+    },
+  );
+
+  it("never tells a held restart that the agent is restarting", () => {
+    // The held copy is shown exactly when the platform decided NOT to
+    // restart; promising one would send people to wait for nothing.
+    expect(conversation.HOME_READ_ONLY_HELD_MESSAGE).not.toMatch(
+      /is restarting/,
+    );
+    expect(conversation.HOME_READ_ONLY_MESSAGE).toMatch(/is restarting/);
   });
 });
 

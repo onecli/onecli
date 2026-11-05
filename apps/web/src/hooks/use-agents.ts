@@ -1,9 +1,11 @@
 "use client";
 
+import { useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { agents } from "@/lib/api";
 import type {
+  Agent,
   AgentDetail,
   AgentEffort,
   CreateAgentInput,
@@ -103,7 +105,6 @@ export const useCreateHostedAgent = () => {
       ...input
     }: {
       name: string;
-      identifier: string;
       instructions?: string;
       workspaceId?: string;
     }) => agents.create({ ...input, kind: "hosted" }, { workspaceId }),
@@ -283,6 +284,93 @@ export const useRestartAgent = () => {
       toast.success("Agent restarted. Your next message starts it fresh.");
     },
     onError: () => toast.error("Failed to restart the agent"),
+  });
+};
+
+/**
+ * The agents this page load already asked to warm. Hover, mount and click
+ * all mean the same thing for the same agent, and the server's answer is
+ * idempotent either way; the set makes them ONE request instead of three.
+ * Module scope on purpose: it must outlive any one component (the button
+ * that hovered is not the frame that mounts), and a full reload clears it,
+ * which is right (a parked box is parked again after 30 minutes anyway).
+ */
+const warmedAgentIds = new Set<string>();
+
+/**
+ * Warm a hosted agent's machine ahead of the person reaching it: the agent
+ * page's mount (any section), the Chat button's hover, an agents-list row.
+ * Fire-and-forget: it never blocks a navigation, never toasts (a hint that
+ * fails is a boot that happens a moment later, not an error the person
+ * caused), and never fires for a BYO agent (no machine) or twice for one
+ * agent in a page load. The returned function is stable per agent.
+ */
+export const useWarmAgent = () => {
+  const { mutate } = useMutation({
+    mutationFn: (agentId: string) => agents.wake(agentId),
+    // A refused hint is forgotten so a later door may try again: a 5xx on
+    // a hover must not silence the frame's mount.
+    onError: (_error, agentId) => warmedAgentIds.delete(agentId),
+  });
+  // `mutate` is referentially stable, so the returned function is too (an
+  // effect may list it as a dep without re-running every render).
+  return useCallback(
+    (agent: Pick<Agent, "id" | "kind"> | undefined) => {
+      if (!agent || agent.kind !== "hosted") return;
+      if (warmedAgentIds.has(agent.id)) return;
+      warmedAgentIds.add(agent.id);
+      mutate(agent.id);
+    },
+    [mutate],
+  );
+};
+
+/** How often the boot screen re-reads the machine's status while it waits. */
+export const SANDBOX_STATUS_POLL_MS = 1_000;
+
+/**
+ * The machine's lifecycle status, polled while `enabled` and the box is not
+ * yet `running` (the onboarding boot screen's wait). Stops polling at
+ * `running`: nothing on that screen needs a later state. `workspaceId`
+ * targets a workspace the URL does not carry (onboarding).
+ */
+export const useAgentSandboxStatus = (
+  agentId: string | null | undefined,
+  {
+    enabled = true,
+    workspaceId,
+  }: { enabled?: boolean; workspaceId?: string } = {},
+) =>
+  useQuery({
+    queryKey: queryKeys.agents.sandbox(agentId ?? ""),
+    queryFn: () => agents.sandbox(agentId ?? "", { workspaceId }),
+    enabled: enabled && Boolean(agentId),
+    refetchInterval: (query) =>
+      query.state.data?.status === "running" ? false : SANDBOX_STATUS_POLL_MS,
+    refetchIntervalInBackground: false,
+  });
+
+/**
+ * The onboarding rename: the agent was created as the default name the
+ * moment the flow opened, and the name step renames it. Quiet (no toast:
+ * the boot screen that follows is the feedback) and workspace-scoped (the
+ * onboarding URL carries none). The agents namespace is swept so the chat
+ * the person lands on reads the new name.
+ */
+export const useRenameOnboardingAgent = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      name,
+      workspaceId,
+    }: {
+      agentId: string;
+      name: string;
+      workspaceId: string;
+    }) => agents.update(agentId, { name }, { workspaceId }),
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: queryKeys.agents.root() }),
   });
 };
 

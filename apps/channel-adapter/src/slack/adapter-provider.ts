@@ -1,5 +1,9 @@
 import { actionChoiceOf, type AdapterPresence } from "@onecli/agent-protocol";
-import { escapeSlackText } from "@onecli/channels/slack";
+import {
+  approvalClickOf,
+  decidedText,
+  escapeSlackText,
+} from "@onecli/channels/slack";
 import type {
   ChannelAdapterProvider,
   GroupApprovalDecision,
@@ -43,41 +47,6 @@ const appTokenOf = (presence: AdapterPresence): string | null => {
   } catch {
     return null;
   }
-};
-
-/** The approval-card click, parsed out of a raw interactivity payload. Only
- * our two buttons translate — every other block_actions surface is not ours
- * and returns null. The click carries ONLY the opaque approval id in its
- * value (the injection rule); the clicker's id rides along for the control
- * plane's authorization check. */
-const approvalDecisionOf = (
-  payload: Record<string, unknown>,
-): {
-  approvalId: string;
-  decision: "approve" | "deny";
-  clickerExternalUserId: string;
-} | null => {
-  const typed = payload as {
-    type?: string;
-    user?: { id?: string };
-    actions?: { action_id?: string; value?: string }[];
-  };
-  const action = typed.actions?.[0];
-  const clicker = typed.user?.id;
-  if (
-    typed.type !== "block_actions" ||
-    !action?.value ||
-    !clicker ||
-    (action.action_id !== "channel_approve" &&
-      action.action_id !== "channel_deny")
-  ) {
-    return null;
-  }
-  return {
-    approvalId: action.value,
-    decision: action.action_id === "channel_approve" ? "approve" : "deny",
-    clickerExternalUserId: clicker,
-  };
 };
 
 /** A GROUPED approval card's click (shared vocabulary: group-card.ts in
@@ -221,7 +190,10 @@ const openTransport = (
           handlers.onGroupApprovalDecision(group);
           return;
         }
-        const decision = approvalDecisionOf(payload);
+        // The single-request card (shared vocabulary: approve-similar.ts in
+        // @onecli/channels/slack, which the control plane's HTTP arm also
+        // reads). Its value is ONLY the opaque approval id.
+        const decision = approvalClickOf(payload);
         if (decision) {
           handlers.onApprovalDecision(decision);
           return;
@@ -345,7 +317,7 @@ const decisionSettledText: ChannelAdapterProvider["decisionSettledText"] = ({
   result,
 }) =>
   result.kind === "decided"
-    ? `${decision === "approve" ? "✅ Approved" : "⛔ Denied"} by ${escapeSlackText(result.decidedByName)}`
+    ? decidedText(decision, result.decidedByName, result.similar)
     : result.kind === "already_settled"
       ? "This request was already decided."
       : escapeSlackText(result.message);

@@ -19,9 +19,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@onecli/ui/components/select";
-import { useAgentsForWorkspace } from "@/hooks/use-agents";
+import { useAgentsForWorkspace, useWarmAgent } from "@/hooks/use-agents";
 import { useWorkspacesList } from "@/hooks/use-workspaces";
-import { getStartedPath } from "@/lib/agents/get-started-target";
+import {
+  firstHostedAgent,
+  getStartedPath,
+} from "@/lib/agents/get-started-target";
 
 interface GetStartedPickerProps {
   /** The org to pick a workspace from; null keeps the dialog closed. */
@@ -63,6 +66,12 @@ export const GetStartedPicker = ({
   const { data: agents = [], isPending: agentsPending } =
     useAgentsForWorkspace(workspaceId);
 
+  // The picker's destination, when it is an existing agent, gets warmed the
+  // moment it is known (the auto-skip) or chosen (Continue): the person is
+  // one navigation away from its chat.
+  const warm = useWarmAgent();
+  const destination = firstHostedAgent(agents);
+
   // Reset on every close so the next open starts clean.
   useEffect(() => {
     if (!open) setPicked("");
@@ -73,6 +82,7 @@ export const GetStartedPicker = ({
   // someone who HAS an agent to the create form.
   useEffect(() => {
     if (!open || !autoSkip || !workspaceId || agentsPending) return;
+    warm(destination);
     onOpenChange(false);
     router.push(getStartedPath(workspaceId, agents));
   }, [
@@ -81,6 +91,8 @@ export const GetStartedPicker = ({
     workspaceId,
     agentsPending,
     agents,
+    destination,
+    warm,
     onOpenChange,
     router,
   ]);
@@ -140,6 +152,7 @@ export const GetStartedPicker = ({
               variant="brand"
               onClick={() => {
                 if (!workspaceId) return;
+                warm(destination);
                 onOpenChange(false);
                 router.push(getStartedPath(workspaceId, agents));
               }}

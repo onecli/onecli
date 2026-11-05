@@ -1,12 +1,9 @@
 "use client";
 
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
+import { useQuery } from "@tanstack/react-query";
 import { secrets } from "@/lib/api";
 import type { PageScope } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
-import { deleteSecret, updateSecret } from "@/lib/actions/secrets";
-import { invalidateGatewayCache } from "@/lib/api/cache";
 
 export const useSecrets = () =>
   useQuery({ queryKey: queryKeys.secrets.list(), queryFn: secrets.list });
@@ -23,62 +20,3 @@ export const useScopedSecrets = (scope: PageScope = "workspace") =>
     queryKey: [...queryKeys.secrets.list(), scope, "policy-target"],
     queryFn: () => secrets.listScoped(scope),
   });
-
-export const useCreateSecret = () => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: secrets.create,
-    onSuccess: async () => {
-      invalidateGatewayCache();
-      // Awaited: the dialog closes onto a list that already shows the key.
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: queryKeys.secrets.all() }),
-        qc.invalidateQueries({ queryKey: queryKeys.counts.all() }),
-        // Creating a workspace LLM key auto-attaches it to the keyless
-        // agents, so this is a grant write as well as a secret write:
-        // refresh both views.
-        qc.invalidateQueries({ queryKey: queryKeys.grants.all() }),
-        qc.invalidateQueries({ queryKey: queryKeys.policy.all() }),
-        qc.invalidateQueries({ queryKey: queryKeys.agents.all() }),
-      ]);
-    },
-    onError: (err) =>
-      toast.error(
-        err instanceof Error ? err.message : "Failed to create secret",
-      ),
-  });
-};
-
-export const useDeleteSecret = () => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: deleteSecret,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.secrets.all() });
-      qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
-      invalidateGatewayCache();
-      toast.success("Secret deleted");
-    },
-    onError: () => toast.error("Failed to delete secret"),
-  });
-};
-
-export const useUpdateSecret = () => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      secretId,
-      input,
-    }: {
-      secretId: string;
-      input: Parameters<typeof updateSecret>[1];
-    }) => updateSecret(secretId, input),
-    onSuccess: async () => {
-      invalidateGatewayCache();
-      // Awaited: the dialog closes onto the saved values.
-      await qc.invalidateQueries({ queryKey: queryKeys.secrets.all() });
-      toast.success("Secret updated");
-    },
-    onError: () => toast.error("Failed to update secret"),
-  });
-};

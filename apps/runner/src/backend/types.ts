@@ -159,6 +159,14 @@ export interface SandboxSnapshot {
    * not running yet (Pending while its image pulls).
    */
   phase?: string | null;
+  /**
+   * The machine the substrate placed this sandbox on, when it has the
+   * concept (a cluster's node name). Absent on single-host substrates.
+   * Rides a read-only-home report so the control plane can tell one bad
+   * machine from a fleet-wide problem; always the substrate's word, never
+   * the guest's.
+   */
+  node?: string;
 }
 
 /**

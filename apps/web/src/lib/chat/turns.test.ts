@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { Turn } from "@/lib/api/types";
 import {
+  BOOTING_TURN_POLL_MS,
+  RUNNING_TURN_POLL_MS,
   hasActiveTurn,
   hasUnsettledTurn,
   isAutomationTurn,
@@ -9,6 +11,7 @@ import {
   isPlatformAuthoredTurn,
   mergeTurnRows,
   resendableKeylessTurn,
+  turnsPollInterval,
 } from "./turns";
 
 const turn = (status: Turn["status"], overrides: Partial<Turn> = {}): Turn => ({
@@ -79,6 +82,29 @@ describe("the poll predicate", () => {
 
   it("joining is NOT active — the Stop button targets the running turn, never a follow-up", () => {
     expect(hasActiveTurn([turn("joining")])).toBe(false);
+  });
+});
+
+describe("the poll cadence", () => {
+  it("polls fast while a turn has not reached the agent (its machine may be booting)", () => {
+    expect(turnsPollInterval([turn("queued")])).toBe(BOOTING_TURN_POLL_MS);
+    expect(turnsPollInterval([turn("dispatched")])).toBe(BOOTING_TURN_POLL_MS);
+    // A booting turn beside a settled one still polls fast.
+    expect(turnsPollInterval([turn("done"), turn("queued")])).toBe(
+      BOOTING_TURN_POLL_MS,
+    );
+  });
+
+  it("slows once the agent is running (the stream carries progress from there)", () => {
+    expect(turnsPollInterval([turn("running")])).toBe(RUNNING_TURN_POLL_MS);
+    expect(turnsPollInterval([turn("done"), turn("joining")])).toBe(
+      RUNNING_TURN_POLL_MS,
+    );
+  });
+
+  it("stops once nothing is owed an outcome", () => {
+    expect(turnsPollInterval([turn("done"), turn("aborted")])).toBe(false);
+    expect(turnsPollInterval(undefined)).toBe(false);
   });
 });
 

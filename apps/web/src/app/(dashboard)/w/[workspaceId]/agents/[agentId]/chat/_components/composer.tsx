@@ -412,11 +412,13 @@ export const Composer = ({
             <Square className="size-3.5" />
           </Button>
         )}
+        {/* No `loading`: the box clears and the message shows at once, so a
+            spinner beside the arrow only made the button jump. `sendable`
+            keeps it disabled while the send is in flight. */}
         <Button
           size="icon"
           onClick={submit}
           disabled={!sendable}
-          loading={sendPending}
           aria-label="Send message"
         >
           <ArrowUp className="size-4" />

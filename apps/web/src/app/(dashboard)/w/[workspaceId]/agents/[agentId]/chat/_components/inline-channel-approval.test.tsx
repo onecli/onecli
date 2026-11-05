@@ -5,11 +5,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PendingChannelApprovalItem } from "@/lib/api/channel-approvals";
 
 /**
- * The chat's inline ACTION approvals (an agent asking to message another
- * agent): the web twin of the Slack DM card. It surfaces in the agent's own
- * thread where the asking turn ran - never another agent's, never another
- * conversation's, never a reach ask - and decides through the same door as
- * the bell row.
+ * The chat's inline channel approvals (here, an agent asking to message
+ * another agent, and a reach ask): the web twin of the Slack DM card. It
+ * surfaces in the agent's own thread - never another agent's, never another
+ * conversation's - and decides through the same door as the bell row.
  */
 
 const state = vi.hoisted(() => ({
@@ -21,6 +20,7 @@ vi.mock("@/hooks/use-approvals", () => ({
   usePendingChannelApprovals: () => ({ data: state.items }),
   useDecideChannelAction: () => ({ mutate: state.mutate, isPending: false }),
   useApproveCustomConnection: () => ({ mutate: vi.fn(), isPending: false }),
+  useDecideChannelReach: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 
 vi.mock("@/ee/slack-read/slack-access-card", () => ({
@@ -40,8 +40,9 @@ vi.mock("next/dynamic", () => ({
   },
 }));
 
-const { useActionApprovalCards } = await import("./use-action-approval-cards");
-const { InlineActionApproval } = await import("./inline-action-approval");
+const { useChannelApprovalCards } =
+  await import("./use-channel-approval-cards");
+const { InlineChannelApproval } = await import("./inline-channel-approval");
 
 const action = (
   over: Partial<Extract<PendingChannelApprovalItem, { kind: "action" }>>,
@@ -69,23 +70,25 @@ const Cards = ({
   conversationId: string;
 }) => (
   <div>
-    {useActionApprovalCards(agentId, conversationId).map((card) => (
-      <InlineActionApproval key={card.item.id} item={card.item} />
+    {useChannelApprovalCards(agentId, conversationId).map((card) => (
+      <InlineChannelApproval key={card.item.id} item={card.item} />
     ))}
   </div>
 );
 
-describe("inline action approvals in the chat", () => {
+describe("inline channel approvals in the chat", () => {
   beforeEach(() => {
     state.items = [];
     state.mutate.mockReset();
   });
 
-  it("shows only THIS agent's holds raised in THIS conversation", () => {
+  it("shows what the bell shows for THIS agent, except another thread's holds", () => {
     state.items = [
       action({ id: "mine" }),
       action({ id: "other-thread", conversationId: "conv-elsewhere" }),
-      action({ id: "bell-only", conversationId: null }),
+      // A hold anchored on no conversation (the receiving side of a
+      // cross-workspace message): the bell used to be its only surface.
+      action({ id: "no-thread", conversationId: null }),
       action({ id: "other-agent", agentId: "mark", agentName: "Mark" }),
       {
         kind: "reach",
@@ -100,7 +103,10 @@ describe("inline action approvals in the chat", () => {
       },
     ];
     render(<Cards agentId="donna" conversationId="conv-home" />);
-    expect(screen.getAllByText(/wants to talk to Mark/)).toHaveLength(1);
+    // "mine" and "no-thread" (both Donna's own holds).
+    expect(screen.getAllByText(/wants to talk to Mark/)).toHaveLength(2);
+    // The reach ask renders with the bell's own row.
+    expect(screen.getByText(/#general/)).toBeInTheDocument();
   });
 
   it("decides through the same door as the bell row", async () => {

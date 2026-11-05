@@ -1,6 +1,9 @@
 import {
+  approvalButtons,
+  APPROVE_ACTION,
   clampHeader,
   clampLabel,
+  DENY_ACTION,
   escapeSlackText,
   GROUP_APPROVE_ACTION,
   GROUP_DENY_ACTION,
@@ -11,6 +14,7 @@ import {
   rowActionId,
   shareFileWithBlocks,
   SharedMessageUnknownError,
+  similarNoteBlocks,
   SlackApiError,
   unpackMessageRef,
   updateBlocksMessage,
@@ -152,23 +156,24 @@ export const approvalCardBlocks = (
     : undefined;
   const fallbackTitle = `${escapeSlackText(approval.method ?? "?")} ${escapeSlackText(approval.host ?? "")}${clampLabel(escapeSlackText(approval.path ?? ""))}`;
   const subject = approval.summary?.subject;
-  const detailLines = (approval.summary?.details ?? [])
-    .slice(0, 8)
-    .map((d, i) => {
-      // The record the action is about reads by name alone ("Contact:
-      // Dana Reyes", linked): its id is noise on a one-record card.
-      const value =
-        i === subject?.row && subject.record ? subject.record : d.value;
-      const label = `>*${clampLabel(escapeSlackText(normalizeLines(d.label)))}:*`;
-      // Prose (a message template, a before → after, an email body) reads
-      // whole, as written: in a code block under its label, so a `*` in it
-      // stays a `*` and its line breaks stay. The section budget still
-      // bounds the card; a value too long for it is cut with a mark.
-      if (isProse(value) && !d.url) {
-        return `${label}\n${codeBlock(value)}`;
-      }
-      return `${label} ${detailValue(value, d.url).replace(/\n/g, "\n>")}`;
-    });
+  // Every row the gateway sent: it already bounds them (field rows, files),
+  // and the section budget below keeps whole lines and names the rest, so
+  // a row past a fixed count is never dropped without a word.
+  const detailLines = (approval.summary?.details ?? []).map((d, i) => {
+    // The record the action is about reads by name alone ("Contact:
+    // Dana Reyes", linked): its id is noise on a one-record card.
+    const value =
+      i === subject?.row && subject.record ? subject.record : d.value;
+    const label = `>*${clampLabel(escapeSlackText(normalizeLines(d.label)))}:*`;
+    // Prose (a message template, a before → after, an email body) reads
+    // whole, as written: in a code block under its label, so a `*` in it
+    // stays a `*` and its line breaks stay. The section budget still
+    // bounds the card; a value too long for it is cut with a mark.
+    if (isProse(value) && !d.url) {
+      return `${label}\n${codeBlock(value)}`;
+    }
+    return `${label} ${detailValue(value, d.url).replace(/\n/g, "\n>")}`;
+  });
   // Hard section budget: keep whole lines while they fit, and say how many
   // were dropped rather than truncating silently.
   const kept = fitting(detailLines, "\n", DETAILS_BUDGET);
@@ -206,23 +211,9 @@ export const approvalCardBlocks = (
       : []),
     {
       type: "actions",
-      elements: [
-        {
-          type: "button",
-          style: "primary",
-          text: { type: "plain_text", text: "Approve" },
-          action_id: "channel_approve",
-          value: approval.id,
-        },
-        {
-          type: "button",
-          style: "danger",
-          text: { type: "plain_text", text: "Deny" },
-          action_id: "channel_deny",
-          value: approval.id,
-        },
-      ],
+      elements: approvalButtons(approval.id, approval.similar),
     },
+    ...similarNoteBlocks(approval.similar, approval.agent?.name),
   ];
 };
 
@@ -503,23 +494,13 @@ const singleRecordCardBlocks = (
       : []),
     {
       type: "actions",
-      elements: [
-        {
-          type: "button",
-          style: "primary",
-          text: { type: "plain_text", text: kindCopy(bulk).approve },
-          action_id: "channel_approve",
-          value: approval.id,
-        },
-        {
-          type: "button",
-          style: "danger",
-          text: { type: "plain_text", text: "Deny" },
-          action_id: "channel_deny",
-          value: approval.id,
-        },
-      ],
+      elements: approvalButtons(
+        approval.id,
+        approval.similar,
+        kindCopy(bulk).approve,
+      ),
     },
+    ...similarNoteBlocks(approval.similar, approval.agent?.name),
   ];
 };
 
@@ -648,14 +629,14 @@ const bulkCardBlocks = (
           // A merged batch decides EXACTLY the requests it merged, through
           // the group click (the control plane refuses any id this presence
           // never posted), never one id standing for the rest.
-          action_id: merged ? GROUP_APPROVE_ACTION : "channel_approve",
+          action_id: merged ? GROUP_APPROVE_ACTION : APPROVE_ACTION,
           value: merged ? merged.packedIds : approval.id,
         },
         {
           type: "button",
           style: "danger",
           text: { type: "plain_text", text: "Deny" },
-          action_id: merged ? GROUP_DENY_ACTION : "channel_deny",
+          action_id: merged ? GROUP_DENY_ACTION : DENY_ACTION,
           value: merged ? merged.packedIds : approval.id,
         },
         // Slack's phone app opens a CSV as plain text, one cell per line;

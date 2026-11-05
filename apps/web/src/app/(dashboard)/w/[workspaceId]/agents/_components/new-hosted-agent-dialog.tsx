@@ -20,7 +20,6 @@ import { cn } from "@onecli/ui/lib/utils";
 import { validateDisplayName } from "@onecli/api/validations/display-name";
 import { INSTRUCTIONS_MAX_LENGTH } from "@onecli/api/validations/agent";
 import { agentChatPath } from "@/lib/navigation";
-import { nameToIdentifier } from "@/lib/agents/agent-identifier";
 import { useCreateHostedAgent } from "@/hooks/use-agents";
 import {
   useHomeDurabilityMessage,
@@ -68,6 +67,12 @@ export const NewHostedAgentDialog = ({
   // one place agent-file durability is stated (§3.9), in agent words only.
   const durabilityNote = useHomeDurabilityMessage();
   const createAgent = useCreateHostedAgent();
+  // The submit door, closed from the first submit until the request settles.
+  // `createAgent.isPending` is a render-time value: a second submit inside
+  // the same tick (Enter and a click that lands together, a double Enter)
+  // runs before React re-renders and would send a second POST, which the
+  // server answers 409 on the derived identifier.
+  const submittingRef = useRef(false);
 
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
@@ -107,9 +112,7 @@ export const NewHostedAgentDialog = ({
   }, [open]);
 
   const nameError = validateDisplayName(name);
-  const identifier = nameToIdentifier(name);
-  const isNameValid =
-    name.trim().length > 0 && nameError === null && identifier.length > 0;
+  const isNameValid = name.trim().length > 0 && nameError === null;
   const showNameError = nameTouched && name.length > 0 && nameError !== null;
   const briefTooLong = instructions.length > INSTRUCTIONS_MAX_LENGTH;
   // Creation genuinely needs a live agent host (the server 422s without one).
@@ -122,14 +125,17 @@ export const NewHostedAgentDialog = ({
 
   const handleCreate = () => {
     setNameTouched(true);
-    if (!canSubmit) return;
+    if (!canSubmit || submittingRef.current) return;
+    submittingRef.current = true;
     createAgent.mutate(
       {
         name,
-        identifier,
         ...(instructions.trim() ? { instructions: instructions.trim() } : {}),
       },
       {
+        onSettled: () => {
+          submittingRef.current = false;
+        },
         onSuccess: (agent) => {
           handleClose(false);
           const created = { id: agent.id, name: agent.name };

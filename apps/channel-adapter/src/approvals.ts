@@ -133,6 +133,16 @@ const pendingResponse = z.object({
           total: z.number().optional(),
         })
         .nullish(),
+      // "Approve similar", when the gateway offers it (a documented update
+      // of one record). A malformed value just hides the button.
+      similar: z
+        .object({
+          label: z.string(),
+          windowMinutes: z.number(),
+          maxRequests: z.number(),
+        })
+        .nullish()
+        .catch(undefined),
       createdAt: z.string().optional(),
       expiresAt: z.string().optional(),
     }),

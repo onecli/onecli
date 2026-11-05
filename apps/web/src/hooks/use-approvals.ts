@@ -13,6 +13,7 @@ import {
   decide,
   listPending,
   type ApprovalDecisionInput,
+  type ApprovalSimilar,
   type PendingApproval,
 } from "@/lib/api/approvals";
 import { listPendingChannelApprovals } from "@/lib/api/channel-approvals";
@@ -172,16 +173,20 @@ export const useDecideApproval = () => {
     mutationFn: ({
       id,
       decision,
+      similar,
     }: {
       id: string;
       decision: ApprovalDecisionInput;
-    }) => decide(id, decision),
+      /** "Approve similar": the offer the reviewer accepted. The gateway
+       *  decides what it covers; this only asks for it. */
+      similar?: ApprovalSimilar;
+    }) => decide(id, decision, similar && "similar"),
     onMutate: ({ id, decision }) => settleOptimistically(qc, [id], decision),
     onError: (_err, { id }, ctx) => {
       restorePending(qc, [id], ctx?.previous);
       toast.error("Failed to submit decision");
     },
-    onSuccess: (outcome, { decision }) => {
+    onSuccess: (outcome, { decision, similar }) => {
       if (outcome === "already_settled") {
         // The card was stale: expired, decided from another surface, or the
         // gateway restarted. The click changed nothing — say that, quietly.
@@ -189,7 +194,11 @@ export const useDecideApproval = () => {
         return;
       }
       toast.success(
-        decision === "approve" ? "Request approved" : "Request denied",
+        decision === "deny"
+          ? "Request denied"
+          : similar
+            ? `Approved, with similar updates for ${similar.windowMinutes} min`
+            : "Request approved",
       );
     },
     onSettled: () => {

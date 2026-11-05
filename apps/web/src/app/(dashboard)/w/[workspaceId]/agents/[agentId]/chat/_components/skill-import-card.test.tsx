@@ -23,6 +23,7 @@ describe("<SkillImportCard />", () => {
               groups: { fixtures: 9, playbooks: 7, references: 3, tools: 2 },
               skipped: [{ path: ".DS_Store", reason: "System file" }],
               skippedCount: 1,
+              fingerprint: "0123456789ab".padEnd(64, "f"),
               replaced: false,
             },
           ],
@@ -40,6 +41,10 @@ describe("<SkillImportCard />", () => {
       "Instructions, 9 fixtures, 7 playbooks, 3 references, 2 runnable tools",
     );
     expect(card).toHaveTextContent("Left out 1: .DS_Store (system file)");
+    expect(card).toHaveTextContent("sha256 0123456789ab");
+    expect(
+      screen.getByRole("button", { name: "Copy check command" }),
+    ).toBeInTheDocument();
     expect(card).toHaveTextContent("Bad Name wasn't added: Not a valid name");
     expect(card).not.toHaveTextContent("more not added");
     expect(screen.getByRole("link", { name: "Open skills" })).toHaveAttribute(
@@ -60,6 +65,7 @@ describe("<SkillImportCard />", () => {
               groups: {},
               skipped: [],
               skippedCount: 0,
+              fingerprint: "",
               replaced: true,
             },
           ],
@@ -71,6 +77,8 @@ describe("<SkillImportCard />", () => {
     expect(screen.getByTestId("skill-import-card")).toHaveTextContent(
       "s updated · 1 files · 10 B",
     );
+    // A result with no fingerprint shows no check.
+    expect(screen.queryByRole("button")).toBeNull();
   });
 
   it("names a folder called constructor as itself", () => {
@@ -85,6 +93,7 @@ describe("<SkillImportCard />", () => {
               groups: { constructor: 2 },
               skipped: [],
               skippedCount: 0,
+              fingerprint: "",
               replaced: false,
             },
           ],

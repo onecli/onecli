@@ -10,6 +10,7 @@ const result = {
       groups: { fixtures: 9, playbooks: 7, references: 3, tools: 2 },
       skipped: [{ path: ".DS_Store", reason: "System file" }],
       skippedCount: 1,
+      fingerprint: "a".repeat(64),
       replaced: false,
     },
   ],
@@ -29,12 +30,23 @@ describe("parseSkillImport", () => {
           groups: { fixtures: 9, playbooks: 7, references: 3, tools: 2 },
           skipped: [{ path: ".DS_Store", reason: "System file" }],
           skippedCount: 1,
+          fingerprint: "a".repeat(64),
           replaced: false,
         },
       ],
       problems: [{ folder: "Bad Name", reason: "Not a valid name" }],
       problemCount: 3,
     });
+  });
+
+  it("drops a fingerprint that isn't a sha256", () => {
+    const odd = {
+      ...result,
+      imported: [{ ...result.imported[0], fingerprint: "<b>nope</b>" }],
+    };
+    expect(parseSkillImport(JSON.stringify(odd))?.skills[0]?.fingerprint).toBe(
+      "",
+    );
   });
 
   it("never counts fewer problems than it lists", () => {
@@ -67,6 +79,7 @@ describe("parseSkillImport", () => {
         groups: {},
         skipped: [],
         skippedCount: 0,
+        fingerprint: "",
         replaced: false,
       },
     ]);

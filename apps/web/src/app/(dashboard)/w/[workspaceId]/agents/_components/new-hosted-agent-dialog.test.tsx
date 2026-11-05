@@ -129,7 +129,7 @@ describe("the hosted create dialog", () => {
     ).toBeInTheDocument();
   });
 
-  it("creates from a name alone, deriving the identifier", async () => {
+  it("creates from a name alone (the server derives the identifier)", async () => {
     const user = userEvent.setup();
     open();
     await user.clear(nameField());
@@ -137,7 +137,7 @@ describe("the hosted create dialog", () => {
     await user.click(screen.getByRole("button", { name: "Create agent" }));
 
     expect(mocks.mutate).toHaveBeenCalledWith(
-      { name: "Support Triage", identifier: "support-triage" },
+      { name: "Support Triage" },
       expect.anything(),
     );
   });
@@ -148,9 +148,30 @@ describe("the hosted create dialog", () => {
     await user.clear(nameField());
     await user.type(nameField(), "Donna{Enter}");
     expect(mocks.mutate).toHaveBeenCalledWith(
-      { name: "Donna", identifier: "donna" },
+      { name: "Donna" },
       expect.anything(),
     );
+  });
+
+  it("sends ONE create however many submits land before the first settles", async () => {
+    // The mock's `isPending` never flips, so this is the window before React
+    // re-renders: Enter and a click in the same tick must not mint two
+    // agents (the second would 409 on the derived identifier).
+    const user = userEvent.setup();
+    open();
+    await user.clear(nameField());
+    await user.type(nameField(), "Donna{Enter}");
+    await user.click(screen.getByRole("button", { name: "Create agent" }));
+    await user.type(nameField(), "{Enter}");
+    expect(mocks.mutate).toHaveBeenCalledTimes(1);
+
+    // Settled (a refusal): the door opens again for a retry.
+    const settle = mocks.mutate.mock.calls[0]?.[1] as {
+      onSettled: () => void;
+    };
+    settle.onSettled();
+    await user.click(screen.getByRole("button", { name: "Create agent" }));
+    expect(mocks.mutate).toHaveBeenCalledTimes(2);
   });
 
   it("sends the brief once it has been opened and filled", async () => {
@@ -166,7 +187,7 @@ describe("the hosted create dialog", () => {
     await user.click(screen.getByRole("button", { name: "Create agent" }));
 
     expect(mocks.mutate).toHaveBeenCalledWith(
-      { name: "Donna", identifier: "donna", instructions: "Triage the inbox." },
+      { name: "Donna", instructions: "Triage the inbox." },
       expect.anything(),
     );
   });
@@ -190,7 +211,7 @@ describe("the hosted create dialog", () => {
 
     await user.click(screen.getByRole("button", { name: "Create agent" }));
     expect(mocks.mutate).toHaveBeenCalledWith(
-      { name: "Donna", identifier: "donna" },
+      { name: "Donna" },
       expect.anything(),
     );
   });

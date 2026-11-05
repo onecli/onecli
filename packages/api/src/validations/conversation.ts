@@ -264,6 +264,10 @@ export const TURN_ERROR_CODES = [
   "transcript_rejected",
   "turn_stalled",
   "turn_time_limit",
+  "home_read_only",
+  "home_read_only_held",
+  "model_refused",
+  "model_empty_response",
 ] as const;
 export type TurnErrorCode = (typeof TURN_ERROR_CODES)[number];
 
@@ -289,6 +293,23 @@ export const NO_MODEL_KEY_MESSAGE =
  * (side effects may exist; a blind "send it again" would invite doubles). */
 export const AGENT_RESTARTED_MESSAGE =
   "The agent had to restart while working on this. Check what it finished, then send it again.";
+
+/** The person's line on a turn the platform resumed after a mid-run death
+ * (the one automatic recovery; a second death closes with
+ * `AGENT_RESTARTED_MESSAGE`). A durable notice under the turn, so it stays
+ * in the chat. Temporary in tone and says what happens next, per the
+ * lifecycle-copy doctrine above. */
+export const AGENT_RESUMING_NOTICE =
+  "The agent restarted while working on this. It's picking up where it left off.";
+
+/** The delivery-only frame on a resumed turn's dispatch (prepended at the
+ * harness boundary like the memory context, never stored). The model needs
+ * three facts the transcript cannot give it: this message is not new, the
+ * step that was running when the agent stopped may have half-happened, and
+ * the earlier work may be absent (a harness that cannot resume the session
+ * starts it fresh). */
+export const RESUMED_TURN_CONTEXT =
+  "[system] The agent restarted while it was working on this message, and this run picks it back up. If your earlier work on it is in this conversation above, continue from where you left off. A step that was running when it restarted may or may not have finished, so check its result before you redo anything with side effects. If no earlier work appears above, start from the beginning.";
 
 /** A start that could not happen (second cold-boot death, generic start
  * failure past its patience window, or the supervisor's launch classification
@@ -396,6 +417,20 @@ export const BLOCKED_BY_POLICY_MESSAGE =
 export const GATEWAY_UNAVAILABLE_MESSAGE =
   "OneCLI couldn't reach the model provider just now. Send your message again in a moment.";
 
+/** The agent's storage went read-only under it (`home_read_only`): every
+ * later write would fail, so the platform restarts it, and a fresh boot
+ * mounts the storage writable again. Temporary in tone, and true: the
+ * restart is already underway when this is shown. */
+export const HOME_READ_ONLY_MESSAGE =
+  "The agent hit a storage problem and is restarting itself. Its files are safe. Send your message again in a minute.";
+
+/** The same problem, after the platform's restart budget or its fleet
+ * brake held the restart (`home_read_only_held`): restarting again would
+ * not help yet, and the team is alerted by the same event. Still no word
+ * "sandbox"; it says what is happening and what to do. */
+export const HOME_READ_ONLY_HELD_MESSAGE =
+  "The agent hit a storage problem and could not restart by itself. Its files are safe, and the OneCLI team has been alerted. Try again in a little while.";
+
 /** The harness refused the message because its session was still executing
  * earlier, platform-abandoned work and the adapter's self-heal (cancel +
  * resend with backoff) could not free it. Genuinely temporary: the blocked
@@ -427,6 +462,20 @@ export const TRANSCRIPT_REJECTED_MESSAGE =
  * internals. */
 export const MODEL_ENDPOINT_NOT_FOUND_MESSAGE =
   'The agent couldn\'t reach its model: the model endpoint answered "not found". This is usually a setup problem with the model name or endpoint, not your message, so contact whoever operates this agent. Sending it again helps only if this was a one-time glitch.';
+/** The model declined to answer and wrote nothing (`model_refused`: a
+ * provider safety stop). The conversation's whole history goes to the model
+ * with every message, so something earlier in it, not only this message, can
+ * keep provoking the refusal: the copy offers rephrasing first, then the two
+ * fixes that change what the model sees (a fresh start, another model).
+ * Shown in shared channels too, so it names the dashboard and no internals,
+ * and it never blames the person (the cause is often not their words). */
+export const MODEL_REFUSED_MESSAGE =
+  "The model declined to answer this message. Try rephrasing it. If it keeps declining, something earlier in this conversation may be the cause: restarting the agent from its menu in the dashboard starts its conversations fresh, or you can switch it to a different model.";
+/** The model ended its turn with nothing visible and no safety stop behind
+ * it (`model_empty_response`), after the agent's own retries. Usually a
+ * transient upstream problem, so the honest recovery is a resend. */
+export const MODEL_EMPTY_RESPONSE_MESSAGE =
+  "The model returned an empty answer to this message. This is usually a temporary problem with the model provider. Send your message again.";
 
 /** The Slack mirror's last-resort line for a FAILED turn that produced no
  * answer text and no error anywhere — silence would read as the agent
@@ -545,6 +594,22 @@ export const TURN_FAILURE_COPY: Partial<
   gateway_unavailable: {
     code: "gateway_unavailable",
     message: GATEWAY_UNAVAILABLE_MESSAGE,
+  },
+  home_read_only: {
+    code: "home_read_only",
+    message: HOME_READ_ONLY_MESSAGE,
+  },
+  home_read_only_held: {
+    code: "home_read_only_held",
+    message: HOME_READ_ONLY_HELD_MESSAGE,
+  },
+  model_refused: {
+    code: "model_refused",
+    message: MODEL_REFUSED_MESSAGE,
+  },
+  model_empty_response: {
+    code: "model_empty_response",
+    message: MODEL_EMPTY_RESPONSE_MESSAGE,
   },
 };
 

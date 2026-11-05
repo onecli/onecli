@@ -1,12 +1,17 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api/client";
 import type { SkillImportResult } from "@/lib/api";
 import { ImportSkillZipButton } from "./import-skill-zip-button";
 
-const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
+const toast = vi.hoisted(() => ({
+  success:
+    vi.fn<(title: string, options: { description: ReactNode }) => void>(),
+  error: vi.fn(),
+}));
 vi.mock("sonner", () => ({ toast }));
 
 const mutate = vi.hoisted(() => vi.fn());
@@ -29,6 +34,7 @@ const RESULT: SkillImportResult = {
       bytes: 39,
       groups: { refs: 1 },
       skipped: [{ path: ".DS_Store", reason: "System file" }],
+      fingerprint: "a".repeat(64),
       replaced: false,
     },
   ],
@@ -45,12 +51,23 @@ const upload = async () => {
 };
 
 describe("<ImportSkillZipButton />", () => {
-  it("says what was added and why something was left out", async () => {
+  it("says what was added, why something was left out, and how to check it", async () => {
     mutate.mockImplementation((_vars, { onSuccess }) => onSuccess(RESULT));
     await upload();
     expect(toast.success).toHaveBeenCalledWith("Added notes-kit", {
-      description: "Left out 2 items, like BadName: Not a valid name",
+      description: expect.anything(),
+      duration: 10_000,
     });
+    const description = toast.success.mock.calls[0]?.[1].description;
+    cleanup();
+    render(<>{description}</>);
+    expect(
+      screen.getByText("Left out 2 items, like BadName: Not a valid name"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("sha256 aaaaaaaaaaaa")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Copy check command" }),
+    ).toBeInTheDocument();
   });
 
   it("names the file and the server's reason when the upload fails", async () => {

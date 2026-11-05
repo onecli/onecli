@@ -78,7 +78,22 @@ const state: {
   manualAccept: boolean;
   softInterruptError: Error | null;
   setModelError: Error | null;
+  /** Refuse `setModel` this many times before accepting it: the model list
+   * race, where a fresh home refuses a valid model until its list loads. */
+  setModelRefusals: number;
+  /** What `listModels` answers: jcode's model list, which carries the model
+   * once the account's list loads. A function, so a test can make the list
+   * land later in the wait, or fail the read. */
+  listModels: () => Promise<{ models: string[] }>;
   setEffortError: Error | null;
+  /** How the "daemon" answers `set_session_env`: a refusal, or fine. */
+  setSessionEnvError: Error | null;
+  /** How the "daemon" answers `set_context_cap`: the effective budget, a
+   * refusal, or never (a busy agent lock). */
+  contextCap:
+    | { kind: "ok" }
+    | { kind: "error"; error: Error }
+    | { kind: "hang" };
   /** The handshake capabilities the "daemon" advertises. Default: the
    * live pickup signal is there (jcode ≥ v0.94.0); a test drops it to
    * exercise the history reconcile an older daemon still needs. */
@@ -107,7 +122,11 @@ const state: {
   manualAccept: false,
   softInterruptError: null,
   setModelError: null,
+  setModelRefusals: 0,
+  listModels: () => Promise.resolve({ models: [] }),
   setEffortError: null,
+  setSessionEnvError: null,
+  contextCap: { kind: "ok" },
   capabilities: [SOFT_INTERRUPT_IDS_CAPABILITY],
   backgroundToolResult: { moved: false },
   bridges: [],
@@ -177,14 +196,42 @@ vi.mock("@1jehuang/jcode-sdk", () => {
     }
     setModel(sessionId: string, model: string) {
       record("setModel", sessionId, model);
+      if (state.setModelRefusals > 0) {
+        state.setModelRefusals -= 1;
+        return Promise.reject(
+          Object.assign(
+            new Error(
+              `invalid_request: Model ${model} not supported by Anthropic provider`,
+            ),
+            { code: "invalid_request" },
+          ),
+        );
+      }
       return state.setModelError
         ? Promise.reject(state.setModelError)
         : Promise.resolve();
+    }
+    listModels(sessionId: string) {
+      record("listModels", sessionId);
+      return state.listModels();
     }
     setReasoningEffort(sessionId: string, effort: string) {
       record("setReasoningEffort", sessionId, effort);
       return state.setEffortError
         ? Promise.reject(state.setEffortError)
+        : Promise.resolve();
+    }
+    setContextCap(sessionId: string, tokens: number | null) {
+      record("setContextCap", sessionId, tokens);
+      const cap = state.contextCap;
+      if (cap.kind === "error") return Promise.reject(cap.error);
+      if (cap.kind === "hang") return new Promise<number>(() => {});
+      return Promise.resolve(tokens ?? 200_000);
+    }
+    setSessionEnv(sessionId: string, env: Record<string, string>) {
+      record("setSessionEnv", sessionId, env);
+      return state.setSessionEnvError
+        ? Promise.reject(state.setSessionEnvError)
         : Promise.resolve();
     }
     sendMessage(sessionId: string, content: string) {
@@ -320,6 +367,9 @@ import {
   BACKGROUND_TOOL_RESULT_CAPABILITY,
   BUSY_DETECT_WINDOW_MS,
   BUSY_RESEND_DELAYS_MS,
+  CONTEXT_CAP_WAIT_MS,
+  MODEL_LIST_POLL_MS,
+  MODEL_LIST_WAIT_MS,
   ORPHAN_DRAIN_MIN_MS,
   POST_ACCEPT_IDLE_MS,
   SOFT_INTERRUPT_IDS_CAPABILITY,
@@ -328,6 +378,8 @@ import {
 } from "./jcode";
 
 const ORIGINAL_DELAYS = [...BUSY_RESEND_DELAYS_MS];
+const ORIGINAL_MODEL_LIST_WAIT_MS = MODEL_LIST_WAIT_MS.value;
+const ORIGINAL_MODEL_LIST_POLL_MS = MODEL_LIST_POLL_MS.value;
 const ORIGINAL_POST_ACCEPT_IDLE_MS = POST_ACCEPT_IDLE_MS.value;
 const ORIGINAL_ABORT_GRACE_MS = ABORT_TERMINAL_GRACE_MS.value;
 const ORIGINAL_BUSY_DETECT_WINDOW_MS = BUSY_DETECT_WINDOW_MS.value;
@@ -347,6 +399,7 @@ const startSession = async (options?: {
   resumeSessionRef?: string;
   harness?: ReturnType<typeof createJcodeHarness>;
   context?: { conversationId: string };
+  env?: Record<string, string>;
 }) => {
   const harness = options?.harness ?? createJcodeHarness();
   const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
@@ -358,6 +411,7 @@ const startSession = async (options?: {
       resumeSessionRef: options.resumeSessionRef,
     }),
     ...(options?.context && { context: options.context }),
+    ...(options?.env && { env: options.env }),
   });
   return { harness, session, homeDir };
 };
@@ -381,10 +435,18 @@ beforeEach(() => {
   state.manualAccept = false;
   state.softInterruptError = null;
   state.setModelError = null;
+  state.setModelRefusals = 0;
+  state.listModels = () => Promise.resolve({ models: [] });
   state.setEffortError = null;
+  state.setSessionEnvError = null;
+  state.contextCap = { kind: "ok" };
+  CONTEXT_CAP_WAIT_MS.value = 3_000;
   state.capabilities = [SOFT_INTERRUPT_IDS_CAPABILITY];
   state.backgroundToolResult = { moved: false };
   state.bridges = [];
+  // A fast model-list wait; afterEach restores the real bounds.
+  MODEL_LIST_WAIT_MS.value = 100;
+  MODEL_LIST_POLL_MS.value = 5;
   BUSY_DETECT_WINDOW_MS.value = 100;
   ORPHAN_DRAIN_MIN_MS.value = 20;
   delete process.env.ONECLI_JCODE_BINARY;
@@ -403,6 +465,8 @@ afterEach(() => {
     BUSY_RESEND_DELAYS_MS.length,
     ...ORIGINAL_DELAYS,
   );
+  MODEL_LIST_WAIT_MS.value = ORIGINAL_MODEL_LIST_WAIT_MS;
+  MODEL_LIST_POLL_MS.value = ORIGINAL_MODEL_LIST_POLL_MS;
   POST_ACCEPT_IDLE_MS.value = ORIGINAL_POST_ACCEPT_IDLE_MS;
   ABORT_TERMINAL_GRACE_MS.value = ORIGINAL_ABORT_GRACE_MS;
   BUSY_DETECT_WINDOW_MS.value = ORIGINAL_BUSY_DETECT_WINDOW_MS;
@@ -423,6 +487,22 @@ describe("the connection model", () => {
     expect(first.sessionRef).toBe("s-1");
     expect(second.sessionRef).toBe("s-2");
     expect(first.sessionRef).not.toBe(second.sessionRef);
+  });
+
+  it("prewarm launches the ONE instance ahead of any session, and the first session reuses it (no second launch, no connection opened early)", async () => {
+    const harness = createJcodeHarness();
+    const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+    harness.prewarm?.(homeDir);
+    harness.prewarm?.(homeDir);
+    await vi.waitFor(() => expect(state.launches).toHaveLength(1));
+    // The launch's managed files are already on the home.
+    expect(existsSync(join(homeDir, ".jcode", "system-prompt.md"))).toBe(true);
+    expect(state.connects).toHaveLength(0);
+
+    const session = await harness.startSession({ homeDir });
+    expect(session.sessionRef).toBe("s-1");
+    expect(state.launches).toHaveLength(1);
+    expect(state.connects).toHaveLength(1);
   });
 
   it("pins the launch env at the launchInstance boundary", async () => {
@@ -786,6 +866,132 @@ describe("applyPreferences honesty", () => {
     expect((notices[0] as { text: string }).text).toContain(
       "isn't available here",
     );
+    // It waited out the window for the model list, which never carried
+    // the model, then asked once more: jcode's last answer decides.
+    expect(callsOf("setModel")).toHaveLength(2);
+    expect(callsOf("listModels").length).toBeGreaterThan(1);
+  });
+
+  it("the model list race: a refusal that clears once the list loads earns NO notice", async () => {
+    // A fresh home refuses a valid model the platform offers until jcode's
+    // model list loads, which can take longer than a short backoff. The
+    // model is asked again only once the list carries it.
+    state.setModelRefusals = 1;
+    let reads = 0;
+    state.listModels = () => {
+      reads += 1;
+      return Promise.resolve({
+        models: reads < 3 ? ["claude-opus-5-5"] : ["claude-sonnet-5-5"],
+      });
+    };
+    const { session } = await startSession({ model: "claude-sonnet-5-5" });
+    expect(await noticesOf(session)).toHaveLength(0);
+    expect(callsOf("listModels")).toHaveLength(3);
+    const tries = callsOf("setModel");
+    expect(tries).toHaveLength(2);
+    expect(tries.at(-1)?.args[1]).toBe("claude-sonnet-5-5");
+  });
+
+  it("a model accepted at once never reads the model list", async () => {
+    const { session } = await startSession({ model: "claude-sonnet-5" });
+    expect(await noticesOf(session)).toHaveLength(0);
+    expect(callsOf("setModel")).toHaveLength(1);
+    expect(callsOf("listModels")).toHaveLength(0);
+  });
+
+  it("after the launch window, a refusal is final at once", async () => {
+    // The window is anchored to jcode's launch: a later session's list has
+    // long loaded, so a model it lacks earns the notice without a wait.
+    const harness = createJcodeHarness();
+    await startSession({ harness });
+    await new Promise((resolve) =>
+      setTimeout(resolve, MODEL_LIST_WAIT_MS.value + 20),
+    );
+    state.setModelError = Object.assign(new Error("invalid_request"), {
+      code: "invalid_request",
+    });
+    const { session } = await startSession({ harness, model: "nope-model" });
+    expect(await noticesOf(session)).toHaveLength(1);
+    expect(callsOf("setModel")).toHaveLength(1);
+    expect(callsOf("listModels")).toHaveLength(0);
+  });
+
+  it("a failed model-list read ends the wait: the last ask decides", async () => {
+    state.setModelRefusals = 1;
+    state.listModels = () =>
+      Promise.reject(
+        Object.assign(new Error("no reply to list_models"), {
+          code: "timeout",
+        }),
+      );
+    const { session } = await startSession({ model: "claude-sonnet-5-5" });
+    expect(await noticesOf(session)).toHaveLength(0);
+    expect(callsOf("listModels")).toHaveLength(1);
+    expect(callsOf("setModel")).toHaveLength(2);
+  });
+
+  it("the effort is set once, after the retried model lands", async () => {
+    state.setModelRefusals = 1;
+    state.listModels = () => Promise.resolve({ models: ["claude-sonnet-5-5"] });
+    const { session } = await startSession({
+      model: "claude-sonnet-5-5",
+      effort: "low",
+    });
+    expect(await noticesOf(session)).toHaveLength(0);
+    const preferenceCalls = state.calls
+      .filter(
+        (c) => c.method === "setModel" || c.method === "setReasoningEffort",
+      )
+      .map((c) => c.method);
+    expect(preferenceCalls).toEqual([
+      "setModel",
+      "setModel",
+      "setReasoningEffort",
+    ]);
+  });
+
+  it("a timeout after a refusal stops retrying without a notice", async () => {
+    state.setModelRefusals = 1;
+    state.listModels = () => Promise.resolve({ models: ["real-model"] });
+    state.setModelError = Object.assign(new Error("no reply"), {
+      code: "timeout",
+    });
+    const { session } = await startSession({ model: "real-model" });
+    expect(await noticesOf(session)).toHaveLength(0);
+    expect(state.calls.filter((c) => c.method === "setModel")).toHaveLength(2);
+  });
+
+  it("a daemon code other than invalid_request is never retried", async () => {
+    // Only a refused switch can clear while the model list loads. An unknown
+    // request or an internal fault is final: it earns its notice at once.
+    state.setModelError = Object.assign(new Error("internal"), {
+      code: "internal",
+    });
+    const { session } = await startSession({ model: "real-model" });
+    expect(await noticesOf(session)).toHaveLength(1);
+    expect(state.calls.filter((c) => c.method === "setModel")).toHaveLength(1);
+    expect(callsOf("listModels")).toHaveLength(0);
+  });
+
+  it("an effort refusal earns its notice on the first attempt", async () => {
+    // The effort is never retried: a refused level never becomes an
+    // accepted one, so a retry would only delay the same notice.
+    state.setEffortError = Object.assign(new Error("unsupported effort"), {
+      code: "invalid_request",
+    });
+    const { session } = await startSession({ effort: "low" });
+    const notices = await noticesOf(session);
+    expect(notices).toHaveLength(1);
+    expect(
+      state.calls.filter((c) => c.method === "setReasoningEffort"),
+    ).toHaveLength(1);
+  });
+
+  it("a dead channel during the retry still throws (never a quiet default)", async () => {
+    state.setModelRefusals = 1;
+    state.listModels = () => Promise.resolve({ models: ["m"] });
+    state.setModelError = new Error("socket ripped");
+    await expect(startSession({ model: "m" })).rejects.toThrow("socket ripped");
   });
 
   it("an SDK timeout is a DEFERRED op, not a refusal — no false notice", async () => {
@@ -805,6 +1011,63 @@ describe("applyPreferences honesty", () => {
     });
     const notices = await noticesOf(session);
     expect(notices).toHaveLength(0);
+    expect(state.calls.filter((c) => c.method === "setModel")).toHaveLength(1);
+    expect(
+      state.calls.filter((c) => c.method === "setReasoningEffort"),
+    ).toHaveLength(1);
+  });
+});
+
+describe("the session environment (the desktop that comes up after the harness)", () => {
+  it("a session started with `env` hands it to the daemon per session, after the preferences", async () => {
+    const { session } = await startSession({
+      model: "m",
+      env: { DISPLAY: ":1", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/bus" },
+    });
+    expect(callsOf("setSessionEnv")).toEqual([
+      {
+        method: "setSessionEnv",
+        args: [
+          session.sessionRef,
+          { DISPLAY: ":1", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/bus" },
+        ],
+      },
+    ]);
+    const order = state.calls.map((c) => c.method);
+    expect(order.indexOf("setModel")).toBeLessThan(
+      order.indexOf("setSessionEnv"),
+    );
+  });
+
+  it("no `env` (or an empty one) sends nothing: the daemon's launch env is the whole story", async () => {
+    await startSession();
+    await startSession({ env: {} });
+    expect(callsOf("setSessionEnv")).toEqual([]);
+  });
+
+  it("`setEnv` on a live session replaces the overlay for THAT session only", async () => {
+    const harness = createJcodeHarness();
+    const a = await startSession({ harness });
+    const b = await startSession({ harness });
+    await a.session.setEnv?.({ DISPLAY: ":1" });
+    expect(callsOf("setSessionEnv")).toEqual([
+      {
+        method: "setSessionEnv",
+        args: [a.session.sessionRef, { DISPLAY: ":1" }],
+      },
+    ]);
+    expect(a.session.sessionRef).not.toBe(b.session.sessionRef);
+  });
+
+  it("a daemon refusal is a warning, never a failed session or turn", async () => {
+    state.setSessionEnvError = Object.assign(new Error("invalid_request"), {
+      code: "invalid_request",
+    });
+    const { session } = await startSession({ env: { DISPLAY: ":1" } });
+    await expect(session.setEnv?.({ DISPLAY: ":2" })).resolves.toBeUndefined();
+    const events = await collect(session.runTurn({ message: "hello" }));
+    expect(events.filter((e) => e.type === "notice")).toEqual([]);
+    expect(events.at(-1)?.type).toBe("turn.done");
   });
 });
 
@@ -2336,4 +2599,381 @@ describe("message framing", () => {
 
     expect(events.filter((e) => e.type === "notice")).toHaveLength(1);
   }, 15_000);
+});
+
+describe("turn usage", () => {
+  /** One turn's usage, with the daemon reporting `provider` (model_info)
+   * on the session's connection first, as it does at create. */
+  const usageUnder = async (
+    provider: string | undefined,
+    frame: Record<string, unknown>,
+  ) => {
+    state.events = [{ ev: "token_usage", ...frame }, { ev: "turn_done" }];
+    const { session } = await startSession();
+    if (provider !== undefined) {
+      state.clients.at(-1)?.emitNamed("model_info", {
+        ev: "model_info",
+        provider,
+      });
+    }
+    const events = await collect(session.runTurn({ message: "hi" }));
+    const done = events.at(-1);
+    return done?.type === "turn.done" ? done.usage : undefined;
+  };
+
+  it("keeps every raw counter, and measures a Claude prompt as input plus both cache halves", async () => {
+    // Anthropic reports cache reads and writes APART from the input: the
+    // prompt is all three, and dropping the write half would read a full
+    // context as a small one.
+    expect(
+      await usageUnder("Claude", {
+        input: 12,
+        output: 300,
+        cache_read_input: 150_000,
+        cache_creation_input: 30_000,
+      }),
+    ).toEqual({
+      inputTokens: 12,
+      outputTokens: 300,
+      cacheReadInputTokens: 150_000,
+      cacheCreationInputTokens: 30_000,
+      promptTokens: 180_012,
+    });
+  });
+
+  it("measures an OpenAI prompt as the input alone: its cache counters are inside it", async () => {
+    // Live shape at p136 (gpt-5.4): input 12464, of which 11904 cached.
+    expect(
+      await usageUnder("OpenAI", {
+        input: 12_464,
+        output: 16,
+        cache_read_input: 11_904,
+        cache_creation_input: 0,
+      }),
+    ).toMatchObject({ inputTokens: 12_464, promptTokens: 12_464 });
+  });
+
+  it("an unknown provider, or none reported, carries no measured prompt", async () => {
+    for (const provider of [undefined, "Gemini"]) {
+      const usage = await usageUnder(provider, {
+        input: 40,
+        output: 5,
+        cache_read_input: 900,
+      });
+      expect(usage).toMatchObject({ inputTokens: 40, outputTokens: 5 });
+      expect(usage).not.toHaveProperty("promptTokens");
+    }
+  });
+
+  it("follows a model switch: the latest provider the daemon reported counts", async () => {
+    state.events = [
+      { ev: "token_usage", input: 1_000, output: 1, cache_read_input: 900 },
+      { ev: "turn_done" },
+    ];
+    const { session } = await startSession();
+    state.clients[0]?.emitNamed("model_info", { provider: "Claude" });
+    state.clients[0]?.emitNamed("model_info", { provider: "OpenAI" });
+    const events = await collect(session.runTurn({ message: "hi" }));
+    expect(events.at(-1)).toMatchObject({ usage: { promptTokens: 1_000 } });
+  });
+});
+
+describe("a turn that ends unanswered (jcode's turn_stopped)", () => {
+  /** The frames the pinned bridge sends for a refusal, in its order: the
+   * call's usage, the stop with the provider's reason, then an ordinary
+   * `turn_done` (translate.rs emits TurnStopped before TurnDone). */
+  const refusalFrames = (stopReason = "refusal") => [
+    { ev: "token_usage", input: 41, output: 0 },
+    {
+      ev: "turn_stopped",
+      session_id: "s",
+      reason: "provider_guardrail",
+      message: `Provider guardrail stopped the response (stop_reason: ${stopReason}). The model declined to answer this request.`,
+      provider_stop_reason: stopReason,
+    },
+    { ev: "turn_done" },
+  ];
+
+  it("yields turn.unanswered (model_refused) just before a clean turn.done that keeps its usage", async () => {
+    state.events = refusalFrames();
+    const { session } = await startSession();
+
+    const events = await collect(session.runTurn({ message: "hey" }));
+
+    const unanswered = events.filter((e) => e.type === "turn.unanswered");
+    expect(unanswered).toEqual([
+      {
+        type: "turn.unanswered",
+        code: "model_refused",
+        message: expect.stringContaining("declined to answer"),
+      },
+    ]);
+    // Immediately ahead of the terminal, which stays an ordinary clean end:
+    // the supervisor decides what the turn's outcome is.
+    expect(events.at(-2)?.type).toBe("turn.unanswered");
+    expect(events.at(-1)).toMatchObject({
+      type: "turn.done",
+      usage: { inputTokens: 41, outputTokens: 0 },
+    });
+  });
+
+  it("an empty response with no safety stop reads as model_empty_response", async () => {
+    state.events = [
+      {
+        ev: "turn_stopped",
+        session_id: "s",
+        reason: "provider_guardrail",
+        message:
+          "The model ended its turn without any visible output (stop_reason: end_turn).",
+        provider_stop_reason: "end_turn",
+      },
+      { ev: "turn_done" },
+    ];
+    const { session } = await startSession();
+
+    const events = await collect(session.runTurn({ message: "hey" }));
+
+    expect(events.find((e) => e.type === "turn.unanswered")).toMatchObject({
+      code: "model_empty_response",
+    });
+    expect(events.at(-1)?.type).toBe("turn.done");
+  });
+
+  it("other stop reasons yield nothing new: the turn ends exactly as before", async () => {
+    state.events = [
+      { ev: "text_delta", text: "partial answer" },
+      {
+        ev: "turn_stopped",
+        session_id: "s",
+        reason: "limit_reached",
+        message: "The provider stopped with max_tokens.",
+        provider_stop_reason: "max_tokens",
+      },
+      { ev: "turn_done" },
+    ];
+    const { session } = await startSession();
+
+    const events = await collect(session.runTurn({ message: "hey" }));
+
+    expect(events.some((e) => e.type === "turn.unanswered")).toBe(false);
+    expect(events.at(-1)?.type).toBe("turn.done");
+  });
+
+  it("a safety stop AFTER visible words is not reported: the reply was cut short, not withheld", async () => {
+    // jcode raises the stop on the stop reason alone, words or not. The
+    // person got words, so the turn keeps them as its answer.
+    state.events = [
+      { ev: "text_delta", text: "Here is what I can share.", message_id: "m1" },
+      ...refusalFrames(),
+    ];
+    const { session } = await startSession();
+
+    const events = await collect(session.runTurn({ message: "hey" }));
+
+    expect(events.some((e) => e.type === "turn.unanswered")).toBe(false);
+    expect(events.at(-1)?.type).toBe("turn.done");
+  });
+
+  it("words BEFORE a tool call do not count: the closing stretch was empty", async () => {
+    // Narration, a tool, then a refusal with nothing after it: the
+    // answer the person is owed (the words after the last tool) is empty.
+    state.events = [
+      { ev: "text_delta", text: "Let me look.", message_id: "m1" },
+      { ev: "tool_start", call_id: "c1", name: "bash" },
+      { ev: "tool_done", call_id: "c1", name: "bash", output: "ok" },
+      ...refusalFrames(),
+    ];
+    const { session } = await startSession();
+
+    const events = await collect(session.runTurn({ message: "hey" }));
+
+    expect(events.find((e) => e.type === "turn.unanswered")).toMatchObject({
+      code: "model_refused",
+    });
+  });
+
+  it("words a correction retracted do not count: nothing visible stands", async () => {
+    state.events = [
+      { ev: "text_delta", text: "partial attempt", message_id: "m1" },
+      { ev: "text_replace", text: "", message_id: "m1" },
+      ...refusalFrames(),
+    ];
+    const { session } = await startSession();
+
+    const events = await collect(session.runTurn({ message: "hey" }));
+
+    expect(events.find((e) => e.type === "turn.unanswered")).toMatchObject({
+      code: "model_refused",
+    });
+  });
+
+  it("whitespace is not words", async () => {
+    state.events = [
+      { ev: "text_delta", text: "\n  \n", message_id: "m1" },
+      ...refusalFrames(),
+    ];
+    const { session } = await startSession();
+
+    const events = await collect(session.runTurn({ message: "hey" }));
+
+    expect(events.some((e) => e.type === "turn.unanswered")).toBe(true);
+  });
+
+  it("a second stop frame in the same turn is not reported twice", async () => {
+    state.events = [...refusalFrames().slice(0, 2), ...refusalFrames()];
+    const { session } = await startSession();
+
+    const events = await collect(session.runTurn({ message: "hey" }));
+
+    expect(events.filter((e) => e.type === "turn.unanswered")).toHaveLength(1);
+  });
+
+  it("a foreign run's refusal before our fence is quarantined, never this turn's outcome", async () => {
+    // An orphan or self-wake run refused while our send waited behind it:
+    // its stop frame is another run's, like its text and its terminal.
+    state.events = [];
+    state.manualAccept = true;
+    const { session } = await startSession();
+    const iterator = session
+      .runTurn({ message: "task" })
+      [Symbol.asyncIterator]();
+    await iterator.next(); // turn.started
+
+    const client = state.clients[0];
+    client?.push({
+      ev: "turn_stopped",
+      session_id: client.sessionId,
+      reason: "provider_guardrail",
+      message: "foreign refusal",
+      provider_stop_reason: "refusal",
+    });
+    client?.push({ ev: "turn_done" });
+    // Our turn spawns and answers.
+    client?.push({ ev: "message_accepted", session_id: client.sessionId });
+    client?.push({ ev: "text_delta", text: "ours" });
+    client?.push({ ev: "turn_done" });
+
+    const events: HarnessEvent[] = [];
+    let next = await iterator.next();
+    while (!next.done) {
+      events.push(next.value);
+      next = await iterator.next();
+    }
+
+    expect(events.some((e) => e.type === "turn.unanswered")).toBe(false);
+    expect(events.at(-1)?.type).toBe("turn.done");
+    expect(
+      events.some((e) => e.type === "text.delta" && e.text === "ours"),
+    ).toBe(true);
+  }, 15_000);
+
+  it("a refusal that lands after a Stop is not reported: the person ended this turn", async () => {
+    // The Stop must land while the LIVE loop runs (past the settle phase),
+    // or the settle phase's own abort check ends the turn before any frame
+    // is read and this pin proves nothing.
+    state.events = [];
+    state.manualAccept = true;
+    const { session } = await startSession();
+    const iterator = session
+      .runTurn({ message: "task" })
+      [Symbol.asyncIterator]();
+    await iterator.next(); // turn.started
+
+    const client = state.clients[0];
+    client?.push({ ev: "message_accepted", session_id: client.sessionId });
+    client?.push({ ev: "text_delta", text: "working on it" });
+    const events: HarnessEvent[] = [];
+    // Read up to the delta: the settle window has closed and the live loop
+    // owns the stream.
+    for (;;) {
+      const next = await iterator.next();
+      if (next.done) throw new Error("turn ended before the live loop");
+      events.push(next.value);
+      if (next.value.type === "text.delta") break;
+    }
+
+    await session.abort();
+    for (const frame of refusalFrames()) client?.push(frame);
+
+    let next = await iterator.next();
+    while (!next.done) {
+      events.push(next.value);
+      next = await iterator.next();
+    }
+
+    expect(events.some((e) => e.type === "turn.unanswered")).toBe(false);
+    expect(events.at(-1)?.type).toBe("turn.done");
+  }, 15_000);
+});
+
+describe("the context size", () => {
+  const capCalls = () =>
+    callsOf("setContextCap").map(({ args }) => ({
+      session: args[0],
+      tokens: args[1],
+    }));
+
+  it("sets the platform's size on THIS session before the message, then skips an unchanged one", async () => {
+    const { session } = await startSession();
+    await collect(
+      session.runTurn({ message: "first", contextTokens: 1_000_000 }),
+    );
+
+    // Always with the session id: the id-less form hangs on an open session.
+    expect(capCalls()).toEqual([
+      { session: session.sessionRef, tokens: 1_000_000 },
+    ]);
+    const order = state.calls.map((c) => c.method);
+    expect(order.indexOf("setContextCap")).toBeLessThan(
+      order.indexOf("sendMessage"),
+    );
+
+    await collect(
+      session.runTurn({ message: "second", contextTokens: 1_000_000 }),
+    );
+    expect(capCalls()).toHaveLength(1);
+  });
+
+  it("a changed size is set again; no size at all sets nothing", async () => {
+    const { session } = await startSession();
+    await collect(session.runTurn({ message: "a", contextTokens: 200_000 }));
+    await collect(session.runTurn({ message: "b", contextTokens: 100_000 }));
+    await collect(session.runTurn({ message: "c" }));
+
+    expect(capCalls().map((c) => c.tokens)).toEqual([200_000, 100_000]);
+  });
+
+  it("a refusal never costs the turn, and the next turn tries again", async () => {
+    state.contextCap = {
+      kind: "error",
+      error: Object.assign(new Error("invalid_request"), {
+        code: "invalid_request",
+      }),
+    };
+    const { session } = await startSession();
+    const events = await collect(
+      session.runTurn({ message: "hi", contextTokens: 1_000_000 }),
+    );
+    expect(events.at(-1)?.type).toBe("turn.done");
+
+    state.contextCap = { kind: "ok" };
+    await collect(
+      session.runTurn({ message: "again", contextTokens: 1_000_000 }),
+    );
+    expect(capCalls()).toHaveLength(2);
+  });
+
+  it("a daemon that never answers holds the turn only for the bound", async () => {
+    state.contextCap = { kind: "hang" };
+    CONTEXT_CAP_WAIT_MS.value = 50;
+    const { session } = await startSession();
+
+    const started = Date.now();
+    const events = await collect(
+      session.runTurn({ message: "hi", contextTokens: 1_000_000 }),
+    );
+    expect(events.at(-1)?.type).toBe("turn.done");
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(callsOf("sendMessage")).toHaveLength(1);
+  }, 10_000);
 });

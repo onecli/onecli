@@ -52,7 +52,8 @@ vi.mock("@/hooks/use-evals", () => ({
   }),
   useSaveEvalSchedule: () => ({ mutate: vi.fn(), isPending: false }),
   useDeleteEvalSchedule: () => ({ mutate: vi.fn(), isPending: false }),
-  useStartEvalRun: () => ({ mutate: vi.fn(), isPending: false }),
+  useRunEvalScheduleNow: () => ({ mutate: vi.fn(), isPending: false }),
+  useEvalReportChannels: () => ({ data: [], isSuccess: true }),
 }));
 
 vi.mock("next/navigation", () => ({
@@ -261,8 +262,10 @@ describe("actions", () => {
     renderSection();
     await userEvent.click(screen.getByRole("button", { name: /New schedule/ }));
     expect(screen.getByRole("dialog")).toBeInTheDocument();
-    const tz = screen.getByLabelText("Timezone") as HTMLInputElement;
-    expect(tz.value).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
+    await userEvent.click(screen.getByRole("button", { name: /Advanced/ }));
+    expect(screen.getByLabelText("Timezone")).toHaveTextContent(
+      Intl.DateTimeFormat().resolvedOptions().timeZone.replace(/_/g, " "),
+    );
   });
 });
 
@@ -275,6 +278,8 @@ describe("the eval schedule", () => {
     nextFireAt: "2026-10-12T06:00:00.000Z",
     lastFiredAt: null,
     lastOutcome: "started",
+    createdByViewer: true,
+    report: null,
   };
 
   it("is listed with the agent's schedules, with the cron row's controls", () => {
@@ -282,10 +287,11 @@ describe("the eval schedule", () => {
     renderSection();
     expect(screen.queryByText("No schedules yet")).not.toBeInTheDocument();
     expect(screen.getByText("Run evals")).toBeInTheDocument();
-    // Same words as the cron rows beside it (one describer).
+    // Same words as the cron rows beside it (one describer); the
+    // expression and zone are a hover away.
     expect(screen.getByText("Every day at 09:00")).toHaveAttribute(
       "title",
-      "Asia/Jerusalem",
+      "0 9 * * * · Asia/Jerusalem",
     );
     expect(screen.getByText("Never yet")).toBeInTheDocument();
     expect(
@@ -353,6 +359,20 @@ describe("the eval schedule", () => {
     expect(screen.getByText("Paused")).toHaveAttribute(
       "title",
       expect.stringMatching(/no longer has access/),
+    );
+  });
+
+  it("reads a one-shot as its date, and says where results reach a teammate", () => {
+    state.evalSchedule = {
+      ...evalSchedule,
+      schedule: "2026-11-05T09:00:00",
+      createdByViewer: false,
+      report: { to: "chat", when: "always" },
+    };
+    renderSection();
+    expect(screen.getByText(/^Once, /)).toHaveAttribute(
+      "title",
+      "2026-11-05T09:00:00 · Asia/Jerusalem · Results to a teammate's chat",
     );
   });
 

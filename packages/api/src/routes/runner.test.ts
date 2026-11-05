@@ -45,6 +45,7 @@ const services = vi.hoisted(() => ({
   retireReplica: vi.fn(),
   isReplicaRetired: vi.fn(),
   buildTurnContext: vi.fn(),
+  deliveredContextTokens: vi.fn(),
   fireDueCrons: vi.fn(),
   fireDueEvalSchedules: vi.fn(),
   fireDueWatches: vi.fn(),
@@ -150,6 +151,10 @@ vi.mock("../services/turn-context-service", () => ({
   buildTurnContext: services.buildTurnContext,
 }));
 
+vi.mock("../services/llm-credential-service", () => ({
+  deliveredContextTokens: services.deliveredContextTokens,
+}));
+
 vi.mock("../services/cron-fire-service", () => ({
   fireDueCrons: services.fireDueCrons,
 }));
@@ -238,6 +243,9 @@ beforeEach(() => {
   services.replicaUpdateMany.mockResolvedValue({ count: 0 });
   services.claimDueWork.mockResolvedValue([]);
   services.buildTurnContext.mockResolvedValue(null);
+  services.deliveredContextTokens.mockImplementation(
+    (_agentId: string, chosen: number | undefined) => Promise.resolve(chosen),
+  );
   // The sweeps return what they killed so the poll can settle it.
   services.reclaimStaleTurns.mockResolvedValue([]);
   services.failStalledTurns.mockResolvedValue([]);
@@ -503,6 +511,51 @@ describe("POST /v1/runner/work", () => {
 
     expect(await res.json()).toEqual({ items: [] });
     expect(services.releaseClaim).toHaveBeenCalledWith("sb-gone", "r-1");
+  });
+
+  it("a delivered turn carries the conversation's size, clamped by the credential, and a failed lookup never blocks it", async () => {
+    const due = (turnId: string, contextTokens?: number) => ({
+      kind: "turn" as const,
+      turnId,
+      conversationId: "conv-1",
+      sandboxId: "sb-1",
+      agentId: "ag-1",
+      message: "go",
+      resumeSessionRef: null,
+      ...(contextTokens !== undefined && { contextTokens }),
+    });
+    const deliverOnce = async () => {
+      const res = await app.request("/v1/runner/work", {
+        method: "POST",
+        headers: RUNNER_AUTH,
+        body: JSON.stringify({}),
+      });
+      return ((await res.json()) as { items: Record<string, unknown>[] }).items;
+    };
+
+    // Clamped: the credential's limit wins over the chosen 1M.
+    services.claimDueWork.mockResolvedValueOnce([due("t-1", 1_000_000)]);
+    services.deliveredContextTokens.mockResolvedValueOnce(200_000);
+    expect(await deliverOnce()).toMatchObject([
+      { kind: "turn.deliver", turnId: "t-1", contextTokens: 200_000 },
+    ]);
+    expect(services.deliveredContextTokens).toHaveBeenLastCalledWith(
+      "ag-1",
+      1_000_000,
+    );
+
+    // No size of its own: nothing on the wire.
+    services.claimDueWork.mockResolvedValueOnce([due("t-2")]);
+    const [plain] = await deliverOnce();
+    expect(plain).toMatchObject({ kind: "turn.deliver", turnId: "t-2" });
+    expect(plain).not.toHaveProperty("contextTokens");
+
+    // The lookup throws: the turn still ships, with no size.
+    services.claimDueWork.mockResolvedValueOnce([due("t-3", 1_000_000)]);
+    services.deliveredContextTokens.mockRejectedValueOnce(new Error("db down"));
+    const [shipped] = await deliverOnce();
+    expect(shipped).toMatchObject({ kind: "turn.deliver", turnId: "t-3" });
+    expect(shipped).not.toHaveProperty("contextTokens");
   });
 
   it("a delivered turn carries the memory context when the builder has one", async () => {

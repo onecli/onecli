@@ -20,7 +20,9 @@
  * harness carries no code and keeps its raw error.
  *
  * - `agent_restarted`: the harness died AFTER the turn's stream opened —
- *   observable work may exist, so the failure must stay visible.
+ *   observable work may exist, so the control plane's recovery is visible:
+ *   it resumes the turn once in its own session, telling both the person
+ *   and the agent, and a second death closes it with the restart copy.
  * - `agent_start_failed`: the harness died BEFORE the stream opened — nothing
  *   observable happened, which is what makes the control plane's invisible
  *   one-shot revival safe.
@@ -84,6 +86,29 @@
  *   (restarting, upstream unreachable or timed out). Temporary.
  *   All four are classified from the gateway's coded JSON body, never from
  *   prose, and keep the raw message beside them like `harness_busy`.
+ * - `home_read_only`: the agent's durable home went read-only under it (a
+ *   home mounted `errors=remount-ro` freezes every later write after one
+ *   failed write to its storage, until a fresh boot
+ *   remounts it). Nothing the harness or the person can do fixes it in
+ *   place; a restart does. Classified by the supervisor, from its own mount
+ *   check (`home/read-only-watch.ts`) or from the harness's raw `EROFS`
+ *   text; the raw message rides beside it.
+ * - `model_refused`: the harness lived and the provider answered, but the
+ *   MODEL declined (a provider safety stop, such as Anthropic's `refusal`
+ *   stop reason) and wrote nothing visible. The run ends cleanly, so
+ *   without this code the turn closed `done` with no answer: silence. The
+ *   conversation's whole history rides every request, so something earlier
+ *   in it can keep provoking the refusal; the copy names rephrasing, a
+ *   fresh start, and another model.
+ * - `model_empty_response`: the same clean end with nothing visible, but
+ *   with no safety stop behind it (an empty or reasoning-only response the
+ *   harness's own retries could not recover). Usually a transient upstream
+ *   problem, so the copy says send it again.
+ *   Both are minted by the ADAPTER from the harness's own stop signal
+ *   (never from model text), carried to the supervisor by the harness-only
+ *   `turn.unanswered` event, and close the turn `failed` so every surface
+ *   says something. Same version-skew posture as `harness_busy`: the
+ *   harness's own explanation rides beside the code as the raw error.
  */
 export const TURN_FAILURE_CODES = {
   agentRestarted: "agent_restarted",
@@ -98,6 +123,9 @@ export const TURN_FAILURE_CODES = {
   modelKeyUnreadable: "model_key_unreadable",
   blockedByPolicy: "blocked_by_policy",
   gatewayUnavailable: "gateway_unavailable",
+  homeReadOnly: "home_read_only",
+  modelRefused: "model_refused",
+  modelEmptyResponse: "model_empty_response",
 } as const;
 export type TurnFailureCode =
   (typeof TURN_FAILURE_CODES)[keyof typeof TURN_FAILURE_CODES];

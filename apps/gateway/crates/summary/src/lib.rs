@@ -45,6 +45,7 @@ mod google_drive;
 mod google_sheets;
 mod graphql;
 mod heyreach;
+mod json_prefix;
 mod nested;
 mod onedrive;
 /// What an approved request actually did (see `outcome.rs`).
@@ -65,6 +66,9 @@ pub use redact::{is_sensitive_key, is_url_credential, mask_secrets};
 
 /// Max length of any single detail value shown to the approver.
 pub const MAX_VALUE_LEN: usize = 240;
+/// Max length of a detail's label. Usually a short field name; a row that
+/// names an item by its own name (a file being uploaded) stays bounded too.
+pub(crate) const MAX_LABEL_LEN: usize = 120;
 /// Max length of a rendered body / generic-fallback value.
 pub const MAX_BODY_LEN: usize = 500;
 /// Max length of the whole rendered text block (kept well under chat limits).
@@ -194,7 +198,7 @@ impl ApprovalSummary {
             return;
         }
         self.details.push(ApprovalDetail {
-            label: label.into(),
+            label: one_line(&label.into(), MAX_LABEL_LEN),
             value,
             url: None,
         });
@@ -225,7 +229,7 @@ impl ApprovalSummary {
             named,
         });
         self.details.push(ApprovalDetail {
-            label: label.into(),
+            label: one_line(&label.into(), MAX_LABEL_LEN),
             value: clamp(&shown.into(), MAX_VALUE_LEN),
             url: None,
         });
@@ -377,6 +381,15 @@ pub fn record_resolver(provider: &str) -> Option<&'static dyn RecordResolver> {
 #[must_use]
 pub fn reads_whole_body(provider: &str, method: &str, path: &str) -> bool {
     provider == "salesforce" && salesforce::reads_whole_body(method, path)
+}
+
+/// Whether this request may upload several files at once (a Salesforce
+/// sObject Collections create, whose records may each carry a whole file
+/// as base64), so its whole-body read needs room for megabytes. Only its
+/// body says whether it really is one.
+#[must_use]
+pub fn may_upload_files(provider: &str, method: &str, path: &str) -> bool {
+    provider == "salesforce" && salesforce::may_upload_files(method, path)
 }
 
 /// Build a human-readable summary for a held request.

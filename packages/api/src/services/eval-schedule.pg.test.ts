@@ -152,13 +152,18 @@ describe.skipIf(!url)("eval schedules on PostgreSQL", () => {
       schedule: "30 7 * * 1-5",
     });
     expect(await db.agentEvalSchedule.count({ where: { agentId } })).toBe(1);
+    const read = await schedules.getEvalSchedule(workspaceId, agentId, userId);
+    expect(read?.schedule).toBe("30 7 * * 1-5");
+    // Whose chat results reach is answered per viewer, never by id.
+    expect(read).toMatchObject({ createdByViewer: true });
+    expect(read).not.toHaveProperty("createdByUserId");
     expect(
-      (await schedules.getEvalSchedule(workspaceId, agentId))?.schedule,
-    ).toBe("30 7 * * 1-5");
+      await schedules.getEvalSchedule(workspaceId, agentId, "someone-else"),
+    ).toMatchObject({ createdByViewer: false });
 
     // Negative controls: the agent read through another workspace.
     await expect(
-      schedules.getEvalSchedule(otherWorkspaceId, agentId),
+      schedules.getEvalSchedule(otherWorkspaceId, agentId, userId),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
     await expect(
       schedules.saveEvalSchedule(otherWorkspaceId, agentId, userId, daily),
@@ -166,7 +171,14 @@ describe.skipIf(!url)("eval schedules on PostgreSQL", () => {
     await expect(
       schedules.deleteEvalSchedule(otherWorkspaceId, agentId),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(
+      fire.runEvalScheduleNow(otherWorkspaceId, agentId),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(
+      schedules.listEvalReportChannels(otherWorkspaceId, agentId),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
     expect(await db.agentEvalSchedule.count({ where: { agentId } })).toBe(1);
+    expect(await db.agentEvalRun.count({ where: { agentId } })).toBe(0);
   });
 
   it("refuses an expression or timezone croner cannot use", async () => {
@@ -406,16 +418,59 @@ describe.skipIf(!url)("eval schedules on PostgreSQL", () => {
     }
   });
 
-  it("run now pulls the next fire to now; it refuses a paused schedule", async () => {
+  it("run now starts a scheduled run at once, as the creator; it refuses a paused schedule and a second run", async () => {
     await schedules.saveEvalSchedule(workspaceId, agentId, userId, daily);
-    const now = await schedules.runEvalScheduleNow(workspaceId, agentId);
-    expect(now.nextFireAt.getTime()).toBeLessThanOrEqual(Date.now());
+    await addQuestion();
+    const before = await db.agentEvalSchedule.findUniqueOrThrow({
+      where: { agentId },
+      select: { nextFireAt: true, lastFiredAt: true },
+    });
+    expect(before.lastFiredAt).toBeNull();
+    // Hold the worker so the run is still active for the second press.
+    let release = () => {};
+    runner.createConversation.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          release = () => reject(new Error("proof: released"));
+        }),
+    );
+    const run = await fire.runEvalScheduleNow(workspaceId, agentId);
+    expect(run).toMatchObject({ trigger: "scheduled" });
+    expect(
+      await db.agentEvalRun.findUniqueOrThrow({
+        where: { id: run.id },
+        select: { createdByUserId: true },
+      }),
+    ).toEqual({ createdByUserId: userId });
+    // The timed occurrence is untouched; "last run" names this one.
+    expect(
+      await db.agentEvalSchedule.findUniqueOrThrow({
+        where: { agentId },
+        select: { nextFireAt: true, lastOutcome: true, lastFiredAt: true },
+      }),
+    ).toEqual({
+      nextFireAt: before.nextFireAt,
+      lastOutcome: "started",
+      lastFiredAt: run.createdAt,
+    });
+    await expect(
+      fire.runEvalScheduleNow(workspaceId, agentId),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    release();
+    // The question scores an error and the run finishes.
+    await vi.waitFor(async () => {
+      expect(
+        (await db.agentEvalRun.findUniqueOrThrow({ where: { id: run.id } }))
+          .status,
+      ).not.toMatch(/queued|running/);
+    });
+
     await schedules.saveEvalSchedule(workspaceId, agentId, userId, {
       ...daily,
       enabled: false,
     });
     await expect(
-      schedules.runEvalScheduleNow(workspaceId, agentId),
+      fire.runEvalScheduleNow(workspaceId, agentId),
     ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
   });
 });

@@ -148,9 +148,15 @@ export const adapterDecisionSchema = z
     presenceId: z.string().trim().min(1),
     approvalId: z.string().trim().min(1).max(500),
     decision: z.enum(["approve", "deny"]),
+    // "Approve similar" qualifies an approve only.
+    scope: z.literal("similar").optional(),
     clickerExternalUserId: z.string().trim().min(1).max(200),
   })
-  .strict();
+  .strict()
+  .refine((body) => !body.scope || body.decision === "approve", {
+    message: "scope requires decision approve",
+    path: ["scope"],
+  });
 
 /** POST /channel-adapter/group-decision - a grouped approval card's click
  * (Approve all / Deny all / one row). The shared wire schema, made strict

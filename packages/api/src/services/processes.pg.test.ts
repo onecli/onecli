@@ -380,6 +380,132 @@ describe.skipIf(!PROOF_URL)("fencing", () => {
       ).originConversationId,
     ).toBe(own.id);
   });
+
+  /**
+   * A scheduled run that starts long work and watches it (Dashi's routine:
+   * a 40-minute compare, then the PR) reports what the watch finds. The run
+   * itself lives in a hidden conversation, so the work anchors to the chat
+   * the schedule reports to. Before, it anchored to nothing, and the PR
+   * link was kept only as the run's record.
+   */
+  describe("work started by an automation run", () => {
+    const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+    const watchFrame = (ref: string) => ({
+      ref,
+      kind: "exit",
+      prompt: "report",
+      status: "armed",
+      expiresAt,
+    });
+    const cronRun = async (
+      agentId: string,
+      origin: string | null,
+      suffix: string,
+    ) => {
+      const cron = await db.agentCron.create({
+        data: {
+          agentId,
+          name: `${P}${suffix}`,
+          prompt: "do it",
+          schedule: "0 9 * * *",
+          timezone: "UTC",
+          nextFireAt: new Date(Date.now() + 86_400_000),
+          originConversationId: origin,
+          createdByUserId: USER,
+        },
+        select: { id: true },
+      });
+      return db.conversation.create({
+        data: { agentId, source: "cron", externalRef: cron.id },
+        select: { id: true },
+      });
+    };
+    const anchorOf = async (sb: string, ref: string) => {
+      const proc = await db.sandboxProcess.findUniqueOrThrow({
+        where: { sandboxId_ref: { sandboxId: sb, ref } },
+        select: {
+          originConversationId: true,
+          createdByUserId: true,
+          watches: {
+            select: { originConversationId: true, createdByUserId: true },
+          },
+        },
+      });
+      return proc;
+    };
+
+    it("anchors to the chat the schedule reports to, with no creator", async () => {
+      const agentId = await seedAgent("cron-anchor");
+      const sb = await seedSandbox("cron-anchor", agentId, "running", {
+        containerRef: "c",
+      });
+      const dm = await db.conversation.create({
+        data: { agentId, source: "slack", direct: true, userId: USER },
+        select: { id: true },
+      });
+      const run = await cronRun(agentId, dm.id, "cron-anchor");
+      const runTurn = await db.turn.create({
+        data: { conversationId: run.id, source: "cron", message: "go" },
+        select: { id: true },
+      });
+      await processes.applyProcessState(
+        RUNNER_A,
+        stateEvent(sb, "c", {
+          ref: "compare",
+          conversationId: run.id,
+          turnId: runTurn.id,
+          watches: [
+            {
+              ...watchFrame("w-compare"),
+              conversationId: run.id,
+              turnId: runTurn.id,
+            },
+          ],
+        }),
+      );
+      const row = await anchorOf(sb, "compare");
+      // MUTATION-PROOF: restore the old refusal (return no anchor for an
+      // automation conversation) and both anchors read null.
+      expect(row.originConversationId).toBe(dm.id);
+      expect(row.watches).toEqual([
+        { originConversationId: dm.id, createdByUserId: null },
+      ]);
+      // Nobody typed a scheduled run: it never borrows a person's standing.
+      expect(row.createdByUserId).toBeNull();
+    });
+
+    it("never anchors to a hidden run, a schedule with no chat, or another agent's chat", async () => {
+      const agentId = await seedAgent("cron-anchor-no");
+      const other = await seedAgent("cron-anchor-other");
+      const sb = await seedSandbox("cron-anchor-no", agentId, "running", {
+        containerRef: "c",
+      });
+      const noChat = await cronRun(agentId, null, "cron-nochat");
+      // A schedule whose origin is itself a hidden run (a cron created by a
+      // cron): the anchor must not chain into another hidden thread.
+      const hidden = await cronRun(agentId, null, "cron-hidden");
+      const chained = await cronRun(agentId, hidden.id, "cron-chained");
+      // A schedule pointing at a chat of a DIFFERENT agent.
+      const foreignChat = await db.conversation.create({
+        data: { agentId: other, source: "web", direct: true, userId: USER },
+        select: { id: true },
+      });
+      const foreign = await cronRun(agentId, foreignChat.id, "cron-foreign");
+
+      for (const [ref, run] of [
+        ["no-chat", noChat],
+        ["chained", chained],
+        ["foreign", foreign],
+      ] as const) {
+        await processes.applyProcessState(
+          RUNNER_A,
+          stateEvent(sb, "c", { ref, conversationId: run.id }),
+        );
+        const row = await anchorOf(sb, ref);
+        expect(row.originConversationId, ref).toBeNull();
+      }
+    });
+  });
 });
 
 describe.skipIf(!PROOF_URL)("the state machine", () => {

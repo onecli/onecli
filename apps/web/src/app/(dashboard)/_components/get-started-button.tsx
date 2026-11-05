@@ -14,7 +14,7 @@ import {
   WORKSPACE_PATH_RE,
   readDefaultOrgCookie,
 } from "@/lib/navigation";
-import { useAgents } from "@/hooks/use-agents";
+import { useAgents, useWarmAgent } from "@/hooks/use-agents";
 import {
   firstHostedAgent,
   getStartedPath,
@@ -40,6 +40,12 @@ export const GetStartedButton = () => {
   const workspaceId = WORKSPACE_PATH_RE.exec(pathname)?.[1];
   const { data: agents = [] } = useAgents(Boolean(workspaceId));
   const existing = workspaceId ? firstHostedAgent(agents) : undefined;
+  // A hover or a focus on "Chat" is the earliest sign the person is heading
+  // for the agent: warm its machine then, so the chat they land on a moment
+  // later finds it awake. Fire-and-forget; one request per agent per page
+  // load (the hook dedupes).
+  const warm = useWarmAgent();
+  const warmExisting = () => warm(existing);
 
   const handleClick = () => {
     const orgScoped = ORG_PATH_RE.exec(pathname)?.[1];
@@ -70,7 +76,13 @@ export const GetStartedButton = () => {
     <>
       <Tooltip>
         <TooltipTrigger asChild>
-          <Button variant="brand" size="sm" onClick={handleClick}>
+          <Button
+            variant="brand"
+            size="sm"
+            onClick={handleClick}
+            onMouseEnter={warmExisting}
+            onFocus={warmExisting}
+          >
             {existing ? (
               <MessageSquare className="size-3.5" />
             ) : (

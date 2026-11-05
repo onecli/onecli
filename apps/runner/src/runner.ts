@@ -218,6 +218,22 @@ export interface Runner {
   /** One reconcile pass against the control plane's sandbox list. */
   reconcile(): Promise<void>;
   /**
+   * The machine the backend last reported a sandbox on (its reconcile
+   * snapshot), for the read-only-home report. Undefined on a backend with
+   * no such concept or a sandbox not seen yet.
+   */
+  nodeOf(sandboxId: string): string | undefined;
+  /**
+   * A supervisor just came up: learn where the substrate placed it NOW,
+   * not at the next reconcile pass. The node map is otherwise filled only
+   * by that pass (once a minute, and only on the reconciler copy), so a
+   * home that froze in a box's first minute, or on a box whose socket a
+   * non-reconciler copy holds, would be reported with no node, and the
+   * per-node brake would never count it. One listing per ready, off
+   * every report path; a failed or empty look leaves the map as it was.
+   */
+  learnNode(sandboxId: string): Promise<void>;
+  /**
    * Resolves once every enqueued work item and every queued report has
    * settled. `tick` only ENQUEUES — this is the deterministic drain
    * tests (and the shutdown path) wait on.
@@ -1041,6 +1057,9 @@ export const createRunner = ({
       // supervisor concatenates, the transcript never sees it.
       ...(item.context && { context: item.context }),
       ...(item.gate && { gate: item.gate }),
+      ...(item.contextTokens !== undefined && {
+        contextTokens: item.contextTokens,
+      }),
       ...(item.attachments &&
         item.attachments.length > 0 && { attachments: item.attachments }),
     };
@@ -1351,6 +1370,15 @@ export const createRunner = ({
    */
   let missingWhileRunning = new Set<string>();
 
+  /**
+   * Where the backend last placed each sandbox, from the reconcile pass's
+   * snapshot (rebuilt wholesale each pass, so it holds only what is listed
+   * now). Read by the read-only-home report: one bad machine and a
+   * fleet-wide problem need different answers, and only the substrate's
+   * own word may say which machine (never the supervisor's).
+   */
+  let nodeBySandbox = new Map<string, string>();
+
   /** Set at registration; the sweep refuses to run without it — before
    * `identify()` every managed object would look foreign. */
   let registeredRunnerId: string | undefined;
@@ -1640,6 +1668,11 @@ export const createRunner = ({
     // Statuses first, snapshots second, so a sandbox can only APPEAR between
     // the reads, never leave a healthy sandbox looking vanished.
     const snapshots = await backend.listSandboxes();
+    nodeBySandbox = new Map(
+      snapshots.flatMap((snapshot) =>
+        snapshot.node ? [[snapshot.sandboxId, snapshot.node] as const] : [],
+      ),
+    );
     /** This copy's own lifecycle work in flight: its verdicts wait. */
     const busy = (sandboxId: string) =>
       queuedStarts.has(sandboxId) ||
@@ -2019,6 +2052,15 @@ export const createRunner = ({
 
     tick,
     reconcile,
+    nodeOf: (sandboxId) => nodeBySandbox.get(sandboxId),
+    async learnNode(sandboxId) {
+      const node = (await backend.listSandboxes()).find(
+        (snapshot) => snapshot.sandboxId === sandboxId && snapshot.node,
+      )?.node;
+      // Additive: never drops what the reconcile pass learned, and the
+      // next pass rebuilds the whole map from the substrate anyway.
+      if (node) nodeBySandbox.set(sandboxId, node);
+    },
     settle,
 
     run() {
