@@ -105,6 +105,8 @@ const answer = (method: string, form: URLSearchParams): unknown => {
           { id: OTHER, name: "other-room", is_member: true },
         ],
       };
+    case "users.conversations":
+      return { ok: true, channels: [] };
     case "conversations.open":
       return { ok: true, channel: { id: DANA_IM } };
     case "chat.postMessage": {
@@ -522,7 +524,13 @@ describe.skipIf(!PROOF_URL)("posting into a thread", () => {
       ok: false,
       error: expect.stringContaining("Nothing was sent."),
     });
-    expect(calls.filter((c) => c.method !== "conversations.list")).toEqual([]);
+    expect(
+      calls.filter(
+        (c) =>
+          c.method !== "conversations.list" &&
+          c.method !== "users.conversations",
+      ),
+    ).toEqual([]);
   });
 
   it("from a schedule: a Never channel refuses the post (top-level and thread) with the Contacts message", async () => {

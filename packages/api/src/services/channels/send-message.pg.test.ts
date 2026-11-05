@@ -75,6 +75,7 @@ const startSlackFake = (): Promise<string> =>
 const scriptSlack = () => {
   slackCalls = [];
   slackHandlers = {};
+  slackHandlers["users.conversations"] = () => ({ channels: [] });
   slackHandlers["conversations.open"] = (call) => ({
     channel: { id: `D-IM-${call.form.get("users")}` },
   });

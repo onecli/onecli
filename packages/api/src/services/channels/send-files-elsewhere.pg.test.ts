@@ -68,6 +68,8 @@ const answer = (method: string, form: URLSearchParams): unknown => {
           { id: ASK, name: "ask-room", is_member: true },
         ],
       };
+    case "users.conversations":
+      return { ok: true, channels: [] };
     case "chat.postMessage":
       return { ok: true, channel: form.get("channel"), ts: nextTs() };
     case "files.getUploadURLExternal": {

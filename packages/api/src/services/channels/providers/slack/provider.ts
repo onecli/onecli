@@ -31,6 +31,7 @@ import {
 } from "./manifest";
 import {
   agentsSessionsSetStatus,
+  botConversations,
   conversationsList,
   conversationsOpen,
   decodeSlackTokens,
@@ -901,18 +902,35 @@ export const slackProvider: ChannelProvider = {
   async listChannels({ credentialsJson }) {
     const { botToken } = parseSlackPresenceCredentials(credentialsJson);
     if (!botToken) return [];
-    const channels: {
-      ref: string;
-      name: string;
-      member: boolean;
-      private: boolean;
-    }[] = [];
+    const channels = new Map<
+      string,
+      { ref: string; name: string; member: boolean; private: boolean }
+    >();
+    // The bot's OWN channels first, from the short member-only list: the
+    // full list below stops at RECIPIENT_PAGES, and in a big workspace the
+    // rooms the bot was invited to (usually the newest) sit past that bound.
     let cursor: string | undefined;
+    for (let page = 0; page < RECIPIENT_PAGES; page += 1) {
+      const response = await botConversations(botToken, { cursor });
+      for (const channel of response.channels) {
+        if (channel.is_archived || !channel.name) continue;
+        channels.set(channel.id, {
+          ref: channel.id,
+          name: channel.name,
+          member: true,
+          private: channel.is_private === true,
+        });
+      }
+      cursor = response.response_metadata?.next_cursor || undefined;
+      if (!cursor) break;
+    }
+    cursor = undefined;
     for (let page = 0; page < RECIPIENT_PAGES; page += 1) {
       const response = await conversationsList(botToken, { cursor });
       for (const channel of response.channels) {
         if (channel.is_archived || !channel.name) continue;
-        channels.push({
+        if (channels.has(channel.id)) continue;
+        channels.set(channel.id, {
           ref: channel.id,
           name: channel.name,
           member: channel.is_member === true,
@@ -922,7 +940,7 @@ export const slackProvider: ChannelProvider = {
       cursor = response.response_metadata?.next_cursor || undefined;
       if (!cursor) break;
     }
-    return channels;
+    return [...channels.values()];
   },
 
   decodeInboundText({ text, resolveUserName, resolveChannelName }) {
