@@ -41,6 +41,11 @@ let slackServer: Server;
 /** The roster the fake serves — tests reshape it per arm. */
 let rosterMembers: unknown[] = [];
 let rosterChannels: unknown[] = [];
+/** The bot's own channels (users.conversations). */
+let memberChannels: unknown[] = [];
+/** When true, conversations.list never ends: every page is empty and carries
+ * a cursor (a workspace too big for the page bound). */
+let listForever = false;
 /** When set, every roster call answers this Slack error (dead token, rate limit). */
 let rosterError: string | null = null;
 
@@ -56,8 +61,18 @@ const startSlackFake = (): Promise<string> =>
           res.end(JSON.stringify({ ok: false, error: rosterError }));
         } else if (method === "users.list") {
           res.end(JSON.stringify({ ok: true, members: rosterMembers }));
+        } else if (method === "conversations.list" && listForever) {
+          res.end(
+            JSON.stringify({
+              ok: true,
+              channels: [],
+              response_metadata: { next_cursor: "more" },
+            }),
+          );
         } else if (method === "conversations.list") {
           res.end(JSON.stringify({ ok: true, channels: rosterChannels }));
+        } else if (method === "users.conversations") {
+          res.end(JSON.stringify({ ok: true, channels: memberChannels }));
         } else {
           res.end(JSON.stringify({ ok: true }));
         }
@@ -187,6 +202,8 @@ beforeEach(async () => {
   await reset();
   rosterMembers = [];
   rosterChannels = [];
+  memberChannels = [];
+  listForever = false;
 });
 
 afterAll(async () => {
@@ -310,6 +327,28 @@ describe.skipIf(!PROOF_URL)("findChannels", () => {
     expect(names).toContain("#general-social");
     expect(names).not.toContain("#general-old");
     expect(channels.find((c) => c.ref === "C0GEN")).toMatchObject({
+      member: true,
+      private: false,
+    });
+  });
+
+  it("finds the bot's own channels even when the full list outruns the page bound", async () => {
+    const agentId = await seedAgent("deep");
+    const integration = await seedIntegration();
+    await seedPresence(agentId, integration.id);
+    listForever = true;
+    memberChannels = [
+      { id: "C0REL", name: "release-notes", is_private: true },
+      { id: "C0RLT", name: "team-release-notes" },
+    ];
+
+    const channels = await search.findChannels(agentId, "#release-notes");
+    expect(channels.find((c) => c.ref === "C0REL")).toMatchObject({
+      name: "#release-notes",
+      member: true,
+      private: true,
+    });
+    expect(channels.find((c) => c.ref === "C0RLT")).toMatchObject({
       member: true,
       private: false,
     });

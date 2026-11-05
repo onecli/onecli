@@ -63,6 +63,7 @@ const startSlackFake = (): Promise<string> =>
 const scriptRoster = () => {
   slackCalls = [];
   slackHandlers = {};
+  slackHandlers["users.conversations"] = () => ({ channels: [] });
   slackHandlers["users.list"] = () => ({
     members: [
       {

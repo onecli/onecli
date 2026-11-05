@@ -1289,6 +1289,33 @@ export const conversationsList = (
     conversationsListResponse,
   );
 
+/**
+ * One page of the channels the BOT is a member of (`users.conversations`
+ * with the bot token). Same scopes and row shape as `conversationsList`, but
+ * only the bot's own channels: in a big workspace the full list can push
+ * them past any page bound (Slack lists oldest first, and fills each page of
+ * 200 BEFORE dropping archived and unjoined private channels, so a page can
+ * hold only a handful of rows).
+ */
+export const botConversations = (
+  botToken: string,
+  input: { cursor?: string; limit?: number } = {},
+) =>
+  slackCall(
+    "users.conversations",
+    {
+      token: botToken,
+      form: {
+        types: "public_channel,private_channel",
+        exclude_archived: "true",
+        limit: String(input.limit ?? 200),
+        ...(input.cursor && { cursor: input.cursor }),
+      },
+      retry5xx: true,
+    },
+    conversationsListResponse,
+  );
+
 // ── A person's own token (xoxp): read-only, for the read tool ──────────────
 
 const userConversation = z.object({

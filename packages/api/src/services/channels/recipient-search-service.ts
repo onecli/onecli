@@ -7,6 +7,9 @@ import { ServiceError } from "../errors";
 import { noteOutboundFailure } from "./agent-channel-service";
 import { channelProvider, isChannelProviderId } from "./registry";
 import type { ChannelProvider } from "./types";
+import { logger } from "../../lib/logger";
+
+const log = logger.child({ component: "recipient-search" });
 
 /**
  * The find_recipient search — the DISCOVERY half of the mention design.
@@ -123,6 +126,12 @@ const fromProvider = async <T>(
         `Your ${platform} app was removed from the workspace, so this tool no longer works. It needs to be re-attached from your Channels page in the OneCLI dashboard before you can reach ${platform} again. Do not retry.`,
       );
     }
+    // Fails open, but never silently: the answer reads "nobody matching",
+    // so the log is the only place the real refusal shows.
+    log.warn(
+      { presenceId: presence.id, err: String(err) },
+      "recipient roster read failed; answering from the linked directory only",
+    );
     return null;
   }
 };
