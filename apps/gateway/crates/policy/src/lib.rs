@@ -190,14 +190,21 @@ fn is_git_discovery(path: &str, service: &str) -> bool {
 /// LLM traffic bypasses deny-by-default policy and is always logged.
 pub fn is_llm_host(host: &str) -> bool {
     let h = host.split(':').next().unwrap_or(host);
-    h.contains("anthropic.com")
-        || h.contains("openai.com")
-        || h.contains("chatgpt.com")
-        || h.contains("deepseek.com")
-        || h.contains("groq.com")
-        || h.contains("openrouter.ai")
-        || h.contains("moonshot.cn")
-        || h.contains("generativelanguage.googleapis.com")
+    is_domain_or_subdomain(h, "anthropic.com")
+        || is_domain_or_subdomain(h, "openai.com")
+        || is_domain_or_subdomain(h, "chatgpt.com")
+        || is_domain_or_subdomain(h, "deepseek.com")
+        || is_domain_or_subdomain(h, "groq.com")
+        || is_domain_or_subdomain(h, "openrouter.ai")
+        || is_domain_or_subdomain(h, "moonshot.cn")
+        || is_domain_or_subdomain(h, "generativelanguage.googleapis.com")
+}
+
+fn is_domain_or_subdomain(host: &str, domain: &str) -> bool {
+    host.eq_ignore_ascii_case(domain)
+        || (host.len() > domain.len()
+            && host.as_bytes()[host.len() - domain.len() - 1] == b'.'
+            && host[host.len() - domain.len()..].eq_ignore_ascii_case(domain))
 }
 
 /// Check if a request should be blocked by any policy rule (sync, block-only).
@@ -470,5 +477,25 @@ mod tests {
         assert!(!is_llm_host("api.github.com"));
         assert!(!is_llm_host("gmail.googleapis.com"));
         assert!(!is_llm_host("example.com"));
+    }
+
+    #[test]
+    fn is_llm_host_rejects_adversarial_domains() {
+        assert!(!is_llm_host("not-anthropic.com"));
+        assert!(!is_llm_host("anthropic.com.evil.test"));
+        assert!(!is_llm_host("evil-openai.com"));
+        assert!(!is_llm_host("openai.com.attacker.com"));
+        assert!(!is_llm_host("mygroq.com"));
+        assert!(!is_llm_host("fakeopenrouter.ai"));
+        assert!(!is_llm_host("deepseek.com.example.org"));
+        assert!(!is_llm_host("notchatgpt.com"));
+    }
+
+    #[test]
+    fn is_llm_host_matches_subdomains() {
+        assert!(is_llm_host("api.anthropic.com"));
+        assert!(is_llm_host("beta.openai.com"));
+        assert!(is_llm_host("sub.api.deepseek.com"));
+        assert!(is_llm_host("CHATGPT.COM"));
     }
 }
