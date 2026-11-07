@@ -56,13 +56,25 @@ vi.mock("@onecli/db", () => {
       if (data.status === "published") state.published.push(data);
       return ruleRow();
     },
+    // The publish snapshot writes the generation in bulk.
+    createMany: async ({ data }: { data: { status?: string }[] }) => {
+      for (const d of data)
+        if (d.status === "published") state.published.push(d);
+      return { count: data.length };
+    },
     update: async () => ruleRow(),
   };
   const tx = {
     // createPolicyRule takes the per-scope advisory lock inside its tx.
     $executeRaw: async () => 0,
-    policyRuleIdentity: { deleteMany: async () => ({}) },
-    policyRuleTarget: { deleteMany: async () => ({}) },
+    policyRuleIdentity: {
+      deleteMany: async () => ({}),
+      createMany: async () => ({ count: 0 }),
+    },
+    policyRuleTarget: {
+      deleteMany: async () => ({}),
+      createMany: async () => ({ count: 0 }),
+    },
     policyRuleV2,
   };
   return {

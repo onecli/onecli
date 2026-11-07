@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "./errors";
 import { isOnpremEdition } from "../lib/policy-flags";
@@ -239,18 +240,23 @@ const targetCreate = (
 };
 
 // Copy an existing identity/target row into a new rule (the publish snapshot).
-const identityRowToCreate = (
+// Scalar rows for the bulk inserts in `snapshotDraftRules`. The source rows are
+// live drafts, so every principal / connection / secret they name exists.
+const identityRowToData = (
+  ruleId: string,
   i: RuleRow["identities"][number],
-): Prisma.PolicyRuleIdentityCreateWithoutRuleInput => {
-  if (i.agentId) return { agent: { connect: { id: i.agentId } } };
-  if (i.userId) return { user: { connect: { id: i.userId } } };
-  if (i.groupId) return { group: { connect: { id: i.groupId } } };
+): Prisma.PolicyRuleIdentityCreateManyInput => {
+  if (i.agentId) return { ruleId, agentId: i.agentId };
+  if (i.userId) return { ruleId, userId: i.userId };
+  if (i.groupId) return { ruleId, groupId: i.groupId };
   throw new Error("policy identity row names no principal");
 };
 
-const targetRowToCreate = (
+const targetRowToData = (
+  ruleId: string,
   t: RuleRow["targets"][number],
-): Prisma.PolicyRuleTargetCreateWithoutRuleInput => ({
+): Prisma.PolicyRuleTargetCreateManyInput => ({
+  ruleId,
   kind: t.kind,
   appProvider: t.appProvider,
   appTools: t.appTools,
@@ -259,10 +265,8 @@ const targetRowToCreate = (
   hostPattern: t.hostPattern,
   pathPattern: t.pathPattern,
   method: t.method,
-  ...(t.appConnectionId
-    ? { appConnection: { connect: { id: t.appConnectionId } } }
-    : {}),
-  ...(t.secretId ? { secret: { connect: { id: t.secretId } } } : {}),
+  appConnectionId: t.appConnectionId,
+  secretId: t.secretId,
 });
 
 // Drop redundant entries whose (rule, principal) / (rule, connection|secret)
@@ -1255,9 +1259,16 @@ const snapshotDraftRules = async (
     _max: { generation: true },
   });
   const generation = (maxGen._max.generation ?? 0) + 1;
-  for (const r of draftRules) {
-    await tx.policyRuleV2.create({
-      data: {
+  // Three bulk inserts, however many rules the scope has. One nested create per
+  // rule made about three round trips per rule, so a scope with a few hundred
+  // rules ran past Prisma's 5 s interactive transaction timeout and every grant
+  // change failed (issue 637). The ids are made here so identities and targets
+  // can name their rule without reading the new rows back.
+  const snapshot = draftRules.map((r) => ({ id: randomUUID(), r }));
+  if (snapshot.length > 0) {
+    await tx.policyRuleV2.createMany({
+      data: snapshot.map(({ id, r }) => ({
+        id,
         ...base,
         status: "published",
         generation,
@@ -1275,10 +1286,20 @@ const snapshotDraftRules = async (
         requireApproval: r.requireApproval,
         conditions: jsonInput(r.conditions),
         createdByUserId: userId,
-        identities: { create: r.identities.map(identityRowToCreate) },
-        targets: { create: r.targets.map(targetRowToCreate) },
-      },
+      })),
     });
+    const identities = snapshot.flatMap(({ id, r }) =>
+      r.identities.map((i) => identityRowToData(id, i)),
+    );
+    if (identities.length > 0) {
+      await tx.policyRuleIdentity.createMany({ data: identities });
+    }
+    const targets = snapshot.flatMap(({ id, r }) =>
+      r.targets.map((t) => targetRowToData(id, t)),
+    );
+    if (targets.length > 0) {
+      await tx.policyRuleTarget.createMany({ data: targets });
+    }
   }
   // Prune published generations beyond the rollback retention window so the
   // per-write publish can't grow the table unbounded. The gateway reads only
