@@ -15,8 +15,23 @@ import { startFakeSlackServer, type FakeSlackServer } from "../test/fakes";
  * redial on the hourly refresh, and never retry a token Slack REFUSED.
  */
 
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
+/** Captured before any test fakes timers: real wall-clock settling time for
+ * the HTTP hop a (wrongly) scheduled redial would make. */
+const realSetTimeout = globalThis.setTimeout;
+const settleReal = (): Promise<void> =>
+  new Promise((resolve) => realSetTimeout(resolve, 50));
+
+/** Fake only the setTimeout family (the redial timer); HTTP to the fake
+ * Slack server and vi.waitFor keep running on real time. */
+const fakeRedialTimers = (): void => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+};
+
+/** Past MAX_BACKOFF_MS: any scheduled redial would have fired by now. */
+const outlastAnyBackoff = async (): Promise<void> => {
+  await vi.advanceTimersByTimeAsync(31_000);
+  await settleReal();
+};
 
 let slack: FakeSlackServer;
 let connections: SocketModeConnection[];
@@ -28,6 +43,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   for (const connection of connections) connection.close();
   delete process.env.SLACK_API_BASE_URL;
   await slack.close();
@@ -225,6 +241,7 @@ describe("the Slack refresh cycle", () => {
   });
 
   it("treats link_disabled as permanent: reports it and never redials", async () => {
+    fakeRedialTimers();
     const { sockets, failures } = setup();
     await dialed(sockets, 1);
     sockets[0]!.open();
@@ -234,8 +251,7 @@ describe("the Slack refresh cycle", () => {
     );
 
     expect(failures).toEqual(["link_disabled"]);
-    // Longer than the initial backoff: a scheduled redial would have fired.
-    await sleep(650);
+    await outlastAnyBackoff();
     expect(sockets).toHaveLength(1);
     expect(slack.callsTo("apps.connections.open")).toHaveLength(1);
   });
@@ -243,6 +259,7 @@ describe("the Slack refresh cycle", () => {
 
 describe("dial failures", () => {
   it("schedules a reconnect on `error` with no `close` (the both-events law)", async () => {
+    fakeRedialTimers();
     // A socket that never establishes may emit error and no close at all;
     // driving the retry solely from close would end the chain right there.
     const { sockets } = setup();
@@ -251,11 +268,13 @@ describe("dial failures", () => {
 
     sockets[0]!.errorOnly();
 
+    await vi.advanceTimersByTimeAsync(500);
     await dialed(sockets, 2);
     expect(slack.callsTo("apps.connections.open")).toHaveLength(2);
   });
 
   it("treats an invalid_auth answer as permanent — no retry loop", async () => {
+    fakeRedialTimers();
     // Slack ANSWERED and said no (the runner's register law): retrying the
     // same app token forever would hide the misconfiguration.
     slack.respond("apps.connections.open", () => ({
@@ -265,7 +284,7 @@ describe("dial failures", () => {
     const { sockets, failures } = setup();
 
     await vi.waitFor(() => expect(failures).toEqual(["invalid_auth"]));
-    await sleep(650);
+    await outlastAnyBackoff();
     expect(slack.callsTo("apps.connections.open")).toHaveLength(1);
     expect(sockets).toHaveLength(0);
   });
@@ -273,6 +292,7 @@ describe("dial failures", () => {
 
 describe("close", () => {
   it("cancels a pending redial — no dial after a deliberate close", async () => {
+    fakeRedialTimers();
     const { connection, sockets } = setup();
     await dialed(sockets, 1);
     sockets[0]!.open();
@@ -280,12 +300,13 @@ describe("close", () => {
 
     connection.close();
 
-    await sleep(650);
+    await outlastAnyBackoff();
     expect(sockets).toHaveLength(1);
     expect(slack.callsTo("apps.connections.open")).toHaveLength(1);
   });
 
   it("closes the live socket and reports not open", async () => {
+    fakeRedialTimers();
     const { connection, sockets } = setup();
     await dialed(sockets, 1);
     sockets[0]!.open();
@@ -297,13 +318,14 @@ describe("close", () => {
     expect(connection.isOpen()).toBe(false);
     // A late error from the closed socket must not resurrect the dialer.
     sockets[0]!.errorOnly();
-    await sleep(650);
+    await outlastAnyBackoff();
     expect(sockets).toHaveLength(1);
   });
 });
 
 describe("backoff", () => {
   it("resets to the initial delay after a successful open", async () => {
+    fakeRedialTimers();
     // MUTATION-PROOF: drop the `backoff = INITIAL_BACKOFF_MS` in the open
     // listener and the second reconnect log reads 1000ms — every hourly
     // refresh would then ratchet the daemon toward the 30s ceiling forever.
@@ -311,10 +333,13 @@ describe("backoff", () => {
     await dialed(sockets, 1);
     sockets[0]!.open();
     sockets[0]!.fail();
+    await vi.advanceTimersByTimeAsync(500);
     await dialed(sockets, 2);
 
     sockets[1]!.open(); // the recovery that must reset the clock
     sockets[1]!.fail();
+    // Exactly the initial delay: a ratcheted (1000ms) backoff never dials.
+    await vi.advanceTimersByTimeAsync(500);
     await dialed(sockets, 3);
 
     expect(logs.filter((line) => line.startsWith("reconnecting"))).toEqual([

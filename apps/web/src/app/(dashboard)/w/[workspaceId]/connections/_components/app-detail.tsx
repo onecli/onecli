@@ -5,10 +5,12 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { openConnectPopup } from "@/lib/connect-popup";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Loader2, Settings2 } from "lucide-react";
+import { ArrowLeft, Loader2, Plus, Settings2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
-import type { Connection, PageScope } from "@/lib/api";
+import { cn } from "@onecli/ui/lib/utils";
+import type { PageScope } from "@/lib/api";
+import type { OAuthConfigField } from "@onecli/api/apps/types";
 import { queryKeys } from "@/lib/api/keys";
 import {
   useAppMessages,
@@ -26,9 +28,20 @@ import { AppIcon } from "@/lib/components/app-icon";
 import { AppConfigForm, type AppConfigFormHandle } from "./app-config-form";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
 import { ConnectionAgentsReflection } from "@/lib/components/policy-reflect";
+import { readConnectLinkAgent } from "@/lib/connect-link-agent";
+import { useVerifiedConnectLinkAgent } from "@/hooks/use-verified-connect-link-agent";
+import { SetupGuideLink } from "@/lib/components/setup-guide-link";
+import { groupMembers, groupOf } from "@onecli/api/apps/oauth/groups";
+import { AppConnectEmpty } from "./app-connect-empty";
 import { ConnectionAccountCard } from "./connection-account-card";
 import { InheritedConnectionCard } from "./inherited-connection-card";
 import { AppBlocklist } from "./app-blocklist";
+import { GitHubAppConnectDialog } from "./github-app-connect-dialog";
+import type { AccountCardConnection } from "./account-card-connection";
+import {
+  GITHUB_APP_PROVIDER,
+  useSharedGitHubInstallations,
+} from "@/hooks/use-github-app-share";
 
 interface AppDetailProps {
   app: {
@@ -42,15 +55,11 @@ interface AppDetailProps {
      *  OAuth setup first. */
     hasApiKeyAlternate?: boolean;
     blocklist?: { id: string; name: string; hostPattern: string }[];
+    /** The app's OneCLI setup guide (`AppDefinition.setupGuideUrl`). */
+    setupGuideUrl?: string;
   };
   configurable?: {
-    fields: {
-      name: string;
-      label: string;
-      description?: string;
-      placeholder: string;
-      secret?: boolean;
-    }[];
+    fields: OAuthConfigField[];
     envDefaults?: Record<string, string>;
     hint?: string;
   };
@@ -59,10 +68,6 @@ interface AppDetailProps {
   pageScope?: PageScope;
   backPath?: string;
 }
-
-type ConnectionData = Omit<Connection, "metadata"> & {
-  metadata: Record<string, unknown> | null;
-};
 
 export const AppDetail = ({
   app,
@@ -83,7 +88,7 @@ export const AppDetail = ({
   const { data: allConnections = [], isPending: loading } =
     useConnections(pageScope);
   const { connections, inheritedConnections } = useMemo(() => {
-    const forProvider: ConnectionData[] = allConnections
+    const forProvider: AccountCardConnection[] = allConnections
       .filter((c) => c.provider === app.id && c.status === "connected")
       .map((c) => ({
         ...c,
@@ -98,10 +103,9 @@ export const AppDetail = ({
   }, [allConnections, app.id, pageScope]);
 
   // A successful connect opens the account's agent-access dialog right here:
-  // the API has already attached a new account to every agent of the
-  // workspace, and this is where the user turns off the ones that shouldn't
-  // have it. The `open` flag outlives the id so closing keeps the exit
-  // animation.
+  // a new workspace account is on for no agent, and this is where the user
+  // turns it on for the ones that should have it. The `open` flag outlives
+  // the id so closing keeps the exit animation.
   const [justConnectedId, setJustConnectedId] = useState<string | null>(null);
   const [justConnectedOpen, setJustConnectedOpen] = useState(false);
   // Agents are workspace-scoped, so this only means anything on a workspace page.
@@ -114,8 +118,8 @@ export const AppDetail = ({
   const handleConnected = useCallback(
     ({ provider, connectionId }: AppConnectedEvent) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
-      // The connection list, plus every grant view: a created connection
-      // arrives already granted to every agent of the workspace.
+      // The connection list, plus every grant view the agent-access dialog
+      // and the account cards read.
       invalidateGrants();
       // Only a CREATED connection carries an id — a reconnect refreshed
       // credentials an agent already had, and needs no setup step. The
@@ -136,6 +140,13 @@ export const AppDetail = ({
   // popup's message was posted and can only learn of it from the URL. One-shot
   // per mount, then stripped so a refresh doesn't reopen the dialog.
   const connectedParam = searchParams.get("connected");
+  // `?reconnect=<id>`: the agent's `connection_needs_reconnect` link. Marks the
+  // account to reconnect while it still needs it; the popup itself needs the
+  // user's click.
+  const reconnectParam = searchParams.get("reconnect");
+  // `?org_access=<org>`: the agent's `github_org_access_required` link. Marks
+  // that organization's notice on the account that recorded it.
+  const orgAccessParam = searchParams.get("org_access");
   const consumedConnectedParam = useRef(false);
   useEffect(() => {
     if (consumedConnectedParam.current) return;
@@ -165,10 +176,19 @@ export const AppDetail = ({
 
   const hasCredentials = hasEnvDefaults || appConfigured;
 
+  // `?source=agent&agent_id=`: an agent's connect door sent the user here to
+  // set the app's credentials up first. A NEW account connected from this
+  // visit is still that agent's; a reconnect never names one.
+  const linkAgent = useVerifiedConnectLinkAgent(
+    canAttachAgents ? readConnectLinkAgent(searchParams) : undefined,
+  );
   const openPopup = (connectionId?: string, options?: { height?: number }) =>
     openConnectPopup(app.id, {
       ...options,
       connectionId,
+      ...(linkAgent && !connectionId
+        ? { agentId: linkAgent.id, agentName: linkAgent.name }
+        : {}),
       workspaceId: pathname.match(WORKSPACE_PATH_RE)?.[1],
       orgId:
         pageScope === "organization"
@@ -179,9 +199,22 @@ export const AppDetail = ({
   const popupOpts =
     app.connectionType === "credentials_import" ? { height: 820 } : undefined;
 
+  // GitHub App: GitHub won't offer a second install on the same account, so
+  // an org admin is offered the org's connected installations first.
+  const isGitHubApp = app.id === GITHUB_APP_PROVIDER;
+  const [githubDialogOpen, setGithubDialogOpen] = useState(false);
+  const { data: sharedInstallations = [] } = useSharedGitHubInstallations(
+    pageScope,
+    isGitHubApp,
+  );
+
   const handleConnect = () => {
     if (!hasCredentials && configurable?.fields && !app.hasApiKeyAlternate) {
       setConfigDialogOpen(true);
+      return;
+    }
+    if (isGitHubApp && sharedInstallations.length > 0) {
+      setGithubDialogOpen(true);
       return;
     }
     openPopup(undefined, popupOpts);
@@ -189,6 +222,17 @@ export const AppDetail = ({
 
   const connectionCount = connections.length + inheritedConnections.length;
   const isConnected = connectionCount > 0;
+  // A vendor-shared client serves every app of its vendor, so changing it
+  // disconnects all of them: the config form confirms when ANY is connected
+  // (counted the way `isConnected` counts this app's own accounts).
+  const clientInUse = useMemo(() => {
+    const group = groupOf(app.id);
+    if (!group) return isConnected;
+    const members = new Set(groupMembers(group));
+    return allConnections.some(
+      (c) => members.has(c.provider) && c.status === "connected",
+    );
+  }, [allConnections, app.id, isConnected]);
 
   return (
     <div className="space-y-6">
@@ -262,45 +306,82 @@ export const AppDetail = ({
         </div>
       </div>
 
+      {/* Apps with a Custom credentials card show the guide inside it, right
+          above the Redirect URI. The rest show it here. */}
+      {!configurable && (
+        <SetupGuideLink appName={app.name} url={app.setupGuideUrl} />
+      )}
+
       {loading ? (
         <div className="flex items-center justify-center py-12">
           <Loader2 className="size-5 animate-spin text-muted-foreground" />
         </div>
+      ) : !isConnected ? (
+        <AppConnectEmpty
+          appName={app.name}
+          pageScope={pageScope}
+          onConnect={handleConnect}
+        />
       ) : (
-        isConnected && (
-          <div className="space-y-3">
-            <div className="flex items-start justify-between">
-              <h3 className="text-sm font-medium">Connected accounts</h3>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleConnect}
-                className="shrink-0"
-              >
-                Connect
-              </Button>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-              {connections.map((conn) => (
-                <ConnectionAccountCard
-                  key={conn.id}
-                  connection={conn}
-                  appName={app.name}
-                  onReconnect={(id) => openPopup(id, popupOpts)}
-                  pageScope={pageScope}
-                />
-              ))}
-              {inheritedConnections.map((conn) => (
-                <InheritedConnectionCard
-                  key={conn.id}
-                  connection={conn}
-                  appName={app.name}
-                  pageScope={pageScope}
-                />
-              ))}
-            </div>
+        <div className="space-y-3">
+          <div className="flex items-start justify-between">
+            <h3 className="text-sm font-medium">Connected accounts</h3>
+            {/* Shown only once an account is connected: a second click adds
+                another account (another login), it doesn't reconnect the
+                first. */}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleConnect}
+              className="shrink-0"
+            >
+              <Plus className="size-4" />
+              Add account
+            </Button>
           </div>
-        )
+          {connections.length > 0 && inheritedConnections.length > 0 && (
+            <p className="text-xs font-medium text-muted-foreground">
+              Workspace accounts
+            </p>
+          )}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+            {connections.map((conn) => (
+              <ConnectionAccountCard
+                key={conn.id}
+                connection={conn}
+                appName={app.name}
+                onReconnect={(id) => openPopup(id, popupOpts)}
+                pageScope={pageScope}
+                highlighted={
+                  conn.id === reconnectParam && !!conn.reauthRequiredAt
+                }
+                highlightedOrg={orgAccessParam}
+              />
+            ))}
+          </div>
+          {inheritedConnections.length > 0 && (
+            <>
+              <p
+                className={cn(
+                  "text-xs font-medium text-muted-foreground",
+                  connections.length > 0 && "pt-3",
+                )}
+              >
+                Organization accounts
+              </p>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+                {inheritedConnections.map((conn) => (
+                  <InheritedConnectionCard
+                    key={conn.id}
+                    connection={conn}
+                    pageScope={pageScope}
+                    highlightedOrg={orgAccessParam}
+                  />
+                ))}
+              </div>
+            </>
+          )}
+        </div>
       )}
 
       {configurable && (
@@ -310,8 +391,9 @@ export const AppDetail = ({
           appName={app.name}
           fields={configurable.fields}
           hint={configurable.hint}
+          setupGuideUrl={app.setupGuideUrl}
           hasEnvDefaults={hasEnvDefaults}
-          isConnected={isConnected}
+          isConnected={clientInUse}
           pageScope={pageScope}
         />
       )}
@@ -333,12 +415,26 @@ export const AppDetail = ({
           appDarkIcon={app.darkIcon}
           fields={configurable.fields}
           hint={configurable.hint}
+          setupGuideUrl={app.setupGuideUrl}
           open={configDialogOpen}
           onOpenChange={setConfigDialogOpen}
           pageScope={pageScope}
           onConfigured={() => {
             setConfigDialogOpen(false);
             openPopup(undefined, popupOpts);
+          }}
+        />
+      )}
+
+      {isGitHubApp && (
+        <GitHubAppConnectDialog
+          open={githubDialogOpen}
+          onOpenChange={setGithubDialogOpen}
+          pageScope={pageScope}
+          agentId={linkAgent?.id}
+          onInstallNew={() => openPopup(undefined, popupOpts)}
+          onConnected={(id) => {
+            if (canAttachAgents) openJustConnected(id);
           }}
         />
       )}
@@ -352,13 +448,7 @@ export const AppDetail = ({
         <ConnectionAgentsReflection
           key={justConnectedId}
           connectionId={justConnectedId}
-          // Only the neutral header renders this; the success header titles on
-          // the app, precisely so it doesn't wait on the refetch.
-          connectionLabel={
-            connections.find((c) => c.id === justConnectedId)?.label ?? ""
-          }
           appName={app.name}
-          justConnected
           open={justConnectedOpen}
           onOpenChange={setJustConnectedOpen}
         />

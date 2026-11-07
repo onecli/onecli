@@ -8,8 +8,10 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+cache = { path = "../cache" }
 dashmap = { workspace = true }
 common = { path = "../common" }
+shutdown = { path = "../shutdown" }
 summary = { path = "../summary" }
 serde = { workspace = true }
 serde_json = { workspace = true }

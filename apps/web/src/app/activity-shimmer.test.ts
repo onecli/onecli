@@ -12,7 +12,7 @@ import { describe, expect, it } from "vitest";
  * Tailwind only applies variants to utilities it owns, so it silently emitted
  * NOTHING for the class — while the neighboring `bg-clip-text
  * text-transparent` DID compile, leaving every live caption ("Thinking…",
- * "Waking the agent…", the agent's narration) painted as a permanently
+ * the agent's narration) painted as a permanently
  * frozen gradient.
  *
  * The guard compiles the real Tailwind entry point (the UI package's

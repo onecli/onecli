@@ -10,6 +10,8 @@ export type FakeStep =
   | { op: "text"; text: string }
   | { op: "sleep"; ms: number }
   | { op: "state" }
+  | { op: "prompt" }
+  | { op: "contextTokens" }
   | {
       op: "http";
       url: string;
@@ -19,6 +21,7 @@ export type FakeStep =
       timeoutMs?: number;
     }
   | { op: "tool"; name: string; args?: unknown }
+  | { op: "bash"; ms: number }
   | { op: "error"; message: string }
   | { op: "failNextStart"; reason?: string };
 
@@ -29,6 +32,11 @@ export const fakeDirective = (steps: FakeStep[], prose = ""): string =>
 export const text = (value: string): FakeStep => ({ op: "text", text: value });
 export const sleep = (ms: number): FakeStep => ({ op: "sleep", ms });
 export const state = (): FakeStep => ({ op: "state" });
+/** Echoes `[prompt <first line>]`: the delivered prompt's first line, which
+ * is the delivery-only context's when the supervisor framed the turn. */
+export const prompt = (): FakeStep => ({ op: "prompt" });
+/** Echoes `[contextTokens N]` (or `none`): the size delivered with the turn. */
+export const contextTokens = (): FakeStep => ({ op: "contextTokens" });
 export const http = (
   url: string,
   opts: Omit<Extract<FakeStep, { op: "http" }>, "op" | "url"> = {},
@@ -38,6 +46,8 @@ export const tool = (name: string, args?: unknown): FakeStep => ({
   name,
   ...(args !== undefined && { args }),
 });
+/** A long-running harness tool that SEND NOW can move to the background. */
+export const bash = (ms: number): FakeStep => ({ op: "bash", ms });
 export const scriptedError = (message: string): FakeStep => ({
   op: "error",
   message,

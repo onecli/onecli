@@ -9,11 +9,64 @@ export interface PendingActionApprovalItem {
   agentId: string;
   agentName: string;
   summary: string;
-  /** Whether "approve + always allow" is a real choice for this action. */
-  offersAlwaysAllow: boolean;
+  /** A standing question about who the agent wants to reach: the only
+   * answers are Always allow and Never. */
+  standingChoice: boolean;
+  /** Where the agent's chat renders it inline: the asking turn's
+   * conversation, or the chat a scheduled run, watch or webhook reports
+   * to; null = no conversation (every member's chat with the agent). */
+  conversationId: string | null;
   /** ISO timestamps. */
   createdAt: string;
   expiresAt: string;
+  /** Set for an agent-proposed custom connection: the card reviews it and
+   * takes the key (approve goes through the dedicated route). */
+  customConnection: CustomConnectionProposalView | null;
+  /** Set for an agent's webhook change: the card shows the full change. */
+  webhookChange: WebhookChangeView | null;
+  /** Set for a "let the agent act as you in Slack" request (licensed):
+   * the chat renders a Connect or Allow card from it. */
+  slackAccess?: SlackAccessView | null;
+  /** Set for a send refused by a blocked contact: Allow / Don't
+   * send. */
+  contactBlocked?: ContactBlockedView | null;
+  /** Set for "send as the agent or as you?": one button per sender. */
+  chooseSender?: ChooseSenderView | null;
+}
+
+export interface ChooseSenderView {
+  recipientLabel: string;
+  text: string;
+  agentName: string;
+}
+
+export interface ContactBlockedView {
+  recipientLabel: string;
+}
+
+/** A Slack access request: what the card offers. Not-connected and
+ * reconnect-for-write resolve by connecting; the rest by Allow. */
+export interface SlackAccessView {
+  kind: "read" | "write";
+  reason: "not_connected" | "not_shared" | "write_off" | "reconnect_for_write";
+  conversationLabel: string | null;
+}
+
+/** An agent's held webhook change: each field it sets, null when unchanged. */
+export interface WebhookChangeView {
+  name: string | null;
+  instructions: string | null;
+  enabled: boolean | null;
+}
+
+/** An agent-proposed custom connection as the approve card renders it: the
+ * name and where the key goes. Non-secret by construction (the proposal has
+ * no value field). */
+export interface CustomConnectionProposalView {
+  name: string;
+  hostPattern: string;
+  /** The owner the key is sent to: the card names it. */
+  registrableDomain: string | null;
 }
 
 export interface PendingReachAskItem {
@@ -28,6 +81,9 @@ export interface PendingReachAskItem {
   subjectLabel: string | null;
   /** The decide door's address (PUT reach/:externalRef). */
   externalRef: string;
+  /** The provider tenant the subject lives in (Slack: the team id), for the
+   * channel link in Details. Absent on older servers. */
+  tenantExternalId?: string;
   /** ISO timestamp. */
   createdAt: string;
 }
@@ -41,3 +97,14 @@ export const listPendingChannelApprovals = (workspaceId: string) =>
   apiGet<{ items: PendingChannelApprovalItem[] }>(
     `/v1/workspaces/${workspaceId}/channel-approvals`,
   ).then((r) => r.items);
+
+/** The bell's channel items. A Slack connect request (not connected /
+ * reconnect for write) is only actionable by the asker in their own chat:
+ * it renders there as a card and never in the bell. */
+export const bellChannelApprovals = (items: PendingChannelApprovalItem[]) =>
+  items.filter(
+    (item) =>
+      item.kind !== "action" ||
+      (item.slackAccess?.reason !== "not_connected" &&
+        item.slackAccess?.reason !== "reconnect_for_write"),
+  );

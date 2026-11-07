@@ -44,12 +44,10 @@ struct CatalogTool {
 
 type Catalog = HashMap<String, HashMap<String, CatalogTool>>;
 
-// Compile-time embed of the local generated catalog (this file's dir). The JSON
-// is the gateway's own build artifact — derived from the shared TS catalog by
-// `pnpm generate:catalog` and drift-checked (`ee/apps/catalog-json.test.ts`).
-// One generated catalog for every edition (shared + cloud providers), derived
-// from the TS registry by a generator script and drift-checked
-// by `catalog-json.test.ts`.
+// Compile-time embed of the local generated catalog (this file's dir): one
+// catalog for every edition (shared + cloud providers), derived from the TS
+// registry by `pnpm generate:catalog` and drift-checked by
+// `packages/api/src/apps/app-permissions/catalog-json.test.ts`.
 const CATALOG_JSON: &str = include_str!("catalog.generated.json");
 
 fn catalog() -> &'static Catalog {
@@ -266,6 +264,164 @@ pub(super) fn app_target_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zendesk_documented_endpoints_keep_method_host_and_depth_fences() {
+        // Mirrors zendesk-permissions.test.ts against the generated catalog.
+        let cases = [
+            ("GET", "/api/v2/tickets", "list_tickets"),
+            ("GET", "/api/v2/tickets/12", "get_ticket"),
+            ("GET", "/api/v2/tickets/12/comments", "list_ticket_comments"),
+            ("GET", "/api/v2/users", "list_users"),
+            ("GET", "/api/v2/users/42", "get_user"),
+            ("GET", "/api/v2/users/me", "get_user"),
+            ("GET", "/api/v2/organizations", "list_organizations"),
+            ("GET", "/api/v2/organizations/42", "get_organization"),
+            ("GET", "/api/v2/search", "search"),
+            ("GET", "/api/v2/help_center/en-us/articles", "list_articles"),
+            ("GET", "/api/v2/job_statuses/abc123", "get_job_status"),
+            ("POST", "/api/v2/tickets", "create_ticket"),
+            ("PUT", "/api/v2/tickets/12", "update_ticket"),
+            ("PUT", "/api/v2/tickets/update_many", "update_ticket"),
+            ("POST", "/api/v2/tickets/12/merge", "merge_tickets"),
+            ("PUT", "/api/v2/tickets/12/mark_as_spam", "mark_ticket_spam"),
+            (
+                "PUT",
+                "/api/v2/tickets/mark_many_as_spam",
+                "mark_ticket_spam",
+            ),
+            ("DELETE", "/api/v2/tickets/12", "delete_tickets"),
+            ("DELETE", "/api/v2/tickets/destroy_many", "delete_tickets"),
+            ("POST", "/api/v2/users", "create_user"),
+            ("PUT", "/api/v2/users/42", "update_user"),
+            ("DELETE", "/api/v2/users/42", "delete_user"),
+            (
+                "POST",
+                "/api/v2/help_center/en-us/sections/42/articles",
+                "create_article",
+            ),
+        ];
+        for (method, path, tool) in cases {
+            for suffix in ["", ".json"] {
+                let endpoint = format!("{path}{suffix}");
+                for id in catalog().get("zendesk").unwrap().keys() {
+                    assert_eq!(
+                        matches("zendesk", &[id], "acme.zendesk.com", method, &endpoint),
+                        id == tool,
+                        "{method} {endpoint}: {id}"
+                    );
+                }
+                assert!(matches(
+                    "zendesk",
+                    &[tool],
+                    "acme.zendesk.com",
+                    method,
+                    &format!("{endpoint}?ids=1,2")
+                ));
+                assert!(!matches(
+                    "zendesk",
+                    &[tool],
+                    "acme.zendesk.com",
+                    method,
+                    &format!("{endpoint}/nested")
+                ));
+                for other in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
+                    if other != method {
+                        assert!(!matches(
+                            "zendesk",
+                            &[tool],
+                            "acme.zendesk.com",
+                            other,
+                            &endpoint
+                        ));
+                    }
+                }
+                for host in ["zendesk.com", "evil.test", "acme.zendesk.com.evil.test"] {
+                    assert!(!matches("zendesk", &[tool], host, method, &endpoint));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zendesk_singular_reads_exclude_named_collection_actions() {
+        for (resource, tool) in [
+            ("tickets", "get_ticket"),
+            ("users", "get_user"),
+            ("organizations", "get_organization"),
+        ] {
+            for suffix in ["", ".json"] {
+                for action in ["show_many", "count", "autocomplete"] {
+                    assert!(!matches(
+                        "zendesk",
+                        &[tool],
+                        "acme.zendesk.com",
+                        "GET",
+                        &format!("/api/v2/{resource}/{action}{suffix}")
+                    ));
+                }
+                for digit in 0..10 {
+                    assert!(matches(
+                        "zendesk",
+                        &[tool],
+                        "acme.zendesk.com",
+                        "GET",
+                        &format!("/api/v2/{resource}/{digit}42{suffix}")
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zendesk_item_writes_exclude_named_actions_and_bulk_user_routes() {
+        for suffix in ["", ".json"] {
+            for digit in 0..10 {
+                for (method, resource, tool) in [
+                    ("PUT", "tickets", "update_ticket"),
+                    ("DELETE", "tickets", "delete_tickets"),
+                    ("PUT", "users", "update_user"),
+                    ("DELETE", "users", "delete_user"),
+                ] {
+                    assert!(matches(
+                        "zendesk",
+                        &[tool],
+                        "acme.zendesk.com",
+                        method,
+                        &format!("/api/v2/{resource}/{digit}42{suffix}")
+                    ));
+                }
+            }
+            for route in ["update_many", "destroy_many", "create_or_update"] {
+                for (method, tool) in [("PUT", "update_user"), ("DELETE", "delete_user")] {
+                    assert!(!matches(
+                        "zendesk",
+                        &[tool],
+                        "acme.zendesk.com",
+                        method,
+                        &format!("/api/v2/users/{route}{suffix}")
+                    ));
+                }
+            }
+            for route in ["12/mark_as_spam", "mark_many_as_spam"] {
+                let path = format!("/api/v2/tickets/{route}{suffix}?ids=12,13");
+                assert!(!matches(
+                    "zendesk",
+                    &["update_ticket"],
+                    "acme.zendesk.com",
+                    "PUT",
+                    &path
+                ));
+                assert!(matches(
+                    "zendesk",
+                    &["mark_ticket_spam"],
+                    "acme.zendesk.com",
+                    "PUT",
+                    &path
+                ));
+            }
+        }
+    }
 
     // ── AWS endpoint coverage: the Rust half of the TS
     // `aws-endpoint-coverage.test.ts` table. Both ports read the SAME generated
@@ -638,6 +794,44 @@ mod tests {
             "/graphql",
             &mutation
         ));
+        // Monday: the same shape on POST /v2. The read tool admits the
+        // shorthand (anonymous) query Monday's own docs use, and nothing
+        // else; the write tool takes the mutation.
+        let shorthand = graphql_envelope("{ boards (limit: 5) { id name } }");
+        let create_item =
+            graphql_envelope("mutation { create_item (board_id: 1, item_name: \"x\") { id } }");
+        assert!(matches_with_body(
+            "monday",
+            &["query_boards"],
+            "api.monday.com",
+            "POST",
+            "/v2",
+            &shorthand
+        ));
+        assert!(!matches_with_body(
+            "monday",
+            &["query_boards"],
+            "api.monday.com",
+            "POST",
+            "/v2",
+            &create_item
+        ));
+        assert!(matches_with_body(
+            "monday",
+            &["mutate_boards"],
+            "api.monday.com",
+            "POST",
+            "/v2",
+            &create_item
+        ));
+        assert!(!matches_with_body(
+            "monday",
+            &["mutate_boards"],
+            "api.monday.com",
+            "POST",
+            "/v2",
+            &shorthand
+        ));
         // Non-GraphQL tools are untouched by the discrimination: a REST tool
         // matches with or without a body.
         assert!(matches_with_body(
@@ -662,6 +856,119 @@ mod tests {
             "POST",
             "/graphql",
             &mutation
+        ));
+    }
+
+    // Webflow nests items under collections, so a collection-level tool must
+    // never match an item path (that would let "Delete collection" approvals
+    // or blocks miss item deletes, or vice versa). The trailing-slash patterns
+    // in `webflow.ts` pin depth; this proves the gateway honours it.
+    #[test]
+    fn webflow_collection_tools_keep_their_depth() {
+        let host = "api.webflow.com";
+        assert!(matches(
+            "webflow",
+            &["delete_collection"],
+            host,
+            "DELETE",
+            "/v2/collections/abc"
+        ));
+        assert!(!matches(
+            "webflow",
+            &["delete_collection"],
+            host,
+            "DELETE",
+            "/v2/collections/abc/items"
+        ));
+        assert!(matches(
+            "webflow",
+            &["delete_items"],
+            host,
+            "DELETE",
+            "/v2/collections/abc/items"
+        ));
+        assert!(matches(
+            "webflow",
+            &["get_item"],
+            host,
+            "GET",
+            "/v2/collections/abc/items/def"
+        ));
+        assert!(!matches(
+            "webflow",
+            &["get_collection"],
+            host,
+            "GET",
+            "/v2/collections/abc/items/def"
+        ));
+        // Read tools never admit a write method on the same path.
+        assert!(!matches(
+            "webflow",
+            &["list_items"],
+            host,
+            "DELETE",
+            "/v2/collections/abc/items"
+        ));
+        assert!(matches(
+            "webflow",
+            &["publish_site"],
+            host,
+            "POST",
+            "/v2/sites/s1/publish"
+        ));
+        // Items addressed one at a time (`/items/<id>`, `/items/<id>/live`)
+        // belong to the same write tool as the bulk endpoints, and the
+        // single-item GET never admits them.
+        assert!(matches(
+            "webflow",
+            &["update_items"],
+            host,
+            "PATCH",
+            "/v2/collections/abc/items/def"
+        ));
+        assert!(matches(
+            "webflow",
+            &["delete_items"],
+            host,
+            "DELETE",
+            "/v2/collections/abc/items/def/live"
+        ));
+        assert!(!matches(
+            "webflow",
+            &["get_item"],
+            host,
+            "DELETE",
+            "/v2/collections/abc/items/def"
+        ));
+        // The older create endpoints Webflow still serves.
+        assert!(matches(
+            "webflow",
+            &["create_items"],
+            host,
+            "POST",
+            "/v2/collections/abc/items"
+        ));
+        assert!(matches(
+            "webflow",
+            &["create_items"],
+            host,
+            "POST",
+            "/v2/collections/abc/items/bulk"
+        ));
+        // Form submissions in the site-less spelling the official SDK uses.
+        assert!(matches(
+            "webflow",
+            &["delete_form_submission"],
+            host,
+            "DELETE",
+            "/v2/form_submissions/fs1"
+        ));
+        assert!(!matches(
+            "webflow",
+            &["get_form_submission"],
+            host,
+            "DELETE",
+            "/v2/form_submissions/fs1"
         ));
     }
 
@@ -698,6 +1005,45 @@ mod tests {
             "/services/data/v66.0/graphql",
             "/services/data/v66.0/tooling/query",
             "/services/apexrest/custom",
+        ] {
+            for method in ["GET", "POST", "PATCH", "DELETE"] {
+                assert!(
+                    !matches("salesforce", all, host, method, path),
+                    "{method} {path} reached a tool"
+                );
+            }
+        }
+        // sObject Collections is the single-record update/delete in bulk, in
+        // both documented spellings; a POST (create, or any `_HttpMethod`
+        // override) reaches no tool, nor does any deeper collections path.
+        for path in [
+            "/services/data/v66.0/composite/sobjects",
+            "/services/data/v66.0/composite/sobjects/",
+        ] {
+            assert!(matches(
+                "salesforce",
+                &["update_record"],
+                host,
+                "PATCH",
+                path
+            ));
+            assert!(matches(
+                "salesforce",
+                &["delete_record"],
+                host,
+                "DELETE",
+                path
+            ));
+            for method in ["GET", "POST"] {
+                assert!(
+                    !matches("salesforce", all, host, method, path),
+                    "{method} {path} reached a tool"
+                );
+            }
+        }
+        for path in [
+            "/services/data/v66.0/composite/sobjects/Contact",
+            "/services/data/v66.0/composite/sobjects/Contact/Ext_Id__c",
         ] {
             for method in ["GET", "POST", "PATCH", "DELETE"] {
                 assert!(
@@ -1245,6 +1591,73 @@ mod tests {
     }
 
     #[test]
+    fn navan_tools_scope_to_their_endpoints() {
+        // "Require approval for every write" compiles to write_all; it must
+        // catch every documented Navan write through the REAL matcher.
+        for (method, path) in [
+            ("PATCH", "/v1/expense/transactions"),
+            ("POST", "/v1/expense/custom-fields/customField1/options"),
+            ("PUT", "/v1/expense/gl-codes"),
+            ("PATCH", "/v1/expense/gl-codes/4000"),
+            ("PATCH", "/v1/expense/gl-code-settings"),
+            ("DELETE", "/v1/expense/gl-code-exclusions/4000"),
+            ("POST", "/v1/expense/tax-mappings/confirm"),
+            ("DELETE", "/v1/expense/tax-mappings/pending"),
+        ] {
+            assert!(
+                matches("navan", &["write_all"], "api.navan.com", method, path),
+                "write_all must gate {method} {path}"
+            );
+        }
+        // read_all is GET-only: it never covers a write.
+        assert!(!matches(
+            "navan",
+            &["read_all"],
+            "api.navan.com",
+            "PATCH",
+            "/v1/expense/transactions"
+        ));
+        // get_transaction covers the receipt sub-resources under one id.
+        for path in [
+            "/v1/expense/transactions/txn_1",
+            "/v1/expense/transactions/txn_1/receipt",
+            "/v1/expense/transactions/txn_1/receipt/download",
+        ] {
+            assert!(matches(
+                "navan",
+                &["get_transaction"],
+                "api.navan.com",
+                "GET",
+                path
+            ));
+        }
+        // A bookings grant does not open expense data.
+        assert!(!matches(
+            "navan",
+            &["list_bookings"],
+            "api.navan.com",
+            "GET",
+            "/v1/expense/card-transactions"
+        ));
+        // A GL-code grant covers both the collection and one code, and only
+        // its own methods: the exclusions endpoint is a separate tool.
+        assert!(matches(
+            "navan",
+            &["manage_gl_codes"],
+            "api.navan.com",
+            "PATCH",
+            "/v1/expense/gl-codes/4000"
+        ));
+        assert!(!matches(
+            "navan",
+            &["manage_gl_codes"],
+            "api.navan.com",
+            "POST",
+            "/v1/expense/gl-code-exclusions"
+        ));
+    }
+
+    #[test]
     fn stripe_rules_cover_the_files_upload_host() {
         // Stripe injects on api.stripe.com AND files.stripe.com (the Files API's
         // separate upload host), but every catalog tool lists api.stripe.com
@@ -1418,6 +1831,46 @@ mod tests {
             "api.affinity.co",
             "GET",
             "/v2/persons"
+        ));
+    }
+
+    #[test]
+    fn timeless_mcp_shares_the_rest_host_but_stays_its_own_tool() {
+        // Unlike Affinity, the Timeless MCP server lives on the SAME host as
+        // the REST API (the one injection host rule covers both), so the fence
+        // is the path alone: `/mcp/*` with or without the trailing slash, any
+        // method, and never a REST path or a lookalike prefix.
+        for (method, path) in [("POST", "/mcp/"), ("POST", "/mcp"), ("GET", "/mcp/")] {
+            assert!(
+                matches(
+                    "timeless",
+                    &["mcp_access"],
+                    "api.timeless.day",
+                    method,
+                    path
+                ),
+                "{method} {path}"
+            );
+        }
+        for path in ["/v1/meetings", "/mcpx", "/v1/mcp"] {
+            assert!(
+                !matches(
+                    "timeless",
+                    &["mcp_access"],
+                    "api.timeless.day",
+                    "POST",
+                    path
+                ),
+                "{path}"
+            );
+        }
+        // And the REST tools do not reach the MCP server.
+        assert!(!matches(
+            "timeless",
+            &["send_bot_to_link", "manage_webhooks"],
+            "api.timeless.day",
+            "POST",
+            "/mcp/"
         ));
     }
 

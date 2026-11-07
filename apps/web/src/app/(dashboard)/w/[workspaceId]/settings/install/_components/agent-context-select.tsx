@@ -9,12 +9,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@onecli/ui/components/select";
-import { withWorkspacePrefix } from "@/lib/navigation";
+import {
+  AGENT_CREATE_PARAM,
+  AGENT_CREATE_PRIMARY,
+  withWorkspacePrefix,
+} from "@/lib/navigation";
 
 const NEW_AGENT = "__new";
 
-// Structural on purpose: agent lists arrive from both the /v1 client (string
-// dates) and the server-action seed (Date) — this select needs neither.
+// Structural on purpose: this select needs only the id and the label.
 interface AgentOption {
   id: string;
   name: string;
@@ -56,7 +59,12 @@ export const AgentContextSelect = ({
         value={value}
         onValueChange={(v) =>
           v === NEW_AGENT
-            ? router.push(withWorkspacePrefix(pathname, "/agents"))
+            ? router.push(
+                withWorkspacePrefix(
+                  pathname,
+                  `/agents?${AGENT_CREATE_PARAM}=${AGENT_CREATE_PRIMARY}`,
+                ),
+              )
             : onChange(v)
         }
       >

@@ -30,8 +30,24 @@ const CALL_TIMEOUT_MS = 15_000;
  * 429 is exactly what fails it. Retries are for the HTTP layer only —
  * `ok:false` refusals are deterministic and never retried. */
 const MAX_ATTEMPTS = 3;
-const RETRY_AFTER_CAP_MS = 10_000;
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const INLINE_RETRY_BUDGET_MS = 10_000;
+
+/** This shared module is client-reachable, so retries must not import Node's
+ * timer module. Remove the abort listener after a completed delay, and clear
+ * the timer immediately when its caller cancels. */
+const waitForRetry = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve, reject) => {
+    signal?.throwIfAborted();
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 
 /**
  * A Slack refusal (`ok: false`), carrying Slack's own error code verbatim —
@@ -41,7 +57,11 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * importing anything Slack-shaped.
  */
 export class SlackApiError extends ChannelProviderApiError {
-  constructor(method: string, code: string) {
+  constructor(
+    method: string,
+    code: string,
+    readonly retryAfterMs?: number,
+  ) {
     super("slack", method, code, `Slack ${method} refused: ${code}`);
     this.name = "SlackApiError";
   }
@@ -62,14 +82,17 @@ const slackCall = async <T extends z.ZodType>(
      * wholesale replaces). A 5xx can arrive AFTER Slack committed the call
      * (their edge failing on the way back), so retrying a create/post/
      * exchange risks a duplicate app, a double-posted message, or burning a
-     * single-use OAuth code. 429s always retry: rate limiting is by
-     * definition pre-execution. */
+     * single-use OAuth code. Rate limits are pre-execution, so 429s may
+     * retry within the inline budget, always honoring Retry-After. */
     retry5xx?: boolean;
+    signal?: AbortSignal;
   },
   schema: T,
 ): Promise<z.infer<T>> => {
   let response: Response | null = null;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    init.signal?.throwIfAborted();
+    const timeout = AbortSignal.timeout(CALL_TIMEOUT_MS);
     response = await fetch(`${apiBase()}/${method}`, {
       method: "POST",
       headers: {
@@ -82,12 +105,12 @@ const slackCall = async <T extends z.ZodType>(
         }),
       },
       body: new URLSearchParams(init.form ?? {}).toString(),
-      signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+      signal: init.signal ? AbortSignal.any([timeout, init.signal]) : timeout,
     });
     const retryable =
       response.status === 429 ||
       (init.retry5xx === true && response.status >= 500);
-    if (!retryable || attempt === MAX_ATTEMPTS) break;
+    if (!retryable) break;
     // Missing/empty header must fall to the backoff branch — Number(null)
     // is 0, which would re-hammer immediately (the exact behavior the
     // marketplace review fails apps for).
@@ -96,10 +119,25 @@ const slackCall = async <T extends z.ZodType>(
       retryAfterHeader === null || retryAfterHeader.trim() === ""
         ? Number.NaN
         : Number(retryAfterHeader);
-    const waitMs = Number.isFinite(retryAfterSeconds)
-      ? Math.min(retryAfterSeconds * 1000, RETRY_AFTER_CAP_MS)
-      : 500 * attempt;
-    await sleep(waitMs);
+    const retryAfterMs =
+      Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0
+        ? retryAfterSeconds * 1000
+        : undefined;
+    init.signal?.throwIfAborted();
+    if (
+      response.status === 429 &&
+      (attempt === MAX_ATTEMPTS || (retryAfterMs ?? 0) > INLINE_RETRY_BUDGET_MS)
+    ) {
+      await response.body?.cancel();
+      throw new SlackApiError(method, "ratelimited", retryAfterMs);
+    }
+    if (attempt === MAX_ATTEMPTS) break;
+    const waitMs = retryAfterMs ?? 500 * attempt;
+    await response.body?.cancel();
+    if (waitMs > INLINE_RETRY_BUDGET_MS) {
+      throw new SlackApiError(method, `http_${response.status}`, waitMs);
+    }
+    await waitForRetry(waitMs, init.signal);
   }
   if (!response) throw new Error(`Slack ${method} produced no response`);
   if (!response.ok) {
@@ -275,12 +313,20 @@ export const postMessage = async (
     text: string;
     threadTs?: string;
     iconUrl?: string;
+    /** Colored side bars under the text: the only way a bot message gets
+     * one. Each is an attachment whose content is Block Kit `blocks` (the
+     * documented form; its `text`/`mrkdwn_in` fields are legacy). */
+    attachments?: readonly { color: string; blocks: readonly unknown[] }[];
   },
 ) => {
   const form = {
     channel: input.channel,
     text: input.text,
     ...(input.threadTs && { thread_ts: input.threadTs }),
+    ...(input.attachments &&
+      input.attachments.length > 0 && {
+        attachments: JSON.stringify(input.attachments),
+      }),
   };
   if (input.iconUrl && !iconlessMemoized(botToken)) {
     try {
@@ -324,6 +370,10 @@ export const postBlocksMessage = async (
     blocks: unknown[];
     threadTs?: string;
     iconUrl?: string;
+    /** No link previews under the message: an approval card links records
+     *  (a Salesforce contact), and the record's own Slack app would attach
+     *  a preview card of its own below ours. */
+    noUnfurl?: boolean;
   },
 ) => {
   const form = {
@@ -331,6 +381,11 @@ export const postBlocksMessage = async (
     text: input.text,
     blocks: JSON.stringify(input.blocks),
     ...(input.threadTs && { thread_ts: input.threadTs }),
+    ...(input.noUnfurl && {
+      unfurl_links: "false",
+      unfurl_media: "false",
+      unfurl_app_links: "false",
+    }),
   };
   if (input.iconUrl && !iconlessMemoized(botToken)) {
     try {
@@ -411,7 +466,18 @@ export const SLACK_TASK_TITLE_MAX = 256;
  */
 export const updateBlocksMessage = (
   botToken: string,
-  input: { channel: string; ts: string; text: string; blocks?: unknown[] },
+  input: {
+    channel: string;
+    ts: string;
+    text: string;
+    blocks?: unknown[];
+    /** The message's files, replacing the ones it has (`chat.update`'s
+     *  `file_ids`): uploaded privately first (`uploadFiles` without a
+     *  channel). `[]` detaches them (a settled bulk card drops its table;
+     *  Slack documents the parameter, not an empty list, so the settle
+     *  path relies on Slack's observed behavior). */
+    fileIds?: readonly string[];
+  },
 ) =>
   slackCall(
     "chat.update",
@@ -422,6 +488,7 @@ export const updateBlocksMessage = (
         ts: input.ts,
         text: input.text,
         ...(input.blocks && { blocks: JSON.stringify(input.blocks) }),
+        ...(input.fileIds && { file_ids: JSON.stringify(input.fileIds) }),
       },
     },
     okEnvelope,
@@ -442,6 +509,28 @@ export const deleteMessage = (
   slackCall(
     "chat.delete",
     { token: botToken, form: { channel: input.channel, ts: input.ts } },
+    okEnvelope,
+  );
+
+/** A message only `user` sees (`chat.postEphemeral`): how a click's refusal
+ * reaches the clicker without rewriting the card everyone shares. `text` is
+ * the caller's already-escaped mrkdwn. `threadTs` puts it inside a thread
+ * (a refused Stop answers in the thread whose loader it clicked). */
+export const postEphemeral = (
+  botToken: string,
+  input: { channel: string; user: string; text: string; threadTs?: string },
+) =>
+  slackCall(
+    "chat.postEphemeral",
+    {
+      token: botToken,
+      form: {
+        channel: input.channel,
+        user: input.user,
+        text: input.text,
+        ...(input.threadTs && { thread_ts: input.threadTs }),
+      },
+    },
     okEnvelope,
   );
 
@@ -577,7 +666,11 @@ export interface SlackUploadFile {
 export const uploadFiles = async (
   botToken: string,
   input: {
-    channel: string;
+    /** Where the files are shared as one message. Omitted: the files stay
+     *  private to the bot and nothing is posted (Slack's documented
+     *  behavior), ready to attach to an existing message by id
+     *  (`updateBlocksMessage`'s `fileIds`). */
+    channel?: string;
     threadTs?: string;
     initialComment?: string;
     files: readonly SlackUploadFile[];
@@ -636,7 +729,7 @@ export const uploadFiles = async (
       token: botToken,
       form: {
         files: JSON.stringify(minted),
-        channel_id: input.channel,
+        ...(input.channel && { channel_id: input.channel }),
         ...(input.threadTs && { thread_ts: input.threadTs }),
         ...(input.initialComment && { initial_comment: input.initialComment }),
       },
@@ -644,6 +737,196 @@ export const uploadFiles = async (
     completeUploadResponse,
   );
   return { fileIds: done.files.map((f) => f.id) };
+};
+
+const fileSharesResponse = z.object({
+  file: z
+    .object({
+      shares: z
+        .object({
+          public: z
+            .record(z.string(), z.array(z.object({ ts: z.string().min(1) })))
+            .optional(),
+          private: z
+            .record(z.string(), z.array(z.object({ ts: z.string().min(1) })))
+            .optional(),
+        })
+        .loose()
+        .optional(),
+    })
+    .loose(),
+});
+
+/** How long the share's message ts may take to appear on the file. */
+const SHARE_TS_TRIES = 15;
+const SHARE_TS_DELAY_MS = 300;
+
+/**
+ * The ts of the message a completed share posted into `channel`: Slack's
+ * upload never answers with it, so it is read back from the file's shares
+ * (`files.info`, `files:read`), polling briefly while the share settles.
+ * Throws when it cannot be read; the share IS posted either way.
+ */
+const sharedMessageTs = async (
+  botToken: string,
+  fileId: string,
+  channel: string,
+): Promise<string> => {
+  for (let i = 0; i < SHARE_TS_TRIES; i++) {
+    const info = await slackCall(
+      "files.info",
+      { token: botToken, form: { file: fileId }, retry5xx: true },
+      fileSharesResponse,
+    );
+    const shares = info.file.shares;
+    const ts =
+      shares?.public?.[channel]?.[0]?.ts ?? shares?.private?.[channel]?.[0]?.ts;
+    if (ts) return ts;
+    await new Promise((r) => setTimeout(r, SHARE_TS_DELAY_MS));
+  }
+  throw new Error("the share never appeared on the file");
+};
+
+/**
+ * The share POSTED its message, but Slack never said which one (no
+ * `files:read` to read it back, or the share never showed up on the file).
+ * The card is in the channel: the caller must NOT post it again.
+ */
+export class SharedMessageUnknownError extends Error {
+  constructor(readonly cause: unknown) {
+    super("Slack shared the file but its message could not be read back");
+    this.name = "SharedMessageUnknownError";
+  }
+}
+
+/**
+ * ONE message carrying Block Kit blocks AND one file: an approval card with
+ * its CSV, which Slack shows under the card, collapsed and scrollable.
+ *
+ * Only a file shared WITH its message shows on it. A file attached later
+ * (`chat.update` `file_ids`) is accepted and linked, but the message never
+ * lists it, so Slack shows nothing (measured live).
+ *
+ * Slack's upload never answers with the message ts, so it is read back from
+ * the file's shares. Failures split in two, and the split is what keeps a
+ * card from ever posting twice:
+ * - before the share completes (upload refused, bytes rejected): plain
+ *   `SlackApiError` / `Error`, nothing was posted, the caller posts the card
+ *   without the file;
+ * - after it completes: `SharedMessageUnknownError`, the card IS posted, the
+ *   caller must not post again.
+ */
+export const shareFileWithBlocks = async (
+  botToken: string,
+  input: {
+    channel: string;
+    threadTs?: string;
+    blocks: unknown[];
+    file: SlackUploadFile;
+  },
+): Promise<{ channel: string; ts: string }> => {
+  const bytes = input.file.bytes;
+  if (bytes.byteLength === 0 || bytes.byteLength > SLACK_MAX_UPLOAD_BYTES) {
+    throw new SlackApiError("files.getUploadURLExternal", "invalid_arguments");
+  }
+  const ticket = await slackCall(
+    "files.getUploadURLExternal",
+    {
+      token: botToken,
+      form: { filename: input.file.name, length: String(bytes.byteLength) },
+    },
+    uploadUrlResponse,
+  );
+  if (!isSlackUploadUrl(ticket.upload_url)) {
+    throw new Error("Slack minted an upload URL outside its own hosts");
+  }
+  // Same rules as `uploadFiles`: raw bytes, no bearer, no redirects.
+  const put = await fetch(ticket.upload_url, {
+    method: "POST",
+    headers: { "content-type": "application/octet-stream" },
+    body: new Blob([Uint8Array.from(bytes)]),
+    redirect: "manual",
+    signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
+  });
+  await put.body?.cancel().catch(() => {});
+  if (!put.ok) throw new Error(`Slack upload answered HTTP ${put.status}`);
+  await slackCall(
+    "files.completeUploadExternal",
+    {
+      token: botToken,
+      form: {
+        files: JSON.stringify([
+          { id: ticket.file_id, title: input.file.title ?? input.file.name },
+        ]),
+        channel_id: input.channel,
+        ...(input.threadTs && { thread_ts: input.threadTs }),
+        blocks: JSON.stringify(input.blocks),
+      },
+    },
+    completeUploadResponse,
+  );
+  // From here the card is in the channel: every failure is "posted, ts
+  // unknown", never a reason to post again.
+  try {
+    return {
+      channel: input.channel,
+      ts: await sharedMessageTs(botToken, ticket.file_id, input.channel),
+    };
+  } catch (err) {
+    throw new SharedMessageUnknownError(err);
+  }
+};
+
+/**
+ * Slack refusals that mean "this workspace/install cannot take the file",
+ * today and on retry. Slack's own codes, verbatim
+ * (files.getUploadURLExternal / files.completeUploadExternal docs).
+ * `invalid_arguments` is here because the client maps an empty file to it.
+ * Shared by the reply mirror (degrade to links) and send_message's files
+ * (a clear refusal, nothing posted).
+ */
+const UPLOAD_DEGRADE_CODES: ReadonlySet<string> = new Set([
+  "missing_scope",
+  "file_uploads_disabled",
+  "file_uploads_except_images_disabled",
+  "file_type_not_allowed",
+  "file_upload_size_restricted",
+  "storage_limit_reached",
+  "user_is_external_guest",
+  "not_allowed_token_type",
+  "invalid_arguments",
+]);
+export const isSlackUploadDegrade = (code: string): boolean =>
+  UPLOAD_DEGRADE_CODES.has(code);
+
+/**
+ * ONE message carrying text AND files (send_message with `files`): every
+ * file is uploaded, then shared together with the text as the share's
+ * `initial_comment`, in a channel or thread (`threadTs` must be the thread's
+ * ROOT, Slack's rule). The posted message's ts is read back like
+ * `shareFileWithBlocks` does; null when it cannot be read (the message IS
+ * posted: the caller must never post again).
+ */
+export const shareFilesWithText = async (
+  botToken: string,
+  input: {
+    channel: string;
+    threadTs?: string;
+    text: string;
+    files: readonly SlackUploadFile[];
+  },
+): Promise<{ channel: string; ts: string | null }> => {
+  const { fileIds } = await uploadFiles(botToken, {
+    channel: input.channel,
+    ...(input.threadTs && { threadTs: input.threadTs }),
+    initialComment: input.text,
+    files: input.files,
+  });
+  const first = fileIds[0];
+  const ts = first
+    ? await sharedMessageTs(botToken, first, input.channel).catch(() => null)
+    : null;
+  return { channel: input.channel, ts };
 };
 
 /**
@@ -830,6 +1113,9 @@ const usersInfoResponse = z.object({
         /** Where a manifest rename lands, ASYNCHRONOUSLY - the field the
          * teardown polls to confirm the tombstone before deleting. */
         real_name: z.string().optional(),
+        /** Avatar URLs (Slack CDN), smallest to largest. */
+        image_48: z.string().optional(),
+        image_72: z.string().optional(),
       })
       .optional(),
   }),
@@ -843,6 +1129,86 @@ export const usersInfo = (botToken: string, userId: string) =>
     { token: botToken, form: { user: userId }, retry5xx: true },
     usersInfoResponse,
   );
+
+const botsInfoResponse = z.object({
+  bot: z.object({
+    /** The app's PROFILE icon — the one set on the app's settings page
+     * (Display Information). Slack serves its generic plugin marks here
+     * until an icon is uploaded; `isSlackAppIconUrl` tells them apart. */
+    icons: z
+      .object({
+        image_48: z.string().optional(),
+        image_72: z.string().optional(),
+      })
+      .optional(),
+  }),
+});
+
+/** An app's bot record — its profile icon. Needs the bot token's
+ * `users:read` (in the manifest from day one). `botId` is the `bot_id`
+ * `authTest` answers for the app's own bot token. */
+export const botsInfo = (botToken: string, botId: string) =>
+  slackCall(
+    "bots.info",
+    { token: botToken, form: { bot: botId }, retry5xx: true },
+    botsInfoResponse,
+  );
+
+/**
+ * Whether a `bots.info` icon URL is an icon someone UPLOADED, and so the one
+ * host set the server may download it from. Uploads are served from Slack's
+ * avatar CDN; the stock marks an icon-less app answers with
+ * (`a.slack-edge.com/.../img/plugins/app/bot_48.png`, observed live) are not,
+ * so they never pass. When SLACK_CDN_BASE_URL points at a fake server (the
+ * test seam), that exact origin is the allowed one.
+ */
+export const isSlackAppIconUrl = (raw: string): boolean => {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  const base = process.env.SLACK_CDN_BASE_URL;
+  if (base) {
+    try {
+      const baseUrl = new URL(base);
+      return url.protocol === baseUrl.protocol && url.host === baseUrl.host;
+    } catch {
+      // Unparseable override — fall through to the production rule.
+    }
+  }
+  return (
+    url.protocol === "https:" &&
+    ["avatars.slack-edge.com", "ca.slack-edge.com"].includes(
+      url.hostname.toLowerCase(),
+    )
+  );
+};
+
+/**
+ * Download an uploaded app icon (public, so no token rides along). The URL
+ * comes from a Slack answer, but the server fetching it must never be
+ * steerable elsewhere: `isSlackAppIconUrl` hosts only, no redirects, a
+ * timeout, and `maxBytes` enforced mid-stream. Throws on any refusal.
+ */
+export const downloadSlackAppIcon = async (
+  url: string,
+  maxBytes: number,
+): Promise<Buffer> => {
+  if (!isSlackAppIconUrl(url)) throw new Error("not a Slack app icon URL");
+  const response = await fetch(url, {
+    redirect: "error",
+    signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error(`app icon download answered HTTP ${response.status}`);
+  }
+  const body = await readCappedBinaryBody(response, maxBytes);
+  if (!body.ok) throw new Error(`app icon download ${body.reason}`);
+  return body.bytes;
+};
 
 const usersListResponse = z.object({
   members: z.array(
@@ -931,6 +1297,242 @@ export const conversationsList = (
     conversationsListResponse,
   );
 
+// ── A person's own token (xoxp): read-only, for the read tool ──────────────
+
+const userConversation = z.object({
+  id: z.string().min(1),
+  name: z.string().optional(),
+  is_channel: z.boolean().optional(),
+  is_group: z.boolean().optional(),
+  is_im: z.boolean().optional(),
+  is_mpim: z.boolean().optional(),
+  is_private: z.boolean().optional(),
+  is_archived: z.boolean().optional(),
+  /** The other person, on a 1:1 DM. */
+  user: z.string().optional(),
+});
+export type SlackUserConversation = z.infer<typeof userConversation>;
+
+/** The conversation kinds `users.conversations` can list (its `types`). */
+type SlackConversationType =
+  | "public_channel"
+  | "private_channel"
+  | "im"
+  | "mpim";
+
+/**
+ * One page of the conversations the TOKEN'S OWNER is a member of
+ * (`users.conversations`). With a person's token and the default types
+ * (channels, private channels, DMs and group DMs) it is exactly "what this
+ * person can see", the read picker's universe. Scopes: channels:read,
+ * groups:read, im:read, mpim:read. With a BOT token and `types` narrowed to
+ * channels it is the bot's own channels, usually one page even in a
+ * workspace of thousands, and needs only channels:read + groups:read.
+ */
+export const usersConversations = (
+  token: string,
+  input: {
+    cursor?: string;
+    limit?: number;
+    types?: readonly SlackConversationType[];
+  } = {},
+) =>
+  slackCall(
+    "users.conversations",
+    {
+      token,
+      form: {
+        types: (
+          input.types ?? ["public_channel", "private_channel", "im", "mpim"]
+        ).join(","),
+        exclude_archived: "true",
+        limit: String(input.limit ?? 200),
+        ...(input.cursor && { cursor: input.cursor }),
+      },
+      retry5xx: true,
+    },
+    z.object({
+      channels: z.array(userConversation),
+      response_metadata: z
+        .object({ next_cursor: z.string().optional() })
+        .optional(),
+    }),
+  );
+
+/**
+ * One conversation as the TOKEN'S USER sees it (`conversations.info` with a
+ * user token) - Slack answers only for conversations that person can see.
+ * Same shape as `usersConversations` rows, plus `is_member` for channels.
+ */
+export const userConversationInfo = (userToken: string, channelId: string) =>
+  slackCall(
+    "conversations.info",
+    { token: userToken, form: { channel: channelId }, retry5xx: true },
+    z.object({
+      channel: userConversation.extend({
+        is_member: z.boolean().optional(),
+      }),
+    }),
+  );
+
+const historyMessage = z.object({
+  ts: z.string().min(1),
+  user: z.string().optional(),
+  bot_id: z.string().optional(),
+  username: z.string().optional(),
+  subtype: z.string().optional(),
+  text: z.string().optional(),
+  thread_ts: z.string().optional(),
+  /** How many replies sit in this message's thread. */
+  reply_count: z.number().optional(),
+  /** Who answered in this message's thread (the agent replies there). */
+  reply_users: z.array(z.string()).optional(),
+  /** The posting APP (a bot post carries no `user`): how the agent
+   * recognizes its own posts. */
+  app_id: z.string().optional(),
+  /** Present on a Block Kit post (a card): only its length matters to the
+   * readers here, so the elements stay unparsed. */
+  blocks: z.array(z.unknown()).optional(),
+});
+export type SlackHistoryMessage = z.infer<typeof historyMessage>;
+
+const historyResponse = z.object({
+  messages: z.array(historyMessage),
+  has_more: z.boolean().optional(),
+  response_metadata: z
+    .object({ next_cursor: z.string().optional() })
+    .optional(),
+});
+
+/**
+ * One page of a conversation's history, newest first. Works with any token
+ * that can see the conversation (a user token: anything its user is in).
+ * `oldest` is a Slack ts (exclusive lower bound). Read-only: 5xx-retried.
+ * Also feeds the point-of-contact reply judge its context (bot token).
+ */
+export const conversationsHistory = (
+  token: string,
+  input: {
+    channel: string;
+    oldest?: string;
+    latest?: string;
+    limit?: number;
+    /** Include a message AT `latest`/`oldest` (one message by ts). */
+    inclusive?: boolean;
+  },
+) =>
+  slackCall(
+    "conversations.history",
+    {
+      token,
+      form: {
+        channel: input.channel,
+        limit: String(input.limit ?? 50),
+        ...(input.oldest && { oldest: input.oldest }),
+        // Exclusive upper bound: pass the oldest ts of the previous page to
+        // walk backwards through the whole history.
+        ...(input.latest && { latest: input.latest }),
+        ...(input.inclusive && { inclusive: "true" }),
+      },
+      retry5xx: true,
+    },
+    historyResponse,
+  );
+
+/**
+ * One page of a thread's messages, OLDEST first (the parent leads the first
+ * page), unlike history. `oldest` / `latest` bound the page by ts
+ * (exclusive unless `inclusive`); `cursor` continues from a previous page's
+ * `response_metadata.next_cursor`. Same rules as history otherwise.
+ */
+export const conversationsReplies = (
+  token: string,
+  input: {
+    channel: string;
+    ts: string;
+    limit?: number;
+    oldest?: string;
+    latest?: string;
+    inclusive?: boolean;
+    cursor?: string;
+  },
+) =>
+  slackCall(
+    "conversations.replies",
+    {
+      token,
+      form: {
+        channel: input.channel,
+        ts: input.ts,
+        limit: String(input.limit ?? 50),
+        ...(input.oldest && { oldest: input.oldest }),
+        ...(input.latest && { latest: input.latest }),
+        ...(input.inclusive && { inclusive: "true" }),
+        ...(input.cursor && { cursor: input.cursor }),
+      },
+      retry5xx: true,
+    },
+    historyResponse,
+  );
+
+/**
+ * One message by its ts, at the top level or inside a thread, or null when
+ * the conversation has no such message. `conversations.replies` takes a
+ * thread's parent or any reply as `ts` (an unthreaded message comes back
+ * alone); `limit: 2` leaves room for the parent, which leads a thread page
+ * whatever the bounds say.
+ */
+export const messageByTs = async (
+  token: string,
+  channel: string,
+  ts: string,
+): Promise<SlackHistoryMessage | null> => {
+  try {
+    const page = await conversationsReplies(token, {
+      channel,
+      ts,
+      oldest: ts,
+      latest: ts,
+      inclusive: true,
+      limit: 2,
+    });
+    return page.messages.find((m) => m.ts === ts) ?? null;
+  } catch (err) {
+    if (err instanceof SlackApiError && err.code === "thread_not_found") {
+      return null;
+    }
+    throw err;
+  }
+};
+
+/**
+ * The thread a message belongs to, by its root's ts: the message's own ts
+ * when it is (or could start) a thread, its parent's when it is a reply.
+ * Slack asks a reply to name the parent, never another reply
+ * (`chat.postMessage` `thread_ts`). Null = no such message in `channel`.
+ */
+export const threadRootOf = async (
+  token: string,
+  channel: string,
+  ts: string,
+): Promise<string | null> => {
+  const message = await messageByTs(token, channel, ts);
+  return message ? (message.thread_ts ?? message.ts) : null;
+};
+
+/**
+ * Revoke a token at Slack (`auth.revoke`) - the disconnect's provider half,
+ * so a disconnected person's token stops working at Slack too, not just in
+ * our table. Idempotent from our side: an already-dead token refuses with
+ * `invalid_auth`/`token_revoked`, which the caller treats as done.
+ */
+export const authRevoke = (token: string) =>
+  slackCall(
+    "auth.revoke",
+    { token, retry5xx: true },
+    z.object({ revoked: z.boolean().optional() }),
+  );
+
 /**
  * Open (or return) the 1:1 IM with a user - where the platform-composed
  * reach card is delivered. Needs `im:write` (already in the manifest's
@@ -951,10 +1553,19 @@ export const conversationsOpen = (botToken: string, userId: string) =>
  * callers: a private channel the token cannot read answers an error they
  * swallow into the bare id / a fail-open verdict.
  */
-export const conversationsInfo = (botToken: string, channelId: string) =>
+export const conversationsInfo = (
+  botToken: string,
+  channelId: string,
+  options: { signal?: AbortSignal } = {},
+) =>
   slackCall(
     "conversations.info",
-    { token: botToken, form: { channel: channelId }, retry5xx: true },
+    {
+      token: botToken,
+      form: { channel: channelId },
+      retry5xx: true,
+      signal: options.signal,
+    },
     z.object({
       channel: z.object({
         id: z.string().min(1),
@@ -1011,6 +1622,38 @@ const oauthAccessResponse = z.object({
     })
     .optional(),
 });
+
+/**
+ * The USER-scope-only exchange ("Connect your Slack"): when the authorize
+ * URL asks only `user_scope`, Slack returns NO bot token and no
+ * `bot_user_id` at the top level - the person's token rides in
+ * `authed_user`. A separate schema, so the bot install's strict one (which
+ * must refuse a response with no bot token) stays as it is.
+ */
+const oauthUserAccessResponse = z.object({
+  team: z.object({ id: z.string().min(1) }),
+  authed_user: z.object({
+    id: z.string().min(1),
+    access_token: z.string().min(1),
+    /** Comma-separated scopes the person actually granted. */
+    scope: z.string().optional(),
+  }),
+});
+
+export const oauthUserAccess = (input: {
+  clientId: string;
+  clientSecret: string;
+  code: string;
+  redirectUri: string;
+}) =>
+  slackCall(
+    "oauth.v2.access",
+    {
+      basicAuth: { user: input.clientId, pass: input.clientSecret },
+      form: { code: input.code, redirect_uri: input.redirectUri },
+    },
+    oauthUserAccessResponse,
+  );
 
 /** The events arm's code exchange. Client creds go as HTTP Basic (Slack's
  * documented preference over form params); `redirect_uri` matches the sole

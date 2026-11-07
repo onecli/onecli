@@ -21,6 +21,10 @@ export class LogScanner {
     match: (line: Record<string, unknown>) => boolean;
     resolve: (line: Record<string, unknown>) => void;
   }>();
+  private readonly rawWaiters = new Set<{
+    match: (raw: string) => boolean;
+    resolve: (raw: string) => void;
+  }>();
 
   push(chunk: string): void {
     this.buffer += chunk;
@@ -38,6 +42,12 @@ export class LogScanner {
         // Non-JSON output (a panic, a stack trace) is still worth keeping.
       }
       this.lines.push({ parsed, raw });
+      for (const waiter of this.rawWaiters) {
+        if (waiter.match(raw)) {
+          this.rawWaiters.delete(waiter);
+          waiter.resolve(raw);
+        }
+      }
       if (parsed !== null) {
         for (const waiter of this.waiters) {
           if (waiter.match(parsed)) {
@@ -70,6 +80,15 @@ export class LogScanner {
 
   text(): string {
     return this.lines.map((l) => l.raw).join("\n");
+  }
+
+  /** Like `waitFor`, over every raw line: for a child whose log is not JSON. */
+  waitForRaw(match: (raw: string) => boolean): Promise<string> {
+    const existing = this.lines.find((l) => match(l.raw))?.raw;
+    if (existing !== undefined) return Promise.resolve(existing);
+    return new Promise((resolve) => {
+      this.rawWaiters.add({ match, resolve });
+    });
   }
 }
 

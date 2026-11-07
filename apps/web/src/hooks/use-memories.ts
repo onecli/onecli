@@ -1,9 +1,17 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { memories } from "@/lib/api";
-import type { AgentMemory, MemoryInput, MemoryPatch } from "@/lib/api";
+import type {
+  AgentMemory,
+  AgentMemorySummary,
+  MemoryInput,
+  MemoryPatch,
+} from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
+import { listItem, patchItem, throughField } from "@/lib/api/optimistic";
+import { useOptimisticMutation } from "@/hooks/use-optimistic-mutation";
 
 // Memory mutations are headless (the crons/channels convention): the Memory
 // section owns the toasts — a save, a restore, and a redact want different
@@ -54,9 +62,10 @@ export const useCreateMemory = (agentId: string) => {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (input: MemoryInput) => memories.create(agentId, input),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.memories.all() });
-    },
+    // Returned, so the dialog's Saving… lasts until the new row is listed
+    // (no close-then-pop-in).
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: queryKeys.memories.all() }),
   });
 };
 
@@ -79,20 +88,47 @@ export const useUpdateMemory = (agentId: string) => {
         queryKeys.memories.detail(agentId, memoryId),
         (prev?: AgentMemory) => (prev ? { ...prev, ...updated } : updated),
       );
-      qc.invalidateQueries({ queryKey: queryKeys.memories.all() });
+      return qc.invalidateQueries({ queryKey: queryKeys.memories.all() });
     },
   });
 };
 
-export const useDeleteMemory = (agentId: string) => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (memoryId: string) => memories.remove(agentId, memoryId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.memories.all() });
+const memoryRow = (memoryId: string) =>
+  throughField<
+    { memories: AgentMemorySummary[] },
+    "memories",
+    AgentMemorySummary
+  >(
+    "memories",
+    listItem((m) => m.id === memoryId),
+  );
+
+/** Delete a memory, instantly: it leaves the list (and its dialog closes)
+ * on click; the confirmation follows the server, and a failure puts the
+ * row back. */
+export const useDeleteMemory = (agentId: string) =>
+  useOptimisticMutation<void, string>({
+    family: `memories:${agentId}`,
+    itemKey: (memoryId) => `memory:${agentId}:${memoryId}`,
+    write: (memoryId) => memories.remove(agentId, memoryId),
+    apply: (qc, memoryId) =>
+      patchItem(
+        qc,
+        queryKeys.memories.agent(agentId),
+        memoryRow(memoryId),
+        () => undefined,
+      ),
+    succeeded: () => toast.success("Memory deleted"),
+    refresh: (qc) =>
+      qc.invalidateQueries({ queryKey: queryKeys.memories.all() }),
+    failure: (qc, memoryId) => {
+      const data = qc.getQueryData<{ memories: AgentMemorySummary[] }>(
+        queryKeys.memories.agent(agentId),
+      );
+      const memory = data && memoryRow(memoryId).get(data);
+      return `Couldn't delete ${memory ? `"${memory.title ?? memory.key}"` : "the memory"}`;
     },
   });
-};
 
 export const useRestoreRevision = (agentId: string) => {
   const qc = useQueryClient();

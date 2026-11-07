@@ -29,11 +29,22 @@ export interface StartApiServerOptions {
   databaseUrl: string;
   gateway: GatewayHandle;
   runnerToken: string;
-  port: number;
+  /**
+   * Omit (or 0) to let the child bind a port the OS picks and read it back
+   * from its "listening" line, as the gateway's `--port 0` is read. Picking a
+   * free port up front and handing it over races the child's multi-second
+   * boot: anything on the host can take the port in between (EADDRINUSE).
+   */
+  port?: number;
   config: HostedE2EConfig;
   /** Per-scenario timing overrides (SANDBOX_IDLE_STOP_SECONDS, ...). */
   env?: Record<string, string>;
 }
+
+/** How long the child may take to report its bound port. */
+const STARTUP_TIMEOUT_MS = 60_000;
+
+const LISTENING_LINE = /api-server listening on port (\d+)/;
 
 export const startApiServer = async (
   opts: StartApiServerOptions,
@@ -53,7 +64,7 @@ export const startApiServer = async (
         // deployment wires them.
         EDITION: "onprem",
         ENTERPRISE_ENABLED: "true",
-        PORT: String(opts.port),
+        PORT: String(opts.port ?? 0),
         DATABASE_URL: opts.databaseUrl,
         SECRET_ENCRYPTION_KEY: secretEncryptionKey(),
         BETTER_AUTH_SECRET: "hosted-e2e-better-auth-secret",
@@ -67,12 +78,33 @@ export const startApiServer = async (
     },
   );
 
-  const origin = `http://127.0.0.1:${opts.port}`;
+  const fail = (why: string): never => {
+    throw new Error(`${why}:\n${service.logs.text()}`);
+  };
+
+  const listening = await Promise.race([
+    service.logs.waitForRaw((raw) => LISTENING_LINE.test(raw)),
+    new Promise<null>((resolve) =>
+      setTimeout(() => resolve(null), STARTUP_TIMEOUT_MS),
+    ),
+    new Promise<null>((resolve) =>
+      service.child.once("close", () => resolve(null)),
+    ),
+  ]);
+  if (listening === null) {
+    return fail("api-server exited before ready, or never reported its port");
+  }
+  const port = Number.parseInt(LISTENING_LINE.exec(listening)?.[1] ?? "", 10);
+  if (!Number.isInteger(port) || port <= 0) {
+    return fail(`api-server logged no usable port: ${listening}`);
+  }
+
+  const origin = `http://127.0.0.1:${port}`;
   await waitForHealthy(service, `${origin}/v1/health`, "api-server");
 
   return {
     origin,
-    port: opts.port,
+    port,
     service,
     stop: () => service.stop(),
   };

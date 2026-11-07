@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { setCookie, getCookie, deleteCookie } from "hono/cookie";
 import { z } from "zod";
 import { db } from "@onecli/db";
@@ -6,6 +6,19 @@ import type { ApiEnv } from "../types";
 import { authMiddleware, requireWorkspaceId, auth } from "../middleware/auth";
 import { hasActiveMembership } from "../middleware/auth/resolve";
 import { getApp, getApps } from "../apps/registry";
+import { accessLevelFromState, resolveAccessLevel } from "../apps/access-level";
+import {
+  appCallbackPath,
+  authorizeScopesFor,
+  configKeysFor,
+  groupMembers,
+  groupOf,
+  isOAuthClientGroupId,
+  redirectPathFor,
+  signedRedirectPath,
+  vendorCallbackPath,
+} from "../apps/oauth/groups";
+import type { AppDefinition } from "../apps/types";
 import {
   getAppPermissionDefinition,
   getAppPermissionDefinitions,
@@ -15,14 +28,17 @@ import { resolveAppCredentials } from "../apps/resolve-credentials";
 import {
   resolveConnectCredentials,
   type ConnectRequestBody,
+  type ConnectResponse,
 } from "../apps/connect-credentials";
 import { getOAuthOrg, getOrgAppConfig, getAppAvailability } from "../providers";
 import {
   signOAuthState,
   verifyOAuthState,
   generateNonce,
+  OAUTH_STATE_COOKIE,
+  oauthStateCookieOptions,
+  type OAuthStatePayload,
 } from "../lib/oauth-state";
-import { NODE_ENV } from "../lib/env";
 import { dashboardUrl } from "../lib/dashboard-url";
 import {
   getApiCallbackOrigin,
@@ -34,7 +50,10 @@ import {
   invalidateGatewayCache,
   invalidateGatewayCacheForAccount,
 } from "../lib/gateway-invalidate";
-import { extractLabel } from "../lib/connection-display";
+import {
+  extractLabel,
+  findDuplicateConnection,
+} from "../lib/connection-display";
 import {
   listConnections,
   createConnection,
@@ -42,6 +61,7 @@ import {
   linkConnectionToAppConfig,
   listConnectionsByProvider,
 } from "../services/connection-service";
+import { connectGitHubInstallation } from "../services/github-installation-connect-service";
 import {
   disconnectOwnedConnection,
   renameOwnedConnection,
@@ -70,11 +90,22 @@ import {
   removeBlocklistRule,
 } from "../services/app-blocklist-service";
 import { logger } from "../lib/logger";
-import { attachNewConnectionToAllAgents } from "../services/workspace-autoattach-service";
+import { setPartialGrantParams } from "../apps/missing-permissions";
+import {
+  grantConnectingAgent,
+  resolveConnectingAgent,
+} from "../services/agent-connect-grant-service";
+import { registerGitHubAppShareRoutes } from "./github-app-share";
 
 const docsBaseURL = "https://onecli.sh/docs/guides/credential-stubs";
 
 const toggleSchema = z.object({ enabled: z.boolean() });
+
+// Saving, removing, or toggling a workspace's OAuth client config overrides
+// the org's client for every app of that vendor in the workspace (and
+// disconnects their accounts), so it is admin/owner-only. Reads stay open to
+// members.
+const configAdmin = auth({ role: "admin" });
 
 export const appRoutes = () => {
   const app = new Hono<ApiEnv>();
@@ -102,6 +133,15 @@ export const appRoutes = () => {
     const orgConfigs = orgConfigsResult ?? {};
 
     const configMap = new Map(configs.map((cfg) => [cfg.provider, cfg]));
+    // A workspace's vendor group row ("google") configures each member app
+    // that has no legacy per-app row of its own.
+    const workspaceConfigFor = (app: AppDefinition) => {
+      for (const key of configKeysFor(app)) {
+        const cfg = configMap.get(key);
+        if (cfg) return cfg;
+      }
+      return undefined;
+    };
 
     const connectionMap = new Map(
       connections.map((conn) => [conn.provider, conn]),
@@ -114,7 +154,7 @@ export const appRoutes = () => {
     }
 
     const result = getApps().map((a) => {
-      const config = configMap.get(a.id);
+      const config = workspaceConfigFor(a);
       const orgConfig = orgConfigs[a.id];
       const connection = connectionMap.get(a.id);
 
@@ -152,6 +192,7 @@ export const appRoutes = () => {
           label: conn.label,
           status: conn.status,
           scopes: conn.scopes,
+          missingPermissions: conn.missingPermissions,
           connectedAt: conn.connectedAt,
         })),
         credentialStubs: a.credentialStubs ?? [],
@@ -288,6 +329,10 @@ export const appRoutes = () => {
     },
   );
 
+  // ── /apps/github-app/… ── shared GitHub App installations ──────────────
+  // Before GET /:provider so the static segments aren't swallowed.
+  registerGitHubAppShareRoutes(app, authMiddleware, "workspace");
+
   // ── GET /apps/:provider ── single app detail ───────────────────────────
   app.get("/:provider", authMiddleware, async (c) => {
     const auth = c.get("auth");
@@ -382,6 +427,15 @@ export const appRoutes = () => {
     async (c) => {
       const provider = c.req.param("provider")!;
       const auth = c.get("auth");
+      // The agent this connect started from (its Connections section, the
+      // chat, an agent's connect link): a created or re-added connection is
+      // switched on for it. Resolved here, at the authenticated end and
+      // before any org interceptor, so an org connect naming one is refused
+      // like every other door, and the id the state signs is already fenced.
+      const rawAgentId = c.req.query("agent_id");
+      if (c.req.query("_org") && rawAgentId) {
+        await resolveConnectingAgent(null, rawAgentId);
+      }
 
       const orgResponse = await getOAuthOrg().tryHandleOrgAuthorize(
         auth,
@@ -415,22 +469,15 @@ export const appRoutes = () => {
       const connectionId = c.req.query("connectionId");
       const rawAgentName = c.req.query("agent_name");
       const agentName = rawAgentName ? rawAgentName.slice(0, 128) : undefined;
+      const agentId = await resolveConnectingAgent(workspaceId, rawAgentId);
 
-      // Decide where the browser goes *after* consent here, at the authenticated
-      // end, and sign it: the callback is unauthenticated, so re-deriving it
-      // there from request headers lets the caller influence the destination.
-      const state = signOAuthState({
-        workspaceId,
-        provider,
-        nonce: generateNonce(),
-        origin: getAppOrigin(c.req.raw),
-        ...(connectionId ? { connectionId } : {}),
-        ...(agentName ? { agentName } : {}),
-        // Who started the connect: the callback is unauthenticated, so this is
-        // the only way the auto-attach grants it makes can be attributed in
-        // the audit log. Signed with the rest of the state, so not forgeable.
-        ...(auth.userId ? { userId: auth.userId } : {}),
-      });
+      const accessLevel = resolveAccessLevel(
+        appDef.connectionMethod,
+        c.req.query("access_level"),
+      );
+      if (!accessLevel.ok) {
+        return c.json({ error: accessLevel.error }, 400);
+      }
 
       const resolved = await resolveAppCredentials(
         workspaceId,
@@ -447,43 +494,73 @@ export const appRoutes = () => {
       }
 
       const { values: creds } = resolved;
+      // A vendor-shared client (e.g. the org's Google client) uses the vendor's
+      // single redirect URI; platform and per-app clients keep the per-app one.
+      const redirectPath = redirectPathFor(provider, resolved.configKey);
 
-      const redirectUri = `${getApiCallbackOrigin(c.req.raw)}/v1/apps/${provider}/callback`;
-      const scopes = appDef.connectionMethod.defaultScopes ?? [];
+      // Decide where the browser goes *after* consent here, at the authenticated
+      // end, and sign it: the callback is unauthenticated, so re-deriving it
+      // there from request headers lets the caller influence the destination.
+      const state = signOAuthState({
+        workspaceId,
+        provider,
+        nonce: generateNonce(),
+        origin: getAppOrigin(c.req.raw),
+        // The token exchange must send the exact redirect_uri used here.
+        redirectPath,
+        ...(connectionId ? { connectionId } : {}),
+        ...(agentName ? { agentName } : {}),
+        ...(agentId ? { agentId } : {}),
+        // The token level the provider is asked for. Signed so the callback
+        // exchanges the code the same way the consent screen issued it.
+        ...(accessLevel.value ? { accessLevel: accessLevel.value } : {}),
+        // Who started the connect: the callback is unauthenticated, so this is
+        // the only way the grant it makes for the connecting agent can be
+        // attributed in the audit log. Signed with the rest of the state, so
+        // not forgeable.
+        ...(auth.userId ? { userId: auth.userId } : {}),
+      });
+
+      const redirectUri = `${getApiCallbackOrigin(c.req.raw)}${redirectPath}`;
+      const scopes = authorizeScopesFor(appDef, resolved.configKey);
 
       const authUrl = await appDef.connectionMethod.buildAuthUrl({
         appCredentials: creds,
         redirectUri,
         scopes,
         state,
+        ...(accessLevel.value ? { accessLevel: accessLevel.value } : {}),
       });
 
-      setCookie(c, "oauth_state", state, {
-        httpOnly: true,
-        secure: NODE_ENV === "production",
-        sameSite: "Lax",
-        path: `/v1/apps/${provider}/callback`,
-        maxAge: 600,
-      });
+      setCookie(
+        c,
+        OAUTH_STATE_COOKIE,
+        state,
+        oauthStateCookieOptions(redirectPath),
+      );
 
       return c.redirect(authUrl);
     },
   );
 
-  // ── GET /apps/:provider/callback ── OAuth callback ─────────────────────
-  app.get("/:provider/callback", async (c) => {
-    const provider = c.req.param("provider")!;
+  // ── OAuth callback core ── shared by the per-app and per-vendor routes ──
+  // Each route resolved the state once (query, else the `oauth_state` cookie
+  // `/authorize` set on this exact path) and checked it was minted for this
+  // path; the core reuses that, never re-reading it.
+  const handleOAuthCallback = async (
+    c: Context<ApiEnv>,
+    provider: string,
+    stateParam: string | undefined,
+    state: OAuthStatePayload | null,
+  ) => {
     const apiOrigin = getApiCallbackOrigin(c.req.raw);
 
-    // Resolve the state before anything else can redirect or render. It arrives
-    // in the query, or in the `oauth_state` cookie `/authorize` set on this exact
-    // path (SameSite=Lax, so the provider's top-level GET still carries it) —
-    // which is why the fragment-bridge branch below can rely on it even though
-    // its provider returns everything else in the URL fragment. That branch
+    // The state is resolved before anything else can redirect or render. The
+    // cookie (SameSite=Lax, so the provider's top-level GET still carries it)
+    // is why the fragment-bridge branch below can rely on it even though its
+    // provider returns everything else in the URL fragment. That branch
     // renders the origin inside a <script>, so it is the last place that should
     // be trusting request headers.
-    const stateParam = c.req.query("state") ?? getCookie(c, "oauth_state");
-    const state = stateParam ? verifyOAuthState(stateParam) : null;
     // Only a state this request would actually accept gets to choose the
     // destination — never one we are about to reject as belonging to another
     // provider.
@@ -536,6 +613,14 @@ export const appRoutes = () => {
       // Both resolved at the top so `appOrigin` could be derived from the state;
       // the checks stay here so the error responses are unchanged.
       if (!stateParam) {
+        // A GitHub App "Redirect on update" with no connect in flight: the
+        // user changed the installation's repos on GitHub itself. Nothing to
+        // connect or store, just tell the popup it was saved.
+        if (c.req.query("setup_action") === "update") {
+          return c.redirect(
+            `${appOrigin}/app-connect/${provider}?status=updated`,
+          );
+        }
         return errorRedirect("Missing state parameter");
       }
       if (!state || state.provider !== provider) {
@@ -591,22 +676,46 @@ export const appRoutes = () => {
         return errorRedirect(`${appDef.name} is not configured`);
       }
 
-      const redirectUri = `${apiOrigin}/v1/apps/${provider}/callback`;
+      // Exactly the redirect_uri the authorize leg sent (signed into the state).
+      const redirectPath = signedRedirectPath(state, provider);
+      const redirectUri = `${apiOrigin}${redirectPath}`;
 
       const url = new URL(c.req.url);
       const callbackParams = Object.fromEntries(url.searchParams.entries());
 
-      const result = await appDef.connectionMethod.exchangeCode({
+      const accessLevel = accessLevelFromState(
+        appDef.connectionMethod,
+        state.accessLevel,
+      );
+      const exchangeParams = {
         appCredentials: resolved.values,
         callbackParams,
         redirectUri,
-      });
+        ...(accessLevel ? { accessLevel } : {}),
+        state,
+        stateCookie: getCookie(c, OAUTH_STATE_COOKIE),
+      };
 
-      const { credentials, scopes, metadata } = result;
+      // One more provider round trip before anything is stored: the next leg
+      // returns to this same callback path, bound to this browser's cookie.
+      const continuation =
+        await appDef.connectionMethod.continueCallback?.(exchangeParams);
+      if (continuation) {
+        setCookie(
+          c,
+          OAUTH_STATE_COOKIE,
+          continuation.state,
+          oauthStateCookieOptions(redirectPath),
+        );
+        return c.redirect(continuation.continueAt);
+      }
+
+      const { credentials, scopes, metadata } =
+        await appDef.connectionMethod.exchangeCode(exchangeParams);
 
       let reconnectId = state.connectionId as string | undefined;
 
-      if (!reconnectId) {
+      if (!reconnectId && provider !== "github-app") {
         const identity = extractLabel(metadata)?.toLowerCase().trim();
         if (identity) {
           const existing = await listConnectionsByProvider(
@@ -621,12 +730,46 @@ export const appRoutes = () => {
       }
 
       // The freshly-CREATED connection id rides the success redirect so the
-      // popup can offer the post-connect attach step. Reconnects deliberately
-      // don't — the existing connection keeps whatever grants it has.
+      // popup can offer the post-connect attach step. A consent that landed on
+      // an existing connection doesn't: its grants stay as they are (a fresh
+      // connect only adds the connecting agent, below).
       let createdId: string | null = null;
+      // The connection this consent landed on, created or re-authenticated.
+      let connectionId: string;
+      // The agent the connect started from (signed at /authorize, fenced
+      // there), and the actor: the callback is unauthenticated, so both come
+      // from the signed state.
+      const connectingAgentId =
+        typeof state.agentId === "string" ? state.agentId : undefined;
+      const actorId = typeof state.userId === "string" ? state.userId : null;
 
-      if (reconnectId) {
-        await reconnectConnection(
+      if (provider === "github-app") {
+        const result = await connectGitHubInstallation({
+          scope: { workspaceId: state.workspaceId },
+          organizationId: stateOrgId,
+          credentials,
+          options: { scopes, metadata, appConfigId: resolved.appConfigId },
+          reconnectId,
+          beforeCreate: () => getConnectionHooks().beforeCreate(stateOrgId),
+        });
+        if (result.status === "updated") {
+          deleteCookie(c, OAUTH_STATE_COOKIE, { path: redirectPath });
+          return c.redirect(
+            `${appOrigin}/app-connect/${provider}?status=updated`,
+          );
+        }
+        connectionId = result.connection.id;
+        if (result.status === "created") createdId = connectionId;
+        if (!state.connectionId) {
+          await grantConnectingAgent(
+            state.workspaceId,
+            connectionId,
+            connectingAgentId,
+            actorId,
+          );
+        }
+      } else if (reconnectId) {
+        const updated = await reconnectConnection(
           { workspaceId: state.workspaceId },
           reconnectId,
           credentials,
@@ -636,6 +779,18 @@ export const appRoutes = () => {
             appConfigId: resolved.appConfigId,
           },
         );
+        connectionId = updated.id;
+        // A fresh connect (no reconnect asked for) that landed on this
+        // account by name: on for the connecting agent too. An explicit
+        // Reconnect only refreshes credentials and grants nothing.
+        if (!state.connectionId) {
+          await grantConnectingAgent(
+            state.workspaceId,
+            updated.id,
+            connectingAgentId,
+            actorId,
+          );
+        }
       } else {
         await getConnectionHooks().beforeCreate(stateOrgId);
         const fresh = await createConnection(
@@ -649,14 +804,15 @@ export const appRoutes = () => {
           },
         );
         createdId = fresh.id;
-        // New workspace connection: on for every agent right away; the
-        // post-connect dialog is where the user turns agents off.
-        // (The callback is unauthenticated: the actor comes from the signed
-        // state, so the grants are attributable in the audit log.)
-        await attachNewConnectionToAllAgents(
+        connectionId = fresh.id;
+        // A new workspace connection is on for no agent, except the one the
+        // connect started from; the post-connect dialog is where the user
+        // turns others on.
+        await grantConnectingAgent(
           state.workspaceId,
           fresh.id,
-          typeof state.userId === "string" ? state.userId : null,
+          connectingAgentId,
+          actorId,
         );
       }
 
@@ -681,10 +837,14 @@ export const appRoutes = () => {
         successParams.set("connected", createdId);
         successParams.set("workspaceId", state.workspaceId);
       }
-
-      deleteCookie(c, "oauth_state", {
-        path: `/v1/apps/${provider}/callback`,
+      // Permissions the user unticked on the consent screen: the popup warns
+      // and offers to try again on this same connection.
+      setPartialGrantParams(successParams, provider, scopes, {
+        connectionId,
+        scope: { workspaceId: state.workspaceId },
       });
+
+      deleteCookie(c, OAUTH_STATE_COOKIE, { path: redirectPath });
 
       return c.redirect(
         `${appOrigin}/app-connect/${provider}?${successParams}`,
@@ -695,6 +855,67 @@ export const appRoutes = () => {
         err instanceof Error ? err.message : "An unexpected error occurred";
       return errorRedirect(message);
     }
+  };
+
+  // The state a callback carries: in the query, or in the `oauth_state` cookie
+  // `/authorize` set on the callback's path.
+  const readCallbackState = (c: Context<ApiEnv>) => {
+    const stateParam = c.req.query("state") ?? getCookie(c, OAUTH_STATE_COOKIE);
+    return {
+      stateParam,
+      state: stateParam ? verifyOAuthState(stateParam) : null,
+    };
+  };
+
+  // A state this callback path must not complete. Nothing is verified for it,
+  // so the destination comes from the request, never from the state.
+  const invalidStateRedirect = (c: Context<ApiEnv>, landing: string) =>
+    c.redirect(
+      `${getAppOrigin(c.req.raw)}/app-connect/${landing}?status=error&message=${encodeURIComponent("Invalid state parameter")}`,
+    );
+
+  // ── GET /apps/oauth/:group/callback ── vendor-shared OAuth callback ─────
+  // One redirect URI per vendor (Google, Atlassian, Microsoft) for clients
+  // shared across that vendor's apps: an admin registers a single URL, and a
+  // single-callback vendor app (Atlassian 3LO) serves every member app. The
+  // app being connected rides the signed state; it must belong to the vendor
+  // in the path AND the state must have been minted for this exact path, so a
+  // per-app state cannot be replayed here (or vice versa).
+  app.get("/oauth/:group/callback", async (c) => {
+    const group = c.req.param("group")!;
+    if (!isOAuthClientGroupId(group)) return c.notFound();
+    const { stateParam, state } = readCallbackState(c);
+    const provider = state?.provider;
+    if (
+      !provider ||
+      groupOf(provider) !== group ||
+      state.redirectPath !== vendorCallbackPath(group)
+    ) {
+      // Land on a real app's connect page, which renders the error: the
+      // state's app when it is one, else the vendor's first app.
+      return invalidStateRedirect(
+        c,
+        provider && getApp(provider) ? provider : groupMembers(group)[0]!,
+      );
+    }
+    return handleOAuthCallback(c, provider, stateParam, state);
+  });
+
+  // ── GET /apps/:provider/callback ── OAuth callback ─────────────────────
+  // Serves states minted for the per-app path (platform clients, legacy
+  // per-app configs, and states minted before vendor callbacks existed). A
+  // state minted for the vendor path is refused here, mirroring the vendor
+  // route's check, so each state completes only where it was registered.
+  app.get("/:provider/callback", (c) => {
+    const provider = c.req.param("provider")!;
+    const { stateParam, state } = readCallbackState(c);
+    if (
+      state &&
+      signedRedirectPath(state, provider) !== appCallbackPath(provider)
+    ) {
+      return invalidStateRedirect(c, provider);
+    }
+    return handleOAuthCallback(c, provider, stateParam, state);
   });
 
   // ── POST /apps/:provider/connect ── direct connect ─────────────────────
@@ -716,6 +937,13 @@ export const appRoutes = () => {
       const body = (await c.req
         .json()
         .catch(() => null)) as ConnectRequestBody | null;
+      // An org connect (`X-Organization-Id`) naming an agent is refused here,
+      // before the org interceptor takes the request: agents live in
+      // workspaces. The workspace arm resolves it below, once the workspace
+      // is known.
+      if (c.req.header("x-organization-id")) {
+        await resolveConnectingAgent(null, body?.agentId);
+      }
 
       // The org this connect actually lands in. The legacy `X-Organization-Id`
       // interceptor (`tryHandleOrgConnect`, below) re-scopes the request to the
@@ -776,6 +1004,13 @@ export const appRoutes = () => {
       }
 
       const workspaceId = requireWorkspaceId(auth);
+      // The agent this connect started from: a created or re-added
+      // connection is switched on for it. Fenced before anything is stored,
+      // so a foreign or unknown id is a 404 and leaves no connection behind.
+      const connectingAgentId = await resolveConnectingAgent(
+        workspaceId,
+        body?.agentId,
+      );
 
       // Workspace-scoped connect starts with no config link — body-provided
       // credentials have no minting config. The credentials-import branch below
@@ -788,8 +1023,9 @@ export const appRoutes = () => {
 
       let connection: { id: string };
       // The freshly-CREATED connection (never a reconnect/duplicate): the popup's
-      // post-connect attach step only offers grants for brand-new connections —
-      // an existing one already has whatever grants it has.
+      // post-connect attach step only offers grants for brand-new connections.
+      // An existing one keeps its grants (a re-add only adds the connecting
+      // agent).
       let created: { id: string; label: string | null } | null = null;
 
       if (body?.connectionId) {
@@ -807,13 +1043,11 @@ export const appRoutes = () => {
         const effectiveLabel =
           connectionOpts.label || extractLabel(metadata) || null;
 
-        const duplicate = effectiveLabel
-          ? existing.find(
-              (conn) =>
-                conn.label?.toLowerCase().trim() ===
-                effectiveLabel.toLowerCase().trim(),
-            )
-          : existing[0];
+        const duplicate = findDuplicateConnection(
+          existing,
+          effectiveLabel,
+          metadata,
+        );
 
         if (duplicate) {
           connection = await reconnectConnection(
@@ -821,6 +1055,14 @@ export const appRoutes = () => {
             duplicate.id,
             credentials,
             workspaceConnectionOpts,
+          );
+          // Connecting an account that is already here: every grant stays as
+          // it is, and it is on for the connecting agent too.
+          await grantConnectingAgent(
+            workspaceId,
+            duplicate.id,
+            connectingAgentId,
+            auth.userId,
           );
         } else {
           await getConnectionHooks().beforeCreate(auth.organizationId);
@@ -832,9 +1074,11 @@ export const appRoutes = () => {
           );
           connection = fresh;
           created = { id: fresh.id, label: fresh.label };
-          await attachNewConnectionToAllAgents(
+          // On for no agent, except the one the connect started from.
+          await grantConnectingAgent(
             workspaceId,
             fresh.id,
+            connectingAgentId,
             auth.userId,
           );
         }
@@ -871,11 +1115,14 @@ export const appRoutes = () => {
 
       invalidateGatewayCache(c.req.raw);
 
-      // `connection` is present only for a brand-new connection — the popup's
-      // attach step keys on it (reconnects keep their existing grants).
-      return c.json(
-        created ? { success: true, connection: created } : { success: true },
-      );
+      // `connection` is present only for a brand-new connection: the popup's
+      // attach step keys on it (an existing one keeps its grants, plus the
+      // connecting agent on a re-add).
+      return c.json({
+        success: true,
+        connectionId: connection.id,
+        ...(created ? { connection: created } : {}),
+      } satisfies ConnectResponse);
     },
   );
 
@@ -932,7 +1179,7 @@ export const appRoutes = () => {
   });
 
   // ── POST /apps/:provider/config ── upsert app config ──────────────────
-  app.post("/:provider/config", authMiddleware, async (c) => {
+  app.post("/:provider/config", configAdmin, async (c) => {
     const auth = c.get("auth");
     const provider = c.req.param("provider")!;
 
@@ -974,7 +1221,7 @@ export const appRoutes = () => {
   });
 
   // ── DELETE /apps/:provider/config ── delete app config ─────────────────
-  app.delete("/:provider/config", authMiddleware, async (c) => {
+  app.delete("/:provider/config", configAdmin, async (c) => {
     const auth = c.get("auth");
     const provider = c.req.param("provider")!;
     const workspaceId = requireWorkspaceId(auth);
@@ -994,7 +1241,7 @@ export const appRoutes = () => {
   });
 
   // ── PATCH /apps/:provider/config/toggle ── enable/disable app config ───
-  app.patch("/:provider/config/toggle", authMiddleware, async (c) => {
+  app.patch("/:provider/config/toggle", configAdmin, async (c) => {
     const auth = c.get("auth");
     const provider = c.req.param("provider")!;
     const body = await c.req.json().catch(() => null);

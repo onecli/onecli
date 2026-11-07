@@ -2,12 +2,18 @@ import { describe, expect, it } from "vitest";
 
 import {
   createSecretSchema,
+  detectAnthropicAuthMode,
   hostPatternSchema,
   injectionConfigSchema,
+  isAnthropicAdminKey,
+  isAnthropicRefreshToken,
+  isOpenaiAdminKey,
   isPathInjection,
   isPathRegexInjection,
   isPathSafeValue,
   isPathTemplateInjection,
+  looksLikeAnthropicKey,
+  looksLikeOpenaiKey,
   wildcardCoversPublicSuffix,
 } from "./secret";
 
@@ -159,5 +165,84 @@ describe("isPathSafeValue", () => {
     expect(isPathSafeValue("a" + String.fromCharCode(0x09) + "b")).toBe(false);
     expect(isPathSafeValue("a" + String.fromCharCode(0x07) + "b")).toBe(false);
     expect(isPathSafeValue("a" + String.fromCharCode(0x7f) + "b")).toBe(false);
+  });
+});
+
+// Synthetic, obviously-fake bodies at realistic lengths: the prefixes are the
+// documented ones (Claude Platform "Authentication" / "Admin API keys",
+// Claude Code "Authentication", OpenAI key types); the bodies are filler.
+const body = (n: number) => "x".repeat(n);
+
+describe("Anthropic credential kinds", () => {
+  it.each([
+    ["a Console API key", `sk-ant-api03-${body(90)}`, "api-key"],
+    // An identity-backed personal key: an API key (x-api-key), never OAuth.
+    [
+      "a Console personal key (sk-ant-usr)",
+      `sk-ant-usr-${body(90)}`,
+      "api-key",
+    ],
+    // An unknown future Console prefix must keep working as an API key.
+    ["an unknown sk-ant- prefix", `sk-ant-sa01-${body(90)}`, "api-key"],
+    [
+      "a claude setup-token subscription token",
+      `sk-ant-oat01-${body(90)}`,
+      "oauth",
+    ],
+    ["an Admin API key", `sk-ant-admin01-${body(90)}`, null],
+    ["an OAuth refresh token", `sk-ant-ort01-${body(90)}`, null],
+    ["an OpenAI key", `sk-proj-${body(90)}`, null],
+  ] as const)("classifies %s", (_name, value, mode) => {
+    expect(detectAnthropicAuthMode(value)).toBe(mode);
+    expect(looksLikeAnthropicKey(value)).toBe(mode !== null);
+  });
+
+  it("flags a Console Admin key: it can't call models, so it is never a usable key", () => {
+    const admin = `sk-ant-admin01-${body(90)}`;
+    expect(isAnthropicAdminKey(admin)).toBe(true);
+    expect(looksLikeAnthropicKey(admin)).toBe(false);
+  });
+
+  it("flags an OAuth refresh token: it only mints access tokens, so it is never a usable key", () => {
+    expect(isAnthropicRefreshToken(`sk-ant-ort01-${body(90)}`)).toBe(true);
+    expect(isAnthropicRefreshToken(`sk-ant-oat01-${body(90)}`)).toBe(false);
+  });
+
+  it.each([
+    ["a Console inference key", `sk-ant-api03-${body(90)}`],
+    ["a subscription token", `sk-ant-oat01-${body(90)}`],
+    // Shared by older inference keys and Enterprise admin keys: ambiguous, so
+    // never warned about as admin.
+    ["an `api01` key", `sk-ant-api01-${body(90)}`],
+  ])("never flags %s as an admin key", (_n, v) => {
+    expect(isAnthropicAdminKey(v)).toBe(false);
+  });
+
+  it("treats a truncated paste as the right kind but not a usable key", () => {
+    expect(detectAnthropicAuthMode("sk-ant-oat01-abc")).toBe("oauth");
+    expect(looksLikeAnthropicKey("sk-ant-oat01-abc")).toBe(false);
+  });
+});
+
+describe("OpenAI key kinds", () => {
+  it.each([
+    ["a project key", `sk-proj-${body(90)}`],
+    ["a service account key", `sk-svcacct-${body(90)}`],
+    ["a legacy user key", `sk-${body(48)}`],
+  ])("accepts %s", (_name, value) => {
+    expect(looksLikeOpenaiKey(value)).toBe(true);
+  });
+
+  it.each([
+    ["an Admin key (it can't call models)", `sk-admin-${body(90)}`],
+    ["an Anthropic key", `sk-ant-api03-${body(90)}`],
+    ["a truncated paste", "sk-proj-abc"],
+  ])("rejects %s", (_name, value) => {
+    expect(looksLikeOpenaiKey(value)).toBe(false);
+  });
+
+  it("recognizes the Admin key prefix", () => {
+    expect(isOpenaiAdminKey(`sk-admin-${body(90)}`)).toBe(true);
+    expect(isOpenaiAdminKey(`sk-proj-${body(90)}`)).toBe(false);
   });
 });

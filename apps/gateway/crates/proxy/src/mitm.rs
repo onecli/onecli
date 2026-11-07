@@ -13,7 +13,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use std::fmt;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::connect::PolicyEngineExt as _;
 use crate::connect::{self, AppConnectionResult, ConnectionChoice, PolicyEngine};
@@ -120,6 +120,7 @@ pub async fn mitm(
                         Ok(ResolveResult::Resolved {
                             rules,
                             app_connections,
+                            secret_choices,
                         }) => {
                             let effective_host = rules.rewrite_host.as_deref().unwrap_or(&host);
                             if is_ws {
@@ -139,6 +140,7 @@ pub async fn mitm(
                                         connect::inject_connections_header(
                                             &mut resp,
                                             &app_connections,
+                                            &secret_choices,
                                         );
                                         Ok(resp)
                                     }
@@ -166,6 +168,7 @@ pub async fn mitm(
                                         connect::inject_connections_header(
                                             &mut resp,
                                             &app_connections,
+                                            &secret_choices,
                                         );
                                         Ok(resp)
                                     }
@@ -186,6 +189,22 @@ pub async fn mitm(
                             connection_id: cid,
                             connections,
                         }) => Ok(response::connection_not_found(&cid, &connections)),
+                        // Answered here, before policy and any approval hold:
+                        // approving the request could only forward a dead token.
+                        Ok(ResolveResult::NeedsReconnect(connection)) => {
+                            info!(host = %host, connection_id = %connection.id, provider = %connection.provider, "connection needs reconnect; request not forwarded");
+                            super::hooks::record_needs_reconnect(
+                                &ctx,
+                                hostname,
+                                failed.method.as_str(),
+                                &failed.path,
+                                failed.start,
+                            );
+                            Ok(response::connection_needs_reconnect(
+                                &connection,
+                                ctx.workspace_id.as_deref(),
+                            ))
+                        }
                         Err(e) => {
                             warn!(host = %host, error = ?e, "rule resolution failed mid-session");
                             Ok(response::resolution_failed())
@@ -276,6 +295,9 @@ pub struct ResolvedRules {
     /// The kind of credential the workspace holds for this host but this agent
     /// was not granted (`ConnectResponse::access_restricted`).
     pub access_restricted: Option<crate::connect::RestrictedCredential>,
+    /// A granted secret for this host could not be read
+    /// (`ConnectResponse::credential_unavailable`).
+    pub credential_unavailable: Option<crate::connect::SecretKind>,
     /// Ready-to-use interception data when the resolved connection has a
     /// cached token that should be served instead of forwarding.
     pub intercept_token: Option<InterceptToken>,
@@ -300,6 +322,16 @@ pub struct ResolvedRules {
     /// non-serving wipe, or a swallowed escalation). Same attribution law as
     /// `session_policy`. `Target::Connection` policy decisions bind to it.
     pub winning_connection_id: Option<String>,
+    /// Provider of that winning connection (`github-app`, not the `github`
+    /// its shared host resolves to). Request logs are labelled with it, so
+    /// two apps on one host stay distinguishable in the activity feed. Same
+    /// attribution law as `winning_connection_id`.
+    pub winning_provider: Option<String>,
+    /// The `githubOrgAccess` record of the winning connection (as of the
+    /// connect cache), set only when it is the GitHub OAuth connection (see
+    /// `github_org_access::record_for`). Advisory: it lets the hot path skip a
+    /// write the database would also have skipped.
+    pub github_org_access: Option<serde_json::Value>,
     /// Cloud-only: spend budgets governing the effective credential for this host
     /// (0/1 in practice).
     pub budget_bindings: Vec<ee::budget::BudgetBinding>,
@@ -345,6 +377,9 @@ enum ResolveResult {
         /// transparent at the use sites.
         rules: Box<ResolvedRules>,
         app_connections: Vec<db::AppConnectionRow>,
+        /// Custom secrets colliding on a slot on this host, advertised in
+        /// `x-onecli-connections` next to the app connections.
+        secret_choices: Vec<ConnectionChoice>,
     },
     /// Multiple connections exist and no header was provided.
     Ambiguous(Vec<ConnectionChoice>),
@@ -355,6 +390,8 @@ enum ResolveResult {
         connection_id: String,
         connections: Vec<ConnectionChoice>,
     },
+    /// The connection serving this request must be reconnected by the user.
+    NeedsReconnect(ConnectionChoice),
 }
 
 /// Resolve injection + policy rules from cache, with per-request app connection
@@ -386,7 +423,32 @@ async fn resolve_rules(
     )
     .await?;
 
-    let secret_rules = resp.injection_rules; // from secrets (path-scoped)
+    // Custom secrets that fill the same slot are disambiguated first, so a
+    // pin naming one never reaches the app resolver as an unknown id, and
+    // `secrets_serve` below reflects only the secret that will inject.
+    let (secret_rules, app_pin, secret_choices) = match connect::select_secret_rules(
+        resp.injection_rules,
+        &resp.app_connections,
+        hostname,
+        request_path,
+        connection_id,
+    ) {
+        connect::SecretSelection::Rules {
+            rules,
+            app_pin,
+            advertised,
+        } => (rules, app_pin, advertised),
+        connect::SecretSelection::Ambiguous(connections) => {
+            return Ok(ResolveResult::Ambiguous(connections));
+        }
+        connect::SecretSelection::NotFound(connections) => {
+            return Ok(ResolveResult::NotFound {
+                connection_id: connection_id.unwrap_or("").to_string(),
+                connections,
+            });
+        }
+    };
+    let connection_id = app_pin.as_deref();
     let mut app_rules: Vec<InjectionRule> = Vec::new();
     let mut pending_injections: Vec<crate::connect::PendingInjection> = Vec::new();
     let mut token_expires_at: Option<i64> = None;
@@ -399,6 +461,7 @@ async fn resolve_rules(
     // Id of the connection that wins injection (if any) — rides with
     // `session_policy` under the same attribution law.
     let mut winning_connection_id: Option<String> = None;
+    let mut winning_provider: Option<String> = None;
     let mut host_mismatch: Option<Vec<crate::connect::ConnectionChoice>> = None;
 
     // Resolve app connections whenever any exist and MERGE their rules with
@@ -425,7 +488,7 @@ async fn resolve_rules(
         {
             Ok(AppConnectionResult::Rules {
                 rules,
-                provider: _,
+                provider,
                 token_expires_at: exp,
                 rewrite_host: rh,
                 connection_label: cl,
@@ -443,6 +506,7 @@ async fn resolve_rules(
                 finalizer = f;
                 body_transform = bt;
                 session_policy = sp;
+                winning_provider = cid.is_some().then_some(provider);
                 winning_connection_id = cid;
             }
             Ok(AppConnectionResult::Ambiguous { connections }) => {
@@ -465,6 +529,12 @@ async fn resolve_rules(
                     });
                 }
                 debug!(host = %hostname, "requested connection not found; secret rules serve this path");
+            }
+            Ok(AppConnectionResult::NeedsReconnect { connection }) => {
+                if !secrets_serve {
+                    return Ok(ResolveResult::NeedsReconnect(connection));
+                }
+                debug!(host = %hostname, "connection needs reconnect; secret rules serve this path");
             }
             Ok(AppConnectionResult::NoConnections) => {}
             // Nothing injects, exactly as `NoConnections`; the choices ride
@@ -539,6 +609,7 @@ async fn resolve_rules(
             policy_rules_v2: resp.policy_rules_v2,
             available_apps: resp.available_apps,
             access_restricted: resp.access_restricted,
+            credential_unavailable: resp.credential_unavailable,
             intercept_token,
             plan: resp.plan,
             rewrite_host,
@@ -546,11 +617,17 @@ async fn resolve_rules(
             finalizer,
             body_transform,
             session_policy,
+            github_org_access: crate::github_org_access::record_for(
+                &resp.app_connections,
+                winning_connection_id.as_deref(),
+            ),
             winning_connection_id,
+            winning_provider,
             budget_bindings: resp.budget_bindings,
             host_mismatch,
         }),
         app_connections: resp.app_connections,
+        secret_choices,
     })
 }
 
@@ -593,6 +670,7 @@ mod tests {
                 name: "authorization".to_string(),
                 value: value.to_string(),
             }],
+            secret: None,
         }
     }
 
@@ -603,6 +681,7 @@ mod tests {
                 name: name.to_string(),
                 value: value.to_string(),
             }],
+            secret: None,
         }
     }
 
@@ -655,6 +734,147 @@ mod tests {
         (auth, request_path)
     }
 
+    fn custom_rule(id: &str, scope: &str, value: &str) -> InjectionRule {
+        InjectionRule {
+            secret: Some(inject::secret_choice::SecretRef {
+                id: id.to_string(),
+                name: format!("Key {id}"),
+                scope: scope.to_string(),
+            }),
+            ..header_rule("*", value)
+        }
+    }
+
+    async fn resolve(store: &Arc<dyn CacheStore>, pin: Option<&str>, path: &str) -> ResolveResult {
+        let engine = PolicyEngine::test_stub();
+        resolve_rules(&ctx(), HOST, &engine, &**store, &[], pin, Some(path))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn colliding_custom_secrets_escalate_then_pin_selects() {
+        let store = cache::in_memory();
+        seed_connect(
+            &store,
+            HOST,
+            vec![
+                custom_rule("s1", "workspace", "one"),
+                custom_rule("s2", "workspace", "two"),
+            ],
+            vec![],
+        )
+        .await;
+
+        let ResolveResult::Ambiguous(choices) = resolve(&store, None, "/x").await else {
+            panic!("expected Ambiguous");
+        };
+        let ids: Vec<&str> = choices.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["s1", "s2"]);
+        assert_eq!(choices[0].provider, "custom");
+        assert_eq!(choices[0].label.as_deref(), Some("Key s1"));
+        assert_eq!(choices[0].host.as_deref(), Some(HOST));
+
+        let ResolveResult::Resolved {
+            rules,
+            secret_choices,
+            ..
+        } = resolve(&store, Some("s1"), "/x").await
+        else {
+            panic!("expected Resolved");
+        };
+        let (auth, _) = applied_auth("/x", &rules.injection_rules);
+        assert_eq!(auth.as_deref(), Some("one"));
+        assert_eq!(secret_choices.len(), 2, "both advertised");
+
+        let ResolveResult::NotFound { connection_id, .. } =
+            resolve(&store, Some("foreign"), "/x").await
+        else {
+            panic!("expected NotFound");
+        };
+        assert_eq!(connection_id, "foreign");
+    }
+
+    #[tokio::test]
+    async fn workspace_custom_secret_shadows_org_without_pin() {
+        let store = cache::in_memory();
+        seed_connect(
+            &store,
+            HOST,
+            vec![
+                custom_rule("org", "organization", "org"),
+                custom_rule("ws", "workspace", "ws"),
+            ],
+            vec![],
+        )
+        .await;
+        let ResolveResult::Resolved { rules, .. } = resolve(&store, None, "/x").await else {
+            panic!("expected Resolved");
+        };
+        assert_eq!(
+            applied_auth("/x", &rules.injection_rules).0.as_deref(),
+            Some("ws")
+        );
+        // A foreign pin on a non-colliding request is ignored, as before.
+        let ResolveResult::Resolved { rules, .. } = resolve(&store, Some("nope"), "/x").await
+        else {
+            panic!("expected Resolved");
+        };
+        assert_eq!(rules.injection_rules.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn secret_pin_does_not_break_app_resolution() {
+        // A pin naming a custom secret is not handed to the app resolver, so
+        // it never becomes an unknown-connection 404 on the app side.
+        let store = cache::in_memory();
+        seed_connect(
+            &store,
+            HOST,
+            vec![InjectionRule {
+                path_pattern: "/youtube/*".into(),
+                ..custom_rule("s1", "workspace", "yt")
+            }],
+            vec![app_conn("c1", "google-calendar")],
+        )
+        .await;
+        seed_app_injection(
+            &store,
+            "c1",
+            "google-calendar",
+            HOST,
+            vec![header_rule("/calendar/*", "Bearer cal")],
+        )
+        .await;
+        let ResolveResult::Resolved { rules, .. } =
+            resolve(&store, Some("s1"), "/calendar/v3/x").await
+        else {
+            panic!("expected Resolved");
+        };
+        assert_eq!(
+            applied_auth("/calendar/v3/x", &rules.injection_rules)
+                .0
+                .as_deref(),
+            Some("Bearer cal")
+        );
+    }
+
+    #[tokio::test]
+    async fn untagged_llm_rules_are_untouched() {
+        let store = cache::in_memory();
+        seed_connect(
+            &store,
+            HOST,
+            vec![header_rule("*", "a"), header_rule("*", "b")],
+            vec![],
+        )
+        .await;
+        let ResolveResult::Resolved { rules, .. } = resolve(&store, None, "/x").await else {
+            panic!("expected Resolved");
+        };
+        assert_eq!(rules.injection_rules.len(), 2);
+    }
+
     #[tokio::test]
     async fn coexisting_secret_and_app_rules_merge() {
         let engine = PolicyEngine::test_stub();
@@ -694,10 +914,14 @@ mod tests {
             applied_auth("/calendar/v3/users/me/calendarList", &rules.injection_rules);
         assert_eq!(auth.as_deref(), Some("Bearer cal"));
         assert!(!path.contains("key=yt-key"));
-        // …and the serving connection's label is attributed.
+        // …and the serving connection's label and provider are attributed:
+        // its request-log rows name `google-calendar`, not the host.
         assert_eq!(rules.connection_label.as_deref(), Some("Conn"));
+        assert_eq!(rules.winning_connection_id.as_deref(), Some("c1"));
+        assert_eq!(rules.winning_provider.as_deref(), Some("google-calendar"));
 
-        // A youtube request still gets the API key and no app metadata.
+        // A youtube request still gets the API key and no app metadata: the
+        // Calendar connection won nothing, so it labels nothing.
         let res = resolve_rules(
             &ctx(),
             HOST,
@@ -717,6 +941,8 @@ mod tests {
         assert!(path.contains("key=yt-key"));
         assert!(rules.connection_label.is_none());
         assert!(rules.session_policy.is_none());
+        assert!(rules.winning_connection_id.is_none());
+        assert!(rules.winning_provider.is_none());
     }
 
     #[tokio::test]
@@ -915,6 +1141,9 @@ mod tests {
         };
         let (auth, _) = applied_auth("/v1/x", &rules.injection_rules);
         assert_eq!(auth.as_deref(), Some("catch-all"));
+        // A secret is not an app connection: nothing relabels its rows.
+        assert!(rules.winning_connection_id.is_none());
+        assert!(rules.winning_provider.is_none());
     }
 
     #[tokio::test]

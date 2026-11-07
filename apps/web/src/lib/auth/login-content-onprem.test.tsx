@@ -53,7 +53,7 @@ const signIntoForm = async (user: ReturnType<typeof userEvent.setup>) => {
 
 describe("self-hosted sign-in screen", () => {
   it("signs in with email and password", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(
       <OnpremLoginContent googleConfigured={false} emailConfigured={false} />,
     );
@@ -69,7 +69,7 @@ describe("self-hosted sign-in screen", () => {
     signInWithPassword.mockRejectedValue(
       new Error("That email and password don't match an account."),
     );
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(
       <OnpremLoginContent googleConfigured={false} emailConfigured={false} />,
     );

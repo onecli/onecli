@@ -66,11 +66,19 @@ export const buildEgressFeed = (
   })),
 });
 
-export const instanceEgressRoutes = () => {
+export type InstanceEgressOptions = {
+  addresses?: readonly string[];
+  region?: string | null;
+};
+
+export const instanceEgressRoutes = ({
+  addresses = EGRESS_IPV4_ADDRESSES,
+  region = EGRESS_REGION,
+}: InstanceEgressOptions = {}) => {
   const app = new Hono();
 
   app.get("/", (c) => {
-    if (EGRESS_IPV4_ADDRESSES.length === 0) {
+    if (addresses.length === 0) {
       return c.json(
         apiError(
           "This deployment does not publish egress addresses.",
@@ -80,9 +88,7 @@ export const instanceEgressRoutes = () => {
       );
     }
     c.header("Cache-Control", CACHE_CONTROL);
-    return c.json(
-      buildEgressFeed(EGRESS_IPV4_ADDRESSES, EGRESS_REGION, new Date()),
-    );
+    return c.json(buildEgressFeed(addresses, region, new Date()));
   });
 
   return app;

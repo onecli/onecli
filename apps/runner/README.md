@@ -38,7 +38,7 @@ Three pieces:
 `pnpm dev` runs it, along with web, api and the gateway:
 
 ```bash
-pnpm agent:build   # once — builds the sandbox image the runner spawns
+pnpm agent:build   # once — builds the sandbox image the runner spawns (its OS base first, then the app on it)
 pnpm dev           # web :10254  api :10256  gateway :10255  runner :8484
 ```
 

@@ -4,6 +4,7 @@ import {
   workspaceFilePath,
   agentChatPath,
   agentPath,
+  agentComputerPath,
   agentsCreatePath,
   agentSectionPath,
   connectionsPath,
@@ -18,7 +19,9 @@ describe("hasWorkspaceContext", () => {
     expect(hasWorkspaceContext("/w/abc")).toBe(true);
     expect(hasWorkspaceContext("/w/abc/agents")).toBe(true);
     expect(hasWorkspaceContext("/")).toBe(false);
-    expect(hasWorkspaceContext("/org/o1/global-connections")).toBe(false);
+    expect(hasWorkspaceContext("/org/o1/settings/global-connections")).toBe(
+      false,
+    );
     expect(hasWorkspaceContext("/org/o1/workspaces")).toBe(false);
   });
 });
@@ -34,9 +37,9 @@ describe("withWorkspacePrefix", () => {
   it("never emits a bare dead path outside a workspace scope", () => {
     // Bare workspace paths (/agents, /connections, ...) 404 everywhere on the
     // org-scoped surface — org context degrades to the org's workspaces list.
-    expect(withWorkspacePrefix("/org/o1/global-connections", "/agents")).toBe(
-      "/org/o1/workspaces",
-    );
+    expect(
+      withWorkspacePrefix("/org/o1/settings/global-connections", "/agents"),
+    ).toBe("/org/o1/workspaces");
     expect(withWorkspacePrefix("/org/o1/settings/team", "/connections")).toBe(
       "/org/o1/workspaces",
     );
@@ -48,7 +51,7 @@ describe("withWorkspacePrefix", () => {
 describe("agentPath", () => {
   it("resolves inside the workspace scope and degrades elsewhere", () => {
     expect(agentPath("/w/abc/agents", "a1")).toBe("/w/abc/agents/a1");
-    expect(agentPath("/org/o1/global-connections", "a1")).toBe(
+    expect(agentPath("/org/o1/settings/global-connections", "a1")).toBe(
       "/org/o1/workspaces",
     );
   });
@@ -65,8 +68,31 @@ describe("agentSectionPath", () => {
     expect(agentSectionPath("/w/abc/agents", "a1", "chat")).toBe(
       "/w/abc/agents/a1/chat",
     );
-    expect(agentSectionPath("/w/abc/overview", "a1", "apps")).toBe(
+    expect(agentSectionPath("/w/abc/activity", "a1", "apps")).toBe(
       "/w/abc/agents/a1/apps",
+    );
+  });
+});
+
+describe("agentComputerPath", () => {
+  it("is the Computer section, deep-linked to an ask when one is given", () => {
+    expect(agentComputerPath("/w/abc/agents/a1/skills", "a1")).toBe(
+      "/w/abc/agents/a1/computer",
+    );
+    expect(
+      agentComputerPath(
+        "/w/abc/agents/a1/skills",
+        "a1",
+        "0b4a1c5e-1111-4222-8333-444455556666",
+      ),
+    ).toBe(
+      "/w/abc/agents/a1/computer?takeover=0b4a1c5e-1111-4222-8333-444455556666",
+    );
+  });
+
+  it("encodes the ask id, so it can never add a param or a path segment", () => {
+    expect(agentComputerPath("/w/abc/agents", "a1", "x&y=1/z")).toBe(
+      "/w/abc/agents/a1/computer?takeover=x%26y%3D1%2Fz",
     );
   });
 });
@@ -76,12 +102,12 @@ describe("connectionsPath", () => {
     expect(
       connectionsPath(
         {
-          pathname: "/org/o1/global-connections",
-          basePath: "/org/o1/global-connections",
+          pathname: "/org/o1/settings/global-connections",
+          basePath: "/org/o1/settings/global-connections",
         },
         "/apps/github",
       ),
-    ).toBe("/org/o1/global-connections/apps/github");
+    ).toBe("/org/o1/settings/global-connections/apps/github");
   });
 
   it("derives the workspace connections root from a /p pathname", () => {
@@ -95,11 +121,16 @@ describe("connectionsPath", () => {
 
   it("derives the org global-connections root from an /org pathname", () => {
     expect(
-      connectionsPath({ pathname: "/org/o1/global-connections/apps/github" }),
-    ).toBe("/org/o1/global-connections");
+      connectionsPath({
+        pathname: "/org/o1/settings/global-connections/apps/github",
+      }),
+    ).toBe("/org/o1/settings/global-connections");
     expect(
-      connectionsPath({ pathname: "/org/o1/global-connections" }, "/apps/x"),
-    ).toBe("/org/o1/global-connections/apps/x");
+      connectionsPath(
+        { pathname: "/org/o1/settings/global-connections" },
+        "/apps/x",
+      ),
+    ).toBe("/org/o1/settings/global-connections/apps/x");
   });
 
   it("falls back to home when the pathname carries no scope", () => {

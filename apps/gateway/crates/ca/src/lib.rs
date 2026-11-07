@@ -2,9 +2,10 @@
 //!
 //! Handles generation, persistence, and caching of CA and leaf certificates.
 //! The CA signs per-hostname leaf certs on the fly so the gateway can terminate
-//! TLS with clients while forwarding to the real upstream server.
+//! TLS with clients while forwarding to the real upstream server. Also home to
+//! the one "verify nothing" upstream verifier every lane shares.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -30,12 +31,39 @@ const LEAF_VALIDITY_HOURS: i64 = 24;
 /// Re-generate leaf cert when less than 1 hour remains.
 const LEAF_REFRESH_BUFFER: Duration = Duration::from_secs(3600);
 
+/// The most leaves kept cached. A database client completes TLS before it
+/// can present its token, so the name a leaf is signed for can come from an
+/// unauthenticated peer: past this, expired entries are dropped and, if the
+/// cache is still full, a new leaf is served without being cached.
+const MAX_CACHED_LEAVES: usize = 4096;
+
 /// Default CN for the self-hosted/OSS CA.
 const LOCAL_CA_CN: &str = "OneCLI Local Gateway CA";
 
 struct CachedCert {
     server_config: Arc<ServerConfig>,
     expires_at: SystemTime,
+}
+
+/// The application protocol a terminated TLS session carries, advertised to
+/// the client through ALPN. A client that offers ALPN without the protocol
+/// the gateway speaks on that lane is refused at the handshake (the
+/// cross-protocol attack ALPN exists to stop).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AppProtocol {
+    /// HTTP/1.1, the MITM lane. HTTP/2 is never offered.
+    Http1,
+    /// The PostgreSQL wire protocol, its IANA-registered ALPN id.
+    Postgres,
+}
+
+impl AppProtocol {
+    fn alpn_id(self) -> &'static [u8] {
+        match self {
+            Self::Http1 => b"http/1.1",
+            Self::Postgres => b"postgresql",
+        }
+    }
 }
 
 pub struct CertificateAuthority {
@@ -48,8 +76,8 @@ pub struct CertificateAuthority {
     /// The original CA certificate DER (from disk or initial generation).
     /// Included in leaf cert chains and served via the API for agents.
     ca_cert_der: CertificateDer<'static>,
-    /// Cached leaf server configs per hostname.
-    leaf_cache: DashMap<String, CachedCert>,
+    /// Cached leaf server configs per (protocol, hostname).
+    leaf_cache: DashMap<(AppProtocol, String), CachedCert>,
 }
 
 impl CertificateAuthority {
@@ -91,7 +119,18 @@ impl CertificateAuthority {
     /// Get a rustls `ServerConfig` for a TLS handshake with a client connecting
     /// to `hostname`. Returns a cached config or generates a new leaf cert.
     pub fn server_config_for_host(&self, hostname: &str) -> Result<Arc<ServerConfig>> {
-        if let Some(entry) = self.leaf_cache.get(hostname) {
+        self.server_config_for(hostname, AppProtocol::Http1)
+    }
+
+    /// [`Self::server_config_for_host`] for any [`AppProtocol`]: the same leaf
+    /// certificate rules, advertising `protocol` through ALPN.
+    pub fn server_config_for(
+        &self,
+        hostname: &str,
+        protocol: AppProtocol,
+    ) -> Result<Arc<ServerConfig>> {
+        let key = (protocol, hostname.to_string());
+        if let Some(entry) = self.leaf_cache.get(&key) {
             let refresh_at = entry
                 .expires_at
                 .checked_sub(LEAF_REFRESH_BUFFER)
@@ -101,11 +140,17 @@ impl CertificateAuthority {
             }
         }
 
-        let config = self.generate_leaf(hostname)?;
-        let config = Arc::new(config);
+        let config = Arc::new(self.generate_leaf(hostname, protocol)?);
 
+        if self.leaf_cache.len() >= MAX_CACHED_LEAVES {
+            let now = SystemTime::now();
+            self.leaf_cache.retain(|_, entry| entry.expires_at > now);
+            if self.leaf_cache.len() >= MAX_CACHED_LEAVES {
+                return Ok(config);
+            }
+        }
         self.leaf_cache.insert(
-            hostname.to_string(),
+            key,
             CachedCert {
                 server_config: Arc::clone(&config),
                 expires_at: SystemTime::now()
@@ -164,6 +209,37 @@ impl CertificateAuthority {
         params.not_before = OffsetDateTime::now_utc();
         params.not_after = OffsetDateTime::now_utc() + time::Duration::days(CA_VALIDITY_DAYS);
         params
+    }
+
+    /// Mint a CA into the on-disk layout `load_or_generate` reads
+    /// (`{data_dir}/gateway/ca.key` + `ca.pem`) WITHOUT starting anything,
+    /// and refuse if either file already exists. This is
+    /// `onecli-gateway --generate-ca`: deployments that keep the CA in a
+    /// secret store (the Helm chart's Secret, Secrets Manager) mint it once
+    /// with this and hand the two files back through
+    /// `GATEWAY_CA_KEY`/`GATEWAY_CA_CERT`. Minted by THIS binary rather than
+    /// by openssl on purpose: `load_from_pem` re-self-signs the CA with
+    /// rcgen's own key-identifier method, so a CA whose SubjectKeyIdentifier
+    /// was computed differently issues leaves whose AuthorityKeyIdentifier
+    /// never matches, and every TLS client rejects the chain. Only a CA rcgen
+    /// produced round-trips cleanly.
+    pub async fn generate_into(data_dir: &Path) -> Result<(PathBuf, PathBuf)> {
+        let gateway_dir = data_dir.join("gateway");
+        let key_path = gateway_dir.join("ca.key");
+        let cert_path = gateway_dir.join("ca.pem");
+        for existing in [&key_path, &cert_path] {
+            if existing.exists() {
+                anyhow::bail!(
+                    "refusing to overwrite existing CA material at {}",
+                    existing.display()
+                );
+            }
+        }
+        fs::create_dir_all(&gateway_dir)
+            .await
+            .context("creating gateway data directory")?;
+        Self::generate_and_persist(&key_path, &cert_path).await?;
+        Ok((key_path, cert_path))
     }
 
     /// Generate a new CA, persist to disk, and return the authority.
@@ -261,9 +337,10 @@ impl CertificateAuthority {
         Ok(params)
     }
 
-    /// Generate a leaf certificate for `hostname`, signed by this CA.
-    /// Returns a `ServerConfig` ready for use with `tokio-rustls`.
-    fn generate_leaf(&self, hostname: &str) -> Result<ServerConfig> {
+    /// Generate a leaf certificate for `hostname`, signed by this CA, for a
+    /// session carrying `protocol`. Returns a `ServerConfig` ready for use
+    /// with `tokio-rustls`.
+    fn generate_leaf(&self, hostname: &str, protocol: AppProtocol) -> Result<ServerConfig> {
         let leaf_key =
             KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).context("generating leaf key pair")?;
 
@@ -283,8 +360,9 @@ impl CertificateAuthority {
             .with_single_cert(cert_chain, key_der)
             .context("building leaf ServerConfig")?;
 
-        // Force HTTP/1.1 — prevent HTTP/2 negotiation via ALPN.
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        // One protocol per lane: HTTP/2 is never negotiated on the MITM lane,
+        // and a database client never lands on an HTTP config.
+        config.alpn_protocols = vec![protocol.alpn_id().to_vec()];
 
         Ok(config)
     }
@@ -299,6 +377,81 @@ impl CertificateAuthority {
             .signed_by(&leaf_key, &self.ca_cert, &self.ca_key)
             .context("signing leaf certificate")?;
         Ok(leaf_cert.der().to_vec())
+    }
+}
+
+/// Accepts any server certificate, for upstreams whose certificate the gateway
+/// is told not to check: hosts an operator explicitly exempted from
+/// verification, and database connections stored with `sslmode=require`.
+///
+/// This is deliberately the same posture `reqwest`'s `danger_accept_invalid_certs`
+/// gives the HTTP path: chain, hostname *and* handshake signature all go
+/// unchecked. Parity is the point — an operator who exempts an internal host
+/// expects it to work over every protocol, and the appliances that need the
+/// exemption at all are exactly the ones with certificates and signature
+/// algorithms nothing modern will accept.
+#[derive(Debug)]
+pub struct AcceptAnyServerCert;
+
+impl rustls::client::danger::ServerCertVerifier for AcceptAnyServerCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    // Both signature paths must be stubbed: rustls calls exactly one depending
+    // on the negotiated version, and TLS 1.2 is still reachable here.
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    /// This list is load-bearing, not decoration: it becomes the ClientHello's
+    /// `signature_algorithms`. Return nothing and the server finds no acceptable
+    /// scheme and aborts *before sending a certificate* — the verifier above
+    /// never runs, and skipping verification manifests as an unexplained
+    /// handshake failure.
+    ///
+    /// Copied from reqwest so the two paths advertise the same thing. It
+    /// deliberately includes schemes our own provider cannot verify (SHA-1,
+    /// Ed448) — harmless, because nothing here verifies anything, and it is
+    /// what lets a legacy appliance find something it can sign with.
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        use rustls::SignatureScheme;
+        vec![
+            SignatureScheme::RSA_PKCS1_SHA1,
+            SignatureScheme::ECDSA_SHA1_Legacy,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ED25519,
+            SignatureScheme::ED448,
+        ]
     }
 }
 
@@ -396,7 +549,39 @@ mod tests {
         assert!(!Arc::ptr_eq(&config_a, &config_b));
     }
 
+    /// A database lane advertises its own protocol, cached apart from the
+    /// HTTP config for the same host: neither lane ever hands a client the
+    /// other's ALPN.
+    #[test]
+    fn each_protocol_gets_its_own_alpn_and_cache_entry() {
+        let ca = test_ca();
+        let http = ca
+            .server_config_for("db.example.com", AppProtocol::Http1)
+            .expect("http leaf");
+        let postgres = ca
+            .server_config_for("db.example.com", AppProtocol::Postgres)
+            .expect("postgres leaf");
+        assert_eq!(http.alpn_protocols, vec![b"http/1.1".to_vec()]);
+        assert_eq!(postgres.alpn_protocols, vec![b"postgresql".to_vec()]);
+        assert!(!Arc::ptr_eq(&http, &postgres));
+        let again = ca
+            .server_config_for("db.example.com", AppProtocol::Postgres)
+            .expect("cached postgres leaf");
+        assert!(Arc::ptr_eq(&postgres, &again));
+    }
+
     // ── Leaf cache tests ────────────────────────────────────────────────
+
+    /// The scheme list is what the ClientHello advertises. An empty one makes
+    /// the server abort before it ever sends a certificate, so "skip
+    /// verification" would surface as an unexplained handshake failure.
+    #[test]
+    fn accept_any_server_cert_advertises_signature_schemes() {
+        use rustls::client::danger::ServerCertVerifier;
+
+        let schemes = AcceptAnyServerCert.supported_verify_schemes();
+        assert!(schemes.contains(&rustls::SignatureScheme::RSA_PKCS1_SHA256));
+    }
 
     #[test]
     fn leaf_cache_returns_same_config_within_validity() {
@@ -419,7 +604,10 @@ mod tests {
             .expect("first call");
 
         // Manually expire the cached entry
-        if let Some(mut entry) = ca.leaf_cache.get_mut("expire.example.com") {
+        if let Some(mut entry) = ca
+            .leaf_cache
+            .get_mut(&(AppProtocol::Http1, "expire.example.com".to_string()))
+        {
             entry.expires_at = SystemTime::UNIX_EPOCH;
         }
 
@@ -430,7 +618,103 @@ mod tests {
         assert!(!Arc::ptr_eq(&config1, &config2));
     }
 
+    /// Names a leaf is signed for can come from an unauthenticated peer, so
+    /// the cache never grows past its bound: a full cache first sheds what
+    /// has expired, and only serves uncached when everything is still live.
+    #[test]
+    fn leaf_cache_stays_bounded() {
+        let ca = test_ca();
+        let template = ca.server_config_for_host("seed.example.com").unwrap();
+        let fill = |expires_at: SystemTime| {
+            ca.leaf_cache.clear();
+            for i in 0..MAX_CACHED_LEAVES {
+                ca.leaf_cache.insert(
+                    (AppProtocol::Postgres, format!("h{i}.example.com")),
+                    CachedCert {
+                        server_config: Arc::clone(&template),
+                        expires_at,
+                    },
+                );
+            }
+        };
+
+        fill(SystemTime::UNIX_EPOCH);
+        let fresh = ca.server_config_for_host("new.example.com").unwrap();
+        assert_eq!(ca.leaf_cache.len(), 1, "expired entries were shed");
+        let again = ca.server_config_for_host("new.example.com").unwrap();
+        assert!(Arc::ptr_eq(&fresh, &again), "and the new leaf was cached");
+
+        fill(SystemTime::now() + Duration::from_secs(3600 * 24));
+        let uncached = ca.server_config_for_host("other.example.com").unwrap();
+        assert_eq!(ca.leaf_cache.len(), MAX_CACHED_LEAVES);
+        let next = ca.server_config_for_host("other.example.com").unwrap();
+        assert!(!Arc::ptr_eq(&uncached, &next), "served, never cached");
+    }
+
     // ── der_to_pem round-trip ───────────────────────────────────────────
+
+    /// The `--generate-ca` contract: a CA minted into a directory loads back
+    /// through the ENV path (the Secret → `GATEWAY_CA_*` route the chart
+    /// takes) and issues leaves a real TLS client verifies against the minted
+    /// certificate. Checked with rustls's own webpki verifier, exactly what
+    /// curl/node do at the proxy. An externally minted CA (openssl) passes the
+    /// load and FAILS this verify, because `load_from_pem` re-self-signs with
+    /// rcgen's key-identifier method, which is why the chart mints through
+    /// the gateway binary.
+    #[tokio::test]
+    async fn generated_ca_round_trips_through_env_and_chains() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let (key_path, cert_path) = CertificateAuthority::generate_into(tmp.path())
+            .await
+            .expect("generate CA");
+        assert_eq!(key_path, tmp.path().join("gateway").join("ca.key"));
+        assert_eq!(cert_path, tmp.path().join("gateway").join("ca.pem"));
+
+        let key_pem = std::fs::read_to_string(&key_path).expect("read key");
+        let cert_pem = std::fs::read_to_string(&cert_path).expect("read cert");
+        assert!(key_pem.starts_with("-----BEGIN PRIVATE KEY-----"));
+        assert!(cert_pem.starts_with("-----BEGIN CERTIFICATE-----"));
+
+        let ca = CertificateAuthority::load_from_pem(&key_pem, &cert_pem).expect("load pair");
+        assert_eq!(ca.ca_cert_pem(), cert_pem);
+
+        let leaf_der = ca.sign_leaf_der("chain.example.com").expect("sign leaf");
+
+        // Verify the way a client would: trust ONLY the minted CA bytes.
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(ca.ca_cert_der.clone())
+            .expect("minted CA is a valid trust anchor");
+        let verifier = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
+            .build()
+            .expect("verifier");
+        use rustls::client::danger::ServerCertVerifier;
+        let name = rustls::pki_types::ServerName::try_from("chain.example.com").expect("name");
+        verifier
+            .verify_server_cert(
+                &CertificateDer::from(leaf_der),
+                &[],
+                &name,
+                &[],
+                rustls::pki_types::UnixTime::now(),
+            )
+            .expect("a leaf signed by the loaded CA chains to the minted certificate");
+    }
+
+    #[tokio::test]
+    async fn generate_into_refuses_to_overwrite() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        CertificateAuthority::generate_into(tmp.path())
+            .await
+            .expect("first mint");
+        let before = std::fs::read(tmp.path().join("gateway/ca.key")).expect("read");
+        let err = CertificateAuthority::generate_into(tmp.path())
+            .await
+            .expect_err("second mint must refuse");
+        assert!(err.to_string().contains("refusing to overwrite"), "{err}");
+        let after = std::fs::read(tmp.path().join("gateway/ca.key")).expect("read");
+        assert_eq!(before, after, "the existing key is untouched");
+    }
 
     #[test]
     fn der_to_pem_round_trips() {

@@ -14,7 +14,7 @@
     "test:scripts": "node --test 'scripts/**/*.test.mjs'",
     "test:licensing": "pnpm --filter @onecli/api test:licensing",
     "fix": "turbo run lint:fix && pnpm run format",
-    "agent:build": "docker build -f docker/agent.Dockerfile -t onecli-agent:dev .",
+    "agent:build": "node scripts/agent-build.mjs",
     "db:up": "docker compose --project-directory . -f docker/docker-compose.dev.yml up -d --wait postgres",
     "db:down": "docker compose --project-directory . -f docker/docker-compose.dev.yml down postgres",
     "db:nuke": "docker compose --project-directory . -f docker/docker-compose.dev.yml down -v",
@@ -39,7 +39,7 @@
   "engines": {
     "node": ">=22"
   },
-  "version": "2.7.0",
+  "version": "2.19.0",
   "license": "Apache-2.0 AND LicenseRef-OneCLI-Enterprise",
   "lint-staged": {
     "*.{ts,tsx,js,jsx,md,css,json}": [
@@ -50,6 +50,9 @@
     "overrides": {
       "openid-client": "6.8.5",
       "@smithy/types": "^4.18.0"
+    },
+    "patchedDependencies": {
+      "@novnc/novnc@1.7.0": "patches/@novnc__novnc@1.7.0.patch"
     }
   }
 }

@@ -9,9 +9,26 @@ import { CHANNEL_PROVIDER_IDS } from "../services/channels/types";
  */
 
 /**
+ * An EVAL run's conversation: the eval worker asks one test question on a
+ * fresh, non-direct conversation it owns, one per question per run.
+ *
+ * PLATFORM-ONLY, like the greeting: it is a stored conversation source, but
+ * `createConversationSchema` excludes it, so no client can mint an "eval"
+ * conversation and pass its own turns off as test runs.
+ *
+ * Deliberately NOT an automation source: an eval turn is a foreground ask
+ * the user clicked for and is waiting on (due-work must not rank it behind
+ * crons), and its answer must never be relayed into anyone's direct thread
+ * by the continuity bridge. It is never linked to a channel, so no mirror
+ * sees it, and chat lists do not show it (the web renders only the direct
+ * thread); the Runs view reads it by source.
+ */
+export const EVAL_SOURCE = "eval";
+
+/**
  * Where a conversation comes from. `web` is a person in the dashboard; the
  * rest arrive with their own steps (channels §3.16, crons step 7, watches
- * step 10, agent-to-agent PR 5b). Channel ingestion stamps
+ * step 10, agent-to-agent PR 5b, evals). Channel ingestion stamps
  * `source: presence.provider`, so the provider ids ARE sources — composed
  * from the one provider list, a new provider cannot forget this union.
  * `agent` is a peer OneCLI agent: the conversation's `externalRef` is the
@@ -22,7 +39,11 @@ export const CONVERSATION_SOURCES = [
   ...CHANNEL_PROVIDER_IDS,
   "cron",
   "watch",
+  // An inbound webhook's own conversation (externalRef = the webhook id).
+  "webhook",
   "agent",
+  EVAL_SOURCE,
+  "memory_review",
 ] as const;
 export type ConversationSource = (typeof CONVERSATION_SOURCES)[number];
 
@@ -43,6 +64,23 @@ export type ConversationSource = (typeof CONVERSATION_SOURCES)[number];
  */
 export const PEER_TASK_SOURCE = "peer_task";
 
+/**
+ * A MEMORY REVIEW: the platform asking the agent, once a conversation has
+ * gone quiet, to save what it learned there (corrections, facts, preferences)
+ * — the safety net under the in-turn "save it the moment you learn it" rule,
+ * which models skip while busy with the task. Runs in its own hidden
+ * conversation per reviewed one (`externalRef` = the reviewed conversation's
+ * id) and delivers nothing: the result IS the memory. An automation source,
+ * so it ranks behind people, never anchors a schedule, and never mirrors.
+ *
+ * PLATFORM-ONLY, like the eval source: `createConversationSchema` refuses
+ * it, and no person or channel may write into one (`requireConversationFor`).
+ * A member who could mint a review conversation pointed at another
+ * person's thread, or speak in one, would plant a newer "last review" that
+ * silences that thread's real reviews.
+ */
+export const MEMORY_REVIEW_SOURCE = "memory_review";
+
 /** The non-human sources: a turn born from an automation, not a person
  * typing. The continuity bridge (turn-service) branches on this constant, and
  * the channel mirror (`apps/channel-adapter/src/mirror.ts`) imports it for
@@ -53,7 +91,9 @@ export const PEER_TASK_SOURCE = "peer_task";
 export const AUTOMATION_SOURCES = [
   "cron",
   "watch",
+  "webhook",
   PEER_TASK_SOURCE,
+  MEMORY_REVIEW_SOURCE,
 ] as const satisfies readonly TurnSource[];
 export type AutomationSource = (typeof AUTOMATION_SOURCES)[number];
 
@@ -79,18 +119,62 @@ export type AutomationSource = (typeof AUTOMATION_SOURCES)[number];
  *     reply, which a first-contact greeting has no use for.
  *
  * What the greeting DOES share with an automation is its render shape: no
- * user typed it, so it wears no user bubble and gets no "(from the web)"
+ * user typed it, so it wears no user bubble and gets no web
  * attribution. That is `isPlatformAuthoredSource` below, which is what the
  * render paths test — never `AUTOMATION_SOURCES`.
  */
 export const GREETING_SOURCE = "greeting";
 
+/**
+ * The platform resuming an agent after a person finished a desktop step:
+ * "Alex took control of your desktop and is done. Continue." Posted with
+ * no user, into the thread the agent asked from. The greeting's twin in every respect that matters: a TURN source
+ * only (no client may mint a "desktop" conversation), platform-authored
+ * (no user bubble, no "(from the web)"), and FOREGROUND, so it never ranks
+ * behind the automation cohort and never relays into the next human turn
+ * as an automation delivery. The one difference is the thread: the
+ * greeting runs on a brand-new direct thread, this one wherever the ask
+ * came from, through the direct-wake door for a direct thread.
+ */
+export const DESKTOP_RESUME_SOURCE = "desktop";
+
+/**
+ * The platform resuming an agent after a card it raised was decided
+ * ("The person approved: … Continue the original request."). The desktop
+ * resume's twin: a TURN source only, platform-authored, FOREGROUND, and only
+ * ever in the agent's direct thread with the person who decided.
+ */
+export const APPROVAL_RESUME_SOURCE = "approval";
+
 /** Every source a TURN may carry: conversation sources plus the turn-only
- * ones (the greeting, a peer task's report). */
+ * ones (the greeting, a desktop resume, a peer task's report). */
 export type TurnSource =
   | ConversationSource
   | typeof GREETING_SOURCE
+  | typeof DESKTOP_RESUME_SOURCE
+  | typeof APPROVAL_RESUME_SOURCE
   | typeof PEER_TASK_SOURCE;
+
+/**
+ * A turn or follow-up born from an automation rather than a person typing.
+ * The one predicate over `AUTOMATION_SOURCES`, shared by every surface that
+ * asks the question (the continuity bridge, the channel mirror, the steer
+ * arm's framing), so a new automation source is still ONE edit.
+ */
+export const isAutomationSource = (
+  source: string,
+): source is AutomationSource =>
+  (AUTOMATION_SOURCES as readonly string[]).includes(source);
+
+/** The sources whose turn message nobody typed: the greeting, a desktop
+ * resume, and every automation. One list, so a query can fence on the same
+ * set the predicate below tests. */
+export const PLATFORM_AUTHORED_SOURCES = [
+  GREETING_SOURCE,
+  DESKTOP_RESUME_SOURCE,
+  APPROVAL_RESUME_SOURCE,
+  ...AUTOMATION_SOURCES,
+] as const satisfies readonly TurnSource[];
 
 /**
  * Nobody typed this turn's message — the platform authored it (an automation
@@ -99,8 +183,7 @@ export type TurnSource =
  * a user bubble", which is about authorship, not about scheduling priority.
  */
 export const isPlatformAuthoredSource = (source: string): boolean =>
-  source === GREETING_SOURCE ||
-  (AUTOMATION_SOURCES as readonly string[]).includes(source);
+  PLATFORM_AUTHORED_SOURCES.some((authored) => authored === source);
 
 /** A turn's lifecycle. The first three are the ACTIVE set the partial unique
  * index fences — at most one of them per conversation. `joining`/`joined` are
@@ -157,36 +240,34 @@ export const FOLLOW_UP_EXPIRED_MESSAGE =
 
 /**
  * Machine-readable failure reasons, set beside the human `Turn.error` ONLY
- * when a reader has to do something more than print the sentence.
- *
- * `no_model_key` and `model_provider_error` offer a fix that is a link away
- * (connect a key / check the key). The lifecycle codes (`agent_restarted`,
- * `agent_start_failed`, `at_capacity`, `image_unavailable`) tell the web
- * these are platform hiccups, not agent output — rendered as a quiet notice,
- * never the red failure box — and none of that can be decided by
- * pattern-matching on prose.
+ * when a reader has to do something more than print the sentence: the web
+ * attaches the fix that matches the code (connect, check or attach a key),
+ * and Slack posts the matching card. None of that can be decided by
+ * pattern-matching on prose. Every failed turn renders as guidance whatever
+ * its code; the code only picks the action.
  */
-/** The lifecycle subset, exported on its own because the web derives its
- * "render as a quiet notice" set from it (turn-block.tsx imports this module
- * directly, like the composer's TURN_MESSAGE_MAX_LENGTH) — a new lifecycle
- * code then reaches the UI without a hand-synced copy. */
-export const LIFECYCLE_TURN_ERROR_CODES = [
+export const TURN_ERROR_CODES = [
+  "no_model_key",
+  "model_provider_error",
+  "trial_credit_exhausted",
+  "model_key_not_attached",
+  "model_key_unreadable",
+  "blocked_by_policy",
+  "gateway_unavailable",
   "agent_restarted",
   "agent_start_failed",
   "at_capacity",
   "harness_busy",
   "harness_no_terminal",
   "image_unavailable",
+  "model_endpoint_not_found",
   "transcript_rejected",
   "turn_stalled",
   "turn_time_limit",
-] as const;
-
-export const TURN_ERROR_CODES = [
-  "no_model_key",
-  "model_provider_error",
-  "trial_credit_exhausted",
-  ...LIFECYCLE_TURN_ERROR_CODES,
+  "home_read_only",
+  "home_read_only_held",
+  "model_refused",
+  "model_empty_response",
 ] as const;
 export type TurnErrorCode = (typeof TURN_ERROR_CODES)[number];
 
@@ -212,6 +293,23 @@ export const NO_MODEL_KEY_MESSAGE =
  * (side effects may exist; a blind "send it again" would invite doubles). */
 export const AGENT_RESTARTED_MESSAGE =
   "The agent had to restart while working on this. Check what it finished, then send it again.";
+
+/** The person's line on a turn the platform resumed after a mid-run death
+ * (the one automatic recovery; a second death closes with
+ * `AGENT_RESTARTED_MESSAGE`). A durable notice under the turn, so it stays
+ * in the chat. Temporary in tone and says what happens next, per the
+ * lifecycle-copy doctrine above. */
+export const AGENT_RESUMING_NOTICE =
+  "The agent restarted while working on this. It's picking up where it left off.";
+
+/** The delivery-only frame on a resumed turn's dispatch (prepended at the
+ * harness boundary like the memory context, never stored). The model needs
+ * three facts the transcript cannot give it: this message is not new, the
+ * step that was running when the agent stopped may have half-happened, and
+ * the earlier work may be absent (a harness that cannot resume the session
+ * starts it fresh). */
+export const RESUMED_TURN_CONTEXT =
+  "[system] The agent restarted while it was working on this message, and this run picks it back up. If your earlier work on it is in this conversation above, continue from where you left off. A step that was running when it restarted may or may not have finished, so check its result before you redo anything with side effects. If no earlier work appears above, start from the beginning.";
 
 /** A start that could not happen (second cold-boot death, generic start
  * failure past its patience window, or the supervisor's launch classification
@@ -248,6 +346,22 @@ export const TURN_STALLED_MESSAGE =
 export const TURN_CEILING_WARNING_MESSAGE =
   "[system] This turn is approaching its time limit and will be ended soon. Stop starting new work and stop waiting on long-running things now. Reply with: what you completed, the current status of anything still running (background processes, CI, other agents — they keep running after this turn ends), what remains, and how to continue in the next message. Then end the turn.";
 
+/**
+ * The delivery-only frame a mid-run follow-up from a person (or a peer agent,
+ * whose text already names it as one) carries into the live run: the steer
+ * arm's `context`, prepended at the harness boundary like a turn's memory
+ * context, so the stored row keeps the sender's exact words. Without it the
+ * words land between tool results with nothing marking them as a new
+ * message, and the model folds them into the task instead of answering.
+ * Agent-facing: names what arrived and what to do, and leaves the HOW (short,
+ * direct, before any tool call) to the system prompt's rule. Sender-neutral
+ * on purpose, so it is never a lie about who wrote it. Automation follow-ups
+ * (a wake joining a running watch turn) and the ceiling warning carry their
+ * own header and never get this one.
+ */
+export const STEERED_FOLLOW_UP_CONTEXT =
+  "[A new message arrived while you were working. Reply to it directly in your next message, then continue the task.]";
+
 /** The host has no room right now; honest about the wait, silent about the
  * infrastructure. */
 export const AT_CAPACITY_MESSAGE =
@@ -277,6 +391,46 @@ export const MODEL_PROVIDER_ERROR_MESSAGE =
 export const TRIAL_CREDIT_EXHAUSTED_MESSAGE =
   "This agent was running on OneCLI's free trial credit, which is now used up. Connect your own model key, then send your message again.";
 
+/** The workspace holds a model key, but this agent was not given it (the
+ * gateway's `access_restricted`). The fix is one link away on the agent's
+ * Models page, so the copy names it. */
+export const MODEL_KEY_NOT_ATTACHED_MESSAGE =
+  "This agent doesn't have access to your model key yet. Attach the key to this agent, then send your message again.";
+
+/** This agent HAS the model key, but OneCLI could not read its stored value
+ * (the gateway's `credential_unavailable`), so the call went out without it.
+ * Attaching or adding a key is not the fix, and nothing about the provider or
+ * a usage limit is known, so the copy names the one fix: re-enter it. */
+export const MODEL_KEY_UNREADABLE_MESSAGE =
+  "OneCLI couldn't read this agent's saved model key. Re-enter the key, then send your message again.";
+
+/** A OneCLI policy or spending limit stopped the model call. Nothing is
+ * broken, and the person may not be the one who can change it (an org rule
+ * or budget is an org admin's), so the copy says who decides without naming
+ * a scope it cannot know. Shown in Slack too, so it never points at a
+ * disclosure only the web has. */
+export const BLOCKED_BY_POLICY_MESSAGE =
+  "A OneCLI policy or spending limit stopped this request. An admin can review it in OneCLI.";
+
+/** The gateway could not complete the model call (restarting, the provider
+ * unreachable or too slow). Temporary, like the lifecycle family. */
+export const GATEWAY_UNAVAILABLE_MESSAGE =
+  "OneCLI couldn't reach the model provider just now. Send your message again in a moment.";
+
+/** The agent's storage went read-only under it (`home_read_only`): every
+ * later write would fail, so the platform restarts it, and a fresh boot
+ * mounts the storage writable again. Temporary in tone, and true: the
+ * restart is already underway when this is shown. */
+export const HOME_READ_ONLY_MESSAGE =
+  "The agent hit a storage problem and is restarting itself. Its files are safe. Send your message again in a minute.";
+
+/** The same problem, after the platform's restart budget or its fleet
+ * brake held the restart (`home_read_only_held`): restarting again would
+ * not help yet, and the team is alerted by the same event. Still no word
+ * "sandbox"; it says what is happening and what to do. */
+export const HOME_READ_ONLY_HELD_MESSAGE =
+  "The agent hit a storage problem and could not restart by itself. Its files are safe, and the OneCLI team has been alerted. Try again in a little while.";
+
 /** The harness refused the message because its session was still executing
  * earlier, platform-abandoned work and the adapter's self-heal (cancel +
  * resend with backoff) could not free it. Genuinely temporary: the blocked
@@ -293,14 +447,35 @@ export const HARNESS_NO_TERMINAL_MESSAGE =
 
 /** The model provider rejected the conversation itself as malformed. Its
  * stored history is replayed whole on every turn, so resending as-is fails
- * the same way. The known cause (#1194: a stop interrupted the agent mid
- * save and left its history duplicated) is repaired the next time the agent
- * starts, which an idle stop brings about on its own; any other cause needs
- * whoever operates the agent. The copy promises neither outcome: it says
- * the problem is the conversation's saved history, not the person's
- * message, and what to try. */
+ * the same way. Boot-time repair covers duplicated tool ids and unsupported
+ * images, but not rejected signed payloads. An explicit dashboard restart
+ * clears the saved session reference and starts fresh for every family.
+ * Name the dashboard because this copy also appears in shared channels. */
 export const TRANSCRIPT_REJECTED_MESSAGE =
-  "The agent couldn't continue because this conversation's saved history is damaged. It tries to repair it the next time it restarts, so send your message again in a little while. If this keeps happening, contact whoever operates this agent.";
+  "The agent couldn't continue because this conversation's saved history is damaged. To start it fresh, restart the agent from its menu in the dashboard, then send your message again. If this keeps happening, contact whoever operates this agent.";
+
+/** The model endpoint answered 404: an unknown model name, a wrong endpoint
+ * address, or a proxy in front of the provider forwarding to a path it does
+ * not serve. Setup, not the person's message and not the key, so the call to
+ * action is the operator. A resend helps only when a proxy misrouted a single
+ * call, so it comes second. Shown in shared channels too, so it names no
+ * internals. */
+export const MODEL_ENDPOINT_NOT_FOUND_MESSAGE =
+  'The agent couldn\'t reach its model: the model endpoint answered "not found". This is usually a setup problem with the model name or endpoint, not your message, so contact whoever operates this agent. Sending it again helps only if this was a one-time glitch.';
+/** The model declined to answer and wrote nothing (`model_refused`: a
+ * provider safety stop). The conversation's whole history goes to the model
+ * with every message, so something earlier in it, not only this message, can
+ * keep provoking the refusal: the copy offers rephrasing first, then the two
+ * fixes that change what the model sees (a fresh start, another model).
+ * Shown in shared channels too, so it names the dashboard and no internals,
+ * and it never blames the person (the cause is often not their words). */
+export const MODEL_REFUSED_MESSAGE =
+  "The model declined to answer this message. Try rephrasing it. If it keeps declining, something earlier in this conversation may be the cause: restarting the agent from its menu in the dashboard starts its conversations fresh, or you can switch it to a different model.";
+/** The model ended its turn with nothing visible and no safety stop behind
+ * it (`model_empty_response`), after the agent's own retries. Usually a
+ * transient upstream problem, so the honest recovery is a resend. */
+export const MODEL_EMPTY_RESPONSE_MESSAGE =
+  "The model returned an empty answer to this message. This is usually a temporary problem with the model provider. Send your message again.";
 
 /** The Slack mirror's last-resort line for a FAILED turn that produced no
  * answer text and no error anywhere — silence would read as the agent
@@ -318,6 +493,46 @@ export const TURN_FAILED_PARTIAL_MESSAGE =
  * the web's word for the same moment (turn-block's aborted arm), kept
  * byte-identical by convention. */
 export const TURN_STOPPED_MESSAGE = "Stopped.";
+
+/** Shown in place of an uncoded failure whose error text is a raw payload
+ * (see `isRawErrorPayload`). Nothing classified the failure, so the copy
+ * names no cause and no fix it cannot vouch for (never the model key: a
+ * provider 500 or a context overflow is not a key problem). Same doctrine as
+ * the family above: temporary in tone, and it says what to do next. */
+export const TURN_FAILED_RAW_ERROR_MESSAGE =
+  "The agent ran into an error and couldn't finish this message. Send it again in a moment. If it keeps happening, contact whoever operates this agent.";
+
+/**
+ * A provider's JSON error envelope (`"error": {…}`: Anthropic, OpenAI and
+ * Google all nest the error object under that key, and a body quoted inside
+ * another string escapes the quote as `\"error\": {`) or an HTML error page
+ * (a proxy's 502). Kept narrow on purpose:
+ * - The OneCLI gateway's own refusals use a FLAT string code
+ *   (`"error": "blocked_by_policy"`) beside a readable message that names
+ *   the rule or budget, so they keep today's passthrough.
+ * - Status phrases, "run this command" lines and tool names never match: an
+ *   ordinary error SENTENCE is the useful answer and must stay as written.
+ * - The one flat gateway code that IS treated as a payload is
+ *   `upstream_unreachable`: the gateway could not reach the model provider
+ *   at all (network down, DNS, TLS). New turns get the `gateway_unavailable`
+ *   class from the supervisor; this catches a turn stored without one (an
+ *   older supervisor), whose message says to "check the hostname", which is
+ *   right for a made-up API host but wrong for api.anthropic.com.
+ * No nested quantifiers: the text is untrusted and can be long.
+ */
+const RAW_ERROR_PAYLOAD =
+  /"error\\?"\s*:\s*\{|"error\\?"\s*:\s*\\?"upstream_unreachable|<!doctype html|<html[\s>]/i;
+
+/**
+ * Whether an UNCODED failure's error text is a raw payload rather than a
+ * sentence. Coded failures never need this (the control plane already
+ * stored their canonical copy). The surfaces swap a payload for
+ * `TURN_FAILED_RAW_ERROR_MESSAGE`; the web keeps the raw text behind a
+ * collapsed disclosure for whoever is debugging, and a shared channel drops
+ * it.
+ */
+export const isRawErrorPayload = (error: string): boolean =>
+  RAW_ERROR_PAYLOAD.test(error);
 
 /**
  * The server-side allowlist: a WIRE failure code (supervisor/runner-supplied,
@@ -360,6 +575,42 @@ export const TURN_FAILURE_COPY: Partial<
     code: "transcript_rejected",
     message: TRANSCRIPT_REJECTED_MESSAGE,
   },
+  model_endpoint_not_found: {
+    code: "model_endpoint_not_found",
+    message: MODEL_ENDPOINT_NOT_FOUND_MESSAGE,
+  },
+  model_key_not_attached: {
+    code: "model_key_not_attached",
+    message: MODEL_KEY_NOT_ATTACHED_MESSAGE,
+  },
+  model_key_unreadable: {
+    code: "model_key_unreadable",
+    message: MODEL_KEY_UNREADABLE_MESSAGE,
+  },
+  blocked_by_policy: {
+    code: "blocked_by_policy",
+    message: BLOCKED_BY_POLICY_MESSAGE,
+  },
+  gateway_unavailable: {
+    code: "gateway_unavailable",
+    message: GATEWAY_UNAVAILABLE_MESSAGE,
+  },
+  home_read_only: {
+    code: "home_read_only",
+    message: HOME_READ_ONLY_MESSAGE,
+  },
+  home_read_only_held: {
+    code: "home_read_only_held",
+    message: HOME_READ_ONLY_HELD_MESSAGE,
+  },
+  model_refused: {
+    code: "model_refused",
+    message: MODEL_REFUSED_MESSAGE,
+  },
+  model_empty_response: {
+    code: "model_empty_response",
+    message: MODEL_EMPTY_RESPONSE_MESSAGE,
+  },
 };
 
 /** Generous but bounded — a turn's message crosses two hops and is stored. */
@@ -387,7 +638,11 @@ const noNulBytes = <T extends z.ZodType<string>>(schema: T) =>
 
 export const createConversationSchema = z.object({
   agentId: z.string().min(1),
-  source: z.enum(CONVERSATION_SOURCES).optional(),
+  // A client may create any stored source except the platform-only ones.
+  source: z
+    .enum(CONVERSATION_SOURCES)
+    .exclude([EVAL_SOURCE, MEMORY_REVIEW_SOURCE])
+    .optional(),
   externalRef: noNulBytes(z.string().trim().min(1).max(500)).optional(),
   title: noNulBytes(z.string().trim().min(1).max(200)).optional(),
 });

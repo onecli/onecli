@@ -64,6 +64,100 @@ describe("unified app registry", () => {
   });
 });
 
+describe("configurable field definitions", () => {
+  // Both config surfaces (the setup dialog and the app page's "Custom
+  // credentials" form) render these without validation of their own: an
+  // `options` field becomes a segmented control whose default is submitted
+  // untouched. A default outside the options, or a duplicate value, would be
+  // a silent mis-save; a text field with no placeholder renders an unlabeled
+  // empty box.
+  const configurableApps = getApps().filter((a) => a.configurable);
+
+  it("options fields are well-formed and their default is one of the options", () => {
+    for (const app of configurableApps) {
+      for (const field of app.configurable!.fields) {
+        const where = `${app.id}.${field.name}`;
+        if (field.options) {
+          expect(field.options.length, where).toBeGreaterThan(1);
+          const values = field.options.map((o) => o.value);
+          expect(new Set(values).size, where).toBe(values.length);
+          for (const option of field.options) {
+            expect(option.value.trim(), where).not.toBe("");
+            expect(option.label.trim(), where).not.toBe("");
+          }
+          if (field.defaultValue !== undefined) {
+            expect(values, where).toContain(field.defaultValue);
+          }
+          // Nothing reads it when options render, so leaving one is dead data.
+          expect(field.placeholder, where).toBeUndefined();
+        } else {
+          expect(field.defaultValue, where).toBeUndefined();
+          expect(field.placeholder?.trim(), where).toBeTruthy();
+        }
+      }
+    }
+  });
+});
+
+// `AppDefinition.setupGuideUrl` is the one way an app links its OneCLI docs
+// page. Pinning the URL to the app's own slug keeps every link on our docs
+// site and stops a copy-paste from sending one app's users to another's page.
+describe("setup guides", () => {
+  it("point at the app's own page on onecli.sh/docs", () => {
+    for (const app of getApps()) {
+      if (app.setupGuideUrl === undefined) continue;
+      expect(app.setupGuideUrl, app.id).toBe(
+        `https://onecli.sh/docs/integrations/${app.id}`,
+      );
+    }
+  });
+});
+
+// The connect window renders `accessLevels` as a choice preselected on the
+// default, and the authorize routes accept only the declared values. A default
+// outside the options would preselect nothing and submit a value every route
+// rejects; a lone option is a choice with nothing to choose.
+describe("OAuth access levels", () => {
+  it("offer two or more distinct, labelled options and default to one", () => {
+    for (const app of getApps()) {
+      if (app.connectionMethod.type !== "oauth") continue;
+      const levels = app.connectionMethod.accessLevels;
+      if (!levels) continue;
+      const values = levels.options.map((o) => o.value);
+      expect(values.length, app.id).toBeGreaterThan(1);
+      expect(new Set(values).size, app.id).toBe(values.length);
+      expect(values, app.id).toContain(levels.defaultValue);
+      expect(levels.label.trim(), app.id).toBeTruthy();
+      for (const option of levels.options) {
+        expect(option.label.trim(), app.id).toBeTruthy();
+        expect(option.description.trim(), app.id).toBeTruthy();
+      }
+    }
+  });
+});
+
+describe("connect notes", () => {
+  // The connect window renders these verbatim and opens the link in a new
+  // tab, so an empty line would be a blank box and a foreign URL would send
+  // the user off our docs from inside our own popup.
+  it("have non-empty lines and link only at our own docs over https", () => {
+    for (const app of getApps()) {
+      const note = app.connectNote;
+      if (!note) continue;
+      expect(note.text.trim(), app.id).toBeTruthy();
+      if (note.fallback !== undefined) {
+        expect(note.fallback.trim(), app.id).toBeTruthy();
+      }
+      if (note.link) {
+        expect(note.link.label.trim(), app.id).toBeTruthy();
+        expect(note.link.url, app.id).toMatch(
+          /^https:\/\/onecli\.sh\/docs\/integrations\//,
+        );
+      }
+    }
+  });
+});
+
 describe("Slack is a channel, not a gateway app (plans/channel-aware-agents.md)", () => {
   // An agent's Slack access is its own Slack app (agent_channels); the
   // gateway never injects Slack credentials. The registry is the one source

@@ -11,10 +11,9 @@ import { ConnectAppPickerDialog } from "./connect-app-picker-dialog";
  * The agent section's own "Add connection" door: connect an app (or mint a
  * custom secret) WITHOUT leaving the agent. The workspace Connections page
  * keeps the full management surface; this is the shortest path from "my agent
- * needs X" to "it has X". A new app account lands already attached to every
- * agent of the workspace (the API's workspace auto-attach); a secret minted
- * here is also attached to THIS agent explicitly, because the dialog can mint
- * an LLM key, which the API only hands to agents that have none.
+ * needs X" to "it has X". Either way the result is on for THIS agent alone: a
+ * new app account through the connect itself (the picker carries the agent),
+ * a secret minted here through an explicit attach once it is saved.
  *
  * The open state is the section's (controlled), so the tabs' empty states can
  * open the same dialogs — one owner for the door, many triggers.
@@ -39,9 +38,8 @@ export const AddConnectionButton = ({
   const pathname = usePathname();
 
   // Create-then-attach for the custom tab: a secret minted here is granted
-  // to THIS agent the moment it lands (the shared SecretActions seam).
-  const { secretActions, onSaved: onSecretSaved } =
-    useCreateThenAttachSecret(agentId);
+  // to THIS agent the moment it lands.
+  const { onSaved: onSecretSaved } = useCreateThenAttachSecret(agentId);
 
   return (
     <>
@@ -87,7 +85,6 @@ export const AddConnectionButton = ({
         onOpenChange={onSecretOpenChange}
         onSaved={onSecretSaved}
         defaultType="generic"
-        secretActions={secretActions}
       />
     </>
   );

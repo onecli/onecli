@@ -14,6 +14,13 @@ export const turnStartedEventSchema = z.object({
   type: z.literal("turn.started"),
 });
 
+/**
+ * A slice of the agent's prose as it is written. Attribution rides the
+ * envelope: a delta that answers a mid-run follow-up is sent under THAT
+ * follow-up's turn id, so a live reader sees the reply grow
+ * under the message it answers, exactly where the settled `text` row lands.
+ * Deltas are live-only (never persisted); the durable `text` follows them.
+ */
 export const textDeltaEventSchema = z.object({
   type: z.literal("text.delta"),
   text: z.string(),
@@ -66,12 +73,32 @@ export const toolStartedEventSchema = z.object({
   name: z.string(),
 });
 
+/**
+ * A tool call's end. `input` is the arguments the model sent (the SQL, the
+ * search query, the shell command), as the harness streamed them: raw text,
+ * usually JSON. Optional because not every harness exposes it and a reader
+ * written before it existed must keep working. It is what makes a transcript
+ * explain a wrong answer ("it queried the wrong table"), so it is durable
+ * alongside `output`, and it is just as UNTRUSTED: model-authored, rendered
+ * as text only.
+ *
+ * Two outcomes, deliberately separate. `isError` means the TOOL failed: it
+ * could not do what was asked (bad arguments, an unknown id, a refusal).
+ * `exitCode` is a shell command's own status, present only when the harness
+ * reported a non-zero one: the command ran, and exiting 1 is often the
+ * answer (`grep` found nothing), not a failure. An adapter fills it from its
+ * vendor's output format and strips that format from `output`, so no reader
+ * ever parses vendor text, and the status survives any truncation of the
+ * output on the way.
+ */
 export const toolFinishedEventSchema = z.object({
   type: z.literal("tool.finished"),
   callId: z.string(),
   name: z.string(),
+  input: z.string().optional(),
   output: z.string(),
   isError: z.boolean().optional(),
+  exitCode: z.number().int().optional(),
 });
 
 /**
@@ -84,10 +111,26 @@ export const approvalPendingEventSchema = z.object({
   description: z.string(),
 });
 
+/**
+ * The model call's token counts at the turn's end: the provider's numbers
+ * for the LATEST call, not a running total. The input and cache counters are
+ * raw, and their accounting differs by provider (one reports cache reads and
+ * writes apart from the input, another counts them inside it), so they never
+ * add up to how full the context was on their own: `promptTokens` does.
+ */
 export const turnUsageSchema = z.object({
   inputTokens: z.number().int().nonnegative(),
   outputTokens: z.number().int().nonnegative(),
   cacheReadInputTokens: z.number().int().nonnegative().optional(),
+  /** Prompt tokens written to the provider's cache on this call. */
+  cacheCreationInputTokens: z.number().int().nonnegative().optional(),
+  /**
+   * How many tokens the call put in front of the model, normalized by the
+   * harness for its provider's accounting: the context the call carried.
+   * Absent when the harness cannot tell, and then nothing reads the raw
+   * counters as a substitute.
+   */
+  promptTokens: z.number().int().nonnegative().optional(),
 });
 export type TurnUsage = z.infer<typeof turnUsageSchema>;
 
@@ -186,18 +229,92 @@ export const readPeerTaskStamp = (
   return parsed.success ? parsed.data : null;
 };
 
+/** How a `request_human_takeover` ask ended: still open, handed back (the
+ * person pressed Stop), the controller went quiet, or nobody came within a
+ * day. */
+export const DESKTOP_REQUEST_OUTCOMES = [
+  "pending",
+  "done",
+  "timeout",
+  "expired",
+] as const;
+export type DesktopRequestOutcome = (typeof DESKTOP_REQUEST_OUTCOMES)[number];
+
+/**
+ * The control plane's stamp on a notice about a desktop takeover ask: the
+ * ask's id and where it stands. The web renders the `pending` notice as
+ * the in-chat card (an Open computer action deep-linked to the ask); the
+ * settled ones read as plain notices. Same posture as `peerMessage`:
+ * platform-authored, read only off a `notice`, stripped at the wire when a
+ * sandbox forges it (the notice schema carries no such key).
+ */
+export const desktopRequestStampSchema = z.object({
+  id: z.string(),
+  outcome: z.enum(DESKTOP_REQUEST_OUTCOMES),
+});
+export type DesktopRequestStamp = z.infer<typeof desktopRequestStampSchema>;
+
+/** Read the stamp off a notice payload; `null` when absent or malformed. */
+export const readDesktopRequestStamp = (
+  payload: Record<string, unknown>,
+): DesktopRequestStamp | null => {
+  const parsed = desktopRequestStampSchema.safeParse(payload.desktopRequest);
+  return parsed.success ? parsed.data : null;
+};
+
+/**
+ * The control plane's stamp on the "Replaced by your message" notice: the
+ * held gateway approvals a person's newer message withdrew. The web settles
+ * those cards as replaced instead of "Decided elsewhere". Same posture as
+ * `peerMessage`: platform-authored, read only off a `notice`, stripped at
+ * the wire when a sandbox forges it (the notice schema carries no such key).
+ */
+export const supersededApprovalsStampSchema = z.array(z.string()).min(1);
+
+/** Read the withdrawn approval ids off a notice payload; `[]` when absent
+ * or malformed. */
+export const readSupersededApprovalsStamp = (
+  payload: Record<string, unknown>,
+): string[] => {
+  const parsed = supersededApprovalsStampSchema.safeParse(
+    payload.supersededApprovalIds,
+  );
+  return parsed.success ? parsed.data : [];
+};
+
 /**
  * A steered follow-up message was CONSUMED by this turn — the adapter
- * confirmed the harness injected it into the live run. Emitted just before
- * the terminal event, one per confirmed follow-up. `followUpId` is the
- * opaque correlation id the steer carried in; the supervisor folds these
- * into `turn.result.followUps`, which is how the control plane settles the
- * follow-up row `joined`. A control-plane state transition, not transcript
- * content — the settled row is the record, so this is never persisted.
+ * confirmed the harness injected it into the live run. Emitted the moment the
+ * harness confirms it (mid-run, on a runtime with the live pickup signal) or
+ * just before the terminal event (a runtime that can only tell at the end),
+ * one per confirmed follow-up. `followUpId` is the opaque correlation id the
+ * steer carried in. The control plane settles the follow-up row `joined` as
+ * soon as the event arrives; the supervisor also folds these into
+ * `turn.result.followUps`, the backstop that settles any join the live stream
+ * never carried. A control-plane state transition, not transcript content:
+ * the settled row is the record, so this is never persisted.
  */
 export const messageJoinedEventSchema = z.object({
   type: z.literal("message.joined"),
   followUpId: z.string(),
+});
+
+/**
+ * SEND NOW's outcome, sent under the waiting FOLLOW-UP's own
+ * turn id: the person asked the agent to read that message now, and this is
+ * the honest answer. `moved` means the harness moved the tool the run was
+ * waiting on (`toolName`) to the background, so the run reaches its next
+ * safe point and reads the message within moments (its `message.joined`
+ * follows). `moved: false` means there was nothing to move (no tool was
+ * running, or the harness cannot say what it moved), and the message is
+ * read at the run's next safe point as before. Live-only, like
+ * `message.joined`: the row's own status is the durable record, and a
+ * reader who arrives later has nothing left to be told.
+ */
+export const messageSentNowEventSchema = z.object({
+  type: z.literal("message.sent_now"),
+  moved: z.boolean(),
+  toolName: z.string().optional(),
 });
 
 export const agentEventSchema = z.discriminatedUnion("type", [
@@ -210,6 +327,7 @@ export const agentEventSchema = z.discriminatedUnion("type", [
   approvalPendingEventSchema,
   noticeEventSchema,
   messageJoinedEventSchema,
+  messageSentNowEventSchema,
   turnDoneEventSchema,
   errorEventSchema,
 ]);
@@ -217,8 +335,9 @@ export const agentEventSchema = z.discriminatedUnion("type", [
 export type AgentEvent = z.infer<typeof agentEventSchema>;
 export type AgentEventType = AgentEvent["type"];
 
-/** The two events that legally terminate a turn's stream. */
-export const isTerminalEvent = (
-  event: AgentEvent,
-): event is Extract<AgentEvent, { type: "turn.done" | "error" }> =>
+/** The two events that legally terminate a turn's stream. Generic so it
+ * narrows the harness-side vocabulary (`HarnessEvent`) as well as this one. */
+export const isTerminalEvent = <E extends { type: string }>(
+  event: E,
+): event is Extract<E, { type: "turn.done" | "error" }> =>
   event.type === "turn.done" || event.type === "error";

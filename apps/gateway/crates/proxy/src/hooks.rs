@@ -128,17 +128,21 @@ pub async fn pre_forward(
     if let Some(denial) = ee::granular_access::enforce_request(
         rules.session_policy.as_ref(),
         host,
+        method,
         path,
         headers,
         body,
-    ) {
-        warn!(host = %common::util::strip_port(host), %path, reason = %denial.reason, "granular access denied");
+    )
+    .await
+    {
+        warn!(host = %common::util::strip_port(host), path = %super::log_redact::redact_for_log(path), reason = %denial.reason, "granular access denied");
         // The block returns before forward.rs emits telemetry, so log it here —
         // surfaces as a "Blocked" row in the activity feed.
         emit_block_telemetry(proxy_ctx, host, method, path, denial.rule_name);
         return Some(ee_response::forbidden_resource(
             &denial.reason,
             &denial.allowed,
+            denial.hint,
         ));
     }
 
@@ -218,14 +222,14 @@ pub fn track_and_wrap(
 // ── Request telemetry ───────────────────────────────────────────────────
 
 /// Current UTC time as an ISO 8601 string, the format every telemetry
-/// timestamp on the forward path is recorded in.
-pub(crate) fn iso_now() -> String {
+/// timestamp is recorded in, on every lane.
+pub fn iso_now() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Iso8601::DEFAULT)
         .unwrap_or_default()
 }
 
-/// The telemetry fields every request-log event on the forward path shares:
+/// The telemetry fields every request-log event shares, on every lane:
 /// who (from the proxy context), where (host, the query-stripped path, the
 /// provider the request is attributed to), what came back (status, latency).
 /// `None` for an unauthenticated request, which is never logged.
@@ -237,7 +241,7 @@ pub(crate) fn iso_now() -> String {
 /// path, else the provider owning the host as a non-injecting alias, else
 /// the bare hostname.
 #[must_use]
-pub(crate) fn request_meta(
+pub fn request_meta(
     proxy_ctx: &ProxyContext,
     host: &str,
     method: &str,
@@ -276,7 +280,26 @@ pub(crate) fn request_meta(
         existing_log_id: None,
         decision: None,
         matched_rule: None,
+        statement: None,
     })
+}
+
+/// Label a row with the app connection that actually injected into it.
+/// `request_meta` resolves the provider from the host, which cannot tell two
+/// apps on one host apart: every GitHub App request resolved to `github`, so
+/// the app was invisible in the activity feed. Uncredentialed rows keep the
+/// host's provider.
+pub(crate) fn attribute_to_connection(
+    meta: &mut RequestMeta,
+    rules: &ResolvedRules,
+    injection_count: usize,
+) {
+    if injection_count == 0 {
+        return;
+    }
+    if let Some(provider) = rules.winning_provider.as_deref() {
+        meta.provider = provider.to_string();
+    }
 }
 
 /// Emits a request-log event for a request the guard blocked. The guard
@@ -284,7 +307,7 @@ pub(crate) fn request_meta(
 /// denial would be invisible in the activity feed. Mirrors the policy-refusal
 /// rows in `forward.rs`; renders as a red "Blocked" row attributed to
 /// `rule_name`.
-fn emit_block_telemetry(
+pub(crate) fn emit_block_telemetry(
     proxy_ctx: &ProxyContext,
     host: &str,
     method: &str,
@@ -316,6 +339,24 @@ pub(crate) fn record_needs_connection(mut meta: RequestMeta, error: &str) {
     telemetry::on_request(meta.into_event(None));
 }
 
+/// Records a destination-guard refusal (`crate::egress`): a 403 decided
+/// before anything was dialed, so no latency and no spend. Shared by the
+/// HTTP forward path and the WebSocket upgrade. Un-injected and not a policy
+/// rule, so without its own decision the row would be dropped and an agent
+/// probing internal addresses would leave no trace in the activity feed.
+pub(crate) fn record_destination_refused(
+    proxy_ctx: &ProxyContext,
+    host: &str,
+    method: &str,
+    path: &str,
+) {
+    let Some(mut meta) = request_meta(proxy_ctx, host, method, path, 403, 0) else {
+        return;
+    };
+    meta.decision = Some(telemetry::core::RequestDecision::DestinationRefused);
+    telemetry::on_request(meta.into_event(None));
+}
+
 /// Records the `connection_host_mismatch` answer to a request that never
 /// reached its upstream (the host did not resolve or refused): the
 /// transport-failure twin of the guidance answers in `forward.rs`, shared by
@@ -328,15 +369,61 @@ pub fn record_host_mismatch_failure(
     path: &str,
     start: std::time::Instant,
 ) {
+    record_unforwarded_guidance(
+        proxy_ctx,
+        host,
+        method,
+        path,
+        start,
+        hyper::StatusCode::MISDIRECTED_REQUEST,
+        super::response::ERROR_CONNECTION_HOST_MISMATCH,
+    );
+}
+
+/// Records the `connection_needs_reconnect` answer to a request resolution
+/// refused before policy (its connection's provider refused the stored
+/// credential for good), shared by the CONNECT (MITM) and absolute-form HTTP
+/// proxy paths. Without it the request, which used to show as an injected
+/// 401, would vanish from the activity feed.
+pub fn record_needs_reconnect(
+    proxy_ctx: &ProxyContext,
+    host: &str,
+    method: &str,
+    path: &str,
+    start: std::time::Instant,
+) {
+    record_unforwarded_guidance(
+        proxy_ctx,
+        host,
+        method,
+        path,
+        start,
+        hyper::StatusCode::UNAUTHORIZED,
+        super::response::ERROR_CONNECTION_NEEDS_RECONNECT,
+    );
+}
+
+/// A guidance answer (`error`, sent with `status`) to a request the gateway
+/// never forwarded: recorded as `NeedsConnection`, like the guidance answers
+/// `forward.rs` gives after an upstream response.
+fn record_unforwarded_guidance(
+    proxy_ctx: &ProxyContext,
+    host: &str,
+    method: &str,
+    path: &str,
+    start: std::time::Instant,
+    status: hyper::StatusCode,
+    error: &str,
+) {
     if let Some(meta) = request_meta(
         proxy_ctx,
         host,
         method,
         path,
-        hyper::StatusCode::MISDIRECTED_REQUEST.as_u16(),
+        status.as_u16(),
         start.elapsed().as_millis() as u32,
     ) {
-        record_needs_connection(meta, super::response::ERROR_CONNECTION_HOST_MISMATCH);
+        record_needs_connection(meta, error);
     }
 }
 

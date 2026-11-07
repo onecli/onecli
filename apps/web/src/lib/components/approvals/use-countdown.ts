@@ -2,27 +2,28 @@
 
 import { useEffect, useState } from "react";
 
-/** Whole seconds remaining until an RFC 3339 timestamp, clamped at 0. */
-const secondsUntil = (iso: string): number => {
+/** Whole seconds from `now` until an RFC 3339 timestamp, clamped at 0. */
+export const secondsUntil = (iso: string, now: number): number => {
   const ms = new Date(iso).getTime();
-  return Number.isNaN(ms)
-    ? 0
-    : Math.max(0, Math.round((ms - Date.now()) / 1000));
+  return Number.isNaN(ms) ? 0 : Math.max(0, Math.round((ms - now) / 1000));
 };
 
-/** Seconds remaining until `expiresAt` (RFC 3339), clamped at 0, ticking every second. */
-export const useCountdown = (expiresAt: string): number => {
-  const [remaining, setRemaining] = useState(() => secondsUntil(expiresAt));
-
+/** The current time (ms epoch), re-read every second: for render logic that
+ *  depends on the clock, which must not call `Date.now()` while rendering. */
+export const useNow = (): number => {
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const tick = () => setRemaining(secondsUntil(expiresAt));
-    tick();
-    const id = setInterval(tick, 1000);
+    const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, [expiresAt]);
-
-  return remaining;
+  }, []);
+  return now;
 };
+
+/** Seconds remaining until `expiresAt` (RFC 3339), clamped at 0, ticking every
+ *  second. A component that needs the clock too reads `useNow` once and
+ *  calls `secondsUntil` itself, so it runs one timer, not two. */
+export const useCountdown = (expiresAt: string): number =>
+  secondsUntil(expiresAt, useNow());
 
 /** Format a seconds count as `m:ss`. */
 export const formatCountdown = (seconds: number): string => {

@@ -8,8 +8,11 @@ import {
 
 export const jira: AppDefinition = {
   id: "jira",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/jira",
   name: "Jira",
   icon: "/icons/jira.svg",
+  apiDocsUrl:
+    "https://developer.atlassian.com/cloud/jira/platform/rest/v3/intro/",
   description: "Projects, issues, and workflows in Jira Cloud.",
   connectionMethod: {
     type: "oauth",
@@ -51,6 +54,7 @@ export const jira: AppDefinition = {
   },
   configurable: {
     fields: atlassianConfigFields,
+    group: "atlassian",
     envDefaults: atlassianEnvDefaults,
   },
 };

@@ -1,17 +1,16 @@
+import type { AgentKind } from "@/lib/api/types";
 import { agentChatPath, agentsCreatePath } from "@/lib/navigation";
 
 /**
- * The only fields this decision needs. Structural on purpose: the app's two
- * agent reads disagree on the rest (the server action hands back `Date`s and a
- * widened `kind`, the client API a serialized `Agent`), and `createdAt` takes
- * both because ISO strings and Dates each order correctly against their own
- * kind, which is all a min-by needs.
+ * The only fields this decision needs. Structural on purpose: the URL-scoped
+ * list and the explicit-workspace list both qualify, and ISO timestamps order
+ * correctly as strings, which is all a min-by needs.
  */
 export interface GetStartedAgent {
   id: string;
   name: string;
-  kind: string;
-  createdAt: string | Date;
+  kind: AgentKind;
+  createdAt: string;
 }
 
 /**

@@ -42,8 +42,9 @@ const AUTHOR = {
 beforeAll(async () => {
   if (!PROOF_URL) return;
   process.env.DATABASE_URL = PROOF_URL;
-  // Pinned per-suite: process.env leaks across worker files, and CI's ambient
-  // NEXT_PUBLIC_EDITION is cloud.
+  // Pinned per-suite: each file starts from the lane's edition (the hermetic
+  // setup resets env per file), and CI's cloud lane carries
+  // NEXT_PUBLIC_EDITION=cloud.
   process.env.EDITION = "onprem";
   process.env.NEXT_PUBLIC_EDITION = "onprem";
 
@@ -113,7 +114,7 @@ beforeEach(async () => {
     data: { id: FOREIGN_RUNNER, name: "runner x", token: `rnr_${P}x` },
   });
   // Pacing state is per-process; a suite must start each test full.
-  platformTools.resetMemoryWritePacing();
+  platformTools.resetSandboxPacing();
 });
 
 /** A hosted agent WITH its sandbox — the file door's identity is the
@@ -370,17 +371,6 @@ describe.skipIf(!PROOF_URL)("caps and pacing", () => {
     expect(result.error).toContain("already holds");
   });
 
-  it("pacing: the burst spends, then refusals are RETRYABLE", async () => {
-    const { sandboxId } = await seedSandboxedAgent("pace");
-    for (let i = 0; i < 20; i += 1) {
-      const result = await write(sandboxId, `k-${i}`, "body");
-      expect(result.ok).toBe(true);
-    }
-    const paced = await write(sandboxId, "k-over", "body");
-    expect(paced.ok).toBe(false);
-    expect(paced.retryable).toBe(true);
-  });
-
   it("pacing is PER-SANDBOX — one sandbox draining its bucket never paces another", async () => {
     // MUTATION-PROOF (lens-1 catch): key the bucket globally/by runner and
     // this fails — a shared bucket is the cross-tenant DoS lever (one
@@ -391,7 +381,10 @@ describe.skipIf(!PROOF_URL)("caps and pacing", () => {
     for (let i = 0; i < 20; i += 1) {
       expect((await write(a.sandboxId, `k-${i}`, "body")).ok).toBe(true);
     }
-    expect((await write(a.sandboxId, "k-over", "body")).ok).toBe(false);
+    // The drained bucket refuses, and the refusal is RETRYABLE.
+    const paced = await write(a.sandboxId, "k-over", "body");
+    expect(paced.ok).toBe(false);
+    expect(paced.retryable).toBe(true);
     // B is untouched by A's exhaustion.
     expect((await write(b.sandboxId, "first", "body")).ok).toBe(true);
   });

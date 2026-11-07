@@ -2,8 +2,10 @@ import type { AppDefinition } from "./types";
 
 export const zoom: AppDefinition = {
   id: "zoom",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/zoom",
   name: "Zoom",
   icon: "/icons/zoom.svg",
+  apiDocsUrl: "https://developers.zoom.us/docs/api/",
   description: "Meetings, webinars, and cloud recordings.",
   connectionMethod: {
     type: "oauth",

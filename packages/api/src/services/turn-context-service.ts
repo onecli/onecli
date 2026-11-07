@@ -5,11 +5,19 @@ import {
   clipLine,
   indexLineText,
 } from "../lib/memory-index";
-import { AUTOMATION_SOURCES } from "../validations/conversation";
+import { isAutomationSource } from "../validations/conversation";
+import { logger } from "../lib/logger";
 import { searchMemories } from "./agent-memory-service";
 import { buildPeerContext } from "./channels/agent-peer-roster";
+import { buildApprovalOutcomeNote } from "./channels/action-approval-service";
 import { buildMentionContext } from "./channels/mention-resolution-service";
+import { buildSentContext } from "./channels/send-message-service";
+import { buildPointOfContactNote } from "./channels/agent-reach-service";
+import { buildFailedRepliesNote } from "./channels/turn-failure-notice-service";
+import { platformJobRunsOf } from "./platform-jobs";
 import { buildContinuityBridge, buildOpenPromiseNote } from "./turn-service";
+
+const log = logger.child({ service: "turn-context" });
 
 /**
  * The turn-start memory context (step 8, §3.8): a delivery-only prepend the
@@ -161,16 +169,41 @@ export const buildTurnContext = async (
     where: { id: turnId },
     select: { createdAt: true, source: true },
   });
-  const isHuman =
-    turn !== null &&
-    !(AUTOMATION_SOURCES as readonly string[]).includes(turn.source);
+  const isHuman = turn !== null && !isAutomationSource(turn.source);
+  // A platform job's run gets memory plus the job's own block, composed
+  // here and never stored (platform-jobs, rule 4). Memory is the index
+  // alone: a run's stored message is platform instruction, not a person's
+  // words to retrieve against.
+  const jobRuns = turn ? platformJobRunsOf(turn.source) : undefined;
+  if (turn && jobRuns) {
+    const [memory, jobBlock] = await Promise.all([
+      buildMemoryContext(agentId, ""),
+      jobRuns.context({ conversationId, createdAt: turn.createdAt }),
+    ]);
+    return (
+      [memory, jobBlock]
+        .filter((block): block is string => block !== null)
+        .join("\n\n")
+        .slice(0, MAX_TURN_CONTEXT_CHARS) || null
+    );
+  }
 
   // The two are mirror images, and exactly one applies. A HUMAN turn needs
   // the bridge: what landed while they were away, which they may be
   // referring to. A WAKE needs the opposite — it arrives with the
   // platform's instruction and no conversation at all, so it gets the
   // agent's own last reply, which is where an unfinished promise lives.
-  const [memory, mentions, peer, bridge, promise] = await Promise.all([
+  const [
+    memory,
+    mentions,
+    peer,
+    approvals,
+    sent,
+    failedReplies,
+    bridge,
+    promise,
+    contact,
+  ] = await Promise.all([
     buildMemoryContext(agentId, message),
     // Channel conversations only (the builder returns null elsewhere): how
     // to ping people, who is mentionable, and what failed last turn.
@@ -180,18 +213,99 @@ export const buildTurnContext = async (
     // conversation, the standing line while a task opened here is running.
     // The same standing-surface slot as the mention note.
     buildPeerContext(conversationId),
+    // Held actions asked from here (send_message, message_agent): what the
+    // owner decided since the model last ran, and what still waits. The
+    // tool result promised the decision "arrives as a notice". Isolated:
+    // an approvals read must never block the turn.
+    turn === null
+      ? null
+      : buildApprovalOutcomeNote(conversationId, turn.createdAt).catch(
+          (err: unknown) => {
+            log.warn(
+              { conversationId, err: String(err) },
+              "approval outcome note failed; the turn ships without it",
+            );
+            return null;
+          },
+        ),
+    // Sends delivered INTO this conversation for someone else: the person
+    // writing may be answering one, and the answer is owed back. A human
+    // turn only (an automation run is never the answer). Isolated like the
+    // approval note.
+    isHuman
+      ? buildSentContext(conversationId, turn.createdAt).catch(
+          (err: unknown) => {
+            log.warn(
+              { conversationId, err: String(err) },
+              "sent-message note failed; the turn ships without it",
+            );
+            return null;
+          },
+        )
+      : null,
+    // Recent failed replies this conversation may hear about: the person
+    // there saw an error and no answer, and only this note tells the
+    // agent. A human turn only. Isolated like the approval note.
+    isHuman
+      ? buildFailedRepliesNote(agentId, conversationId, turn.createdAt).catch(
+          (err: unknown) => {
+            log.warn(
+              { conversationId, err: String(err) },
+              "failed-replies note failed; the turn ships without it",
+            );
+            return null;
+          },
+        )
+      : null,
     isHuman ? buildContinuityBridge(conversationId, turn.createdAt) : null,
     isHuman || turn === null
       ? null
       : buildOpenPromiseNote(conversationId, turn.createdAt),
+    // A promoted channel's room: the agent hears everything there and
+    // decides whether to answer. Isolated: a reach read must never block
+    // the turn.
+    isHuman
+      ? buildPointOfContactNote(conversationId).catch((err: unknown) => {
+          log.warn(
+            { conversationId, err: String(err) },
+            "point-of-contact note failed; the turn ships without it",
+          );
+          return null;
+        })
+      : null,
   ]);
-  if (!memory && !mentions && !peer && !bridge && !promise) return null;
+  if (
+    !memory &&
+    !mentions &&
+    !peer &&
+    !approvals &&
+    !sent &&
+    !bridge &&
+    !promise &&
+    !contact &&
+    !failedReplies
+  ) {
+    return null;
+  }
 
   // Memory first (standing knowledge); the mention/peer note is standing
-  // surface truth too, so it rides next; the bridge or the promise note sits
-  // NEAREST the message — it is the immediate "what just landed" the person
-  // is most likely referring to, or the commitment the wake must honor.
-  return [memory, mentions, peer, bridge, promise]
+  // surface truth too, so it rides next; then the approval updates and the
+  // sent-message note (news about the agent's own asks and errands); the
+  // bridge or the promise note sits NEAREST the message — it is the
+  // immediate "what just landed" the person is most likely referring to, or
+  // the commitment the wake must honor. The failed-replies note rides with
+  // the sent-message note: news about the agent's own unfinished work.
+  return [
+    contact,
+    memory,
+    mentions,
+    peer,
+    approvals,
+    sent,
+    failedReplies,
+    bridge,
+    promise,
+  ]
     .filter((block): block is string => block !== null)
     .join("\n\n")
     .slice(0, MAX_TURN_CONTEXT_CHARS);

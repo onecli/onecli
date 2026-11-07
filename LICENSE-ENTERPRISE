@@ -12,6 +12,7 @@ back to this list rather than restating it.
     apps/web/src/ee/
     packages/api/src/ee/
     apps/gateway/crates/ee/
+    apps/sandbox-supervisor/src/ee/
 
 Those paths are NOT covered by the Apache License. No rights under the Apache
 License, including the rights to use, reproduce, modify, distribute or

@@ -18,8 +18,16 @@ pub enum AuthStrategy {
     Bearer,
     /// `Authorization: Basic base64("x-access-token:{token}")`
     BasicXAccessToken,
+    /// `Authorization: Basic base64("x-token-auth:{token}")` — Bitbucket
+    /// Cloud's git-over-HTTPS form for an OAuth access token.
+    BasicXTokenAuth,
     /// `Authorization: Zoho-oauthtoken {token}` — Zoho's OAuth header scheme.
     ZohoOauthtoken,
+    /// `Authorization: Token token={token}` — PagerDuty's REST API key scheme.
+    PagerDutyToken,
+    /// `Authorization: Basic base64({token})`, where the stored token is
+    /// already the `username:password` pair (Twilio's `KeySid:KeySecret`).
+    BasicCredentials,
     /// No `Authorization` header — auth injected via `credential_headers` only.
     None,
 }
@@ -103,19 +111,67 @@ pub enum ClientCredentialMethod {
     BasicAuth,
 }
 
+/// A token endpoint on each account's own host, for providers that serve
+/// every customer from `<label>.<zone>` (Zendesk). The URL is built only from
+/// a stored host that is exactly ONE DNS label under the fixed `zone`, so a
+/// database value can name which account but never which domain: the
+/// client secret and refresh token can only ever reach `*.<zone>`.
+#[derive(Debug, Clone, Copy)]
+pub struct TenantTokenUrl {
+    /// The credential field holding the connection's host
+    /// (`acme.zendesk.com`).
+    pub host_field: &'static str,
+    /// The provider's zone, leading dot included (`.zendesk.com`).
+    pub zone: &'static str,
+    /// The endpoint path on that host (`/oauth/tokens`).
+    pub path: &'static str,
+}
+
+impl TenantTokenUrl {
+    /// `https://<label><zone><path>` for a stored host that is one valid
+    /// label under the zone, case-insensitively; `None` for anything else
+    /// (another domain, a nested name, a port, a path, an empty label).
+    #[must_use]
+    pub fn url_for(&self, host: &str) -> Option<String> {
+        let host = host.trim().to_ascii_lowercase();
+        let label = host.strip_suffix(self.zone)?;
+        let valid = !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        valid.then(|| format!("https://{label}{}{}", self.zone, self.path))
+    }
+}
+
+/// A refresh destination controlled by the provider, never an arbitrary URL
+/// read from a connection. Tenant endpoints have no fixed fallback.
+#[derive(Debug, Clone, Copy)]
+pub enum TokenEndpoint {
+    Fixed {
+        url: &'static str,
+        /// Only these exact static URLs may override `url` via a stored
+        /// `token_endpoint` (Salesforce production versus sandbox).
+        alternates: &'static [&'static str],
+    },
+    Tenant(TenantTokenUrl),
+}
+
+/// Lifetimes requested on every renewal, in seconds. Some older OAuth clients
+/// otherwise issue non-expiring tokens even after an expiring initial grant.
+#[derive(Debug, Clone, Copy)]
+pub struct TokenLifetimes {
+    pub access_secs: i64,
+    pub refresh_secs: i64,
+}
+
 /// Configuration for refreshing expired OAuth tokens.
 pub struct RefreshConfig {
-    /// Token endpoint URL (e.g., `https://oauth2.googleapis.com/token`).
-    pub token_url: &'static str,
-    /// Additional token endpoints a CONNECTION may select via its stored
-    /// `token_endpoint` credential, for providers whose endpoint depends on
-    /// the account rather than the provider (Salesforce production vs sandbox).
-    ///
-    /// The stored value must match one of these strings EXACTLY; anything else
-    /// falls back to `token_url`. An exact match against a static allowlist is
-    /// deliberate — it keeps a value read from the database from ever steering
-    /// a client-secret-bearing request at an arbitrary host.
-    pub alternate_token_urls: &'static [&'static str],
+    pub endpoint: TokenEndpoint,
+    /// `None` preserves the provider's default request and response handling.
+    pub requested_lifetimes: Option<TokenLifetimes>,
     /// Env var for the OAuth client ID.
     pub client_id_env: &'static str,
     /// Env var for the OAuth client secret.
@@ -124,21 +180,84 @@ pub struct RefreshConfig {
     pub body_format: TokenBodyFormat,
     /// How client credentials are sent (body vs Basic auth header).
     pub client_auth: ClientCredentialMethod,
+    /// Upper bound on how long a refreshed access token is trusted, in
+    /// seconds, whatever lifetime the token endpoint reports (or the
+    /// one-hour default when it reports none). For providers whose tokens can
+    /// die before that (Salesforce ends them with the org's session timeout,
+    /// as short as 15 minutes), so the expiry-driven refresh renews them
+    /// first. `None` trusts the report.
+    pub max_lifetime_secs: Option<i64>,
+    /// `errorCode`s in a 401 body that mean the provider refused the ACCESS
+    /// token it was sent (expired, or ended early), so a refresh may fix it.
+    /// Matched against a JSON body that is an object or an array of objects
+    /// with an `errorCode` field (Salesforce's REST error shape). Empty = the
+    /// gateway never refreshes on a refusal for this provider. A provider
+    /// that opts in must carry its whole credential in one `Authorization:
+    /// Bearer` header (`proxy::stale_token` resends with only that replaced).
+    pub stale_token_error_codes: &'static [&'static str],
 }
 
 impl RefreshConfig {
-    /// Resolve the endpoint for one connection. `stored` comes from the
-    /// connection's credentials and is honored only when allowlisted above.
-    /// The returned URL is always one of this config's own `'static` strings,
-    /// never the caller's bytes, so a database value cannot reach the request.
+    /// Resolve a statically allowlisted endpoint or build a tenant endpoint
+    /// from a validated stored host. An invalid tenant host returns `None`,
+    /// never a fallback that would receive another account's credentials.
     #[must_use]
-    pub fn endpoint_for(&self, stored: Option<&str>) -> &'static str {
-        stored
-            .and_then(|url| self.alternate_token_urls.iter().find(|alt| **alt == url))
-            .copied()
-            .unwrap_or(self.token_url)
+    pub fn endpoint_for_connection(&self, creds: &serde_json::Value) -> Option<String> {
+        match self.endpoint {
+            TokenEndpoint::Tenant(tenant) => {
+                let host = creds.get(tenant.host_field).and_then(|v| v.as_str())?;
+                tenant.url_for(host)
+            }
+            TokenEndpoint::Fixed { url, alternates } => Some(
+                creds
+                    .get("token_endpoint")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|stored| alternates.iter().find(|alt| **alt == stored))
+                    .copied()
+                    .unwrap_or(url)
+                    .to_string(),
+            ),
+        }
+    }
+
+    /// The lifetime to trust for a token the provider says lives `reported`
+    /// seconds: never longer than `max_lifetime_secs`.
+    #[must_use]
+    pub fn trusted_lifetime(&self, reported: i64) -> i64 {
+        match self.max_lifetime_secs {
+            Some(max) => reported.min(max),
+            None => reported,
+        }
+    }
+
+    /// Whether a 401 body says the access token itself was refused (a refresh
+    /// may fix it), per `stale_token_error_codes`. Anything unparseable, or
+    /// any other error, is not.
+    #[must_use]
+    pub fn is_stale_token_error(&self, body: &[u8]) -> bool {
+        if self.stale_token_error_codes.is_empty() {
+            return false;
+        }
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+            return false;
+        };
+        let code_matches = |item: &serde_json::Value| {
+            item.get("errorCode")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|code| self.stale_token_error_codes.contains(&code))
+        };
+        match &value {
+            serde_json::Value::Array(items) => items.iter().any(code_matches),
+            serde_json::Value::Object(_) => code_matches(&value),
+            _ => false,
+        }
     }
 }
+
+/// Salesforce's lifetime cap for a refreshed token. Matches the API's
+/// `ASSUMED_TOKEN_LIFETIME_SECONDS` for a freshly connected one (10 minutes,
+/// under the shortest session timeout an org admin can set).
+const SALESFORCE_MAX_TOKEN_LIFETIME_SECS: i64 = 10 * 60;
 
 /// Maps a credential JSON field to an HTTP header injected on every request.
 /// Used for providers that need custom headers (e.g., Datadog's DD-API-KEY).
@@ -192,163 +311,284 @@ pub struct AppProvider {
 
 /// Shared refresh config for Atlassian OAuth APIs (Jira, Confluence).
 static ATLASSIAN_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://auth.atlassian.com/oauth/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://auth.atlassian.com/oauth/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "ATLASSIAN_CLIENT_ID",
     client_secret_env: "ATLASSIAN_CLIENT_SECRET",
     body_format: TokenBodyFormat::Json,
     client_auth: ClientCredentialMethod::Body,
+    max_lifetime_secs: None,
+    stale_token_error_codes: &[],
 };
 
 /// Refresh config for Todoist OAuth API.
 static TODOIST_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://api.todoist.com/oauth/access_token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://api.todoist.com/oauth/access_token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "TODOIST_CLIENT_ID",
     client_secret_env: "TODOIST_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::Body,
+    max_lifetime_secs: None,
+    stale_token_error_codes: &[],
 };
 
 /// Shared refresh config for all Google OAuth APIs.
 static GOOGLE_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://oauth2.googleapis.com/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://oauth2.googleapis.com/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "GOOGLE_CLIENT_ID",
     client_secret_env: "GOOGLE_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::Body,
+    max_lifetime_secs: None,
+    stale_token_error_codes: &[],
 };
 
 /// Refresh config for Supabase Management API OAuth (uses Basic auth).
 static SUPABASE_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://api.supabase.com/v1/oauth/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://api.supabase.com/v1/oauth/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "SUPABASE_CLIENT_ID",
     client_secret_env: "SUPABASE_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::BasicAuth,
+    max_lifetime_secs: None,
+    stale_token_error_codes: &[],
 };
 
 /// Refresh config for GitLab OAuth API.
 static GITLAB_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://gitlab.com/oauth/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://gitlab.com/oauth/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "GITLAB_CLIENT_ID",
     client_secret_env: "GITLAB_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::Body,
+    max_lifetime_secs: None,
+    stale_token_error_codes: &[],
+};
+
+/// Refresh config for Bitbucket Cloud OAuth (Basic client auth, form body).
+/// Bitbucket rotates refresh tokens on every use; `proxy::refresh` stores
+/// the rotated one.
+static BITBUCKET_REFRESH: RefreshConfig = RefreshConfig {
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://bitbucket.org/site/oauth2/access_token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
+    client_id_env: "BITBUCKET_CLIENT_ID",
+    client_secret_env: "BITBUCKET_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Form,
+    client_auth: ClientCredentialMethod::BasicAuth,
+    max_lifetime_secs: None,
+    stale_token_error_codes: &[],
 };
 
 /// Refresh config for Notion OAuth API (uses Basic auth + token rotation).
 static NOTION_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://api.notion.com/v1/oauth/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://api.notion.com/v1/oauth/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "NOTION_CLIENT_ID",
     client_secret_env: "NOTION_CLIENT_SECRET",
     body_format: TokenBodyFormat::Json,
     client_auth: ClientCredentialMethod::BasicAuth,
+    max_lifetime_secs: None,
+    stale_token_error_codes: &[],
 };
 
 /// Refresh config for Dropbox OAuth API.
 static DROPBOX_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://api.dropboxapi.com/oauth2/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://api.dropboxapi.com/oauth2/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "DROPBOX_CLIENT_ID",
     client_secret_env: "DROPBOX_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::Body,
+    max_lifetime_secs: None,
+    stale_token_error_codes: &[],
 };
 
 /// Refresh config for LinkedIn OAuth API.
 static LINKEDIN_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://www.linkedin.com/oauth/v2/accessToken",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://www.linkedin.com/oauth/v2/accessToken",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "LINKEDIN_CLIENT_ID",
     client_secret_env: "LINKEDIN_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::Body,
+    max_lifetime_secs: None,
+    stale_token_error_codes: &[],
 };
 
 /// Refresh config for Sentry OAuth API.
 static SENTRY_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://sentry.io/oauth/token/",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://sentry.io/oauth/token/",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "SENTRY_CLIENT_ID",
     client_secret_env: "SENTRY_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::Body,
+    max_lifetime_secs: None,
+    stale_token_error_codes: &[],
 };
 
 /// Refresh config for Zoom OAuth API (uses Basic auth for client credentials).
 static ZOOM_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://zoom.us/oauth/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://zoom.us/oauth/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "ZOOM_CLIENT_ID",
     client_secret_env: "ZOOM_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::BasicAuth,
+    max_lifetime_secs: None,
+    stale_token_error_codes: &[],
 };
 
 /// Shared refresh config for all Microsoft 365 OAuth APIs (Outlook Mail, Calendar, Word, OneNote).
 static MICROSOFT_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "MICROSOFT_CLIENT_ID",
     client_secret_env: "MICROSOFT_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::Body,
+    max_lifetime_secs: None,
+    stale_token_error_codes: &[],
 };
 
 /// Refresh config for Linear OAuth API.
 static LINEAR_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://api.linear.app/oauth/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://api.linear.app/oauth/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "LINEAR_CLIENT_ID",
     client_secret_env: "LINEAR_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::Body,
+    max_lifetime_secs: None,
+    stale_token_error_codes: &[],
 };
 
 /// Refresh config for Fathom AI OAuth API.
 static FATHOM_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://api.fathom.ai/external/v1/oauth2/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://api.fathom.ai/external/v1/oauth2/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "FATHOM_CLIENT_ID",
     client_secret_env: "FATHOM_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::Body,
+    max_lifetime_secs: None,
+    stale_token_error_codes: &[],
 };
 
 /// Refresh config for X (Twitter) OAuth API (uses Basic auth for client credentials).
 static X_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://api.x.com/2/oauth2/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://api.x.com/2/oauth2/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "X_CLIENT_ID",
     client_secret_env: "X_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::BasicAuth,
+    max_lifetime_secs: None,
+    stale_token_error_codes: &[],
 };
 
 /// Refresh config for HubSpot OAuth API.
 static HUBSPOT_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://api.hubapi.com/oauth/2026-03/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://api.hubapi.com/oauth/2026-03/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "HUBSPOT_CLIENT_ID",
     client_secret_env: "HUBSPOT_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::Body,
+    max_lifetime_secs: None,
+    stale_token_error_codes: &[],
 };
 
 /// Refresh config for Zoho CRM OAuth (BYO clients only — the env vars match
 /// the definition's envDefaults, so an operator-configured client refreshes).
 static ZOHO_CRM_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://accounts.zoho.com/oauth/v2/token",
-    alternate_token_urls: &[],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://accounts.zoho.com/oauth/v2/token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
     client_id_env: "ZOHO_CRM_CLIENT_ID",
     client_secret_env: "ZOHO_CRM_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::Body,
+    max_lifetime_secs: None,
+    stale_token_error_codes: &[],
+};
+
+/// Zendesk: every account issues and refreshes tokens on its own host, so
+/// the endpoint is built from the connection's validated `instance_host`.
+/// Global OAuth clients must use expiring tokens with refresh (Zendesk,
+/// required since 2026-02-02); a JSON body, client pair in the body.
+static ZENDESK_TOKEN_URL: TenantTokenUrl = TenantTokenUrl {
+    host_field: "instance_host",
+    zone: ".zendesk.com",
+    path: "/oauth/tokens",
+};
+
+static ZENDESK_REFRESH: RefreshConfig = RefreshConfig {
+    endpoint: TokenEndpoint::Tenant(ZENDESK_TOKEN_URL),
+    requested_lifetimes: Some(TokenLifetimes {
+        access_secs: 30 * 60,
+        refresh_secs: 30 * 24 * 60 * 60,
+    }),
+    client_id_env: "ZENDESK_CLIENT_ID",
+    client_secret_env: "ZENDESK_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Json,
+    client_auth: ClientCredentialMethod::Body,
+    max_lifetime_secs: None,
+    stale_token_error_codes: &[],
 };
 
 /// Refresh config for Salesforce (BYO External Client App only — there are no
@@ -356,12 +596,25 @@ static ZOHO_CRM_REFRESH: RefreshConfig = RefreshConfig {
 /// A connection stores its own endpoint: sandboxes, Developer Edition and
 /// scratch orgs authenticate against `test.salesforce.com`.
 static SALESFORCE_REFRESH: RefreshConfig = RefreshConfig {
-    token_url: "https://login.salesforce.com/services/oauth2/token",
-    alternate_token_urls: &["https://test.salesforce.com/services/oauth2/token"],
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://login.salesforce.com/services/oauth2/token",
+        alternates: &["https://test.salesforce.com/services/oauth2/token"],
+    },
+    requested_lifetimes: None,
     client_id_env: "SALESFORCE_CLIENT_ID",
     client_secret_env: "SALESFORCE_CLIENT_SECRET",
     body_format: TokenBodyFormat::Form,
     client_auth: ClientCredentialMethod::Body,
+    // Whatever lifetime Salesforce's token endpoint reports (often none, so
+    // the one-hour default applied), the org's session timeout ends the token,
+    // after as little as 15 minutes.
+    max_lifetime_secs: Some(SALESFORCE_MAX_TOKEN_LIFETIME_SECS),
+    // A token Salesforce ended early (session timeout, an admin revoking
+    // sessions, a password reset): `INVALID_SESSION_ID` for an opaque token,
+    // `INVALID_AUTH_HEADER` (message `INVALID_JWT_FORMAT`) for a JWT-based
+    // one. The same codes can mean a refusal no refresh fixes (a session
+    // policy); `proxy::stale_token` stops recovering when one recurs.
+    stale_token_error_codes: &["INVALID_SESSION_ID", "INVALID_AUTH_HEADER"],
 };
 
 /// Maps a Datadog site code to its regional hostname, preserving the full
@@ -389,7 +642,160 @@ fn datadog_host_for_site(site: &str, original_host: &str) -> Option<String> {
     })
 }
 
+/// Maps a Pylon connection's stored `region` to the API host that region is
+/// served from. Pylon's API has two regional hosts and a token works only on
+/// its own. The connect form accepts the region case- and
+/// whitespace-insensitively but stores what was typed, so the same
+/// normalization is applied here: what passed validation at connect time is
+/// exactly what routes at injection time. Anything else is treated as US
+/// (Pylon's documented default base URL) rather than steering the token at
+/// an arbitrary host. The request host is ignored: every host rule of the
+/// provider is one of the two regional API hosts, so the rewrite is the same
+/// whichever one the agent called.
+fn pylon_host_for_region(region: &str, _original_host: &str) -> Option<String> {
+    Some(match region.trim().to_ascii_lowercase().as_str() {
+        "eu" => "api.eu.usepylon.com".to_string(),
+        _ => "api.usepylon.com".to_string(),
+    })
+}
+
+/// Maps a PagerDuty connection's stored `region` to the REST API host that
+/// region is served from. A key works only on its own region's host. The
+/// connect form accepts the region case- and whitespace-insensitively but
+/// stores what was typed, so the same normalization applies here. Anything
+/// else is treated as US (PagerDuty's documented base URL) rather than
+/// steering the key at an arbitrary host. Every host rule of the provider is
+/// one of the two regional API hosts, so the request host is ignored.
+fn pagerduty_host_for_region(region: &str, _original_host: &str) -> Option<String> {
+    Some(match region.trim().to_ascii_lowercase().as_str() {
+        "eu" => "api.eu.pagerduty.com".to_string(),
+        _ => "api.pagerduty.com".to_string(),
+    })
+}
+
+/// The Coralogix regions whose API answers on `api.<region>.coralogix.com`.
+const CORALOGIX_REGIONS: &[&str] = &["us1", "us2", "us3", "eu1", "eu2", "ap1", "ap2", "ap3"];
+
+/// Maps a Coralogix connection's stored `region` to that region's API host.
+/// A key works only on its own region, so whichever Coralogix API host the
+/// agent called (current or legacy name), the request goes to the
+/// connection's own. The value is normalized exactly like the connect form
+/// (case, whitespace, an optional `.coralogix.com` suffix) and must be a
+/// known region: anything else declines the rewrite rather than building a
+/// hostname out of a stored string.
+fn coralogix_host_for_region(region: &str, _original_host: &str) -> Option<String> {
+    let region = region.trim().to_ascii_lowercase();
+    let region = region.strip_suffix(".coralogix.com").unwrap_or(&region);
+    CORALOGIX_REGIONS
+        .iter()
+        .find(|r| **r == region)
+        .map(|r| format!("api.{r}.coralogix.com"))
+}
+
+/// A Bearer rule on one dedicated API host (every path).
+const fn bearer_host(host: &'static str) -> HostRule {
+    HostRule {
+        pattern: HostPattern::Exact(host),
+        path_prefix: None,
+        strategy: AuthStrategy::Bearer,
+        intercept: false,
+        credential_host_field: None,
+    }
+}
+
+/// A `Basic user:pass` rule on one dedicated API host (every path).
+const fn basic_host(host: &'static str) -> HostRule {
+    HostRule {
+        pattern: HostPattern::Exact(host),
+        path_prefix: None,
+        strategy: AuthStrategy::BasicCredentials,
+        intercept: false,
+        credential_host_field: None,
+    }
+}
+
+/// Twilio's REST API products, each served on `<product>.twilio.com` (US1)
+/// and on `<product>.<edge>.<region>.twilio.com` in the IE1 and AU1
+/// processing regions. Exact hosts only, never a `.twilio.com` suffix: the
+/// console, the marketing site, and customers' `*.twil.io` Functions share
+/// the zone. The one list: it defines both `TWILIO_PRODUCTS` (which the
+/// region rewrite accepts) and `TWILIO_HOST_RULES` (where the key goes), so
+/// the two can never disagree.
+macro_rules! twilio_products {
+    ($($product:literal),* $(,)?) => {
+        const TWILIO_PRODUCTS: &[&str] = &[$($product),*];
+        const TWILIO_HOST_RULES: &[HostRule] = &[$(
+            basic_host(concat!($product, ".twilio.com")),
+            basic_host(concat!($product, ".dublin.ie1.twilio.com")),
+            basic_host(concat!($product, ".sydney.au1.twilio.com")),
+        )*];
+    };
+}
+
+twilio_products!(
+    "api",
+    "messaging",
+    "verify",
+    "lookups",
+    "conversations",
+    "voice",
+    "studio",
+    "serverless",
+    "taskrouter",
+    "sync",
+    "notify",
+    "video",
+    "numbers",
+    "pricing",
+    "insights",
+    "trunking",
+    "events",
+    "intelligence",
+    "content",
+    "accounts",
+    "monitor",
+    "trusthub",
+    "bulkexports",
+    "chat",
+    "proxy",
+    "routes",
+);
+
+/// The Twilio product a known Twilio API host serves (`messaging` for
+/// `messaging.dublin.ie1.twilio.com`), or `None` for any other host.
+fn twilio_product_of(host: &str) -> Option<&'static str> {
+    let host = host.to_ascii_lowercase();
+    let product = host
+        .strip_suffix(".dublin.ie1.twilio.com")
+        .or_else(|| host.strip_suffix(".sydney.au1.twilio.com"))
+        .or_else(|| host.strip_suffix(".twilio.com"))?;
+    TWILIO_PRODUCTS.iter().copied().find(|p| *p == product)
+}
+
+/// Maps a Twilio connection's stored `region` to the same product's host in
+/// that region. Twilio keeps API keys per region (a US1 key is refused in
+/// IE1 and the reverse), so whichever regional host the agent called, the
+/// request goes to the connection's own region. `us1` and anything unknown
+/// map to the US1 host (Twilio's default) rather than building a hostname
+/// out of a stored string; a host that is not a known product is left alone.
+fn twilio_host_for_region(region: &str, original_host: &str) -> Option<String> {
+    let product = twilio_product_of(original_host)?;
+    Some(match region.trim().to_ascii_lowercase().as_str() {
+        "ie1" => format!("{product}.dublin.ie1.twilio.com"),
+        "au1" => format!("{product}.sydney.au1.twilio.com"),
+        _ => format!("{product}.twilio.com"),
+    })
+}
+
 // ── Provider registry ──────────────────────────────────────────────────
+
+/// The PostgreSQL connection provider id (`app_connections.provider`).
+pub const POSTGRES_PROVIDER: &str = "postgres";
+
+/// The reserved zone a PostgreSQL connection's statements are judged under:
+/// `<connection-id>.postgres.onecli.invalid`. `.invalid` is reserved by
+/// RFC 2606 and can never resolve, so no HTTP request can ever reach it.
+pub const POSTGRES_POLICY_ZONE: &str = ".postgres.onecli.invalid";
 
 static APP_PROVIDERS: &[AppProvider] = &[
     AppProvider {
@@ -661,6 +1067,18 @@ static APP_PROVIDERS: &[AppProvider] = &[
             intercept: false,
             credential_host_field: None,
         }],
+        refresh: Some(&GOOGLE_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "google-keep",
+        display_name: "Google Keep",
+        host_rules: &[bearer_host("keep.googleapis.com")],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
@@ -1097,6 +1515,31 @@ static APP_PROVIDERS: &[AppProvider] = &[
         finalizer: None,
         body_transform: None,
     },
+    // Navan: client_credentials token (re-minted from the stored client
+    // id/secret/token_url). One API host for every region; EU connections
+    // store `ta_region: "EU"`, which becomes the `X-ta-region` header Navan
+    // requires on EU calls. US connections have no such field, so no header.
+    AppProvider {
+        provider: "navan",
+        display_name: "Navan",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.navan.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[CredentialHeader {
+            credential_field: "ta_region",
+            header_name: "X-ta-region",
+        }],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
     AppProvider {
         provider: "flyio",
         display_name: "Fly.io",
@@ -1152,6 +1595,27 @@ static APP_PROVIDERS: &[AppProvider] = &[
             intercept: false,
             credential_host_field: None,
         }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "webflow",
+        display_name: "Webflow",
+        // Only the Data API host. Customer sites (`*.webflow.io`) and the
+        // OAuth pages on `webflow.com` must never receive the token.
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.webflow.com"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        // Webflow access tokens do not expire and carry no refresh token.
         refresh: None,
         metadata_headers: &[],
         credential_headers: &[],
@@ -1260,6 +1724,35 @@ static APP_PROVIDERS: &[AppProvider] = &[
         body_transform: None,
     },
     AppProvider {
+        provider: "bitbucket",
+        display_name: "Bitbucket",
+        host_rules: &[
+            // REST API 2.0.
+            HostRule {
+                pattern: HostPattern::Exact("api.bitbucket.org"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            // git over HTTPS (clone/fetch/push).
+            HostRule {
+                pattern: HostPattern::Exact("bitbucket.org"),
+                path_prefix: None,
+                strategy: AuthStrategy::BasicXTokenAuth,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: Some(&BITBUCKET_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
         provider: "jfrog-artifactory",
         display_name: "JFrog Artifactory",
         // Wildcard suffix: JFrog SaaS hosts are per-customer (`<name>.jfrog.io`).
@@ -1295,6 +1788,30 @@ static APP_PROVIDERS: &[AppProvider] = &[
             strategy: AuthStrategy::Bearer,
             intercept: false,
             credential_host_field: Some("host"),
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: POSTGRES_PROVIDER,
+        display_name: "PostgreSQL",
+        // Never an HTTP destination: Postgres speaks its own wire protocol to
+        // the gateway's database front door, which logs in with the stored
+        // credentials itself. The reserved zone exists so the policy engine,
+        // app availability and telemetry can name a connection's statements
+        // the way they name HTTP requests (`dbproxy::policy_host`); `.invalid`
+        // never resolves, and nothing is ever injected.
+        host_rules: &[HostRule {
+            pattern: HostPattern::Suffix(POSTGRES_POLICY_ZONE),
+            path_prefix: None,
+            strategy: AuthStrategy::None,
+            intercept: false,
+            credential_host_field: None,
         }],
         refresh: None,
         metadata_headers: &[],
@@ -1830,6 +2347,36 @@ static APP_PROVIDERS: &[AppProvider] = &[
         finalizer: None,
         body_transform: None,
     },
+    // HeyReach's public API (documenter.getpostman.com/view/23808049/2sA2xb5F75)
+    // reads its key from `X-API-KEY`, not Authorization, so the strategy is
+    // None and the key is a credential header (as Apollo.io, Clay and
+    // Dripify). api.heyreach.io also serves HeyReach's own web app backend,
+    // so injection is scoped to the public API (`/api/public/`): the key only
+    // ever reaches the surface it was issued for.
+    AppProvider {
+        provider: "heyreach",
+        display_name: "HeyReach",
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.heyreach.io"),
+            path_prefix: Some("/api/public/"),
+            strategy: AuthStrategy::None,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[CredentialHeader {
+            // The trimmed copy the connect handler stores, not the raw form
+            // field: a key pasted with a trailing newline would otherwise be
+            // no valid header value, and every call would go out keyless.
+            credential_field: "access_token",
+            header_name: "X-API-KEY",
+        }],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
     AppProvider {
         provider: "linear",
         display_name: "Linear",
@@ -1925,6 +2472,317 @@ static APP_PROVIDERS: &[AppProvider] = &[
         body_transform: None,
     },
     AppProvider {
+        provider: "timeless",
+        display_name: "Timeless",
+        // One host rule with `path_prefix: None` injects the personal API token
+        // as a standard Bearer on every path of api.timeless.day: the REST API
+        // under /v1 and the hosted MCP server at /mcp/, which take the same
+        // token (docs.timeless.day/api-reference, …/api-reference/mcp).
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("api.timeless.day"),
+            path_prefix: None,
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "circleback",
+        display_name: "Circleback",
+        // The REST API lives under /api on the same host as the Circleback web
+        // app (circleback.ai/docs/api), so the account API key is injected as a
+        // standard Bearer under /api/ only, never on the web app's pages. The
+        // hosted MCP server at /api/mcp uses its own OAuth, so a Bearer from
+        // here is simply not what it accepts.
+        host_rules: &[HostRule {
+            pattern: HostPattern::Exact("circleback.ai"),
+            path_prefix: Some("/api/"),
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: None,
+        }],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "pylon",
+        display_name: "Pylon",
+        // Pylon's API is served from two regional hosts and a token works
+        // only on its own region (docs.usepylon.com, Authentication). Both
+        // hosts take the token as a standard Bearer on every path: they are
+        // dedicated API hosts, nothing else lives there. The connection's
+        // stored `region` rewrites the upstream to the right host, so an
+        // agent calling the documented US base URL reaches an EU tenant too.
+        // The hosted MCP server at mcp.usepylon.com uses its own OAuth, so a
+        // Bearer from here is not what it accepts and it is not a rule.
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("api.usepylon.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("api.eu.usepylon.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: Some(&HostRewrite {
+            credential_field: "region",
+            template: pylon_host_for_region,
+        }),
+        finalizer: None,
+        body_transform: None,
+    },
+    // PagerDuty REST API v2 with a REST API key, sent as `Token token=<key>`
+    // (developer.pagerduty.com, Authentication). Two regional hosts, and a
+    // key works only on its own region's: the stored `region` rewrites the
+    // upstream, so an agent calling the documented US base URL reaches an EU
+    // account too. Only the REST API hosts: the Events API
+    // (events.pagerduty.com) authenticates with a routing key in the body,
+    // not this key, and the web app lives on the account's own subdomain.
+    AppProvider {
+        provider: "pagerduty",
+        display_name: "PagerDuty",
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("api.pagerduty.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::PagerDutyToken,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("api.eu.pagerduty.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::PagerDutyToken,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: Some(&HostRewrite {
+            credential_field: "region",
+            template: pagerduty_host_for_region,
+        }),
+        finalizer: None,
+        body_transform: None,
+    },
+    // Coralogix with an API key as a standard Bearer. Exact hosts only, never
+    // a `.coralogix.com` suffix: every team's web app lives on a subdomain of
+    // the same zones (`<team>.app.cx498.coralogix.com`), and ingestion uses
+    // its own Send-Your-Data key on `ingress.*`. Current per-region API hosts
+    // plus the legacy names existing scripts still call; the stored `region`
+    // rewrites any of them to the connection's own region.
+    AppProvider {
+        provider: "coralogix",
+        display_name: "Coralogix",
+        host_rules: &[
+            bearer_host("api.us1.coralogix.com"),
+            bearer_host("api.us2.coralogix.com"),
+            bearer_host("api.us3.coralogix.com"),
+            bearer_host("api.eu1.coralogix.com"),
+            bearer_host("api.eu2.coralogix.com"),
+            bearer_host("api.ap1.coralogix.com"),
+            bearer_host("api.ap2.coralogix.com"),
+            bearer_host("api.ap3.coralogix.com"),
+            // Legacy per-region API names (US1, US2, EU1, AP1, AP2).
+            bearer_host("api.coralogix.us"),
+            bearer_host("api.cx498.coralogix.com"),
+            bearer_host("api.coralogix.com"),
+            bearer_host("api.coralogix.in"),
+            bearer_host("api.coralogixsg.com"),
+            // Legacy `ng-api-http` query hosts.
+            bearer_host("ng-api-http.coralogix.us"),
+            bearer_host("ng-api-http.cx498.coralogix.com"),
+            bearer_host("ng-api-http.us3.coralogix.com"),
+            bearer_host("ng-api-http.coralogix.com"),
+            bearer_host("ng-api-http.eu2.coralogix.com"),
+            bearer_host("ng-api-http.coralogix.in"),
+            bearer_host("ng-api-http.coralogixsg.com"),
+            bearer_host("ng-api-http.ap3.coralogix.com"),
+        ],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: Some(&HostRewrite {
+            credential_field: "region",
+            template: coralogix_host_for_region,
+        }),
+        finalizer: None,
+        body_transform: None,
+    },
+    // Dripify: the key rides an `X-Api-Key` header, not Authorization, so the
+    // strategy is None and the key is a credential header (as Apollo.io and
+    // Clay). The Open API has its own host, api.dripify.com, so that rule
+    // needs no path prefix. The hosted MCP server takes the same key but lives
+    // on the web app's host (app.dripify.com/api/v1/mcp), so that rule is
+    // scoped to the MCP path: a browser page load never carries the key.
+    AppProvider {
+        provider: "dripify",
+        display_name: "Dripify",
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("api.dripify.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::None,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("app.dripify.com"),
+                path_prefix: Some("/api/v1/mcp/"),
+                strategy: AuthStrategy::None,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[CredentialHeader {
+            // The trimmed copy the connect handler stores, not the raw form
+            // field: a key pasted with a trailing newline would otherwise be
+            // sent verbatim and rejected.
+            credential_field: "access_token",
+            header_name: "X-Api-Key",
+        }],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    // Onyx Cloud with an API key or Personal Access Token as a Bearer
+    // (docs.onyx.app, Overview & Auth). cloud.onyx.app serves the web app as
+    // well, so injection is scoped to the REST API (`/api/`) and the hosted
+    // MCP server (`/mcp`): a browser page load never carries the key.
+    // Self-hosted Onyx runs on the customer's own domain and is not covered.
+    AppProvider {
+        provider: "onyx",
+        display_name: "Onyx",
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("cloud.onyx.app"),
+                path_prefix: Some("/api/"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("cloud.onyx.app"),
+                path_prefix: Some("/mcp/"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    // Twilio REST APIs with an API key (or the Account SID and Auth Token),
+    // sent as `Basic base64(KeySid:KeySecret)`. The connect step stores the
+    // pair, already joined, as `access_token`. Credentials are per region, so
+    // the stored `region` rewrites any product host to the connection's own
+    // region (see `twilio_host_for_region`).
+    AppProvider {
+        provider: "twilio",
+        display_name: "Twilio",
+        host_rules: TWILIO_HOST_RULES,
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: Some(&HostRewrite {
+            credential_field: "region",
+            template: twilio_host_for_region,
+        }),
+        finalizer: None,
+        body_transform: None,
+    },
+    // Tavily (docs.tavily.com, Headers & Authentication) with one API key as a
+    // Bearer: every path of the REST API host, and only the MCP server's path
+    // on mcp.tavily.com, which also serves Tavily's own OAuth endpoints
+    // (/authorize, /token, /register) that must never carry the key.
+    AppProvider {
+        provider: "tavily",
+        display_name: "Tavily",
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("api.tavily.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            HostRule {
+                pattern: HostPattern::Exact("mcp.tavily.com"),
+                path_prefix: Some("/mcp/"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
+        refresh: None,
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
+        provider: "zendesk",
+        display_name: "Zendesk",
+        // Every account answers on its own `<subdomain>.zendesk.com`, so the
+        // suffix rule is broad and `credential_host_field` narrows it to the
+        // ONE host this connection was issued for. Scoped to the API path so
+        // the token never reaches the account's Help Center or OAuth pages.
+        host_rules: &[HostRule {
+            pattern: HostPattern::Suffix(".zendesk.com"),
+            path_prefix: Some("/api/"),
+            strategy: AuthStrategy::Bearer,
+            intercept: false,
+            credential_host_field: Some("instance_host"),
+        }],
+        // Expiring access tokens with a refresh token, renewed on the
+        // account's own host (see `ZENDESK_REFRESH`).
+        refresh: Some(&ZENDESK_REFRESH),
+        metadata_headers: &[],
+        credential_headers: &[],
+        credential_params: &[],
+        host_rewrite: None,
+        finalizer: None,
+        body_transform: None,
+    },
+    AppProvider {
         provider: "zoho-crm",
         display_name: "Zoho CRM",
         // US data center only, by construction: the definition hardcodes
@@ -1947,6 +2805,67 @@ static APP_PROVIDERS: &[AppProvider] = &[
 ];
 
 // ── Public API ─────────────────────────────────────────────────────────
+
+/// Vendor OAuth client groups: apps that share one vendor OAuth client, whose
+/// BYOC config is stored once under the group key (`app_configs.provider =
+/// "google"`). Mirrors `configurable.group` in `packages/api/src/apps` (parity
+/// is asserted by `apps/oauth/groups.test.ts`). Deliberately explicit rather than
+/// derived from `GOOGLE_REFRESH`: `vertex-ai` shares that refresh config but is
+/// a credentials-import app with no BYOC client.
+pub static OAUTH_CLIENT_GROUPS: &[(&str, &[&str])] = &[
+    (
+        "google",
+        &[
+            "gmail",
+            "google-admin",
+            "google-analytics",
+            "google-calendar",
+            "google-chat",
+            "google-classroom",
+            "google-contacts",
+            "google-docs",
+            "google-drive",
+            "google-forms",
+            "google-keep",
+            "google-meet",
+            "google-photos",
+            "google-search-console",
+            "google-sheets",
+            "google-slides",
+            "google-tasks",
+            "youtube",
+        ],
+    ),
+    ("atlassian", &["confluence", "jira"]),
+    (
+        "microsoft",
+        &[
+            "microsoft-onenote",
+            "microsoft-word",
+            "outlook-calendar",
+            "outlook-mail",
+        ],
+    ),
+];
+
+/// The vendor OAuth client group a provider belongs to, if any.
+#[must_use]
+pub fn oauth_client_group(provider: &str) -> Option<&'static str> {
+    OAUTH_CLIENT_GROUPS
+        .iter()
+        .find_map(|(group, members)| members.contains(&provider).then_some(*group))
+}
+
+/// The `app_configs.provider` keys to read for a provider, most specific
+/// first: a legacy per-app row, then the vendor group row.
+#[must_use]
+pub fn config_keys_for(provider: &str) -> Vec<&str> {
+    let mut keys = vec![provider];
+    if let Some(group) = oauth_client_group(provider) {
+        keys.push(group);
+    }
+    keys
+}
 
 /// Iterate over all registered providers.
 fn all_providers() -> impl Iterator<Item = &'static AppProvider> {
@@ -1992,6 +2911,17 @@ pub fn provider_for_host(hostname: &str) -> Option<(&'static str, &'static str)>
     })
 }
 
+/// Whether `path` falls under a host rule's `path_prefix` — exactly the paths
+/// that rule's injection pattern (`{prefix}*`) puts the credential on. Defined
+/// by `inject::path_matches` itself so that the requests a provider is
+/// IDENTIFIED for (its granular guard, availability gate, policy adoption) are
+/// never narrower than the ones its credential reaches: `/batch/drive` (no
+/// trailing slash, a live Drive batch endpoint) carries the Drive token, so it
+/// must be judged as Drive too.
+fn path_under_prefix(path: &str, prefix: &str) -> bool {
+    inject::path_matches(path, &format!("{prefix}*"))
+}
+
 /// Given a hostname and request path, return the best matching provider's (id, display_name).
 ///
 /// For shared hosts (e.g., `www.googleapis.com`), uses the path prefix to disambiguate
@@ -2009,7 +2939,8 @@ pub fn provider_for_host_and_path(
             .iter()
             .any(|r| {
                 host_rule_matches(r, hostname)
-                    && r.path_prefix.is_some_and(|pfx| path.starts_with(pfx))
+                    && r.path_prefix
+                        .is_some_and(|pfx| path_under_prefix(path, pfx))
             })
             .then_some((p.provider, p.display_name))
     });
@@ -2166,6 +3097,18 @@ pub fn guidance_provider_for(hostname: &str, path: &str) -> Option<(&'static str
     })
 }
 
+/// Whether a connection of `provider` is the one an auth failure on
+/// `hostname` + `path` is about: a host rule of the provider covers the
+/// request, or the host is the provider's non-injecting alias. The
+/// per-provider form of [`guidance_provider_for`], for a host several apps
+/// share (`www.googleapis.com` carries Gmail, Calendar and Drive, each on its
+/// own path). Used only to pick guidance, never to inject.
+#[must_use]
+pub fn provider_explains(provider: &str, hostname: &str, path: &str) -> bool {
+    provider_matches_host_and_path(provider, hostname, path)
+        || alias_host(hostname).is_some_and(|alias| alias.provider == provider)
+}
+
 /// The path prefix a host-gated provider injects on (e.g. Salesforce's
 /// `/services/data/`), so a wrong-host answer can also correct a wrong path.
 #[must_use]
@@ -2233,11 +3176,28 @@ pub fn build_app_injections(provider: &str, hostname: &str, token: &str) -> Vec<
                 value: format!("Basic {encoded}"),
             }]
         }
+        AuthStrategy::BasicXTokenAuth => {
+            vec![basic_credentials_header(&format!("x-token-auth:{token}"))]
+        }
         AuthStrategy::ZohoOauthtoken => vec![Injection::SetHeader {
             name: "authorization".to_string(),
             value: format!("Zoho-oauthtoken {token}"),
         }],
+        AuthStrategy::PagerDutyToken => vec![Injection::SetHeader {
+            name: "authorization".to_string(),
+            value: format!("Token token={token}"),
+        }],
+        AuthStrategy::BasicCredentials => vec![basic_credentials_header(token)],
         AuthStrategy::None => vec![],
+    }
+}
+
+/// `Authorization: Basic base64("user:pass")` from a stored `user:pass` pair.
+fn basic_credentials_header(pair: &str) -> Injection {
+    let b64 = base64::engine::general_purpose::STANDARD;
+    Injection::SetHeader {
+        name: "authorization".to_string(),
+        value: format!("Basic {}", b64.encode(pair)),
     }
 }
 
@@ -2274,10 +3234,18 @@ pub fn build_app_injection_rules(
                         value: format!("Basic {encoded}"),
                     }]
                 }
+                AuthStrategy::BasicXTokenAuth => {
+                    vec![basic_credentials_header(&format!("x-token-auth:{token}"))]
+                }
                 AuthStrategy::ZohoOauthtoken => vec![Injection::SetHeader {
                     name: "authorization".to_string(),
                     value: format!("Zoho-oauthtoken {token}"),
                 }],
+                AuthStrategy::PagerDutyToken => vec![Injection::SetHeader {
+                    name: "authorization".to_string(),
+                    value: format!("Token token={token}"),
+                }],
+                AuthStrategy::BasicCredentials => vec![basic_credentials_header(token)],
                 AuthStrategy::None => vec![],
             };
             (pattern, injections)
@@ -2290,7 +3258,8 @@ pub fn build_app_injection_rules(
 pub fn provider_matches_host_and_path(provider: &str, hostname: &str, path: &str) -> bool {
     provider_by_id(provider).is_some_and(|app| {
         app.host_rules.iter().any(|r| {
-            host_rule_matches(r, hostname) && r.path_prefix.is_none_or(|pfx| path.starts_with(pfx))
+            host_rule_matches(r, hostname)
+                && r.path_prefix.is_none_or(|pfx| path_under_prefix(path, pfx))
         })
     })
 }
@@ -2307,7 +3276,9 @@ pub fn provider_matches_host_and_path(provider: &str, hostname: &str, path: &str
 pub fn provider_matches_path_scoped(provider: &str, hostname: &str, path: &str) -> bool {
     provider_by_id(provider).is_some_and(|app| {
         app.host_rules.iter().any(|r| {
-            host_rule_matches(r, hostname) && r.path_prefix.is_some_and(|pfx| path.starts_with(pfx))
+            host_rule_matches(r, hostname)
+                && r.path_prefix
+                    .is_some_and(|pfx| path_under_prefix(path, pfx))
         })
     })
 }
@@ -2460,6 +3431,127 @@ pub fn is_intercept_target(hostname: &str, path: &str) -> bool {
     })
 }
 
+/// Ceiling on one OAuth refresh round trip (connect through body). The
+/// refresh lock's wait (`context::refresh_gate::REFRESH_LOCK_WAIT`) is sized to
+/// outlast it, so a queued refresh never gives up on one about to finish.
+pub const REFRESH_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The provider refused a stored credential FOR GOOD: an OAuth refresh token
+/// it revoked, a GitHub App installation that is gone or suspended, a deleted
+/// or disabled service-account key, a rotated client secret, a changed Docker
+/// Hub token. Retrying cannot help, only the user reconnecting the account
+/// can, so every refresh and re-mint returns this type for such a refusal and
+/// callers check for it with `anyhow::Error::is`. Every other failure (the
+/// network, a 5xx, a rate limit, a clock out of step, an answer that cannot
+/// be read, a setting only an admin can change) stays an opaque error and is
+/// treated as transient.
+#[derive(Debug)]
+pub struct CredentialRevoked {
+    /// What the provider answered (the status and its error code), for the
+    /// gateway's log. Never a token, never shown to the agent.
+    pub detail: String,
+}
+
+impl std::fmt::Display for CredentialRevoked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "credential refused for good: {}", self.detail)
+    }
+}
+
+impl std::error::Error for CredentialRevoked {}
+
+/// Whose client a token request authenticates with: it decides what a
+/// refused client means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenClient {
+    /// The platform's or a workspace's OAuth app (an OAuth refresh). A
+    /// refused client is a configuration problem that a reconnect, which
+    /// authenticates with the same app, cannot fix.
+    App,
+    /// The connection's own credential (a service-account key, a
+    /// client-credentials pair). A refused client IS the dead credential.
+    Connection,
+}
+
+/// A token endpoint's refusal (RFC 6749 section 5.2) as an error: a
+/// [`CredentialRevoked`] when only a reconnect can fix it, an opaque error
+/// otherwise. `what` names the exchange for the log (`"token refresh"`).
+fn token_endpoint_error(
+    what: &str,
+    client: TokenClient,
+    status: reqwest::StatusCode,
+    body: &serde_json::Value,
+) -> anyhow::Error {
+    let error = body.get("error").and_then(|v| v.as_str());
+    let description = body
+        .get("error_description")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let detail = format!("{what} ({status}): {}", error.unwrap_or("no error code"));
+    if token_refusal_is_permanent(client, status, error, description) {
+        anyhow::Error::new(CredentialRevoked { detail })
+    } else {
+        anyhow::anyhow!("{detail}")
+    }
+}
+
+/// Whether a token endpoint's error means the stored credential itself is
+/// dead (RFC 6749 section 5.2, plus the codes Google adds for a deleted or
+/// disabled client), rather than a passing failure or a setting an admin
+/// changes without a reconnect:
+///
+/// - `invalid_grant`: the refresh token or signing key is revoked, deleted or
+///   expired. Except Google's clock-skew refusal ("…in a reasonable
+///   timeframe. Check your 'iat' and 'exp' values"): the gateway's clock, not
+///   the key, is wrong.
+/// - `invalid_client`, `deleted_client`, `disabled_client`, or a 401 whose
+///   error is no RFC 6749 code at all (a bare 401, or Navan's
+///   `{"error":"Unauthorized"}`): the client failed to authenticate. Dead
+///   only when the client is the connection's own credential
+///   ([`TokenClient::Connection`]).
+///
+/// `access_denied` and `unauthorized_client` are deliberately transient: at
+/// a client-credentials or service-account endpoint they mean an IP access
+/// list or a domain-wide delegation setting refused the request, which an
+/// admin fixes and a reconnect does not.
+fn token_refusal_is_permanent(
+    client: TokenClient,
+    status: reqwest::StatusCode,
+    error: Option<&str>,
+    description: &str,
+) -> bool {
+    let own_client = client == TokenClient::Connection;
+    match error {
+        Some("invalid_grant") => !description.contains("reasonable timeframe"),
+        Some("invalid_client" | "deleted_client" | "disabled_client") => own_client,
+        Some(code) if RFC6749_TOKEN_ERRORS.contains(&code) => false,
+        _ => own_client && status == reqwest::StatusCode::UNAUTHORIZED,
+    }
+}
+
+/// The token-endpoint error codes RFC 6749 section 5.2 defines, plus
+/// `access_denied` / `server_error` / `temporarily_unavailable` (section
+/// 4.1.2.1 defines them for the authorization endpoint; token endpoints
+/// return them too, e.g. MongoDB Atlas's IP access list refusal). Any other
+/// `error` is a provider's own wording.
+const RFC6749_TOKEN_ERRORS: &[&str] = &[
+    "invalid_request",
+    "invalid_client",
+    "invalid_grant",
+    "unauthorized_client",
+    "unsupported_grant_type",
+    "invalid_scope",
+    "access_denied",
+    "temporarily_unavailable",
+    "server_error",
+];
+
+/// The body of a token endpoint's answer, or `Null` when it is not JSON (an
+/// HTML error page from a proxy, an empty 401), so the status alone decides.
+async fn token_endpoint_body(resp: reqwest::Response) -> serde_json::Value {
+    resp.json().await.unwrap_or(serde_json::Value::Null)
+}
+
 /// Refresh an expired access token using the provider's token endpoint.
 /// Returns (new_access_token, expires_at, optional_new_refresh_token).
 ///
@@ -2467,15 +3559,29 @@ pub fn is_intercept_target(hostname: &str, path: &str) -> bool {
 /// 1. Explicit `client_id`/`client_secret` (from BYOC AppConfig)
 /// 2. Env vars from `RefreshConfig` (platform defaults)
 ///
-/// `stored_token_url` is the connection's own endpoint, honored only when the
-/// provider allowlists it in `alternate_token_urls` (see `endpoint_for`).
+/// `creds` is the connection's stored credentials: the endpoint is the
+/// provider's own, an allowlisted `token_endpoint`, or,
+/// for a per-account provider, built from the connection's validated host
+/// (see [`RefreshConfig::endpoint_for_connection`]).
+///
+/// Bounded by [`REFRESH_REQUEST_TIMEOUT`]: callers hold a cross-instance lock
+/// for the duration, so a provider that never answers must not hold it forever.
+/// Tenant endpoints never follow redirects. Providers with requested lifetimes
+/// require a successful response, nonempty access and rotated refresh tokens,
+/// and a positive integer expiry (defaulting to, and capped at, the requested
+/// access lifetime). An optional token type must be Bearer. Tokens may not
+/// have surrounding whitespace. Their expiry arithmetic is checked and errors
+/// never include response secrets.
 pub async fn refresh_access_token(
     config: &RefreshConfig,
     refresh_token: &str,
     byoc_client_id: Option<&str>,
     byoc_client_secret: Option<&str>,
-    stored_token_url: Option<&str>,
+    creds: &serde_json::Value,
 ) -> anyhow::Result<(String, i64, Option<String>)> {
+    let token_url = config.endpoint_for_connection(creds).ok_or_else(|| {
+        anyhow::anyhow!("connection has no valid account host for its token endpoint")
+    })?;
     let client_id = match byoc_client_id {
         Some(id) => id.to_string(),
         None => std::env::var(config.client_id_env)
@@ -2487,7 +3593,14 @@ pub async fn refresh_access_token(
             .map_err(|_| anyhow::anyhow!("{} env var not set", config.client_secret_env))?,
     };
 
-    let mut req = reqwest::Client::new().post(config.endpoint_for(stored_token_url));
+    let mut client = reqwest::Client::builder();
+    if matches!(config.endpoint, TokenEndpoint::Tenant(_)) {
+        client = client.redirect(reqwest::redirect::Policy::none());
+    }
+    let mut req = client
+        .build()?
+        .post(token_url)
+        .timeout(REFRESH_REQUEST_TIMEOUT);
 
     if matches!(config.client_auth, ClientCredentialMethod::BasicAuth) {
         let b64 = base64::engine::general_purpose::STANDARD;
@@ -2502,12 +3615,19 @@ pub async fn refresh_access_token(
             ("refresh_token", refresh_token),
             ("grant_type", "refresh_token"),
         ]),
-        (TokenBodyFormat::Json, ClientCredentialMethod::Body) => req.json(&serde_json::json!({
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "refresh_token": refresh_token,
-            "grant_type": "refresh_token",
-        })),
+        (TokenBodyFormat::Json, ClientCredentialMethod::Body) => {
+            let mut body = serde_json::json!({
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            });
+            if let Some(lifetimes) = config.requested_lifetimes {
+                body["expires_in"] = lifetimes.access_secs.into();
+                body["refresh_token_expires_in"] = lifetimes.refresh_secs.into();
+            }
+            req.json(&body)
+        }
         (TokenBodyFormat::Form, ClientCredentialMethod::BasicAuth) => req.form(&[
             ("refresh_token", refresh_token),
             ("grant_type", "refresh_token"),
@@ -2519,26 +3639,81 @@ pub async fn refresh_access_token(
             }))
         }
     };
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("refresh request failed: {e}"))?;
+    let resp = req.send().await.map_err(|error| {
+        if matches!(config.endpoint, TokenEndpoint::Tenant(_))
+            || config.requested_lifetimes.is_some()
+        {
+            anyhow::anyhow!("refresh request failed")
+        } else {
+            anyhow::anyhow!("refresh request failed: {error}")
+        }
+    })?;
 
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("refresh response parse failed: {e}"))?;
+    let status = resp.status();
+    let body = token_endpoint_body(resp).await;
+
+    // Expiring, rotating providers must not turn malformed or error replies
+    // into a successful credential update. Never echo their response secrets.
+    if let Some(lifetimes) = config.requested_lifetimes {
+        let invalid =
+            || anyhow::anyhow!("token refresh returned an invalid rotating token response");
+        if !status.is_success() {
+            let code = body.get("error").and_then(serde_json::Value::as_str);
+            let description = body
+                .get("error_description")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if status.is_client_error()
+                && token_refusal_is_permanent(TokenClient::App, status, code, description)
+            {
+                return Err(anyhow::Error::new(CredentialRevoked {
+                    detail: format!("token refresh ({status}): invalid_grant"),
+                }));
+            }
+            return Err(invalid());
+        }
+        if let Some(kind) = body.get("token_type") {
+            if !kind
+                .as_str()
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("bearer"))
+            {
+                return Err(invalid());
+            }
+        }
+        let access = body
+            .get("access_token")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty() && value.trim() == *value)
+            .ok_or_else(invalid)?;
+        let rotated = body
+            .get("refresh_token")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty() && value.trim() == *value && *value != refresh_token)
+            .ok_or_else(invalid)?;
+        let lifetime = match body.get("expires_in") {
+            None => lifetimes.access_secs,
+            Some(value) => value
+                .as_i64()
+                .filter(|seconds| *seconds > 0)
+                .ok_or_else(invalid)?,
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| invalid())?
+            .as_secs();
+        let expiry = i64::try_from(now)
+            .ok()
+            .and_then(|now| {
+                now.checked_add(config.trusted_lifetime(lifetime.min(lifetimes.access_secs)))
+            })
+            .ok_or_else(invalid)?;
+        return Ok((access.to_string(), expiry, Some(rotated.to_string())));
+    }
 
     let access_token = body
         .get("access_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            let error = body
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            anyhow::anyhow!("token refresh failed: {error}")
-        })?
+        .ok_or_else(|| token_endpoint_error("token refresh", TokenClient::App, status, &body))?
         .to_string();
 
     let new_refresh_token = body
@@ -2546,10 +3721,11 @@ pub async fn refresh_access_token(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let expires_in = body
-        .get("expires_in")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(3600);
+    let expires_in = config.trusted_lifetime(
+        body.get("expires_in")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(3600),
+    );
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2610,20 +3786,19 @@ pub async fn refresh_via_service_account(
         .await
         .map_err(|e| anyhow::anyhow!("service account token request failed: {e}"))?;
 
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("service account token response parse failed: {e}"))?;
+    let status = resp.status();
+    let body = token_endpoint_body(resp).await;
 
     let access_token = body
         .get("access_token")
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
-            let error = body
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            anyhow::anyhow!("service account token exchange failed: {error}")
+            token_endpoint_error(
+                "service account token exchange",
+                TokenClient::Connection,
+                status,
+                &body,
+            )
         })?
         .to_string();
 
@@ -2660,20 +3835,19 @@ pub async fn refresh_via_client_credentials(
         .await
         .map_err(|e| anyhow::anyhow!("client_credentials token request failed: {e}"))?;
 
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("client_credentials token response parse failed: {e}"))?;
+    let status = resp.status();
+    let body = token_endpoint_body(resp).await;
 
     let access_token = body
         .get("access_token")
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
-            let error = body
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            anyhow::anyhow!("client_credentials token exchange failed: {error}")
+            token_endpoint_error(
+                "client_credentials token exchange",
+                TokenClient::Connection,
+                status,
+                &body,
+            )
         })?
         .to_string();
 
@@ -2749,12 +3923,21 @@ pub async fn refresh_github_app_token(
         .await
         .map_err(|e| anyhow::anyhow!("GitHub App token request failed: {e}"))?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!(
-            "GitHub App token exchange failed ({status}): {body}"
-        ));
+    let status = resp.status();
+    if !status.is_success() {
+        // GitHub's error is JSON with a `message`; only that is kept (for
+        // the classification and the log), never an arbitrary body.
+        let message = resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_owned))
+            .unwrap_or_default();
+        let detail = format!("GitHub App token exchange ({status}): {message}");
+        if github_mint_refusal_is_permanent(status, &message) {
+            return Err(anyhow::Error::new(CredentialRevoked { detail }));
+        }
+        return Err(anyhow::anyhow!("{detail}"));
     }
 
     let body: serde_json::Value = resp
@@ -2783,8 +3966,71 @@ pub async fn refresh_github_app_token(
     Ok((token, expires_at))
 }
 
+/// A GitHub App connection's own repository pin (`credentials.repositories`),
+/// set when the connection was built on an installation shared inside the org.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PinnedRepos {
+    /// No pin: the connection holds the installation's whole grant.
+    Unpinned,
+    /// Tokens must be minted for exactly these repos (`owner/name`).
+    Pinned(Vec<String>),
+    /// A pin that names nothing. Never mint: GitHub reads an absent list as
+    /// "every repo", so this must fail closed.
+    Empty,
+}
+
+pub fn github_app_pinned_repositories(creds: &serde_json::Value) -> PinnedRepos {
+    let Some(value) = creds.get("repositories") else {
+        return PinnedRepos::Unpinned;
+    };
+    if value.is_null() {
+        return PinnedRepos::Unpinned;
+    }
+    let repos: Vec<String> = value
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    if repos.is_empty() {
+        PinnedRepos::Empty
+    } else {
+        PinnedRepos::Pinned(repos)
+    }
+}
+
+/// Whether GitHub's refusal to mint an installation token (`message` is its
+/// error message) means the connection is dead, per the endpoint's documented
+/// answers (`401`, `403`, `404`, `422`):
+///
+/// - `404`: the installation is gone (uninstalled, or the app reinstalled
+///   under a new id).
+/// - `401`: the app's key no longer authenticates (rotated or deleted, or the
+///   app itself deleted). Except the JWT's `exp` / `iat` claim refused: the
+///   gateway's clock is out of step with GitHub's, which a reconnect cannot
+///   fix (Octokit retries exactly these).
+/// - `403`: only a suspended installation. Every other 403 here is a primary
+///   or secondary rate limit, which GitHub asks callers to wait out.
+///
+/// Anything else (`422` for a repository the installation cannot reach, a
+/// `429`, a `5xx`) is transient.
+fn github_mint_refusal_is_permanent(status: reqwest::StatusCode, message: &str) -> bool {
+    match status.as_u16() {
+        404 => true,
+        401 => !message.contains("claim ('exp')") && !message.contains("claim ('iat')"),
+        403 => message.to_ascii_lowercase().contains("suspended"),
+        _ => false,
+    }
+}
+
 /// Attempt to refresh credentials for a known credential type.
 /// Returns `None` if the type is not recognized (falls through to standard OAuth refresh).
+/// A refusal the user must fix carries [`CredentialRevoked`].
 pub async fn try_refresh_credentials(
     cred_type: &str,
     creds: &serde_json::Value,
@@ -2800,7 +4046,17 @@ pub async fn try_refresh_credentials(
                     "GitHub App credentials incomplete, cannot refresh"
                 )));
             };
-            Some(refresh_github_app_token(pk, aid, iid, None).await)
+            // A connection built on a shared installation pins its repo subset
+            // in the credentials: every refresh must stay inside it.
+            match github_app_pinned_repositories(creds) {
+                PinnedRepos::Unpinned => Some(refresh_github_app_token(pk, aid, iid, None).await),
+                PinnedRepos::Pinned(repos) => {
+                    Some(refresh_github_app_token(pk, aid, iid, Some(&repos)).await)
+                }
+                PinnedRepos::Empty => Some(Err(anyhow::anyhow!(
+                    "GitHub App connection pins an empty repository list; refusing to mint an unscoped token"
+                ))),
+            }
         }
         "service_account" => {
             let pk = creds.get("private_key").and_then(|v| v.as_str());
@@ -2831,40 +4087,54 @@ pub async fn try_refresh_credentials(
                     "Docker Hub credentials incomplete, cannot refresh"
                 )));
             };
-            Some(refresh_docker_hub_token(username, password).await)
+            Some(refresh_docker_hub_token(DOCKER_HUB_TOKEN_URL, username, password).await)
         }
         _ => None,
     }
 }
 
-async fn refresh_docker_hub_token(username: &str, password: &str) -> anyhow::Result<(String, i64)> {
+/// Docker Hub's "Create access token" endpoint: exchanges a username and a
+/// personal access token (or password) for a short-lived bearer JWT. Replaces
+/// the deprecated `/v2/users/login`.
+const DOCKER_HUB_TOKEN_URL: &str = "https://hub.docker.com/v2/auth/token";
+
+/// Mint a Docker Hub access token from the connection's username and
+/// personal access token (stored as `password`). The endpoint documents one
+/// refusal, `401` (the token was revoked or the password changed), which
+/// only a reconnect fixes. Anything else (a 429, a 5xx) is transient.
+async fn refresh_docker_hub_token(
+    token_url: &str,
+    username: &str,
+    secret: &str,
+) -> anyhow::Result<(String, i64)> {
     let resp = reqwest::Client::new()
-        .post("https://hub.docker.com/v2/users/login")
+        .post(token_url)
         .json(&serde_json::json!({
-            "username": username,
-            "password": password,
+            "identifier": username,
+            "secret": secret,
         }))
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("Docker Hub login request failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Docker Hub token request failed: {e}"))?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!(
-            "Docker Hub login failed ({status}): {body}"
-        ));
+    let status = resp.status();
+    if !status.is_success() {
+        let detail = format!("Docker Hub token exchange ({status})");
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(anyhow::Error::new(CredentialRevoked { detail }));
+        }
+        return Err(anyhow::anyhow!("{detail}"));
     }
 
     let body: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| anyhow::anyhow!("Docker Hub login response parse failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Docker Hub token response parse failed: {e}"))?;
 
     let token = body
-        .get("token")
+        .get("access_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Docker Hub login response missing 'token' field"))?
+        .ok_or_else(|| anyhow::anyhow!("Docker Hub token response missing 'access_token'"))?
         .to_string();
 
     let now = std::time::SystemTime::now()
@@ -2884,6 +4154,82 @@ async fn refresh_docker_hub_token(username: &str, password: &str) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_app_pin_absent_null_or_listed() {
+        use serde_json::json;
+        assert_eq!(
+            github_app_pinned_repositories(&json!({ "installation_id": "1" })),
+            PinnedRepos::Unpinned
+        );
+        assert_eq!(
+            github_app_pinned_repositories(&json!({ "repositories": null })),
+            PinnedRepos::Unpinned
+        );
+        assert_eq!(
+            github_app_pinned_repositories(&json!({ "repositories": ["o/a", " o/b "] })),
+            PinnedRepos::Pinned(vec!["o/a".into(), "o/b".into()])
+        );
+    }
+
+    #[test]
+    fn github_app_pin_that_names_nothing_fails_closed() {
+        use serde_json::json;
+        // Each of these would mint a token for EVERY repo if read as "no pin".
+        for v in [
+            json!([]),
+            json!([""]),
+            json!("o/a"),
+            json!({}),
+            json!([1, 2]),
+        ] {
+            assert_eq!(
+                github_app_pinned_repositories(&json!({ "repositories": v })),
+                PinnedRepos::Empty
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_pin_refuses_to_refresh() {
+        let creds = serde_json::json!({
+            "type": "github_app",
+            "private_key": "x",
+            "app_id": "1",
+            "installation_id": "2",
+            "repositories": []
+        });
+        let result = try_refresh_credentials("github_app", &creds, None).await;
+        assert!(matches!(result, Some(Err(_))));
+    }
+
+    #[test]
+    fn config_keys_put_the_app_before_its_vendor_group() {
+        assert_eq!(config_keys_for("gmail"), vec!["gmail", "google"]);
+        assert_eq!(config_keys_for("jira"), vec!["jira", "atlassian"]);
+        assert_eq!(
+            config_keys_for("outlook-mail"),
+            vec!["outlook-mail", "microsoft"]
+        );
+        assert_eq!(config_keys_for("github"), vec!["github"]);
+    }
+
+    #[test]
+    fn vertex_ai_shares_google_refresh_but_not_the_byoc_group() {
+        assert_eq!(oauth_client_group("vertex-ai"), None);
+    }
+
+    #[test]
+    fn every_oauth_client_group_member_is_a_registered_provider() {
+        for (group, members) in OAUTH_CLIENT_GROUPS {
+            for member in *members {
+                assert!(
+                    all_providers().any(|p| p.provider == *member),
+                    "{group} member {member} is not a registered provider"
+                );
+            }
+        }
+    }
 
     #[test]
     fn providers_for_known_hosts() {
@@ -3083,6 +4429,10 @@ mod tests {
             vec!["google-tasks"]
         );
         assert_eq!(
+            providers_for_host("keep.googleapis.com"),
+            vec!["google-keep"]
+        );
+        assert_eq!(
             providers_for_host("forms.googleapis.com"),
             vec!["google-forms"]
         );
@@ -3165,6 +4515,7 @@ mod tests {
             ("google-sheets", "sheets.googleapis.com"),
             ("google-slides", "slides.googleapis.com"),
             ("google-tasks", "tasks.googleapis.com"),
+            ("google-keep", "keep.googleapis.com"),
             ("google-forms", "forms.googleapis.com"),
             ("google-classroom", "classroom.googleapis.com"),
             ("google-admin", "admin.googleapis.com"),
@@ -3616,6 +4967,50 @@ mod tests {
         assert!(providers_for_host("atlas.mongodb.com").is_empty());
     }
 
+    // ── Navan ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn provider_for_host_navan() {
+        assert_eq!(provider_for_host("api.navan.com"), Some(("navan", "Navan")));
+        assert_eq!(providers_for_host("api.navan.com"), vec!["navan"]);
+    }
+
+    #[test]
+    fn navan_api_uses_bearer() {
+        let injections = build_app_injections("navan", "api.navan.com", "navan-token");
+        assert_eq!(
+            injections,
+            vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer navan-token".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn navan_region_header_comes_from_credentials() {
+        let headers = credential_headers("navan");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].credential_field, "ta_region");
+        assert_eq!(headers[0].header_name, "X-ta-region");
+    }
+
+    #[test]
+    fn navan_refreshes_via_client_credentials_not_oauth() {
+        assert!(refresh_config("navan").is_none());
+        assert!(needs_access_token("navan"));
+    }
+
+    #[test]
+    fn navan_token_and_web_hosts_get_no_injection() {
+        // The token hosts receive the client secret via Basic auth on refresh;
+        // they must never also receive an injected bearer token.
+        assert!(providers_for_host("app.navan.com").is_empty());
+        assert!(providers_for_host("app-fra.navan.com").is_empty());
+        assert!(providers_for_host("navan.com").is_empty());
+        assert!(providers_for_host("evil-api.navan.com").is_empty());
+    }
+
     // ── Docker Hub ────────────────────────────────────────────────────
 
     #[test]
@@ -3694,6 +5089,43 @@ mod tests {
     fn monday_does_not_match_other_monday_hosts() {
         assert!(providers_for_host("monday.com").is_empty());
         assert!(providers_for_host("auth.monday.com").is_empty());
+    }
+
+    // ── Webflow ───────────────────────────────────────────────────────
+
+    #[test]
+    fn provider_for_host_webflow() {
+        assert_eq!(providers_for_host("api.webflow.com"), vec!["webflow"]);
+        assert_eq!(
+            provider_for_host("api.webflow.com"),
+            Some(("webflow", "Webflow"))
+        );
+    }
+
+    #[test]
+    fn webflow_api_uses_bearer() {
+        let injections = build_app_injections("webflow", "api.webflow.com", "test_token");
+        assert_eq!(injections.len(), 1);
+        assert_eq!(
+            injections[0],
+            Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer test_token".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn webflow_has_no_refresh_config() {
+        assert!(refresh_config("webflow").is_none());
+    }
+
+    #[test]
+    fn webflow_token_never_reaches_customer_sites() {
+        assert!(providers_for_host("webflow.com").is_empty());
+        assert!(providers_for_host("www.webflow.com").is_empty());
+        assert!(providers_for_host("my-site.webflow.io").is_empty());
+        assert!(providers_for_host("api.webflow.com.evil.com").is_empty());
     }
 
     // ── Edge cases ───────────────────────────────────────────────────
@@ -3811,6 +5243,42 @@ mod tests {
         // return None instead of falling back to the first match (Gmail).
         assert_eq!(
             provider_for_host_and_path("www.googleapis.com", "/some-unknown-api/v1/resource"),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_identification_covers_every_path_its_credential_reaches() {
+        // `/batch/drive` (no trailing slash) is a live Drive batch endpoint and
+        // the `/batch/drive/*` injection pattern puts the Drive token on it, so
+        // it must be identified as Drive — or Drive's folder guard never runs.
+        let rules = build_app_injection_rules("google-drive", "www.googleapis.com", "t");
+        for path in [
+            "/batch/drive",
+            "/batch/drive?x=1",
+            "/drive",
+            "/upload/drive",
+        ] {
+            assert!(
+                rules
+                    .iter()
+                    .any(|(pattern, _)| inject::path_matches(path, pattern)),
+                "{path} carries the credential"
+            );
+            assert_eq!(
+                provider_for_host_and_path("www.googleapis.com", path),
+                Some(("google-drive", "Google Drive")),
+                "{path}"
+            );
+            assert!(provider_matches_host_and_path(
+                "google-drive",
+                "www.googleapis.com",
+                path
+            ));
+        }
+        // ...without bleeding onto a sibling that merely shares the prefix.
+        assert_eq!(
+            provider_for_host_and_path("www.googleapis.com", "/batch/drivex"),
             None
         );
     }
@@ -3962,6 +5430,66 @@ mod tests {
     fn gitlab_refresh_uses_form_body_format() {
         let config = refresh_config("gitlab").expect("gitlab should have refresh config");
         assert!(matches!(config.body_format, TokenBodyFormat::Form));
+    }
+
+    // ── Bitbucket ─────────────────────────────────────────────────────
+
+    #[test]
+    fn provider_for_host_bitbucket_api_and_git() {
+        assert_eq!(
+            provider_for_host("api.bitbucket.org"),
+            Some(("bitbucket", "Bitbucket"))
+        );
+        assert_eq!(
+            provider_for_host("bitbucket.org"),
+            Some(("bitbucket", "Bitbucket"))
+        );
+        // A look-alike host never matches.
+        assert_eq!(provider_for_host("evilbitbucket.org"), None);
+        assert_eq!(provider_for_host("bitbucket.org.example.com"), None);
+        assert!(build_app_injections("bitbucket", "evilbitbucket.org", "bb-tok").is_empty());
+    }
+
+    #[test]
+    fn bitbucket_api_uses_bearer() {
+        let injections = build_app_injections("bitbucket", "api.bitbucket.org", "bb-tok");
+        assert_eq!(
+            injections,
+            vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer bb-tok".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn bitbucket_git_uses_x_token_auth_basic() {
+        let injections = build_app_injections("bitbucket", "bitbucket.org", "bb-tok");
+        let b64 = base64::engine::general_purpose::STANDARD;
+        assert_eq!(
+            injections,
+            vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: format!("Basic {}", b64.encode("x-token-auth:bb-tok")),
+            }]
+        );
+    }
+
+    #[test]
+    fn bitbucket_refresh_is_form_with_basic_client_auth() {
+        let config = refresh_config("bitbucket").expect("bitbucket refreshes");
+        assert_eq!(
+            config
+                .endpoint_for_connection(&serde_json::json!({}))
+                .as_deref(),
+            Some("https://bitbucket.org/site/oauth2/access_token")
+        );
+        assert!(matches!(config.body_format, TokenBodyFormat::Form));
+        assert!(matches!(
+            config.client_auth,
+            ClientCredentialMethod::BasicAuth
+        ));
+        assert_eq!(config.client_id_env, "BITBUCKET_CLIENT_ID");
     }
 
     #[test]
@@ -4184,6 +5712,41 @@ mod tests {
         );
     }
 
+    // ── PostgreSQL ────────────────────────────────────────────────────
+
+    /// The policy zone names a connection's statements for the engine and the
+    /// activity feed, and never carries a credential: Postgres logs in on its
+    /// own wire, never through an HTTP header.
+    #[test]
+    fn postgres_zone_identifies_the_provider_and_never_injects() {
+        let host = format!("c1{POSTGRES_POLICY_ZONE}");
+        assert_eq!(
+            provider_for_host_and_path(&host, "/sql/read"),
+            Some((POSTGRES_PROVIDER, "PostgreSQL"))
+        );
+        assert!(!needs_access_token(POSTGRES_PROVIDER));
+        assert!(build_app_injections(POSTGRES_PROVIDER, &host, "secret").is_empty());
+        assert!(
+            build_app_injection_rules(POSTGRES_PROVIDER, &host, "secret")
+                .iter()
+                .all(|(_, injections)| injections.is_empty())
+        );
+    }
+
+    /// No real host is ever in the zone: the bare zone, a lookalike, and a
+    /// public name that merely contains `postgres` all match nothing.
+    #[test]
+    fn postgres_zone_matches_no_real_host() {
+        for host in [
+            "postgres.onecli.invalid",
+            "c1.postgres.onecli.invalid.evil.com",
+            "db.postgres.example.com",
+            "postgres.example.com",
+        ] {
+            assert_eq!(provider_for_host_and_path(host, "/"), None, "{host}");
+        }
+    }
+
     // ── Salesforce ────────────────────────────────────────────────────
 
     #[test]
@@ -4244,6 +5807,26 @@ mod tests {
             assert!(alias_host(host).is_none(), "{host}");
             assert_eq!(guidance_provider_for(host, "/x"), None, "{host}");
         }
+    }
+
+    /// A shared host is explained per path, so a Calendar account never
+    /// answers for a Gmail request; a host two apps fully share (GitHub and
+    /// the GitHub App) is explained by either; an alias by its owner alone.
+    #[test]
+    fn provider_explains_follows_the_path_on_a_shared_host() {
+        let gmail = ("www.googleapis.com", "/gmail/v1/users/me/messages");
+        assert!(provider_explains("gmail", gmail.0, gmail.1));
+        assert!(!provider_explains("google-calendar", gmail.0, gmail.1));
+        assert!(!provider_explains("gmail", gmail.0, "/calendar/v3/x"));
+
+        for provider in ["github", "github-app"] {
+            assert!(provider_explains(provider, "api.github.com", "/user"));
+        }
+
+        let alias = ("login.salesforce.com", "/services/oauth2/userinfo");
+        assert!(provider_explains("salesforce", alias.0, alias.1));
+        assert!(!provider_explains("snowflake", alias.0, alias.1));
+        assert!(!provider_explains("resend", "api.github.com", "/user"));
     }
 
     /// Every alias names a real host-bound provider: an alias exists only to
@@ -4311,12 +5894,14 @@ mod tests {
         let config = refresh_config("salesforce").expect("salesforce refreshes");
         // Default (production) when nothing is stored or the value is unknown.
         assert_eq!(
-            config.endpoint_for(None),
-            "https://login.salesforce.com/services/oauth2/token"
+            config
+                .endpoint_for_connection(&serde_json::json!({}))
+                .as_deref(),
+            Some("https://login.salesforce.com/services/oauth2/token")
         );
         assert_eq!(
-            config.endpoint_for(Some("https://test.salesforce.com/services/oauth2/token")),
-            "https://test.salesforce.com/services/oauth2/token"
+            config.endpoint_for_connection(&serde_json::json!({"token_endpoint": "https://test.salesforce.com/services/oauth2/token"})).as_deref(),
+Some("https://test.salesforce.com/services/oauth2/token")
         );
         // A stored endpoint outside the allowlist must never be dialed: the
         // client secret would otherwise be posted to an attacker's host.
@@ -4327,8 +5912,10 @@ mod tests {
             "",
         ] {
             assert_eq!(
-                config.endpoint_for(Some(stored)),
-                "https://login.salesforce.com/services/oauth2/token",
+                config
+                    .endpoint_for_connection(&serde_json::json!({"token_endpoint": stored}))
+                    .as_deref(),
+                Some("https://login.salesforce.com/services/oauth2/token"),
                 "{stored}"
             );
         }
@@ -4338,9 +5925,80 @@ mod tests {
     fn providers_without_alternates_ignore_a_stored_endpoint() {
         let config = refresh_config("google-calendar").expect("google refreshes");
         assert_eq!(
-            config.endpoint_for(Some("https://evil.test/token")),
-            "https://oauth2.googleapis.com/token"
+            config
+                .endpoint_for_connection(
+                    &serde_json::json!({"token_endpoint": "https://evil.test/token"})
+                )
+                .as_deref(),
+            Some("https://oauth2.googleapis.com/token")
         );
+    }
+
+    /// The incident: Salesforce's token endpoint reported more than its
+    /// org's session timeout allowed. A refreshed token is trusted for 10
+    /// minutes at most, like a freshly connected one.
+    #[test]
+    fn a_refreshed_salesforce_token_is_trusted_for_ten_minutes_at_most() {
+        let config = refresh_config("salesforce").expect("salesforce refreshes");
+        assert_eq!(config.trusted_lifetime(3600), 600);
+        // A shorter report is kept as it is.
+        assert_eq!(config.trusted_lifetime(300), 300);
+        // Every other provider keeps what it reports.
+        let gitlab = refresh_config("gitlab").expect("gitlab refreshes");
+        assert_eq!(gitlab.trusted_lifetime(7200), 7200);
+    }
+
+    /// The gateway's refused-token resend (`proxy::stale_token`) re-sends a
+    /// request with ONLY a new `Authorization: Bearer` value. A provider that
+    /// opts in must therefore carry its whole credential in that one header:
+    /// Bearer on every host rule, and no credential headers, params, host
+    /// rewrite, finalizer or body transform that would still hold the refused
+    /// token or be bound to the first send.
+    #[test]
+    fn a_provider_recovering_from_refusals_injects_only_a_bearer_header() {
+        let mut opted_in = 0;
+        for app in all_providers() {
+            let Some(config) = app.refresh else { continue };
+            if config.stale_token_error_codes.is_empty() {
+                continue;
+            }
+            opted_in += 1;
+            let p = app.provider;
+            assert!(
+                app.host_rules
+                    .iter()
+                    .all(|r| matches!(r.strategy, AuthStrategy::Bearer)),
+                "{p}: every host rule must be Bearer"
+            );
+            assert!(app.credential_headers.is_empty(), "{p}: credential headers");
+            assert!(app.credential_params.is_empty(), "{p}: credential params");
+            assert!(app.host_rewrite.is_none(), "{p}: host rewrite");
+            assert!(app.finalizer.is_none(), "{p}: finalizer");
+            assert!(app.body_transform.is_none(), "{p}: body transform");
+        }
+        assert_eq!(opted_in, 1, "only Salesforce opts in today");
+    }
+
+    #[test]
+    fn only_salesforce_dead_token_codes_are_stale() {
+        let sf = refresh_config("salesforce").expect("salesforce refreshes");
+        // Salesforce's REST error shape: an array of {message, errorCode}.
+        assert!(sf.is_stale_token_error(
+            br#"[{"message":"INVALID_JWT_FORMAT","errorCode":"INVALID_AUTH_HEADER"}]"#
+        ));
+        assert!(sf.is_stale_token_error(
+            br#"[{"message":"Session expired or invalid","errorCode":"INVALID_SESSION_ID"}]"#
+        ));
+        assert!(sf.is_stale_token_error(br#"{"errorCode":"INVALID_SESSION_ID"}"#));
+        // Any other refusal is not one.
+        assert!(!sf.is_stale_token_error(
+            br#"[{"message":"insufficient access","errorCode":"INSUFFICIENT_ACCESS"}]"#
+        ));
+        assert!(!sf.is_stale_token_error(b"<html>401</html>"));
+        assert!(!sf.is_stale_token_error(br#""INVALID_SESSION_ID""#));
+        // Every other provider opts out.
+        let gitlab = refresh_config("gitlab").expect("gitlab refreshes");
+        assert!(!gitlab.is_stale_token_error(br#"[{"errorCode":"INVALID_SESSION_ID"}]"#));
     }
 
     // ── credential_host_field ─────────────────────────────────────────
@@ -4466,8 +6124,9 @@ mod tests {
     fn linkedin_has_refresh_config() {
         let cfg = refresh_config("linkedin").expect("linkedin should have refresh config");
         assert_eq!(
-            cfg.token_url,
-            "https://www.linkedin.com/oauth/v2/accessToken"
+            cfg.endpoint_for_connection(&serde_json::json!({}))
+                .as_deref(),
+            Some("https://www.linkedin.com/oauth/v2/accessToken")
         );
     }
 
@@ -4778,8 +6437,9 @@ mod tests {
         let cfg = refresh_config("microsoft-onenote")
             .expect("microsoft-onenote should have refresh config");
         assert_eq!(
-            cfg.token_url,
-            "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+            cfg.endpoint_for_connection(&serde_json::json!({}))
+                .as_deref(),
+            Some("https://login.microsoftonline.com/common/oauth2/v2.0/token")
         );
     }
 
@@ -4996,6 +6656,742 @@ mod tests {
         assert_eq!(providers_for_host("api.fireflies.ai"), vec!["fireflies"]);
     }
 
+    // ── Timeless ───────────────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_timeless_host() {
+        assert_eq!(providers_for_host("api.timeless.day"), vec!["timeless"]);
+        assert_eq!(
+            provider_for_host("api.timeless.day"),
+            Some(("timeless", "Timeless"))
+        );
+        // Only the API host: the dashboard and lookalikes get nothing.
+        for host in [
+            "my.timeless.day",
+            "timeless.day",
+            "api.timeless.day.evil.example",
+            "evilapi.timeless.day",
+        ] {
+            assert!(providers_for_host(host).is_empty(), "{host}");
+        }
+    }
+
+    #[test]
+    fn timeless_api_uses_bearer() {
+        let injections = build_app_injections("timeless", "api.timeless.day", "abc123");
+        assert_eq!(
+            injections,
+            vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer abc123".to_string(),
+            }]
+        );
+        assert!(needs_access_token("timeless"));
+        assert!(refresh_config("timeless").is_none());
+        assert!(credential_headers("timeless").is_empty());
+    }
+
+    #[test]
+    fn timeless_injects_on_both_rest_and_mcp() {
+        // A single host rule (path_prefix: None) covers both API surfaces, so
+        // the catalog must describe both (its `mcp_access` tool).
+        assert!(provider_matches_host_and_path(
+            "timeless",
+            "api.timeless.day",
+            "/v1/meetings"
+        ));
+        assert!(provider_matches_host_and_path(
+            "timeless",
+            "api.timeless.day",
+            "/mcp/"
+        ));
+    }
+
+    // ── Circleback ─────────────────────────────────────────────────────
+    #[test]
+    fn providers_for_circleback_host() {
+        assert_eq!(providers_for_host("circleback.ai"), vec!["circleback"]);
+        // Only the apex host: subdomains and lookalikes get nothing.
+        for host in [
+            "www.circleback.ai",
+            "support.circleback.ai",
+            "circleback.ai.evil.example",
+            "evilcircleback.ai",
+        ] {
+            assert!(providers_for_host(host).is_empty(), "{host}");
+        }
+    }
+
+    #[test]
+    fn circleback_api_uses_bearer() {
+        let injections = build_app_injections("circleback", "circleback.ai", "cb_abc123");
+        assert_eq!(
+            injections,
+            vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer cb_abc123".to_string(),
+            }]
+        );
+        assert!(needs_access_token("circleback"));
+        assert!(refresh_config("circleback").is_none());
+        assert!(credential_headers("circleback").is_empty());
+    }
+
+    #[test]
+    fn circleback_injects_under_api_only() {
+        // The API shares the host with the web app: the key must reach /api/
+        // and never the app's own pages or a lookalike prefix.
+        for path in [
+            "/api/meetings",
+            "/api/meeting/m1/transcript",
+            "/api/oauth/test",
+        ] {
+            assert!(
+                provider_matches_host_and_path("circleback", "circleback.ai", path),
+                "{path}"
+            );
+        }
+        for path in [
+            "/",
+            "/settings",
+            "/docs/api",
+            "/apix/meetings",
+            "/apimeetings",
+        ] {
+            assert!(
+                !provider_matches_host_and_path("circleback", "circleback.ai", path),
+                "{path}"
+            );
+        }
+        assert_eq!(
+            provider_for_host_and_path("circleback.ai", "/api/meetings"),
+            Some(("circleback", "Circleback"))
+        );
+        // The rule the proxy actually installs (build_app_injection_rules) is
+        // the path_prefix turned into a pattern: one Bearer rule on /api/*.
+        let rules = build_app_injection_rules("circleback", "circleback.ai", "cb_abc123");
+        assert_eq!(
+            rules,
+            vec![(
+                "/api/*".to_string(),
+                vec![Injection::SetHeader {
+                    name: "authorization".to_string(),
+                    value: "Bearer cb_abc123".to_string(),
+                }]
+            )]
+        );
+    }
+
+    // ── Pylon ──────────────────────────────────────────────────────────
+    #[test]
+    fn providers_for_pylon_hosts() {
+        // Both regional API hosts, and only those.
+        assert_eq!(providers_for_host("api.usepylon.com"), vec!["pylon"]);
+        assert_eq!(providers_for_host("api.eu.usepylon.com"), vec!["pylon"]);
+        assert_eq!(
+            provider_for_host("api.eu.usepylon.com"),
+            Some(("pylon", "Pylon"))
+        );
+        // The apex, the dashboard, the docs, the OAuth-only MCP server, and
+        // lookalikes get nothing.
+        for host in [
+            "usepylon.com",
+            "app.usepylon.com",
+            "app.eu.usepylon.com",
+            "docs.usepylon.com",
+            "mcp.usepylon.com",
+            "api.usepylon.com.evil.example",
+            "evilapi.usepylon.com",
+            "api.us.usepylon.com",
+        ] {
+            assert!(providers_for_host(host).is_empty(), "{host}");
+        }
+    }
+
+    #[test]
+    fn pylon_api_uses_bearer_on_every_path_of_both_hosts() {
+        for host in ["api.usepylon.com", "api.eu.usepylon.com"] {
+            let injections = build_app_injections("pylon", host, "tok");
+            assert_eq!(
+                injections,
+                vec![Injection::SetHeader {
+                    name: "authorization".to_string(),
+                    value: "Bearer tok".to_string(),
+                }],
+                "{host}"
+            );
+            // Dedicated API hosts: no path prefix, so the installed rule is
+            // the catch-all.
+            let rules = build_app_injection_rules("pylon", host, "tok");
+            assert_eq!(rules.len(), 1, "{host}");
+            assert_eq!(rules[0].0, "*", "{host}");
+            assert!(
+                provider_matches_host_and_path("pylon", host, "/me"),
+                "{host}"
+            );
+            assert!(
+                provider_matches_host_and_path("pylon", host, "/issues/search"),
+                "{host}"
+            );
+        }
+        assert!(needs_access_token("pylon"));
+        assert!(refresh_config("pylon").is_none());
+        assert!(credential_headers("pylon").is_empty());
+        assert!(credential_params("pylon").is_empty());
+    }
+
+    #[test]
+    fn pylon_rewrites_the_upstream_host_to_the_stored_region() {
+        // A US tenant: the documented default host, whichever host the
+        // agent called.
+        let us = serde_json::json!({"access_token": "tok", "region": "us"});
+        assert_eq!(
+            rewrite_host("pylon", &us, "api.usepylon.com"),
+            Some("api.usepylon.com".to_string())
+        );
+        assert_eq!(
+            rewrite_host("pylon", &us, "api.eu.usepylon.com"),
+            Some("api.usepylon.com".to_string())
+        );
+        // An EU tenant: the EU host, even when the agent called the US one.
+        let eu = serde_json::json!({"access_token": "tok", "region": "eu"});
+        assert_eq!(
+            rewrite_host("pylon", &eu, "api.usepylon.com"),
+            Some("api.eu.usepylon.com".to_string())
+        );
+        assert_eq!(
+            rewrite_host("pylon", &eu, "api.eu.usepylon.com"),
+            Some("api.eu.usepylon.com".to_string())
+        );
+        // The connect form validates the region case- and whitespace-
+        // insensitively but stores what was typed: the same value it
+        // accepted must route to the same host here.
+        for stored in [" EU ", "Eu", "eu\n"] {
+            let creds = serde_json::json!({"access_token": "tok", "region": stored});
+            assert_eq!(
+                rewrite_host("pylon", &creds, "api.usepylon.com"),
+                Some("api.eu.usepylon.com".to_string()),
+                "{stored:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pylon_rewrite_falls_back_to_us_and_never_to_an_arbitrary_host() {
+        // The connect form only stores a normalized `us`/`eu`, but the
+        // gateway must still fail safe on anything else in the database: a
+        // stored value is never spliced into the host.
+        for region in ["", "apac", "evil.example", "api.eu.usepylon.com"] {
+            let creds = serde_json::json!({"access_token": "tok", "region": region});
+            assert_eq!(
+                rewrite_host("pylon", &creds, "api.usepylon.com"),
+                Some("api.usepylon.com".to_string()),
+                "{region:?}"
+            );
+        }
+        // No region at all (or not a string): no rewrite, the request host
+        // stands.
+        let none = serde_json::json!({"access_token": "tok"});
+        assert_eq!(rewrite_host("pylon", &none, "api.usepylon.com"), None);
+        let bad = serde_json::json!({"access_token": "tok", "region": 7});
+        assert_eq!(rewrite_host("pylon", &bad, "api.usepylon.com"), None);
+    }
+
+    // ── PagerDuty ──────────────────────────────────────────────────────
+    #[test]
+    fn providers_for_pagerduty_hosts() {
+        assert_eq!(providers_for_host("api.pagerduty.com"), vec!["pagerduty"]);
+        assert_eq!(
+            providers_for_host("api.eu.pagerduty.com"),
+            vec!["pagerduty"]
+        );
+        assert_eq!(
+            provider_for_host("api.pagerduty.com"),
+            Some(("pagerduty", "PagerDuty"))
+        );
+        // The Events API (routing key in the body, not this key), account
+        // subdomains, the apex, and lookalikes get nothing.
+        for host in [
+            "events.pagerduty.com",
+            "events.eu.pagerduty.com",
+            "acme.pagerduty.com",
+            "acme.eu.pagerduty.com",
+            "pagerduty.com",
+            "app.pagerduty.com",
+            "api.pagerduty.com.evil.example",
+            "evilapi.pagerduty.com",
+        ] {
+            assert!(providers_for_host(host).is_empty(), "{host}");
+        }
+    }
+
+    #[test]
+    fn pagerduty_uses_token_scheme_on_both_hosts() {
+        for host in ["api.pagerduty.com", "api.eu.pagerduty.com"] {
+            let expected = vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Token token=tok".to_string(),
+            }];
+            assert_eq!(build_app_injections("pagerduty", host, "tok"), expected);
+            let rules = build_app_injection_rules("pagerduty", host, "tok");
+            assert_eq!(rules, vec![("*".to_string(), expected)], "{host}");
+            assert!(provider_matches_host_and_path(
+                "pagerduty",
+                host,
+                "/incidents"
+            ));
+        }
+        assert!(needs_access_token("pagerduty"));
+        assert!(refresh_config("pagerduty").is_none());
+        assert!(credential_headers("pagerduty").is_empty());
+    }
+
+    #[test]
+    fn pagerduty_rewrites_to_the_stored_region_and_fails_safe_to_us() {
+        for (stored, want) in [
+            ("us", "api.pagerduty.com"),
+            ("eu", "api.eu.pagerduty.com"),
+            (" EU ", "api.eu.pagerduty.com"),
+            ("", "api.pagerduty.com"),
+            ("evil.example", "api.pagerduty.com"),
+            ("api.eu.pagerduty.com", "api.pagerduty.com"),
+        ] {
+            let creds = serde_json::json!({"access_token": "tok", "region": stored});
+            for called in ["api.pagerduty.com", "api.eu.pagerduty.com"] {
+                assert_eq!(
+                    rewrite_host("pagerduty", &creds, called),
+                    Some(want.to_string()),
+                    "{stored:?} via {called}"
+                );
+            }
+        }
+        let none = serde_json::json!({"access_token": "tok"});
+        assert_eq!(rewrite_host("pagerduty", &none, "api.pagerduty.com"), None);
+    }
+
+    // ── Coralogix ──────────────────────────────────────────────────────
+    #[test]
+    fn providers_for_coralogix_hosts() {
+        for host in [
+            "api.us1.coralogix.com",
+            "api.us2.coralogix.com",
+            "api.eu2.coralogix.com",
+            "api.ap3.coralogix.com",
+            "api.cx498.coralogix.com",
+            "api.coralogix.us",
+            "api.coralogix.com",
+            "ng-api-http.cx498.coralogix.com",
+            "ng-api-http.coralogix.us",
+        ] {
+            assert_eq!(providers_for_host(host), vec!["coralogix"], "{host}");
+        }
+        // Team web apps, ingestion, the apex, and lookalikes get nothing.
+        for host in [
+            "acme.app.cx498.coralogix.com",
+            "acme.coralogix.com",
+            "acme.app.coralogix.us",
+            "ingress.us2.coralogix.com",
+            "ingress.cx498.coralogix.com",
+            "coralogix.com",
+            "api.us9.coralogix.com",
+            "api.gov1.coralogixgov.us",
+            "api.us2.coralogix.com.evil.example",
+        ] {
+            assert!(providers_for_host(host).is_empty(), "{host}");
+        }
+    }
+
+    #[test]
+    fn coralogix_uses_bearer_and_rewrites_to_the_stored_region() {
+        let injections = build_app_injections("coralogix", "api.us2.coralogix.com", "tok");
+        assert_eq!(
+            injections,
+            vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer tok".to_string(),
+            }]
+        );
+        assert!(needs_access_token("coralogix"));
+        assert!(refresh_config("coralogix").is_none());
+        for (stored, want) in [
+            ("us2", "api.us2.coralogix.com"),
+            (" EU2 ", "api.eu2.coralogix.com"),
+            ("us2.coralogix.com", "api.us2.coralogix.com"),
+            ("ap1", "api.ap1.coralogix.com"),
+        ] {
+            let creds = serde_json::json!({"access_token": "tok", "region": stored});
+            // A legacy host the agent called still lands on the region.
+            for called in ["api.cx498.coralogix.com", "api.eu1.coralogix.com"] {
+                assert_eq!(
+                    rewrite_host("coralogix", &creds, called),
+                    Some(want.to_string()),
+                    "{stored:?} via {called}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn coralogix_rewrite_never_builds_a_host_from_an_unknown_region() {
+        for region in ["", "us9", "evil.example", "us2.evil.example", "gov1"] {
+            let creds = serde_json::json!({"access_token": "tok", "region": region});
+            assert_eq!(
+                rewrite_host("coralogix", &creds, "api.us2.coralogix.com"),
+                None,
+                "{region:?}"
+            );
+        }
+    }
+
+    // ── Dripify ────────────────────────────────────────────────────────
+    #[test]
+    fn dripify_injects_x_api_key_on_the_api_host_and_the_mcp_path() {
+        assert_eq!(providers_for_host("api.dripify.com"), vec!["dripify"]);
+        assert_eq!(providers_for_host("app.dripify.com"), vec!["dripify"]);
+        // The key rides a credential header, never Authorization.
+        assert!(!needs_access_token("dripify"));
+        let headers = credential_headers("dripify");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].credential_field, "access_token");
+        assert_eq!(headers[0].header_name, "X-Api-Key");
+        assert!(refresh_config("dripify").is_none());
+        // Every path of the Open API host, only the MCP path of the web app's.
+        // Neither rule injects an Authorization header of its own.
+        for (host, pattern) in [
+            ("api.dripify.com", "*"),
+            ("app.dripify.com", "/api/v1/mcp/*"),
+        ] {
+            assert_eq!(
+                build_app_injection_rules("dripify", host, "tok"),
+                vec![(pattern.to_string(), vec![])],
+                "{host}"
+            );
+        }
+        for path in ["/api/v1/mcp", "/api/v1/mcp/"] {
+            assert!(
+                provider_matches_host_and_path("dripify", "app.dripify.com", path),
+                "{path}"
+            );
+        }
+        // The web app on the same host never carries the key.
+        for path in ["/", "/login", "/api/v1/campaigns", "/api/v1/mcpx"] {
+            assert!(
+                !provider_matches_host_and_path("dripify", "app.dripify.com", path),
+                "{path}"
+            );
+        }
+        // The legacy web-app host, the marketing site, and lookalikes get nothing.
+        for host in [
+            "app.dripify.io",
+            "dripify.com",
+            "www.dripify.com",
+            "help.dripify.com",
+            "api.dripify.io",
+            "api.dripify.com.evil.example",
+            "evilapi.dripify.com",
+        ] {
+            assert!(providers_for_host(host).is_empty(), "{host}");
+        }
+    }
+
+    // ── HeyReach ───────────────────────────────────────────────────────
+    #[test]
+    fn heyreach_injects_x_api_key_on_the_public_api_only() {
+        assert_eq!(providers_for_host("api.heyreach.io"), vec!["heyreach"]);
+        // The key rides a credential header, never Authorization, and it is
+        // the trimmed copy the connect handler stores.
+        assert!(!needs_access_token("heyreach"));
+        let headers = credential_headers("heyreach");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].credential_field, "access_token");
+        assert_eq!(headers[0].header_name, "X-API-KEY");
+        assert!(refresh_config("heyreach").is_none());
+        assert_eq!(
+            build_app_injection_rules("heyreach", "api.heyreach.io", "tok"),
+            vec![("/api/public/*".to_string(), vec![])],
+        );
+        for path in [
+            "/api/public/auth/CheckApiKey",
+            "/api/public/campaign/GetAll",
+            "/api/public/li_account/GetAll",
+            "/api/public/campaign/GetById?campaignId=1",
+        ] {
+            assert!(
+                provider_matches_host_and_path("heyreach", "api.heyreach.io", path),
+                "{path}"
+            );
+        }
+        // HeyReach's own web app backend shares the host and never carries
+        // the key.
+        for path in [
+            "/",
+            "/UserConfiguration/GetAllExtended",
+            "/api/WhiteLabel/WhiteLabelThemeConfig",
+            "/api/TokenAuth/Authenticate",
+            "/api/publicx/campaign/GetAll",
+        ] {
+            assert!(
+                !provider_matches_host_and_path("heyreach", "api.heyreach.io", path),
+                "{path}"
+            );
+        }
+        // The web app, the marketing site, the live-updates host and
+        // lookalikes get nothing.
+        for host in [
+            "app.heyreach.io",
+            "heyreach.io",
+            "www.heyreach.io",
+            "live-updates.heyreach.io",
+            "api.heyreach.com",
+            "api.heyreach.io.evil.example",
+            "evilapi.heyreach.io",
+        ] {
+            assert!(providers_for_host(host).is_empty(), "{host}");
+        }
+    }
+
+    // ── Onyx ───────────────────────────────────────────────────────────
+    #[test]
+    fn onyx_injects_only_on_the_api_and_mcp_paths() {
+        assert_eq!(providers_for_host("cloud.onyx.app"), vec!["onyx"]);
+        for path in [
+            "/api/me",
+            "/api/search",
+            "/api/chat/send-chat-message",
+            "/mcp/",
+            "/mcp/x",
+        ] {
+            assert!(
+                provider_matches_host_and_path("onyx", "cloud.onyx.app", path),
+                "{path}"
+            );
+        }
+        // The web app on the same host never carries the key.
+        for path in [
+            "/",
+            "/chat",
+            "/admin/api-key",
+            "/apiary",
+            "/mcpx",
+            "/_next/static/x.js",
+        ] {
+            assert!(
+                !provider_matches_host_and_path("onyx", "cloud.onyx.app", path),
+                "{path}"
+            );
+        }
+        let rules = build_app_injection_rules("onyx", "cloud.onyx.app", "tok");
+        let patterns: Vec<_> = rules.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(patterns, vec!["/api/*", "/mcp/*"]);
+        for (_, injections) in &rules {
+            assert_eq!(
+                injections,
+                &vec![Injection::SetHeader {
+                    name: "authorization".to_string(),
+                    value: "Bearer tok".to_string(),
+                }]
+            );
+        }
+        for host in [
+            "onyx.app",
+            "docs.onyx.app",
+            "acme.onyx.app",
+            "cloud.onyx.app.evil.example",
+        ] {
+            assert!(providers_for_host(host).is_empty(), "{host}");
+        }
+        assert!(refresh_config("onyx").is_none());
+    }
+
+    // ── Twilio ─────────────────────────────────────────────────────────
+    #[test]
+    fn twilio_covers_every_product_in_every_region() {
+        let rules = provider_by_id("twilio").unwrap().host_rules;
+        assert_eq!(rules.len(), TWILIO_PRODUCTS.len() * 3);
+        for product in TWILIO_PRODUCTS {
+            for host in [
+                format!("{product}.twilio.com"),
+                format!("{product}.dublin.ie1.twilio.com"),
+                format!("{product}.sydney.au1.twilio.com"),
+            ] {
+                assert_eq!(providers_for_host(&host), vec!["twilio"], "{host}");
+                assert_eq!(twilio_product_of(&host), Some(*product), "{host}");
+            }
+        }
+    }
+
+    #[test]
+    fn twilio_sends_the_stored_pair_as_basic() {
+        let rules = build_app_injection_rules("twilio", "api.twilio.com", "SKabc:s3cret");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].0, "*");
+        assert_eq!(
+            rules[0].1,
+            vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                // base64("SKabc:s3cret")
+                value: "Basic U0thYmM6czNjcmV0".to_string(),
+            }]
+        );
+        assert!(needs_access_token("twilio"));
+        assert!(refresh_config("twilio").is_none());
+    }
+
+    #[test]
+    fn twilio_never_matches_non_api_hosts() {
+        for host in [
+            "twilio.com",
+            "www.twilio.com",
+            "console.twilio.com",
+            "status.twilio.com",
+            "acme-1234.twil.io",
+            "media.twiliocdn.com",
+            "api.twilio.com.evil.example",
+            "evil.api.twilio.com",
+            "api.ashburn.us1.twilio.com",
+            "api.tokyo.jp1.twilio.com",
+        ] {
+            assert!(providers_for_host(host).is_empty(), "{host}");
+            assert_eq!(twilio_product_of(host), None, "{host}");
+        }
+    }
+
+    #[test]
+    fn twilio_rewrites_to_the_connections_region() {
+        let rw = |region: &str, host: &str| {
+            rewrite_host("twilio", &serde_json::json!({ "region": region }), host)
+        };
+        assert_eq!(
+            rw("ie1", "api.twilio.com").as_deref(),
+            Some("api.dublin.ie1.twilio.com")
+        );
+        assert_eq!(
+            rw(" AU1 ", "messaging.twilio.com").as_deref(),
+            Some("messaging.sydney.au1.twilio.com")
+        );
+        // A US connection pulls an agent's regional call back to US1.
+        assert_eq!(
+            rw("us1", "verify.dublin.ie1.twilio.com").as_deref(),
+            Some("verify.twilio.com")
+        );
+        // Unknown region: US1, never a host built from the stored value.
+        assert_eq!(
+            rw("evil.example", "api.twilio.com").as_deref(),
+            Some("api.twilio.com")
+        );
+        // Not a known product host: no rewrite.
+        assert_eq!(rw("ie1", "console.twilio.com"), None);
+        // No region stored: no rewrite.
+        assert_eq!(
+            rewrite_host("twilio", &serde_json::json!({}), "api.twilio.com"),
+            None
+        );
+    }
+
+    #[test]
+    fn zendesk_is_host_gated_bearer_on_api_path() {
+        assert_eq!(
+            provider_for_host_and_path("acme.zendesk.com", "/api/v2/tickets"),
+            Some(("zendesk", "Zendesk"))
+        );
+        assert_eq!(
+            credential_host_field("zendesk", "acme.zendesk.com"),
+            Some("instance_host")
+        );
+        assert!(is_host_bound("zendesk"));
+        assert!(refresh_config("zendesk").is_some());
+        let injections = build_app_injections("zendesk", "acme.zendesk.com", "zd_token");
+        assert_eq!(
+            injections,
+            vec![Injection::SetHeader {
+                name: "authorization".to_string(),
+                value: "Bearer zd_token".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn zendesk_refreshes_on_the_connections_own_account() {
+        let config = refresh_config("zendesk").expect("zendesk refreshes");
+        let at = |host: &str| {
+            config.endpoint_for_connection(&serde_json::json!({ "instance_host": host }))
+        };
+        assert_eq!(
+            at("acme.zendesk.com").as_deref(),
+            Some("https://acme.zendesk.com/oauth/tokens")
+        );
+        assert_eq!(
+            at(" ACME-2.Zendesk.com ").as_deref(),
+            Some("https://acme-2.zendesk.com/oauth/tokens")
+        );
+        // Anything but one label under .zendesk.com is refused, never sent
+        // to a fallback: the client secret travels with this request.
+        for bad in [
+            "evil.test",
+            "zendesk.com",
+            ".zendesk.com",
+            "a.b.zendesk.com",
+            "acme.zendesk.com.evil.test",
+            "acme.zendesk.com:8443",
+            "acme.zendesk.com/x",
+            "-acme.zendesk.com",
+            "acme-.zendesk.com",
+            "ac_me.zendesk.com",
+            "acme%2eevil.zendesk.com",
+        ] {
+            assert_eq!(at(bad), None, "{bad}");
+        }
+        assert_eq!(
+            config.endpoint_for_connection(&serde_json::json!({})),
+            None,
+            "no stored host, no refresh"
+        );
+        // A stored token_endpoint never overrides the per-account rule.
+        assert_eq!(
+            config
+                .endpoint_for_connection(&serde_json::json!({
+                    "instance_host": "acme.zendesk.com",
+                    "token_endpoint": "https://evil.test/token",
+                }))
+                .as_deref(),
+            Some("https://acme.zendesk.com/oauth/tokens")
+        );
+    }
+
+    #[test]
+    fn rotating_lifetime_providers_have_a_complete_json_lifecycle() {
+        let mut configured = 0;
+        for app in all_providers() {
+            let Some(config) = app.refresh else { continue };
+            let Some(lifetimes) = config.requested_lifetimes else {
+                continue;
+            };
+            configured += 1;
+            assert_eq!(app.provider, "zendesk");
+            assert!(matches!(config.endpoint, TokenEndpoint::Tenant(_)));
+            assert!(matches!(config.body_format, TokenBodyFormat::Json));
+            assert!(matches!(config.client_auth, ClientCredentialMethod::Body));
+            assert_eq!(lifetimes.access_secs, 1800);
+            assert_eq!(lifetimes.refresh_secs, 2592000);
+            assert!(lifetimes.refresh_secs > lifetimes.access_secs);
+        }
+        assert_eq!(
+            configured, 1,
+            "Zendesk must request expiring rotating tokens"
+        );
+    }
+
+    #[test]
+    fn zendesk_suffix_no_false_positives() {
+        assert!(providers_for_host("zendesk.com").is_empty());
+        assert!(providers_for_host("myzendesk.com").is_empty());
+        assert!(providers_for_host("acme.zendesk.com.evil.test").is_empty());
+        assert_eq!(
+            provider_for_host_and_path("acme.zendesk.com", "/hc/en-us"),
+            None
+        );
+    }
+
     #[test]
     fn providers_for_zoho_crm_host() {
         assert_eq!(providers_for_host("www.zohoapis.com"), vec!["zoho-crm"]);
@@ -5058,6 +7454,59 @@ mod tests {
             "api.fireflies.ai",
             "/mcp"
         ));
+    }
+
+    // ── Tavily ─────────────────────────────────────────────────────────
+    #[test]
+    fn tavily_injects_on_the_api_host_and_the_mcp_path_only() {
+        assert_eq!(providers_for_host("api.tavily.com"), vec!["tavily"]);
+        assert_eq!(providers_for_host("mcp.tavily.com"), vec!["tavily"]);
+        assert!(refresh_config("tavily").is_none());
+        // Every path of the API host, only the MCP path of the MCP host.
+        for (host, pattern) in [("api.tavily.com", "*"), ("mcp.tavily.com", "/mcp/*")] {
+            assert_eq!(
+                build_app_injection_rules("tavily", host, "tvly-tok"),
+                vec![(
+                    pattern.to_string(),
+                    vec![Injection::SetHeader {
+                        name: "authorization".to_string(),
+                        value: "Bearer tvly-tok".to_string(),
+                    }]
+                )],
+                "{host}"
+            );
+        }
+        for path in ["/mcp", "/mcp/"] {
+            assert!(
+                provider_matches_host_and_path("tavily", "mcp.tavily.com", path),
+                "{path}"
+            );
+        }
+        // Tavily's OAuth server on the same host never carries the key.
+        for path in [
+            "/",
+            "/authorize",
+            "/token",
+            "/register",
+            "/.well-known/oauth-authorization-server",
+            "/mcpx",
+        ] {
+            assert!(
+                !provider_matches_host_and_path("tavily", "mcp.tavily.com", path),
+                "{path}"
+            );
+        }
+        // The dashboard, the docs, the marketing site, and lookalikes get nothing.
+        for host in [
+            "app.tavily.com",
+            "docs.tavily.com",
+            "tavily.com",
+            "www.tavily.com",
+            "api.tavily.com.evil.example",
+            "evilapi.tavily.com",
+        ] {
+            assert!(providers_for_host(host).is_empty(), "{host}");
+        }
     }
 
     // ── HubSpot ─────────────────────────────────────────────────────
@@ -5374,5 +7823,522 @@ mod tests {
         assert!(providers_for_host("x.com").is_empty());
         assert!(providers_for_host("twitter.com").is_empty());
         assert!(providers_for_host("www.twitter.com").is_empty());
+    }
+
+    /// A token endpoint that accepts the connection and never answers must
+    /// not hold the caller (and the cross-instance refresh lock it holds)
+    /// forever: the exchange gives up at `REFRESH_REQUEST_TIMEOUT`.
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_token_endpoint_is_abandoned_at_the_request_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let token_url: &'static str = Box::leak(format!("http://{addr}/token").into_boxed_str());
+        let config = RefreshConfig {
+            endpoint: TokenEndpoint::Fixed {
+                url: token_url,
+                alternates: &[],
+            },
+            requested_lifetimes: None,
+            client_id_env: "ONECLI_TIMEOUT_TEST_UNSET_ID",
+            client_secret_env: "ONECLI_TIMEOUT_TEST_UNSET_SECRET",
+            body_format: TokenBodyFormat::Form,
+            client_auth: ClientCredentialMethod::Body,
+            max_lifetime_secs: None,
+            stale_token_error_codes: &[],
+        };
+
+        let started = tokio::time::Instant::now();
+        // The outer bound only exists so a missing timeout fails the test
+        // instead of hanging it.
+        let outcome = tokio::time::timeout(
+            REFRESH_REQUEST_TIMEOUT * 4,
+            refresh_access_token(
+                &config,
+                "rt",
+                Some("id"),
+                Some("secret"),
+                &serde_json::json!({}),
+            ),
+        )
+        .await
+        .expect("the request timeout fired before the outer bound");
+        let elapsed = started.elapsed();
+
+        // The error text cannot say why (the source chain is flattened into
+        // the message), so the clock does: a refused or broken connection
+        // fails at once, only the request timeout fails at exactly its mark.
+        outcome.expect_err("a hung endpoint yields no token");
+        assert!(
+            elapsed >= REFRESH_REQUEST_TIMEOUT,
+            "gave up early: {elapsed:?}"
+        );
+        assert!(
+            elapsed < REFRESH_REQUEST_TIMEOUT + std::time::Duration::from_secs(1),
+            "gave up late: {elapsed:?}"
+        );
+    }
+
+    // ── Refusals only a reconnect fixes (`CredentialRevoked`) ────────────
+
+    fn is_revoked(e: &anyhow::Error) -> bool {
+        e.is::<CredentialRevoked>()
+    }
+
+    /// Token endpoint answers, as Google's service-account endpoint, MongoDB
+    /// Atlas and RFC 6749 document them: only a dead credential is a
+    /// reconnect. The clock, a rate limit, an admin setting or an outage
+    /// never are.
+    #[test]
+    fn a_token_endpoint_refusal_is_permanent_only_for_a_dead_credential() {
+        use reqwest::StatusCode;
+        use serde_json::json;
+        let permanent = |client, status, body: serde_json::Value| {
+            is_revoked(&token_endpoint_error("mint", client, status, &body))
+        };
+        let conn = TokenClient::Connection;
+        let app = TokenClient::App;
+        let bad_request = StatusCode::BAD_REQUEST;
+
+        // A deleted, disabled or expired key (Google: "Invalid JWT
+        // Signature."), a revoked refresh token.
+        let revoked_key =
+            json!({ "error": "invalid_grant", "error_description": "Invalid JWT Signature." });
+        assert!(permanent(conn, bad_request, revoked_key.clone()));
+        assert!(permanent(
+            app,
+            bad_request,
+            json!({ "error": "invalid_grant" })
+        ));
+        // The gateway's clock is wrong, not the key.
+        let skew = json!({
+            "error": "invalid_grant",
+            "error_description": "Invalid JWT: Token must be a short-lived token (60 minutes) and in a reasonable timeframe. Check your iat and exp values in the JWT claim."
+        });
+        assert!(!permanent(conn, bad_request, skew));
+
+        // The connection's own client is dead: a rotated Atlas secret, a
+        // deleted or disabled Google client, a bare 401.
+        let unauthorized = StatusCode::UNAUTHORIZED;
+        for code in ["invalid_client", "deleted_client", "disabled_client"] {
+            assert!(
+                permanent(conn, unauthorized, json!({ "error": code })),
+                "{code}"
+            );
+            // The OAuth app is a configuration problem a reconnect, which
+            // uses the same app, cannot fix.
+            assert!(
+                !permanent(app, unauthorized, json!({ "error": code })),
+                "{code}"
+            );
+        }
+        assert!(permanent(conn, unauthorized, serde_json::Value::Null));
+        assert!(!permanent(app, unauthorized, serde_json::Value::Null));
+        // Bodies the live endpoints returned for a deleted or wrong secret:
+        // Navan's (no RFC 6749 code), MongoDB Atlas's, Google's for a
+        // service account that no longer exists.
+        let navan = json!({ "status": 401, "error": "Unauthorized", "message": "Unauthorized" });
+        assert!(permanent(conn, unauthorized, navan));
+        let atlas = json!({ "error": "invalid_client", "error_description": "Invalid credentials provided" });
+        assert!(permanent(conn, unauthorized, atlas));
+        let google_gone = json!({
+            "error": "invalid_grant",
+            "error_description": "Invalid grant: account not found"
+        });
+        assert!(permanent(conn, bad_request, google_gone));
+        // A provider's own wording on anything but a 401 says nothing.
+        assert!(!permanent(
+            conn,
+            StatusCode::TOO_MANY_REQUESTS,
+            json!({ "error": "Too Many Requests" })
+        ));
+
+        // An IP access list (Atlas) or domain-wide delegation (Google)
+        // setting: an admin fixes it, a reconnect does not.
+        assert!(!permanent(
+            conn,
+            bad_request,
+            json!({ "error": "access_denied" })
+        ));
+        assert!(!permanent(
+            conn,
+            unauthorized,
+            json!({ "error": "unauthorized_client" })
+        ));
+        // Passing failures.
+        for (status, body) in [
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                json!({ "error": "rate_limited" }),
+            ),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({ "error": "server_error" }),
+            ),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({ "error": "temporarily_unavailable" }),
+            ),
+            (StatusCode::BAD_GATEWAY, serde_json::Value::Null),
+        ] {
+            assert!(!permanent(conn, status, body.clone()), "{status} {body}");
+        }
+    }
+
+    /// GitHub's documented answers to an installation-token mint, with the
+    /// messages it really sends.
+    #[test]
+    fn a_github_mint_refusal_is_permanent_only_for_a_dead_installation_or_key() {
+        use reqwest::StatusCode;
+        for (status, message, permanent) in [
+            // Uninstalled, or reinstalled under a new id.
+            (StatusCode::NOT_FOUND, "Not Found", true),
+            // The app's key was rotated or deleted.
+            (
+                StatusCode::UNAUTHORIZED,
+                "A JSON web token could not be decoded",
+                true,
+            ),
+            (StatusCode::UNAUTHORIZED, "Bad credentials", true),
+            // The gateway's clock is out of step: Octokit retries these.
+            (
+                StatusCode::UNAUTHORIZED,
+                "'Expiration time' claim ('exp') must be a numeric value representing the future time at which the assertion expires",
+                false,
+            ),
+            (
+                StatusCode::UNAUTHORIZED,
+                "'Issued at' claim ('iat') must be an Integer representing the time that the assertion was issued",
+                false,
+            ),
+            (
+                StatusCode::FORBIDDEN,
+                "This installation has been suspended",
+                true,
+            ),
+            // Primary and secondary rate limits: wait, never reconnect.
+            (
+                StatusCode::FORBIDDEN,
+                "API rate limit exceeded for installation ID 1.",
+                false,
+            ),
+            (
+                StatusCode::FORBIDDEN,
+                "You have exceeded a secondary rate limit.",
+                false,
+            ),
+            (StatusCode::TOO_MANY_REQUESTS, "", false),
+            // A repository the installation cannot reach.
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "There is at least one repository that does not exist or is not accessible to the parent installation.",
+                false,
+            ),
+            (StatusCode::BAD_GATEWAY, "", false),
+        ] {
+            assert_eq!(
+                github_mint_refusal_is_permanent(status, message),
+                permanent,
+                "{status} {message}"
+            );
+        }
+    }
+
+    /// A one-shot HTTP endpoint answering every request with `status` and
+    /// `body`, recording the request bodies it was sent.
+    async fn stub_endpoint(
+        status: u16,
+        body: &'static str,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = std::sync::Arc::clone(&seen);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = Vec::new();
+                let mut buf = [0u8; 4096];
+                // One small request per connection: headers, then a body of
+                // `content-length` bytes.
+                loop {
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some((head, rest)) = text.split_once("\r\n\r\n") {
+                        let length = head
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                            })
+                            .unwrap_or(0);
+                        if rest.len() >= length {
+                            record.lock().expect("lock").push(rest.to_string());
+                            break;
+                        }
+                    }
+                }
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        (format!("http://{addr}/v2/auth/token"), seen)
+    }
+
+    async fn local_zendesk_refresh(
+        status: u16,
+        body: &'static str,
+    ) -> (
+        anyhow::Result<(String, i64, Option<String>)>,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let (url, seen) = stub_endpoint(status, body).await;
+        let config = RefreshConfig {
+            endpoint: TokenEndpoint::Fixed {
+                url: Box::leak(url.into_boxed_str()),
+                alternates: &[],
+            },
+            ..ZENDESK_REFRESH
+        };
+        (
+            refresh_access_token(
+                &config,
+                "old-refresh",
+                Some("client"),
+                Some("secret"),
+                &serde_json::json!({}),
+            )
+            .await,
+            seen,
+        )
+    }
+
+    #[tokio::test]
+    async fn zendesk_refresh_requests_expiry_and_returns_rotated_tokens() {
+        for body in [
+            r#"{"access_token":"new-access","refresh_token":"new-refresh"}"#,
+            r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":1800}"#,
+            r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":9223372036854775807,"token_type":"bEaReR"}"#,
+        ] {
+            let before = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            let (result, seen) = local_zendesk_refresh(200, body).await;
+            let (access, expires, refresh) = result.expect("valid rotating response");
+            assert_eq!(access, "new-access");
+            assert_eq!(refresh.as_deref(), Some("new-refresh"));
+            assert!((before + 1800..=before + 1805).contains(&expires));
+            let payload: serde_json::Value =
+                serde_json::from_str(&seen.lock().unwrap()[0]).unwrap();
+            assert_eq!(
+                payload,
+                serde_json::json!({"client_id":"client", "client_secret":"secret", "grant_type":"refresh_token", "refresh_token":"old-refresh", "expires_in":1800, "refresh_token_expires_in":2592000})
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn zendesk_refresh_rejects_malformed_or_unrotated_tokens() {
+        for (status, body) in [
+            (
+                401,
+                r#"{"access_token":"secret-access","refresh_token":"secret-refresh"}"#,
+            ),
+            (200, r#"{"access_token":"","refresh_token":"new-refresh"}"#),
+            (200, r#"{"access_token":"new-access"}"#),
+            (200, r#"{"access_token":"new-access","refresh_token":""}"#),
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"old-refresh"}"#,
+            ),
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":0}"#,
+            ),
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":-1}"#,
+            ),
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":1.5}"#,
+            ),
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":"1800"}"#,
+            ),
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":null}"#,
+            ),
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Basic"}"#,
+            ),
+            (
+                200,
+                r#"{"access_token":" new-access","refresh_token":"new-refresh"}"#,
+            ),
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh "}"#,
+            ),
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","token_type":null}"#,
+            ),
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":18446744073709551615}"#,
+            ),
+            (200, "not json"),
+        ] {
+            let error = local_zendesk_refresh(status, body)
+                .await
+                .0
+                .expect_err(body)
+                .to_string();
+            assert!(!error.contains("secret-access") && !error.contains("secret-refresh"));
+        }
+    }
+
+    #[tokio::test]
+    async fn zendesk_refresh_revocation_is_classified_without_echoing_provider_text() {
+        for (status, body, revoked) in [
+            (
+                400,
+                r#"{"error":"invalid_grant","error_description":"secret-refresh revoked"}"#,
+                true,
+            ),
+            (401, r#"{"error":"invalid_grant"}"#, true),
+            (500, r#"{"error":"invalid_grant"}"#, false),
+            (
+                400,
+                r#"{"error":"invalid_grant","error_description":"not in a reasonable timeframe secret-refresh"}"#,
+                false,
+            ),
+            (
+                400,
+                r#"{"error":"invalid_client","error_description":"secret-client"}"#,
+                false,
+            ),
+            (
+                400,
+                r#"{"error":"secret-error-code","error_description":"secret-refresh"}"#,
+                false,
+            ),
+        ] {
+            let error = local_zendesk_refresh(status, body).await.0.expect_err(body);
+            assert_eq!(error.is::<CredentialRevoked>(), revoked, "{status}: {body}");
+            assert!(!format!("{error:#}").contains("secret"));
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_refresh_keeps_optional_rotation_and_default_lifetime() {
+        let (url, seen) = stub_endpoint(200, r#"{"access_token":"legacy-access"}"#).await;
+        let config = RefreshConfig {
+            endpoint: TokenEndpoint::Fixed {
+                url: Box::leak(url.into_boxed_str()),
+                alternates: &[],
+            },
+            ..GOOGLE_REFRESH
+        };
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let (access, expires, rotated) = refresh_access_token(
+            &config,
+            "old",
+            Some("client"),
+            Some("secret"),
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(access, "legacy-access");
+        assert_eq!(rotated, None);
+        assert!((before + 3600..=before + 3605).contains(&expires));
+        let body = &seen.lock().unwrap()[0];
+        assert!(body.contains("grant_type=refresh_token"));
+        assert!(!body.contains("expires_in"));
+    }
+
+    /// Docker Hub's "Create access token": the username and the stored
+    /// personal access token go as `identifier` / `secret`, and the minted
+    /// JWT comes back as `access_token`, its own `exp` (less a minute) the
+    /// expiry.
+    #[tokio::test]
+    async fn docker_hub_mints_with_the_access_token_endpoint() {
+        // A JWT whose payload is {"exp":4102444800}.
+        const JWT: &str = "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln";
+        let (url, seen) = stub_endpoint(
+            200,
+            r#"{"access_token":"eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln"}"#,
+        )
+        .await;
+
+        let (token, expires_at) = refresh_docker_hub_token(&url, "octo", "dckr_pat_x")
+            .await
+            .expect("minted");
+
+        assert_eq!(token, JWT);
+        assert_eq!(expires_at, 4_102_444_800 - 60);
+        let sent: serde_json::Value =
+            serde_json::from_str(&seen.lock().expect("lock")[0]).expect("json body");
+        assert_eq!(
+            sent,
+            serde_json::json!({ "identifier": "octo", "secret": "dckr_pat_x" })
+        );
+    }
+
+    /// Its one documented refusal, a 401, is a revoked token; a rate limit or
+    /// an outage is not.
+    #[tokio::test]
+    async fn docker_hub_refuses_for_good_only_with_a_401() {
+        for (status, revoked) in [(401, true), (429, false), (503, false)] {
+            let (url, _) =
+                stub_endpoint(status, r#"{"errinfo":null,"message":"unauthorized"}"#).await;
+            let err = refresh_docker_hub_token(&url, "octo", "dckr_pat_x")
+                .await
+                .expect_err("refused");
+            assert_eq!(is_revoked(&err), revoked, "{status}: {err}");
+        }
+    }
+
+    /// A non-JSON answer (a proxy's HTML page, an empty 401) is classified
+    /// by its status alone, never treated as a parse failure.
+    #[tokio::test]
+    async fn a_client_credentials_401_without_a_body_is_a_dead_secret() {
+        let (url, _) = stub_endpoint(401, "").await;
+        let err = refresh_via_client_credentials(&url, "id", "rotated")
+            .await
+            .expect_err("refused");
+        assert!(is_revoked(&err), "{err}");
+
+        let (url, _) = stub_endpoint(502, "<html>Bad Gateway</html>").await;
+        let err = refresh_via_client_credentials(&url, "id", "secret")
+            .await
+            .expect_err("refused");
+        assert!(!is_revoked(&err), "{err}");
     }
 }

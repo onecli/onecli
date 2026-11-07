@@ -8,6 +8,26 @@ export interface PlanSwitchItem {
 }
 
 /**
+ * The one definition of which Stripe statuses grant an org its plan, shared
+ * by the webhook and every reconcile-on-read path so they agree on what a
+ * paying subscription is. Live: billing normally, so the org gets the
+ * subscription's plan.
+ */
+export const isLiveSubscription = (
+  s: Pick<Stripe.Subscription, "status">,
+): boolean => s.status === "active" || s.status === "trialing";
+
+/**
+ * A payment failed (or an invoice went overdue) and is not settled yet:
+ * Stripe may still be retrying (`past_due`) or have stopped (`unpaid`). The
+ * org is on free until a payment succeeds and the subscription turns live
+ * again; retries exhausted end in cancellation instead.
+ */
+export const isPastDueSubscription = (
+  s: Pick<Stripe.Subscription, "status">,
+): boolean => s.status === "past_due" || s.status === "unpaid";
+
+/**
  * Finds the organization's active (or trialing) subscription among the
  * customer's subscriptions. Matches on subscription metadata so a customer
  * shared across orgs never picks up another org's subscription.
@@ -24,8 +44,7 @@ export const findActivePlanSubscription = async (
 
   return existing.data.find(
     (s) =>
-      (s.status === "active" || s.status === "trialing") &&
-      s.metadata.organizationId === organizationId,
+      isLiveSubscription(s) && s.metadata.organizationId === organizationId,
   );
 };
 
@@ -38,7 +57,7 @@ export const findActivePlanSubscription = async (
  * subscriptions the query returns — i.e. which org's plan we read. Reject
  * anything that isn't a plain id instead of trying to escape it.
  */
-const SAFE_ORG_ID = /^[A-Za-z0-9_-]+$/;
+export const SAFE_ORG_ID = /^[A-Za-z0-9_-]+$/;
 
 interface OrgSubscriptionMatch {
   subscription: Stripe.Subscription;
@@ -46,13 +65,17 @@ interface OrgSubscriptionMatch {
   customerId: string;
 }
 
-const isLive = (s: Stripe.Subscription) =>
-  s.status === "active" || s.status === "trialing";
+/**
+ * The id behind a Stripe expandable reference: a bare id, an expanded object,
+ * or (deleted customer / trimmed webhook payload) absent. Never assume a
+ * reference dereferences.
+ */
+export const stripeRefId = (
+  ref: string | { id: string } | null | undefined,
+): string | undefined => (typeof ref === "string" ? ref : ref?.id);
 
-// A subscription's `customer` is an id, an expanded object, or (deleted
-// customer / trimmed webhook payload) absent — never assume it dereferences.
 const customerOf = (s: Stripe.Subscription): string | undefined =>
-  typeof s.customer === "string" ? s.customer : s.customer?.id;
+  stripeRefId(s.customer);
 
 /**
  * Live subscriptions on the org's stored customer, split by how surely they
@@ -84,7 +107,7 @@ const listStoredCustomerMatches = async (
   const labeled: OrgSubscriptionMatch[] = [];
   const unlabeled: OrgSubscriptionMatch[] = [];
   for (const subscription of existing.data) {
-    if (!isLive(subscription)) continue;
+    if (!isLiveSubscription(subscription)) continue;
     const owner = subscription.metadata?.organizationId;
     const match = {
       subscription,
@@ -120,7 +143,10 @@ const searchOrgSubscriptions = async (
     // customer can be shared across orgs; a search result must clear the same
     // bar before it can become this org's plan.
     return found.data.flatMap((s) => {
-      if (!isLive(s) || s.metadata?.organizationId !== organizationId) {
+      if (
+        !isLiveSubscription(s) ||
+        s.metadata?.organizationId !== organizationId
+      ) {
         return [];
       }
       const customerId = customerOf(s);

@@ -2,7 +2,9 @@ import type { AppDefinition } from "./types";
 
 export const resend: AppDefinition = {
   id: "resend",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/resend",
   name: "Resend",
+  apiDocsUrl: "https://resend.com/docs/api-reference/introduction",
   icon: "/icons/resend.svg",
   darkIcon: "/icons/resend-light.svg",
   description: "Send transactional and marketing emails.",

@@ -150,6 +150,77 @@ pub(super) enum Identity {
     Unresolved,
 }
 
+/// A whole-app connection target's method narrowing, from the target row's
+/// `method` column: empty = `Any`; `GET,HEAD` = `Only` those; `!GET,HEAD` =
+/// `Except` those (every other method). Methods compare case-insensitively.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum MethodFilter {
+    Any,
+    Only(Vec<String>),
+    Except(Vec<String>),
+}
+
+impl MethodFilter {
+    pub(super) fn parse(raw: Option<&str>) -> Self {
+        let raw = raw.unwrap_or_default().trim();
+        let (except, list) = match raw.strip_prefix('!') {
+            Some(rest) => (true, rest),
+            None => (false, raw),
+        };
+        let methods: Vec<String> = list
+            .split(',')
+            .map(|m| m.trim().to_ascii_uppercase())
+            .filter(|m| !m.is_empty())
+            .collect();
+        match (except, methods.is_empty()) {
+            (_, true) => Self::Any,
+            (false, false) => Self::Only(methods),
+            (true, false) => Self::Except(methods),
+        }
+    }
+
+    pub(super) fn allows(&self, method: &str) -> bool {
+        let listed = |ms: &[String]| ms.iter().any(|m| m.eq_ignore_ascii_case(method));
+        match self {
+            Self::Any => true,
+            Self::Only(ms) => listed(ms),
+            Self::Except(ms) => !listed(ms),
+        }
+    }
+}
+
+#[cfg(test)]
+mod method_filter_tests {
+    use super::MethodFilter;
+
+    #[test]
+    fn parses_only_except_and_any() {
+        assert_eq!(MethodFilter::parse(None), MethodFilter::Any);
+        assert_eq!(MethodFilter::parse(Some(" ")), MethodFilter::Any);
+        assert_eq!(MethodFilter::parse(Some("!")), MethodFilter::Any);
+        assert_eq!(
+            MethodFilter::parse(Some("get, head")),
+            MethodFilter::Only(vec!["GET".into(), "HEAD".into()])
+        );
+        assert_eq!(
+            MethodFilter::parse(Some("!GET,HEAD")),
+            MethodFilter::Except(vec!["GET".into(), "HEAD".into()])
+        );
+    }
+
+    #[test]
+    fn only_and_except_partition_every_method() {
+        let only = MethodFilter::parse(Some("GET,HEAD"));
+        let except = MethodFilter::parse(Some("!GET,HEAD"));
+        for m in [
+            "GET", "get", "HEAD", "POST", "PATCH", "PUT", "DELETE", "OPTIONS",
+        ] {
+            assert_ne!(only.allows(m), except.allows(m), "{m}");
+            assert!(MethodFilter::Any.allows(m));
+        }
+    }
+}
+
 /// A rule target. `Network` matches host/path/method verbatim; `App` names a
 /// provider and tool set the catalog re-expands to the same network fan-out
 /// (§7.7) — or, with NO tools, the whole app: host-only against every catalog
@@ -180,10 +251,19 @@ pub(super) enum Target {
     /// host-only). A request with no winning connection (uncredentialed,
     /// secret-served, or the non-serving wipe) never matches — fail-closed for
     /// allow AND block.
+    ///
+    /// `methods` narrows a WHOLE-APP connection target (empty `tools`) by HTTP
+    /// method: a grant's split catch-all puts it on the STRICTER of "All
+    /// other reads" (`GET,HEAD`) and "All other writes" (`!GET,HEAD`: every
+    /// method but those), so a binary that predates it, matching the row
+    /// whole-app, only ever applies the stricter choice. `Any` = no narrowing
+    /// (every row written before it existed). Ignored on a tool-scoped
+    /// target, whose catalog tools carry their own methods.
     Connection {
         id: String,
         provider: String,
         tools: Vec<String>,
+        methods: MethodFilter,
     },
     /// A `secret` target resolved (at connect) to its credential's host
     /// pattern(s): a specific secret → its one host; a level scope → the union of

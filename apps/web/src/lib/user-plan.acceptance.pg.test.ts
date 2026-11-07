@@ -2,11 +2,12 @@
  * ACCEPTANCE: the first-login onboarding gate, against real PostgreSQL.
  *
  * `checkDashboardRedirect` is what every dashboard page calls before it
- * renders, and it is the whole of this PR's first claim: a fresh org owner is
- * routed into `/onboarding` on EVERY edition, and only a paid org's owner is
- * exempt (billing editions only). Its unit tests hand-write a `db` mock whose
+ * renders. Onboarding is the billing editions' walkthrough: a fresh free-org
+ * OWNER is routed into `/onboarding`, and a paid org's owner, a member, and a
+ * completed owner are left alone (the onprem arm is a hard no-op, pinned by
+ * `user-plan.onprem.test.ts`). Its unit tests hand-write a `db` mock whose
  * `user.findUnique` always returns a row and whose `organization.findUnique`
- * always returns `free` — so they assert the branch shape but never that the
+ * returns a canned status, so they assert the branch shape but never that the
  * real queries select the real columns, or that the roles the gate reasons
  * about are the roles the membership table actually stores.
  *
@@ -95,7 +96,9 @@ const reset = async () => {
 beforeAll(async () => {
   if (!PROOF_URL) return;
   process.env.DATABASE_URL = PROOF_URL;
-  delete process.env.NEXT_PUBLIC_EDITION; // onprem: no billing
+  // The billing edition: the only one onboarding routes on. Set before the
+  // dynamic imports below, since CAPS resolves at module load.
+  process.env.NEXT_PUBLIC_EDITION = "cloud";
   // The auth module refuses to load without one; its value is irrelevant
   // here because the session itself is the mocked input.
   process.env.BETTER_AUTH_SECRET ??= "pg-proof-fake-secret-value-000000000000";
@@ -126,11 +129,9 @@ afterAll(async () => {
 });
 
 describe.skipIf(!PROOF_URL)(
-  "ACCEPTANCE: the first-login onboarding gate (onprem, real db)",
+  "ACCEPTANCE: the first-login onboarding gate (billing edition, real db)",
   () => {
-    it("routes a fresh org OWNER into onboarding", async () => {
-      // The PR's headline: self-hosted signups used to land on an empty
-      // dashboard because the gate returned early without billing.
+    it("routes a fresh free-org OWNER into onboarding", async () => {
       session.current = { id: OWNER, email: `${OWNER}@example.test` };
 
       expect(await checkDashboardRedirect()).toBe("/onboarding");
@@ -154,24 +155,25 @@ describe.skipIf(!PROOF_URL)(
       expect(await checkDashboardRedirect()).toBeNull();
     });
 
-    it("never touches the subscription column without billing", async () => {
-      // The read that must not run on a self-host (it reaches the Stripe
-      // graph on cloud). Proven positively: the gate still routes correctly
-      // for an org whose subscriptionStatus is a PAID value — which on a
-      // billing edition would exempt this owner. Reading it here would flip
-      // the answer to null, so the assertion is load-bearing.
+    it("leaves a PAID org's owner alone, read from the real subscription column", async () => {
+      // Load-bearing on the real column: the same fresh owner the first case
+      // routes into onboarding is exempt the moment their org is paid. A gate
+      // that stopped reading subscription_status would still answer
+      // "/onboarding" here.
       await db.organization.update({
         where: { id: ORG },
-        data: { subscriptionStatus: "active" },
+        data: { subscriptionStatus: "team" },
       });
       session.current = { id: OWNER, email: `${OWNER}@example.test` };
 
-      expect(await checkDashboardRedirect()).toBe("/onboarding");
-
-      await db.organization.update({
-        where: { id: ORG },
-        data: { subscriptionStatus: "free" },
-      });
+      try {
+        expect(await checkDashboardRedirect()).toBeNull();
+      } finally {
+        await db.organization.update({
+          where: { id: ORG },
+          data: { subscriptionStatus: "free" },
+        });
+      }
     });
 
     it("returns null rather than throwing when nobody is signed in", async () => {

@@ -45,7 +45,9 @@ const exchangeCredentials = async (
 
 export const aws: AppDefinition = {
   id: "aws",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/aws",
   name: "AWS",
+  apiDocsUrl: "https://docs.aws.amazon.com/general/latest/gr/",
   icon: "/icons/aws.svg",
   darkIcon: "/icons/aws-light.svg",
   description: "Access AWS services: S3, EC2, Lambda, and more.",

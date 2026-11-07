@@ -7,6 +7,7 @@ import type { AppPermissionDefinition } from "./types";
 // over an arbitrary-SQL provider would be misleading.
 export const snowflakePermissions: AppPermissionDefinition = {
   provider: "snowflake",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

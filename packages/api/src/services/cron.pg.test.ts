@@ -44,8 +44,9 @@ const USER = `${P}user`;
 beforeAll(async () => {
   if (!PROOF_URL) return;
   process.env.DATABASE_URL = PROOF_URL;
-  // Pinned per-suite: process.env leaks across worker files, and CI's ambient
-  // NEXT_PUBLIC_EDITION is cloud — these assertions are flat-team semantics.
+  // Pinned per-suite: each file starts from the lane's edition (the hermetic
+  // setup resets env per file), and CI's cloud lane carries
+  // NEXT_PUBLIC_EDITION=cloud. These assertions are flat-team semantics.
   process.env.EDITION = "onprem";
   process.env.NEXT_PUBLIC_EDITION = "onprem";
   // The sweep-settle test ages a run against THIS value, not the prod default.
@@ -230,6 +231,7 @@ const seedDueCron = async (
     createdByUserId?: string | null;
     consecutiveFailures?: number;
     nextFireAt?: Date;
+    schedule?: string;
   } = {},
 ) => {
   const cron = await db.agentCron.create({
@@ -237,7 +239,7 @@ const seedDueCron = async (
       agentId,
       name: `${P}${suffix}`,
       prompt: `do the ${suffix} thing`,
-      schedule: "*/5 * * * *",
+      schedule: overrides.schedule ?? "*/5 * * * *",
       timezone: "UTC",
       enabled: overrides.enabled ?? true,
       nextFireAt: overrides.nextFireAt ?? new Date(Date.now() - 60_000),
@@ -420,29 +422,218 @@ describe.skipIf(!PROOF_URL)("one-shot schedules", () => {
     expect(created.id).toBeTruthy();
   });
 
-  it("run-now on a completed one-shot reads the honest refusal", async () => {
+  it("run-now re-runs a completed one-shot, but never a paused schedule", async () => {
     const agentId = await seedAgent("once-run");
-    const cron = await db.agentCron.create({
-      data: {
-        agentId,
-        name: `${P}once-run`,
-        prompt: "p",
-        schedule: "2026-01-01T09:00:00",
-        timezone: "UTC",
-        nextFireAt: new Date(),
-        enabled: false,
-        disabledReason: "completed",
-      },
-      select: { id: true },
-    });
+    const seed = (suffix: string, disabledReason: string | null) =>
+      db.agentCron.create({
+        data: {
+          agentId,
+          name: `${P}once-run-${suffix}`,
+          prompt: "p",
+          schedule: "2026-01-01T09:00:00",
+          timezone: "UTC",
+          nextFireAt: new Date(Date.now() + 3_600_000),
+          enabled: false,
+          disabledReason,
+        },
+        select: { id: true },
+      });
+    const done = await seed("done", "completed");
+    const paused = await seed("paused", null);
     const cronService = await import("./agent-cron-service");
+    const actor = { userId: USER, organizationId: ORG };
+
+    const rerun = await cronService.runCronNow(
+      WORKSPACE,
+      agentId,
+      done.id,
+      actor,
+    );
+    expect(rerun).toMatchObject({ enabled: true, disabledReason: null });
+    expect(new Date(rerun.nextFireAt).getTime()).toBeLessThanOrEqual(
+      Date.now(),
+    );
+
     await expect(
-      cronService.runCronNow(WORKSPACE, agentId, cron.id),
-    ).rejects.toThrow(/already ran to completion/);
+      cronService.runCronNow(WORKSPACE, agentId, paused.id, actor),
+    ).rejects.toThrow(/paused/);
   });
 });
 
 describe.skipIf(!PROOF_URL)("firing", () => {
+  it("a schedule's History lists only its own runs, and nothing from another workspace", async () => {
+    const agentId = await seedAgent("history");
+    await grantLlmKey(agentId, "history-key");
+    await seedSandbox("history", agentId, "running");
+    const first = await seedDueCron(agentId, "history-a");
+    const second = await seedDueCron(agentId, "history-b");
+    await cronFire.fireDueCrons();
+
+    const { listRuns } = await import("./agent-runs-service");
+    const ofFirst = await listRuns(WORKSPACE, ORG, USER, agentId, {
+      source: "cron",
+      cronId: first,
+    });
+    expect(ofFirst.runs).toHaveLength(1);
+    const every = await listRuns(WORKSPACE, ORG, USER, agentId, {
+      source: "cron",
+    });
+    expect(every.runs.length).toBeGreaterThanOrEqual(2);
+    expect(second).not.toBe(first);
+    const foreign = await listRuns(FOREIGN_WORKSPACE, ORG, USER, null, {
+      cronId: first,
+    });
+    expect(foreign.runs).toHaveLength(0);
+  });
+
+  it("the gate round-trips through the schedule_task args and the service: set, kept on unrelated edits, cleared by empty", async () => {
+    const { scheduleTaskArgsSchema, updateCronSchema } =
+      await import("../validations/crons.js");
+    const cronService = await import("./agent-cron-service");
+    const agentId = await seedAgent("gate-crud");
+    const args = scheduleTaskArgsSchema.parse({
+      name: "watcher",
+      prompt: "report new decks",
+      schedule: "*/30 * * * *",
+      timezone: "UTC",
+      gate: "  bash check.sh  ",
+      gateDescription: "a new board deck appears in Dropbox",
+    });
+    const created = await cronService.createCron(WORKSPACE, agentId, args, {
+      originConversationId: null,
+      createdByUserId: USER,
+    });
+    expect(created.gate).toBe("bash check.sh");
+    expect(created.running).toBe(false);
+
+    const actor = { userId: USER, organizationId: ORG };
+    const edit = (body: Record<string, unknown>) =>
+      cronService.updateCron(
+        WORKSPACE,
+        agentId,
+        created.id,
+        updateCronSchema.parse(body),
+        actor,
+      );
+    const renamed = await edit({ name: "watcher 2" });
+    expect(renamed.gate).toBe("bash check.sh");
+    expect(renamed.gateDescription).toBe("a new board deck appears in Dropbox");
+
+    // A check never travels without its words, on either door.
+    // MUTATION-PROOF: drop assertGatePaired and these rejections resolve.
+    await expect(
+      cronService.createCron(
+        WORKSPACE,
+        agentId,
+        { ...args, gateDescription: null },
+        { originConversationId: null, createdByUserId: USER },
+      ),
+    ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+    await expect(edit({ gateDescription: "" })).rejects.toMatchObject({
+      code: "UNPROCESSABLE",
+    });
+
+    // Removing the check takes its words with it.
+    const cleared = await edit({ gate: "" });
+    expect(cleared.gate).toBeNull();
+    expect(cleared.gateDescription).toBeNull();
+    // And words with no check are refused rather than stored.
+    await expect(
+      edit({ gateDescription: "orphan words" }),
+    ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+
+    expect(() =>
+      scheduleTaskArgsSchema.parse({ ...args, gate: "x".repeat(2_001) }),
+    ).toThrow();
+  });
+
+  it("a newly written schedule is 5 fields (or a one-shot); a saved one keeps firing until its schedule changes", async () => {
+    const cronService = await import("./agent-cron-service");
+    const agentId = await seedAgent("five");
+    const input = {
+      name: "every second",
+      prompt: "p",
+      timezone: "UTC",
+    };
+    const origin = { originConversationId: null, createdByUserId: USER };
+    // MUTATION-PROOF: drop assertFiveFieldSchedule and the seconds-field
+    // create resolves (croner reads it as every second).
+    for (const schedule of ["* * * * * *", "0 0 9 * * * 2027"]) {
+      await expect(
+        cronService.createCron(
+          WORKSPACE,
+          agentId,
+          { ...input, schedule },
+          origin,
+        ),
+      ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+    }
+    const once = await cronService.createCron(
+      WORKSPACE,
+      agentId,
+      { ...input, schedule: "2099-01-01T09:00:00" },
+      origin,
+    );
+    expect(once.schedule).toBe("2099-01-01T09:00:00");
+
+    // A row saved before the rule: renaming and pausing still work, only a
+    // new schedule string is checked.
+    const legacy = await seedDueCron(agentId, "five-legacy", {
+      schedule: "*/30 * * * * *",
+      nextFireAt: new Date(Date.now() + 3_600_000),
+    });
+    const actor = { userId: USER, organizationId: ORG };
+    await expect(
+      cronService.updateCron(
+        WORKSPACE,
+        agentId,
+        legacy,
+        { name: "renamed" },
+        actor,
+      ),
+    ).resolves.toMatchObject({ name: "renamed" });
+    await expect(
+      cronService.updateCron(
+        WORKSPACE,
+        agentId,
+        legacy,
+        { schedule: "*/10 * * * * *" },
+        actor,
+      ),
+    ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+  });
+
+  it("a gated schedule's run dispatches with its gate; a person typing in that conversation never does", async () => {
+    const agentId = await seedAgent("gate");
+    await grantLlmKey(agentId, "gate-key");
+    await seedSandbox("gate", agentId, "running");
+    const cronId = await seedDueCron(agentId, "gate");
+    await db.agentCron.update({
+      where: { id: cronId },
+      data: { gate: "bash check.sh" },
+    });
+    await cronFire.fireDueCrons();
+    const claimTurn = async () =>
+      (await dueWork.claimDueWork(RUNNER_A, 10)).find(
+        (item) => item.kind === "turn",
+      );
+
+    const run = await claimTurn();
+    expect(run?.gate).toBe("bash check.sh");
+
+    await db.turn.update({
+      where: { id: run!.turnId },
+      data: { status: "done" },
+    });
+    await turnService.createTurn(WORKSPACE, run!.conversationId, "why?", {
+      source: "web",
+      userId: USER,
+    });
+    const asked = await claimTurn();
+    expect(asked?.turnId).not.toBe(run!.turnId);
+    expect(asked?.gate).toBeUndefined();
+  });
+
   it("a fire is a real turn in the cron's own conversation, and it wakes the parked sandbox", async () => {
     const agentId = await seedAgent("fire");
     await grantLlmKey(agentId, "fire-key");
@@ -511,6 +702,55 @@ describe.skipIf(!PROOF_URL)("firing", () => {
       where: { conversation: { agentId } },
     });
     expect(turns).toBe(1);
+  });
+
+  it("a schedule reads running exactly while a run of it is live, whatever ends that run", async () => {
+    // Derived from the turns, never stored: no ending path can leave it
+    // stuck. MUTATION-PROOF: make `running` a stored marker the fire sets
+    // and the queued stop below leaves it true forever.
+    const cronService = await import("./agent-cron-service");
+    const agentId = await seedAgent("live");
+    await grantLlmKey(agentId, "live-key");
+    await seedSandbox("live", agentId, "running");
+    const cronId = await seedDueCron(agentId, "live", {
+      createdByUserId: USER,
+    });
+    const view = async () =>
+      (await cronService.listCrons(WORKSPACE, agentId)).find(
+        (cron) => cron.id === cronId,
+      );
+    expect(await view()).toMatchObject({ running: false, lastOutcome: null });
+
+    await cronFire.fireDueCrons();
+    expect((await view())?.running).toBe(true);
+
+    // A fire while that run is still live skips, and the schedule still
+    // reads running: the live run is what the person is waiting on.
+    await db.agentCron.update({
+      where: { id: cronId },
+      data: { nextFireAt: new Date(Date.now() - 1000) },
+    });
+    await cronFire.fireDueCrons();
+    expect(await view()).toMatchObject({
+      running: true,
+      lastOutcome: "skipped_busy",
+    });
+
+    // A person stops it before it was ever dispatched: no `finishTurn` will
+    // come, and the schedule still settles, as stopped (no failure strike).
+    // MUTATION-PROOF: drop the queued-stop settle and lastOutcome stays
+    // skipped_busy.
+    const run = await db.turn.findFirstOrThrow({
+      where: { conversation: { agentId, source: "cron" } },
+      select: { id: true, status: true },
+    });
+    expect(run.status).toBe("queued");
+    await turnService.abortTurn(WORKSPACE, run.id, USER);
+    expect(await view()).toMatchObject({
+      running: false,
+      lastOutcome: "stopped",
+      consecutiveFailures: 0,
+    });
   });
 
   it("a keyless agent's fire fails at door 1 and counts toward the failure disable", async () => {
@@ -636,6 +876,106 @@ describe.skipIf(!PROOF_URL)("settling and delivery", () => {
     });
     expect(cron.lastOutcome).toBe("ok");
     expect(cron.consecutiveFailures).toBe(0);
+  });
+
+  it("a person's stop mid-run reads stopped, not failed, and counts no strike", async () => {
+    // MUTATION-PROOF: book "failed" for an aborted settle and this fails.
+    const { sandboxId, cronId, run, originId } = await fireAndGetRun("stop");
+    await turnService.finishTurn({
+      reporter: { sandboxId, runnerId: RUNNER_A },
+      conversationId: run.conversationId,
+      turnId: run.id,
+      status: "aborted",
+    });
+    expect(
+      await db.agentCron.findUniqueOrThrow({
+        where: { id: cronId },
+        select: { lastOutcome: true, consecutiveFailures: true },
+      }),
+    ).toEqual({ lastOutcome: "stopped", consecutiveFailures: 0 });
+    expect(
+      await db.turn.count({
+        where: { conversationId: originId, source: "cron" },
+      }),
+    ).toBe(0);
+  });
+
+  it("a run that answers [no reply] settles ok and delivers nothing", async () => {
+    const { sandboxId, cronId, run, originId } = await fireAndGetRun("quiet");
+    await db.turnEvent.updateMany({
+      where: { turnId: run.id, type: "text" },
+      data: { payload: { type: "text", text: "[no reply]" } },
+    });
+
+    await turnService.finishTurn({
+      reporter: { sandboxId, runnerId: RUNNER_A },
+      conversationId: run.conversationId,
+      turnId: run.id,
+      status: "done",
+    });
+
+    expect(
+      await db.turn.count({
+        where: { conversationId: originId, source: "cron" },
+      }),
+    ).toBe(0);
+    const cron = await db.agentCron.findUniqueOrThrow({
+      where: { id: cronId },
+      select: { lastOutcome: true },
+    });
+    expect(cron.lastOutcome).toBe("ok");
+  });
+
+  it("a gated run the check WOKE always delivers, even if the agent answered [no reply]", async () => {
+    // The live failure: the check fired at :27, the agent re-judged the
+    // condition ("not :07") and went silent. The check decides, not the
+    // agent: the person gets the check's output.
+    const { sandboxId, cronId, run, originId } = await fireAndGetRun("woke");
+    await db.agentCron.update({
+      where: { id: cronId },
+      data: { gate: "bash check.sh" },
+    });
+    await db.turnEvent.updateMany({
+      where: { turnId: run.id, type: "text" },
+      data: { payload: { type: "text", text: "[no reply]" } },
+    });
+    const conversation = await db.conversation.update({
+      where: { id: run.conversationId },
+      data: { lastSeq: { increment: 1 } },
+      select: { lastSeq: true },
+    });
+    await db.turnEvent.create({
+      data: {
+        conversationId: run.conversationId,
+        turnId: run.id,
+        seq: conversation.lastSeq,
+        type: "notice",
+        payload: {
+          type: "notice",
+          level: "info",
+          text: "Schedule check found: It's :27",
+        },
+      },
+    });
+
+    await turnService.finishTurn({
+      reporter: { sandboxId, runnerId: RUNNER_A },
+      conversationId: run.conversationId,
+      turnId: run.id,
+      status: "done",
+    });
+
+    const delivery = await db.turn.findFirstOrThrow({
+      where: { conversationId: originId, source: "cron" },
+      select: { id: true },
+    });
+    const text = await db.turnEvent.findFirstOrThrow({
+      where: { turnId: delivery.id, type: "text" },
+      select: { payload: true },
+    });
+    expect((text.payload as { text: string }).text).toBe(
+      "Schedule check found: It's :27",
+    );
   });
 
   it("a ceiling-swept run still settles: outcome, strike, and the delivery", async () => {
@@ -927,6 +1267,11 @@ describe.skipIf(!PROOF_URL)("settling and delivery", () => {
         status: "done",
         source: "watch",
         userId: null,
+        // A second in the past: `created_at` is millisecond-precision and
+        // the bridge window is strictly `createdAt < before`, so a wake
+        // inserted in the same millisecond as the person's next turn falls
+        // outside it and the report vanishes from the context (flaked here).
+        createdAt: new Date(Date.now() - 1000),
         startedAt: new Date(),
         finishedAt: new Date(),
       },
@@ -1073,5 +1418,67 @@ describe.skipIf(!PROOF_URL)("the platform-tool fence", () => {
       select: { id: true },
     });
     expect(survives).not.toBeNull();
+  });
+
+  it("update_task changes the check and its words in place, removes both together, and is agent-fenced", async () => {
+    const agentId = await seedAgent("update");
+    const sandboxId = await seedSandbox("update", agentId, "running");
+    const cronId = await seedDueCron(agentId, "update", {
+      nextFireAt: new Date(Date.now() + 3_600_000),
+    });
+    const call = (args: Record<string, unknown>) =>
+      platformTools.executePlatformTool(RUNNER_A, {
+        sandboxId,
+        tool: "update_task",
+        args: { cronId, ...args },
+      });
+    const row = () =>
+      db.agentCron.findUniqueOrThrow({
+        where: { id: cronId },
+        select: { gate: true, gateDescription: true, prompt: true },
+      });
+
+    expect(
+      (
+        await call({
+          gate: "bash deck.sh",
+          gateDescription: "a new board deck appears in Dropbox",
+        })
+      ).ok,
+    ).toBe(true);
+    expect(await row()).toMatchObject({
+      gate: "bash deck.sh",
+      gateDescription: "a new board deck appears in Dropbox",
+      prompt: `do the update thing`,
+    });
+
+    await call({ gate: null });
+    expect(await row()).toMatchObject({ gate: null, gateDescription: null });
+
+    // Over the agent's own door too: a check without its words is refused,
+    // with the reason the agent needs to fix the call.
+    const bare = await call({ gate: "bash deck.sh" });
+    expect(bare).toMatchObject({ ok: false });
+    expect(JSON.stringify(bare)).toContain("gateDescription");
+    expect(await row()).toMatchObject({ gate: null, gateDescription: null });
+
+    const foreignAgent = await seedAgent("update-foreign", FOREIGN_WORKSPACE);
+    const foreignCron = await seedDueCron(foreignAgent, "update-foreign", {
+      nextFireAt: new Date(Date.now() + 3_600_000),
+    });
+    const foreign = await platformTools.executePlatformTool(RUNNER_A, {
+      sandboxId,
+      tool: "update_task",
+      args: { cronId: foreignCron, gate: "true" },
+    });
+    expect(foreign.ok).toBe(false);
+    expect(
+      (
+        await db.agentCron.findUniqueOrThrow({
+          where: { id: foreignCron },
+          select: { gate: true },
+        })
+      ).gate,
+    ).toBeNull();
   });
 });

@@ -81,7 +81,8 @@ export const MemoryDialog = ({
     setContentSeeded(true);
   }, [open, editing, contentSeeded, detail.data]);
 
-  const busy = create.isPending || update.isPending || remove.isPending;
+  // A save holds the dialog (the server validates it); a delete is instant.
+  const busy = create.isPending || update.isPending;
   const contentReady = !editing || contentSeeded;
 
   const submit = () => {
@@ -204,16 +205,12 @@ export const MemoryDialog = ({
               variant="ghost"
               className="text-destructive hover:text-destructive"
               disabled={busy}
-              loading={remove.isPending}
-              onClick={() =>
-                remove.mutate(editing.id, {
-                  onSuccess: () => {
-                    toast.success("Memory deleted");
-                    onOpenChange(false);
-                  },
-                  onError: (error) => toast.error(String(error.message)),
-                })
-              }
+              // Instant: the row leaves the list and the dialog closes on
+              // click; the hook confirms, or puts the row back and says why.
+              onClick={() => {
+                remove.mutate(editing.id);
+                onOpenChange(false);
+              }}
             >
               Delete
             </Button>

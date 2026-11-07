@@ -7,14 +7,11 @@ import {
   Settings,
   Building2,
   Fingerprint,
-  Globe,
   KeyRound,
   MessagesSquare,
-  ShieldCheck,
   Plug,
   Shield,
   LayoutGrid,
-  LayoutDashboard,
   Download,
   Activity,
   Sparkles,
@@ -75,8 +72,8 @@ export interface NavSurface {
  * agent is the thread (§3.18), so chat lives on the agent page.
  *
  * Agents is not in the sidebar's render list either: the sidebar gives it its
- * own GROUP (`AgentsGroup`), whose "Manage agents" row is this section and
- * whose remaining rows are the workspace's agents. It stays in the TABLE
+ * own GROUP (`AgentsGroup`): the workspace's agents and a New agent row. It
+ * stays in the TABLE
  * because the header breadcrumb resolves section titles from here —
  * `opts.sidebar` is what drops it from the sidebar's copy, so the crumb keeps
  * reading "Agents".
@@ -85,11 +82,8 @@ export const workspaceNavItems = (
   workspaceId: string,
   opts?: NavSurface,
 ): NavItem[] => [
-  {
-    title: "Overview",
-    url: `/w/${workspaceId}/overview`,
-    icon: LayoutDashboard,
-  },
+  // No Overview: the workspace's front door is its first agent (`/w/<id>`
+  // redirects there), and the sidebar puts the Agents group above this list.
   ...(opts?.sidebar
     ? []
     : [{ title: "Agents", url: `/w/${workspaceId}/agents`, icon: AgentIcon }]),
@@ -121,6 +115,7 @@ export const getNavItems = (
   // RBAC builds (cloud) and once the runtime entitlement is known either way.
   // App Availability is org administration and lives under Organization
   // Settings (`getSettingsSections`), beside the other org-wide controls.
+  // Shared Connections and Global Policy live there too, for the same reason.
   // Usage + Billing need billing.
   const adminGroup: NavItem[] = [
     // "Members" (not "Team"/"Users"): for humans OneCLI is the SP — the label
@@ -147,16 +142,10 @@ export const getNavItems = (
   return [
     [
       { title: "Workspaces", url: `${p}/workspaces`, icon: FolderOpen },
-      {
-        title: "Global Connections",
-        url: `${p}/global-connections`,
-        icon: Plug,
-      },
-      { title: "Global Policy", url: `${p}/policy`, icon: Shield },
       // Both hosted-only (§3.13 — no runner, no surface): Channels is where
       // hosted agents meet the team (§3.16), an org-wide integration surface
-      // beside Global Connections rather than a settings pane; org-tier
-      // skills reach every workspace's hosted agents.
+      // rather than a settings pane; org-tier skills reach every workspace's
+      // hosted agents.
       ...(opts?.hosted !== false
         ? [
             {
@@ -194,6 +183,13 @@ export const getWorkspaceSettingsSections = (
         url: `/w/${workspaceId}/settings/install`,
         icon: Download,
       },
+      // The caller's PERSONAL key for this workspace (one per user), the
+      // workspace twin of the org settings' API Keys page.
+      {
+        title: "API Key",
+        url: `/w/${workspaceId}/settings/api-key`,
+        icon: KeyRound,
+      },
     ],
   },
 ];
@@ -205,31 +201,51 @@ export const getSettingsSections = (orgId?: string): SettingsNavSection[] => {
       label: "Organization",
       items: [
         { title: "General", url: `${p}/settings/general`, icon: Building2 },
-        { title: "Domains", url: `${p}/settings/domains`, icon: Globe },
         {
           title: "Single sign-on",
           url: `${p}/settings/sso`,
           icon: Fingerprint,
         },
-        // Enterprise, like Single sign-on above: listed unconditionally and
-        // gated by the page itself, which renders the licensed card when the
-        // deployment is not entitled.
+        // Licensed (the enterprise entitlement gates it on self-host), and on
+        // cloud sold from Scale like Single sign-on above: listed
+        // unconditionally and gated by the page itself, which renders the
+        // licensed card when the deployment is not entitled.
         {
           title: "App Availability",
           url: `${p}/settings/app-availability`,
           icon: LayoutGrid,
         },
         {
+          title: "Shared Connections",
+          url: `${p}/settings/global-connections`,
+          icon: Plug,
+        },
+        { title: "Global Policy", url: `${p}/settings/policy`, icon: Shield },
+        {
           title: "API Keys",
           url: `${p}/settings/org-api-keys`,
           icon: KeyRound,
-        },
-        {
-          title: "Encryption",
-          url: `${p}/settings/encryption`,
-          icon: ShieldCheck,
         },
       ],
     },
   ];
 };
+
+/**
+ * The settings entry the user is ON: the longest item URL that is `pathname`
+ * itself or a segment-boundary prefix of it. Exact matching left every page
+ * BELOW an entry (a Shared Connections tab, an app's page) with no active
+ * item, and a bare `startsWith` would let `/settings/policy` claim a sibling
+ * like `/settings/policy-x`. One resolver for the desktop pane, the mobile
+ * strip and the header breadcrumb, so the three can never disagree.
+ */
+export const activeSettingsItem = (
+  sections: SettingsNavSection[],
+  pathname: string,
+): SettingsNavItem | undefined =>
+  sections
+    .flatMap((section) => section.items)
+    .filter(
+      (item) => pathname === item.url || pathname.startsWith(`${item.url}/`),
+    )
+    .sort((a, b) => b.url.length - a.url.length)[0];

@@ -49,11 +49,12 @@ const createFakeSocket = (url: string): FakeSocket => {
   return target;
 };
 
-const setup = (options: { maxAttempts?: number } = {}) => {
+const setup = (options: { maxAttempts?: number; sandboxId?: string } = {}) => {
   const sockets: FakeSocket[] = [];
   const transport = createWsTransport({
     url: "ws://runner:8484",
     token: "boot-token",
+    sandboxId: options.sandboxId ?? "sb-test",
     socketFactory: (url) => {
       const socket = createFakeSocket(url);
       sockets.push(socket);
@@ -169,6 +170,79 @@ describe("connection", () => {
     expect(DEFAULT_MAX_ATTEMPTS).toBeGreaterThanOrEqual(40);
   });
 
+  describe("reconnect delay", () => {
+    // A runner copy closes every socket it holds at once when it rolls or
+    // stops (hundreds of sandboxes). Without jitter they all redial in the
+    // same instant, and keep retrying in lockstep. Equal jitter: each delay
+    // is a random point in [half, all] of the exponential step, so the cap
+    // is never exceeded (the runner's resume grace is derived from it) and
+    // no sandbox redials before half the step (the leaving copy may still be
+    // in the balancer's rotation for a moment).
+    const delays = (random: () => number, failures: number) => {
+      vi.useFakeTimers();
+      try {
+        const spy = vi.spyOn(globalThis, "setTimeout");
+        const sockets: FakeSocket[] = [];
+        createWsTransport({
+          url: "ws://runner:8484",
+          token: "boot-token",
+          sandboxId: "sb-test",
+          socketFactory: (url) => {
+            const socket = createFakeSocket(url);
+            sockets.push(socket);
+            return socket as unknown as WebSocket;
+          },
+          minBackoffMs: 500,
+          maxBackoffMs: 15_000,
+          maxAttempts: Infinity,
+          random,
+        });
+        sockets[0]!.open();
+        const seen: number[] = [];
+        for (let i = 0; i < failures; i += 1) {
+          spy.mockClear();
+          sockets[sockets.length - 1]!.fail();
+          const call = spy.mock.calls.find(([, ms]) => typeof ms === "number");
+          seen.push(Number(call?.[1]));
+          vi.runOnlyPendingTimers();
+        }
+        spy.mockRestore();
+        return seen;
+      } finally {
+        vi.useRealTimers();
+      }
+    };
+
+    it("stays inside [half, all] of each exponential step, the cap included", () => {
+      // MUTATION-PROOF: drop the jitter (low and high runs match), let it
+      // exceed the step (high run passes the cap), or start it at zero (low
+      // run redials at once).
+      // The steps: the minimum twice (the first retry after an open is
+      // floored at it), then doubling to the cap.
+      const steps = [500, 500, 1000, 2000, 4000, 8000, 15_000, 15_000];
+      const low = delays(() => 0, steps.length);
+      const high = delays(() => 0.999_999, steps.length);
+      expect(low).toEqual(steps.map((step) => step / 2));
+      for (const [i, ms] of high.entries()) {
+        expect(ms).toBeLessThanOrEqual(steps[i]!);
+        expect(ms).toBeGreaterThan(low[i]!);
+      }
+    });
+
+    it("spreads a fleet that lost its runner copy at the same instant", () => {
+      // Fifty sandboxes, one shared outage: their first redials must not
+      // land together. MUTATION-PROOF: ignore `random` and every delay is
+      // the same.
+      let seed = 1;
+      const lcg = () => {
+        seed = (seed * 1_103_515_245 + 12_345) % 2 ** 31;
+        return seed / 2 ** 31;
+      };
+      const firsts = Array.from({ length: 50 }, () => delays(lcg, 1)[0]!);
+      expect(new Set(firsts).size).toBeGreaterThan(40);
+    });
+  });
+
   it("ignores a superseded socket, so the retry budget cannot be reset", async () => {
     // A late `open` from a socket that has already been replaced would reset
     // `attempts` for a connection nobody uses — defeating the bound whose
@@ -225,6 +299,27 @@ describe("connection", () => {
       (raw) => (JSON.parse(raw) as { kind: string }).kind,
     );
     expect(after).toContain("progress");
+  });
+
+  it("drops port stream frames while the channel is down", async () => {
+    // The runner tears a sandbox's streams down when its channel drops, so a
+    // buffered port frame would replay against a stream nobody holds.
+    const { transport, sockets } = setup();
+    transport.send({ kind: "port.data", streamId: "s1", dataBase64: "AA==" });
+    transport.send({ kind: "ready", harness: "fake" });
+    sockets[0]!.open();
+
+    const kinds = sockets[0]!.sent.map(
+      (raw) => (JSON.parse(raw) as { kind: string }).kind,
+    );
+    expect(kinds).toContain("ready");
+    expect(kinds).not.toContain("port.data");
+
+    transport.send({ kind: "port.data", streamId: "s1", dataBase64: "AA==" });
+    const after = sockets[0]!.sent.map(
+      (raw) => (JSON.parse(raw) as { kind: string }).kind,
+    );
+    expect(after).toContain("port.data");
   });
 
   it("gives up after the attempt limit and ends the stream", async () => {
@@ -434,5 +529,385 @@ describe("the shared transport laws", () => {
 
       expect(sockets).toHaveLength(1);
     });
+  });
+});
+
+/**
+ * The resumable channel. Once the runner hands this supervisor a session, the
+ * transport (and only the transport: the supervisor loop never sees it)
+ * reconnects WITH it, numbers every outbound frame, trims its buffer on the
+ * runner's acks, and replays exactly the unacked tail after a gap. Before a
+ * session exists the wire is byte-for-byte what it was: a bare bootstrap
+ * token and bare frames, so an old runner notices nothing.
+ */
+describe("resumable session", () => {
+  const session = (credential: string, ack = 0) =>
+    JSON.stringify({ kind: "session", credential, ack });
+  const envelopes = (socket: FakeSocket) =>
+    socket.sent.map(
+      (raw) => JSON.parse(raw) as { seq?: number; kind?: string },
+    );
+
+  it("sends BARE frames and never an envelope until a session is held", () => {
+    const { transport, sockets } = setup();
+    sockets[0]!.open();
+    transport.send({ kind: "ready", harness: "h" });
+    expect(envelopes(sockets[0]!)).toEqual([{ kind: "ready", harness: "h" }]);
+  });
+
+  it("reconnects with the session, not the spent bootstrap token, and keeps the sandbox id beside it", async () => {
+    const { transport, sockets } = setup({ sandboxId: "sb-1" });
+    sockets[0]!.open();
+    sockets[0]!.emit(session("v1.k1.cred"));
+    sockets[0]!.fail();
+    await vi.waitFor(() => expect(sockets.length).toBe(2));
+    const url = new URL(sockets[1]!.url);
+    expect(url.searchParams.get("session")).toBe("v1.k1.cred");
+    expect(url.searchParams.get("sandbox")).toBe("sb-1");
+    expect(url.searchParams.get("token")).toBeNull();
+    void transport;
+  });
+
+  it("the session item is consumed by the transport: the supervisor loop never sees it", async () => {
+    const { transport, sockets } = setup();
+    sockets[0]!.open();
+    sockets[0]!.emit(session("v1.k1.cred"));
+    sockets[0]!.emit(JSON.stringify({ kind: "shutdown" }));
+    const items = await collect(transport.incoming(), 1);
+    expect(items).toEqual([{ kind: "shutdown" }]);
+  });
+
+  it("numbers every frame once a session is held, monotonically", () => {
+    const { transport, sockets } = setup();
+    sockets[0]!.open();
+    sockets[0]!.emit(session("v1.k1.cred"));
+    transport.send({ kind: "ready", harness: "a" });
+    transport.send({ kind: "ready", harness: "b" });
+    expect(envelopes(sockets[0]!).map((e) => e.seq)).toEqual([1, 2]);
+  });
+
+  it("a session handed LATE on the live socket (the cloud order) leaves the bare frames already sent alone and numbers from 1 after it", async () => {
+    // On the cloud backend the runner learns the container ref only after the
+    // supervisor has connected, so the session arrives mid-socket. What went
+    // out bare was applied bare (the runner's passthrough) and must never be
+    // replayed or renumbered; from the hand-off on, frames are sequenced and
+    // a reconnect replays only those.
+    const { transport, sockets } = setup({ sandboxId: "sb-1" });
+    sockets[0]!.open();
+    transport.send({ kind: "ready", harness: "bare" });
+    sockets[0]!.emit(session("v1.k1.late"));
+    transport.send({ kind: "ready", harness: "after" });
+    expect(envelopes(sockets[0]!)).toEqual([
+      { kind: "ready", harness: "bare" },
+      { seq: 1, message: { kind: "ready", harness: "after" } },
+    ]);
+
+    sockets[0]!.fail();
+    await vi.waitFor(() => expect(sockets.length).toBe(2));
+    sockets[1]!.open();
+    sockets[1]!.emit(session("v1.k1.late", 0));
+    expect(envelopes(sockets[1]!)).toEqual([
+      { seq: 1, message: { kind: "ready", harness: "after" } },
+    ]);
+    void transport;
+  });
+
+  it("replays exactly the unacked tail after a reconnect, in order, with the same seqs", async () => {
+    const { transport, sockets } = setup({ sandboxId: "sb-1" });
+    sockets[0]!.open();
+    sockets[0]!.emit(session("v1.k1.cred"));
+    transport.send({ kind: "ready", harness: "a" }); // seq 1
+    transport.send({ kind: "ready", harness: "b" }); // seq 2
+    sockets[0]!.emit(JSON.stringify({ kind: "ack", seq: 1 }));
+    transport.send({ kind: "ready", harness: "c" }); // seq 3
+    sockets[0]!.fail();
+    await vi.waitFor(() => expect(sockets.length).toBe(2));
+    sockets[1]!.open();
+    // The runner's hand-off on reconnect carries its cursor; here it saw 1.
+    sockets[1]!.emit(session("v1.k1.cred", 1));
+    const replayed = envelopes(sockets[1]!);
+    expect(replayed.map((e) => e.seq)).toEqual([2, 3]);
+  });
+
+  it("trusts the runner's cursor on reconnect over its own acks: a runner that lost state replays from zero", async () => {
+    // A runner that RESTARTED applied nothing it does not remember: its
+    // hand-off says ack 0 even though the old process acked 2. Everything
+    // unacked by THIS process must be re-sent; the runner dedupes nothing
+    // here because it genuinely has nothing.
+    const { transport, sockets } = setup({ sandboxId: "sb-1" });
+    sockets[0]!.open();
+    sockets[0]!.emit(session("v1.k1.cred"));
+    transport.send({ kind: "ready", harness: "a" }); // 1
+    transport.send({ kind: "ready", harness: "b" }); // 2
+    sockets[0]!.emit(JSON.stringify({ kind: "ack", seq: 2 }));
+    transport.send({ kind: "ready", harness: "c" }); // 3
+    sockets[0]!.fail();
+    await vi.waitFor(() => expect(sockets.length).toBe(2));
+    sockets[1]!.open();
+    sockets[1]!.emit(session("v1.k1.cred", 0));
+    // Acked frames are gone from the buffer (that is what an ack means), so
+    // only 3 can be replayed; the control plane's history covers 1 and 2.
+    expect(envelopes(sockets[1]!).map((e) => e.seq)).toEqual([3]);
+  });
+
+  it("replays from the runner's cursor even when it is behind the last in-flight ack", async () => {
+    // seq 1..3 sent; the runner acked 3 on the OLD socket; then it restarted
+    // and its hand-off says 2 (it persisted nothing past 2). 3 must replay:
+    // the local ack is not the truth, the hand-off is.
+    const { transport, sockets } = setup({ sandboxId: "sb-1" });
+    sockets[0]!.open();
+    sockets[0]!.emit(session("v1.k1.cred"));
+    transport.send({ kind: "ready", harness: "a" });
+    transport.send({ kind: "ready", harness: "b" });
+    transport.send({ kind: "ready", harness: "c" });
+    sockets[0]!.emit(JSON.stringify({ kind: "ack", seq: 2 }));
+    sockets[0]!.fail();
+    await vi.waitFor(() => expect(sockets.length).toBe(2));
+    sockets[1]!.open();
+    sockets[1]!.emit(session("v1.k1.cred", 2));
+    expect(envelopes(sockets[1]!).map((e) => e.seq)).toEqual([3]);
+    // And a SECOND reconnect replays 3 again if still unacked: the write
+    // cursor is per socket, not per process.
+    sockets[1]!.fail();
+    await vi.waitFor(() => expect(sockets.length).toBe(3));
+    sockets[2]!.open();
+    sockets[2]!.emit(session("v1.k1.cred", 2));
+    expect(envelopes(sockets[2]!).map((e) => e.seq)).toEqual([3]);
+  });
+
+  it("keeps presenting its session after a refused reconnect: the bootstrap token is spent and can never help", async () => {
+    // A refused dial is what a closing or crashed runner copy answers while
+    // the balancer still routes to it, so a supervisor sees refusals on
+    // ordinary rolls. The token was used up by the first connect (a session
+    // is only ever handed on a connected socket), so falling back to it
+    // could only throw the one credential that still works away.
+    // Budget: the open resets attempts to 0; two refusals = 2, the limit.
+    const { transport, sockets } = setup({ sandboxId: "sb-1", maxAttempts: 2 });
+    sockets[0]!.open();
+    sockets[0]!.emit(session("v1.k1.cred"));
+    sockets[0]!.fail();
+    await vi.waitFor(() => expect(sockets.length).toBe(2));
+    sockets[1]!.fail(); // refused: closed before it ever opened
+    await vi.waitFor(() => expect(sockets.length).toBe(3));
+    for (const socket of sockets.slice(1)) {
+      const params = new URL(socket.url).searchParams;
+      expect(params.get("session")).toBe("v1.k1.cred");
+      expect(params.get("sandbox")).toBe("sb-1");
+      expect(params.get("token")).toBeNull();
+    }
+    // The ordinary finite budget still ends a session nobody accepts.
+    sockets[2]!.fail();
+    const items: WorkItem[] = [];
+    for await (const item of transport.incoming()) items.push(item);
+    expect(items).toEqual([]);
+    expect(sockets).toHaveLength(3);
+  });
+
+  it("resumes on the copy that accepts it after refusals, with its unacked tail", async () => {
+    const { transport, sockets } = setup({ sandboxId: "sb-1" });
+    sockets[0]!.open();
+    sockets[0]!.emit(session("v1.k1.cred"));
+    transport.send({ kind: "ready", harness: "x" });
+    sockets[0]!.fail();
+    await vi.waitFor(() => expect(sockets.length).toBe(2));
+    sockets[1]!.fail();
+    await vi.waitFor(() => expect(sockets.length).toBe(3));
+    sockets[2]!.fail();
+    await vi.waitFor(() => expect(sockets.length).toBe(4));
+    // Another copy takes it, under the same key: the session resumes and
+    // the unacked frame replays with its original seq.
+    expect(new URL(sockets[3]!.url).searchParams.get("session")).toBe(
+      "v1.k1.cred",
+    );
+    sockets[3]!.open();
+    sockets[3]!.emit(session("v1.k1.cred", 0));
+    expect(envelopes(sockets[3]!).map((e) => e.seq)).toEqual([1]);
+  });
+
+  it("still drops liveness heartbeats while down, session or not", () => {
+    const { transport, sockets } = setup();
+    sockets[0]!.open();
+    sockets[0]!.emit(session("v1.k1.cred"));
+    sockets[0]!.fail();
+    transport.send({ kind: "progress", turnId: "t", conversationId: "c" });
+    transport.send({ kind: "ready", harness: "x" });
+    // Only the ready is buffered (it replays); the beat is gone.
+    return vi
+      .waitFor(() => expect(sockets.length).toBe(2))
+      .then(() => {
+        sockets[1]!.open();
+        sockets[1]!.emit(session("v1.k1.cred", 0));
+        expect(envelopes(sockets[1]!).map((e) => e.seq)).toEqual([1]);
+      });
+  });
+});
+
+/**
+ * Channel liveness. A half-open socket (the runner process went away and
+ * no FIN reached the sandbox) emits neither `close` nor `error`, ever, and
+ * the WHATWG client has no ping event: without its own check the
+ * supervisor sits on a dead socket until the runner's reconcile reports
+ * the container dead (seen live: one sandbox of several after a runner
+ * restart). So, while
+ * it holds a session, the transport beats on a timer and expects the
+ * runner's ack for SOME frame within the timeout; past that it closes the
+ * socket itself and takes the ordinary reconnect path.
+ */
+describe("channel liveness", () => {
+  const session = (credential: string, ack = 0) =>
+    JSON.stringify({ kind: "session", credential, ack });
+  const kinds = (socket: FakeSocket) =>
+    socket.sent.map((raw) => {
+      const frame = JSON.parse(raw) as { message?: { kind: string } };
+      return frame.message?.kind;
+    });
+  const liveness = { intervalMs: 20_000, timeoutMs: 75_000 };
+  const setupWithLiveness = () => {
+    const sockets: FakeSocket[] = [];
+    const transport = createWsTransport({
+      url: "ws://runner:8484",
+      token: "boot-token",
+      sandboxId: "sb-1",
+      socketFactory: (url) => {
+        const socket = createFakeSocket(url);
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
+      },
+      minBackoffMs: 1,
+      maxBackoffMs: 2,
+      maxAttempts: Infinity,
+      liveness,
+    });
+    return { transport, sockets };
+  };
+
+  it("beats on the interval once a session is held, as a sequenced frame the runner acks", () => {
+    vi.useFakeTimers();
+    try {
+      const { sockets } = setupWithLiveness();
+      sockets[0]!.open();
+      sockets[0]!.emit(session("v1.k1.cred"));
+      vi.advanceTimersByTime(liveness.intervalMs);
+      expect(kinds(sockets[0]!)).toEqual(["heartbeat"]);
+      vi.advanceTimersByTime(liveness.intervalMs);
+      expect(kinds(sockets[0]!)).toEqual(["heartbeat", "heartbeat"]);
+      const frames = sockets[0]!.sent.map(
+        (raw) => JSON.parse(raw) as { seq: number },
+      );
+      expect(frames.map((f) => f.seq)).toEqual([1, 2]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never beats without a session: an old runner would drop the frame anyway", () => {
+    vi.useFakeTimers();
+    try {
+      const { sockets } = setupWithLiveness();
+      sockets[0]!.open();
+      vi.advanceTimersByTime(liveness.timeoutMs * 3);
+      expect(sockets[0]!.sent).toEqual([]);
+      expect(sockets.length).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes a socket that answers no ack for the timeout and reconnects with the session (the half-open socket)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { sockets } = setupWithLiveness();
+      sockets[0]!.open();
+      sockets[0]!.emit(session("v1.k1.cred"));
+      let closed = false;
+      sockets[0]!.close = () => {
+        closed = true;
+        // A half-open socket: close() reaches no peer, so the library
+        // reports the close only on its own timeout; model that as
+        // never, the worst case.
+        sockets[0]!.readyState = WebSocket.CLOSING;
+      };
+      // The watchdog runs on the beat interval, so the verdict lands on
+      // the first tick past the timeout: at most one interval late.
+      vi.advanceTimersByTime(liveness.timeoutMs);
+      expect(closed).toBe(false);
+      vi.advanceTimersByTime(liveness.intervalMs);
+      expect(closed).toBe(true);
+      // The reconnect does not wait for a close event that never comes.
+      await vi.advanceTimersByTimeAsync(5);
+      expect(sockets.length).toBe(2);
+      expect(sockets[1]!.url).toContain("session=v1.k1.cred");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an ack for ANY frame (a turn's event, not only a beat) resets the clock", () => {
+    vi.useFakeTimers();
+    try {
+      const { transport, sockets } = setupWithLiveness();
+      sockets[0]!.open();
+      sockets[0]!.emit(session("v1.k1.cred"));
+      let closed = false;
+      sockets[0]!.close = () => {
+        closed = true;
+      };
+      vi.advanceTimersByTime(liveness.timeoutMs - 10_000);
+      transport.send({ kind: "ready", harness: "h" });
+      const last = JSON.parse(sockets[0]!.sent.at(-1)!) as { seq: number };
+      sockets[0]!.emit(JSON.stringify({ kind: "ack", seq: last.seq }));
+      // Without the reset the next tick (at 80 s from the start) would
+      // have closed it; with it the clock restarts at 65 s.
+      vi.advanceTimersByTime(liveness.timeoutMs);
+      expect(closed).toBe(false);
+      vi.advanceTimersByTime(liveness.intervalMs);
+      expect(closed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("replays the real frames, never the swallowed beats, on the socket after a dead one", async () => {
+    vi.useFakeTimers();
+    try {
+      const { transport, sockets } = setupWithLiveness();
+      sockets[0]!.open();
+      sockets[0]!.emit(session("v1.k1.cred"));
+      sockets[0]!.close = () => {
+        sockets[0]!.readyState = WebSocket.CLOSING;
+      };
+      // Two beats go unanswered, then a real frame the dead socket also
+      // swallowed, then the verdict.
+      vi.advanceTimersByTime(liveness.intervalMs * 2);
+      transport.send({ kind: "ready", harness: "h" });
+      vi.advanceTimersByTime(liveness.timeoutMs);
+      await vi.advanceTimersByTimeAsync(5);
+      sockets[1]!.open();
+      sockets[1]!.emit(session("v1.k1.cred", 0));
+      const replayed = sockets[1]!.sent.map(
+        (raw) => JSON.parse(raw) as { seq: number; message: { kind: string } },
+      );
+      expect(replayed.map((f) => [f.seq, f.message.kind])).toEqual([
+        [3, "ready"],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops beating and never times out after close()", async () => {
+    vi.useFakeTimers();
+    try {
+      const { transport, sockets } = setupWithLiveness();
+      sockets[0]!.open();
+      sockets[0]!.emit(session("v1.k1.cred"));
+      const before = sockets[0]!.sent.length;
+      await transport.close();
+      vi.advanceTimersByTime(liveness.timeoutMs * 3);
+      expect(sockets[0]!.sent.length).toBe(before);
+      expect(sockets.length).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

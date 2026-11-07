@@ -3,6 +3,27 @@ import { AGENT_EFFORTS, KNOWN_AGENT_HARNESSES } from "@onecli/agent-protocol";
 
 export const IDENTIFIER_REGEX = /^[a-z0-9][a-z0-9-]{0,49}$/;
 
+export const IDENTIFIER_MESSAGE =
+  "Identifier must be 1-50 characters, start with a letter or number, and contain only lowercase letters, numbers, and hyphens";
+
+/**
+ * A hosted agent's identifier, derived from its display name: lowercased,
+ * every run of other characters folded to one hyphen, trimmed of hyphens,
+ * cut to the identifier's length. A name with no usable character ("✨")
+ * derives to "" and the service substitutes `"agent"`. The identifier was a
+ * BYO contract (`container-config?agent=`, the SDK's `ensureAgent`), typed
+ * by the person who pins a machine to it; a hosted agent never exposes it,
+ * so the server derives it from the one thing the person did type and keeps
+ * it in step with the name on a rename (`agent-service`).
+ */
+export const identifierFromName = (name: string): string =>
+  name
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 50);
+
 export const AGENT_KINDS = ["byo", "hosted"] as const;
 export type AgentKind = (typeof AGENT_KINDS)[number];
 
@@ -12,12 +33,22 @@ export const INSTRUCTIONS_MAX_LENGTH = 20_000;
 const hostedOnlyFieldsRule = (
   data: {
     kind: AgentKind;
+    identifier?: string;
     harness?: string;
     instructions?: string;
   },
   ctx: z.RefinementCtx,
 ) => {
   if (data.kind === "byo") {
+    // The BYO identifier is a public handle (`ensureAgent` pins a machine to
+    // it), so the person supplies it; a hosted one is derived from the name.
+    if (data.identifier === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["identifier"],
+        message: "identifier is required for byo agents",
+      });
+    }
     for (const field of ["harness", "instructions"] as const) {
       if (data[field] !== undefined) {
         ctx.addIssue({
@@ -33,10 +64,13 @@ const hostedOnlyFieldsRule = (
 export const createAgentSchema = z
   .object({
     name: z.string().trim().min(1).max(255),
-    identifier: z.string().regex(IDENTIFIER_REGEX, {
-      message:
-        "Identifier must be 1-50 characters, start with a letter or number, and contain only lowercase letters, numbers, and hyphens",
-    }),
+    // Required for a BYO agent (the refinement below), optional for a hosted
+    // one, where the server derives it from the name when absent and keeps
+    // honoring one that is sent (the SDK's `ensureAgent` idempotency).
+    identifier: z
+      .string()
+      .regex(IDENTIFIER_REGEX, { message: IDENTIFIER_MESSAGE })
+      .optional(),
     kind: z.enum(AGENT_KINDS).default("byo"),
     // The column stays a free string (the adapter-#2 seam — schema.prisma),
     // but the API refuses ids no composition root can boot: a typo here would
@@ -95,5 +129,3 @@ export const mintSshCertificateSchema = z.union([
   z.object({ publicKey: z.string().trim().min(1).max(1024) }).strict(),
   z.object({ sshKeyId: z.string().trim().min(1).max(128) }).strict(),
 ]);
-
-export type MintSshCertificateInput = z.infer<typeof mintSshCertificateSchema>;

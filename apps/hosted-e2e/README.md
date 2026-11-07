@@ -35,8 +35,11 @@ docker run -d --name he2e-pg -e POSTGRES_PASSWORD=postgres -p 5461:5432 postgres
 docker exec he2e-pg psql -U postgres -c 'CREATE DATABASE onecli_he2e_template'
 DATABASE_URL=postgresql://postgres:postgres@localhost:5461/onecli_he2e_template \
   pnpm --filter @onecli/db exec prisma migrate deploy
+docker build -f docker/agent-base.Dockerfile -t onecli-agent-base:local .
 docker build -f docker/agent.Dockerfile -t onecli-agent:he2e .
 cargo build --manifest-path apps/gateway/Cargo.toml --bin onecli-gateway
+# The stub upstream is addressed by name (see law 4); map it once.
+echo "127.0.0.1 upstream.e2e.test" | sudo tee -a /etc/hosts
 
 E2E_ADMIN_DATABASE_URL=postgresql://postgres:postgres@localhost:5461/postgres \
 E2E_TEMPLATE_DB=onecli_he2e_template \
@@ -46,6 +49,8 @@ E2E_AGENT_IMAGE=onecli-agent:he2e \
 
 Unset variables **skip locally and throw in CI** — the gateway-e2e law: a
 silently-skipping proof suite is exactly the rot this package replaces.
+A missing hosts line fails the first scenario that starts a stub upstream,
+with the line to add in the error.
 
 One scenario is opt-in in BOTH places: `tests/send-file-scale.test.ts` pushes
 100 concurrent 25 MB uploads through the api child (2.5 GB over loopback,
@@ -53,7 +58,49 @@ about half a minute) and runs only with `HOSTED_E2E_SCALE=1`; otherwise it
 registers as skipped. Run it after touching the attachment door, the blob
 store, or the pool.
 
-## The three laws worth knowing before writing a scenario
+## Live command-output delivery (opt-in)
+
+`tests/live-jcode-output-delivery.test.ts` uses real Jcode on the full local
+stack, not the fake harness. It spends model tokens, and API-key usage is
+billable to the Anthropic API account. After the local prerequisites above
+are ready, export exactly one auth option through a secure environment:
+
+- `E2E_ANTHROPIC_OAUTH_TOKEN` for Anthropic OAuth.
+- `E2E_ANTHROPIC_API_KEY` for Anthropic API-key authentication.
+
+Never put either credential in a command literal or committed file. There is
+no automatic fallback between auth modes. Both variables supplied, or a
+supplied value that is empty or contains whitespace, fail with a secret-free
+configuration error.
+
+```bash
+# Exactly one of E2E_ANTHROPIC_OAUTH_TOKEN or E2E_ANTHROPIC_API_KEY is already exported.
+E2E_ADMIN_DATABASE_URL=postgresql://postgres:postgres@localhost:5461/postgres \
+E2E_TEMPLATE_DB=onecli_he2e_template \
+E2E_AGENT_IMAGE=onecli-agent:he2e \
+  pnpm --filter @onecli/hosted-e2e exec vitest run \
+    tests/live-jcode-output-delivery.test.ts
+```
+
+Without either auth variable, the live scenario explicitly registers as
+skipped, while deterministic auth-selection and delivery-oracle tests still run.
+Each turn has a three-minute deadline and the scenario has a twenty-minute
+ceiling. Only synthetic records are generated. Checks require every field of
+all four small-result rows in durable final text, then every field of all
+100 larger-result rows in final text or a bound outbound attachment whose
+API download contains all records. The repeat request must deliver again on
+a **new turn**, not borrow the previous answer or attachment. A subsequent
+explicit CSV export request additionally requires a **new bound outbound
+attachment** on that export turn, with every row and field verified through
+the API download. The export must be a CSV-named file with the expected header
+and complete CSV records, not a Markdown table saved as a file. Complete
+inline text cannot substitute for this export.
+Only that turn's last `text` event counts as final text: collapsed tool output and
+progress cannot satisfy delivery. Empty output, command failure, and a
+nonexistent-file send must be reported truthfully. Attachment containment,
+size, and count fences remain covered by `tests/send-file.test.ts`.
+
+## The four laws worth knowing before writing a scenario
 
 1. **Door 2 is seeded from day one.** A sandbox will not start without a
    stored LLM secret **and** a published grant rule naming the agent
@@ -69,6 +116,14 @@ store, or the pool.
    that transits the gateway from inside the sandbox (the injection/approval
    witness), platform-tool dials, scripted deaths. Non-directive messages take
    the fake's default echo path.
+4. **A sandbox reaches the stub upstream by name, never by `127.0.0.1`.**
+   Inside the container that address is the container's own loopback, and
+   the sandbox env exempts it from the proxy (`NO_PROXY`, so an agent can
+   reach its own open proxy, DevTools port, or dev server). A request to it
+   dials the container itself and never meets the gateway. Use
+   `upstream.url(path)` and `upstream.host` (`upstream.e2e.test`, resolved on
+   the host by the `/etc/hosts` line above); the gateway's skip-verify and
+   private-destination allowances name exactly that host.
 
 ## Isolation model
 

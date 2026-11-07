@@ -1,0 +1,15 @@
+OneCLI Enterprise License
+
+This directory is NOT covered by the Apache License that covers the rest of
+this repository. It contains enterprise features licensed under the OneCLI
+Enterprise License.
+
+  Terms:      /LICENSE-ENTERPRISE at the root of this repository
+  Path list:  /LICENSE-ENTERPRISE, under "THE LICENSED PATHS"
+
+That license permits development, testing, evaluation and internal
+non-production use. Production use requires a valid OneCLI Enterprise
+subscription.
+
+Copyright (c) 2025-present ChartDB, Inc.
+For enterprise licensing enquiries, contact sales@onecli.sh.

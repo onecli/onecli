@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
-import { AttachParamDialog } from "./_components/attach-param-dialog";
+import { AttachParamDialog } from "../_components/attach-param-dialog";
 import { DirectThreadSection } from "./_components/direct-thread-section";
 
 export const metadata: Metadata = {
@@ -13,7 +13,10 @@ export const metadata: Metadata = {
 export default function AgentChatPage() {
   return (
     <>
-      <DirectThreadSection />
+      {/* Suspense: the section reads `?draft=` (useSearchParams). */}
+      <Suspense>
+        <DirectThreadSection />
+      </Suspense>
       {/* `?attach=<provider>` deep links (the Slack card's Attach button)
           open the attach dialog over the chat. Suspense: useSearchParams. */}
       <Suspense>

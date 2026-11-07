@@ -5,17 +5,25 @@ import { usePathname } from "next/navigation";
 import { KeyRound, Loader2, TriangleAlert } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
+import { cn } from "@onecli/ui/lib/utils";
 import { useSecrets } from "@/hooks/use-secrets";
 import { useAgentGrants } from "@/hooks/use-grants";
 import { useEffectiveCredentials } from "@/lib/api/policy-visibility";
+import { agentActiveSets } from "@/hooks/use-agent-active-connections";
+import { usePinnedPlacement } from "@/hooks/use-stable-placement";
 import { connectionsPath } from "@/lib/navigation";
 import type { Secret } from "@/lib/api";
 import { SecretGrantRow } from "./secret-grant-row";
+import { InactiveConnections } from "./inactive-connections";
+import { sortSecretsForChooser } from "./chooser-order";
+import { chooserEmptyClassName, chooserGridClassName } from "./chooser-layout";
 
 interface SecretGrantsTabProps {
   agentId: string;
   /** "secret" = generic secrets; "llm" = typed LLM keys (type !== "generic" —
-   * the counts-service split). One tab component, two filters. */
+   * the counts-service split). One tab component, two filters. Custom folds
+   * the ones that are off for this agent away; Models keeps every key in
+   * view. */
   kind: "secret" | "llm";
   /** Opens the section's in-place add door (the Connections section's secret
    * dialog with attach-on-create); without it the empty state falls back to
@@ -23,18 +31,23 @@ interface SecretGrantsTabProps {
   onAdd?: () => void;
   /** Opens the section's edit dialog for one secret. */
   onEdit?: (secret: Secret) => void;
+  /** The new agent's "choose connections" window: every secret in view as a
+   * tile, A to Z (none folded away, since each starts off and IS the
+   * choice). */
+  chooser?: boolean;
 }
 
 const COPY = {
   secret: {
-    empty: "No secrets yet",
-    hint: "Add a secret first, then give this agent access to it here.",
-    hintAdd: "Create a secret and this agent gets access to it automatically.",
-    cta: "Go to Secrets",
-    ctaAdd: "Add secret",
+    empty: "No custom connections yet",
+    hint: "Add a custom connection first, then give this agent access to it here.",
+    hintAdd:
+      "Add a custom connection and this agent gets access to it automatically.",
+    cta: "Go to Custom",
+    ctaAdd: "Add connection",
     sub: "/custom",
-    loading: "Loading secrets…",
-    error: "Couldn't load secrets for this agent.",
+    loading: "Loading custom connections…",
+    error: "Couldn't load custom connections for this agent.",
   },
   llm: {
     empty: "No LLM keys yet",
@@ -53,12 +66,20 @@ export const SecretGrantsTab = ({
   kind,
   onAdd,
   onEdit,
+  chooser = false,
 }: SecretGrantsTabProps) => {
   const pathname = usePathname();
   const secretsQuery = useSecrets();
   const grantsQuery = useAgentGrants(agentId);
   const credentialsQuery = useEffectiveCredentials(agentId);
   const copy = COPY[kind];
+  // Active = attached to this agent or granted by the organization (the
+  // switch's own rule). A toggled row keeps its group until the next visit.
+  const { isActiveSecret } = agentActiveSets(
+    grantsQuery.data,
+    credentialsQuery.data,
+  );
+  const placement = usePinnedPlacement(isActiveSecret);
 
   if (
     secretsQuery.isPending ||
@@ -95,7 +116,12 @@ export const SecretGrantsTab = ({
   );
   if (pool.length === 0) {
     return (
-      <Card className="flex flex-col items-center justify-center py-16 text-center">
+      <Card
+        className={cn(
+          "flex flex-col items-center justify-center py-16 text-center",
+          chooser && chooserEmptyClassName,
+        )}
+      >
         <div className="bg-muted mb-4 flex size-12 items-center justify-center rounded-full dark:bg-white/10 dark:border-white/10">
           <KeyRound className="text-muted-foreground size-5" aria-hidden />
         </div>
@@ -138,29 +164,56 @@ export const SecretGrantsTab = ({
     (credentialsQuery.data?.secrets ?? []).map((e) => [e.id, e]),
   );
 
+  const renderRow = (secret: (typeof pool)[number]) => {
+    const credential = credentialById.get(secret.id);
+    const granted = grantedIds.has(secret.id);
+    const orgGranted =
+      !granted &&
+      (credential?.provenance.some((p) => p.scope === "organization") ?? false);
+    return (
+      <SecretGrantRow
+        key={secret.id}
+        agentId={agentId}
+        secret={secret}
+        granted={granted}
+        orgGranted={orgGranted}
+        credentialStatus={credential?.status}
+        // An org-scoped key is not editable from a workspace surface —
+        // the workspace-fenced update can never own it.
+        onEdit={secret.scope === "organization" ? undefined : onEdit}
+        onBeforeToggle={() => placement.pin(secret.id)}
+        compact={chooser}
+      />
+    );
+  };
+
+  if (chooser) {
+    return (
+      <div className={chooserGridClassName}>
+        {sortSecretsForChooser(pool).map(renderRow)}
+      </div>
+    );
+  }
+
+  if (kind === "llm") {
+    return <div className="divide-y">{pool.map(renderRow)}</div>;
+  }
+
+  const active = pool.filter((s) => placement.placeOf(s.id));
+  const inactive = pool.filter((s) => !placement.placeOf(s.id));
+
   return (
-    <div className="divide-y">
-      {pool.map((secret) => {
-        const credential = credentialById.get(secret.id);
-        const granted = grantedIds.has(secret.id);
-        const orgGranted =
-          !granted &&
-          (credential?.provenance.some((p) => p.scope === "organization") ??
-            false);
-        return (
-          <SecretGrantRow
-            key={secret.id}
-            agentId={agentId}
-            secret={secret}
-            granted={granted}
-            orgGranted={orgGranted}
-            credentialStatus={credential?.status}
-            // An org-scoped key is not editable from a workspace surface —
-            // the workspace-fenced update can never own it.
-            onEdit={secret.scope === "organization" ? undefined : onEdit}
-          />
-        );
-      })}
+    <div>
+      {active.length > 0 ? (
+        <div className="divide-y">{active.map(renderRow)}</div>
+      ) : (
+        <p className="text-muted-foreground py-6 text-center text-sm">
+          None are on for this agent yet. Turn one on below.
+        </p>
+      )}
+      <InactiveConnections count={inactive.length} noun="secrets">
+        {inactive.map(renderRow)}
+      </InactiveConnections>
     </div>
   );
 };

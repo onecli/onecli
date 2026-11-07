@@ -14,8 +14,20 @@
  */
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 
-/** DELIVERABLE files per message. Also the manifest bound on the turn wire. */
-export const MAX_ATTACHMENTS_PER_MESSAGE = 5;
+/**
+ * DELIVERABLE files per message. Also the manifest bound on the turn wire.
+ * 10 matches Slack's own per-message file maximum; each file still meets
+ * MAX_ATTACHMENT_BYTES on its own.
+ */
+export const MAX_ATTACHMENTS_PER_MESSAGE = 10;
+
+/**
+ * The manifest bound of a runner that does not advertise
+ * `maxAttachmentsPerMessage`: builds from before the cap was raised parse at
+ * most this many files, and their poll parse is all-or-nothing, so a longer
+ * manifest would fail every item in the batch.
+ */
+export const LEGACY_RUNNER_ATTACHMENTS_PER_MESSAGE = 5;
 
 /**
  * Attachment ROWS one message may reference, deliverable or not. Higher than
@@ -45,7 +57,10 @@ export const INLINE_IMAGE_MAX_BYTES = 3_700_000;
  */
 export const INLINE_IMAGES_TOTAL_MAX_BYTES = 10 * 1024 * 1024;
 
-/** Uploaded-but-never-sent bound, per conversation (swept after 24h). */
+/** Unsent capacity shared by an uploader's tabs in one conversation. Completed
+ * pending files are evicted oldest-first, never another uploader's files or an
+ * active upload. If every slot is uploading, new uploads must wait and retry.
+ * Unsent rows, including abandoned upload reservations, are swept after 24h. */
 export const MAX_PENDING_ATTACHMENTS_PER_CONVERSATION = 20;
 
 /**

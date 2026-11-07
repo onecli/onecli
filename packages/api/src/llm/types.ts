@@ -19,6 +19,13 @@ import type { AgentEffort } from "@onecli/agent-protocol";
  */
 export type LlmProviderId = "anthropic" | "openai";
 
+/**
+ * How a stored LLM credential authenticates, from `Secret.metadata.authMode`:
+ * a Console API key, or the OAuth credential a subscription login produced.
+ * Legacy rows with no metadata are `api-key`.
+ */
+export type LlmAuthMode = "api-key" | "oauth";
+
 export interface ModelOption {
   /**
    * The PROVIDER's own model id, always — `claude-sonnet-4-6`, never a harness
@@ -56,10 +63,11 @@ export interface LlmProvider {
    */
   defaultModel: string;
   /**
-   * Left undefined on purpose: absent means "send no effort at all and let the
-   * provider's own default stand", which is both the safest wire behaviour and
-   * the only one that cannot be rejected for a model whose accepted set we
-   * guessed wrong. An explicit level is always a user's choice.
+   * The level the DEFAULT model runs at when the user chose none. Applied to
+   * the default model only, whose id is known to accept it: a model the user
+   * picks runs at its own default unless they also pick a level, because a
+   * forced level is refused by a model with no reasoning control. Absent =
+   * send no effort and let the provider's own default stand.
    */
   defaultEffort?: AgentEffort;
   /** Which levels of OUR scale this provider can express. */
@@ -71,17 +79,12 @@ export interface LlmProvider {
    * against our own network.
    */
   catalogUrl: string;
-  /**
-   * Can a credential of this auth mode list at all? Asked BEFORE the
-   * credential is obtained, because obtaining it costs a KMS decrypt and the
-   * answer here does not depend on its value.
-   *
-   * `false` is a NORMAL state, not an error: an OAuth blob's access token is
-   * refreshed by the gateway, which the control plane must not reimplement.
-   * That arm serves the pinned list instead.
-   */
-  canList: (authMode: "api-key" | "oauth") => boolean;
-  catalogHeaders: (credential: string) => Record<string, string>;
+  /** Same headers the gateway injects for this auth mode, so the catalog is
+   *  the inventory of the credential the agent actually runs on. */
+  catalogHeaders: (
+    credential: string,
+    authMode: LlmAuthMode,
+  ) => Record<string, string>;
   parseCatalog: (body: unknown) => Array<{ id: string; label?: string }>;
   /**
    * Is this id a chat model a hosted agent could actually run? A prefix rule
@@ -92,4 +95,18 @@ export interface LlmProvider {
   labelFor: (id: string) => string;
   /** The offline answer. NEVER EMPTY — an empty dropdown is not a legal state. */
   fallback: readonly string[];
+  /**
+   * What a subscription (OAuth) login answers differently, for a provider
+   * whose login is a different product from its API: OpenAI's ChatGPT login
+   * lists on `chatgpt.com` and refuses some API models outright ("not
+   * supported when using Codex with a ChatGPT account"). Every field keeps the
+   * rule of the one it replaces. Read through `forAuthMode`, never directly.
+   */
+  oauth?: Partial<LlmAuthAnswers>;
 }
+
+/** The parts of a provider that depend on how its credential authenticates. */
+export type LlmAuthAnswers = Pick<
+  LlmProvider,
+  "defaultModel" | "catalogUrl" | "parseCatalog" | "fallback"
+>;

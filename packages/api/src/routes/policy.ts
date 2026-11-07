@@ -34,8 +34,9 @@ import {
 
 // ── Unified policy engine routes (/v1/policy, /v1/org/policy) ───────────────
 // A scope's policy is a singleton aggregate: a `/rules` sub-collection (CRUD +
-// reorder), a terminal `/default`, and a `/publish` action. The workspace and org
-// routers share these handlers, differing only in scope + auth. Inert in step 2.
+// reorder) and a terminal `/default`. Every write is enforced immediately (the
+// service publishes inside the write's transaction). `/publish` and
+// `/last-publish` remain only for older CLIs.
 
 interface PolicyRouteScope {
   /** Resolve the write/read scope from the request's auth context. */
@@ -84,6 +85,16 @@ export const registerPolicyRoutes = (
     return c.json(await listPolicyRules(cfg.resolveScope(auth), status));
   });
 
+  // A write can attach or detach connections (provider-level grants):
+  // re-render the affected agents' connected-apps list. Best-effort, a missed
+  // bump self-heals at the next boot. Lives here rather than in the service:
+  // home-sync-service already reaches policy-service through the rule loader,
+  // so the service cannot import the bump without a cycle.
+  const refreshHomes = (auth: AuthContext) =>
+    bumpHomeForScope(cfg.resolveScope(auth)).catch((err: unknown) => {
+      logger.warn({ err }, "policy write: agent home refresh failed");
+    });
+
   app.post("/rules", async (c) => {
     const auth = c.get("auth");
     const input = parse(createPolicyRuleSchema, await jsonBody(c));
@@ -95,6 +106,7 @@ export const registerPolicyRoutes = (
         metadata: { ruleId: r.id, name: r.name },
       }),
     );
+    await refreshHomes(auth);
     return c.json(rule, 201);
   });
 
@@ -103,13 +115,14 @@ export const registerPolicyRoutes = (
     const auth = c.get("auth");
     const { orderedIds } = parse(reorderPolicyRulesSchema, await jsonBody(c));
     const rules = await withAudit(
-      () => reorderPolicyRules(cfg.resolveScope(auth), orderedIds),
+      () => reorderPolicyRules(cfg.resolveScope(auth), orderedIds, auth.userId),
       () => ({
         ...auditBase(auth),
         action: AUDIT_ACTIONS.UPDATE,
         metadata: { reorder: true, count: orderedIds.length },
       }),
     );
+    await refreshHomes(auth);
     return c.json(rules);
   });
 
@@ -125,13 +138,14 @@ export const registerPolicyRoutes = (
     const id = c.req.param("id");
     const input = parse(updatePolicyRuleSchema, await jsonBody(c));
     const rule = await withAudit(
-      () => updatePolicyRule(cfg.resolveScope(auth), id, input),
+      () => updatePolicyRule(cfg.resolveScope(auth), id, input, auth.userId),
       () => ({
         ...auditBase(auth),
         action: AUDIT_ACTIONS.UPDATE,
         metadata: { ruleId: id },
       }),
     );
+    await refreshHomes(auth);
     return c.json(rule);
   });
 
@@ -139,13 +153,14 @@ export const registerPolicyRoutes = (
     const auth = c.get("auth");
     const id = c.req.param("id");
     await withAudit(
-      () => deletePolicyRule(cfg.resolveScope(auth), id),
+      () => deletePolicyRule(cfg.resolveScope(auth), id, auth.userId),
       () => ({
         ...auditBase(auth),
         action: AUDIT_ACTIONS.DELETE,
         metadata: { ruleId: id },
       }),
     );
+    await refreshHomes(auth);
     return c.body(null, 204);
   });
 
@@ -160,39 +175,34 @@ export const registerPolicyRoutes = (
     const auth = c.get("auth");
     const { action } = parse(setDefaultRuleSchema, await jsonBody(c));
     const rule = await withAudit(
-      () => setPolicyDefaultAction(cfg.resolveScope(auth), action),
+      () => setPolicyDefaultAction(cfg.resolveScope(auth), action, auth.userId),
       () => ({
         ...auditBase(auth),
         action: AUDIT_ACTIONS.UPDATE,
         metadata: { default: true, defaultAction: action },
       }),
     );
+    await refreshHomes(auth);
     return c.json(rule);
   });
 
+  // Compatibility for older CLIs (`onecli org policy publish`): writes already
+  // publish, so this only re-snapshots an identical draft.
   app.post("/publish", async (c) => {
     const auth = c.get("auth");
-    const scope = cfg.resolveScope(auth);
     const result = await withAudit(
-      () => publishPolicy(scope, auth.userId),
+      () => publishPolicy(cfg.resolveScope(auth), auth.userId),
       (r) => ({
         ...auditBase(auth),
         action: AUDIT_ACTIONS.PUBLISH,
         metadata: { generation: r.generation, ruleCount: r.ruleCount },
       }),
     );
-    // A publish can attach or detach connections (provider-level grants):
-    // re-render the affected agents' connected-apps list. Best-effort — a
-    // missed bump self-heals at the next boot. Lives here rather than in
-    // publishPolicy: home-sync-service already reaches policy-service through
-    // the rule loader, so the service cannot import the bump without a cycle.
-    await bumpHomeForScope(scope).catch((err: unknown) => {
-      logger.warn({ err }, "policy publish: agent home refresh failed");
-    });
+    await refreshHomes(auth);
     return c.json(result);
   });
 
-  // Who last applied this scope's policy, and when — null when never published.
+  // Compatibility for older CLIs (`onecli org policy status`).
   app.get("/last-publish", async (c) => {
     const auth = c.get("auth");
     return c.json(await getLastPublish(cfg.resolveScope(auth)));

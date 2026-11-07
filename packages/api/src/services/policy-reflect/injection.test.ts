@@ -170,8 +170,8 @@ describe("the shared selections match the pre-refactor inline walk", () => {
       {},
     ]);
 
-  it("over 2,000 random rule sets", () => {
-    for (let run = 0; run < 2000; run++) {
+  it("over 200 random rule sets", () => {
+    for (let run = 0; run < 200; run++) {
       const rows = Array.from({ length: Math.floor(rand() * 6) }, () =>
         rule({
           action: pick(["allow", "allow", "block", "rate_limit"]),

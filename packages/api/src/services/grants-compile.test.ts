@@ -1,8 +1,19 @@
 import type { Prisma } from "@onecli/db";
 import { describe, expect, it } from "vitest";
-import { getAppPermissionDefinitions } from "../apps/app-permissions";
-import { catalogToolIds } from "../apps/app-permissions/validate";
-import { compileConnectionStack } from "./grants-compile";
+import {
+  getAppPermissionDefinition,
+  getAppPermissionDefinitions,
+} from "../apps/app-permissions";
+import { getApps } from "../apps/registry";
+import {
+  assertUnlistedChoicesValid,
+  catalogToolIds,
+} from "../apps/app-permissions/validate";
+import {
+  compileConnectionStack,
+  defaultConnectionGrant,
+  stackToGrant,
+} from "./grants-compile";
 
 /** The terminal "everything else" row (see `compileConnectionStack`). */
 describe("compileConnectionStack: unlisted requests", () => {
@@ -116,5 +127,324 @@ describe("compileConnectionStack: unlisted requests", () => {
         },
       ]);
     }
+  });
+});
+
+/** "All other reads" / "All other writes": the two catch-all rows. */
+describe("compileConnectionStack: all other reads / writes", () => {
+  const compile = (
+    provider: string,
+    extra: {
+      otherReads?: "allow" | "ask" | "never";
+      otherWrites?: "allow" | "ask" | "never";
+    },
+  ) =>
+    compileConnectionStack("Grant: a · c", provider, {
+      access: "custom",
+      allow: [catalogToolIds(provider)[0] ?? ""],
+      ask: [],
+      ...extra,
+    });
+
+  it("absent choices compile exactly as before: one approval terminal", () => {
+    const before = compile("github-app", {});
+    const explicit = compile("github-app", {
+      otherReads: "ask",
+      otherWrites: "ask",
+    });
+    expect(explicit).toEqual(before);
+    expect(before.at(-1)).toMatchObject({
+      name: "Grant: a · c: everything else",
+      action: "allow",
+      requireApproval: true,
+      tools: [],
+    });
+    expect(before.at(-1)?.method).toBeUndefined();
+  });
+
+  it("AWS defaults both to Never: the terminal block it always had", () => {
+    expect(compile("aws", {}).at(-1)).toMatchObject({
+      name: "Grant: a · c: everything else",
+      action: "block",
+      tools: [],
+    });
+  });
+
+  it("different choices split the terminal: the stricter row first, narrowed", () => {
+    const stack = compile("github-app", { otherReads: "allow" });
+    const [writes, reads] = stack.slice(-2);
+    // Writes (Needs approval) is stricter than reads (Allowed): it comes
+    // first, narrowed to every method but GET/HEAD.
+    expect(writes).toMatchObject({
+      name: "Grant: a · c: all other writes",
+      action: "allow",
+      requireApproval: true,
+      tools: [],
+      method: "!GET,HEAD",
+    });
+    expect(reads).toMatchObject({
+      name: "Grant: a · c: all other reads",
+      action: "allow",
+      requireApproval: false,
+      tools: [],
+    });
+    expect(reads?.method).toBeUndefined();
+    // The blocked complement still sits before both catch-alls.
+    const blockedAt = stack.findIndex((r) => r.name.endsWith(": blocked"));
+    expect(blockedAt).toBeGreaterThanOrEqual(0);
+    expect(blockedAt).toBeLessThan(stack.length - 2);
+  });
+
+  it("stricter reads come first narrowed to GET,HEAD", () => {
+    const [reads, writes] = compile("github-app", {
+      otherReads: "never",
+      otherWrites: "ask",
+    }).slice(-2);
+    expect(reads).toMatchObject({
+      name: "Grant: a · c: all other reads",
+      action: "block",
+      method: "GET,HEAD",
+    });
+    expect(writes).toMatchObject({
+      name: "Grant: a · c: all other writes",
+      requireApproval: true,
+    });
+    expect(writes?.method).toBeUndefined();
+  });
+
+  // A gateway that predates method narrowing reads every whole-app row as
+  // "any method". The first catch-all row then decides EVERY unlisted
+  // request, so it must be the stricter choice: mid-deploy, a split grant
+  // is never looser than the user asked.
+  it("an old gateway (no method narrowing) only ever applies the stricter choice", () => {
+    const rank = { allow: 0, ask: 1, never: 2 } as const;
+    const choices = ["allow", "ask", "never"] as const;
+    for (const otherReads of choices) {
+      for (const otherWrites of choices) {
+        const last = compile("github-app", { otherReads, otherWrites }).filter(
+          (r) => r.tools.length === 0,
+        );
+        const first = last[0];
+        const applied =
+          first?.action === "block"
+            ? "never"
+            : first?.requireApproval
+              ? "ask"
+              : "allow";
+        const stricter =
+          rank[otherReads] >= rank[otherWrites] ? otherReads : otherWrites;
+        expect(applied, `${otherReads}/${otherWrites}`).toBe(stricter);
+      }
+    }
+  });
+
+  it("Never on writes is a block; block rows carry no conditions", () => {
+    const stack = compileConnectionStack(
+      "Grant: a · c",
+      "github-app",
+      {
+        access: "custom",
+        allow: ["get_repo"],
+        ask: [],
+        otherReads: "allow",
+        otherWrites: "never",
+      },
+      { repos: ["acme/web"] },
+    );
+    const byName = (n: string) => stack.find((r) => r.name.endsWith(n));
+    const reads = byName(": all other reads");
+    const writes = byName(": all other writes");
+    expect(reads?.conditions).toEqual({ repos: ["acme/web"] });
+    expect(writes).toMatchObject({ action: "block", requireApproval: false });
+    expect(writes?.conditions ?? null).toBeNull();
+  });
+});
+
+/** A stored stack reads back as the choices that compiled it. */
+describe("stackToGrant: round-trips the catch-all choices", () => {
+  type Row = Parameters<typeof stackToGrant>[0][number];
+  // The minimal row shape `stackToGrant` reads, as `writeStack` stores it.
+  const asRows = (stack: ReturnType<typeof compileConnectionStack>): Row[] =>
+    stack.map(
+      (r) =>
+        ({
+          action: r.action,
+          requireApproval: r.requireApproval,
+          targets: [
+            {
+              appTools: r.tools,
+              method: r.method ?? null,
+            },
+          ],
+        }) as unknown as Row,
+    );
+  const choices = ["allow", "ask", "never"] as const;
+  /** The stack as if the catalog gained `added` after it was written: no row
+   * names them (the blocked complement never listed them). */
+  const withoutBlocked = (rows: Row[], added: string[]): Row[] =>
+    rows.map((row) =>
+      row.action === "block"
+        ? ({
+            ...row,
+            targets: row.targets.map((t) => ({
+              ...t,
+              appTools: t.appTools.filter((id) => !added.includes(id)),
+            })),
+          } as Row)
+        : row,
+    );
+
+  it.each(
+    choices.flatMap((otherReads) =>
+      choices.map((otherWrites) => ({ otherReads, otherWrites })),
+    ),
+  )("reads=$otherReads writes=$otherWrites", ({ otherReads, otherWrites }) => {
+    const stack = compileConnectionStack("Grant: a · c", "github-app", {
+      access: "custom",
+      allow: ["get_repo"],
+      ask: ["create_issue"],
+      otherReads,
+      otherWrites,
+    });
+    expect(stackToGrant(asRows(stack), "github-app")).toEqual({
+      access: "custom",
+      allow: ["get_repo"],
+      ask: ["create_issue"],
+      otherReads,
+      otherWrites,
+    });
+  });
+
+  it("a stack written before the rows existed reads as Ask + Ask", () => {
+    const legacy = compileConnectionStack("Grant: a · c", "github-app", {
+      access: "custom",
+      allow: ["get_repo"],
+      ask: [],
+    });
+    expect(stackToGrant(asRows(legacy), "github-app")).toMatchObject({
+      otherReads: "ask",
+      otherWrites: "ask",
+    });
+  });
+
+  // A tool added to the catalog after the stack was written has no row of its
+  // own: the gateway decides it on the catch-alls, so it must read back as
+  // their choice, not as Never (a save would then block it).
+  it("a tool no row names reads as the catch-all choice it falls to", () => {
+    const stack = compileConnectionStack("Grant: a · c", "github-app", {
+      access: "custom",
+      allow: ["get_repo"],
+      ask: [],
+      otherReads: "allow",
+      otherWrites: "never",
+    });
+    // A GET-only read and a POST-only write, both unnamed by any row.
+    const grant = stackToGrant(
+      withoutBlocked(asRows(stack), ["list_issues", "create_issue"]),
+      "github-app",
+    );
+    expect(grant.allow).toEqual(["get_repo", "list_issues"]);
+    expect(grant.ask).toEqual([]);
+  });
+
+  it("a later tool lands on the stricter catch-all when its methods span both", () => {
+    // linear's tools name no method (any method, all on POST /graphql).
+    const stack = compileConnectionStack("Grant: a · c", "linear", {
+      access: "custom",
+      allow: ["get_issue"],
+      ask: [],
+      otherReads: "allow",
+      otherWrites: "ask",
+    });
+    const grant = stackToGrant(
+      withoutBlocked(asRows(stack), ["list_issues"]),
+      "linear",
+    );
+    expect(grant.allow).toEqual(["get_issue"]);
+    expect(grant.ask).toEqual(["list_issues"]);
+  });
+});
+
+describe("defaultConnectionGrant", () => {
+  const toolsOf = (provider: string, category: "read" | "write") =>
+    (getAppPermissionDefinition(provider)?.groups ?? [])
+      .filter((g) => g.category === category)
+      .flatMap((g) => g.tools.map((t) => t.id))
+      .sort();
+
+  it("an audited catalog allows reads (listed and unlisted), holds every write tool and unlisted write", () => {
+    const stack = compileConnectionStack(
+      "G",
+      "github",
+      defaultConnectionGrant("github"),
+    );
+    expect(toolsOf("github", "write").length).toBeGreaterThan(0);
+    expect(
+      stack.map((r) => [r.action, r.requireApproval, r.tools, r.method]),
+    ).toEqual([
+      ["allow", false, toolsOf("github", "read"), undefined],
+      ["allow", true, toolsOf("github", "write"), undefined],
+      // The stricter catch-all first, narrowed to everything but reads.
+      ["allow", true, [], "!GET,HEAD"],
+      ["allow", false, [], undefined],
+    ]);
+  });
+
+  it("a catalog not checked safe holds every unlisted request, reads included", () => {
+    const stack = compileConnectionStack(
+      "G",
+      "cloudflare",
+      defaultConnectionGrant("cloudflare"),
+    );
+    // One terminal over everything unlisted: the same shape every stack had
+    // before the two catch-all rows existed.
+    expect(stack.at(-1)).toMatchObject({
+      action: "allow",
+      requireApproval: true,
+      tools: [],
+    });
+    expect(stack.at(-1)?.method).toBeUndefined();
+  });
+
+  it("AWS: read tools allowed, writes and every unlisted request need approval", () => {
+    const stack = compileConnectionStack(
+      "G",
+      "aws-role",
+      defaultConnectionGrant("aws-role"),
+    );
+    expect(stack.map((r) => [r.action, r.requireApproval, r.tools])).toEqual([
+      ["allow", false, toolsOf("aws-role", "read")],
+      ["allow", true, toolsOf("aws-role", "write")],
+      ["allow", true, []],
+    ]);
+  });
+
+  it("never defaults to a catch-all the catalog rejects, and always holds other writes", () => {
+    for (const app of getApps()) {
+      const grant = defaultConnectionGrant(app.id);
+      if (grant.access !== "custom") continue;
+      expect(grant.otherWrites, app.id).toBe("ask");
+      expect(() =>
+        assertUnlistedChoicesValid(app.id, [
+          grant.otherReads,
+          grant.otherWrites,
+        ]),
+      ).not.toThrow();
+    }
+  });
+
+  it("no catalog tool is ever 'Always allow' for writes by default, in any app", () => {
+    for (const app of getApps()) {
+      const grant = defaultConnectionGrant(app.id);
+      if (grant.access !== "custom") continue;
+      const writes = toolsOf(app.id, "write");
+      expect(grant.allow.filter((t) => writes.includes(t))).toEqual([]);
+    }
+  });
+
+  it("keeps full access for an app with no catalog", () => {
+    expect(defaultConnectionGrant("jfrog-artifactory")).toEqual({
+      access: "full",
+    });
   });
 });

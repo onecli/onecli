@@ -1,10 +1,18 @@
 import { db, Prisma } from "@onecli/db";
 import { getCrypto } from "../../providers";
-import { channelProvider } from "./registry";
-import { chooseReaction } from "./reaction-chooser";
+import { channelProvider, isChannelProviderId } from "./registry";
+import { chooseReaction } from "../judges/reaction-judge";
 import { ChannelProviderApiError } from "./errors";
-import type { ChannelProvider, ChannelProviderId } from "./types";
+import type {
+  ChannelProvider,
+  ChannelProviderId,
+  WaitingMessage,
+} from "./types";
 import { noteOutboundFailure } from "./agent-channel-service";
+import {
+  AUTOMATION_SOURCES,
+  MAX_JOINING_FOLLOW_UPS,
+} from "../../validations/conversation";
 import { logger } from "../../lib/logger";
 
 const log = logger.child({ component: "turn-receipts" });
@@ -398,10 +406,42 @@ export const sweepStaleSessionReceipts = async (): Promise<void> => {
       log.warn({ turnId: row.turn_id }, "stale session loader; sweeping clear");
       await clearTurnReceipt(row.turn_id);
     }
+    // ANY receipt (card, loader, mark) whose turn is TERMINAL, whatever the
+    // receipt's age: the turn's own clear should have taken it, so one still
+    // here raced something (an API restart between the terminal flip and the
+    // clear, a refused provider call). A short grace past `finished_at`
+    // leaves the ordinary answer-post clear its window.
+    const graceBefore = new Date(Date.now() - TERMINAL_SWEEP_GRACE_MS);
+    const finished = await db.$queryRaw<{ turn_id: string }[]>`
+      SELECT r.turn_id
+      FROM channel_turn_receipts r
+      JOIN turns t ON t.id = r.turn_id
+      LEFT JOIN turns p ON p.id = t.follow_up_of_turn_id
+      WHERE (
+          t.status IN ('done', 'failed', 'aborted')
+          AND t.finished_at IS NOT NULL
+          AND t.finished_at < ${graceBefore}
+        ) OR (
+          t.status = 'joined'
+          AND p.status IN ('done', 'failed', 'aborted')
+          AND p.finished_at IS NOT NULL
+          AND p.finished_at < ${graceBefore}
+        )
+      ORDER BY r.created_at ASC
+      LIMIT ${STALE_SESSION_SWEEP_LIMIT}
+    `;
+    for (const row of finished) {
+      log.warn({ turnId: row.turn_id }, "receipt outlived its turn; clearing");
+      await clearTurnReceipt(row.turn_id);
+    }
   } catch (err) {
     log.warn({ err: String(err) }, "stale-session sweep skipped");
   }
 };
+
+/** How long after a turn finished its receipt is presumed leaked: the
+ * answer-post clear lands within seconds of the terminal flip. */
+const TERMINAL_SWEEP_GRACE_MS = 30 * 1000;
 
 /** Fire-and-forget prune: losing one pass costs nothing. */
 const pruneOldReceipts = (agentChannelId: string): void => {
@@ -451,8 +491,52 @@ const removeNarrationCard = async (
 };
 
 /**
+ * The messages a turn's card lists as waiting: sent to this run while it
+ * works, not read yet, oldest first. A person's words only: a joined
+ * automation (a cron or watch wake, a peer task's report) is the platform
+ * talking, and its card row would quote an instruction nobody typed. Each
+ * row names its author on THIS integration when they are linked, which is
+ * what puts their Send now on it.
+ *
+ * One indexed read (`followUpOfTurnId`), bounded by the per-conversation
+ * follow-up cap, so a card render costs the same however busy the thread.
+ */
+const waitingMessagesFor = async (
+  turnId: string,
+  integrationId: string,
+): Promise<WaitingMessage[]> => {
+  const rows = await db.turn.findMany({
+    where: {
+      followUpOfTurnId: turnId,
+      status: "joining",
+      source: { notIn: [...AUTOMATION_SOURCES] },
+    },
+    orderBy: { createdAt: "asc" },
+    take: MAX_JOINING_FOLLOW_UPS,
+    select: {
+      id: true,
+      message: true,
+      user: {
+        select: {
+          channelUserLinks: {
+            where: { integrationId },
+            select: { externalUserId: true },
+          },
+        },
+      },
+    },
+  });
+  return rows.map((row) => ({
+    id: row.id,
+    text: row.message,
+    authorExternalUserId: row.user?.channelUserLinks[0]?.externalUserId ?? null,
+  }));
+};
+
+/**
  * NARRATE the turn's current activity on its own card beside the
- * conversation — one row per tool call, the newest running.
+ * conversation: one row per tool call, the newest running, then a row for
+ * each message still waiting to be read (`waitingMessagesFor`).
  *
  * Best-effort and never load-bearing: the native loader is already standing
  * from the attach, so a provider that cannot narrate, a workspace that
@@ -472,79 +556,58 @@ export const narrateTurnActivity = async (
   activity: string,
 ): Promise<void> => {
   try {
-    const receipt = await db.channelTurnReceipt.findFirst({
-      where: { turnId, kind: "session" },
-      select: {
-        id: true,
-        channel: true,
-        messageTs: true,
-        cardThreadTs: true,
-        cardTs: true,
-        cardSteps: true,
-        cardRev: true,
-        cardAt: true,
-        agentChannel: { select: { provider: true, credentials: true } },
-      },
-    });
+    const receipt = await findCardReceipt(turnId);
     // No session receipt = nothing to narrate onto (a reaction fallback, or
     // a turn whose loader already came down). Not a problem.
     if (!receipt) return;
     // The same step repeated: the card already says this, and rewriting it
     // with itself would spend Slack's rate limit on nothing.
     if (receipt.cardSteps.at(-1) === activity) return;
-    // THROTTLE. Repeat-suppression alone bounds nothing: an agent
-    // alternating two tools changes the step every call, and a fast turn can
-    // pass Slack's ceiling and start collecting 429s. A step that appears a
-    // beat late is invisible to a reader; a rate-limited channel is not.
-    if (
-      receipt.cardAt &&
-      Date.now() - receipt.cardAt.getTime() < NARRATION_MIN_INTERVAL_MS
-    ) {
-      return;
-    }
 
-    const provider = channelProvider(
-      receipt.agentChannel.provider as ChannelProviderId,
-    );
-    if (!provider.narrateThreadWork) return;
+    const provider = narratorFor(receipt);
+    if (!provider) return;
 
     const steps = [...receipt.cardSteps, activity].slice(-NARRATION_MAX_STEPS);
 
-    // RESERVE the step before talking to the provider, and let that write
-    // be what excludes a rival. The route pushes narration detached, so two
-    // batches for one turn can be in flight together; writing the list here
-    // (not after the call) means the second caller reads the first's step
-    // and APPENDS to it rather than racing it — the card grows, it never
-    // rewinds.
+    // RECORD the step before talking to the provider. The route pushes
+    // narration detached, so two batches for one turn can be in flight
+    // together; writing the list here (not after the call) means the second
+    // caller reads the first's step and APPENDS to it rather than racing
+    // it: the card grows, it never rewinds.
     //
-    // The revision is bumped for the posting rule below, which is the one
-    // window this ordering cannot cover on its own.
+    // The revision is bumped for the posting rule below. A turn with no card
+    // yet also opens the write window here: the first post IS the window's
+    // write, so a refresh arriving meanwhile waits for it.
     await db.channelTurnReceipt.updateMany({
       where: { id: receipt.id },
-      data: { cardSteps: steps, cardAt: new Date(), cardRev: { increment: 1 } },
+      data: {
+        cardSteps: steps,
+        cardRev: { increment: 1 },
+        ...(receipt.cardTs === null && { cardAt: new Date() }),
+      },
     });
 
-    // POSTING is exclusive, and reserving the step does not make it so:
+    // A card already up is written through the paced path, which shows this
+    // step now or at the end of the current write window. Never dropped: an
+    // agent that runs a fast tool and then a long one must not leave the card
+    // naming the fast one for the whole of the long one.
+    if (receipt.cardTs !== null) {
+      await refreshTurnCard(turnId);
+      return;
+    }
+
+    // POSTING is exclusive, and recording the step does not make it so:
     // `cardTs` is written only once the provider answers, so a caller
     // arriving during that round-trip still reads null and would post a
     // SECOND card. The first writer (the one that found revision 0) posts;
-    // everyone else waits for the handle rather than racing it.
-    if (receipt.cardTs === null && receipt.cardRev > 0) return;
+    // everyone else hands its step to the paced path, which renders it once
+    // the post has landed.
+    if (receipt.cardRev > 0) {
+      await refreshTurnCard(turnId);
+      return;
+    }
 
-    const credentialsJson = receipt.agentChannel.credentials
-      ? await getCrypto().decrypt(receipt.agentChannel.credentials)
-      : null;
-
-    const result = await provider.narrateThreadWork({
-      credentialsJson,
-      channel: receipt.channel,
-      // A group thread's card belongs in that thread; a DM has none, and
-      // passing null is what keeps the card inline instead of opening a
-      // thread nobody asked for.
-      threadTs: receipt.cardThreadTs,
-      activities: steps,
-      cardTs: receipt.cardTs,
-    });
+    const result = await renderCard(provider, receipt, steps);
     // Null = this provider or workspace cannot narrate. RELEASE the claim so
     // the row still reflects what is actually on screen, and nothing later
     // tries to remove a card that was never posted.
@@ -565,17 +628,216 @@ export const narrateTurnActivity = async (
       where: { id: receipt.id },
       data: { cardTs: result.cardTs },
     });
+    // Whatever changed while the post was in flight (a step, a message
+    // accepted or read) moved the revision past this post's own and is owed
+    // to the card: the paced path shows it now that there is a card to
+    // write. Read AFTER the handle is recorded, so a change either moved the
+    // revision before this read or found the card and took the paced path
+    // itself.
+    const landed = await db.channelTurnReceipt.findUnique({
+      where: { id: receipt.id },
+      select: { cardRev: true },
+    });
+    if (landed && landed.cardRev !== receipt.cardRev + 1) {
+      await refreshTurnCard(turnId);
+    }
   } catch (err) {
-    // A PROVIDER refusal is routine (plan-gated workspace, dead credential)
-    // and stays at info: the loader is untouched and there is nothing to
-    // fix. A fault on OUR side is not routine — it means narration is
-    // broken for everyone, and swallowing it at the same level is how a
-    // missing column looked exactly like a Slack refusal for a whole
-    // afternoon (observed 2026-08-31). Same swallow, louder record.
-    const providerRefusal = err instanceof ChannelProviderApiError;
-    const line = "activity narration skipped; the loader stands";
-    if (providerRefusal) log.info({ err: String(err), turnId }, line);
-    else log.error({ err: String(err), turnId }, line);
+    logCardFailure(
+      err,
+      turnId,
+      "activity narration skipped; the loader stands",
+    );
+  }
+};
+
+/**
+ * WRITE a turn's posted card as it stands now (its steps, and the messages
+ * waiting on it), at most once per write window. Called whenever either
+ * changes: a step (above), a message accepted under the card, or the agent
+ * reading one, so a row appears with its Send now and leaves the moment its
+ * message is read.
+ *
+ * Paced, never dropped. Slack's message write is rate-limited per app, so
+ * one write per window (`NARRATION_MIN_INTERVAL_MS`) is the rule for every
+ * write to the card. A change that finds the window taken is deferred to
+ * the window's end, every change deferred in that window collapses into
+ * that one write, and the write reads the state as it is then. In-process
+ * and best-effort: a restart inside a window costs one write, which the next
+ * change repairs.
+ *
+ * Only a posted card is written here. Before the first step there is no
+ * card, and the first post lists whatever is waiting by then. While the
+ * first post is in flight, a change marks itself owed (it moves the
+ * revision) and the poster shows it once the card lands.
+ */
+export const refreshTurnCard = async (turnId: string): Promise<void> => {
+  try {
+    // CLAIM the window in one statement, so two writers (a step and a
+    // refresh, or two processes) can never both take it: the first moves the
+    // clock, and the second's condition no longer holds.
+    const claimed = await db.channelTurnReceipt.updateMany({
+      where: {
+        turnId,
+        kind: "session",
+        cardTs: { not: null },
+        OR: [
+          { cardAt: null },
+          { cardAt: { lte: new Date(Date.now() - NARRATION_MIN_INTERVAL_MS) } },
+        ],
+      },
+      data: { cardAt: new Date() },
+    });
+    if (claimed.count === 0) {
+      // No card yet, but a first post has begun (the revision moved): mark
+      // this change owed for the poster, which can wait longer than any
+      // window. A refused post leaves the same mark, which costs nothing:
+      // that turn has no card to write. Nothing begun at all: the first
+      // post lists what is waiting then.
+      const owed = await db.channelTurnReceipt.updateMany({
+        where: { turnId, kind: "session", cardTs: null, cardRev: { gt: 0 } },
+        data: { cardRev: { increment: 1 } },
+      });
+      if (owed.count > 0) return;
+      // A posted card whose window is taken: write once the window ends.
+      const row = await db.channelTurnReceipt.findFirst({
+        where: { turnId, kind: "session" },
+        select: { cardTs: true, cardAt: true },
+      });
+      if (row?.cardTs) {
+        deferCardRefresh(turnId, narrationFloorRemaining(row.cardAt));
+      }
+      return;
+    }
+    // Read the card AFTER the claim, so what is written is the newest state
+    // rather than the one this call started from.
+    const receipt = await findCardReceipt(turnId);
+    if (!receipt) return;
+    const provider = narratorFor(receipt);
+    if (!provider) return;
+    await renderCard(provider, receipt, receipt.cardSteps);
+  } catch (err) {
+    logCardFailure(err, turnId, "card write skipped; the loader stands");
+  }
+};
+
+/** Deferred card refreshes in this process, one per turn: a change that
+ * finds one already scheduled is covered by it. */
+const deferredCardRefreshes = new Map<string, NodeJS.Timeout>();
+
+const deferCardRefresh = (turnId: string, delayMs: number): void => {
+  if (deferredCardRefreshes.has(turnId)) return;
+  const timer = setTimeout(() => {
+    deferredCardRefreshes.delete(turnId);
+    void refreshTurnCard(turnId);
+  }, delayMs);
+  // A pending refresh is decoration: it must never hold a process open.
+  timer.unref();
+  deferredCardRefreshes.set(turnId, timer);
+};
+
+/** Test seam: cancel every deferred refresh and say which turns had one, so
+ * a suite can assert a deferral and run it on its own clock. Never called by
+ * production code. */
+export const takeDeferredCardRefreshesForTests = (): string[] => {
+  const turnIds = [...deferredCardRefreshes.keys()];
+  for (const timer of deferredCardRefreshes.values()) clearTimeout(timer);
+  deferredCardRefreshes.clear();
+  return turnIds;
+};
+
+/** How long until the card may be written again (0 = now). */
+const narrationFloorRemaining = (cardAt: Date | null): number =>
+  cardAt
+    ? Math.max(0, NARRATION_MIN_INTERVAL_MS - (Date.now() - cardAt.getTime()))
+    : 0;
+
+/** What a card render reads off the session receipt. */
+const cardReceiptSelect = {
+  id: true,
+  turnId: true,
+  channel: true,
+  cardThreadTs: true,
+  cardTs: true,
+  cardSteps: true,
+  cardRev: true,
+  cardAt: true,
+  workStatusSet: true,
+  agentChannel: {
+    select: { provider: true, credentials: true, integrationId: true },
+  },
+} satisfies Prisma.ChannelTurnReceiptSelect;
+
+type CardReceipt = Prisma.ChannelTurnReceiptGetPayload<{
+  select: typeof cardReceiptSelect;
+}>;
+
+const findCardReceipt = (turnId: string): Promise<CardReceipt | null> =>
+  db.channelTurnReceipt.findFirst({
+    where: { turnId, kind: "session" },
+    select: cardReceiptSelect,
+  });
+
+type Narrator = ChannelProvider &
+  Required<Pick<ChannelProvider, "narrateThreadWork">>;
+
+const canNarrate = (provider: ChannelProvider): provider is Narrator =>
+  provider.narrateThreadWork !== undefined;
+
+/** The receipt's provider when it can narrate, else null: an unknown
+ * provider string (a DB row must never crash a card write) and a provider
+ * without a card both mean there is nothing to write. */
+const narratorFor = (receipt: CardReceipt): Narrator | null => {
+  const id = receipt.agentChannel.provider;
+  if (!isChannelProviderId(id)) return null;
+  const provider = channelProvider(id);
+  return canNarrate(provider) ? provider : null;
+};
+
+/**
+ * Write the card: the given steps, every message waiting on the turn now,
+ * and Stop where no native loader stands. The ONE render both the step and
+ * the refresh go through, so the card always shows the two together.
+ */
+const renderCard = async (
+  provider: Narrator,
+  receipt: CardReceipt,
+  steps: string[],
+): Promise<{ cardTs: string } | null> => {
+  const [credentialsJson, waiting] = await Promise.all([
+    receipt.agentChannel.credentials
+      ? getCrypto().decrypt(receipt.agentChannel.credentials)
+      : null,
+    waitingMessagesFor(receipt.turnId, receipt.agentChannel.integrationId),
+  ]);
+  return provider.narrateThreadWork({
+    credentialsJson,
+    channel: receipt.channel,
+    // A group thread's card belongs in that thread; a DM has none, and
+    // passing null is what keeps the card inline instead of opening a
+    // thread nobody asked for.
+    threadTs: receipt.cardThreadTs,
+    activities: steps,
+    cardTs: receipt.cardTs,
+    // The card is the only signal where no native loader stands, so it
+    // carries the only Stop there is.
+    stoppable: !receipt.workStatusSet,
+    waiting,
+  });
+};
+
+/**
+ * A PROVIDER refusal is routine (plan-gated workspace, dead credential) and
+ * stays at info: the loader is untouched and there is nothing to fix. A
+ * fault on OUR side is not routine: it means narration is broken for
+ * everyone, and swallowing it at the same level is how a missing column
+ * looked exactly like a Slack refusal for a whole afternoon. Same swallow,
+ * louder record.
+ */
+const logCardFailure = (err: unknown, turnId: string, line: string): void => {
+  if (err instanceof ChannelProviderApiError) {
+    log.info({ err: String(err), turnId }, line);
+  } else {
+    log.error({ err: String(err), turnId }, line);
   }
 };
 
@@ -659,6 +921,38 @@ export const clearTurnReceipt = async (turnId: string): Promise<void> => {
   }
 };
 
+/** Backoff between clear attempts (ms): the clear is the only thing taking
+ * a narration card or loader down, so a transient refusal (a restart, a
+ * provider blip) is retried a few times before the sweep takes over. */
+export const CLEAR_RETRY_DELAYS_MS = [500, 2_000, 5_000];
+
+/**
+ * Clear one turn's receipt, retrying with backoff while the row survives
+ * (a clear that threw keeps the row). Only for a TERMINAL turn: a live
+ * turn's receipt is not ours to retry. Returns whether the row is gone.
+ */
+export const clearTurnReceiptWithRetry = async (
+  turnId: string,
+  delaysMs: readonly number[] = CLEAR_RETRY_DELAYS_MS,
+): Promise<boolean> => {
+  await clearTurnReceipt(turnId);
+  for (const delay of delaysMs) {
+    const left = await db.channelTurnReceipt.findUnique({
+      where: { turnId },
+      select: { id: true },
+    });
+    if (!left) return true;
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    log.info({ turnId }, "receipt survived its clear; retrying");
+    await clearTurnReceipt(turnId);
+  }
+  const left = await db.channelTurnReceipt.findUnique({
+    where: { turnId },
+    select: { id: true },
+  });
+  return left === null;
+};
+
 /**
  * Clear the receipts of a finished turn AND its joined follow-ups — the
  * answer that is posting covers all of them, so every seen-mark the exchange
@@ -672,7 +966,7 @@ export const clearTurnReceipts = async (turnId: string): Promise<void> => {
       select: { id: true },
     });
     for (const id of [turnId, ...joined.map((row) => row.id)]) {
-      await clearTurnReceipt(id);
+      await clearTurnReceiptWithRetry(id);
     }
   } catch (err) {
     log.warn({ err: String(err), turnId }, "receipt family clear skipped");
@@ -680,153 +974,156 @@ export const clearTurnReceipts = async (turnId: string): Promise<void> => {
 };
 
 /**
- * MOVE the conversation's seen-mark to the newest message (the mid-run
- * follow-up that just arrived): remove the reaction from wherever it sits —
- * the target turn's message or an earlier follow-up's — and attach the SAME
- * emoji to the new one. Reusing the previous reaction is deliberate: no
- * second chooser inference per follow-up, and the mark visibly travels
- * instead of mutating. A SESSION mark doesn't travel at all — the thread's
- * loader already covers every message in it, and the row stays on the turn
- * that is RUNNING, which is both where the clear looks (it walks the turn
- * and its joined follow-ups) and where the narration card is keyed. Detached
- * and best-effort like every receipt write; two rapid follow-ups' moves can
- * interleave into a transient double-mark until the answer-post clear
- * converges them — bounded, cosmetic, accepted.
+ * The turn behind a live loader, by the address a Stop names it by. Two
+ * kinds of loader, two addresses, one row:
+ *
+ *   - the provider's NATIVE loader (Slack: `agent_session_stopped`) names
+ *     the conversation and the THREAD ROOT, which is `messageTs` on a
+ *     session receipt;
+ *   - the narration CARD's own Stop (where no native loader stands, so the
+ *     card carries the only one) names the conversation and the CARD
+ *     message, which is `cardTs`.
+ *
+ * The session receipt IS the mapping: written exactly when the loader goes
+ * on, removed when the answer clears it. A row here means "this turn put
+ * that loader up"; no row means nothing of ours is working there. Scoped to
+ * the presence, so an address on another app's loader never matches.
+ *
+ * Newest first: a thread keeps one loader at a time, but a stale row from an
+ * earlier turn (its clear refused) can still sit beside the live one until
+ * the sweep takes it; the live turn is always the latest to go up.
  */
-export const moveTurnReceipt = async (input: {
+/** Where a Stop says the loader is: the native loader's thread root, or
+ * the narration card's own message. */
+export type LoaderAddress =
+  | { presenceId: string; channel: string; threadTs: string }
+  | { presenceId: string; channel: string; cardTs: string };
+
+export const findSessionTurn = async (
+  address: LoaderAddress,
+): Promise<string | null> => {
+  const receipt = await db.channelTurnReceipt.findFirst({
+    where: {
+      agentChannelId: address.presenceId,
+      channel: address.channel,
+      kind: "session",
+      ...("threadTs" in address
+        ? { messageTs: address.threadTs }
+        : { cardTs: address.cardTs }),
+    },
+    orderBy: { createdAt: "desc" },
+    select: { turnId: true },
+  });
+  return receipt?.turnId ?? null;
+};
+
+/**
+ * Take a STOPPED session out of `processing`. The provider does not do this
+ * itself when its Stop is clicked (Slack documents that the status stays
+ * until the app moves it), and the stop must look instant even while the
+ * abort is still reaching the sandbox: the turn's own close will clear the
+ * row and post "Stopped." when it lands. Best-effort, never throws: a
+ * refused status costs a loader that the close, or the provider's own
+ * timeout, still takes down.
+ */
+export const settleStoppedSession = async (input: {
   presenceId: string;
-  /** The follow-up row: the reaction mark's new owner, and the excluded id
-   * when resolving where the current mark sits. A SESSION mark does not
-   * change owner — see the session arm below. */
-  followUpTurnId: string;
-  /** The conversation whose seen-mark is moving. */
-  conversationId: string;
   channel: string;
-  messageTs: string;
-  /** The session root — threaded through so a no-mark fallback attach can
-   * still choose the session kind. Null only when the caller has none. */
-  threadTs?: string | null;
-  /** Where a narration card belongs, for the no-mark fallback below — the
-   * same field `attachTurnReceipt` takes. Carried rather than re-derived so
-   * a follow-up that falls through to an attach lands its card in the same
-   * thread its own turn would have. */
-  replyThreadTs?: string | null;
-  /** Whether there is no thread to hang a loader on, for that same fallback.
-   * Omitted keeps `attachTurnReceipt`'s own default. */
-  unthreaded?: boolean;
-  /** The inbound text — chooser input only when no mark exists to move. */
-  text: string;
+  threadTs: string;
 }): Promise<void> => {
   try {
-    // Resolve where the mark currently sits. `ChannelTurnReceipt` has no
-    // conversation column (and no Turn FK) on purpose, so the family is
-    // resolved through the conversation's own recent turns — which also
-    // survives promotion chains, where the mark can sit on a follow-up of a
-    // follow-up rather than on this one's direct target. Bounded recency:
-    // marks live for one exchange and are pruned at 24h regardless.
-    const candidateIds = (
-      await db.turn.findMany({
-        where: {
-          conversationId: input.conversationId,
-          id: { not: input.followUpTurnId },
-        },
-        orderBy: { createdAt: "desc" },
-        take: 30,
-        select: { id: true },
-      })
-    ).map((row) => row.id);
-
-    const current = await db.channelTurnReceipt.findFirst({
-      where: { turnId: { in: candidateIds } },
-      orderBy: { createdAt: "desc" },
-      select: {
-        id: true,
-        turnId: true,
-        channel: true,
-        messageTs: true,
-        kind: true,
-        reaction: true,
-        workStatusSet: true,
-        agentChannel: {
-          select: { id: true, provider: true, credentials: true },
-        },
-      },
+    const presence = await db.agentChannel.findUnique({
+      where: { id: input.presenceId },
+      select: { provider: true, credentials: true, appMode: true },
     });
-
-    if (!current) {
-      // Nothing to move (a web-opened turn never had a mark): fall back to
-      // the ordinary attach, chooser and all — with the SAME addressing its
-      // own turn would have had, so a threaded follow-up's card opens in its
-      // thread rather than at the top of the conversation.
-      await attachTurnReceipt({
-        presenceId: input.presenceId,
-        turnId: input.followUpTurnId,
-        channel: input.channel,
-        messageTs: input.messageTs,
-        threadTs: input.threadTs,
-        replyThreadTs: input.replyThreadTs,
-        ...(input.unthreaded !== undefined && { unthreaded: input.unthreaded }),
-        text: input.text,
-      });
-      return;
-    }
-
-    if (current.kind === "session") {
-      // The row STAYS on the turn it was attached to. Nothing moves
-      // provider-side (the thread's loader already covers the follow-up's
-      // message), and nothing moves ledger-side either.
-      //
-      // It used to be re-keyed to the follow-up, on the reasoning that the
-      // clear "fires off the newest turn's id". That reasoning was wrong in
-      // one direction and load-bearing in the other:
-      //
-      // - The clear fires off the FINISHED turn's id — the mirror passes
-      //   `item.turn.id` (routes/channel-adapter.ts), and `clearTurnReceipts`
-      //   then walks that turn AND its `joined` follow-ups. A row left here is
-      //   found either way, so the re-key bought nothing.
-      // - The narration card is keyed by turn id, and the supervisor reports
-      //   tool activity under the turn it is RUNNING: a steer never moves
-      //   `runtime.activeTurnId` (apps/sandbox-supervisor). Re-keying moved
-      //   the receipt out from under `narrateTurnActivity`, whose lookup then
-      //   missed and returned silently — so a mid-run follow-up showed a
-      //   frozen card, or in a top-level DM no card at all, for the rest of
-      //   the turn (live 2026-09-02).
-      //
-      // Keeping the row where the narration looks for it is what fixes that,
-      // and it is also the simpler invariant: a session receipt belongs to
-      // the run, not to the last message that joined it.
-      //
-      // The self-clear still runs, against the row's OWN turn: the same
-      // attach-vs-clear race applies here (a clear that fired between the
-      // lookup above and now would have found nothing to do), and the
-      // follow-up's arrival is exactly when the parent may have just
-      // finished.
-      await selfClearIfTurnFinished(current.turnId);
-      return;
-    }
-    if (!current.reaction) return; // malformed row — nothing to move
-    const reaction = current.reaction;
-
-    const credentialsJson = current.agentChannel.credentials
-      ? await getCrypto().decrypt(current.agentChannel.credentials)
-      : null;
-    const provider = channelProvider(
-      current.agentChannel.provider as ChannelProviderId,
+    // Only an agent-flavor app has a session to settle (a regular app's
+    // status call is refused for scope, and it never shows a Stop).
+    if (presence?.appMode !== "agent") return;
+    const provider = channelProvider(presence.provider as ChannelProviderId);
+    if (!provider.setThreadWorkStatus) return;
+    await provider.setThreadWorkStatus({
+      credentialsJson: presence.credentials
+        ? await getCrypto().decrypt(presence.credentials)
+        : null,
+      channel: input.channel,
+      threadTs: input.threadTs,
+      working: false,
+    });
+  } catch (err) {
+    void noteOutboundFailure(input.presenceId, err);
+    log.info(
+      { err: String(err), presenceId: input.presenceId },
+      "stopped session left processing",
     );
+  }
+};
 
-    // New mark FIRST, old mark off second: a crash in between leaves two
-    // marks (converged by the answer-post clear) rather than none — a
-    // vanished ack reads as a drop, which is the exact perception this
-    // feature kills.
+/**
+ * THE FOLLOW-UP'S OWN MARK: a mid-run message sent
+ * while the agent works gets a reaction of its own the moment it is
+ * accepted, and keeps it. One mark per message, never moved:
+ *
+ *   `hourglass_flowing_sand`   accepted, waiting for the agent to reach it
+ *   `eyes`                     the agent has it (`markFollowUpRead`)
+ *   (removed)                  the answer posted (`clearTurnReceipts`)
+ *
+ * No chooser call: the waiting mark is a fixed glyph with a fixed meaning,
+ * and spending the customer's key on a pick per follow-up bought nothing a
+ * reader could tell apart. A thread under a SESSION mark (the provider's
+ * native loader, keyed on the running turn) gets no emoji: its waiting mark
+ * is a row on the loader's card instead (`refreshTurnCard`), with the
+ * author's Send now beside it, and the row leaves when the agent reads it.
+ * The session receipt stays on the running turn, where the card and the
+ * clear look.
+ *
+ * Detached and best-effort like every receipt write. The row is keyed by the
+ * follow-up's own turn id, which is what the family clear walks (the turn
+ * and its `joined` follow-ups), so the mark comes off with the answer.
+ */
+export const FOLLOW_UP_WAITING_REACTION = "hourglass_flowing_sand";
+export const FOLLOW_UP_READ_REACTION = "eyes";
+
+export const attachFollowUpReceipt = async (input: {
+  presenceId: string;
+  /** The follow-up row the mark belongs to. */
+  followUpTurnId: string;
+  channel: string;
+  messageTs: string;
+}): Promise<void> => {
+  try {
+    const presence = await db.agentChannel.findUnique({
+      where: { id: input.presenceId },
+      select: { id: true, provider: true, credentials: true },
+    });
+    if (!presence) return;
+
+    // The target is the RUNNING turn, which is where a session mark sits
+    // (it never moves off the run): one lookup says whether the thread's
+    // loader already covers this message. When it does, the message's mark
+    // is its row on the loader's card (with its Send now), not an emoji.
+    const followUp = await db.turn.findUnique({
+      where: { id: input.followUpTurnId },
+      select: { followUpOfTurnId: true },
+    });
+    if (!followUp?.followUpOfTurnId) return;
+    const loader = await db.channelTurnReceipt.findFirst({
+      where: { turnId: followUp.followUpOfTurnId, kind: "session" },
+      select: { id: true },
+    });
+    if (loader) {
+      await refreshTurnCard(followUp.followUpOfTurnId);
+      return;
+    }
+
     try {
       await db.channelTurnReceipt.create({
         data: {
           turnId: input.followUpTurnId,
-          agentChannelId: current.agentChannel.id,
+          agentChannelId: presence.id,
           channel: input.channel,
           messageTs: input.messageTs,
           kind: "reaction",
-          reaction,
+          reaction: FOLLOW_UP_WAITING_REACTION,
         },
         select: { id: true },
       });
@@ -835,31 +1132,114 @@ export const moveTurnReceipt = async (input: {
         err instanceof Prisma.PrismaClientKnownRequestError &&
         err.code === "P2002"
       ) {
-        return; // a twin already moved for this follow-up — its mark stands
+        return; // a twin already marked this follow-up: its mark stands
       }
       throw err;
     }
+    pruneOldReceipts(presence.id);
+
+    const credentialsJson = presence.credentials
+      ? await getCrypto().decrypt(presence.credentials)
+      : null;
+    const provider = channelProvider(presence.provider as ChannelProviderId);
     await provider.addReceiptReaction({
       credentialsJson,
       channel: input.channel,
       messageTs: input.messageTs,
-      reaction,
+      reaction: FOLLOW_UP_WAITING_REACTION,
     });
-
-    await provider.removeReceiptReaction({
-      credentialsJson,
-      channel: current.channel,
-      messageTs: current.messageTs,
-      reaction,
-    });
-    await db.channelTurnReceipt.delete({ where: { id: current.id } });
-    // Same race window as attach: the answer may have posted (and its clear
-    // no-oped) while the marks were being shuffled.
+    // The same race as the turn's own attach: the answer may have posted
+    // (and its clear no-oped) while the mark was landing.
     await selfClearIfTurnFinished(input.followUpTurnId);
   } catch (err) {
+    void noteOutboundFailure(input.presenceId, err);
     log.warn(
       { err: String(err), followUpTurnId: input.followUpTurnId },
-      "receipt move skipped",
+      "follow-up receipt add skipped",
+    );
+  }
+};
+
+/**
+ * The agent has the message (the live pickup signal, `message.joined`):
+ * swap the follow-up's waiting mark for the read mark. New mark on first,
+ * old mark off second, so a crash between the two leaves both (converged by
+ * the answer-post clear) rather than none. Idempotent: a row already read,
+ * or one that never had the waiting mark (a session thread, a web-sourced
+ * follow-up with no receipt), changes nothing.
+ */
+export const markFollowUpRead = async (
+  followUpTurnId: string,
+): Promise<void> => {
+  try {
+    const receipt = await db.channelTurnReceipt.findFirst({
+      where: {
+        turnId: followUpTurnId,
+        kind: "reaction",
+        reaction: FOLLOW_UP_WAITING_REACTION,
+      },
+      select: {
+        id: true,
+        channel: true,
+        messageTs: true,
+        agentChannel: {
+          select: { id: true, provider: true, credentials: true },
+        },
+      },
+    });
+    if (!receipt) return;
+
+    const credentialsJson = receipt.agentChannel.credentials
+      ? await getCrypto().decrypt(receipt.agentChannel.credentials)
+      : null;
+    const provider = channelProvider(
+      receipt.agentChannel.provider as ChannelProviderId,
+    );
+    await provider.addReceiptReaction({
+      credentialsJson,
+      channel: receipt.channel,
+      messageTs: receipt.messageTs,
+      reaction: FOLLOW_UP_READ_REACTION,
+    });
+    // The ledger flips BEFORE the old mark comes off: a clear racing in
+    // between then removes the read mark (what the row says), and the
+    // waiting mark is taken off right here, so nothing is left behind.
+    // Conditional on the row still holding the waiting mark: a clear that
+    // won in between (the answer posted as the join landed) already took
+    // the waiting mark off and deleted the row, and the read mark just
+    // added would outlive the exchange. A row flipped by a twin stands.
+    const flipped = await db.channelTurnReceipt.updateMany({
+      where: { id: receipt.id, reaction: FOLLOW_UP_WAITING_REACTION },
+      data: { reaction: FOLLOW_UP_READ_REACTION },
+    });
+    if (flipped.count === 0) {
+      const row = await db.channelTurnReceipt.findUnique({
+        where: { id: receipt.id },
+        select: { id: true },
+      });
+      if (row) return; // a twin flipped it: its read mark stands
+      log.info(
+        { followUpTurnId },
+        "answer cleared the mark as it flipped; taking the read mark off",
+      );
+      await provider.removeReceiptReaction({
+        credentialsJson,
+        channel: receipt.channel,
+        messageTs: receipt.messageTs,
+        reaction: FOLLOW_UP_READ_REACTION,
+      });
+      return;
+    }
+    await provider.removeReceiptReaction({
+      credentialsJson,
+      channel: receipt.channel,
+      messageTs: receipt.messageTs,
+      reaction: FOLLOW_UP_WAITING_REACTION,
+    });
+  } catch (err) {
+    log.warn(
+      { err: String(err), followUpTurnId },
+      "follow-up read mark skipped",
     );
   }
 };

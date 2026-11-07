@@ -6,10 +6,15 @@ import { describe, expect, it } from "vitest";
 import { getApps } from "../apps/registry";
 import {
   AMBIENT_HAZARD_VARS,
+  HERMETIC_BASELINE_KEY,
   HERMETIC_CA_PEM_SENTINEL,
   HERMETIC_MARKER_VAR,
   PRESERVED_AMBIENT_VARS,
+  applyHermeticEnv,
   normalizeTestEnv,
+  pinProofDatabaseUrl,
+  workerBaselineHolder,
+  type HermeticBaselineHolder,
 } from "./hermetic-env";
 
 describe("normalizeTestEnv", () => {
@@ -155,7 +160,148 @@ describe("normalizeTestEnv", () => {
   });
 });
 
+describe("applyHermeticEnv: one worker, many files", () => {
+  it("the first file normalizes and records the worker baseline", () => {
+    const holder: HermeticBaselineHolder = {};
+    const env: NodeJS.ProcessEnv = {
+      EDITION: "cloud",
+      DATABASE_URL: "postgresql://ambient",
+      PATH: "/usr/bin",
+      VITEST_WORKER_ID: "1",
+    };
+    applyHermeticEnv(env, holder);
+    expect(env.NEXT_PUBLIC_EDITION).toBe("cloud");
+    expect(env.DATABASE_URL).toBeUndefined();
+    expect(holder[HERMETIC_BASELINE_KEY]).toMatchObject({
+      NEXT_PUBLIC_EDITION: "cloud",
+      PATH: "/usr/bin",
+      NODE_ENV: "test",
+    });
+    // The runner's own bookkeeping is vitest's, never part of our baseline.
+    expect(holder[HERMETIC_BASELINE_KEY]).not.toHaveProperty(
+      "VITEST_WORKER_ID",
+    );
+  });
+
+  it("a later file starts from the baseline, not from the previous file's pins", () => {
+    // The incident: the onprem lane (edition unset), one file pins cloud
+    // and never undoes it, and the NEXT file loaded as cloud.
+    const holder: HermeticBaselineHolder = {};
+    const env: NodeJS.ProcessEnv = { PATH: "/usr/bin" };
+    applyHermeticEnv(env, holder);
+
+    env.NEXT_PUBLIC_EDITION = "cloud";
+    env.EDITION = "cloud";
+    env.DATABASE_URL = "postgresql://previous-file";
+    env.TURN_CEILING_SECONDS = "1800";
+    env.PATH = "/changed";
+    delete env.NODE_ENV;
+
+    applyHermeticEnv(env, holder);
+    expect(env.NEXT_PUBLIC_EDITION).toBeUndefined();
+    expect(env.EDITION).toBeUndefined();
+    expect(env.DATABASE_URL).toBeUndefined();
+    expect(env.TURN_CEILING_SECONDS).toBeUndefined();
+    expect(env.PATH).toBe("/usr/bin");
+    expect(env.NODE_ENV).toBe("test");
+    expect(env).toEqual({ ...holder[HERMETIC_BASELINE_KEY] });
+  });
+
+  it("the cloud lane's carrier survives every reset, even after an onprem pin", () => {
+    const holder: HermeticBaselineHolder = {};
+    const env: NodeJS.ProcessEnv = { NEXT_PUBLIC_EDITION: "cloud" };
+    applyHermeticEnv(env, holder);
+    env.NEXT_PUBLIC_EDITION = "onprem";
+    env.EDITION = "onprem";
+    applyHermeticEnv(env, holder);
+    expect(env.NEXT_PUBLIC_EDITION).toBe("cloud");
+    expect(env.EDITION).toBeUndefined();
+  });
+
+  it("leaves the runner's per-worker vars to vitest", () => {
+    const holder: HermeticBaselineHolder = {};
+    const env: NodeJS.ProcessEnv = { VITEST: "true", TEST: "true" };
+    applyHermeticEnv(env, holder);
+    env.VITEST_POOL_ID = "2";
+    applyHermeticEnv(env, holder);
+    expect(env).toMatchObject({
+      VITEST: "true",
+      TEST: "true",
+      VITEST_POOL_ID: "2",
+    });
+  });
+});
+
+describe("pinProofDatabaseUrl: the pg project's step after the reset", () => {
+  it("keeps the proof database in DATABASE_URL across the reset between files", () => {
+    // The incident: a suite's unawaited poll queried the shared Prisma
+    // client after the suite's $disconnect, the reset had just deleted
+    // DATABASE_URL, and every later pg file failed "Environment variable
+    // not found: DATABASE_URL". The reset alone deletes it; reset + pin,
+    // as the pg setup runs them, leaves the proof database in place.
+    const holder: HermeticBaselineHolder = {};
+    const proof = "postgresql://ci:ci@localhost:5440/onecli";
+    const env: NodeJS.ProcessEnv = { POLICY_PROOF_DATABASE_URL: proof };
+    applyHermeticEnv(env, holder);
+    pinProofDatabaseUrl(env);
+    expect(env.DATABASE_URL).toBe(proof);
+
+    // A suite repoints or deletes it; the next file's setup puts it back.
+    delete env.DATABASE_URL;
+    applyHermeticEnv(env, holder);
+    expect(env.DATABASE_URL).toBeUndefined();
+    pinProofDatabaseUrl(env);
+    expect(env.DATABASE_URL).toBe(proof);
+  });
+
+  it("never revives an ambient DATABASE_URL when no proof database is opted in", () => {
+    // Locally without POLICY_PROOF_DATABASE_URL the pg suites skip; a
+    // developer's real DATABASE_URL must stay deleted, not come back.
+    for (const proof of [undefined, ""]) {
+      const holder: HermeticBaselineHolder = {};
+      const env: NodeJS.ProcessEnv = {
+        DATABASE_URL: "postgresql://a-real-dev-database",
+        ...(proof !== undefined && { POLICY_PROOF_DATABASE_URL: proof }),
+      };
+      applyHermeticEnv(env, holder);
+      pinProofDatabaseUrl(env);
+      expect(env.DATABASE_URL).toBeUndefined();
+    }
+  });
+
+  it("is wired as the pg project's only setup file, and the unit project keeps the plain reset", async () => {
+    // The pin must run in the SAME setup file as the reset: a project's
+    // setupFiles are appended to the root's, so a root reset plus a pg-only
+    // pin would leave the gap open between the two files.
+    const { default: config } = await import("../../vitest.config");
+    const projects = (config.test?.projects ?? []).flatMap((project) =>
+      typeof project === "object" && "test" in project ? [project] : [],
+    );
+    const setupOf = (name: string) =>
+      projects.find((project) => project.test?.name === name)?.test?.setupFiles;
+    expect(config.test?.setupFiles).toBeUndefined();
+    expect(setupOf("pg")).toEqual(["./src/testing/pg-proof-env.setup.ts"]);
+    expect(setupOf("unit")).toEqual(["./src/testing/hermetic-env.setup.ts"]);
+    const pgSetup = readFileSync(
+      join(import.meta.dirname, "pg-proof-env.setup.ts"),
+      "utf8",
+    );
+    expect(pgSetup).toMatch(
+      /applyHermeticEnv\(process\.env, workerBaselineHolder\(\)\);\s*pinProofDatabaseUrl\(process\.env\);/,
+    );
+  });
+});
+
 describe("setup wiring", () => {
+  it("recorded this worker's baseline on globalThis", () => {
+    // The reset only works if the setup keeps the baseline where the next
+    // file's setup can find it: the worker's globalThis.
+    const baseline = workerBaselineHolder()[HERMETIC_BASELINE_KEY];
+    expect(baseline).toBeDefined();
+    expect(baseline?.[HERMETIC_MARKER_VAR]).toBe("1");
+    expect(baseline?.GATEWAY_CA_PEM_FILE).toBe(HERMETIC_CA_PEM_SENTINEL);
+  });
+
   it("ran the hermetic setup before this file loaded", () => {
     // Fails on every machine if vitest.config.ts stops mounting the setup
     // file — the marker only exists when normalizeTestEnv ran in this worker.

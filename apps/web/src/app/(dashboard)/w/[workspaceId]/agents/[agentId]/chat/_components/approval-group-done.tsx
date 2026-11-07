@@ -1,15 +1,16 @@
 "use client";
 
 import { Message, MessageContent } from "@onecli/ui/components/message";
-import type { ApprovalSummary, SettledOutcome } from "@/lib/api/approvals";
+import type { ApprovalSummary, GroupedOutcome } from "@/lib/api/approvals";
 import { ApprovalTitle } from "@/lib/components/approvals/approval-title";
 
 /** Each outcome as the Done line says it, in the order it lists them. */
-const OUTCOME_COPY: [SettledOutcome, string][] = [
+const OUTCOME_COPY: [GroupedOutcome, string][] = [
   ["approved", "approved"],
   ["denied", "denied"],
   ["expired", "expired"],
-  ["decided", "decided elsewhere"],
+  ["cancelled", "cancelled"],
+  ["unknown", "no longer waiting"],
 ];
 
 /** The quiet record a finished task leaves in the thread: what it was and
@@ -25,7 +26,7 @@ export const ApprovalGroupDone = ({
   action: string;
   /** Set when every request acted on one record: the title links it. */
   summary?: ApprovalSummary;
-  counts: Record<SettledOutcome, number>;
+  counts: Record<GroupedOutcome, number>;
 }) => {
   const parts = OUTCOME_COPY.filter(([o]) => counts[o] > 0).map(
     ([o, copy]) => `${counts[o]} ${copy}`,

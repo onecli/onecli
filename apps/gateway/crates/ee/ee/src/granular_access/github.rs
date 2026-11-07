@@ -57,6 +57,28 @@ impl TokenScoper for GithubApp {
                 "GitHub App credentials incomplete, cannot refresh"
             )));
         };
+        // A connection built on a shared installation pins its own repo
+        // subset: an agent policy narrows inside it and can never widen it.
+        let repos = match apps::github_app_pinned_repositories(creds) {
+            apps::PinnedRepos::Unpinned => repos,
+            apps::PinnedRepos::Empty => {
+                return Some(Err(anyhow::anyhow!(
+                    "GitHub App connection pins an empty repository list; refusing to mint"
+                )))
+            }
+            apps::PinnedRepos::Pinned(pinned) => {
+                let inside: Vec<String> = repos
+                    .into_iter()
+                    .filter(|r| self.covered_by(r, &pinned))
+                    .collect();
+                if inside.is_empty() {
+                    return Some(Err(anyhow::anyhow!(
+                        "agent repository allowlist is outside this connection's repositories"
+                    )));
+                }
+                inside
+            }
+        };
         Some(apps::refresh_github_app_token(pk, aid, iid, Some(&repos)).await)
     }
 }

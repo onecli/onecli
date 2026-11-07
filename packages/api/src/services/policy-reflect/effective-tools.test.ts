@@ -348,6 +348,54 @@ describe("the agreement law (per-tool verdicts ≡ the evaluator)", () => {
     expect(result.basis.credentialAttached).toBe(true);
   });
 
+  it("monday: an org 'writes need approval' rule floors ONLY the write tools", async () => {
+    // The reported bug: every Monday tool is POST api.monday.com /v2 (one
+    // GraphQL endpoint), so an org rule naming only the write tools matched
+    // the read tools' identical requests too, and the drawer showed "Org
+    // minimum: needs approval" on every read row. The rule below is the one
+    // that was authored in the console, verbatim.
+    const writesNeedApproval = simRow({
+      id: "o-monday",
+      scope: "organization",
+      workspaceId: null,
+      organizationId: "org-1",
+      logicalId: "org-monday-writes",
+      name: "monday",
+      action: "allow",
+      requireApproval: true,
+      priority: 1,
+      targets: [
+        targetRow({
+          kind: "app",
+          appProvider: "monday",
+          appConnectionScope: "workspace",
+          appTools: [
+            "mutate_boards",
+            "mutate_docs",
+            "mutate_updates",
+            "manage_webhooks",
+            "send_notifications",
+          ],
+        }),
+      ],
+    });
+    armStubs({ orgRows: [writesNeedApproval] });
+
+    const result = await effectiveAppPermissions(
+      { provider: "monday", agentId: "agent-1" },
+      WORKSPACE_CTX,
+    );
+    const ceilings = new Map(
+      result.groups.flatMap((g) =>
+        g.tools.map((t) => [`${g.category}:${t.toolId}`, t.orgCeiling]),
+      ),
+    );
+    for (const [key, ceiling] of ceilings) {
+      if (key.startsWith("read:")) expect(ceiling, key).toBeNull();
+      else expect(ceiling, key).toBe("approval");
+    }
+  });
+
   it("github graphql: the panel splits the shared /graphql endpoint by operation kind", async () => {
     // The Manage-permissions scenario the discrimination exists for: a grant
     // stack with graphql_mutation (and create_pull) set to Never and

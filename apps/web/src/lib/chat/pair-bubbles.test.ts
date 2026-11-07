@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Turn } from "@/lib/api/types";
 import type { RenderedTurn } from "./transcript";
-import { pairBubbles, stripPeerFrame, taskClosedLine } from "./pair-bubbles";
+import { pairBubbles, stripPeerFrame } from "./pair-bubbles";
 
 /**
  * The pair view's one decision, tested as the pure function it is: which
@@ -33,6 +33,8 @@ const rendered = (
   lead: "",
   liveText: "",
   notices: [],
+  supersededApprovalIds: [],
+  desktopRequests: new Map(),
   peerMessages: [],
   peerMessagesOpeningTask: new Set<number>(),
   tools: [],
@@ -163,17 +165,6 @@ describe("pairBubbles", () => {
       new Map(),
     );
     expect(bubbles).toEqual([]);
-  });
-});
-
-describe("taskClosedLine", () => {
-  it("has a short plain line for every outcome", () => {
-    expect(taskClosedLine("reported")).toBe("Reported back to the person.");
-    expect(taskClosedLine("budget")).toContain("Out of messages");
-    expect(taskClosedLine("expired")).toContain("No progress");
-    expect(taskClosedLine("blocked")).toContain("blocked");
-    expect(taskClosedLine("removed")).toContain("removed");
-    expect(taskClosedLine("undeliverable")).toContain("could not be delivered");
   });
 });
 

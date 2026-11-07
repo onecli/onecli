@@ -2,7 +2,9 @@ import type { AppDefinition } from "./types";
 
 export const jfrogArtifactory: AppDefinition = {
   id: "jfrog-artifactory",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/jfrog-artifactory",
   name: "JFrog Artifactory",
+  apiDocsUrl: "https://docs.jfrog.com/integrations/docs/jfrog-api",
   icon: "/icons/jfrog.svg",
   darkIcon: "/icons/jfrog-light.svg",
   description:

@@ -1,6 +1,7 @@
 import { createMiddleware } from "hono/factory";
 import pino from "pino";
 import type { AuthContext } from "@onecli/api";
+import { loggablePath } from "@onecli/api/lib/loggable-path";
 
 const SLOW_THRESHOLD_MS = 3000;
 
@@ -28,7 +29,7 @@ export const requestLogger = createMiddleware(async (c, next) => {
     {
       requestId,
       method: c.req.method,
-      path: c.req.path,
+      path: loggablePath(c.req.path),
       status: c.res.status,
       ms,
       orgId: auth?.organizationId,

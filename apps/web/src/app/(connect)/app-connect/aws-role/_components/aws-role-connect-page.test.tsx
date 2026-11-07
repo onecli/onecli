@@ -36,16 +36,19 @@ vi.mock("@/app/(connect)/app-connect/_components/connect-flow", () => ({
     preContent,
     workspaceId,
     orgId,
+    agentId,
   }: {
     preContent?: ReactNode;
     workspaceId?: string;
     orgId?: string;
+    agentId?: string;
   }) => (
     <div>
       {/* The connect POST authenticates with these; without them the submit
           401s on cloud exactly like the read did. */}
       <span data-testid="flow-workspace">{workspaceId ?? "-"}</span>
       <span data-testid="flow-org">{orgId ?? "-"}</span>
+      <span data-testid="flow-agent">{agentId ?? "-"}</span>
       {preContent}
     </div>
   ),
@@ -93,6 +96,19 @@ describe("AwsRoleConnectPage", () => {
     });
     // …and onward to the connect POST, which needs the same scope.
     expect(screen.getByTestId("flow-workspace").textContent).toBe("ws-1");
+  });
+
+  it("passes the connecting agent on, so the new role lands on for it", async () => {
+    search.params = new URLSearchParams({
+      workspaceId: "ws-1",
+      agent_id: "agent-7",
+    });
+    mocks.getExternalId.mockResolvedValue({ externalId: "onecli-abc-123" });
+
+    renderPage();
+
+    await screen.findByText("onecli-abc-123");
+    expect(screen.getByTestId("flow-agent").textContent).toBe("agent-7");
   });
 
   it("passes the ORG scope from the query string", async () => {

@@ -1,0 +1,34 @@
+{
+  "_comment": "Shared custom-connection label corpus. The SAME cases are asserted by the TS side (customConnectionLabel, text.test.ts) and the Rust gateway (display_label, inject/src/secret_choice.rs, include_str!). A divergence means list_apps and the x-onecli-connections header name one connection two ways. max is in UTF-16 code units.",
+  "max": 80,
+  "fallback": "Custom connection",
+  "cases": [
+    { "raw": "Prod key", "want": "Prod key" },
+    { "raw": "  Prod   key  ", "want": "Prod key" },
+    { "raw": "Prod\nkey\u0007  one", "want": "Prodkey one" },
+    { "raw": "Prod\tkey", "want": "Prodkey" },
+    { "raw": "a\u0085b\u009bc\u007fd", "want": "abcd" },
+    { "raw": "Ada\u2028Bee\u2029Cy", "want": "Ada Bee Cy" },
+    { "raw": "x\u00a0y\u3000z", "want": "x y z" },
+    {
+      "raw": "\u202eProd\u200b key\u2066x\u2069\ufeff\u2060",
+      "want": "Prod keyx"
+    },
+    { "raw": "a\u200e\u200f\u202ab\u00ad\u061c\u180e", "want": "ab" },
+    { "raw": "Clé prod 🔑", "want": "Clé prod 🔑" },
+    { "raw": "", "want": "Custom connection" },
+    { "raw": "  \n\u200b\t", "want": "Custom connection" },
+    {
+      "raw": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "want": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "raw": "🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑",
+      "want": "🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑"
+    },
+    {
+      "raw": "x🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑",
+      "want": "x🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑"
+    }
+  ]
+}

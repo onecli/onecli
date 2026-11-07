@@ -1,18 +1,34 @@
 import { configDefaults, defineConfig } from "vitest/config";
+import {
+  API_LANE_ENV,
+  laneInvariantPgSuites,
+} from "./src/testing/lane-invariant";
+import { PG_PROOF_HOOK_TIMEOUT_MS } from "./src/testing/pg-proof";
 
 /** The `*.pg.test.ts` proof suites (see src/testing/pg-proof.ts). */
 const PG_PROOF_SUITES = ["src/**/*.pg.test.ts"];
 
+/**
+ * CI's onprem-default lane re-runs this package with the edition unset to
+ * prove module-load defaults. pg suites that pin their own edition before
+ * anything reads it run identical code in both lanes, so that lane skips
+ * them (see src/testing/lane-invariant.ts for the rule and its guard test).
+ */
+const ONPREM_LANE_SKIPS =
+  process.env[API_LANE_ENV] === "onprem"
+    ? laneInvariantPgSuites(import.meta.dirname)
+    : [];
+
 export default defineConfig({
   test: {
-    // Normalizes the ambient shell env to the clean-CI baseline before each
-    // test file's module graph loads — see src/testing/hermetic-env.ts.
-    setupFiles: ["./src/testing/hermetic-env.setup.ts"],
     projects: [
       {
         extends: true,
         test: {
           name: "unit",
+          // Normalizes the ambient shell env to the clean-CI baseline before
+          // each test file's module graph loads (src/testing/hermetic-env.ts).
+          setupFiles: ["./src/testing/hermetic-env.setup.ts"],
           exclude: [...configDefaults.exclude, ...PG_PROOF_SUITES],
         },
       },
@@ -26,10 +42,23 @@ export default defineConfig({
         // time, is the isolation the schema does not give them; the unit
         // project keeps full parallelism. (`singleFork` is honored per
         // project; the root-level `fileParallelism` is not.)
+        //
+        // Its setup is the same reset PLUS the proof database kept in
+        // DATABASE_URL between files, as one step (hermetic-env.ts, step 6):
+        // a query a suite left running after its `$disconnect` would
+        // otherwise break the shared Prisma client for every later file.
+        // Per project, not root: a project's setupFiles are appended to the
+        // root's, which would split the two steps across files.
+        //
+        // Hooks get more than the 10 s default: each suite loads its subject
+        // inside `beforeAll` (see PG_PROOF_HOOK_TIMEOUT_MS in pg-proof.ts).
         extends: true,
         test: {
           name: "pg",
+          setupFiles: ["./src/testing/pg-proof-env.setup.ts"],
           include: PG_PROOF_SUITES,
+          exclude: [...configDefaults.exclude, ...ONPREM_LANE_SKIPS],
+          hookTimeout: PG_PROOF_HOOK_TIMEOUT_MS,
           poolOptions: { forks: { singleFork: true } },
         },
       },

@@ -1,9 +1,11 @@
 "use client";
 
+import { useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { agents } from "@/lib/api";
 import type {
+  Agent,
   AgentDetail,
   AgentEffort,
   CreateAgentInput,
@@ -11,16 +13,20 @@ import type {
 } from "@/lib/api/types";
 import { queryKeys } from "@/lib/api/keys";
 import { squareCrop } from "@/lib/agents/square-crop";
-import {
-  getAgents,
-  deleteAgent,
-  renameAgent,
-  regenerateAgentToken,
-} from "@/lib/actions/agents";
+import { deleteAgent, renameAgent } from "@/lib/actions/agents";
 import { invalidateGatewayCache } from "@/lib/api/cache";
 
+/** The URL-scoped agent list, read through `/v1/agents` (workspace scoped
+ * from the URL by `apiFetch`). Never a server action: those are addressed by
+ * a build-specific id, so a tab left open across a deploy would keep posting
+ * an id the new server no longer knows, and the agent page could not load
+ * again until a full reload. */
 export const useAgents = (enabled = true) =>
-  useQuery({ queryKey: queryKeys.agents.list(), queryFn: getAgents, enabled });
+  useQuery({
+    queryKey: queryKeys.agents.list(),
+    queryFn: () => agents.list(),
+    enabled,
+  });
 
 /** Detail read incl. `recentRequestAt`. With `poll`, refetches every 5s until
  * a request is seen — the Install page's "waiting for the first request"
@@ -43,10 +49,10 @@ export const useAgentDetail = (
 /** Agents of an explicitly-chosen workspace (the org-level Get Started picker,
  * the sidebar's Agents group) — for page content inside /w/<id>/ routes use
  * `useAgents()`, which follows the URL scope. Chrome that can outlive a
- * workspace URL (the sidebar) must use THIS hook: `useAgents`'s server-action
- * queryFn posts to the CURRENT route and loses its workspace header the moment
- * the browser sits on a non-workspace URL (bare /org mid-redirect), turning a
- * routine refetch into a 500. */
+ * workspace URL (the sidebar) must use THIS hook: `useAgents` scopes its read
+ * from the CURRENT URL and has no workspace the moment the browser sits on a
+ * non-workspace URL (bare /org mid-redirect), turning a routine refetch into
+ * a refusal. */
 export const useAgentsForWorkspace = (workspaceId: string, enabled = true) =>
   useQuery({
     queryKey: queryKeys.agents.forWorkspace(workspaceId),
@@ -61,13 +67,14 @@ export const useCreateAgent = () => {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
       qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
+      // The agent quota the create gates read (cloud; inert elsewhere).
+      qc.invalidateQueries({ queryKey: queryKeys.billing.planUsage() });
       // A new agent appears in the connection→agents reverse view (app-page
       // connection cards, keyed under connections.*) — refresh it too.
       qc.invalidateQueries({ queryKey: queryKeys.connections.all() });
-      // Creation now WRITES GRANTS (the LLM auto-attach, plus every workspace
-      // connection and custom secret), so the grant and policy views are
-      // stale the moment it returns. Same sweep a manual attach does in
-      // use-grants.
+      // Creation WRITES GRANTS (the LLM auto-attach), so the grant and policy
+      // views are stale the moment it returns. Same sweep a manual attach
+      // does in use-grants.
       qc.invalidateQueries({ queryKey: queryKeys.grants.all() });
       qc.invalidateQueries({ queryKey: queryKeys.policy.all() });
       invalidateGatewayCache();
@@ -98,13 +105,14 @@ export const useCreateHostedAgent = () => {
       ...input
     }: {
       name: string;
-      identifier: string;
       instructions?: string;
       workspaceId?: string;
     }) => agents.create({ ...input, kind: "hosted" }, { workspaceId }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
       qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
+      // The agent quota the create gates read (cloud; inert elsewhere).
+      qc.invalidateQueries({ queryKey: queryKeys.billing.planUsage() });
       qc.invalidateQueries({ queryKey: queryKeys.connections.all() });
       // Creation writes grants here too (see `useCreateAgent`).
       qc.invalidateQueries({ queryKey: queryKeys.grants.all() });
@@ -121,8 +129,12 @@ export const useDeleteAgent = () => {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
       qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
-      // Drop the deleted agent from the connection→agents reverse view too.
+      // The agent quota the create gates read (cloud; inert elsewhere).
+      qc.invalidateQueries({ queryKey: queryKeys.billing.planUsage() });
+      // Drop the deleted agent from the connection→agents and secret→agents
+      // reverse views too.
       qc.invalidateQueries({ queryKey: queryKeys.connections.all() });
+      qc.invalidateQueries({ queryKey: queryKeys.grants.secrets() });
       // The delete cascades to the agent's conversations — refresh the chat
       // rail rather than leaving rows that 404 on click.
       qc.invalidateQueries({ queryKey: queryKeys.conversations.all() });
@@ -138,10 +150,15 @@ export const useRenameAgent = () => {
   return useMutation({
     mutationFn: ({ agentId, name }: { agentId: string; name: string }) =>
       renameAgent(agentId, name),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
-      // The renamed agent is also shown in the connection→agents reverse view.
-      qc.invalidateQueries({ queryKey: queryKeys.connections.all() });
+    onSuccess: async () => {
+      // Awaited: the rename dialog closes onto the new name, not the old.
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: queryKeys.agents.root() }),
+        // The renamed agent is also shown in the connection→agents and
+        // secret→agents reverse views.
+        qc.invalidateQueries({ queryKey: queryKeys.connections.all() }),
+        qc.invalidateQueries({ queryKey: queryKeys.grants.secrets() }),
+      ]);
       toast.success("Agent renamed");
     },
     onError: () => toast.error("Failed to rename agent"),
@@ -205,7 +222,7 @@ export const useUpdateAgentModel = () => {
         ...(effort !== undefined && { effort }),
       }),
     onSuccess: (_data, { agentId }) => {
-      // Both: `models` holds the selection, `detail` renders it on Overview.
+      // Both: `models` holds the selection, `detail` renders it in Details.
       qc.invalidateQueries({ queryKey: queryKeys.agents.models(agentId) });
       qc.invalidateQueries({ queryKey: queryKeys.agents.detail(agentId) });
       toast.success("Model updated");
@@ -251,16 +268,109 @@ export const useUpdateAgentImage = () => {
   });
 };
 
-export const useRegenerateToken = () => {
+/**
+ * "Restart agent": every conversation starts fresh and the sandbox stops.
+ * Only the agent list is invalidated (it carries the status pill). The
+ * conversations namespace is deliberately left alone: its direct-thread key
+ * is backed by a PUT that must never be swept, and the open thread's turns
+ * poll already picks up the turns the restart ended.
+ */
+export const useRestartAgent = () => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: regenerateAgentToken,
+    mutationFn: agents.restart,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
-      invalidateGatewayCache();
-      toast.success("Token regenerated");
+      toast.success("Agent restarted. Your next message starts it fresh.");
     },
-    onError: () => toast.error("Failed to regenerate token"),
+    onError: () => toast.error("Failed to restart the agent"),
+  });
+};
+
+/**
+ * The agents this page load already asked to warm. Hover, mount and click
+ * all mean the same thing for the same agent, and the server's answer is
+ * idempotent either way; the set makes them ONE request instead of three.
+ * Module scope on purpose: it must outlive any one component (the button
+ * that hovered is not the frame that mounts), and a full reload clears it,
+ * which is right (a parked box is parked again after 30 minutes anyway).
+ */
+const warmedAgentIds = new Set<string>();
+
+/**
+ * Warm a hosted agent's machine ahead of the person reaching it: the agent
+ * page's mount (any section), the Chat button's hover, an agents-list row.
+ * Fire-and-forget: it never blocks a navigation, never toasts (a hint that
+ * fails is a boot that happens a moment later, not an error the person
+ * caused), and never fires for a BYO agent (no machine) or twice for one
+ * agent in a page load. The returned function is stable per agent.
+ */
+export const useWarmAgent = () => {
+  const { mutate } = useMutation({
+    mutationFn: (agentId: string) => agents.wake(agentId),
+    // A refused hint is forgotten so a later door may try again: a 5xx on
+    // a hover must not silence the frame's mount.
+    onError: (_error, agentId) => warmedAgentIds.delete(agentId),
+  });
+  // `mutate` is referentially stable, so the returned function is too (an
+  // effect may list it as a dep without re-running every render).
+  return useCallback(
+    (agent: Pick<Agent, "id" | "kind"> | undefined) => {
+      if (!agent || agent.kind !== "hosted") return;
+      if (warmedAgentIds.has(agent.id)) return;
+      warmedAgentIds.add(agent.id);
+      mutate(agent.id);
+    },
+    [mutate],
+  );
+};
+
+/** How often the boot screen re-reads the machine's status while it waits. */
+export const SANDBOX_STATUS_POLL_MS = 1_000;
+
+/**
+ * The machine's lifecycle status, polled while `enabled` and the box is not
+ * yet `running` (the onboarding boot screen's wait). Stops polling at
+ * `running`: nothing on that screen needs a later state. `workspaceId`
+ * targets a workspace the URL does not carry (onboarding).
+ */
+export const useAgentSandboxStatus = (
+  agentId: string | null | undefined,
+  {
+    enabled = true,
+    workspaceId,
+  }: { enabled?: boolean; workspaceId?: string } = {},
+) =>
+  useQuery({
+    queryKey: queryKeys.agents.sandbox(agentId ?? ""),
+    queryFn: () => agents.sandbox(agentId ?? "", { workspaceId }),
+    enabled: enabled && Boolean(agentId),
+    refetchInterval: (query) =>
+      query.state.data?.status === "running" ? false : SANDBOX_STATUS_POLL_MS,
+    refetchIntervalInBackground: false,
+  });
+
+/**
+ * The onboarding rename: the agent was created as the default name the
+ * moment the flow opened, and the name step renames it. Quiet (no toast:
+ * the boot screen that follows is the feedback) and workspace-scoped (the
+ * onboarding URL carries none). The agents namespace is swept so the chat
+ * the person lands on reads the new name.
+ */
+export const useRenameOnboardingAgent = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      name,
+      workspaceId,
+    }: {
+      agentId: string;
+      name: string;
+      workspaceId: string;
+    }) => agents.update(agentId, { name }, { workspaceId }),
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: queryKeys.agents.root() }),
   });
 };
 

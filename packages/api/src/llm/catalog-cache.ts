@@ -1,4 +1,5 @@
-import type { LlmProvider, ModelOption } from "./types";
+import { forAuthMode } from "./registry";
+import type { LlmAuthMode, LlmProvider, ModelOption } from "./types";
 
 /**
  * The model catalog, fetched live and cached in process.
@@ -6,13 +7,16 @@ import type { LlmProvider, ModelOption } from "./types";
  * THE CREDENTIAL IS PASSED, USED, AND DROPPED. It is never logged, never
  * returned, and never stored on a cache entry.
  *
- * Keyed by the SECRET, not by the provider. A provider's `/v1/models` looks
- * like public product data and is not: both providers return the inventory
- * that KEY may use, which can include preview and allowlisted ids. Sharing one
- * entry across tenants would show one customer's early access to another, and
- * would let a tenant whose key was revoked pace everybody else's refresh with
- * its own failure backoff. Entries are small — a few hundred short strings —
- * and bounded by the number of granted LLM secrets on the instance.
+ * Keyed by the SECRET and its auth mode, not by the provider. A provider's
+ * `/v1/models` looks like public product data and is not: both providers
+ * return the inventory that KEY may use, which can include preview and
+ * allowlisted ids. Sharing one entry across tenants would show one customer's
+ * early access to another, and would let a tenant whose key was revoked pace
+ * everybody else's refresh with its own failure backoff. The auth mode is part
+ * of the key because one secret's value can be replaced by the other kind
+ * (an API key by a ChatGPT login), and the two list different products.
+ * Entries are small — a few hundred short strings — and bounded by the number
+ * of granted LLM secrets on the instance.
  *
  * Never empty, in any state: live → stale → pinned. An empty dropdown is not a
  * legal answer, so every failure arm degrades to the next rung down rather
@@ -43,7 +47,7 @@ interface CacheEntry {
   nextRetryAt?: number;
 }
 
-/** `${provider}:${secretId}` — see the header on why not the provider alone. */
+/** `${provider}:${authMode}:${secretId}` — see the header on why. */
 type CacheKey = string;
 
 const cache = new Map<CacheKey, CacheEntry>();
@@ -63,8 +67,8 @@ export const resetModelCatalogCache = (): void => {
   inflight.clear();
 };
 
-const pinned = (provider: LlmProvider): ModelOption[] =>
-  provider.fallback.map((id) => ({
+const pinned = (provider: LlmProvider, authMode: LlmAuthMode): ModelOption[] =>
+  forAuthMode(provider, authMode).fallback.map((id) => ({
     id,
     label: provider.labelFor(id),
     source: "pinned" as const,
@@ -73,8 +77,10 @@ const pinned = (provider: LlmProvider): ModelOption[] =>
 const fetchCatalog = async (
   provider: LlmProvider,
   headers: Record<string, string>,
+  authMode: LlmAuthMode,
 ): Promise<ModelOption[]> => {
-  const res = await fetch(provider.catalogUrl, {
+  const { catalogUrl, parseCatalog } = forAuthMode(provider, authMode);
+  const res = await fetch(catalogUrl, {
     headers,
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     // The URL is a constant, so a redirect can only ever move us OFF the host
@@ -85,7 +91,7 @@ const fetchCatalog = async (
   });
   // The provider's error body can carry account details; never let it travel.
   if (!res.ok) throw new Error(`catalog fetch failed: ${res.status}`);
-  const parsed = provider.parseCatalog(await res.json());
+  const parsed = parseCatalog(await res.json());
   const models: ModelOption[] = [];
   for (const { id, label } of parsed) {
     if (!provider.isSelectable(id)) continue;
@@ -101,13 +107,14 @@ const refresh = (
   provider: LlmProvider,
   key: CacheKey,
   headers: Record<string, string>,
+  authMode: LlmAuthMode,
 ): Promise<void> => {
   const existing = inflight.get(key);
   if (existing) return existing.promise;
   const flight: Flight = { promise: Promise.resolve() };
   flight.promise = (async () => {
     try {
-      const models = await fetchCatalog(provider, headers);
+      const models = await fetchCatalog(provider, headers, authMode);
       cache.set(key, { models, fetchedAt: Date.now() });
     } catch {
       // Keep serving what we have, and pace the next attempt.
@@ -120,7 +127,7 @@ const refresh = (
       // failure seeds the pinned list as the entry — `fetchedAt: 0` keeps it
       // permanently stale, so a later success still replaces it.
       const entry = cache.get(key) ?? {
-        models: pinned(provider),
+        models: pinned(provider, authMode),
         fetchedAt: 0,
       };
       entry.staleSince ??= Date.now();
@@ -160,21 +167,17 @@ export const getModelCatalog = async (
   provider: LlmProvider,
   secretId: string,
   credential: () => Promise<string | null>,
-  authMode: "api-key" | "oauth",
+  authMode: LlmAuthMode,
 ): Promise<ModelCatalog> => {
-  const key = `${provider.id}:${secretId}`;
+  const key = `${provider.id}:${authMode}:${secretId}`;
   const entry = cache.get(key);
   if (entry && Date.now() - entry.fetchedAt < TTL_MS)
     return { models: entry.models, degraded: false };
 
-  // Decided BEFORE the credential is fetched, because it does not depend on
-  // the value — and an OAuth secret DOES have a decryptable blob, so asking
-  // first would spend a KMS decrypt on a credential we then refuse to use.
   const serveWhatWeHave = (): ModelCatalog => ({
-    models: entry ? entry.models : pinned(provider),
+    models: entry ? entry.models : pinned(provider, authMode),
     degraded: true,
   });
-  if (!provider.canList(authMode)) return serveWhatWeHave();
 
   // A stale entry inside its backoff window answers now; no credential, no
   // fetch. Checked here so a failing provider costs nothing per request.
@@ -183,18 +186,18 @@ export const getModelCatalog = async (
 
   const value = await credential();
   if (value === null) return serveWhatWeHave();
-  const headers = provider.catalogHeaders(value);
+  const headers = provider.catalogHeaders(value, authMode);
 
   if (entry) {
     // Stale-while-revalidate: answer now from what we hold, refresh behind it,
     // so this endpoint's latency never tracks the provider's.
-    void refresh(provider, key, headers);
+    void refresh(provider, key, headers, authMode);
     return { models: entry.models, degraded: true };
   }
 
-  await refresh(provider, key, headers);
+  await refresh(provider, key, headers, authMode);
   const filled = cache.get(key);
-  if (!filled) return { models: pinned(provider), degraded: true };
+  if (!filled) return { models: pinned(provider, authMode), degraded: true };
   // Freshness, not mere existence: a FAILED cold refresh also leaves an entry
   // (the pinned list, stamped `fetchedAt: 0` so it is stale by construction),
   // and reporting that as a live catalog would be a lie the UI acts on.

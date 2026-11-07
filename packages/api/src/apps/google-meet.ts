@@ -7,7 +7,10 @@ import {
 
 export const googleMeet: AppDefinition = {
   id: "google-meet",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/google-meet",
   name: "Google Meet",
+  apiDocsUrl:
+    "https://developers.google.com/workspace/meet/api/reference/rest/v2",
   icon: "/icons/google-meet.svg",
   description: "Create and manage meetings.",
   connectionMethod: {
@@ -43,5 +46,6 @@ export const googleMeet: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
   },
 };

@@ -7,7 +7,10 @@ import {
 
 export const googleAnalytics: AppDefinition = {
   id: "google-analytics",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/google-analytics",
   name: "Google Analytics",
+  apiDocsUrl:
+    "https://developers.google.com/analytics/devguides/reporting/data/v1/rest",
   icon: "/icons/google-analytics.svg",
   description: "Access report data and run analytics queries.",
   connectionMethod: {
@@ -43,5 +46,6 @@ export const googleAnalytics: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
   },
 };

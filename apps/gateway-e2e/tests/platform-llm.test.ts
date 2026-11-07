@@ -26,7 +26,10 @@ import { throughProxy } from "../src/proxy.js";
  *  - a spent credit blocks with the trial_credit_exhausted 403 (seeded via the
  *    durable floor, exactly how a restarted gateway re-learns spend);
  *  - the credit is keyed to the org's founding OWNER, so a second org by the
- *    same user shares the exhausted pool (the "new org, fresh $5" hole).
+ *    same user shares the exhausted pool (the "new org, fresh $5" hole);
+ *  - only a trusted owner gets it: a Google sign-in (any address) or any
+ *    address that is not a consumer Microsoft mailbox. An outlook.com owner,
+ *    or an org with no active owner, gets no platform key at all.
  */
 
 const PLATFORM_KEY = "sk-ant-api03-platform-e2e";
@@ -47,10 +50,41 @@ const platformEnv = {
   PLATFORM_ANTHROPIC_API_HOST: "127.0.0.1",
 } as const;
 
+type Cx = Parameters<Parameters<typeof scenario>[1]>[0];
+
+/**
+ * Make `ids.user` the org's founding owner, with the given address and
+ * recorded sign-in provider (`users.sign_in_provider`). Every address used
+ * below is made up.
+ */
+const seedOwner = async (
+  cx: Cx,
+  email: string,
+  signInProvider: string | null = null,
+) => {
+  await cx.db.prisma.user.create({
+    data: {
+      id: cx.ids.user,
+      email,
+      externalAuthId: cx.ids.user,
+      signInProvider,
+    },
+  });
+  await cx.db.prisma.organizationMember.create({
+    data: {
+      organizationId: cx.ids.org,
+      userId: cx.ids.user,
+      userEmail: email,
+      role: "owner",
+    },
+  });
+};
+
 describe("platform trial credit (cloud edition)", () => {
   scenario("injects the platform key for a keyless org", async (cx) => {
     const upstream = await cx.upstream();
     await cx.seed(); // no secrets, no grants — a brand-new user's world
+    await seedOwner(cx, `${cx.ids.nonce}@company.example`);
     const gw = await cx.startGateway({
       env: platformEnv,
       expectedEdition: "Cloud",
@@ -73,6 +107,7 @@ describe("platform trial credit (cloud edition)", () => {
   scenario("does not inject without the env key", async (cx) => {
     const upstream = await cx.upstream();
     await cx.seed();
+    await seedOwner(cx, `${cx.ids.nonce}@company.example`);
     const gw = await cx.startGateway(CLOUD); // no PLATFORM_ANTHROPIC_API_KEY
 
     await throughProxy(gw.origin, {
@@ -92,6 +127,7 @@ describe("platform trial credit (cloud edition)", () => {
       // scenarios hit the stub because of the override, not a loose match.
       const upstream = await cx.upstream();
       await cx.seed();
+      await seedOwner(cx, `${cx.ids.nonce}@company.example`);
       const gw = await cx.startGateway({
         env: { ...CLOUD_ENV, PLATFORM_ANTHROPIC_API_KEY: PLATFORM_KEY },
         expectedEdition: "Cloud",
@@ -139,15 +175,15 @@ describe("platform trial credit (cloud edition)", () => {
     async (cx) => {
       const upstream = await cx.upstream();
       await cx.seed();
+      await seedOwner(cx, `${cx.ids.nonce}@company.example`);
       // Spend the whole credit via the durable floor — the same row a running
-      // gateway persists and a restarted one rehydrates enforcement from. No
-      // owner is seeded, so the grant subject falls back to the ORG-attributed
-      // subject (`org:<id>` — the column carries a rendered BudgetSubject,
-      // never a bare id).
+      // gateway persists and a restarted one rehydrates enforcement from. The
+      // grant subject is the founding owner's USER (`user:<id>` — the column
+      // carries a rendered BudgetSubject, never a bare id).
       await cx.db.prisma.budgetSpend.create({
         data: {
           secretId: "platform:anthropic",
-          organizationId: `org:${cx.ids.org}`,
+          organizationId: `user:${cx.ids.user}`,
           period: "total",
           // $5 in nano-dollars — exactly the default limit, and >= is a block.
           spentNanos: 5_000_000_000n,
@@ -188,18 +224,7 @@ describe("platform trial credit (cloud edition)", () => {
       const upstream = await cx.upstream();
       await cx.seed();
       // Make ids.user the org's founding owner...
-      const email = `${cx.ids.nonce}-owner@e2e.invalid`;
-      await cx.db.prisma.user.create({
-        data: { id: cx.ids.user, email, externalAuthId: cx.ids.user },
-      });
-      await cx.db.prisma.organizationMember.create({
-        data: {
-          organizationId: cx.ids.org,
-          userId: cx.ids.user,
-          userEmail: email,
-          role: "owner",
-        },
-      });
+      await seedOwner(cx, `${cx.ids.nonce}-owner@company.example`);
       // ...whose lifetime credit is already spent (as if in an earlier org:
       // the spend row keys on the USER subject, not this org).
       await cx.db.prisma.budgetSpend.create({
@@ -227,4 +252,70 @@ describe("platform trial credit (cloud edition)", () => {
       );
     },
   );
+
+  scenario(
+    "an outlook.com owner gets no platform key (a consumer Microsoft mailbox)",
+    async (cx) => {
+      const upstream = await cx.upstream();
+      await cx.seed();
+      await seedOwner(cx, `AlexKim${cx.ids.nonce.slice(0, 6)}@outlook.com`);
+      const gw = await cx.startGateway({
+        env: platformEnv,
+        expectedEdition: "Cloud",
+      });
+
+      const res = await throughProxy(gw.origin, {
+        url: upstream.url("/v1/messages"),
+        token: cx.ids.agentToken,
+      });
+
+      // Forwarded untouched, exactly like an org with no credit at all: no
+      // platform key, and no budget 403 either (the credit never applied).
+      expect(res.status).toBe(200);
+      const [seen] = await upstream.waitForRequests(1);
+      expect(seen?.header("x-api-key")).toBeUndefined();
+    },
+  );
+
+  scenario(
+    "a Google sign-in owner gets it even on an outlook.com address",
+    async (cx) => {
+      const upstream = await cx.upstream();
+      await cx.seed();
+      await seedOwner(
+        cx,
+        `AlexKim${cx.ids.nonce.slice(0, 6)}@outlook.com`,
+        "Google",
+      );
+      const gw = await cx.startGateway({
+        env: platformEnv,
+        expectedEdition: "Cloud",
+      });
+
+      await throughProxy(gw.origin, {
+        url: upstream.url("/v1/messages"),
+        token: cx.ids.agentToken,
+      });
+
+      const [seen] = await upstream.waitForRequests(1);
+      expect(seen?.header("x-api-key")).toBe(PLATFORM_KEY);
+    },
+  );
+
+  scenario("an org with no active owner gets no platform key", async (cx) => {
+    const upstream = await cx.upstream();
+    await cx.seed(); // no owner seeded
+    const gw = await cx.startGateway({
+      env: platformEnv,
+      expectedEdition: "Cloud",
+    });
+
+    await throughProxy(gw.origin, {
+      url: upstream.url("/v1/messages"),
+      token: cx.ids.agentToken,
+    });
+
+    const [seen] = await upstream.waitForRequests(1);
+    expect(seen?.header("x-api-key")).toBeUndefined();
+  });
 });

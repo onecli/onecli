@@ -13,14 +13,20 @@ import {
   decide,
   listPending,
   type ApprovalDecisionInput,
+  type ApprovalSimilar,
   type PendingApproval,
 } from "@/lib/api/approvals";
 import { listPendingChannelApprovals } from "@/lib/api/channel-approvals";
+import type { PendingChannelApprovalItem } from "@/lib/api/channel-approvals";
 import * as channels from "@/lib/api/channels";
-import type { ChannelProvider } from "@/lib/api/channels";
+import type { ChannelProvider, ReachDecision } from "@/lib/api/channels";
 import { getWorkspaceId } from "@/lib/api-fetch";
 import { queryKeys } from "@/lib/api/keys";
+import { invalidateGatewayCache } from "@/lib/api/cache";
+import { useInvalidateGrants } from "@/hooks/use-grants";
+import { listItem, patchItem } from "@/lib/api/optimistic";
 import { hasWorkspaceContext } from "@/lib/navigation";
+import { useOptimisticMutation } from "@/hooks/use-optimistic-mutation";
 
 /**
  * How far this browser's clock reads ahead of the gateway's, at most: every
@@ -167,16 +173,20 @@ export const useDecideApproval = () => {
     mutationFn: ({
       id,
       decision,
+      similar,
     }: {
       id: string;
       decision: ApprovalDecisionInput;
-    }) => decide(id, decision),
+      /** "Approve similar": the offer the reviewer accepted. The gateway
+       *  decides what it covers; this only asks for it. */
+      similar?: ApprovalSimilar;
+    }) => decide(id, decision, similar && "similar"),
     onMutate: ({ id, decision }) => settleOptimistically(qc, [id], decision),
     onError: (_err, { id }, ctx) => {
       restorePending(qc, [id], ctx?.previous);
       toast.error("Failed to submit decision");
     },
-    onSuccess: (outcome, { decision }) => {
+    onSuccess: (outcome, { decision, similar }) => {
       if (outcome === "already_settled") {
         // The card was stale: expired, decided from another surface, or the
         // gateway restarted. The click changed nothing — say that, quietly.
@@ -184,7 +194,11 @@ export const useDecideApproval = () => {
         return;
       }
       toast.success(
-        decision === "approve" ? "Request approved" : "Request denied",
+        decision === "deny"
+          ? "Request denied"
+          : similar
+            ? `Approved, with similar updates for ${similar.windowMinutes} min`
+            : "Request approved",
       );
     },
     onSettled: () => {
@@ -310,68 +324,154 @@ export const usePendingChannelApprovals = () => {
     queryKey: queryKeys.approvals.channel(workspaceId ?? "none"),
     queryFn: () => listPendingChannelApprovals(workspaceId as string),
     enabled: hasWorkspaceContext(pathname) && workspaceId !== undefined,
+    // Cards raised in an open chat refetch instantly (`raisesApproval`);
+    // this catches cards raised elsewhere (Slack, schedules, other members).
     refetchInterval: 15_000,
     refetchIntervalInBackground: false,
   });
 };
 
-/** Decide one action approval from the bell (approve / always-allow /
- * reject+reason) — the per-agent decide door, bell cache refreshed. */
-export const useDecideChannelAction = (agentId: string) => {
-  const qc = useQueryClient();
-  const workspaceId = getWorkspaceId();
-  return useMutation({
-    mutationFn: (input: {
+/** The bell's channel arm, every workspace's entry: a decision leaves the
+ * list on click (the gateway-approval convention) and comes back if it
+ * fails. */
+const leaveChannelBell = (qc: QueryClient, itemId: string) =>
+  patchItem(
+    qc,
+    [...queryKeys.approvals.all(), "channel"],
+    listItem<PendingChannelApprovalItem>((i) => i.id === itemId),
+    () => undefined,
+  );
+
+const refreshChannelBell = (qc: QueryClient) =>
+  Promise.all([
+    qc.invalidateQueries({
+      queryKey: [...queryKeys.approvals.all(), "channel"],
+    }),
+    qc.invalidateQueries({ queryKey: queryKeys.channels.all() }),
+  ]);
+
+/** Decide one action approval from the bell (approve / reject+reason), the
+ * per-agent decide door. On a standing question an approve is Always allow
+ * and a reject is Never. Instant: the ask leaves the bell on click, and the
+ * outcome (done, failed, already settled) is said when the server answers;
+ * the row is gone by then, so the hook says it. */
+export const useDecideChannelAction = (agentId: string) =>
+  useOptimisticMutation<
+    Awaited<ReturnType<typeof channels.decideActionApproval>>,
+    {
       approvalId: string;
-      decision: "approve" | "approve_always" | "reject";
+      decision: "approve" | "reject";
+      /** The ask is a standing question: say the outcome in its words. */
+      standing?: boolean;
       reason?: string;
-    }) =>
-      channels.decideActionApproval(agentId, input.approvalId, {
-        decision: input.decision,
-        ...(input.reason !== undefined && { reason: input.reason }),
+      /** The picked option on a choice card. */
+      choice?: "agent" | "you" | "allow";
+    }
+  >({
+    family: "channel-bell",
+    itemKey: ({ approvalId }) => `channel-ask:${approvalId}`,
+    write: ({ approvalId, decision, reason, choice }) =>
+      channels.decideActionApproval(agentId, approvalId, {
+        decision,
+        ...(reason !== undefined && { reason }),
+        ...(choice !== undefined && { choice }),
       }),
-    onSuccess: () => {
-      if (workspaceId) {
-        qc.invalidateQueries({
-          queryKey: queryKeys.approvals.channel(workspaceId),
-        });
+    apply: (qc, { approvalId }) => leaveChannelBell(qc, approvalId),
+    succeeded: (outcome, { decision, standing }) => {
+      if (outcome.kind === "already_settled") {
+        toast.info("Already decided elsewhere.");
+      } else if (decision === "reject") {
+        toast.success(
+          standing
+            ? "Never. The agent was told."
+            : "Rejected. The agent was told.",
+        );
+      } else if (outcome.status === "failed") {
+        toast.error("Approved, but it failed. The agent was told.");
+      } else {
+        toast.success(approvedToast(outcome.note, standing === true));
       }
-      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
     },
+    refresh: refreshChannelBell,
+    failure: (_qc, { decision }) =>
+      decision === "reject"
+        ? "Couldn't reject the request"
+        : "Couldn't approve the request",
+  });
+
+/** What a successful approve says: the handler's own outcome line when it
+ * gave one (e.g. "Sent to Sam."), else the generic words. */
+export const approvedToast = (
+  note: string | undefined,
+  standing: boolean,
+): string => {
+  const said = note?.trim();
+  if (said) return said;
+  return standing ? "Done. Always allowed from now on." : "Approved and done.";
+};
+
+/** Approve an agent-proposed custom connection with the key the person
+ * typed. The server creates the secret and grants it to that agent only, so
+ * the bell, the secrets list, the agent's grant views and the gateway cache
+ * all refresh. Deliberately NOT optimistic: the card waits for the answer,
+ * because a refused key has to stay on screen to be corrected. */
+export const useApproveCustomConnection = (agentId: string) => {
+  const qc = useQueryClient();
+  const invalidateGrants = useInvalidateGrants();
+  return useMutation({
+    // The variables carry the pasted key: drop the mutation from the cache
+    // the moment nothing observes it (the card resets after it settles), not
+    // after the default 5 minutes. No onMutate snapshot keeps it either.
+    gcTime: 0,
+    mutationFn: (input: { approvalId: string; value: string }) =>
+      channels.approveCustomConnection(agentId, input.approvalId, input.value),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: queryKeys.secrets.all() });
+      void qc.invalidateQueries({ queryKey: queryKeys.counts.all() });
+      // The approve writes a grant, so the agent's toggles, badges and
+      // effective-credential views refetch too, or the new connection reads
+      // as "off" until a reload.
+      invalidateGrants();
+      void invalidateGatewayCache();
+    },
+    // Settled either way: a 409 (decided elsewhere) must clear the card too.
+    onSettled: () => refreshChannelBell(qc),
   });
 };
 
-/** Decide one reach ask from the bell — space (3-way) or person (2-way),
- * through the existing per-agent reach doors. */
-export const useDecideChannelReach = (agentId: string, provider: string) => {
-  const qc = useQueryClient();
-  const workspaceId = getWorkspaceId();
-  return useMutation({
-    mutationFn: (input: {
+/** Decide one reach ask from the bell: a space or a person, both two-way,
+ * through the existing per-agent reach doors. Instant: the ask leaves the
+ * bell on click and comes back if the decision fails. */
+export const useDecideChannelReach = (agentId: string, provider: string) =>
+  useOptimisticMutation<
+    { kind: string },
+    {
+      itemId: string;
       externalRef: string;
       subjectKind: "space" | "external_user";
-      state: "approved" | "members_only" | "blocked";
-    }) =>
-      input.subjectKind === "space"
+      state: ReachDecision;
+      /** Said once the server agrees ("Donna answers everyone in #ops"). */
+      confirmation: string;
+    }
+  >({
+    family: "channel-bell",
+    itemKey: ({ itemId }) => `channel-ask:${itemId}`,
+    write: ({ externalRef, subjectKind, state }) =>
+      subjectKind === "space"
         ? channels.setReachState(
             agentId,
             provider as ChannelProvider,
-            input.externalRef,
-            input.state,
+            externalRef,
+            state,
           )
         : channels.setPersonReachState(
             agentId,
             provider as ChannelProvider,
-            input.externalRef,
-            input.state === "members_only" ? "blocked" : input.state,
+            externalRef,
+            state,
           ),
-    onSuccess: () => {
-      if (workspaceId) {
-        qc.invalidateQueries({
-          queryKey: queryKeys.approvals.channel(workspaceId),
-        });
-      }
-      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
-    },
+    apply: (qc, { itemId }) => leaveChannelBell(qc, itemId),
+    succeeded: (_result, { confirmation }) => toast.success(confirmation),
+    refresh: refreshChannelBell,
+    failure: () => "Couldn't save that decision",
   });
-};

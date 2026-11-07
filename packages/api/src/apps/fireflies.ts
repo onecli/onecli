@@ -2,8 +2,10 @@ import type { AppDefinition } from "./types";
 
 export const fireflies: AppDefinition = {
   id: "fireflies",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/fireflies",
   name: "Fireflies",
   icon: "/icons/fireflies.svg",
+  apiDocsUrl: "https://docs.fireflies.ai/getting-started/introduction",
   description: "AI meeting transcripts, summaries, and action items.",
   connectionMethod: {
     type: "api_key",
@@ -11,7 +13,8 @@ export const fireflies: AppDefinition = {
       {
         name: "apiKey",
         label: "API Key",
-        description: "Your Fireflies API key from Integrations → Fireflies API",
+        description:
+          "Your Fireflies API key from Integrations → Fireflies API.",
         placeholder: "Paste your Fireflies API key",
         helpUrl: "https://app.fireflies.ai/integrations/custom/fireflies",
         helpLabel: "Get your API key",

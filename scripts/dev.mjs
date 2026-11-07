@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { normalizeDevArgs } from "./lib/args.mjs";
+import { AGENT_DEV_TAG, buildAgentImages } from "./lib/agent-image.mjs";
 import { devExcludeFilters } from "./lib/dev-services.mjs";
 import { EnvFile, resolveEnv } from "./lib/env-file.mjs";
 import { portBusy } from "./lib/ports.mjs";
@@ -78,7 +79,7 @@ const DEV_DEFAULTS = {
   // where it wanted a routable one only warns and reuses it — dev sandboxes
   // would boot with no route to the gateway.
   RUNNER_SANDBOX_NETWORK: "onecli-sandboxes-dev",
-  RUNNER_AGENT_IMAGE: "onecli-agent:dev",
+  RUNNER_AGENT_IMAGE: AGENT_DEV_TAG,
   RUNNER_NAME: "dev",
   // better-auth refuses sign-in/sign-up POSTs from any origin it was not told
   // about, and dev can't enumerate its origins anyway: the dev server proxies
@@ -170,7 +171,7 @@ const askYesNo = async (question, def = true) => {
  * runner can start.
  */
 const offerAgentImageBuild = async (image) => {
-  if (image !== "onecli-agent:dev") {
+  if (image !== AGENT_DEV_TAG) {
     warn(
       `The agent image ${image} is not available — runner skipped.`,
       "Pull or build it, then re-run pnpm dev.",
@@ -195,12 +196,7 @@ const offerAgentImageBuild = async (image) => {
     );
     return false;
   }
-  const b = spawnSync(
-    "docker",
-    ["build", "-f", "docker/agent.Dockerfile", "-t", image, "."],
-    { cwd: ROOT, stdio: "inherit" },
-  );
-  if (b.status !== 0) {
+  if (!buildAgentImages(ROOT, image)) {
     warn(
       "The agent image build failed — starting without hosted agents.",
       "Retry with: pnpm agent:build",

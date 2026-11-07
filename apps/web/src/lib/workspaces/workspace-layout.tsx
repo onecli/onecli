@@ -1,8 +1,5 @@
-import { redirect } from "next/navigation";
 import dynamic from "next/dynamic";
-import { getServerSession } from "@/lib/auth/server";
-import { db } from "@onecli/db";
-import { canAccessWorkspaceAsUser } from "@onecli/api/services/workspace-access-check";
+import { requireAccessibleWorkspace } from "@/lib/workspaces/workspace-access";
 import { WorkspaceNameBroadcast } from "@/lib/workspaces/workspace-name-broadcast";
 
 // Lazy: the quota banner is Cloud billing UI (renders nothing elsewhere) — a
@@ -10,6 +7,11 @@ import { WorkspaceNameBroadcast } from "@/lib/workspaces/workspace-name-broadcas
 const OverQuotaBanner = dynamic(() =>
   import("@/ee/billing/_components/over-quota-banner").then(
     (m) => m.OverQuotaBanner,
+  ),
+);
+const PaymentIssueBanner = dynamic(() =>
+  import("@/ee/billing/_components/payment-issue-banner").then(
+    (m) => m.PaymentIssueBanner,
   ),
 );
 
@@ -20,42 +22,7 @@ interface Props {
 
 export default async function WorkspaceLayout({ children, params }: Props) {
   const { workspaceId } = await params;
-  const session = await getServerSession();
-  if (!session) redirect("/auth/login");
-
-  const user = await db.user.findUnique({
-    where: { externalAuthId: session.id },
-    select: { id: true },
-  });
-  if (!user) redirect("/auth/login");
-
-  const workspace = await db.workspace.findFirst({
-    where: {
-      id: workspaceId,
-      organization: {
-        members: { some: { userId: user.id, status: { not: "suspended" } } },
-      },
-    },
-    select: {
-      id: true,
-      name: true,
-      organizationId: true,
-    },
-  });
-  if (!workspace) {
-    redirect("/org");
-  }
-  // Usage is bindings-only since step 13b — the creator arm was dropped, so on
-  // RBAC deployments (cloud, licensed self-host) every user must hold a
-  // WorkspaceAccess binding (direct or group) or be an org admin/owner to open
-  // the workspace; non-RBAC deployments enforce no roles. The provider-driven
-  // shared check is the same one the auth middleware runs, so the layout and
-  // the API can never disagree. The findFirst above already excludes
-  // suspended members.
-  const allowed = await canAccessWorkspaceAsUser(user.id, workspace);
-  if (!allowed) {
-    redirect("/org");
-  }
+  const workspace = await requireAccessibleWorkspace(workspaceId);
 
   return (
     <>
@@ -68,6 +35,7 @@ export default async function WorkspaceLayout({ children, params }: Props) {
           page is handed the dashboard's raw flex ROW cell, where two loose
           siblings would render side by side instead of stacked. */}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <PaymentIssueBanner />
         <OverQuotaBanner />
         {children}
       </div>

@@ -16,7 +16,7 @@ const state = vi.hoisted(() => ({
   holding: false,
 }));
 
-vi.mock("next/navigation", () => ({ usePathname: () => "/w/ws-1/overview" }));
+vi.mock("next/navigation", () => ({ usePathname: () => "/w/ws-1/activity" }));
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
@@ -156,5 +156,81 @@ describe("useDecideApprovals", () => {
       queryKeys.approvals.list(),
     );
     expect(cached?.map((a) => a.id)).toEqual(["bad"]);
+  });
+});
+
+describe("useApproveCustomConnection", () => {
+  it("does not keep the pasted key in the mutation cache after success", async () => {
+    vi.doMock("@/lib/api/channels", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("@/lib/api/channels")>()),
+      approveCustomConnection: vi.fn(async () => ({
+        kind: "decided",
+        status: "executed",
+      })),
+    }));
+    vi.doMock("@/lib/api/cache", () => ({
+      invalidateGatewayCache: vi.fn(async () => {}),
+    }));
+    const { useApproveCustomConnection } = await load();
+    const { client, wrapper } = setup();
+    const { result } = renderHook(() => useApproveCustomConnection("ag-1"), {
+      wrapper,
+    });
+    const cached = () =>
+      JSON.stringify(
+        client
+          .getMutationCache()
+          .getAll()
+          .map((m) => m.state),
+      );
+
+    await act(async () => {
+      await result.current.mutateAsync({
+        approvalId: "aa-1",
+        value: "sk-live-secret",
+      });
+    });
+    // The card resets the observer on settle; gcTime 0 then drops it.
+    act(() => result.current.reset());
+    await vi.waitFor(() => expect(cached()).not.toContain("sk-live-secret"));
+    expect(client.getMutationCache().getAll()).toHaveLength(0);
+    vi.doUnmock("@/lib/api/channels");
+    vi.doUnmock("@/lib/api/cache");
+  });
+
+  it("does not keep the pasted key after a refused approve either", async () => {
+    vi.doMock("@/lib/api/channels", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("@/lib/api/channels")>()),
+      approveCustomConnection: vi.fn(async () => {
+        throw new Error("This request was already decided.");
+      }),
+    }));
+    const { useApproveCustomConnection } = await load();
+    const { client, wrapper } = setup();
+    const { result } = renderHook(() => useApproveCustomConnection("ag-1"), {
+      wrapper,
+    });
+
+    await act(async () => {
+      await result.current
+        .mutateAsync({ approvalId: "aa-1", value: "sk-live-secret" })
+        .catch(() => undefined);
+    });
+    act(() => result.current.reset());
+    await vi.waitFor(() =>
+      expect(client.getMutationCache().getAll()).toHaveLength(0),
+    );
+    vi.doUnmock("@/lib/api/channels");
+  });
+});
+
+describe("approvedToast", () => {
+  it("says the handler's outcome when it gave one, else the generic line", async () => {
+    const { approvedToast } = await import("./use-approvals");
+    expect(approvedToast("Sent to Sam.", false)).toBe("Sent to Sam.");
+    expect(approvedToast("  ", false)).toBe("Approved and done.");
+    expect(approvedToast(undefined, true)).toBe(
+      "Done. Always allowed from now on.",
+    );
   });
 });

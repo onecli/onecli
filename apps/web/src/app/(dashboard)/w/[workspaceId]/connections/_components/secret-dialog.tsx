@@ -1,10 +1,26 @@
 "use client";
 
-import { useState, useEffect, useRef, useMemo, type RefObject } from "react";
+import {
+  useState,
+  useEffect,
+  useId,
+  useRef,
+  useMemo,
+  type RefObject,
+} from "react";
 import Image from "next/image";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { toast } from "sonner";
-import { ArrowLeft, Copy, Key, Settings2, Upload, X } from "lucide-react";
+import {
+  ArrowLeft,
+  CircleHelp,
+  ExternalLink,
+  Key,
+  Lock,
+  Settings2,
+  Upload,
+  X,
+} from "lucide-react";
 import { cn } from "@onecli/ui/lib/utils";
 import {
   Dialog,
@@ -30,14 +46,17 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@onecli/ui/components/accordion";
-import { Badge } from "@onecli/ui/components/badge";
 import { updateSecret as defaultUpdateSecret } from "@/lib/actions/secrets";
 import { useQueryClient } from "@tanstack/react-query";
-import { secrets } from "@/lib/api";
+import { secrets, type SavedSecret } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import type { CreateSecretInput } from "@onecli/api/validations/secret";
 import type { SecretActions } from "./types";
 import { CopyableCommand } from "./copyable-command";
+import { CodexLoginSteps } from "./codex-login-steps";
+import { inlineLinkClassName } from "./inline-link";
+import { AnthropicKeyBadge } from "./anthropic-key-badge";
+import { keyFormatWarning } from "./key-format-warning";
 import {
   OnePasswordPickerDialog,
   type OpDisplay,
@@ -46,12 +65,20 @@ import {
 import { useOnePasswordReady } from "@/hooks/use-onepassword-picker";
 import { validateDisplayName } from "@onecli/api/validations/display-name";
 import {
+  DEFAULT_GENERIC_INJECTION,
+  buildGenericInjectionConfig,
+  injectionFromConfig,
+  injectionFromPrefill,
+  isGenericInjectionValid,
+  isPathLimit,
+  type GenericInjection,
+} from "./generic-injection";
+import { SentAsFields } from "./sent-as-fields";
+import { CustomConnectionExamples } from "./custom-connection-examples";
+import { OptionalField } from "./optional-field";
+import {
   type InjectionConfig,
   detectAnthropicAuthMode,
-  isHeaderInjection,
-  isParamInjection,
-  isPathRegexInjection,
-  isPathTemplateInjection,
   looksLikeAnthropicKey,
   looksLikeOpenaiKey,
   parseOpenaiAuthJson,
@@ -59,15 +86,23 @@ import {
 
 type SecretType = "anthropic" | "openai" | "generic";
 
+/** The docs guide behind the Anthropic dialog's "Need help?" link. */
+const ANTHROPIC_SETUP_GUIDE_URL =
+  "https://onecli.sh/docs/integrations/anthropic";
+
+/** How long the focus handoff below waits after open or the type→form step.
+ * Exported so tests can let it land before they interact. */
+export const FOCUS_HANDOFF_MS = 100;
+
 /**
  * Hand focus to an input once it exists — the value input when the name
  * arrives pre-filled (the VALUE is the missing piece), the name input when
- * it doesn't. The 100ms outruns Radix's open-autofocus and the type→form
+ * it doesn't. The delay outruns Radix's open-autofocus and the type→form
  * re-render (the input may not be in the DOM at call time); the
  * optional-chained ref makes a post-close timer a no-op.
  */
 const focusInputSoon = (ref: RefObject<HTMLInputElement | null>) => {
-  setTimeout(() => ref.current?.focus(), 100);
+  setTimeout(() => ref.current?.focus(), FOCUS_HANDOFF_MS);
 };
 
 interface SecretTypeOption {
@@ -105,8 +140,9 @@ const OpenAIIcon = ({ className }: { className?: string }) => (
 const SECRET_TYPE_OPTIONS: SecretTypeOption[] = [
   {
     value: "anthropic",
-    label: "Anthropic API Key",
-    description: "Inject your Anthropic key into requests to api.anthropic.com",
+    label: "Anthropic",
+    description:
+      "Inject a Claude subscription token or API key into requests to api.anthropic.com",
     icon: <AnthropicIcon className="size-5" />,
     hostDefault: "api.anthropic.com",
     nameDefault: "Anthropic Token",
@@ -122,45 +158,13 @@ const SECRET_TYPE_OPTIONS: SecretTypeOption[] = [
   },
   {
     value: "generic",
-    label: "Generic Secret",
-    description:
-      "Inject a custom header, URL parameter, or URL path into matching requests",
+    label: "Custom connection",
+    description: "Any API with a key: header, URL parameter or path",
     icon: <Key className="size-5" />,
     hostDefault: "",
     nameDefault: "",
   },
 ];
-
-const PATH_PREVIEW_MASK = "••••••";
-const PATH_PREVIEW_FILLER = "<token>";
-
-/**
- * Build a masked before/after preview of a path-injection rewrite for the
- * dialog. Mirrors the gateway's substitution shape without revealing the secret:
- * template mode shows the request path with the `{value}` slot filled; regex mode
- * shows the pattern and the masked replacement.
- */
-const buildPathPreview = (
-  mode: "template" | "regex",
-  template: string,
-  regex: string,
-  replacement: string,
-): { before: string; after: string } | null => {
-  if (mode === "template") {
-    if (!template.includes("{value}")) return null;
-    const [prefix, suffix = ""] = template.split("{value}");
-    const tail = suffix || "/…";
-    return {
-      before: `${prefix}${PATH_PREVIEW_FILLER}${tail}`,
-      after: `${prefix}${PATH_PREVIEW_MASK}${tail}`,
-    };
-  }
-  if (!regex.trim() || !replacement.includes("{value}")) return null;
-  return {
-    before: regex,
-    after: replacement.replaceAll("{value}", PATH_PREVIEW_MASK),
-  };
-};
 
 export interface SecretItem {
   id: string;
@@ -204,7 +208,10 @@ export interface SecretPrefill {
 interface SecretDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onSaved?: () => void;
+  /** After a successful save. Carries the created secret so the caller can
+   * act on exactly it (attach it to an agent, open its "choose agents"
+   * window); `undefined` after an edit. */
+  onSaved?: (created: SavedSecret | undefined) => void;
   /** Pass an existing secret to edit. Omit for create mode. */
   secret?: SecretItem;
   /** Pre-populate fields and skip type selection step. */
@@ -213,10 +220,9 @@ interface SecretDialogProps {
   defaultType?: SecretType;
   /** Filter which types appear in TypeStep. */
   allowedTypes?: SecretType[];
-  /** Per-action overrides — the dialog falls back to its defaults for any
-   * member not supplied, so callers intercepting one action (the agent
-   * section's create-then-attach) pass just that one. */
-  secretActions?: Partial<SecretActions>;
+  /** The scope's own create/update (the org pages pass org-level actions);
+   * omitted, the dialog writes to the workspace. */
+  secretActions?: SecretActions;
 }
 
 export const SecretDialog = ({
@@ -239,23 +245,17 @@ export const SecretDialog = ({
 
   const [type, setType] = useState<SecretType>("anthropic");
   const [openaiMode, setOpenaiMode] = useState<"api-key" | "codex">("api-key");
+  const openaiMethodLabelId = useId();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
   const [value, setValue] = useState("");
   const [hostPattern, setHostPattern] = useState("api.anthropic.com");
   const [pathPattern, setPathPattern] = useState("");
-  const [injectionTarget, setInjectionTarget] = useState<
-    "header" | "param" | "path"
-  >("header");
-  const [headerName, setHeaderName] = useState("Authorization");
-  const [valueFormat, setValueFormat] = useState("Bearer {value}");
-  const [paramName, setParamName] = useState("");
-  const [paramFormat, setParamFormat] = useState("");
-  const [pathMode, setPathMode] = useState<"template" | "regex">("template");
-  const [pathTemplate, setPathTemplate] = useState("");
-  const [pathRegex, setPathRegex] = useState("");
-  const [pathReplacement, setPathReplacement] = useState("");
+  const [generic, setGeneric] = useState<GenericInjection>(
+    DEFAULT_GENERIC_INJECTION,
+  );
+  const [pathLimitOpen, setPathLimitOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState("");
   const [opSelection, setOpSelection] = useState<OpSelection | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -270,6 +270,11 @@ export const SecretDialog = ({
   const fromOnePassword = !!opSelection;
   const isOAuthMode =
     type === "openai" && openaiMode === "codex" && !fromOnePassword;
+
+  // The amber hint under an LLM key input (null for generic secrets, an empty
+  // field, or a value that looks right).
+  const formatWarning =
+    type === "generic" ? null : keyFormatWarning(type, value);
 
   const nameError = useMemo(() => validateDisplayName(name), [name]);
   const showNameError = nameTouched && nameError !== null;
@@ -295,12 +300,10 @@ export const SecretDialog = ({
       setOpenaiMode("api-key");
       setOpSelection(null);
       setPickerOpen(false);
-      // Path-injection fields reset here; only the edit branches below repopulate
-      // them, so every other branch leaves them at these defaults.
-      setPathMode("template");
-      setPathTemplate("");
-      setPathRegex("");
-      setPathReplacement("");
+      // Custom-connection injection resets here; only the edit and prefill
+      // branches below repopulate it.
+      setGeneric(DEFAULT_GENERIC_INJECTION);
+      setPathLimitOpen(false);
       if (secret) {
         const config = secret.injectionConfig as InjectionConfig | null;
         setStep("form");
@@ -317,44 +320,9 @@ export const SecretDialog = ({
         setValue("");
         setHostPattern(secret.hostPattern);
         setPathPattern(secret.pathPattern ?? "");
-        if (isParamInjection(config)) {
-          setInjectionTarget("param");
-          setParamName(config.paramName);
-          setParamFormat(config.paramFormat ?? "");
-          setHeaderName("Authorization");
-          setValueFormat("Bearer {value}");
-        } else if (isHeaderInjection(config)) {
-          setInjectionTarget("header");
-          setHeaderName(config.headerName);
-          setValueFormat(config.valueFormat ?? "Bearer {value}");
-          setParamName("");
-          setParamFormat("");
-        } else if (isPathTemplateInjection(config)) {
-          setInjectionTarget("path");
-          setPathMode("template");
-          setPathTemplate(config.pathTemplate);
-          setHeaderName("Authorization");
-          setValueFormat("Bearer {value}");
-          setParamName("");
-          setParamFormat("");
-        } else if (isPathRegexInjection(config)) {
-          setInjectionTarget("path");
-          setPathMode("regex");
-          setPathRegex(config.pathRegex);
-          setPathReplacement(config.pathReplacement);
-          setHeaderName("Authorization");
-          setValueFormat("Bearer {value}");
-          setParamName("");
-          setParamFormat("");
-        } else {
-          setInjectionTarget("header");
-          setHeaderName("Authorization");
-          setValueFormat("Bearer {value}");
-          setParamName("");
-          setParamFormat("");
-        }
+        setPathLimitOpen(isPathLimit(secret.pathPattern));
+        setGeneric(injectionFromConfig(config));
       } else if (prefill) {
-        const isParam = !!prefill.paramName;
         setStep("form");
         setType(prefill.type as SecretType);
         if (prefill.type === "openai") setOpenaiMode("codex");
@@ -362,11 +330,9 @@ export const SecretDialog = ({
         setValue("");
         setHostPattern(prefill.hostPattern);
         setPathPattern(prefill.pathPattern ?? "");
-        setInjectionTarget(isParam ? "param" : "header");
-        setHeaderName(prefill.headerName ?? "Authorization");
-        setValueFormat(prefill.valueFormat ?? "Bearer {value}");
-        setParamName(prefill.paramName ?? "");
-        setParamFormat(prefill.paramFormat ?? "");
+        // The gateway's link always carries `path=/*`, which limits nothing.
+        setPathLimitOpen(isPathLimit(prefill.pathPattern));
+        setGeneric(injectionFromPrefill(prefill));
         focusInputSoon(valueInputRef);
       } else if (defaultType) {
         const option = SECRET_TYPE_OPTIONS.find((o) => o.value === defaultType);
@@ -376,11 +342,6 @@ export const SecretDialog = ({
         setValue("");
         setHostPattern(option?.hostDefault ?? "");
         setPathPattern("");
-        setInjectionTarget("header");
-        setHeaderName("Authorization");
-        setValueFormat("Bearer {value}");
-        setParamName("");
-        setParamFormat("");
         // No nameDefault (the generic door): the name is the missing piece.
         // On a REOPEN the input mounts with the PREVIOUS session's name still
         // in state (this effect resets it a beat later), so its mount-time
@@ -394,11 +355,6 @@ export const SecretDialog = ({
         setValue("");
         setHostPattern("api.anthropic.com");
         setPathPattern("");
-        setInjectionTarget("header");
-        setHeaderName("Authorization");
-        setValueFormat("Bearer {value}");
-        setParamName("");
-        setParamFormat("");
       }
     }
   }, [open, secret, prefill, defaultType]);
@@ -412,27 +368,8 @@ export const SecretDialog = ({
     if (option?.nameDefault) focusInputSoon(valueInputRef);
   };
 
-  const hasPathTarget =
-    pathMode === "template"
-      ? pathTemplate.startsWith("/") &&
-        pathTemplate.split("{value}").length === 2
-      : pathRegex.trim().length > 0 && pathReplacement.includes("{value}");
-
-  const hasInjectionTarget =
-    type !== "generic" ||
-    (injectionTarget === "header"
-      ? headerName.trim().length > 0
-      : injectionTarget === "param"
-        ? paramName.trim().length > 0
-        : hasPathTarget);
-
-  const pathPreview = useMemo(
-    () =>
-      injectionTarget === "path"
-        ? buildPathPreview(pathMode, pathTemplate, pathRegex, pathReplacement)
-        : null,
-    [injectionTarget, pathMode, pathTemplate, pathRegex, pathReplacement],
-  );
+  const isGeneric = type === "generic";
+  const hasInjectionTarget = !isGeneric || isGenericInjectionValid(generic);
 
   const isValid = isEdit
     ? hostPattern.trim() && !hostPatternError && hasInjectionTarget
@@ -442,28 +379,30 @@ export const SecretDialog = ({
       !hostPatternError &&
       hasInjectionTarget;
 
+  // A custom connection's path limit is optional, and hidden when the key
+  // goes in the URL path (the path template already scopes it) unless the
+  // connection being edited already has one. Closed or hidden means no
+  // limit, so a value typed before either is never saved.
+  const pathLimitHidden =
+    isGeneric &&
+    generic.sentAs === "path" &&
+    !(isEdit && isPathLimit(secret.pathPattern));
+  const effectivePathPattern =
+    isGeneric && (pathLimitHidden || !pathLimitOpen) ? "" : pathPattern;
+
   const handleSave = async () => {
     if (!isValid) return;
     setSaving(true);
     try {
-      const buildInjectionConfig = () => {
-        if (type !== "generic") return undefined;
-        if (injectionTarget === "param") {
-          return { paramName, paramFormat: paramFormat || "{value}" };
-        }
-        if (injectionTarget === "path") {
-          return pathMode === "template"
-            ? { pathTemplate }
-            : { pathRegex, pathReplacement };
-        }
-        return { headerName, valueFormat: valueFormat || "{value}" };
-      };
+      const buildInjectionConfig = () =>
+        isGeneric ? buildGenericInjectionConfig(generic) : undefined;
 
       const updateSecret = secretActions?.updateSecret ?? defaultUpdateSecret;
       const createSecret =
         secretActions?.createSecret ??
         ((input: unknown) => secrets.create(input as CreateSecretInput));
 
+      let created: SavedSecret | undefined;
       if (isEdit) {
         await updateSecret(secret.id, {
           name: name !== secret.name ? name : undefined,
@@ -477,12 +416,12 @@ export const SecretDialog = ({
               ? { valueSource: "inline" as const, value: value.trim() }
               : {}),
           hostPattern,
-          pathPattern: pathPattern || null,
+          pathPattern: effectivePathPattern || null,
           injectionConfig: buildInjectionConfig() ?? undefined,
         });
-        toast.success("Secret updated");
+        toast.success(isGeneric ? "Connection updated" : "Secret updated");
       } else {
-        await createSecret(
+        const { id } = await createSecret(
           opSelection
             ? {
                 name,
@@ -491,7 +430,7 @@ export const SecretDialog = ({
                 opRef: opSelection.opRef,
                 opDisplay: opSelection.opDisplay,
                 hostPattern,
-                pathPattern: pathPattern || undefined,
+                pathPattern: effectivePathPattern || undefined,
                 injectionConfig: buildInjectionConfig() ?? null,
               }
             : {
@@ -499,22 +438,22 @@ export const SecretDialog = ({
                 type,
                 value,
                 hostPattern,
-                pathPattern: pathPattern || undefined,
+                pathPattern: effectivePathPattern || undefined,
                 injectionConfig: buildInjectionConfig() ?? null,
               },
         );
-        toast.success("Secret created");
+        created = { id, name };
+        toast.success(isGeneric ? "Connection added" : "Secret created");
       }
       queryClient.invalidateQueries({ queryKey: queryKeys.secrets.all() });
       queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
-      // Creating a workspace secret auto-attaches it (a custom secret to every
-      // agent, an LLM key to the agents that could reach none), so this is a
-      // grant write too: the attach-list and policy views are stale without
-      // this.
+      // Creating a workspace LLM key auto-attaches it to the agents that could
+      // reach none, so this is a grant write too: the attach-list and policy
+      // views are stale without this.
       queryClient.invalidateQueries({ queryKey: queryKeys.grants.all() });
       queryClient.invalidateQueries({ queryKey: queryKeys.policy.all() });
       queryClient.invalidateQueries({ queryKey: queryKeys.agents.all() });
-      onSaved?.();
+      onSaved?.(created);
       onOpenChange(false);
       invalidateCache();
     } catch (err) {
@@ -584,74 +523,60 @@ export const SecretDialog = ({
                 </DialogTitle>
               </div>
               <DialogDescription>
-                {isEdit
-                  ? "Update the secret\u2019s configuration. Leave the value field empty to keep the current value."
-                  : type === "anthropic"
-                    ? "Your key will be encrypted and injected into requests to api.anthropic.com."
-                    : type === "openai"
-                      ? `Inject credentials into requests to ${openaiMode === "codex" ? "chatgpt.com" : "api.openai.com"}.`
-                      : "Configure a custom secret to inject as a header, URL parameter, or URL path into matching requests."}
+                {isGeneric
+                  ? isEdit
+                    ? "Change where it goes, or paste a new API key / Secret."
+                    : "Paste an API key / Secret and where it goes."
+                  : isEdit
+                    ? "Update the secret\u2019s configuration. Leave the value field empty to keep the current value."
+                    : type === "anthropic"
+                      ? "Your token or key is encrypted and injected into requests to api.anthropic.com."
+                      : `Inject credentials into requests to ${openaiMode === "codex" ? "chatgpt.com" : "api.openai.com"}.`}
               </DialogDescription>
-              {type === "generic" && !isEdit && !prefill && (
-                <div className="flex items-center gap-2 pt-1">
-                  <span className="text-muted-foreground text-xs">
-                    Try an example:
-                  </span>
-                  <button
-                    type="button"
-                    className="text-xs text-green-600 hover:text-green-500 underline underline-offset-2 transition-colors dark:text-green-400 dark:hover:text-green-300"
-                    onClick={() => {
-                      setName("GitHub Token");
-                      setHostPattern("api.github.com");
-                      setInjectionTarget("header");
-                      setHeaderName("Authorization");
-                      setValueFormat("Bearer {value}");
-                      setAdvancedOpen("advanced");
-                    }}
+              {type === "openai" &&
+                !fromOnePassword &&
+                (!isEdit || isOAuthMode) && (
+                  <a
+                    href={
+                      openaiMode === "codex"
+                        ? "https://onecli.sh/docs/integrations/openai#setup-codex-oauth"
+                        : "https://onecli.sh/docs/integrations/openai#setup-api-key"
+                    }
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className={cn(
+                      inlineLinkClassName,
+                      "inline-flex w-fit items-center gap-1 text-xs",
+                    )}
                   >
-                    Header injection
-                  </button>
-                  <span className="text-muted-foreground text-xs">|</span>
-                  <button
-                    type="button"
-                    className="text-xs text-green-600 hover:text-green-500 underline underline-offset-2 transition-colors dark:text-green-400 dark:hover:text-green-300"
-                    onClick={() => {
-                      setName("Google Maps Key");
-                      setHostPattern("maps.googleapis.com");
-                      setInjectionTarget("param");
-                      setParamName("key");
-                      setParamFormat("{value}");
-                      setAdvancedOpen("advanced");
-                    }}
-                  >
-                    URL parameter
-                  </button>
-                  <span className="text-muted-foreground text-xs">|</span>
-                  <button
-                    type="button"
-                    className="text-xs text-green-600 hover:text-green-500 underline underline-offset-2 transition-colors dark:text-green-400 dark:hover:text-green-300"
-                    onClick={() => {
-                      setName("Telegram Bot Token");
-                      setHostPattern("api.telegram.org");
-                      setInjectionTarget("path");
-                      setPathMode("template");
-                      setPathTemplate("/bot{value}");
-                      setAdvancedOpen("advanced");
-                    }}
-                  >
-                    URL path
-                  </button>
-                </div>
+                    Setup guide
+                    <ExternalLink className="size-3" aria-hidden />
+                  </a>
+                )}
+              {isGeneric && !isEdit && !prefill && (
+                <CustomConnectionExamples
+                  onPick={(example) => {
+                    setName(example.name);
+                    setHostPattern(example.hostPattern);
+                    setGeneric({
+                      ...DEFAULT_GENERIC_INJECTION,
+                      ...example.injection,
+                    });
+                  }}
+                />
               )}
             </DialogHeader>
 
             <div className="min-h-0 space-y-4 overflow-y-auto py-2">
               {type === "openai" && !isEdit && !fromOnePassword && (
                 <div className="space-y-2">
+                  <p id={openaiMethodLabelId} className="text-sm font-medium">
+                    How to connect
+                  </p>
                   <div
                     className="flex w-full items-center gap-1 rounded-lg border p-1"
                     role="radiogroup"
-                    aria-label="OpenAI auth method"
+                    aria-labelledby={openaiMethodLabelId}
                   >
                     <button
                       type="button"
@@ -692,67 +617,27 @@ export const SecretDialog = ({
                       Codex (OAuth)
                     </button>
                   </div>
-                  <p className="text-muted-foreground text-xs">
-                    {openaiMode === "api-key" ? (
-                      <>
-                        Paste your API key from{" "}
-                        <a
-                          href="https://platform.openai.com/api-keys"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-foreground underline underline-offset-2"
-                        >
-                          platform.openai.com
-                        </a>
-                        .{" "}
-                        <a
-                          href="https://onecli.sh/docs/integrations/openai#setup-api-key"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-foreground underline underline-offset-2"
-                        >
-                          Setup guide
-                        </a>
-                      </>
-                    ) : (
-                      <>
-                        Run{" "}
-                        <CopyableCommand
-                          command="codex login --device-auth"
-                          toastMessage="Copied. Run it in your terminal, then upload the auth.json it writes."
-                        />{" "}
-                        and upload the auth.json file.{" "}
-                        <a
-                          href="https://onecli.sh/docs/integrations/openai#setup-codex-oauth"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-foreground underline underline-offset-2"
-                        >
-                          Setup guide
-                        </a>
-                      </>
-                    )}
-                  </p>
+                  {openaiMode === "api-key" ? (
+                    <p className="text-muted-foreground text-xs">
+                      Paste your API key from{" "}
+                      <a
+                        href="https://platform.openai.com/api-keys"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className={inlineLinkClassName}
+                      >
+                        platform.openai.com
+                      </a>
+                      .
+                    </p>
+                  ) : (
+                    <CodexLoginSteps />
+                  )}
                 </div>
               )}
 
               {type === "openai" && isEdit && isOAuthMode && (
-                <p className="text-muted-foreground text-xs">
-                  Run{" "}
-                  <CopyableCommand
-                    command="codex login --device-auth"
-                    toastMessage="Copied. Run it in your terminal, then upload the auth.json it writes."
-                  />{" "}
-                  and upload the auth.json file.{" "}
-                  <a
-                    href="https://onecli.sh/docs/integrations/openai#setup-codex-oauth"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-foreground underline underline-offset-2"
-                  >
-                    Setup guide
-                  </a>
-                </p>
+                <CodexLoginSteps />
               )}
 
               <div className="space-y-2">
@@ -767,7 +652,7 @@ export const SecretDialog = ({
                         ? "e.g. Codex Personal"
                         : type === "openai"
                           ? "e.g. OpenAI Production Key"
-                          : "e.g. GitHub Token"
+                          : "e.g. Airtable"
                   }
                   value={name}
                   onChange={(e) => setName(e.target.value)}
@@ -785,18 +670,15 @@ export const SecretDialog = ({
 
               <div className="space-y-2">
                 <Label htmlFor="secret-value">
-                  {isOAuthMode ? (
-                    <>
-                      Token file{" "}
-                      <code className="bg-muted text-muted-foreground ml-1 select-all rounded px-1.5 py-0.5 text-xs font-normal">
-                        ~/.codex/auth.json
-                      </code>
-                    </>
-                  ) : isEdit ? (
-                    "New value"
-                  ) : (
-                    "Secret value"
-                  )}{" "}
+                  {isOAuthMode
+                    ? "Token file"
+                    : isGeneric
+                      ? isEdit
+                        ? "New API key / Secret"
+                        : "API key / Secret"
+                      : isEdit
+                        ? "New value"
+                        : "Secret value"}{" "}
                   {isEdit && !isOAuthMode && !fromOnePassword && (
                     <span className="text-muted-foreground font-normal">
                       (leave empty to keep current)
@@ -860,25 +742,35 @@ export const SecretDialog = ({
                           id="secret-value"
                           placeholder={
                             type === "anthropic"
-                              ? "sk-ant-api03-..."
+                              ? "sk-ant-oat01-… or sk-ant-api03-…"
                               : type === "openai"
-                                ? "sk-proj-..."
-                                : "Enter secret value"
+                                ? "sk-proj-…"
+                                : "Paste your API key / Secret"
                           }
                           value={value}
                           onChange={(e) => {
                             const val = e.target.value;
                             setValue(val);
-                            if (type === "anthropic" && !name.trim()) {
-                              const detected = detectAnthropicAuthMode(val);
-                              if (detected === "api-key")
-                                setName("Anthropic API Key");
-                              else if (detected === "oauth")
-                                setName("Anthropic OAuth Token");
+                            if (name.trim()) return;
+                            const pasted = val.trim();
+                            // Name the key by its kind only once the value is
+                            // a complete credential: a half-typed `sk-ant-…`
+                            // would read as an API key before the `oat` lands.
+                            if (
+                              type === "anthropic" &&
+                              looksLikeAnthropicKey(pasted)
+                            ) {
+                              setName(
+                                detectAnthropicAuthMode(pasted) === "oauth"
+                                  ? "Claude Subscription"
+                                  : "Anthropic API Key",
+                              );
                             }
-                            if (type === "openai" && !name.trim()) {
-                              if (looksLikeOpenaiKey(val))
-                                setName("OpenAI API Key");
+                            if (
+                              type === "openai" &&
+                              looksLikeOpenaiKey(pasted)
+                            ) {
+                              setName("OpenAI API Key");
                             }
                           }}
                         />
@@ -889,74 +781,56 @@ export const SecretDialog = ({
                         />
                       )}
                     </div>
-                    <div className="flex items-center gap-2">
-                      {type === "anthropic" &&
-                      value.trim() &&
-                      !looksLikeAnthropicKey(value) ? (
-                        <p className="text-xs text-amber-600 dark:text-amber-400">
-                          {detectAnthropicAuthMode(value) !== null ? (
-                            "This key looks incomplete. Make sure you copied the full value."
-                          ) : (
-                            <>
-                              Keys typically start with{" "}
-                              <code className="text-[11px]">sk-ant-api</code> or{" "}
-                              <code className="text-[11px]">sk-ant-oat</code>
-                            </>
-                          )}
-                        </p>
-                      ) : type === "openai" &&
-                        value.trim() &&
-                        !looksLikeOpenaiKey(value) ? (
-                        <p className="text-xs text-amber-600 dark:text-amber-400">
-                          {value.startsWith("sk-ant-") ? (
-                            "This looks like an Anthropic key, not an OpenAI key."
-                          ) : value.startsWith("sk-") ? (
-                            "This key looks incomplete. Make sure you copied the full value."
-                          ) : (
-                            <>
-                              Keys typically start with{" "}
-                              <code className="text-[11px]">sk-proj-</code> or{" "}
-                              <code className="text-[11px]">sk-</code>
-                            </>
-                          )}
+                    {/* A stable live region: the amber warning and the kind
+                        badge swap in as the user pastes, and a region that
+                        mounts with its content isn't reliably announced. */}
+                    <div role="status" className="flex items-center gap-2">
+                      {formatWarning ? (
+                        <p className="min-w-0 text-xs text-amber-600 dark:text-amber-400">
+                          {formatWarning}
                         </p>
                       ) : (
-                        <p className="text-muted-foreground text-xs">
+                        <p className="text-muted-foreground min-w-0 text-xs">
                           {type === "anthropic" ? (
                             <>
-                              Paste a key from the{" "}
+                              From{" "}
+                              <CopyableCommand
+                                command="claude setup-token"
+                                variant="link"
+                                tooltip="Run it in a terminal with Claude Code (needs a Pro, Max, Team, or Enterprise plan), approve in the browser, then paste the token it prints. Click to copy."
+                                toastMessage="Copied. Run it in your terminal, approve in the browser, then paste the token here."
+                              />
+                              , or an API key from the{" "}
                               <a
                                 href="https://platform.claude.com/settings/keys"
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="text-foreground underline underline-offset-2"
+                                className={inlineLinkClassName}
                               >
-                                Anthropic Console
+                                Claude Console
                               </a>
-                              , or a token from{" "}
-                              <CopyableCommand
-                                command="claude setup-token"
-                                toastMessage="Copied. Run it in your terminal, then paste the token here."
-                              />
                             </>
                           ) : type === "openai" ? (
                             <>
                               Paste your API key, or{" "}
                               <button
                                 type="button"
-                                className="text-foreground underline underline-offset-2"
+                                className={inlineLinkClassName}
                                 onClick={() => fileInputRef.current?.click()}
                               >
                                 upload auth.json
                               </button>
                             </>
                           ) : (
-                            "Encrypted at rest. You won\u2019t be able to view this value again."
+                            <span className="flex items-center gap-1">
+                              <Lock aria-hidden className="size-3 shrink-0" />
+                              Encrypted. Never shown again.
+                            </span>
                           )}
                         </p>
                       )}
                       {type === "anthropic" && (
-                        <AnthropicKeyBadge value={value} />
+                        <AnthropicKeyBadge value={value.trim()} />
                       )}
                     </div>
                   </>
@@ -976,44 +850,69 @@ export const SecretDialog = ({
                 }}
               />
 
-              {type === "generic" && !prefill && (
-                <div className="space-y-2">
-                  <Label htmlFor="secret-host">Host pattern</Label>
-                  <Input
-                    id="secret-host"
-                    placeholder="e.g. api.example.com or *.example.com"
-                    value={hostPattern}
-                    onChange={(e) => setHostPattern(e.target.value)}
+              {isGeneric && (
+                <>
+                  <div className="space-y-2">
+                    <Label htmlFor="secret-host">API host</Label>
+                    <Input
+                      id="secret-host"
+                      placeholder="api.example.com"
+                      value={hostPattern}
+                      onChange={(e) => setHostPattern(e.target.value)}
+                    />
+                    {hostPatternError && (
+                      <p className="text-xs text-red-500">{hostPatternError}</p>
+                    )}
+                  </div>
+
+                  <SentAsFields
+                    value={generic}
+                    hostPattern={hostPattern}
+                    onChange={(patch) =>
+                      setGeneric((prev) => ({ ...prev, ...patch }))
+                    }
                   />
-                  {hostPatternError ? (
-                    <p className="text-xs text-red-500">{hostPatternError}</p>
-                  ) : (
-                    <p className="text-muted-foreground text-xs">
-                      The host this secret applies to. Use{" "}
-                      <code className="text-xs">*.example.com</code> for
-                      wildcard subdomains.
-                    </p>
+
+                  {!pathLimitHidden && (
+                    <OptionalField
+                      label="Limit to a path"
+                      open={pathLimitOpen}
+                      onOpenChange={setPathLimitOpen}
+                    >
+                      <Label htmlFor="secret-path" className="sr-only">
+                        Path pattern
+                      </Label>
+                      <Input
+                        id="secret-path"
+                        placeholder="/v1/*"
+                        value={pathPattern}
+                        onChange={(e) => setPathPattern(e.target.value)}
+                      />
+                    </OptionalField>
                   )}
-                </div>
+                </>
               )}
 
-              <Accordion
-                type="single"
-                collapsible
-                className="border-none"
-                value={advancedOpen}
-                onValueChange={setAdvancedOpen}
-              >
-                <AccordionItem value="advanced" className="border-t border-b-0">
-                  <AccordionTrigger className="py-3 hover:no-underline">
-                    <span className="text-muted-foreground flex items-center gap-2 text-xs font-normal">
-                      <Settings2 className="size-3.5" />
-                      Advanced settings
-                    </span>
-                  </AccordionTrigger>
-                  <AccordionContent className="pb-0">
-                    <div className="space-y-4">
-                      {(type !== "generic" || !!prefill) && (
+              {!isGeneric && (
+                <Accordion
+                  type="single"
+                  collapsible
+                  className="border-none"
+                  value={advancedOpen}
+                  onValueChange={setAdvancedOpen}
+                >
+                  <AccordionItem
+                    value="advanced"
+                    className="border-t border-b-0"
+                  >
+                    <AccordionTrigger className="py-3 hover:no-underline">
+                      <span className="text-muted-foreground flex items-center gap-2 text-xs font-normal">
+                        <Settings2 className="size-3.5" />
+                        Advanced settings
+                      </span>
+                    </AccordionTrigger>
+                    <AccordionContent className="pb-0">
+                      <div className="space-y-4">
                         <div className="space-y-2">
                           <Label htmlFor="secret-host">Host pattern</Label>
                           <Input
@@ -1034,9 +933,7 @@ export const SecretDialog = ({
                             </p>
                           )}
                         </div>
-                      )}
 
-                      {injectionTarget !== "path" && (
                         <div className="space-y-2">
                           <Label htmlFor="secret-path">
                             Path pattern{" "}
@@ -1051,339 +948,33 @@ export const SecretDialog = ({
                             onChange={(e) => setPathPattern(e.target.value)}
                           />
                         </div>
-                      )}
-
-                      {type === "generic" && (
-                        <div className="flex items-center gap-3">
-                          <Label
-                            id="inject-as-label"
-                            className="text-muted-foreground shrink-0 text-xs"
-                          >
-                            Inject as
-                          </Label>
-                          <div
-                            className="border-input inline-flex overflow-hidden rounded-md border"
-                            role="radiogroup"
-                            aria-labelledby="inject-as-label"
-                            onKeyDown={(e) => {
-                              if (
-                                ![
-                                  "ArrowRight",
-                                  "ArrowDown",
-                                  "ArrowLeft",
-                                  "ArrowUp",
-                                ].includes(e.key)
-                              )
-                                return;
-                              e.preventDefault();
-                              const order = [
-                                "header",
-                                "param",
-                                "path",
-                              ] as const;
-                              const delta =
-                                e.key === "ArrowRight" || e.key === "ArrowDown"
-                                  ? 1
-                                  : -1;
-                              const nextIdx =
-                                (order.indexOf(injectionTarget) +
-                                  delta +
-                                  order.length) %
-                                order.length;
-                              const next = order[nextIdx];
-                              if (!next) return;
-                              setInjectionTarget(next);
-                              e.currentTarget
-                                .querySelectorAll<HTMLButtonElement>(
-                                  '[role="radio"]',
-                                )
-                                [nextIdx]?.focus();
-                            }}
-                          >
-                            {(
-                              [
-                                ["header", "Header"],
-                                ["param", "URL Parameter"],
-                                ["path", "URL Path"],
-                              ] as const
-                            ).map(([target, label], i) => (
-                              <button
-                                key={target}
-                                type="button"
-                                role="radio"
-                                aria-checked={injectionTarget === target}
-                                tabIndex={injectionTarget === target ? 0 : -1}
-                                className={cn(
-                                  "px-3 py-1.5 text-xs font-medium transition-colors",
-                                  i > 0 && "border-input border-l",
-                                  injectionTarget === target
-                                    ? "bg-accent text-foreground"
-                                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                                )}
-                                onClick={() => setInjectionTarget(target)}
-                              >
-                                {label}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {type === "generic" && injectionTarget !== "path" && (
-                        <div
-                          key={`name-${injectionTarget}`}
-                          className="animate-in fade-in duration-150 space-y-2"
-                        >
-                          <Label
-                            htmlFor={
-                              injectionTarget === "header"
-                                ? "secret-header"
-                                : "secret-param"
-                            }
-                          >
-                            {injectionTarget === "header"
-                              ? "Header name"
-                              : "Parameter name"}
-                          </Label>
-                          <Input
-                            id={
-                              injectionTarget === "header"
-                                ? "secret-header"
-                                : "secret-param"
-                            }
-                            placeholder={
-                              injectionTarget === "header"
-                                ? "e.g. Authorization"
-                                : "e.g. api_key"
-                            }
-                            value={
-                              injectionTarget === "header"
-                                ? headerName
-                                : paramName
-                            }
-                            onChange={(e) =>
-                              injectionTarget === "header"
-                                ? setHeaderName(e.target.value)
-                                : setParamName(e.target.value)
-                            }
-                          />
-                        </div>
-                      )}
-
-                      {type === "generic" && injectionTarget === "path" && (
-                        <div className="animate-in fade-in duration-150 space-y-3">
-                          <div className="flex items-center gap-3">
-                            <Label
-                              id="path-mode-label"
-                              className="text-muted-foreground shrink-0 text-xs"
-                            >
-                              Mode
-                            </Label>
-                            <div
-                              className="border-input inline-flex overflow-hidden rounded-md border"
-                              role="radiogroup"
-                              aria-labelledby="path-mode-label"
-                            >
-                              {(
-                                [
-                                  ["template", "Template"],
-                                  ["regex", "Regex"],
-                                ] as const
-                              ).map(([mode, label], i) => (
-                                <button
-                                  key={mode}
-                                  type="button"
-                                  role="radio"
-                                  aria-checked={pathMode === mode}
-                                  className={cn(
-                                    "px-3 py-1.5 text-xs font-medium transition-colors",
-                                    i > 0 && "border-input border-l",
-                                    pathMode === mode
-                                      ? "bg-accent text-foreground"
-                                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                                  )}
-                                  onClick={() => setPathMode(mode)}
-                                >
-                                  {label}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-
-                          {pathMode === "template" ? (
-                            <div className="space-y-2">
-                              <Label htmlFor="secret-path-template">
-                                Path template
-                              </Label>
-                              <Input
-                                id="secret-path-template"
-                                className="font-mono"
-                                placeholder="/bot{value}"
-                                value={pathTemplate}
-                                onChange={(e) =>
-                                  setPathTemplate(e.target.value)
-                                }
-                              />
-                              <p className="text-muted-foreground text-xs">
-                                Put <code className="text-xs">{"{value}"}</code>{" "}
-                                where the secret goes. The gateway replaces
-                                whatever your agent sends in that spot (up to
-                                the next <code className="text-xs">/</code>), so
-                                the agent never needs the real secret.
-                              </p>
-                            </div>
-                          ) : (
-                            <>
-                              <div className="space-y-2">
-                                <Label htmlFor="secret-path-regex">
-                                  Path pattern (regex)
-                                </Label>
-                                <Input
-                                  id="secret-path-regex"
-                                  className="font-mono"
-                                  placeholder="^/bot[^/]+(/.*)?$"
-                                  value={pathRegex}
-                                  onChange={(e) => setPathRegex(e.target.value)}
-                                />
-                              </div>
-                              <div className="space-y-2">
-                                <Label htmlFor="secret-path-replacement">
-                                  Replacement
-                                </Label>
-                                <Input
-                                  id="secret-path-replacement"
-                                  className="font-mono"
-                                  placeholder="/bot{value}$1"
-                                  value={pathReplacement}
-                                  onChange={(e) =>
-                                    setPathReplacement(e.target.value)
-                                  }
-                                />
-                                <p className="text-muted-foreground text-xs">
-                                  Use <code className="text-xs">$1</code> for
-                                  capture groups and{" "}
-                                  <code className="text-xs">{"{value}"}</code>{" "}
-                                  for the secret.
-                                </p>
-                              </div>
-                            </>
-                          )}
-
-                          {pathPreview && (
-                            <div className="bg-muted/40 space-y-1.5 rounded-md border p-3">
-                              <div className="flex items-center justify-between">
-                                <span className="text-muted-foreground text-[11px] font-medium tracking-wide uppercase">
-                                  Preview
-                                </span>
-                                {pathMode === "template" && (
-                                  <button
-                                    type="button"
-                                    className="text-muted-foreground hover:text-foreground flex items-center gap-1 text-[11px] transition-colors"
-                                    onClick={async () => {
-                                      const host =
-                                        hostPattern
-                                          .trim()
-                                          .replace(/^\*\./, "") ||
-                                        "api.example.com";
-                                      try {
-                                        await navigator.clipboard.writeText(
-                                          `https://${host}${pathPreview.before}`,
-                                        );
-                                        toast.success("Example call copied");
-                                      } catch {
-                                        toast.error(
-                                          "Couldn't copy to clipboard",
-                                        );
-                                      }
-                                    }}
-                                  >
-                                    <Copy className="size-3" />
-                                    Copy call
-                                  </button>
-                                )}
-                              </div>
-                              <div className="space-y-1 font-mono text-xs">
-                                <div className="flex gap-2">
-                                  <span className="text-muted-foreground w-24 shrink-0">
-                                    {pathMode === "template"
-                                      ? "Agent sends"
-                                      : "Matches"}
-                                  </span>
-                                  <span className="break-all">
-                                    {pathPreview.before}
-                                  </span>
-                                </div>
-                                <div className="flex gap-2">
-                                  <span className="text-muted-foreground w-24 shrink-0">
-                                    {pathMode === "template"
-                                      ? "Gateway sends"
-                                      : "Rewrites to"}
-                                  </span>
-                                  <span className="text-foreground break-all">
-                                    {pathPreview.after}
-                                  </span>
-                                </div>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {type === "generic" && injectionTarget !== "path" && (
-                        <div
-                          key={`format-${injectionTarget}`}
-                          className="animate-in fade-in duration-150 space-y-2"
-                        >
-                          <Label
-                            htmlFor={
-                              injectionTarget === "header"
-                                ? "secret-format"
-                                : "secret-param-format"
-                            }
-                          >
-                            {injectionTarget === "header"
-                              ? "Header value"
-                              : "Parameter value"}{" "}
-                            <span className="text-muted-foreground font-normal">
-                              (optional)
-                            </span>
-                          </Label>
-                          <Input
-                            id={
-                              injectionTarget === "header"
-                                ? "secret-format"
-                                : "secret-param-format"
-                            }
-                            placeholder={
-                              injectionTarget === "header"
-                                ? "e.g. Bearer {value}"
-                                : "e.g. {value}"
-                            }
-                            value={
-                              injectionTarget === "header"
-                                ? valueFormat
-                                : paramFormat
-                            }
-                            onChange={(e) =>
-                              injectionTarget === "header"
-                                ? setValueFormat(e.target.value)
-                                : setParamFormat(e.target.value)
-                            }
-                          />
-                          <p className="text-muted-foreground text-xs">
-                            Use <code className="text-xs">{"{value}"}</code> as
-                            a placeholder for the secret. Defaults to the raw
-                            value.
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  </AccordionContent>
-                </AccordionItem>
-              </Accordion>
+                      </div>
+                    </AccordionContent>
+                  </AccordionItem>
+                </Accordion>
+              )}
             </div>
 
             <DialogFooter>
+              {type === "anthropic" && (
+                // The step-by-step guide for both credentials (installing
+                // Claude Code for `claude setup-token`, or a Console API key).
+                // Left-aligned so it never competes with the primary action.
+                <Button
+                  variant="link"
+                  asChild
+                  className="px-0 has-[>svg]:px-0 sm:mr-auto"
+                >
+                  <a
+                    href={ANTHROPIC_SETUP_GUIDE_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    <CircleHelp aria-hidden />
+                    Need help?
+                  </a>
+                </Button>
+              )}
               <Button variant="ghost" onClick={() => onOpenChange(false)}>
                 Cancel
               </Button>
@@ -1393,8 +984,10 @@ export const SecretDialog = ({
                     ? "Saving..."
                     : "Creating..."
                   : isEdit
-                    ? "Save Changes"
-                    : "Add Secret"}
+                    ? "Save changes"
+                    : isGeneric
+                      ? "Add connection"
+                      : "Add Secret"}
               </Button>
             </DialogFooter>
           </>
@@ -1444,27 +1037,6 @@ const TypeStep = ({
         ))}
       </div>
     </>
-  );
-};
-
-const AnthropicKeyBadge = ({ value }: { value: string }) => {
-  const detected = detectAnthropicAuthMode(value);
-  if (!detected) return null;
-
-  return (
-    <Badge
-      variant="outline"
-      className="text-muted-foreground animate-in fade-in shrink-0 gap-1.5 text-[10px] font-normal"
-    >
-      <span
-        className={
-          detected === "api-key"
-            ? "bg-brand size-1.5 rounded-full"
-            : "bg-blue-500 size-1.5 rounded-full"
-        }
-      />
-      {detected === "api-key" ? "API Key" : "OAuth Token"}
-    </Badge>
   );
 };
 

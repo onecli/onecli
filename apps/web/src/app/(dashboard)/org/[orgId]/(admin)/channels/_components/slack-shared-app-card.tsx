@@ -142,7 +142,7 @@ export const SlackSharedAppCard = ({ choice }: SlackSharedAppCardProps) => {
                   </Badge>
                 )}
               </div>
-              <CardDescription className="mt-1">
+              <CardDescription className="mt-1.5">
                 Teammates message @OneCLI in Slack and get their own OneCLI
                 account.
                 {choice?.role === "alternative" &&

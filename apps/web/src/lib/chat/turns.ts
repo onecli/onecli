@@ -2,6 +2,7 @@ import {
   ACTIVE_TURN_STATUSES,
   AUTOMATION_SOURCES,
   UNSETTLED_TURN_STATUSES,
+  isAutomationSource,
   isPlatformAuthoredSource,
 } from "@onecli/api/validations/conversation";
 import type { Turn, TurnStatus } from "@/lib/api/types";
@@ -19,6 +20,10 @@ const UNSETTLED: readonly TurnStatus[] = UNSETTLED_TURN_STATUSES;
 
 export const isActiveTurn = (turn: Turn): boolean =>
   ACTIVE.includes(turn.status);
+
+/** The same test on a bare status string (a run's, read off the wire). */
+export const isActiveTurnStatus = (status: string): boolean =>
+  ACTIVE.some((active) => active === status);
 
 /** A mid-run follow-up riding the active turn (steering, or parked). */
 export const isJoiningTurn = (turn: Turn): boolean => turn.status === "joining";
@@ -62,7 +67,7 @@ export const isPlatformAuthoredTurn = (turn: Turn): boolean =>
 export const isAutomationTurn = (
   turn: Turn,
 ): turn is Turn & { source: AutomationSource } =>
-  (AUTOMATION_SOURCES as readonly string[]).includes(turn.source);
+  isAutomationSource(turn.source);
 
 /** The one in-flight turn, if any. `undefined` input reads as "none". */
 export const activeTurn = (turns: Turn[] | undefined): Turn | undefined =>
@@ -81,6 +86,39 @@ export const hasActiveTurn = (turns: Turn[] | undefined): boolean =>
 export const hasUnsettledTurn = (turns: Turn[] | undefined): boolean =>
   turns?.some((turn) => UNSETTLED.includes(turn.status)) ?? false;
 
+/** The turns poll while a turn is booting its machine (`queued` or
+ * `dispatched`): the stream has no event to push in that window, so the poll
+ * is the only thing that can notice the agent start. */
+export const BOOTING_TURN_POLL_MS = 1_000;
+
+/** The turns poll once the agent is running: the stream carries its progress
+ * from there, so the poll only owns the no-event failure gap. */
+export const RUNNING_TURN_POLL_MS = 2_500;
+
+/**
+ * The POLL CADENCE beside the poll predicate: `false` once nothing is owed an
+ * outcome (`hasUnsettledTurn`), fast while a turn has not reached the agent
+ * yet (its machine may be booting, and the chat's caption flips the moment
+ * the poll sees `running`), slower once it has.
+ */
+export const turnsPollInterval = (
+  turns: Turn[] | undefined,
+): number | false => {
+  if (!hasUnsettledTurn(turns)) return false;
+  const booting = turns?.some(
+    (turn) => turn.status === "queued" || turn.status === "dispatched",
+  );
+  return booting ? BOOTING_TURN_POLL_MS : RUNNING_TURN_POLL_MS;
+};
+
+/**
+ * Whether a failed turn's code means "no usable key: add one" (none yet, or
+ * the free trial credit ran out). These are the codes the chat's in-place
+ * add-key door fixes, and the ones it re-sends after.
+ */
+export const isAddKeyCode = (errorCode: string | null | undefined): boolean =>
+  errorCode === "no_model_key" || errorCode === "trial_credit_exhausted";
+
 /**
  * The turn the chat's in-place key door may RE-SEND once a key attaches:
  * only the newest thing the user themselves asked (trailing platform rows —
@@ -94,14 +132,7 @@ export const hasUnsettledTurn = (turns: Turn[] | undefined): boolean =>
  */
 export const resendableKeylessTurn = (turns: Turn[]): Turn | null => {
   const last = [...turns].reverse().find((turn) => turn.userId !== null);
-  // Both codes are the same situation for the resend: the message failed
-  // for want of a usable key, and the user just connected one.
-  if (
-    !last ||
-    (last.errorCode !== "no_model_key" &&
-      last.errorCode !== "trial_credit_exhausted")
-  )
-    return null;
+  if (!last || !isAddKeyCode(last.errorCode)) return null;
   if (last.attachments.length > 0) return null;
   if (hasActiveTurn(turns)) return null;
   return last;

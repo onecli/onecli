@@ -439,6 +439,25 @@ export const processChannelCleanups = async (
       const credentialsJson = job.credentials
         ? await getCrypto().decrypt(job.credentials)
         : null;
+      // An app the user created by hand holds nothing the platform can tear
+      // down: no uninstall credentials, and the app record is theirs. Retaining
+      // the job would only reserve the app id against re-attaching it, so
+      // release it before any provider call (rename included). Deleted, not
+      // completed: a completed tombstone still reserves the id after a remote
+      // delete request, and against any presence but its source. The identity
+      // lock orders this against an enqueue reading the same row, and the
+      // ciphertext fence releases only the snapshot judged here.
+      if (provider.isUserCreatedApp?.({ credentialsJson })) {
+        const released = await db.$transaction(async (tx) => {
+          await lockChannelIdentity(tx, job.provider, job.externalId);
+          return tx.channelCleanup.deleteMany({
+            where: { ...fence(), credentials: job.credentials },
+          });
+        });
+        // Nothing is left to do for this app, which is what `completed` counts.
+        counts.completed += released.count;
+        continue;
+      }
       const withConfig = <T>(fn: (accessToken: string) => Promise<T>) =>
         withFreshIntegrationCredentials(
           job.organizationId,

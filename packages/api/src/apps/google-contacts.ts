@@ -7,7 +7,9 @@ import {
 
 export const googleContacts: AppDefinition = {
   id: "google-contacts",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/google-contacts",
   name: "Google Contacts",
+  apiDocsUrl: "https://developers.google.com/people/api/rest",
   icon: "/icons/google-contacts.svg",
   description: "Read, search, and manage Google Contacts.",
   connectionMethod: {
@@ -65,5 +67,6 @@ export const googleContacts: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
   },
 };

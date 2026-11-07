@@ -41,6 +41,8 @@ let sharedInstall: SharedInstall;
 let oauthState: OAuthState;
 let initSelfUrl: Providers["initSelfUrl"];
 let app: ReturnType<typeof import("../app").createApiApp>;
+/** Drains the detached Slack replies (fireReply) so negatives are exact. */
+let settleDetachedReplies: () => Promise<void>;
 
 const P = "shw-";
 const ORG = `${P}org`;
@@ -164,6 +166,8 @@ beforeAll(async () => {
   initSelfUrl(SELF_URL);
 
   const { createApiApp } = await import("../app");
+  settleDetachedReplies = (await import("./channel-inbound-slack"))
+    .settleDetachedRepliesForTests;
   // Sessionless: every request in this suite rides Slack-signature trust,
   // never a session — exactly the production posture of the inbound arm.
   app = createApiApp(
@@ -518,6 +522,34 @@ describe.skipIf(!PROOF_URL)("the MARKETPLACE install path", () => {
     const body = (await res.json()) as { error?: { message?: string } };
     expect(body.error?.message).toContain("expired");
     expect(body.error?.message).toContain("Start the install again");
+  });
+});
+
+describe.skipIf(!PROOF_URL)("the 'Connect your Slack' return", () => {
+  it("lands on the agent's Contacts (where connecting starts), not the Slack page", async () => {
+    const hooks = await import("../providers/hooks/conversation-reader");
+    const previous = hooks.getUserReadConnectCompleter();
+    // The licensed completer verifies the state itself; this stand-in
+    // pins only where the shared route sends the person afterwards.
+    hooks.initUserReadConnectCompleter({
+      handles: (kind) => kind === "slack-user-read",
+      complete: async () => ({ workspaceId: "ws 1", agentId: "agent/1" }),
+    });
+    try {
+      const state = Buffer.from(
+        JSON.stringify({ data: { kind: "slack-user-read" } }),
+      ).toString("base64url");
+      const res = await app.request(
+        `/v1/channels/slack/oauth/callback?code=c1&state=${state}`,
+        { method: "GET", redirect: "manual" },
+      );
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe(
+        "https://app.sharedwire.test/w/ws%201/agents/agent%2F1/contacts?connected=slack-read",
+      );
+    } finally {
+      hooks.initUserReadConnectCompleter(previous);
+    }
   });
 });
 
@@ -959,7 +991,7 @@ describe.skipIf(!PROOF_URL)(
       expect((await postEvent(envelope)).status).toBe(200);
       expect((await postEvent(envelope)).status).toBe(200);
       await waitForSlackCall("chat.postMessage");
-      await new Promise((r) => setTimeout(r, 150));
+      await settleDetachedReplies();
       expect(
         slackCalls.filter((c) => c.method === "chat.postMessage"),
       ).toHaveLength(1);
@@ -1008,7 +1040,7 @@ describe.skipIf(!PROOF_URL)(
         ),
       );
       expect(res.status).toBe(200);
-      await new Promise((r) => setTimeout(r, 100));
+      await settleDetachedReplies();
       expect(slackCalls).toHaveLength(0);
     });
 
@@ -1032,7 +1064,7 @@ describe.skipIf(!PROOF_URL)(
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ ok: true });
       // Long enough for a stray detached reply to have surfaced.
-      await new Promise((r) => setTimeout(r, 100));
+      await settleDetachedReplies();
       expect(slackCalls).toHaveLength(0);
     });
 
@@ -1090,7 +1122,7 @@ describe.skipIf(!PROOF_URL)(
 
       // A second open (fresh event id, same user) sends NOTHING more.
       expect((await open(`wire-${Date.now()}-home2`)).status).toBe(200);
-      await new Promise((r) => setTimeout(r, 150));
+      await settleDetachedReplies();
       expect(
         slackCalls.filter((call) => call.method === "chat.postMessage").length,
       ).toBe(before + 1);
@@ -1103,7 +1135,7 @@ describe.skipIf(!PROOF_URL)(
         ),
       );
       expect(res.status).toBe(200);
-      await new Promise((r) => setTimeout(r, 100));
+      await settleDetachedReplies();
       expect(
         slackCalls.filter((call) => call.method === "chat.postMessage").length,
       ).toBe(before + 1);
@@ -1331,7 +1363,7 @@ describe.skipIf(!PROOF_URL)(
       expect(after).toBe(0);
       // And a follow-up DM is now ack-and-drop, not a reply.
       await postEvent(eventEnvelope(dm("hello?"), `wire-${Date.now()}-after`));
-      await new Promise((r) => setTimeout(r, 100));
+      await settleDetachedReplies();
       expect(slackCalls).toHaveLength(0);
     });
 
@@ -1539,6 +1571,11 @@ describe.skipIf(!PROOF_URL)("the DEDICATED arm's lifecycle fence", () => {
       body: activeRaw,
     });
     expect(accepted.status).toBe(200);
+    // The accepted event is processed off the request: let it finish before
+    // the presence it belongs to is deleted out from under it.
+    await (
+      await import("../services/channels/inbound-event-service")
+    ).settleInboundEventsForTests();
 
     await db.agentChannel.delete({ where: { id: presence.id } });
     await db.agent.delete({ where: { id: agent.id } });

@@ -67,8 +67,6 @@ export interface EditableRuleRowProps {
   /** Move one step within the custom relative order; undefined = at the bound. */
   onMoveUp?: () => void;
   onMoveDown?: () => void;
-  /** Staged-change chip: this rule is new or edited since the last Apply. */
-  changeState?: "new" | "changed";
   /** Provably-dead chip: this rule can never take effect (see policy-overlap). */
   overlap?: OverlapWarning;
   onEdit: (rule: PolicyRuleV2) => void;
@@ -98,7 +96,6 @@ export const EditableRuleRow = ({
   sortLocked = false,
   onMoveUp,
   onMoveDown,
-  changeState,
   overlap,
   onEdit,
   onToggleEnabled,
@@ -180,7 +177,7 @@ export const EditableRuleRow = ({
               {rule.name}
             </span>
           )}
-          {(sourceLabel || muted || changeState || overlap || notEnforced) && (
+          {(sourceLabel || muted || overlap || notEnforced) && (
             <div className="flex items-center gap-1.5">
               {notEnforced && (
                 <Badge
@@ -214,18 +211,6 @@ export const EditableRuleRow = ({
                     : overlap.kind === "conflict"
                       ? "Conflicts"
                       : "Duplicate"}
-                </Badge>
-              )}
-              {changeState && (
-                <Badge
-                  variant="outline"
-                  className={
-                    changeState === "new"
-                      ? "rounded border-emerald-500/40 px-1.5 py-0 text-[10px] font-medium text-emerald-700 dark:text-emerald-400"
-                      : "rounded border-amber-500/40 px-1.5 py-0 text-[10px] font-medium text-amber-700 dark:text-amber-400"
-                  }
-                >
-                  {changeState === "new" ? "New" : "Changed"}
                 </Badge>
               )}
               {sourceLabel && (

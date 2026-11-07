@@ -22,6 +22,14 @@ export default defineConfig({
       // reads it at module load) and the spawned gateway decrypts with it. A
       // fixed test key, never a production value.
       SECRET_ENCRYPTION_KEY: "3q2+7wEhI0VniavN7xEjRWeJq83vESNFZ4mrze8RI0U=",
+      // The in-process API (fixtures, and the scenarios that drive the
+      // control plane directly) runs the edition every spawned gateway runs:
+      // onprem with local AES. CI sets NEXT_PUBLIC_EDITION=cloud job-wide,
+      // and @onecli/api reads the edition at module load, so without this the
+      // in-process API expected KMS and could not read what the fixtures
+      // encrypted.
+      EDITION: "onprem",
+      NEXT_PUBLIC_EDITION: "onprem",
     },
   },
 });

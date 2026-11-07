@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decodeSlackTokens } from "./text";
+import { decodeSlackTokens, sectionChunks } from "./text";
 
 /**
  * The inbound token grammar, arm per token type — each rule is the
@@ -190,5 +190,59 @@ describe("decodeSlackTokens", () => {
       "plain text, no tokens",
     );
     expect(called).toBe(false);
+  });
+
+  it("unescapes `&amp;` `&lt;` `&gt;` back to what was typed (the docs' escaping rule)", async () => {
+    expect(
+      await decodeSlackTokens(
+        "R&amp;D: 3 &lt; 5 &gt; 1, ping <@UBOT>",
+        resolver,
+      ),
+    ).toBe("R&D: 3 < 5 > 1, ping @[Kelly]");
+    expect(await decodeSlackTokens("Q&amp;A only", resolver)).toBe("Q&A only");
+  });
+
+  it("an escaped token stays TEXT: an entity never becomes live grammar", async () => {
+    let called = false;
+    const spy = () => {
+      called = true;
+      return "Admin";
+    };
+    // What Slack sends when someone types `<@U0B0WPLS8MC>` or `<!channel>`
+    // literally, and `&amp;lt;` when they type `&lt;`.
+    expect(
+      await decodeSlackTokens(
+        "&lt;@U0B0WPLS8MC&gt; &lt;!channel&gt; &amp;lt;b&amp;gt;",
+        spy,
+      ),
+    ).toBe("<@U0B0WPLS8MC> <!channel> &lt;b&gt;");
+    expect(called).toBe(false);
+  });
+
+  it("unescapes labels and urls inside tokens", async () => {
+    expect(
+      await decodeSlackTokens(
+        "<https://x.example/?a=1&amp;b=2|Tom &amp; Jerry> <#C0AAA|r&amp;d>",
+        resolver,
+      ),
+    ).toBe("Tom & Jerry (https://x.example/?a=1&b=2) #r&d");
+  });
+});
+
+describe("sectionChunks", () => {
+  it("never cuts an emoji in half on a hard cut", () => {
+    // No newline to cut at, and the emoji straddles the section limit.
+    const text = `${"a".repeat(2899)}😀${"b".repeat(300)}`;
+    const sections = sectionChunks(text);
+
+    expect(sections.join("")).toBe(text);
+    for (const section of sections) {
+      expect(section.length).toBeLessThanOrEqual(2900);
+      expect(
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
+          section,
+        ),
+      ).toBe(false);
+    }
   });
 });

@@ -1,5 +1,18 @@
 import { z } from "zod";
-import type { AdapterPresence } from "@onecli/agent-protocol";
+import type { AdapterLink, AdapterPresence } from "@onecli/agent-protocol";
+import { APPROVAL_GROUP_ID_RE, APPROVAL_GROUP_MAX_IDS } from "@onecli/channels";
+import {
+  approvalGroupKey,
+  batchArrival,
+} from "@onecli/api/lib/approval-groups";
+import { CELL_OPS } from "@onecli/api/lib/record-change";
+import {
+  CHANNEL_CARD_EXPIRED_TEXT,
+  CHANNEL_CARD_RECORD_WAIT_MS,
+  channelCardEndingOf,
+  channelCardEndingText,
+  type ChannelCardEnding,
+} from "@onecli/api/lib/channel-card-ending";
 import type { ControlPlaneClient } from "./control-plane";
 import {
   replyTargetForLink,
@@ -39,6 +52,10 @@ const recordUrl = z
   .optional()
   .catch(undefined);
 
+/** A bulk table's column: a change (`fields`) or a read-only context
+ *  column (`context`). */
+const bulkField = z.object({ api: z.string(), label: z.string() });
+
 const pendingResponse = z.object({
   requests: z.array(
     z.object({
@@ -51,7 +68,17 @@ const pendingResponse = z.object({
           action: z.string().optional(),
           // The title's action without its record: grouping keys on it, so
           // per-record titles ("Delete Contact Ada") still share a card.
-          subject: z.object({ verb: z.string() }).partial().nullish(),
+          // `record` and `row` let a row lead with its record and label the
+          // change beside it ("Batch Test04 · Title: After"), and sort by it.
+          subject: z
+            .object({
+              verb: z.string(),
+              record: z.string(),
+              row: z.number().int().nonnegative(),
+            })
+            .partial()
+            .nullish()
+            .catch(undefined),
           details: z
             .array(
               z.object({
@@ -61,9 +88,62 @@ const pendingResponse = z.object({
               }),
             )
             .optional(),
+          // One request that changes a whole list of records. Every link is
+          // re-checked as https, like a detail's; a malformed bulk is dropped
+          // (the card falls back to its detail rows), never fatal.
+          bulk: z
+            .object({
+              objectLabel: z.string(),
+              hiddenFields: z.array(z.string()).optional().catch(undefined),
+              kind: z
+                .enum(["update", "create", "delete"])
+                .optional()
+                .catch(undefined),
+              fields: z.array(bulkField),
+              rows: z.array(
+                z.object({
+                  id: z.string(),
+                  name: z.string().optional(),
+                  url: recordUrl,
+                  new: z.array(z.string().nullable()),
+                  old: z.array(z.string().nullable()).optional(),
+                  ops: z.array(z.enum(CELL_OPS)).optional().catch(undefined),
+                  op: z.enum(CELL_OPS).optional().catch(undefined),
+                  context: z
+                    .array(z.string().nullable())
+                    .optional()
+                    .catch(undefined),
+                }),
+              ),
+              oldValuesRead: z.boolean().optional(),
+              // Read-only "who is this" columns (account, title). Malformed:
+              // dropped, the card still renders without them.
+              context: z.array(bulkField).optional().catch(undefined),
+            })
+            .nullish()
+            .catch(undefined),
         })
         .nullish(),
       agent: z.object({ id: z.string(), name: z.string() }).partial().nullish(),
+      app: z.string().optional().catch(undefined),
+      batch: z
+        .object({
+          id: z.string(),
+          label: z.string().optional(),
+          total: z.number().optional(),
+        })
+        .nullish(),
+      // "Approve similar", when the gateway offers it (a documented update
+      // of one record). A malformed value just hides the button.
+      similar: z
+        .object({
+          label: z.string(),
+          windowMinutes: z.number(),
+          maxRequests: z.number(),
+        })
+        .nullish()
+        .catch(undefined),
+      createdAt: z.string().optional(),
       expiresAt: z.string().optional(),
     }),
   ),
@@ -72,6 +152,11 @@ const pendingResponse = z.object({
 export type PendingApproval = z.infer<
   typeof pendingResponse
 >["requests"][number];
+
+/** One request over many records, outside a tagged batch: its own card,
+ *  with its table and CSV (`bulkCardBlocks`), never a row on a task card. */
+const isOwnTable = (a: PendingApproval): boolean =>
+  !((a.batch?.total ?? 0) > 1) && (a.summary?.bulk?.rows.length ?? 0) > 1;
 
 export class ApprovalsAuthError extends Error {}
 
@@ -111,7 +196,15 @@ export interface ApprovalCardUi {
   /** Post the card for a pending approval; returns the channel-native
    * message ref. Throws on failure (the caller owns retry semantics). */
   post(
-    input: ChannelPostTarget & { approval: PendingApproval },
+    input: ChannelPostTarget & {
+      approval: PendingApproval;
+      /** The rest of a tagged batch arriving with it: the card posts with
+       *  every row at once instead of growing from one. */
+      batch?: PendingApproval[];
+      /** Where the request can be reviewed in OneCLI (the agent's web
+       *  chat: a batch row by row, a record change as its table). */
+      reviewUrl?: string;
+    },
   ): Promise<{ channel: string; ts: string }>;
   /** Rewrite a posted card with plain settled text, prefixed by the
    * approval's action title when one is known — a settled card must still
@@ -135,6 +228,41 @@ export interface ApprovalCardUi {
   unpackMessageRef(
     ref: string | null | undefined,
   ): { channel: string; ts: string } | null;
+  /** OPTIONAL: rewrite a posted card in place as one GROUPED card for
+   * several approvals of one task (the first approval posts it through
+   * `post`). A channel without it gets one card per approval (the manager
+   * never groups). Throws on failure, EXCEPT a permanently-gone card (as
+   * `settle`). */
+  renderGroup?(input: {
+    credential: string;
+    channel: string;
+    ts: string;
+    view: GroupCardView;
+  }): Promise<void>;
+}
+
+/** How one grouped approval ended, for the card's done list. */
+type GroupOutcome = ChannelCardEnding;
+
+export interface GroupCardView {
+  /** Still pending, oldest first: exactly the ids the buttons carry. */
+  live: PendingApproval[];
+  /** Already settled members of this card, oldest first. */
+  settled: {
+    id: string;
+    title: string | null;
+    /** The agent's own name for the task (its batch label), kept so the
+     *  finished card still reads "Import 8 leads" once no row is live. */
+    label?: string;
+    outcome: GroupOutcome;
+    by?: string;
+    /** When it arrived: a batch counts its decided members as arrived. */
+    createdAt?: string;
+  }[];
+  /** The render's clock (ms epoch); tests pin it, production omits it. */
+  now?: number;
+  /** The agent's web chat, where the card can be reviewed row by row. */
+  reviewUrl?: string;
 }
 
 interface TrackedPrompt {
@@ -148,16 +276,24 @@ interface TrackedPrompt {
    * ledger recorded no message (claimed, never posted).
    */
   messageRef: string | null;
+  /** The thread the card was claimed in (the ledger's `externalThreadId`),
+   * so a card rebuilt after a restart knows where it sits. */
+  externalThreadId: string;
   expiresAt: number | null;
   /** The approval's action title, for outcome rewrites ("what was asked").
    * Null for prompts recovered from the ledger (it records no title). */
   title: string | null;
+  /** When this adapter first saw the request gone from the pending list
+   * (ms epoch), while it waits for the record to say how it ended. */
+  departedAt?: number;
 }
 
 export interface ApprovalsManagerDeps {
   controlPlane: ControlPlaneClient;
   gatewayUrl: string;
   approvalsPollSeconds: number;
+  /** The web app's base URL (no trailing slash); empty when not configured. */
+  appUrl?: string;
   /** Resolve a presence's card rendering (the channel's business — Slack:
    * slack/approval-card.ts, handed out via the provider registry). Null for
    * a provider this build cannot serve — its prompts stay tracked untouched,
@@ -171,8 +307,62 @@ export interface ApprovalsManagerDeps {
   /** Poll pacing while cards are outstanding (the gateway answers instantly
    * then). Injectable so tests don't sleep real seconds. */
   pacingMs?: number;
+  /** How long a grouped card waits for more arrivals before re-rendering
+   * (coalesces a burst into one chat.update). Injectable for tests. */
+  groupDebounceMs?: number;
   onLog: (message: string, detail?: unknown) => void;
 }
+
+/** One posted message carrying several approvals of one task. */
+interface GroupCard {
+  presenceId: string;
+  key: string | null;
+  messageRef: string;
+  /** The thread the card was posted in (the ledger's `externalThreadId`).
+   * A new approval joins only while this is still the presence's card home,
+   * so a card left in a thread that stopped being the home never grows. */
+  externalThreadId: string;
+  /** Pending members, arrival order. Null details = recovered from the
+   * ledger and not yet seen in a poll (the render waits for them). */
+  live: Map<string, PendingApproval | null>;
+  settled: GroupCardView["settled"];
+  timer: ReturnType<typeof setTimeout> | null;
+  /** Serializes renders so a later state never loses to an earlier one. */
+  chain: Promise<void>;
+}
+
+/**
+ * Where a presence's approval cards go: the APPROVER's own direct thread,
+ * named by the control plane (`approvalsLinkId`). Never a guest's DM:
+ * someone allowed to talk to the agent is not thereby allowed to approve
+ * what it does, and a card in their DM sits unanswered until it expires
+ * while the agent waits. Undefined = no home (the approver has no DM yet,
+ * or the named link is not in this feed): the caller leaves the approval
+ * unclaimed and a later poll retries. An older control plane never sends
+ * the field: keep the legacy first-direct-link pick, so version skew
+ * degrades to the old behavior rather than to silence.
+ */
+const approvalCardLink = (
+  presence: AdapterPresence,
+): AdapterLink | undefined => {
+  const { approvalsLinkId, links } = presence;
+  if (approvalsLinkId === undefined) {
+    return links.find((l) => l.kind === "direct") ?? links[0];
+  }
+  if (approvalsLinkId === null) return undefined;
+  return links.find((l) => l.id === approvalsLinkId);
+};
+
+/** The agent's web chat, where a card can be reviewed row by row and a
+ *  record change seen as its table. Built only from server config and the
+ *  presence's own ids (never payload text); none without a web app URL. */
+const reviewUrlFor = (
+  appUrl: string | undefined,
+  presence: AdapterPresence,
+): string | undefined =>
+  appUrl
+    ? `${appUrl}/w/${encodeURIComponent(presence.agent.workspaceId)}/agents/${encodeURIComponent(presence.agent.id)}/chat`
+    : undefined;
 
 /**
  * The per-adapter approvals manager: one poll loop per presence that holds a
@@ -199,6 +389,262 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
    * provenance. The expiry sweep stays unfenced — the deadline is truth. */
   const deciding = new Set<string>();
 
+  /** messageRef → the grouped card on it. A card of one is a group too (its
+   * message is where the next same-task approval lands). */
+  const groups = new Map<string, GroupCard>();
+
+  const groupFor = (prompt: TrackedPrompt): GroupCard | undefined =>
+    prompt.messageRef ? groups.get(prompt.messageRef) : undefined;
+
+  /** A grouped card is RENDERED by the group path once it has held more
+   * than one approval, or from the start for a request the agent tagged as
+   * one of several (it posts as the batch card); a lone untagged request
+   * keeps the classic single rendering. */
+  const isMulti = (g: GroupCard): boolean =>
+    g.live.size + g.settled.length > 1 ||
+    [...g.live.values()].some((a) => (a?.batch?.total ?? 0) > 1);
+
+  const renderGroupNow = async (g: GroupCard): Promise<void> => {
+    const credential = tokenFor.get(g.presenceId);
+    const cardUi = cardUiFor.get(g.presenceId);
+    if (!credential || !cardUi?.renderGroup) {
+      throw new Error("group card not renderable yet");
+    }
+    const ref = cardUi.unpackMessageRef(g.messageRef);
+    if (!ref) throw new Error("group card ref malformed");
+    const live = [...g.live.values()].filter(
+      (a): a is PendingApproval => a !== null,
+    );
+    if (live.length !== g.live.size) {
+      throw new Error("group card waiting on recovered details");
+    }
+    const presence = presenceById.get(g.presenceId);
+    const reviewUrl = presence && reviewUrlFor(deps.appUrl, presence);
+    await cardUi.renderGroup({
+      credential,
+      channel: ref.channel,
+      ts: ref.ts,
+      view: {
+        live,
+        settled: [...g.settled],
+        ...(reviewUrl && { reviewUrl }),
+      },
+    });
+  };
+
+  /** Render now, serialized behind any render in flight. Rejects on
+   * failure so a settle can keep its prompts tracked. */
+  const flushGroup = (g: GroupCard): Promise<void> => {
+    if (g.timer) {
+      clearTimeout(g.timer);
+      g.timer = null;
+    }
+    const run = g.chain.then(() => renderGroupNow(g));
+    g.chain = run.catch(() => {});
+    return run;
+  };
+
+  const scheduleGroupRender = (g: GroupCard): void => {
+    if (g.timer) return;
+    g.timer = setTimeout(() => {
+      g.timer = null;
+      flushGroup(g)
+        .then(() => scheduleSettleRender(g))
+        .catch((err: unknown) =>
+          deps.onLog("group card render failed; next change retries", {
+            err: String(err),
+          }),
+        );
+    }, deps.groupDebounceMs ?? 2_000);
+    g.timer.unref?.();
+  };
+
+  /** A card holding Approve all for a batch still arriving re-renders once
+   *  the batch goes quiet, so Approve all appears even if nothing else
+   *  changes (a miscounted total never blocks the reviewer). */
+  const scheduleSettleRender = (g: GroupCard): void => {
+    const live = [...g.live.values()].filter(
+      (a): a is PendingApproval => a !== null,
+    );
+    const total = live.find((a) => a.batch?.total)?.batch?.total ?? null;
+    const { settlesAt } = batchArrival(
+      total,
+      [...live.map((a) => a.createdAt), ...g.settled.map((s) => s.createdAt)],
+      Date.now(),
+    );
+    if (settlesAt === null) return;
+    const wait = Math.max(0, settlesAt - Date.now()) + 50;
+    setTimeout(() => {
+      if (g.live.size > 0) scheduleGroupRender(g);
+    }, wait).unref?.();
+  };
+
+  /** A settle's per-request verdict: what its card's done list counts, the
+   * line a single card is rewritten with, and the ledger state (the ledger
+   * only tells "settled at the deadline" from "settled otherwise"). */
+  interface Ending {
+    outcome: GroupOutcome;
+    text: string;
+  }
+
+  const ledgerStateOf = (outcome: GroupOutcome): "decided" | "expired" =>
+    outcome === "expired" ? "expired" : "decided";
+
+  const EXPIRED: Ending = {
+    outcome: "expired",
+    text: CHANNEL_CARD_EXPIRED_TEXT,
+  };
+
+  const outcomeOf = (text: string): GroupOutcome =>
+    text.startsWith("✅")
+      ? "approved"
+      : text.startsWith("⛔")
+        ? "denied"
+        : "decided";
+
+  /** A row as its card's done list records it. */
+  const settledRow = (
+    id: string,
+    prompt: TrackedPrompt,
+    approval: PendingApproval | null,
+    outcome: GroupOutcome,
+    by?: string,
+  ): GroupCardView["settled"][number] => ({
+    id,
+    title: prompt.title ?? approval?.summary?.action ?? null,
+    ...(approval?.batch?.label && { label: approval.batch.label }),
+    outcome,
+    ...(by && { by }),
+    ...(approval?.createdAt && { createdAt: approval.createdAt }),
+  });
+
+  /** Put a row on its card's done list once. Overlapping sweeps (a large
+   *  batch's ledger writes can outlast the 5s expiry interval) and the
+   *  absence arm can each reach the same id; counting it again would
+   *  over-count the expired total. */
+  const markSettled = (
+    g: GroupCard,
+    row: GroupCardView["settled"][number],
+  ): void => {
+    if (!g.settled.some((s) => s.id === row.id)) g.settled.push(row);
+  };
+
+  /** Stop tracking a prompt and drop it from its card's live rows, so a
+   * later render of that card never offers (or Approve-alls) an id that is
+   * already settled. The card itself is not rewritten here. */
+  const untrack = (prompt: TrackedPrompt): void => {
+    prompts.delete(prompt.approvalId);
+    const g = groupFor(prompt);
+    if (!g) return;
+    g.live.delete(prompt.approvalId);
+    if (g.live.size === 0) groups.delete(g.messageRef);
+  };
+
+  /**
+   * Settle several prompts at once, card first: every grouped member is
+   * moved to its card's done list, each touched card renders ONCE, and only
+   * then does the ledger settle. A failed render puts the members back and
+   * keeps them tracked (the caller's cadence retries), the same contract
+   * `settleTracked` keeps for a single card. Each prompt carries its own
+   * ending: one poll can see a cancel and a dashboard approval together.
+   */
+  const settleMany = async (
+    list: { prompt: TrackedPrompt; ending: Ending }[],
+  ): Promise<void> => {
+    const byGroup = new Map<
+      GroupCard,
+      { prompt: TrackedPrompt; ending: Ending }[]
+    >();
+    for (const item of list) {
+      const { prompt, ending } = item;
+      const g = groupFor(prompt);
+      if (g && isMulti(g)) {
+        const members = byGroup.get(g) ?? [];
+        members.push(item);
+        byGroup.set(g, members);
+        continue;
+      }
+      try {
+        if (await settleTracked(prompt, ending)) untrack(prompt);
+      } catch (err) {
+        deps.onLog("settle failed; will retry", { err: String(err) });
+      }
+    }
+    for (const [g, members] of byGroup) {
+      const removed = members.map(({ prompt, ending }) => ({
+        prompt,
+        ending,
+        approval: g.live.get(prompt.approvalId) ?? null,
+      }));
+      for (const { prompt, ending, approval } of removed) {
+        g.live.delete(prompt.approvalId);
+        markSettled(
+          g,
+          settledRow(prompt.approvalId, prompt, approval, ending.outcome),
+        );
+      }
+      try {
+        await flushGroup(g);
+      } catch (err) {
+        // Put them back: the card still shows them live, so they must stay
+        // tracked and live until a render lands.
+        const ids = new Set(members.map(({ prompt }) => prompt.approvalId));
+        g.settled = g.settled.filter((s) => !ids.has(s.id));
+        for (const { prompt, approval } of removed) {
+          g.live.set(prompt.approvalId, approval);
+        }
+        deps.onLog("group settle render failed; will retry", {
+          err: String(err),
+        });
+        continue;
+      }
+      for (const { prompt, ending } of members) {
+        try {
+          await deps.controlPlane.settlePrompt(
+            prompt.approvalId,
+            ledgerStateOf(ending.outcome),
+          );
+          prompts.delete(prompt.approvalId);
+        } catch (err) {
+          deps.onLog("ledger settle failed; will retry", { err: String(err) });
+        }
+      }
+      if (g.live.size === 0) groups.delete(g.messageRef);
+    }
+  };
+
+  /** Join a new approval to its task's open card on this presence, if one
+   * in `externalThreadId` (the card home right now) can take it; returns
+   * that card. */
+  const openGroupFor = (
+    presenceId: string,
+    externalThreadId: string,
+    approval: PendingApproval,
+  ): GroupCard | undefined => {
+    if (!cardUiFor.get(presenceId)?.renderGroup) return undefined;
+    if (!APPROVAL_GROUP_ID_RE.test(approval.id)) return undefined;
+    // A request that is itself a list (one bulk call over many records) is
+    // its own card: its table and CSV are the review. Joining a task card
+    // would flatten it to one line per request and drop the CSV.
+    if (isOwnTable(approval)) return undefined;
+    const key = approvalGroupKey(approval);
+    for (const g of groups.values()) {
+      if (g.presenceId !== presenceId || g.key !== key) continue;
+      if (g.externalThreadId !== externalThreadId) continue;
+      if ([...g.live.values()].some((a) => a !== null && isOwnTable(a))) {
+        continue;
+      }
+      // A card carries at most one click's worth of ids (the shared group
+      // decide cap); the next arrival opens a fresh card.
+      if (g.live.size === 0 || g.live.size >= APPROVAL_GROUP_MAX_IDS) continue;
+      if (![...g.live.keys()].every((id) => APPROVAL_GROUP_ID_RE.test(id))) {
+        continue;
+      }
+      return g;
+    }
+    return undefined;
+  };
+
   /**
    * Card FIRST, ledger second, untrack last: once the ledger settles, no
    * instance ever looks at this prompt again, so settling before the rewrite
@@ -206,44 +652,185 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
    * instance death between the two calls). Any failure keeps the prompt
    * tracked — the caller's cadence (the 5s sweep, or the poll loop's next
    * absence) retries the whole pair; a missing credential (config feed
-   * pending) just leaves it tracked the same way.
+   * pending) just leaves it tracked the same way. Resolves true once the
+   * card and the ledger are both settled.
    */
   const settleTracked = async (
     prompt: TrackedPrompt,
-    state: "decided" | "expired",
-    text: string,
-  ): Promise<void> => {
+    ending: Ending,
+  ): Promise<boolean> => {
     if (prompt.messageRef) {
       const credential = tokenFor.get(prompt.presenceId);
       const cardUi = cardUiFor.get(prompt.presenceId);
-      if (!credential || !cardUi) return;
+      if (!credential || !cardUi) return false;
       const ref = cardUi.unpackMessageRef(prompt.messageRef);
-      if (!ref) return;
+      if (!ref) return false;
       await cardUi.settle({
         credential,
         ...ref,
-        text,
+        text: ending.text,
         title: prompt.title,
       });
     }
-    await deps.controlPlane.settlePrompt(prompt.approvalId, state);
-    prompts.delete(prompt.approvalId);
+    await deps.controlPlane.settlePrompt(
+      prompt.approvalId,
+      ledgerStateOf(ending.outcome),
+    );
+    return true;
+  };
+
+  /**
+   * The candidates the control plane's ledger still holds pending; the rest
+   * are untracked here without a rewrite.
+   *
+   * A click on the events (HTTP) arm is decided control-plane-side: it
+   * rewrites THAT card itself (response_url) and settles the ledger, and
+   * this adapter is never told. Without this check the absence arm then
+   * rewrote the person's own decision as "Decided from the dashboard", or
+   * as "Expired" once the deadline passed (live, 2026-10-03). The ledger is
+   * the one record every channel decide path settles (a dashboard decision
+   * goes straight to the gateway and leaves it pending, so it still gets
+   * its dashboard rewrite).
+   *
+   * A decision in flight on THIS channel keeps its prompt: settleDecided
+   * owns that rewrite. A failed lookup acts on nothing; everything stays
+   * tracked and the caller's cadence retries.
+   *
+   * On a GROUPED card, a row settled that way moves to the card's done
+   * list and the card re-renders, because a one-row (or partly failed)
+   * events-arm click leaves the shared card to this adapter. A card left
+   * with no live rows is not rendered: the control plane replaced it
+   * itself when one click decided all of it.
+   */
+  const stillUnsettled = async (
+    candidates: TrackedPrompt[],
+  ): Promise<TrackedPrompt[]> => {
+    if (candidates.length === 0) return [];
+    let unsettled: Set<string>;
+    try {
+      unsettled = new Set(
+        (await deps.controlPlane.listUnsettledPrompts()).map(
+          (prompt) => prompt.approvalId,
+        ),
+      );
+    } catch (err) {
+      deps.onLog("unsettled-card lookup failed; will retry", {
+        err: String(err),
+      });
+      return [];
+    }
+    const touched = new Set<GroupCard>();
+    const keep = candidates.filter((prompt) => {
+      if (unsettled.has(prompt.approvalId)) return true;
+      if (deciding.has(prompt.approvalId)) return false;
+      // Grouped-ness is the card's BEFORE this row leaves it: a two-row
+      // card losing one row is still a grouped card.
+      const g = groupFor(prompt);
+      const grouped = g !== undefined && isMulti(g);
+      const approval = g?.live.get(prompt.approvalId) ?? null;
+      untrack(prompt);
+      if (g && grouped) {
+        markSettled(
+          g,
+          settledRow(prompt.approvalId, prompt, approval, "decided"),
+        );
+        touched.add(g);
+      }
+      return false;
+    });
+    for (const g of touched) if (g.live.size > 0) scheduleGroupRender(g);
+    return keep;
   };
 
   const settleExpired = async (): Promise<void> => {
     const now = Date.now();
-    for (const prompt of [...prompts.values()]) {
-      if (prompt.expiresAt === null || prompt.expiresAt > now) continue;
-      try {
-        await settleTracked(
+    const expired = [...prompts.values()].filter(
+      (prompt) => prompt.expiresAt !== null && prompt.expiresAt <= now,
+    );
+    const due = await stillUnsettled(expired);
+    if (due.length > 0) {
+      await settleMany(due.map((prompt) => ({ prompt, ending: EXPIRED })));
+    }
+    // A card that left the pending list and is still waiting for its record
+    // gets asked again here (the poll may be idle in its long-poll). Only
+    // what is still tracked: the expiry pass above may have settled it.
+    await settleDeparted(
+      [...prompts.values()].filter(
+        (prompt) =>
+          prompt.departedAt !== undefined &&
+          !(prompt.expiresAt !== null && prompt.expiresAt <= now) &&
+          !deciding.has(prompt.approvalId),
+      ),
+    );
+  };
+
+  /**
+   * Cards whose request left the gateway's pending list with no click on
+   * them: the record says how it ended (a dashboard decision, a request
+   * replaced by a person's message, or the agent no longer waiting), and
+   * the card says exactly that. Channel-neutral: every provider renders the
+   * same ending through its own card seam.
+   *
+   * A request with no record yet stays tracked, stamped with when it left,
+   * and is asked about again (the next poll, or the 5s sweep) for
+   * `CHANNEL_CARD_RECORD_WAIT_MS`; then the card says only what this
+   * adapter saw: "No longer waiting". At its deadline, a request with no
+   * record is the gateway's auto-deny. A failed lookup acts on nothing.
+   */
+  const settleDeparted = async (candidates: TrackedPrompt[]): Promise<void> => {
+    const now = Date.now();
+    for (const prompt of candidates) prompt.departedAt ??= now;
+    const left = await stillUnsettled(candidates);
+    if (left.length === 0) return;
+    let record: Map<string, { outcome: string; via?: string }>;
+    try {
+      // Every departed card is asked about, a read's worth at a time: one
+      // never asked would read "No longer waiting" with a record waiting.
+      const answers = [];
+      for (let i = 0; i < left.length; i += APPROVAL_GROUP_MAX_IDS) {
+        const ids = left
+          .slice(i, i + APPROVAL_GROUP_MAX_IDS)
+          .map((p) => p.approvalId);
+        answers.push(...(await deps.controlPlane.listPromptOutcomes(ids)));
+      }
+      record = new Map(answers.map((o) => [o.approvalId, o]));
+    } catch (err) {
+      deps.onLog("approval outcome lookup failed; will retry", {
+        err: String(err),
+      });
+      return;
+    }
+    const due: { prompt: TrackedPrompt; ending: Ending }[] = [];
+    for (const prompt of left) {
+      const known = record.get(prompt.approvalId);
+      const ending = channelCardEndingOf(known?.outcome);
+      if (ending) {
+        due.push({
           prompt,
-          "expired",
-          "Expired (no response) · denied",
-        );
-      } catch (err) {
-        deps.onLog("expiry settle failed; will retry", { err: String(err) });
+          ending: {
+            outcome: ending,
+            text: channelCardEndingText(ending, known?.via),
+          },
+        });
+        continue;
+      }
+      if (prompt.expiresAt !== null && prompt.expiresAt - 15_000 <= now) {
+        // At/near the deadline with no other record: the gateway's
+        // auto-deny, settled now rather than after the sweep's local clock.
+        due.push({ prompt, ending: EXPIRED });
+        continue;
+      }
+      if (now - (prompt.departedAt ?? now) >= CHANNEL_CARD_RECORD_WAIT_MS) {
+        due.push({
+          prompt,
+          ending: {
+            outcome: "unknown",
+            text: channelCardEndingText("unknown"),
+          },
+        });
       }
     }
+    if (due.length > 0) await settleMany(due);
   };
 
   /** The swallow-wrapper for decision-path rewrites: the outcome is already
@@ -277,13 +864,55 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
     text: string,
   ): Promise<void> => {
     const prompt = prompts.get(approvalId);
-    prompts.delete(approvalId);
-    if (prompt) await settleCardSafe(prompt, text);
+    if (!prompt) return;
+    const g = groupFor(prompt);
+    if (g && isMulti(g)) {
+      await settleDecidedMany([approvalId], {
+        outcome: outcomeOf(text),
+      });
+      return;
+    }
+    untrack(prompt);
+    await settleCardSafe(prompt, text);
+  };
+
+  /** A grouped click's outcome (socket arm): the decided ids move to their
+   * card's done list in one render. The ledger is already settled by the
+   * control plane's decide; a failed render is cosmetic here (the next
+   * poll's absence arm would otherwise re-settle), so the ids untrack. */
+  const settleDecidedMany = async (
+    approvalIds: string[],
+    outcome: { outcome: GroupOutcome; by?: string },
+  ): Promise<void> => {
+    const touched = new Set<GroupCard>();
+    for (const id of approvalIds) {
+      const prompt = prompts.get(id);
+      if (!prompt) continue;
+      prompts.delete(id);
+      const g = groupFor(prompt);
+      if (!g) continue;
+      const approval = g.live.get(id) ?? null;
+      g.live.delete(id);
+      markSettled(
+        g,
+        settledRow(id, prompt, approval, outcome.outcome, outcome.by),
+      );
+      touched.add(g);
+    }
+    for (const g of touched) {
+      try {
+        await flushGroup(g);
+      } catch (err) {
+        deps.onLog("group card update failed", { err: String(err) });
+      }
+      if (g.live.size === 0) groups.delete(g.messageRef);
+    }
   };
 
   const postCard = async (
     presenceId: string,
     approval: PendingApproval,
+    batch: PendingApproval[] = [],
   ): Promise<void> => {
     // Read the CURRENT presence, not a snapshot captured when the loop began —
     // a card that arrives before the agent's first DM must find its home once
@@ -293,11 +922,7 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
     const cardUi = presence ? cardUiFor.get(presenceId) : undefined;
     if (!presence || !credential || !cardUi) return;
 
-    // Where the card goes: the presence's direct thread when there is one,
-    // else its first link. No home at all → leave it unclaimed; a later poll
-    // retries once a DM exists.
-    const link =
-      presence.links.find((l) => l.kind === "direct") ?? presence.links[0];
+    const link = approvalCardLink(presence);
     if (!link) return;
     const decode = deps.threadAddressOf(presence);
     if (!decode) return;
@@ -311,24 +936,59 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
     });
     if (!claimed) return;
 
+    const track = (messageRef: string) =>
+      prompts.set(approval.id, {
+        approvalId: approval.id,
+        presenceId,
+        messageRef,
+        externalThreadId: link.externalThreadId,
+        expiresAt: approval.expiresAt
+          ? new Date(approval.expiresAt).getTime()
+          : null,
+        title: approval.summary?.action ?? null,
+      });
+
+    // Same task, card still open in this home → this approval joins THAT
+    // message: the ledger row shares its ref (restart-safe), and the card
+    // re-renders once the burst settles down.
+    const open = openGroupFor(presenceId, link.externalThreadId, approval);
+    if (open) {
+      await deps.controlPlane.recordPromptMessage(approval.id, open.messageRef);
+      open.live.set(approval.id, approval);
+      track(open.messageRef);
+      scheduleGroupRender(open);
+      return;
+    }
+
+    const reviewUrl = reviewUrlFor(deps.appUrl, presence);
     const posted = await cardUi.post({
       credential,
       channel: target.channel,
       ...(target.threadTs && { threadTs: target.threadTs }),
       ...(presence.agent.imageUrl && { iconUrl: presence.agent.imageUrl }),
       approval,
+      ...(batch.length > 1 && { batch }),
+      ...(reviewUrl && { reviewUrl }),
     });
     const messageRef = cardUi.packMessageRef(posted);
     await deps.controlPlane.recordPromptMessage(approval.id, messageRef);
-    prompts.set(approval.id, {
-      approvalId: approval.id,
-      presenceId,
-      messageRef,
-      expiresAt: approval.expiresAt
-        ? new Date(approval.expiresAt).getTime()
-        : null,
-      title: approval.summary?.action ?? null,
-    });
+    track(messageRef);
+    if (cardUi.renderGroup) {
+      const g: GroupCard = {
+        presenceId,
+        key: approvalGroupKey(approval),
+        messageRef,
+        externalThreadId: link.externalThreadId,
+        live: new Map([[approval.id, approval]]),
+        settled: [],
+        timer: null,
+        chain: Promise.resolve(),
+      };
+      groups.set(messageRef, g);
+      // A batch card posted on its first row offers Approve all once the
+      // batch goes quiet, even if no other row ever arrives.
+      if (isMulti(g)) scheduleSettleRender(g);
+    }
   };
 
   const runLoop = (presenceId: string): void => {
@@ -369,47 +1029,43 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
           // final 15s window is treated as the expiry it almost certainly
           // is. Both arms settle card-first via settleTracked: a failure
           // keeps the prompt tracked, and the absence persisting into the
-          // next poll retries the pair.
+          // next poll retries the pair. A card a channel click already
+          // settled is untracked instead (`stillUnsettled`).
           const pendingIds = new Set(pending.map((a) => a.id));
-          for (const prompt of [...prompts.values()]) {
-            if (prompt.presenceId !== presenceId) continue;
-            if (pendingIds.has(prompt.approvalId)) continue;
-            // A click on THIS card is mid-flight: decide() already removed
-            // the approval from the pending set, and settleDecided is about
-            // to rewrite the card with the real outcome — an absence settle
-            // here would win the race with the wrong provenance.
-            if (deciding.has(prompt.approvalId)) continue;
-            if (
-              prompt.expiresAt !== null &&
-              prompt.expiresAt - 15_000 <= Date.now()
-            ) {
-              // At/near the deadline: expire NOW rather than waiting out the
-              // sweep against a local clock the gateway already beat.
-              try {
-                await settleTracked(
-                  prompt,
-                  "expired",
-                  "Expired (no response) · denied",
-                );
-              } catch (err) {
-                deps.onLog("expiry settle failed; will retry", {
-                  err: String(err),
-                });
-              }
-              continue;
-            }
-            try {
-              await settleTracked(
-                prompt,
-                "decided",
-                "Decided from the dashboard",
-              );
-            } catch (err) {
-              deps.onLog("cross-surface settle failed; will retry", {
-                err: String(err),
-              });
+          // Seen pending again (a poll answer that dropped it was stale):
+          // its wait for the record starts over on its next departure.
+          for (const id of pendingIds) {
+            const tracked = prompts.get(id);
+            if (tracked) delete tracked.departedAt;
+          }
+          // Recovered group members get their details from this poll. Once
+          // a rebuilt card has every row's details it renders again: a join
+          // whose debounced render was lost to a restart shows up then.
+          const filled = new Set<GroupCard>();
+          for (const approval of pending) {
+            const tracked = prompts.get(approval.id);
+            const g = tracked ? groupFor(tracked) : undefined;
+            if (g && g.live.get(approval.id) === null) {
+              g.live.set(approval.id, approval);
+              g.key ??= approvalGroupKey(approval);
+              filled.add(g);
             }
           }
+          for (const g of filled) {
+            const complete = [...g.live.values()].every((a) => a !== null);
+            if (complete && isMulti(g)) scheduleGroupRender(g);
+          }
+          const absent = [...prompts.values()].filter(
+            (prompt) =>
+              prompt.presenceId === presenceId &&
+              !pendingIds.has(prompt.approvalId) &&
+              // A click on THIS card is mid-flight: decide() already removed
+              // the approval from the pending set, and settleDecided is
+              // about to rewrite the card with the real outcome. An absence
+              // settle here would win the race with the wrong provenance.
+              !deciding.has(prompt.approvalId),
+          );
+          await settleDeparted(absent);
           for (const approval of pending) {
             if (prompts.has(approval.id)) continue;
             // The gateway's pending list is WORKSPACE-scoped, but this loop
@@ -423,7 +1079,29 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
               approvalAgentId !== presence.agent.id
             )
               continue;
-            await postCard(presenceId, approval);
+            // A tagged batch posts once it is all here (or has gone quiet),
+            // like the web card: the reviewer never sees "1 of 20" grow.
+            // A batch whose card is already up is never held back. Siblings
+            // match on the group key (agent + app + batch), never the batch
+            // id alone: it is the agent's claim, and the pending set is the
+            // whole workspace's.
+            const key = approvalGroupKey(approval);
+            const siblings = approval.batch?.total
+              ? pending.filter((a) => approvalGroupKey(a) === key)
+              : [];
+            if (
+              approval.batch?.total &&
+              ![...groups.values()].some(
+                (g) => g.presenceId === presenceId && g.key === key,
+              ) &&
+              batchArrival(
+                approval.batch.total,
+                siblings.map((a) => a.createdAt),
+                Date.now(),
+              ).arriving
+            )
+              continue;
+            await postCard(presenceId, approval, siblings);
           }
           // Pace on what the fetch actually did: the gateway long-polls only
           // when the pending set is EMPTY, so any non-empty answer came back
@@ -532,6 +1210,7 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
           approvalId: prompt.approvalId,
           presenceId: prompt.agentChannelId,
           messageRef: prompt.externalMessageRef,
+          externalThreadId: prompt.externalThreadId,
           // The gateway's own recorded deadline, so a fast restart never marks
           // a still-live approval timed-out early. A row with no recorded
           // expiry (older) gets one sweep cycle to settle.
@@ -539,6 +1218,30 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
             ? new Date(prompt.expiresAt).getTime()
             : Date.now() + 5_000,
           title: null,
+        });
+      }
+      // Rebuild grouped cards: ledger rows sharing one message ref are one
+      // card. Details arrive with the next poll (live entries start null).
+      const byRef = new Map<string, TrackedPrompt[]>();
+      for (const prompt of prompts.values()) {
+        if (!prompt.messageRef || groups.has(prompt.messageRef)) continue;
+        const members = byRef.get(prompt.messageRef) ?? [];
+        members.push(prompt);
+        byRef.set(prompt.messageRef, members);
+      }
+      // The task key comes from the first poll that carries a row's details.
+      for (const [messageRef, members] of byRef) {
+        const [first] = members;
+        if (!first) continue;
+        groups.set(messageRef, {
+          presenceId: first.presenceId,
+          key: null,
+          messageRef,
+          externalThreadId: first.externalThreadId,
+          live: new Map(members.map((p) => [p.approvalId, null])),
+          settled: [],
+          timer: null,
+          chain: Promise.resolve(),
         });
       }
     },
@@ -554,8 +1257,10 @@ export const createApprovalsManager = (deps: ApprovalsManagerDeps) => {
     },
 
     settleDecided,
+    settleDecidedMany,
 
     stop(): void {
+      for (const g of groups.values()) if (g.timer) clearTimeout(g.timer);
       for (const loop of loops.values()) loop.stop();
       loops.clear();
       if (expiryTimer) clearInterval(expiryTimer);

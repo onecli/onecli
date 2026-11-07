@@ -23,16 +23,8 @@ import {
 } from "@onecli/ui/components/dialog";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@onecli/ui/components/select";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { Textarea } from "@onecli/ui/components/textarea";
-import { useAgents } from "@/hooks/use-agents";
 import {
   useCreateOrgSkill,
   useCreateSkill,
@@ -43,8 +35,18 @@ import {
   useUpdateOrgSkill,
   useUpdateSkill,
 } from "@/hooks/use-skills";
-import type { SkillFileInput, SkillSummary } from "@/lib/api";
-import { SkillFilesEditor, skillFileProblem } from "./skill-files-editor";
+import type { Skill, SkillFileInput, SkillSummary } from "@/lib/api";
+import {
+  MAX_FILES_PER_SKILL,
+  SKILL_CONTENT_MAX_LENGTH,
+  SKILL_DESCRIPTION_MAX_LENGTH,
+} from "@onecli/api/validations/skills";
+import {
+  SkillFilesEditor,
+  skillFileElementId,
+  skillFileProblem,
+} from "./skill-files-editor";
+import { SkillFileList } from "./skill-file-list";
 
 /**
  * Create/edit one skill (both doors — the tier decides which hooks fire).
@@ -57,15 +59,52 @@ import { SkillFilesEditor, skillFileProblem } from "./skill-files-editor";
  * body-only counter would let a user fill it and still 422 on the sum. */
 const SKILL_TOTAL_MAX = 32_000;
 
-export interface SkillDialogProps {
-  tier: "agent" | "organization";
-  /** The agent door's subject: the default audience for a new skill. */
-  agentId?: string;
+/** The footer line's id, so the Save/Create button is described by it. */
+const BLOCKER_ID = "skill-save-blocker";
+
+/** A skill imported from a zip: files the hand-written editor can't take
+ * whole (one it can't show or save as it is, or more than it holds), or a
+ * body imported past its limit. The dialog lists its files instead of
+ * editing them, and holds its body to its imported length. */
+const isImportedSkill = (skill: Skill): boolean =>
+  skill.files.length > MAX_FILES_PER_SKILL ||
+  skill.files.some((file) => !file.editable) ||
+  skill.content.length > SKILL_CONTENT_MAX_LENGTH;
+
+/** Why a Create/Save click did not save: the words for the footer, and the
+ *  input the caret goes to. */
+interface SaveBlocker {
+  message: string;
+  focusId: string;
+}
+
+const requiredBlocker = (focusId: string): SaveBlocker => ({
+  message: "Fill in the required fields.",
+  focusId,
+});
+
+/** Every required field carries the same mark, so "required" is read from
+ *  one glance at the form rather than discovered at the Create button. */
+const Required = () => (
+  <span aria-hidden className="text-destructive ml-0.5">
+    *
+  </span>
+);
+
+interface SkillDialogBaseProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** Null = create. The list row is body-free; the dialog fetches content. */
   editing: SkillSummary | null;
 }
+
+export type SkillDialogProps = SkillDialogBaseProps &
+  (
+    | { tier: "organization"; agentId?: never }
+    /** The agent door: a new skill always belongs to THIS agent. Required,
+     *  so a missing id can never fall through to a broader tier. */
+    | { tier: "agent"; agentId: string }
+  );
 
 export const SkillDialog = ({
   tier,
@@ -81,7 +120,6 @@ export const SkillDialog = ({
   const orgCreate = useCreateOrgSkill();
   const orgUpdate = useUpdateOrgSkill();
   const orgRemove = useDeleteOrgSkill();
-  const agents = useAgents();
   const workspaceDetail = useSkill(
     !isOrg && open && editing ? editing.id : null,
   );
@@ -92,18 +130,17 @@ export const SkillDialog = ({
   const [description, setDescription] = useState("");
   const [content, setContent] = useState("");
   const [files, setFiles] = useState<SkillFileInput[]>([]);
-  // An agent id or "workspace" — the create-time scope picker. On the agent
-  // door it defaults to THIS agent: you are standing in its section, so the
-  // narrow, obvious choice is the default and widening is deliberate.
-  const [audience, setAudience] = useState(agentId ?? "workspace");
   const [bodySeeded, setBodySeeded] = useState(false);
+  /** Set by a Create/Save click on an invalid form: validation shows up when
+   *  the user asks for it, never while they are still typing. */
+  const [attempted, setAttempted] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   // Re-seed on open/target change; the body arrives with the detail fetch.
   useEffect(() => {
     if (!open) return;
+    setAttempted(false);
     setBodySeeded(false);
-    setAudience(agentId ?? "workspace");
     if (editing) {
       setName(editing.name);
       setDescription(editing.description);
@@ -115,35 +152,93 @@ export const SkillDialog = ({
       setContent("");
       setFiles([]);
     }
-  }, [open, editing, agentId]);
+  }, [open, editing]);
 
   // Seeded ONCE per open (the memory-dialog lesson): the detail query
   // refetches on window focus, and a data-identity dependency would wipe
-  // what the user has typed.
+  // what the user has typed. An imported skill's files are listed, never
+  // seeded: its save sends none, and the server keeps them all.
   useEffect(() => {
     if (!open || !editing || bodySeeded || !detail.data) return;
     setContent(detail.data.content);
-    setFiles(detail.data.files);
+    setFiles(
+      isImportedSkill(detail.data)
+        ? []
+        : detail.data.files.map(({ path, content: text }) => ({
+            path,
+            content: text,
+          })),
+    );
     setBodySeeded(true);
   }, [open, editing, bodySeeded, detail.data]);
 
-  const hostedAgents = (agents.data ?? []).filter(
-    (agent) => agent.kind === "hosted",
-  );
+  // A save holds the dialog (the server validates it); a delete never does:
+  // it is instant, and the dialog is closed by the time it settles.
   const busy =
     create.isPending ||
     update.isPending ||
-    remove.isPending ||
     orgCreate.isPending ||
-    orgUpdate.isPending ||
-    orgRemove.isPending;
+    orgUpdate.isPending;
   const bodyReady = !editing || bodySeeded;
-  const filesValid = files.every((file) => skillFileProblem(file) === null);
+  // A skill imported from a zip: it edits the description and instructions
+  // only, lists the files read-only, and its save sends no files, so the
+  // server keeps every one. Its body may change but not outgrow the import.
+  const importedSkill =
+    editing && detail.data && isImportedSkill(detail.data) ? detail.data : null;
+  const importedFiles = importedSkill?.files ?? null;
   const totalChars =
     content.length + files.reduce((sum, file) => sum + file.content.length, 0);
-  const overBudget = totalChars > SKILL_TOTAL_MAX;
+  const totalMax = importedSkill
+    ? Math.max(SKILL_CONTENT_MAX_LENGTH, importedSkill.content.length)
+    : SKILL_TOTAL_MAX;
+  const overBudget = totalChars > totalMax;
+
+  const missingName = !editing && name.trim() === "";
+  const missingDescription = description.trim() === "";
+  const missingContent = bodyReady && content.trim() === "";
+  const badFile = files
+    .map((file, index) => ({ index, problem: skillFileProblem(file) }))
+    .find((row) => row.problem !== null);
+  /**
+   * The first thing stopping a save, in form order, or null when it can save.
+   * ONE answer drives both the footer sentence and the caret, so the words and
+   * the focus can never point at different problems. The button stays live: a
+   * dead, unexplained button gave the user nothing to act on, while a click
+   * always produces an answer.
+   */
+  const findBlocker = (): SaveBlocker | null => {
+    if (missingName) return requiredBlocker("skill-name");
+    if (missingDescription) return requiredBlocker("skill-description");
+    if (missingContent) return requiredBlocker("skill-content");
+    if (badFile?.problem) {
+      return {
+        message: "Fix the highlighted file.",
+        focusId: skillFileElementId(badFile.index, badFile.problem.field),
+      };
+    }
+    if (overBudget) {
+      return {
+        message: "Too long to save. Shorten the instructions or files.",
+        focusId: "skill-content",
+      };
+    }
+    return null;
+  };
+  const blocker = findBlocker();
+  /** Only after a real attempt, and each mark clears as its field is fixed. */
+  const blockerShown = attempted && blocker !== null;
 
   const submit = () => {
+    if (!bodyReady || busy) return;
+    // The click IS the validation request: mark what is wrong and stop here,
+    // so nothing is ever rejected silently.
+    if (blocker) {
+      setAttempted(true);
+      // Put the caret on the problem, so the answer is not just visible but
+      // reachable in a long, scrolling dialog (focus scrolls it into view).
+      document.getElementById(blocker.focusId)?.focus();
+      return;
+    }
     // Only fully-blank rows are dropped. A row with a path but no content is
     // a validation problem (`skillFileProblem`), never a silent deletion.
     const cleanFiles = files
@@ -162,7 +257,7 @@ export const SkillDialog = ({
         patch: {
           description: description.trim(),
           content,
-          files: cleanFiles,
+          ...(!importedFiles && { files: cleanFiles }),
         },
       };
       if (isOrg) orgUpdate.mutate(payload, handlers);
@@ -175,28 +270,21 @@ export const SkillDialog = ({
       content,
       ...(cleanFiles.length > 0 && { files: cleanFiles }),
     };
-    if (isOrg) {
-      orgCreate.mutate(input, handlers);
-    } else {
-      create.mutate(
-        audience === "workspace" ? input : { ...input, agentId: audience },
-        handlers,
-      );
-    }
+    // The agent door creates for the agent you are standing in — never a
+    // picker: skills describe how ONE agent works (§3.18 as amended).
+    if (tier === "organization") orgCreate.mutate(input, handlers);
+    else create.mutate({ ...input, agentId }, handlers);
   };
 
   const removeSkill = () => {
     if (!editing) return;
-    const handlers = {
-      onSuccess: () => {
-        toast.success("Skill deleted");
-        setConfirmOpen(false);
-        onOpenChange(false);
-      },
-      onError: (error: Error) => toast.error(String(error.message)),
-    };
-    if (isOrg) orgRemove.mutate(editing.id, handlers);
-    else remove.mutate(editing.id, handlers);
+    // Instant: the row leaves the list and both dialogs close on click; the
+    // hook confirms once the server agrees, or puts the row back and says
+    // why. The confirm before this is what guards a delete, not a spinner.
+    if (isOrg) orgRemove.mutate(editing.id);
+    else remove.mutate(editing.id);
+    setConfirmOpen(false);
+    onOpenChange(false);
   };
 
   // Deleting is not undoable, and the prune carries it into every sandbox in
@@ -245,62 +333,54 @@ export const SkillDialog = ({
               ? "Changes reach every running agent within seconds."
               : isOrg
                 ? "Reaches every hosted agent in every workspace of the organization."
-                : "Reusable instructions your agents load while they work."}
+                : "Reusable instructions this agent loads while it works."}
           </DialogDescription>
         </DialogHeader>
 
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain pr-1">
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="space-y-1.5">
-              <Label htmlFor="skill-name">Name</Label>
-              <Input
-                id="skill-name"
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                placeholder="release-checklist"
-                className="font-mono"
-                maxLength={64}
-                spellCheck={false}
-                autoComplete="off"
-                disabled={editing !== null}
-              />
-            </div>
-            {!isOrg && !editing && (
-              <div className="space-y-1.5">
-                <Label htmlFor="skill-audience">Who gets it</Label>
-                <Select value={audience} onValueChange={setAudience}>
-                  <SelectTrigger id="skill-audience" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {/* This agent first: it is the door you came through. */}
-                    {agentId !== undefined && (
-                      <SelectItem value={agentId}>Only this agent</SelectItem>
-                    )}
-                    <SelectItem value="workspace">
-                      Everyone in this workspace
-                    </SelectItem>
-                    {hostedAgents
-                      .filter((agent) => agent.id !== agentId)
-                      .map((agent) => (
-                        <SelectItem key={agent.id} value={agent.id}>
-                          Only {agent.name}
-                        </SelectItem>
-                      ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
+          <div className="space-y-1.5">
+            <Label htmlFor="skill-name">
+              Name
+              {/* Immutable once created: nothing left to fill in. */}
+              {!editing && <Required />}
+            </Label>
+            <Input
+              id="skill-name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="release-checklist"
+              required={!editing}
+              aria-invalid={attempted && missingName}
+              className="font-mono"
+              maxLength={64}
+              spellCheck={false}
+              autoComplete="off"
+              disabled={editing !== null}
+            />
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="skill-description">Description</Label>
-            <Input
+            <Label htmlFor="skill-description">
+              Description
+              <Required />
+            </Label>
+            {/* Up to 1,024 characters (the standard's limit), so it wraps
+                in view; still one line, which is what the server takes. */}
+            <Textarea
               id="skill-description"
               value={description}
-              onChange={(event) => setDescription(event.target.value)}
+              onChange={(event) =>
+                setDescription(event.target.value.replace(/\r?\n/g, " "))
+              }
+              onKeyDown={(event) => {
+                if (event.key === "Enter") event.preventDefault();
+              }}
               placeholder="One line: how the agent decides when to use it"
-              maxLength={500}
+              required
+              aria-invalid={attempted && missingDescription}
+              maxLength={SKILL_DESCRIPTION_MAX_LENGTH}
+              rows={1}
+              className="max-h-32 min-h-9 resize-none"
             />
           </div>
 
@@ -308,15 +388,15 @@ export const SkillDialog = ({
             <div className="flex items-baseline justify-between">
               <Label htmlFor="skill-content">
                 Instructions (SKILL.md body)
+                <Required />
               </Label>
               {/* Counts the body AND the files, because the server's cap is
-                  their sum — and says so in words, not colour alone. */}
+                  their sum, and says so in words, not colour alone. */}
               <span
                 aria-live="polite"
                 className={`text-xs ${overBudget ? "text-destructive" : "text-muted-foreground"}`}
               >
-                {totalChars.toLocaleString()} /{" "}
-                {SKILL_TOTAL_MAX.toLocaleString()}
+                {totalChars.toLocaleString()} / {totalMax.toLocaleString()}
                 {overBudget && " (too long to save)"}
               </span>
             </div>
@@ -327,6 +407,8 @@ export const SkillDialog = ({
                 onChange={(event) => setContent(event.target.value)}
                 placeholder="Markdown the agent follows when it loads this skill."
                 rows={12}
+                required
+                aria-invalid={attempted && (missingContent || overBudget)}
                 className="resize-y font-mono"
               />
             ) : (
@@ -334,14 +416,18 @@ export const SkillDialog = ({
             )}
           </div>
 
-          {bodyReady ? (
+          {!bodyReady ? (
+            <Skeleton className="h-10 w-full" />
+          ) : importedFiles ? (
+            <SkillFileList files={importedFiles} />
+          ) : (
             <SkillFilesEditor
               files={files}
               onChange={setFiles}
               disabled={busy}
+              hasBody={content.trim() !== ""}
+              showErrors={attempted}
             />
-          ) : (
-            <Skeleton className="h-10 w-full" />
           )}
         </div>
 
@@ -351,7 +437,7 @@ export const SkillDialog = ({
               variant="ghost"
               className="text-destructive hover:text-destructive"
               disabled={busy}
-              loading={remove.isPending || orgRemove.isPending}
+              // No spinner: deleting is instant and closes this dialog.
               onClick={() => setConfirmOpen(true)}
             >
               Delete
@@ -359,7 +445,20 @@ export const SkillDialog = ({
           ) : (
             <span />
           )}
-          <div className="flex gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {/* Short, and beside the button it explains. A tooltip on a
+                disabled button is unreachable by keyboard and invisible on
+                touch, so this stays visible text. The region is ALWAYS
+                mounted (sr-only while empty, so it takes no room): a live
+                region inserted together with its text is often not
+                announced at all. */}
+            <p
+              id={BLOCKER_ID}
+              role="status"
+              className={blockerShown ? "text-destructive text-xs" : "sr-only"}
+            >
+              {blockerShown ? blocker.message : ""}
+            </p>
             <Button
               variant="outline"
               disabled={busy}
@@ -368,15 +467,10 @@ export const SkillDialog = ({
               Cancel
             </Button>
             <Button
-              disabled={
-                busy ||
-                !bodyReady ||
-                !filesValid ||
-                content.trim() === "" ||
-                description.trim() === "" ||
-                (!editing && name.trim() === "") ||
-                overBudget
-              }
+              // Never dead: clicking an incomplete form is how the user asks
+              // what is missing (`submit` marks the fields).
+              disabled={busy || !bodyReady}
+              aria-describedby={blockerShown ? BLOCKER_ID : undefined}
               loading={
                 create.isPending ||
                 update.isPending ||

@@ -2541,5 +2541,731 @@
     "expected": {
       "action": "allow"
     }
+  },
+  {
+    "name": "catch-all split: an unlisted GET falls past the narrowed writes row to the plain reads row",
+    "rules": [
+      {
+        "scope": "workspace",
+        "priority": 0,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: allowed",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": ["list_pulls"]
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 1,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: blocked",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": ["create_issue", "search"]
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 2,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: all other writes",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": [],
+            "method": "!GET,HEAD"
+          }
+        ],
+        "action": "allow",
+        "requireApproval": true,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 3,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: all other reads",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": []
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.github.com",
+      "path": "/installation/repositories",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false,
+      "winningConnectionId": "c-gh"
+    },
+    "expected": {
+      "action": "allow"
+    }
+  },
+  {
+    "name": "catch-all split: HEAD counts as a read, case-insensitively",
+    "rules": [
+      {
+        "scope": "workspace",
+        "priority": 0,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: allowed",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": ["list_pulls"]
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 1,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: blocked",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": ["create_issue", "search"]
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 2,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: all other writes",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": [],
+            "method": "!GET,HEAD"
+          }
+        ],
+        "action": "allow",
+        "requireApproval": true,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 3,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: all other reads",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": []
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.github.com",
+      "path": "/installation/repositories",
+      "method": "head",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false,
+      "winningConnectionId": "c-gh"
+    },
+    "expected": {
+      "action": "allow"
+    }
+  },
+  {
+    "name": "catch-all split: an unlisted POST hits the narrowed writes row",
+    "rules": [
+      {
+        "scope": "workspace",
+        "priority": 0,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: allowed",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": ["list_pulls"]
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 1,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: blocked",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": ["create_issue", "search"]
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 2,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: all other writes",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": [],
+            "method": "!GET,HEAD"
+          }
+        ],
+        "action": "allow",
+        "requireApproval": true,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 3,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: all other reads",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": []
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.github.com",
+      "path": "/repos/o/r/labels",
+      "method": "POST",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false,
+      "winningConnectionId": "c-gh"
+    },
+    "expected": {
+      "action": "allow",
+      "requireApproval": true
+    }
+  },
+  {
+    "name": "catch-all split: a catalog GET left on Never stays blocked before the catch-alls",
+    "rules": [
+      {
+        "scope": "workspace",
+        "priority": 0,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: allowed",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": ["list_pulls"]
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 1,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: blocked",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": ["create_issue", "search"]
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 2,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: all other writes",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": [],
+            "method": "!GET,HEAD"
+          }
+        ],
+        "action": "allow",
+        "requireApproval": true,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 3,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: all other reads",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": []
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.github.com",
+      "path": "/search/code",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false,
+      "winningConnectionId": "c-gh"
+    },
+    "expected": {
+      "action": "block"
+    }
+  },
+  {
+    "name": "catch-all split: a narrowed GET,HEAD row blocks unlisted reads only",
+    "rules": [
+      {
+        "scope": "workspace",
+        "priority": 0,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: allowed",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": ["list_pulls"]
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 1,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: all other reads",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": [],
+            "method": "GET,HEAD"
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 2,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: all other writes",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": []
+          }
+        ],
+        "action": "allow",
+        "requireApproval": true,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.github.com",
+      "path": "/installation/repositories",
+      "method": "GET",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false,
+      "winningConnectionId": "c-gh"
+    },
+    "expected": {
+      "action": "block"
+    }
+  },
+  {
+    "name": "catch-all split: writes fall past a GET,HEAD row to the plain writes row",
+    "rules": [
+      {
+        "scope": "workspace",
+        "priority": 0,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: allowed",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": ["list_pulls"]
+          }
+        ],
+        "action": "allow",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 1,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: all other reads",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": [],
+            "method": "GET,HEAD"
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      },
+      {
+        "scope": "workspace",
+        "priority": 2,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: all other writes",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": []
+          }
+        ],
+        "action": "allow",
+        "requireApproval": true,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.github.com",
+      "path": "/repos/o/r/labels/x",
+      "method": "DELETE",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false,
+      "winningConnectionId": "c-gh"
+    },
+    "expected": {
+      "action": "allow",
+      "requireApproval": true
+    }
+  },
+  {
+    "name": "catch-all split: method narrowing is ignored on a tool-scoped row",
+    "rules": [
+      {
+        "scope": "workspace",
+        "priority": 0,
+        "isDefault": false,
+        "source": "grant",
+        "name": "gh: tool",
+        "identities": [
+          {
+            "id": "agent-1",
+            "type": "agent"
+          }
+        ],
+        "targets": [
+          {
+            "kind": "connection",
+            "connectionId": "c-gh",
+            "provider": "github",
+            "tools": ["create_issue"],
+            "method": "GET"
+          }
+        ],
+        "action": "block",
+        "requireApproval": false,
+        "rateLimit": null,
+        "rateLimitWindow": null,
+        "conditions": null
+      }
+    ],
+    "request": {
+      "host": "api.github.com",
+      "path": "/repos/o/r/issues",
+      "method": "POST",
+      "agentId": "agent-1",
+      "hasInjections": true,
+      "isLlmHost": false,
+      "winningConnectionId": "c-gh"
+    },
+    "expected": {
+      "action": "block"
+    }
   }
 ]

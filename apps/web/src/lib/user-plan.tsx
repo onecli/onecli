@@ -7,12 +7,14 @@ import { normalizePlan } from "@onecli/api/ee/billing/plans";
 
 /** Check if the user needs a redirect before seeing the dashboard.
  *
- * Onboarding (welcome → create your first agent) runs on EVERY edition: a
- * fresh org owner is routed into it until they finish or skip it. Billing
- * only adds an exemption — a paid org's owner already has what they came
- * for, so they are left alone — and that subscription read is the one thing
- * that must never run without billing (it reaches the Stripe graph). */
+ * Onboarding (welcome → create your first agent) is the billing editions'
+ * first-login walkthrough: a fresh free-org owner is routed into it until they
+ * finish it. Without billing (self-hosted) nothing routes there, because the
+ * dashboard is the self-hoster's front door. So this is a hard no-op that
+ * resolves nothing and reads nothing. */
 export const checkDashboardRedirect = async (): Promise<string | null> => {
+  if (!CAPS.billing) return null;
+
   let organizationId: string;
   let userId: string;
   let role: string;
@@ -28,19 +30,20 @@ export const checkDashboardRedirect = async (): Promise<string | null> => {
   // not be bounced into a flow that assumes they are setting it up.
   if (role !== "owner") return null;
 
-  const user = await db.user.findUnique({
-    where: { id: userId },
-    select: { onboardingCompletedAt: true },
-  });
-  if (!user) return null;
-
-  if (CAPS.billing) {
-    const org = await db.organization.findUnique({
+  const [user, org] = await Promise.all([
+    db.user.findUnique({
+      where: { id: userId },
+      select: { onboardingCompletedAt: true },
+    }),
+    db.organization.findUnique({
       where: { id: organizationId },
       select: { subscriptionStatus: true },
-    });
-    if (!org || org.subscriptionStatus !== "free") return null;
-  }
+    }),
+  ]);
+  if (!user || !org) return null;
+
+  // A paid org's owner already has what they came for: leave them alone.
+  if (org.subscriptionStatus !== "free") return null;
 
   return user.onboardingCompletedAt ? null : "/onboarding";
 };

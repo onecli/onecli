@@ -2,19 +2,10 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { IS_CLOUD } from "@/lib/env";
-import { gatewayHttpOrigin } from "@onecli/api/lib/public-origins";
+import { getGatewayApiUrl } from "@/lib/gateway-url";
 import { getGatewayFetchOptions } from "@/lib/gateway-auth";
 
-export const getGatewayApiUrl = (): string => {
-  if (IS_CLOUD) return gatewayHttpOrigin();
-  return (
-    (typeof window !== "undefined" &&
-      ((window as unknown as Record<string, unknown>)
-        .__GATEWAY_API_URL__ as string)) ||
-    gatewayHttpOrigin()
-  );
-};
+export { getGatewayApiUrl } from "@/lib/gateway-url";
 
 export interface VaultStatus<T = unknown> {
   connected: boolean;

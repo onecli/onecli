@@ -86,6 +86,21 @@ vi.mock("../../lib/gateway-invalidate", () => ({
   invalidateGatewayCacheForOrg: () => {},
 }));
 
+// The seat cap: `seats.full` makes the plan refuse a new member, the way a
+// Scale org at its 10 seats does.
+const seats = vi.hoisted(() => ({ full: false }));
+vi.mock("../services/quota-service", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../services/quota-service")>();
+  return {
+    ...actual,
+    assertCanInviteMember: async () => {
+      if (seats.full)
+        throw new actual.QuotaExceededError("members", 10, 10, "scale");
+    },
+  };
+});
+
 import { ensureSsoJitMembership } from "./jit-service";
 import { initEntitlementForTests } from "../../lib/entitlements";
 
@@ -124,6 +139,7 @@ beforeEach(() => {
   state.transactions = 0;
   state.transactionThrowsP2002 = false;
   state.orgQueryThrows = false;
+  seats.full = false;
 });
 
 describe("ensureSsoJitMembership", () => {
@@ -193,6 +209,21 @@ describe("ensureSsoJitMembership", () => {
 
     await ensureSsoJitMembership(session, user);
     expect(state.memberCreates).toHaveLength(0);
+  });
+
+  it("a full plan refuses the join: no membership, no workspace, and the session survives", async () => {
+    liveTrust();
+    state.org = { jitEnabled: true };
+    seats.full = true;
+
+    await expect(
+      ensureSsoJitMembership(session, user),
+    ).resolves.toBeUndefined();
+    expect(state.memberCreates).toHaveLength(0);
+    expect(state.workspaceCreates).toHaveLength(0);
+    expect(state.transactions).toBe(0);
+    // The connection still went live: the sign-in itself was a real one.
+    expect(state.activeFlips).toHaveLength(1);
   });
 
   it("no-ops for non-SSO sessions without touching the DB", async () => {

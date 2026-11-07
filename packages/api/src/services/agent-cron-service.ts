@@ -1,7 +1,14 @@
 import { Cron } from "croner";
 import { db } from "@onecli/db";
 import { ServiceError } from "./errors";
-import type { CronDisabledReason } from "../validations/crons";
+import { userIsOrgAdmin } from "./workspace-access-check";
+import {
+  CRON_OUTCOMES,
+  type CronDisabledReason,
+  type CronOutcome,
+} from "../validations/crons";
+import { ACTIVE_TURN_STATUSES } from "../validations/conversation";
+import { isValidTimezone } from "../validations/timezone";
 
 /**
  * Scheduled tasks on hosted agents (plans/hosted-agents-v2.md step 7).
@@ -27,6 +34,8 @@ const cronSelect = {
   prompt: true,
   schedule: true,
   timezone: true,
+  gate: true,
+  gateDescription: true,
   enabled: true,
   disabledReason: true,
   nextFireAt: true,
@@ -43,13 +52,62 @@ export type AgentCronView = {
   prompt: string;
   schedule: string;
   timezone: string;
+  gate: string | null;
+  gateDescription: string | null;
   enabled: boolean;
   disabledReason: string | null;
   nextFireAt: Date;
   lastFiredAt: Date | null;
-  lastOutcome: string | null;
+  /** How the last finished run went. Never "running": that is `running`. */
+  lastOutcome: CronOutcome | null;
+  /**
+   * The schedule's conversation is busy right now: a run of it, or a
+   * person's follow-up in it (a fire now would only be skipped as busy).
+   * DERIVED from the turns, never stored: a stored marker needs every way a
+   * run can end (a stop before dispatch, a park, an agent restart, a sweep)
+   * to clear it, and one that misses leaves the schedule "running" forever.
+   */
+  running: boolean;
   consecutiveFailures: number;
   createdAt: Date;
+};
+
+type CronRow = Omit<AgentCronView, "lastOutcome" | "running"> & {
+  lastOutcome: string | null;
+};
+
+/** The stored string narrowed to its union, or null: the service is the
+ * only writer, so anything else reads as "unset", never an unknown label. */
+const outcomeOf = (raw: string | null): CronOutcome | null =>
+  CRON_OUTCOMES.find((outcome) => outcome === raw) ?? null;
+
+/** The rows as views. `running` comes from ONE query for the whole set: a
+ * schedule's runs live in its own `cron` conversation (externalRef = id). */
+const toViews = async (rows: CronRow[]): Promise<AgentCronView[]> => {
+  const live =
+    rows.length === 0
+      ? []
+      : await db.conversation.findMany({
+          where: {
+            source: "cron",
+            agentId: { in: [...new Set(rows.map((row) => row.agentId))] },
+            externalRef: { in: rows.map((row) => row.id) },
+            turns: { some: { status: { in: [...ACTIVE_TURN_STATUSES] } } },
+          },
+          select: { externalRef: true },
+        });
+  const running = new Set(live.map((conversation) => conversation.externalRef));
+  return rows.map((row) => ({
+    ...row,
+    lastOutcome: outcomeOf(row.lastOutcome),
+    running: running.has(row.id),
+  }));
+};
+
+const toView = async (row: CronRow): Promise<AgentCronView> => {
+  const [view] = await toViews([row]);
+  if (!view) throw new Error("toViews dropped a row");
+  return view;
 };
 
 export interface CronInput {
@@ -57,7 +115,47 @@ export interface CronInput {
   prompt: string;
   schedule: string;
   timezone: string;
+  gate?: string | null;
+  gateDescription?: string | null;
 }
+
+/** Who is acting on a schedule from the dashboard. */
+export interface CronActor {
+  userId: string;
+  organizationId: string;
+}
+
+/**
+ * A schedule runs with its CREATOR's access (the fire-time authorization
+ * anchor): whatever the creator may read, including data shared only with
+ * them, its runs may read. So changing what it does, or making it run, is
+ * the creator's call alone, plus the org's owners and admins. Anyone else
+ * could otherwise rewrite a teammate's prompt and run it to act as that
+ * teammate. Deleting needs no such fence: it only ever narrows what runs.
+ * Without roles (the flat team) every member is an admin, as on every
+ * other admin surface. A schedule whose creator is gone is admin-only.
+ * Not-found shaped for a foreign or missing schedule.
+ */
+const requireCronManager = async (
+  agentId: string,
+  cronId: string,
+  actor: CronActor,
+) => {
+  const cron = await db.agentCron.findFirst({
+    where: { id: cronId, agentId },
+    select: { createdByUserId: true },
+  });
+  if (!cron) throw new ServiceError("NOT_FOUND", "Schedule not found");
+  if (
+    cron.createdByUserId !== actor.userId &&
+    !(await userIsOrgAdmin(actor.userId, actor.organizationId))
+  ) {
+    throw new ServiceError(
+      "FORBIDDEN",
+      "Only the person who created this schedule, or an admin, can change or run it.",
+    );
+  }
+};
 
 /** Consecutive failed runs before a schedule turns itself off. */
 export const CRON_FAILURE_DISABLE_THRESHOLD = 5;
@@ -71,9 +169,7 @@ export const CRON_FAILURE_DISABLE_THRESHOLD = 5;
 export const MAX_CRONS_PER_AGENT = 20;
 
 const assertValidTimezone = (timezone: string): void => {
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone: timezone });
-  } catch {
+  if (!isValidTimezone(timezone)) {
     throw new ServiceError(
       "UNPROCESSABLE",
       `Unknown timezone "${timezone}". Use an IANA zone name like "America/Los_Angeles"`,
@@ -88,6 +184,29 @@ const cronOf = (schedule: string, timezone: string): Cron => {
     throw new ServiceError(
       "UNPROCESSABLE",
       `Invalid schedule expression: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+};
+
+/**
+ * A schedule string as people and the agent write one: a 5-field cron
+ * expression (minute hour day month weekday), or a one-shot ISO datetime.
+ * croner also reads 6 and 7 fields (seconds, then years), and a seconds
+ * field turns "every minute" into "every second": an agent run back to back,
+ * spending a model turn each. So a NEWLY WRITTEN schedule string must be one
+ * of these two; a row saved before this rule keeps firing (and can still be
+ * paused, resumed or renamed) until someone changes its schedule.
+ */
+export const isFiveFieldSchedule = (schedule: string): boolean => {
+  const fields = schedule.trim().split(/\s+/);
+  return fields.length === 5 || (fields.length === 1 && schedule.includes(":"));
+};
+
+const assertFiveFieldSchedule = (schedule: string): void => {
+  if (!isFiveFieldSchedule(schedule)) {
+    throw new ServiceError(
+      "UNPROCESSABLE",
+      'Use a 5-field cron expression (minute hour day month weekday), like "0 9 * * 1-5"',
     );
   }
 };
@@ -193,6 +312,28 @@ export interface CronOrigin {
   createdByUserId: string | null;
 }
 
+/**
+ * A check never travels without its words: the words are all a person sees
+ * of it. `gate` and `gateDescription` are the row's values AFTER the write.
+ */
+const assertGatePaired = (
+  gate: string | null,
+  gateDescription: string | null,
+): void => {
+  if (gate && !gateDescription) {
+    throw new ServiceError(
+      "UNPROCESSABLE",
+      "A run condition needs gateDescription: the condition in plain words",
+    );
+  }
+  if (!gate && gateDescription) {
+    throw new ServiceError(
+      "UNPROCESSABLE",
+      "gateDescription describes a run condition, and this schedule has none",
+    );
+  }
+};
+
 export const createCron = async (
   workspaceId: string,
   agentId: string,
@@ -200,6 +341,10 @@ export const createCron = async (
   origin: CronOrigin,
 ): Promise<AgentCronView> => {
   await requireHostedAgent(workspaceId, agentId);
+  assertFiveFieldSchedule(input.schedule);
+  const gate = input.gate ?? null;
+  const gateDescription = input.gateDescription ?? null;
+  assertGatePaired(gate, gateDescription);
   // Completed one-shots are inert (out of the claim predicate forever), so
   // they don't count against the cap — a reminder-happy agent must not evict
   // its recurring schedules. Paused rows still count (unchanged semantics).
@@ -222,19 +367,23 @@ export const createCron = async (
     input.timezone,
     new Date(),
   );
-  return db.agentCron.create({
-    data: {
-      agentId,
-      name: input.name,
-      prompt: input.prompt,
-      schedule: input.schedule,
-      timezone: input.timezone,
-      nextFireAt,
-      originConversationId: origin.originConversationId,
-      createdByUserId: origin.createdByUserId,
-    },
-    select: cronSelect,
-  });
+  return toView(
+    await db.agentCron.create({
+      data: {
+        agentId,
+        name: input.name,
+        prompt: input.prompt,
+        schedule: input.schedule,
+        timezone: input.timezone,
+        gate,
+        gateDescription,
+        nextFireAt,
+        originConversationId: origin.originConversationId,
+        createdByUserId: origin.createdByUserId,
+      },
+      select: cronSelect,
+    }),
+  );
 };
 
 export const listCrons = async (
@@ -242,11 +391,13 @@ export const listCrons = async (
   agentId: string,
 ): Promise<AgentCronView[]> => {
   await requireHostedAgent(workspaceId, agentId);
-  return db.agentCron.findMany({
-    where: { agentId },
-    orderBy: { createdAt: "asc" },
-    select: cronSelect,
-  });
+  return toViews(
+    await db.agentCron.findMany({
+      where: { agentId },
+      orderBy: { createdAt: "asc" },
+      select: cronSelect,
+    }),
+  );
 };
 
 export interface CronUpdate {
@@ -254,48 +405,95 @@ export interface CronUpdate {
   prompt?: string;
   schedule?: string;
   timezone?: string;
+  gate?: string | null;
+  gateDescription?: string | null;
   enabled?: boolean;
 }
 
+/** A person editing from the dashboard: only the schedule's manager. */
 export const updateCron = async (
+  workspaceId: string,
+  agentId: string,
+  cronId: string,
+  update: CronUpdate,
+  actor: CronActor,
+): Promise<AgentCronView> => {
+  await requireHostedAgent(workspaceId, agentId);
+  await requireCronManager(agentId, cronId, actor);
+  return applyCronUpdate(agentId, cronId, update);
+};
+
+/** The agent editing its own schedule (update_task): agent authority,
+ * agent-fenced, the same posture as cancel_task. */
+export const updateCronAsAgent = async (
   workspaceId: string,
   agentId: string,
   cronId: string,
   update: CronUpdate,
 ): Promise<AgentCronView> => {
   await requireHostedAgent(workspaceId, agentId);
+  return applyCronUpdate(agentId, cronId, update);
+};
+
+const applyCronUpdate = async (
+  agentId: string,
+  cronId: string,
+  update: CronUpdate,
+): Promise<AgentCronView> => {
   // Fenced read first: existence is decided by the (agentId) pair so a
   // foreign cron id reads as NOT_FOUND, never as a hint.
   const existing = await db.agentCron.findFirst({
     where: { id: cronId, agentId },
-    select: { schedule: true, timezone: true, enabled: true },
+    select: {
+      schedule: true,
+      timezone: true,
+      enabled: true,
+      gate: true,
+      gateDescription: true,
+    },
   });
   if (!existing) throw new ServiceError("NOT_FOUND", "Schedule not found");
 
+  if (update.schedule !== undefined) assertFiveFieldSchedule(update.schedule);
   const schedule = update.schedule ?? existing.schedule;
   const timezone = update.timezone ?? existing.timezone;
   const scheduleChanged =
     schedule !== existing.schedule || timezone !== existing.timezone;
+  // A removed check takes its words with it; otherwise the row after this
+  // write must still pair a check with its words. Absent = unchanged, null
+  // = cleared, for both fields.
+  const gate = update.gate === undefined ? existing.gate : update.gate;
+  const gateDescription =
+    update.gate === null
+      ? null
+      : update.gateDescription === undefined
+        ? existing.gateDescription
+        : update.gateDescription;
+  assertGatePaired(gate, gateDescription);
   // Re-enabling is a human decision that supersedes an auto-disable: the
   // reason clears and the failure counter restarts, otherwise one stale
   // failure from last week would re-disable a just-fixed schedule.
   const reEnabled = update.enabled === true && !existing.enabled;
 
-  return db.agentCron.update({
-    where: { id: cronId },
-    data: {
-      ...(update.name !== undefined && { name: update.name }),
-      ...(update.prompt !== undefined && { prompt: update.prompt }),
-      ...(update.schedule !== undefined && { schedule: update.schedule }),
-      ...(update.timezone !== undefined && { timezone: update.timezone }),
-      ...(update.enabled !== undefined && { enabled: update.enabled }),
-      ...((scheduleChanged || reEnabled) && {
-        nextFireAt: computeNextFire(schedule, timezone, new Date()),
-      }),
-      ...(reEnabled && { disabledReason: null, consecutiveFailures: 0 }),
-    },
-    select: cronSelect,
-  });
+  return toView(
+    await db.agentCron.update({
+      where: { id: cronId },
+      data: {
+        ...(update.name !== undefined && { name: update.name }),
+        ...(update.prompt !== undefined && { prompt: update.prompt }),
+        ...(update.schedule !== undefined && { schedule: update.schedule }),
+        ...(update.timezone !== undefined && { timezone: update.timezone }),
+        gate,
+        gateDescription,
+        ...(update.enabled !== undefined && { enabled: update.enabled }),
+        ...((scheduleChanged || reEnabled) && {
+          nextFireAt: computeNextFire(schedule, timezone, new Date()),
+        }),
+        ...(reEnabled && { disabledReason: null, consecutiveFailures: 0 }),
+      },
+      select: cronSelect,
+    }),
+  );
 };
 
 export const deleteCron = async (
@@ -320,32 +518,34 @@ export const runCronNow = async (
   workspaceId: string,
   agentId: string,
   cronId: string,
+  actor: CronActor,
 ): Promise<AgentCronView> => {
   await requireHostedAgent(workspaceId, agentId);
+  await requireCronManager(agentId, cronId, actor);
   const { count } = await db.agentCron.updateMany({
-    where: { id: cronId, agentId, enabled: true },
-    data: { nextFireAt: new Date() },
+    // A one-shot that already ran can be run again by hand: the fire finds
+    // no next occurrence and marks it completed once more.
+    where: {
+      id: cronId,
+      agentId,
+      OR: [{ enabled: true }, { disabledReason: "completed" }],
+    },
+    data: { nextFireAt: new Date(), enabled: true, disabledReason: null },
   });
   if (count === 0) {
-    // Fenced read to say WHICH refusal honestly (absent vs completed vs paused).
     const exists = await db.agentCron.findFirst({
       where: { id: cronId, agentId },
-      select: { id: true, disabledReason: true },
+      select: { id: true },
     });
     if (!exists) throw new ServiceError("NOT_FOUND", "Schedule not found");
-    if (exists.disabledReason === "completed") {
-      throw new ServiceError(
-        "UNPROCESSABLE",
-        "This schedule already ran to completion",
-      );
-    }
     throw new ServiceError("UNPROCESSABLE", "This schedule is paused");
   }
-  const cron = await db.agentCron.findFirstOrThrow({
-    where: { id: cronId, agentId },
-    select: cronSelect,
-  });
-  return cron;
+  return toView(
+    await db.agentCron.findFirstOrThrow({
+      where: { id: cronId, agentId },
+      select: cronSelect,
+    }),
+  );
 };
 
 /** Auto-disable — the fire path's arm (due-work), never a user surface. */

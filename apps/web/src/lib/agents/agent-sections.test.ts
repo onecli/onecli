@@ -6,6 +6,7 @@ import {
   agentSectionsFor,
   defaultAgentSection,
   isFullHeightAgentSection,
+  isTheaterAgentSection,
 } from "./agent-sections";
 
 /**
@@ -33,9 +34,14 @@ describe("agentSectionsFor", () => {
     // SSH lands in a HOSTED agent's sandbox — a BYO agent has no computer to
     // shell into.
     expect(byo).not.toContain("ssh");
+    // Ports preview services on a HOSTED agent's computer — a BYO agent has
+    // none to share.
+    expect(byo).not.toContain("ports");
     // Schedules wake a HOSTED agent's sandbox — a BYO agent has no computer
     // the platform can wake.
     expect(byo).not.toContain("schedules");
+    // Webhooks fire a HOSTED agent's run — a BYO agent has no run to fire.
+    expect(byo).not.toContain("webhooks");
     // Memory is written by a HOSTED agent's tools — a BYO agent has none.
     expect(byo).not.toContain("memory");
     // Its own page still works: Connections and Models.
@@ -45,12 +51,15 @@ describe("agentSectionsFor", () => {
 
 describe("agentSectionBlocked", () => {
   it("blocks a hosted-only section for a BYO agent", () => {
+    expect(agentSectionBlocked("computer", "byo")).toBe(true);
     expect(agentSectionBlocked("chat", "byo")).toBe(true);
     expect(agentSectionBlocked("instructions", "byo")).toBe(true);
     expect(agentSectionBlocked("channels", "byo")).toBe(true);
     expect(agentSectionBlocked("contacts", "byo")).toBe(true);
     expect(agentSectionBlocked("ssh", "byo")).toBe(true);
+    expect(agentSectionBlocked("ports", "byo")).toBe(true);
     expect(agentSectionBlocked("schedules", "byo")).toBe(true);
+    expect(agentSectionBlocked("webhooks", "byo")).toBe(true);
     expect(agentSectionBlocked("memory", "byo")).toBe(true);
   });
 
@@ -71,10 +80,14 @@ describe("agentSectionBlocked", () => {
 });
 
 describe("isFullHeightAgentSection", () => {
-  it("is the chat thread, and only the chat thread", () => {
+  it("is the chat thread, while the computer is a standalone theater", () => {
     expect(isFullHeightAgentSection("chat")).toBe(true);
+    expect(isFullHeightAgentSection("computer")).toBe(false);
+    expect(isTheaterAgentSection("computer")).toBe(true);
+    expect(isTheaterAgentSection("chat")).toBe(false);
+    expect(isTheaterAgentSection("unknown")).toBe(false);
     for (const { section } of AGENT_SECTIONS.filter(
-      (s) => s.section !== "chat",
+      (s) => s.section !== "chat" && s.section !== "computer",
     )) {
       expect(isFullHeightAgentSection(section)).toBe(false);
     }
@@ -82,22 +95,18 @@ describe("isFullHeightAgentSection", () => {
 });
 
 describe("the rail's shape (§3.18 as amended)", () => {
-  it("puts Chat first, then Access, then Behavior", () => {
-    const hosted = agentSectionsFor("hosted").map((s) => s.section);
-    expect(hosted).toEqual([
-      "chat",
-      "channels",
-      "connections",
-      "contacts",
-      "models",
-      "ssh",
-      "instructions",
-      "skills",
-      "schedules",
-      "memory",
-    ]);
+  it("keeps the computer route known without a rail entry", () => {
+    expect(
+      agentSectionsFor("hosted")
+        .filter((s) => !s.theater)
+        .map((s) => s.section),
+    ).not.toContain("computer");
+    expect(AGENT_SECTIONS.find((s) => s.section === "computer")).toMatchObject({
+      theater: true,
+      hostedOnly: true,
+      instanceGated: "previews",
+    });
   });
-
   it("consolidates apps and secrets into one Connections section", () => {
     const sections = AGENT_SECTIONS.map((s) => s.section);
     expect(sections).toContain("connections");
@@ -105,37 +114,18 @@ describe("the rail's shape (§3.18 as amended)", () => {
     expect(sections).not.toContain("secrets");
   });
 
-  it("keeps Access to exactly what the agent is GIVEN, plus the ways in: connections, contacts, models and ssh", () => {
-    const access = AGENT_SECTIONS.filter((s) => s.group === "access");
-    expect(access.map((s) => s.section)).toEqual([
-      "connections",
-      "contacts",
-      "models",
-      "ssh",
-    ]);
-  });
-
-  it("puts everything else under Behavior", () => {
-    const behavior = AGENT_SECTIONS.filter((s) => s.group === "behavior");
-    expect(behavior.map((s) => s.section)).toEqual([
-      "instructions",
-      "skills",
-      "schedules",
-      "memory",
-    ]);
-  });
-
   it("renders every section under exactly one declared group, in order", () => {
     const declared = AGENT_SECTION_GROUPS.map((g) => g.group);
     for (const s of AGENT_SECTIONS) expect(declared).toContain(s.group);
     const order = AGENT_SECTIONS.map((s) => declared.indexOf(s.group));
     expect(order).toEqual([...order].sort((a, b) => a - b));
-    // Three titled clusters; ONE section leads visually (prominent), and it
+    // Four titled clusters; ONE section leads visually (prominent), and it
     // is Chat — not its whole cluster, or Slack would falsely lead too.
     expect(AGENT_SECTION_GROUPS.map((g) => g.label)).toEqual([
       "Work",
       "Access",
       "Behavior",
+      "Advanced",
     ]);
     expect(AGENT_SECTIONS.filter((s) => s.prominent)).toHaveLength(1);
     expect(AGENT_SECTIONS.find((s) => s.prominent)?.section).toBe("chat");
@@ -183,7 +173,7 @@ describe("Slack sits beside Chat (§3.16)", () => {
     expect(slack?.group).toBe("chat");
     expect(
       AGENT_SECTIONS.filter((s) => s.group === "chat").map((s) => s.section),
-    ).toEqual(["chat", "channels"]);
+    ).toEqual(["chat", "channels", "computer"]);
   });
 
   it("is titled for the provider a user recognizes, on the unchanged URL", () => {
@@ -203,33 +193,29 @@ describe("Slack sits beside Chat (§3.16)", () => {
 });
 
 describe("Contacts is an Access entry (PR 5b)", () => {
-  it("sits under Access right after Connections: who the agent may talk with is something it is GIVEN, not a place you go to talk", () => {
-    const contacts = AGENT_SECTIONS.find((s) => s.section === "contacts");
-    expect(contacts?.group).toBe("access");
-    expect(
-      AGENT_SECTIONS.filter((s) => s.group === "access").map((s) => s.section),
-    ).toEqual(["connections", "contacts", "models", "ssh"]);
-  });
-
   it("stays hosted-only: a BYO agent is not reached through the platform", () => {
     expect(agentSectionBlocked("contacts", "byo")).toBe(true);
   });
 });
 
 describe("SSH is instance-gated (sandbox-platform step 5)", () => {
-  it("is the ONE instance-gated entry, keyed to the instance's ssh capability", () => {
+  it("SSH, Ports and Computer are the instance-gated entries, each keyed to its capability", () => {
     // The rail hides an `instanceGated` entry when /v1/instance resolves
-    // without the capability (auto-hide, never a teased dead door). Exactly
-    // one entry carries the gate, and it is SSH — a second one must extend
-    // the rail's filter deliberately, not ride this law by accident.
+    // without the capability (auto-hide, never a teased dead door). A new
+    // gated entry must be added here deliberately, not ride this law by
+    // accident. Computer rides the preview zone (its stream is a desktop
+    // share), so it follows the same `previews` capability as Ports.
     const gated = AGENT_SECTIONS.filter((s) => s.instanceGated !== undefined);
-    expect(gated.map((s) => s.section)).toEqual(["ssh"]);
-    expect(gated[0]?.instanceGated).toBe("ssh");
+    expect(gated.map((s) => [s.section, s.instanceGated])).toEqual([
+      ["computer", "previews"],
+      ["ssh", "ssh"],
+      ["ports", "previews"],
+    ]);
   });
 
-  it("is an Access entry and hosted-only — a BYO agent has no computer to shell into", () => {
+  it("is an Advanced entry and hosted-only: a BYO agent has no computer to shell into", () => {
     const ssh = AGENT_SECTIONS.find((s) => s.section === "ssh");
-    expect(ssh?.group).toBe("access");
+    expect(ssh?.group).toBe("advanced");
     expect(ssh?.hostedOnly).toBe(true);
     expect(agentSectionBlocked("ssh", "byo")).toBe(true);
     expect(agentSectionBlocked("ssh", "hosted")).toBe(false);

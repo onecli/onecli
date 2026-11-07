@@ -1,15 +1,19 @@
 import type {
+  AdapterCardFollowUpActionResponse,
+  AdapterCardStopResponse,
   AdapterIngestResponse,
   AdapterPresence,
+  AdapterReplyItem,
   AdapterWorkItem,
 } from "@onecli/agent-protocol";
 import type { AdapterConfig } from "./config";
-import type { ControlPlaneClient } from "./control-plane";
+import { ControlPlaneError, type ControlPlaneClient } from "./control-plane";
 import { createApprovalsManager } from "./approvals";
-import { mirrorFinishedTurn } from "./mirror";
+import { mirrorFinishedTurn, mirrorFollowUpReply } from "./mirror";
 import {
   channelAdapterProviderFor,
   type ChannelAdapterProvider,
+  type GroupApprovalDecision,
   type ProviderTransport,
 } from "./providers";
 
@@ -42,6 +46,11 @@ interface PresenceRuntime {
   socket: ProviderTransport | null;
 }
 
+/** The pause before re-sending an event the control plane answered 409 for
+ * (still processing elsewhere). Four of them outlast a dead holder's claim
+ * lease (two minutes), so the last retry can take the event over. */
+const IN_FLIGHT_RETRY_MS = 45_000;
+
 export interface AdapterDeps {
   config: AdapterConfig;
   controlPlane: ControlPlaneClient;
@@ -55,6 +64,7 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
   const approvals = createApprovalsManager({
     controlPlane,
     gatewayUrl: config.gatewayUrl,
+    appUrl: config.appUrl,
     approvalsPollSeconds: config.approvalsPollSeconds,
     // Per-presence resolution through the registry: the approvals manager
     // stays channel-general and only ever sees the seam. Null for a
@@ -93,9 +103,11 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
 
   // ── The socket pump ─────────────────────────────────────────────────────
 
-  /** Ingest with bounded retry — the envelope is acked, so a dropped message
-   * is gone unless we re-attempt. Idempotent by eventId (control-plane dedupe),
-   * so a retry that races a slow success is a harmless `duplicate`. */
+  /** Ingest with bounded retry: the envelope is acked, so a dropped message
+   * is gone unless we re-attempt. Idempotent by eventId (control-plane
+   * ledger), so a retry that races a slow success is a harmless `duplicate`,
+   * and a 409 (the same event still processing elsewhere) waits out a claim
+   * that may be a dead replica's: the longer schedule spans its lease. */
   const ingestWithRetry = async (
     runtime: PresenceRuntime,
     input: { event: unknown; eventId: string },
@@ -116,10 +128,36 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
           log("ingest failed after retries", { err: String(err) });
           return;
         }
-        await sleep(delay);
+        const inFlight = err instanceof ControlPlaneError && err.status === 409;
+        await sleep(inFlight ? IN_FLIGHT_RETRY_MS : delay);
         delay = Math.min(delay * 2, 8_000);
       }
     }
+  };
+
+  /** A card click the control plane refused is told to the clicker alone
+   * (the card everyone shares is not rewritten for it); anything else owes
+   * nothing back. Shared by every control on the card. */
+  const tellRefusedClicker = async (
+    runtime: PresenceRuntime,
+    click: { channel: string; clickerExternalUserId: string },
+    result: AdapterCardStopResponse | AdapterCardFollowUpActionResponse,
+  ): Promise<void> => {
+    const { credential } = runtime;
+    if (
+      result.kind !== "refused" ||
+      !credential ||
+      !runtime.provider.notifyClicker
+    ) {
+      return;
+    }
+    await runtime.provider.notifyClicker({
+      credential,
+      channel: click.channel,
+      user: click.clickerExternalUserId,
+      text: result.message,
+      onLog: log,
+    });
   };
 
   const openSocket = (runtime: PresenceRuntime): void => {
@@ -135,6 +173,11 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
       onApprovalDecision: (decision) => {
         void handleApprovalDecision(runtime, decision).catch((err: unknown) =>
           log("interactive handling failed", { err }),
+        );
+      },
+      onGroupApprovalDecision: (decision) => {
+        void handleGroupApprovalDecision(runtime, decision).catch(
+          (err: unknown) => log("group decision handling failed", { err }),
         );
       },
       onReachDecision: (decision) => {
@@ -162,9 +205,42 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
             approvalId: decision.approvalId,
             decision: decision.decision,
             clickerExternalUserId: decision.clickerExternalUserId,
+            ...(decision.choice !== undefined && { choice: decision.choice }),
           })
           .catch((err: unknown) =>
             log("action decision forward failed", { err }),
+          );
+      },
+      onCardStop: (input) => {
+        // Forward, then tell a refused clicker alone (the card everyone
+        // shares is not rewritten for it). A stop owes nothing here: the
+        // turn's close replaces the card with "Stopped.".
+        void controlPlane
+          .stopFromCard({
+            presenceId: runtime.presence.presenceId,
+            channel: input.channel,
+            cardTs: input.cardTs,
+            clickerExternalUserId: input.clickerExternalUserId,
+          })
+          .then((result) => tellRefusedClicker(runtime, input, result))
+          .catch((err: unknown) => log("card stop forward failed", { err }));
+      },
+      onCardFollowUpAction: (input) => {
+        // The same: forward, and only a refusal is owed back, to the
+        // clicker alone. Done owes nothing: the row leaves the card when
+        // the agent reads the message.
+        void controlPlane
+          .actOnCardFollowUp({
+            presenceId: runtime.presence.presenceId,
+            channel: input.channel,
+            cardTs: input.cardTs,
+            clickerExternalUserId: input.clickerExternalUserId,
+            action: input.action,
+            followUpId: input.followUpId,
+          })
+          .then((result) => tellRefusedClicker(runtime, input, result))
+          .catch((err: unknown) =>
+            log("card follow-up action forward failed", { err }),
           );
       },
       onPermanentFailure: (reason) => {
@@ -206,6 +282,7 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
     input: {
       approvalId: string;
       decision: "approve" | "deny";
+      scope?: "similar";
       clickerExternalUserId: string;
     },
   ): Promise<void> => {
@@ -219,6 +296,7 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
         presenceId: runtime.presence.presenceId,
         approvalId: input.approvalId,
         decision: input.decision,
+        ...(input.scope && { scope: input.scope }),
         clickerExternalUserId: input.clickerExternalUserId,
       });
       const text = runtime.provider.decisionSettledText({
@@ -228,6 +306,60 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
       await approvals.settleDecided(input.approvalId, text);
     } finally {
       approvals.endDecision(input.approvalId);
+    }
+  };
+
+  /** A grouped card's click (socket arm). Fence every id against the
+   * absence arm for the round-trip, forward, then move what settled to the
+   * card's done list. A refusal (or ids that failed) is told to the clicker
+   * alone; the shared card is not rewritten for it. */
+  const handleGroupApprovalDecision = async (
+    runtime: PresenceRuntime,
+    input: GroupApprovalDecision,
+  ): Promise<void> => {
+    for (const id of input.approvalIds) approvals.beginDecision(id);
+    try {
+      const result = await controlPlane.decideGroup({
+        presenceId: runtime.presence.presenceId,
+        approvalIds: input.approvalIds,
+        decision: input.decision,
+        clickerExternalUserId: input.clickerExternalUserId,
+      });
+      const tell = async (text: string) => {
+        const { credential } = runtime;
+        if (!credential || !input.channel || !runtime.provider.notifyClicker) {
+          return;
+        }
+        await runtime.provider.notifyClicker({
+          credential,
+          channel: input.channel,
+          user: input.clickerExternalUserId,
+          text,
+          onLog: log,
+        });
+      };
+      if (result.kind !== "decided") {
+        await tell(result.message);
+        return;
+      }
+      if (result.decided.length > 0) {
+        await approvals.settleDecidedMany(result.decided, {
+          outcome: input.decision === "approve" ? "approved" : "denied",
+          by: result.decidedByName,
+        });
+      }
+      if (result.alreadySettled.length > 0) {
+        await approvals.settleDecidedMany(result.alreadySettled, {
+          outcome: "decided",
+        });
+      }
+      if (result.failed.length > 0) {
+        await tell(
+          `${result.failed.length} of these couldn't be decided just now. They're still on the card; try again.`,
+        );
+      }
+    } finally {
+      for (const id of input.approvalIds) approvals.endDecision(id);
     }
   };
 
@@ -347,6 +479,28 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
     else cursors.delete(item.linkId); // lost the CAS — re-seed from config
   };
 
+  const handleReply = async (item: AdapterReplyItem): Promise<void> => {
+    const runtime = runtimes.get(item.presenceId);
+    if (!runtime?.credential) return;
+    const { agent } = runtime.presence;
+    await mirrorFollowUpReply({
+      controlPlane,
+      credential: runtime.credential,
+      provider: runtime.presence.provider,
+      posts: runtime.provider.posts,
+      removalEventFor: runtime.provider.removalEventFor,
+      threadAddress: runtime.provider.threadAddress,
+      iconUrl: runtime.presence.agent.imageUrl ?? null,
+      item,
+      // The same doors the completion pass hands a reply's connect cards.
+      ...(config.appUrl && {
+        modelsUrl: `${config.appUrl}/w/${encodeURIComponent(agent.workspaceId)}/agents/${encodeURIComponent(agent.id)}/models`,
+        chatUrl: `${config.appUrl}/w/${encodeURIComponent(agent.workspaceId)}/agents/${encodeURIComponent(agent.id)}/chat`,
+      }),
+      onLog: log,
+    });
+  };
+
   // ── Loops ───────────────────────────────────────────────────────────────
 
   // These parked timers are what keep the PROCESS alive between polls — the
@@ -378,6 +532,12 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
     while (!stopped) {
       try {
         const work = await controlPlane.getWork();
+        // Replies first: a reply to a mid-run message is read by someone
+        // waiting on it right now; a finished turn's answer has already
+        // waited the whole turn.
+        for (const item of work.replies ?? []) {
+          await handleReply(item);
+        }
         for (const item of work.finished) {
           await handleFinished(item);
         }

@@ -20,7 +20,9 @@
  * harness carries no code and keeps its raw error.
  *
  * - `agent_restarted`: the harness died AFTER the turn's stream opened —
- *   observable work may exist, so the failure must stay visible.
+ *   observable work may exist, so the control plane's recovery is visible:
+ *   it resumes the turn once in its own session, telling both the person
+ *   and the agent, and a second death closes it with the restart copy.
  * - `agent_start_failed`: the harness died BEFORE the stream opened — nothing
  *   observable happened, which is what makes the control plane's invisible
  *   one-shot revival safe.
@@ -56,12 +58,57 @@
  *   `harness_busy`: the raw message rides beside it.
  * - `transcript_rejected`: the harness lived and the key was fine, but the
  *   model provider rejected the CONVERSATION as malformed (a `tool_use` not
- *   answered by its `tool_result`). The stored transcript is replayed whole
- *   on every turn, so every resend fails identically until it is repaired
- *   (issue #1194: a container stop tore the harness's checkpoint and doubled
- *   the history; the jcode adapter repairs that shape at its next boot).
+ *   answered by its `tool_result`, or an image in a media type the provider
+ *   does not accept). The stored transcript is replayed whole on every turn,
+ *   so every resend fails identically until it is repaired (issue #1194: a
+ *   container stop tore the harness's checkpoint and doubled the history;
+ *   the jcode adapter repairs both shapes at its next boot).
  *   Classified by the supervisor from the provider's wording; same
  *   version-skew posture as `harness_busy`: the raw message rides beside it.
+ * - `model_endpoint_not_found`: the harness lived, but the model endpoint
+ *   answered 404 (an unknown model name, a wrong endpoint address, a proxy
+ *   in front of the provider forwarding to a path it does not serve). Setup:
+ *   a new key never fixes it and a resend only helps a one-off misroute, so
+ *   the copy points at whoever operates the agent. Classified by the
+ *   supervisor from the harness's model-API error wrapper; the raw message
+ *   rides beside it.
+ * - `model_key_not_attached`: the gateway answered the model call with its
+ *   `access_restricted` code: the workspace holds a model key this agent was
+ *   not given. The fix is attaching it on the agent's Models page.
+ * - `model_key_unreadable`: the gateway answered the model call with its
+ *   `credential_unavailable` code: this agent WAS given the key, but its
+ *   stored value could not be read, so the call went out without it. The fix
+ *   is re-entering the key on the agent's Models page, never attaching it.
+ * - `blocked_by_policy`: the gateway refused the model call under a OneCLI
+ *   policy or spending limit (`blocked_by_policy`, `rate_limited`,
+ *   `budget_exceeded`, ...). Nothing is broken; an admin's rule decided it.
+ * - `gateway_unavailable`: the gateway could not complete the model call
+ *   (restarting, upstream unreachable or timed out). Temporary.
+ *   All four are classified from the gateway's coded JSON body, never from
+ *   prose, and keep the raw message beside them like `harness_busy`.
+ * - `home_read_only`: the agent's durable home went read-only under it (a
+ *   home mounted `errors=remount-ro` freezes every later write after one
+ *   failed write to its storage, until a fresh boot
+ *   remounts it). Nothing the harness or the person can do fixes it in
+ *   place; a restart does. Classified by the supervisor, from its own mount
+ *   check (`home/read-only-watch.ts`) or from the harness's raw `EROFS`
+ *   text; the raw message rides beside it.
+ * - `model_refused`: the harness lived and the provider answered, but the
+ *   MODEL declined (a provider safety stop, such as Anthropic's `refusal`
+ *   stop reason) and wrote nothing visible. The run ends cleanly, so
+ *   without this code the turn closed `done` with no answer: silence. The
+ *   conversation's whole history rides every request, so something earlier
+ *   in it can keep provoking the refusal; the copy names rephrasing, a
+ *   fresh start, and another model.
+ * - `model_empty_response`: the same clean end with nothing visible, but
+ *   with no safety stop behind it (an empty or reasoning-only response the
+ *   harness's own retries could not recover). Usually a transient upstream
+ *   problem, so the copy says send it again.
+ *   Both are minted by the ADAPTER from the harness's own stop signal
+ *   (never from model text), carried to the supervisor by the harness-only
+ *   `turn.unanswered` event, and close the turn `failed` so every surface
+ *   says something. Same version-skew posture as `harness_busy`: the
+ *   harness's own explanation rides beside the code as the raw error.
  */
 export const TURN_FAILURE_CODES = {
   agentRestarted: "agent_restarted",
@@ -71,6 +118,14 @@ export const TURN_FAILURE_CODES = {
   harnessBusy: "harness_busy",
   harnessNoTerminal: "harness_no_terminal",
   transcriptRejected: "transcript_rejected",
+  modelEndpointNotFound: "model_endpoint_not_found",
+  modelKeyNotAttached: "model_key_not_attached",
+  modelKeyUnreadable: "model_key_unreadable",
+  blockedByPolicy: "blocked_by_policy",
+  gatewayUnavailable: "gateway_unavailable",
+  homeReadOnly: "home_read_only",
+  modelRefused: "model_refused",
+  modelEmptyResponse: "model_empty_response",
 } as const;
 export type TurnFailureCode =
   (typeof TURN_FAILURE_CODES)[keyof typeof TURN_FAILURE_CODES];

@@ -7,7 +7,7 @@ import type {
   Harness,
   SupervisorMessage,
   SupervisorTransport,
-  WorkItem,
+  SupervisorWorkItem,
 } from "@onecli/agent-protocol";
 import {
   createFakeHarness,
@@ -39,6 +39,7 @@ const config = (homeDir: string) => ({
   harness: "fake",
   runnerWsUrl: undefined,
   bootstrapToken: undefined,
+  sandboxId: undefined,
   outboundAttachments: false,
 });
 
@@ -47,7 +48,7 @@ const home = (prefix: string) => mkdtempSync(join(tmpdir(), prefix));
 /** A transport the test drives by hand: push work in, read messages out. */
 const createTestTransport = () => {
   const sent: SupervisorMessage[] = [];
-  const queue: WorkItem[] = [];
+  const queue: SupervisorWorkItem[] = [];
   let notify: (() => void) | undefined;
   let closes = 0;
   /**
@@ -62,7 +63,7 @@ const createTestTransport = () => {
     lost,
     /** How many times the supervisor released the channel. */
     closeCount: () => closes,
-    push(item: WorkItem) {
+    push(item: SupervisorWorkItem) {
       queue.push(item);
       notify?.();
       notify = undefined;
@@ -87,7 +88,7 @@ const createTestTransport = () => {
       await run;
     },
     transport: {
-      async *incoming(): AsyncIterable<WorkItem> {
+      async *incoming(): AsyncIterable<SupervisorWorkItem> {
         for (;;) {
           while (queue.length > 0) {
             const item = queue.shift();
@@ -117,7 +118,7 @@ const deliver = (
   turnId: string,
   conversationId: string,
   extra: { message?: string; resumeSessionRef?: string } = {},
-): WorkItem => ({
+): SupervisorWorkItem => ({
   kind: "turn.deliver",
   turnId,
   conversationId,
@@ -310,20 +311,72 @@ describe("the turn-liveness heartbeat", () => {
 
     t.push(deliver("t1", "cv-a", { message: "go" }));
     await t.until(() => t.of("progress").length >= 2, "two heartbeats");
-    // Every beat names the turn it vouches for.
-    for (const beat of t.of("progress")) {
-      expect(beat).toEqual({
+    await t.until(() => t.of("turn.result").length === 1, "the turn to end");
+    const sessionRef = t.of("turn.result")[0]?.sessionRef;
+    expect(sessionRef).toBeTruthy();
+    // Every beat names the turn it vouches for. Once the turn runs, each
+    // also names the session it runs in (the resume handle the control plane
+    // holds while the turn runs); a beat while the session is still starting
+    // has none to name, and the turn is not running yet for it to matter.
+    const started = t.sent.findIndex(
+      (m) => m.kind === "event" && m.event.type === "turn.started",
+    );
+    const beats = t.sent.flatMap((m, index) =>
+      m.kind === "progress" ? [{ m, running: index > started }] : [],
+    );
+    expect(beats.filter(({ running }) => running).length).toBeGreaterThan(0);
+    for (const { m, running } of beats) {
+      expect(m).toEqual({
         kind: "progress",
         turnId: "t1",
         conversationId: "cv-a",
+        ...(running && { sessionRef }),
       });
     }
 
-    await t.until(() => t.of("turn.result").length === 1, "the turn to end");
     const atClose = t.of("progress").length;
     // The timer died in the turn's finally: no beat lands after the close.
     await new Promise((resolve) => setTimeout(resolve, 60));
     expect(t.of("progress").length).toBe(atClose);
+    await t.finish(run);
+  });
+
+  it("beats once right behind turn.started, before any interval elapses", async () => {
+    // The stall sweep only covers a turn that has beaten, and the control
+    // plane stamps only a RUNNING turn (`turn.started` makes it running). So
+    // the first beat must follow `turn.started` on the wire, and must not
+    // wait a whole interval: a turn shorter than one interval whose close
+    // was lost otherwise sits out the turn ceiling. MUTATION-PROOF: beating
+    // at the claim puts it ahead of `turn.started` (stamped nothing);
+    // beating only on the timer sends none here.
+    const t = createTestTransport();
+    const run = runSupervisor(
+      { ...config(home("sup-beat-first-")), progressIntervalMs: 3_600_000 },
+      createFakeHarness({ script: longScript }),
+      t.transport,
+    );
+
+    t.push(deliver("t1", "cv-a", { message: "go" }));
+    await t.until(() => t.of("turn.result").length === 1, "the turn to end");
+    const order = t.sent.flatMap((m) =>
+      m.kind === "progress"
+        ? ["progress"]
+        : m.kind === "event" && m.event.type === "turn.started"
+          ? ["turn.started"]
+          : m.kind === "turn.result"
+            ? ["turn.result"]
+            : [],
+    );
+    expect(order).toEqual(["turn.started", "progress", "turn.result"]);
+    // The first beat already carries the session: a turn whose sandbox dies
+    // before the next interval still leaves its resume handle behind.
+    expect(t.of("progress")[0]).toEqual({
+      kind: "progress",
+      turnId: "t1",
+      conversationId: "cv-a",
+      sessionRef: t.of("turn.result")[0]?.sessionRef,
+    });
+    expect(t.of("progress")[0]?.sessionRef).toBeTruthy();
     await t.finish(run);
   });
 });
@@ -1014,6 +1067,101 @@ describe("a harness that dies takes the sandbox with it", () => {
   });
 });
 
+describe("a home that goes read-only takes the sandbox with it", () => {
+  /** A mount table whose home entry flips when the test says so. The flip
+   * is the entry a 6.15+ kernel shows after an ext4 error: the table still
+   * says `rw`, the kernel adds `emergency_ro` (ext4 6.15+ no longer remounts
+   * `ro`), and every write fails with os error 30. */
+  const mounts = (homeDir: string) => {
+    let options = "rw,relatime,discard";
+    return {
+      readMounts: () =>
+        [
+          `tmpfs ${homeDir} tmpfs rw,nodev,relatime 0 0`,
+          `/dev/sdb ${homeDir} ext4 ${options} 0 0`,
+        ].join("\n"),
+      remountReadOnly: () => {
+        options = "rw,relatime,discard,emergency_ro";
+      },
+    };
+  };
+
+  it("reports unhealthy with the home_read_only code and fails the running turn with it", async () => {
+    // The incident this exists for: ext4 remounted the home read-only and
+    // the agent answered every message with "Read-only file system (os
+    // error 30)" for hours, while the sandbox looked healthy from outside.
+    const t = createTestTransport();
+    const homeDir = home("sup-ro-");
+    const table = mounts(homeDir);
+    const harness = createFakeHarness({ script: longScript });
+    const run = runSupervisor(config(homeDir), harness, t.transport, {
+      readMounts: table.readMounts,
+      // Faster than the fake turn's ~120 ms stream, so the flip lands
+      // mid-turn the way a real (minutes-long) turn sees it.
+      homeWatchIntervalMs: 5,
+    });
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => deltasOf(t, "t1").length >= 3, "the turn to start");
+    table.remountReadOnly();
+    await run;
+
+    const [unhealthy] = t.of("unhealthy");
+    expect(unhealthy?.code).toBe("home_read_only");
+    expect(unhealthy?.reason).toContain("read-only");
+    // Not dressed as a restart or a start failure: the control plane must
+    // show the storage copy and budget the restart, and must never revive
+    // the turn into a home that would fail it the same way.
+    const failed = t.of("turn.result").find((r) => r.turnId === "t1");
+    expect(failed?.status).toBe("failed");
+    expect(failed?.errorCode).toBe("home_read_only");
+    expect(t.lost).toEqual([]);
+    expect(t.closeCount()).toBe(1);
+  }, 30_000);
+
+  it("never reports a healthy home", async () => {
+    const t = createTestTransport();
+    const homeDir = home("sup-ro-");
+    const run = runSupervisor(
+      config(homeDir),
+      createFakeHarness(),
+      t.transport,
+      { readMounts: mounts(homeDir).readMounts, homeWatchIntervalMs: 5 },
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the turn");
+    await t.finish(run);
+
+    expect(t.of("turn.result")[0]?.status).toBe("done");
+    expect(t.of("unhealthy")).toHaveLength(0);
+  });
+
+  it("reports a home already read-only at boot, after ready", async () => {
+    // A boot that mounted a read-only home must still say so, and only
+    // once the sandbox is running: the control plane applies a stop
+    // report to a running sandbox only.
+    const t = createTestTransport();
+    const homeDir = home("sup-ro-");
+    const table = mounts(homeDir);
+    table.remountReadOnly();
+    const run = runSupervisor(
+      config(homeDir),
+      createFakeHarness(),
+      t.transport,
+      {
+        readMounts: table.readMounts,
+      },
+    );
+    await run;
+
+    const kinds = t.sent.map((message) => message.kind);
+    expect(kinds.indexOf("ready")).toBeGreaterThanOrEqual(0);
+    expect(kinds.indexOf("unhealthy")).toBeGreaterThan(kinds.indexOf("ready"));
+    expect(t.of("unhealthy")[0]?.code).toBe("home_read_only");
+  });
+});
+
 describe("a model-provider refusal on a live harness", () => {
   const REFUSAL =
     'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"rate limit reached"}}';
@@ -1045,6 +1193,33 @@ describe("a model-provider refusal on a live harness", () => {
     expect(t.of("unhealthy")).toHaveLength(0);
   });
 
+  it("codes a model-endpoint 404 model_endpoint_not_found, keeping the raw error beside it", async () => {
+    // The live incident: a proxy in front of the provider retried to the
+    // wrong path and answered 404. Setup, not the message and not the key,
+    // so it gets its own code instead of the generic line.
+    const NOT_FOUND =
+      'Anthropic API error (404 Not Found): {"error":{"code":"404","message": "Resource not found"}}';
+    const t = createTestTransport();
+    const harness = createFakeHarness({
+      script: () => [{ type: "error", message: NOT_FOUND }],
+    });
+    const run = runSupervisor(
+      config(home("sup-endpoint-404-")),
+      harness,
+      t.transport,
+    );
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the failed turn");
+    await t.finish(run);
+
+    const [failed] = t.of("turn.result");
+    expect(failed?.status).toBe("failed");
+    expect(failed?.errorCode).toBe("model_endpoint_not_found");
+    expect(failed?.error).toBe(NOT_FOUND);
+    expect(t.of("unhealthy")).toHaveLength(0);
+  });
+
   it("codes a rejected transcript transcript_rejected, never as a key problem", async () => {
     // #1194: the provider rejects the stored conversation itself. That 400
     // carries no key-problem token, but it must not fall through to the
@@ -1073,19 +1248,24 @@ describe("a model-provider refusal on a live harness", () => {
     expect(t.of("unhealthy")).toHaveLength(0);
   });
 
-  it("keeps a non-refusal terminal error uncoded — no error field either", async () => {
-    // The passthrough contract: anything the classifier does not positively
-    // recognize keeps today's shape (no code, no turn.result error; the
-    // transcript's own error event is the witness), so canonical copy can
-    // never paper over an unrecognized failure.
+  it.each([
+    {
+      name: "encrypted search result",
+      message:
+        'Anthropic API error (400 Bad Request): {"type":"error","error":{"type":"invalid_request_error","message":"messages.67.content.0: Invalid `encrypted_content` in `search_result` block"},"request_id":"req_011CAAAAAAAAAAAAAAAAAAAA"}',
+    },
+    {
+      name: "thinking signature",
+      message:
+        'Anthropic API error (400 Bad Request): {"type":"error","error":{"type":"invalid_request_error","message":"messages.3.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation."}}',
+    },
+  ])("codes a rejected $name as transcript_rejected", async ({ message }) => {
     const t = createTestTransport();
     const harness = createFakeHarness({
-      script: () => [
-        { type: "error", message: "something unrecognizable went wrong" },
-      ],
+      script: () => [{ type: "error", message }],
     });
     const run = runSupervisor(
-      config(home("sup-refusal-")),
+      config(home("sup-transcript-")),
       harness,
       t.transport,
     );
@@ -1096,20 +1276,54 @@ describe("a model-provider refusal on a live harness", () => {
 
     const [failed] = t.of("turn.result");
     expect(failed?.status).toBe("failed");
-    expect(failed?.errorCode).toBeUndefined();
-    expect(failed?.error).toBeUndefined();
+    expect(failed?.errorCode).toBe("transcript_rejected");
+    expect(failed?.error).toBe(message);
+    expect(t.of("unhealthy")).toHaveLength(0);
   });
 
-  it("truncates the raw refusal at the source — the terminal frame must deliver", async () => {
+  it.each([
+    "something unrecognizable went wrong",
+    "Invalid signature in jwt block",
+  ])(
+    "keeps an unrelated failure uncoded with its raw error: %s",
+    async (message) => {
+      const t = createTestTransport();
+      const harness = createFakeHarness({
+        script: () => [{ type: "error", message }],
+      });
+      const run = runSupervisor(
+        config(home("sup-refusal-")),
+        harness,
+        t.transport,
+      );
+
+      t.push(deliver("t1", "cv-a"));
+      await t.until(() => t.of("turn.result").length === 1, "the failed turn");
+      await t.finish(run);
+
+      const [failed] = t.of("turn.result");
+      expect(failed?.status).toBe("failed");
+      expect(failed?.errorCode).toBeUndefined();
+      expect(failed?.error).toBe(message);
+    },
+  );
+
+  it.each([
+    { name: "refusal", prefix: REFUSAL, errorCode: "model_provider_error" },
+    {
+      name: "uncoded failure",
+      prefix: "unrecognized failure",
+      errorCode: undefined,
+    },
+  ])("truncates a raw $name at the sender", async ({ prefix, errorCode }) => {
     // An unbounded harness error could exceed the runner WS server's frame
     // cap, which does not truncate — it drops the frame and kills the
     // socket, losing the turn's close entirely. Same law as the unhealthy
     // reason: slice at the sender.
+    const message = `${prefix} ${"x".repeat(300_000)}`;
     const t = createTestTransport();
     const harness = createFakeHarness({
-      script: () => [
-        { type: "error", message: `${REFUSAL} ${"x".repeat(300_000)}` },
-      ],
+      script: () => [{ type: "error", message }],
     });
     const run = runSupervisor(
       config(home("sup-refusal-")),
@@ -1122,8 +1336,8 @@ describe("a model-provider refusal on a live harness", () => {
     await t.finish(run);
 
     const [failed] = t.of("turn.result");
-    expect(failed?.errorCode).toBe("model_provider_error");
-    expect(failed?.error?.length).toBe(2000);
+    expect(failed?.errorCode).toBe(errorCode);
+    expect(failed?.error).toBe(message.slice(0, 2000));
   });
 
   it("classifies a refusal that arrives as a THROW, not a stream event", async () => {
@@ -1200,6 +1414,154 @@ const withAbortCounter = (base: Harness) => {
   };
   return { harness, counter };
 };
+
+describe("a turn the model left unanswered", () => {
+  const REFUSED =
+    "Provider guardrail stopped the response (stop_reason: refusal). The model declined to answer this request.";
+
+  it("closes FAILED with the adapter's code, the harness's words as the raw error, and the usage kept", async () => {
+    // The run ends cleanly (a `turn.done`), so without the adapter's word
+    // this closed `done` with no answer: the silence a person reads as being
+    // ignored. Failed is what makes every surface say something.
+    const t = createTestTransport();
+    const harness = createFakeHarness({
+      script: () => [
+        { type: "turn.unanswered", code: "model_refused", message: REFUSED },
+        { type: "turn.done", usage: { inputTokens: 41, outputTokens: 0 } },
+      ],
+    });
+    const run = runSupervisor(config(home("sup-unans-")), harness, t.transport);
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the closed turn");
+    await t.finish(run);
+
+    const [result] = t.of("turn.result");
+    expect(result?.status).toBe("failed");
+    expect(result?.errorCode).toBe("model_refused");
+    expect(result?.error).toBe(REFUSED);
+    expect(result?.usage).toEqual({ inputTokens: 41, outputTokens: 0 });
+    // A model's refusal is one turn's outcome, never a sick harness.
+    expect(t.of("unhealthy")).toHaveLength(0);
+  });
+
+  it("never puts the reason on the wire as an event: the turn's failure carries it", async () => {
+    const t = createTestTransport();
+    const harness = createFakeHarness({
+      script: () => [
+        {
+          type: "turn.unanswered",
+          code: "model_empty_response",
+          message: "empty",
+        },
+        { type: "turn.done" },
+      ],
+    });
+    const run = runSupervisor(config(home("sup-unans-")), harness, t.transport);
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the closed turn");
+    await t.finish(run);
+
+    const types = t.of("event").map((m) => m.event.type);
+    expect(types).not.toContain("turn.unanswered");
+    expect(types.at(-1)).toBe("turn.done");
+    expect(t.of("turn.result")[0]?.errorCode).toBe("model_empty_response");
+  });
+
+  it("keeps whatever the agent did say before it ended unanswered", async () => {
+    // A turn can work, narrate, and only then end empty: the words already
+    // said stay its answer, with the failure beside them (the mirror's
+    // partial-answer shape).
+    const t = createTestTransport();
+    const harness = createFakeHarness({
+      script: () => [
+        { type: "text.delta", text: "Looking into it." },
+        { type: "tool.started", callId: "c1", name: "bash" },
+        { type: "tool.finished", callId: "c1", name: "bash", output: "ok" },
+        { type: "turn.unanswered", code: "model_refused", message: REFUSED },
+        { type: "turn.done" },
+      ],
+    });
+    const run = runSupervisor(config(home("sup-unans-")), harness, t.transport);
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the closed turn");
+    await t.finish(run);
+
+    const texts = t
+      .of("event")
+      .filter((m) => m.turnId === "t1" && m.event.type === "text")
+      .map((m) => (m.event as { text: string }).text);
+    expect(texts).toEqual(["Looking into it."]);
+    expect(t.of("turn.result")[0]).toMatchObject({
+      status: "failed",
+      errorCode: "model_refused",
+    });
+  });
+
+  it("does not cancel the run: a clean end left nothing running", async () => {
+    // The defensive abort exists for a failure WITHOUT a clean terminal (the
+    // run may still be burning). This one ended cleanly.
+    const t = createTestTransport();
+    const { harness, counter } = withAbortCounter(
+      createFakeHarness({
+        script: () => [
+          { type: "turn.unanswered", code: "model_refused", message: REFUSED },
+          { type: "turn.done" },
+        ],
+      }),
+    );
+    const run = runSupervisor(config(home("sup-unans-")), harness, t.transport);
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the closed turn");
+    await t.finish(run);
+
+    expect(t.of("turn.result")[0]?.status).toBe("failed");
+    expect(counter.aborts).toBe(0);
+  });
+
+  it("an ordinary clean end is still done: only the harness's word fails a turn", async () => {
+    // Never inferred from missing text: a turn can end with its words stored
+    // under a follow-up, or quietly by design.
+    const t = createTestTransport();
+    const harness = createFakeHarness({
+      script: () => [{ type: "turn.done" }],
+    });
+    const run = runSupervisor(config(home("sup-unans-")), harness, t.transport);
+
+    t.push(deliver("t1", "cv-a"));
+    await t.until(() => t.of("turn.result").length === 1, "the closed turn");
+    await t.finish(run);
+
+    const [result] = t.of("turn.result");
+    expect(result?.status).toBe("done");
+    expect(result?.errorCode).toBeUndefined();
+  });
+
+  it("a Stop outranks it: an aborted turn stays aborted", async () => {
+    const t = createTestTransport();
+    const harness = createFakeHarness({
+      script: () => [
+        ...longScript(),
+        { type: "turn.unanswered", code: "model_refused", message: REFUSED },
+        { type: "turn.done" },
+      ],
+    });
+    const run = runSupervisor(config(home("sup-unans-")), harness, t.transport);
+
+    t.push(deliver("t1", "cv-a", { message: "go" }));
+    await t.until(() => deltasOf(t, "t1").length >= 3, "the turn to start");
+    t.push({ kind: "turn.abort", turnId: "t1", conversationId: "cv-a" });
+    await t.until(() => t.of("turn.result").length === 1, "the turn to end");
+    await t.finish(run);
+
+    const [result] = t.of("turn.result");
+    expect(result?.status).toBe("aborted");
+    expect(result?.errorCode).toBeUndefined();
+  });
+});
 
 describe("a busy harness on a live session", () => {
   const BUSY = "Already processing a message";
@@ -1442,5 +1804,73 @@ describe("the turn-end safety net (supervisor gating)", () => {
 
     expect(t.of("turn.result")[0]?.status).toBe("failed");
     expect(netCalls).toHaveLength(0);
+  });
+});
+
+describe("the preview relaunch (a wake a preview hit caused)", () => {
+  /** A ProcessManager stub that records starts — the spawn itself is
+   * manager-tested; what the supervisor owes is one start per relaunch,
+   * named for its port, with no watch and no turn context. */
+  const startStub = () => {
+    const starts: { args: unknown; context: unknown }[] = [];
+    const manager: ProcessManager = {
+      start: (args, context) => {
+        starts.push({ args, context });
+        return { ok: true, result: { processId: `p${starts.length}` } };
+      },
+      status: () => ({ ok: true }),
+      stop: () => ({ ok: true }),
+      watch: () => {
+        throw new Error("a relaunch must not arm a watch");
+      },
+      observeUpsert: () => ({ created: false, hasArmedWatch: false }),
+      cancelWatch: () => false,
+      armTurnEndSafetyNet: () => 0,
+      close: () => undefined,
+      killAllSync: () => undefined,
+    };
+    return { manager, starts };
+  };
+
+  it("starts every registered command on boot, as a plain background process", async () => {
+    const t = createTestTransport();
+    const { manager, starts } = startStub();
+    const run = runSupervisor(
+      {
+        ...config(home("sup-relaunch-")),
+        previewRelaunch: [
+          { port: 3000, command: "python3 server.py" },
+          { port: 8080, command: "docker start metabase" },
+        ],
+      },
+      createFakeHarness(),
+      t.transport,
+      { processManager: manager },
+    );
+    await t.finish(run);
+
+    expect(starts).toEqual([
+      {
+        args: { command: "python3 server.py", name: "preview:3000" },
+        context: null,
+      },
+      {
+        args: { command: "docker start metabase", name: "preview:8080" },
+        context: null,
+      },
+    ]);
+  });
+
+  it("a plain wake (no relaunch list) starts nothing", async () => {
+    const t = createTestTransport();
+    const { manager, starts } = startStub();
+    const run = runSupervisor(
+      config(home("sup-relaunch-")),
+      createFakeHarness(),
+      t.transport,
+      { processManager: manager },
+    );
+    await t.finish(run);
+    expect(starts).toEqual([]);
   });
 });

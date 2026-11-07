@@ -35,10 +35,31 @@
  * `POLICY_PROOF_DATABASE_URL` — `testing/pg-proof.ts`'s opt-in/loud-fail
  * contract; `LOG_LEVEL`, `HOME`, `PATH`.
  *
- * Scope caveat: with default per-file isolation each worker runs the setup
- * fresh. Under `--no-isolate`/`singleFork` the setup runs once per worker,
- * so suites that mutate env without restoring can still leak forward —
- * identical to the pre-existing behavior, not a regression.
+ * One worker, many files: the setup runs before EVERY test file, but a
+ * worker that runs several files (the pg project's `singleFork`, where all
+ * of them share one process) also shares `process.env` between them, and
+ * vitest restores none of it. Suites pin their edition by writing
+ * `process.env` and never undo it, so without a reset the NEXT file loaded
+ * under the PREVIOUS file's pin: a suite could pass only because whatever
+ * ran before it happened to pin the edition it needed, and fail the day the
+ * file order changed. `applyHermeticEnv` closes that: the first file in a
+ * worker records the normalized env as the worker's baseline, and every
+ * later file starts from exactly that baseline (5. below).
+ *
+ *  5. Restore the worker baseline before each later file: drop vars a
+ *     previous file added, put back ones it changed or deleted. The
+ *     runner's own bookkeeping (`VITEST*`, `TEST`) is left to vitest.
+ *
+ *  6. The pg project only (`pg-proof-env.setup.ts`): right after the reset,
+ *     in the same synchronous step, point `DATABASE_URL` back at the opted-in
+ *     proof database (`pinProofDatabaseUrl`). Every pg suite sets exactly
+ *     that URL in its own `beforeAll`, so this adds no reach. What it closes
+ *     is the gap between files: work a suite started but never awaited (a
+ *     detached poll) can query the shared Prisma client after the suite's
+ *     `$disconnect`. With `DATABASE_URL` deleted, Prisma's lazy reconnect
+ *     fails and the singleton stays broken for every later file in the fork
+ *     ("Environment variable not found: DATABASE_URL" across ~50 suites).
+ *     With the URL kept, the stray query just reconnects.
  *
  * This module must stay dependency-free: importing anything from `src/`
  * here would freeze `lib/env.ts` before the normalization runs.
@@ -125,6 +146,7 @@ export const AMBIENT_HAZARD_VARS: readonly string[] = [
   "GATEWAY_API_URL",
   "NEXT_PUBLIC_GATEWAY_API_URL",
   "GATEWAY_INTERNAL_URL",
+  "API_INTERNAL_URL",
   "GATEWAY_BASE_URL",
   "ONECLI_AGENT_PROXY_ADDRESS",
   "ONECLI_TRUSTED_ORIGINS",
@@ -143,10 +165,13 @@ export const AMBIENT_HAZARD_VARS: readonly string[] = [
   "CHANNEL_ADAPTER_TOKEN",
   "RUNNER_ONLINE_THRESHOLD_SECONDS",
   "SANDBOX_IDLE_STOP_SECONDS",
+  "SANDBOX_BACKGROUND_CAP_SECONDS",
   "TURN_CEILING_SECONDS",
   "TURN_CEILING_WARNING_SECONDS",
   "TURN_STALL_SECONDS",
+  "STALE_DISPATCH_SECONDS",
   "MAX_HELD_AWAKE_SANDBOXES",
+  "SANDBOX_DEFAULT_TIMEZONE",
   // SSH front door
   "SSH_TERMINATOR_SECRET",
   "SSH_CA_KMS_KEY_ARN",
@@ -159,6 +184,10 @@ export const AMBIENT_HAZARD_VARS: readonly string[] = [
   "SSH_MAX_SESSION_SECONDS",
   "SSH_IDLE_TIMEOUT_SECONDS",
   "SSH_SESSION_LEASE_SECONDS",
+  // Sandbox ports / previews — presence lights the preview routes and the
+  // agent's Ports section.
+  "PREVIEW_DOMAIN",
+  "PREVIEW_RELAY_SECRET",
   // Published egress identity (plans/stable-egress-identity.md) — presence
   // flips GET /v1/instance/egress from 404 to a live feed at module load,
   // and a malformed ambient value throws at import.
@@ -195,11 +224,15 @@ export const AMBIENT_HAZARD_VARS: readonly string[] = [
   "ATTIO_CLIENT_SECRET",
   "ATLASSIAN_CLIENT_ID",
   "ATLASSIAN_CLIENT_SECRET",
+  "BITBUCKET_CLIENT_ID",
+  "BITBUCKET_CLIENT_SECRET",
   "DROPBOX_CLIENT_ID",
   "DROPBOX_CLIENT_SECRET",
   "FATHOM_CLIENT_ID",
   "FATHOM_CLIENT_SECRET",
   "GITHUB_APP_ID",
+  "GITHUB_APP_CLIENT_ID",
+  "GITHUB_APP_CLIENT_SECRET",
   "GITHUB_APP_PRIVATE_KEY",
   "GITHUB_APP_SLUG",
   "GITHUB_CLIENT_ID",
@@ -226,6 +259,8 @@ export const AMBIENT_HAZARD_VARS: readonly string[] = [
   "TODOIST_CLIENT_SECRET",
   "TRELLO_API_KEY",
   "TRELLO_API_SECRET",
+  "WEBFLOW_CLIENT_ID",
+  "WEBFLOW_CLIENT_SECRET",
   "ZOHO_CRM_CLIENT_ID",
   "ZOHO_CRM_CLIENT_SECRET",
   "ZOOM_CLIENT_ID",
@@ -265,6 +300,54 @@ export const PRESERVED_AMBIENT_VARS: readonly string[] = [
   "HOME",
 ];
 
+/**
+ * Where the worker baseline lives between files: on `globalThis`, because
+ * the setup module itself is re-evaluated per file (isolated module
+ * registries) while the worker process, and its `process.env`, carry over.
+ */
+export const HERMETIC_BASELINE_KEY = "__onecliHermeticBaseline";
+
+/** The holder `applyHermeticEnv` keeps the baseline on (`globalThis`). */
+export type HermeticBaselineHolder = {
+  [HERMETIC_BASELINE_KEY]?: Readonly<Record<string, string>>;
+};
+
+/** The worker's holder: `globalThis`, typed the way `@onecli/db`'s Prisma
+ * singleton and `providers/edition-state.ts` type theirs. */
+export const workerBaselineHolder = (): HermeticBaselineHolder =>
+  globalThis as unknown as HermeticBaselineHolder;
+
+/** Vars vitest itself owns and sets per worker; never restored by us. */
+const isRunnerOwned = (name: string): boolean =>
+  name === "TEST" || name.startsWith("VITEST");
+
+/**
+ * The per-file entry point (`hermetic-env.setup.ts`): normalize the first
+ * file's env and record it as the worker baseline, then reset every later
+ * file in the same worker to that baseline (see module doc, step 5).
+ */
+export const applyHermeticEnv = (
+  env: NodeJS.ProcessEnv,
+  holder: HermeticBaselineHolder,
+): void => {
+  const baseline = holder[HERMETIC_BASELINE_KEY];
+  if (baseline === undefined) {
+    normalizeTestEnv(env);
+    const snapshot: Record<string, string> = {};
+    for (const [name, value] of Object.entries(env)) {
+      if (value !== undefined && !isRunnerOwned(name)) snapshot[name] = value;
+    }
+    holder[HERMETIC_BASELINE_KEY] = snapshot;
+    return;
+  }
+  for (const name of Object.keys(env)) {
+    if (!isRunnerOwned(name) && !Object.hasOwn(baseline, name)) {
+      delete env[name];
+    }
+  }
+  for (const [name, value] of Object.entries(baseline)) env[name] = value;
+};
+
 /** Normalize `env` in place to the clean-CI test baseline (see module doc). */
 export const normalizeTestEnv = (env: NodeJS.ProcessEnv): void => {
   // Production resolves `EDITION ?? NEXT_PUBLIC_EDITION`, so a set EDITION —
@@ -281,4 +364,16 @@ export const normalizeTestEnv = (env: NodeJS.ProcessEnv): void => {
   env.NODE_ENV = "test";
   env.GATEWAY_CA_PEM_FILE = HERMETIC_CA_PEM_SENTINEL;
   env[HERMETIC_MARKER_VAR] = "1";
+};
+
+/**
+ * The pg project's step after the reset (module doc, step 6): keep
+ * `DATABASE_URL` on the opted-in proof database between files, so a query a
+ * previous suite left running reconnects instead of breaking the shared
+ * Prisma client for the rest of the fork. A no-op without a proof database
+ * (the suites skip then), so an ambient `DATABASE_URL` is never revived.
+ */
+export const pinProofDatabaseUrl = (env: NodeJS.ProcessEnv): void => {
+  const url = env.POLICY_PROOF_DATABASE_URL;
+  if (url !== undefined && url !== "") env.DATABASE_URL = url;
 };

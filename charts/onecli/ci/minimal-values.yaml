@@ -1,0 +1,14 @@
+# The smallest production-shaped install: your secrets, your database,
+# Gateway API routing.
+externalUrl: https://onecli.example.com
+secrets:
+  existingSecret: onecli-secrets
+database:
+  enabled: false
+  external:
+    existingSecret: onecli-database
+httpRoute:
+  enabled: true
+  parentRefs:
+    - name: onecli
+      namespace: gateway-system

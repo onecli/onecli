@@ -8,9 +8,11 @@ import {
   AnimatedTabTrigger,
 } from "@onecli/ui/components/animated-tabs";
 import { Badge } from "@onecli/ui/components/badge";
-import { useCounts } from "@/hooks/use-counts";
+import { useAgentActiveConnections } from "@/hooks/use-agent-active-connections";
 import { AppsSection } from "./apps-section";
 import { SecretGrantsTab } from "./secret-grants-tab";
+import { SecretDialog } from "@/app/(dashboard)/w/[workspaceId]/connections/_components/secret-dialog";
+import type { Secret } from "@/lib/api";
 import { AddConnectionButton } from "./add-connection-button";
 
 /**
@@ -27,11 +29,15 @@ import { AddConnectionButton } from "./add-connection-button";
 export const AgentConnectionsSection = ({ agentId }: { agentId: string }) => {
   const searchParams = useSearchParams();
   const pathname = usePathname();
-  const { data: counts } = useCounts();
+  // Badges count what is ACTIVE for this agent (switched on or org-granted),
+  // not the workspace's whole pool: the inactive rest sits folded away.
+  const active = useAgentActiveConnections(agentId);
   // The add door's open state lives here (not in the button) so the tabs'
   // empty states can open the same dialogs — one owner, many triggers.
   const [pickerOpen, setPickerOpen] = useState(false);
   const [secretOpen, setSecretOpen] = useState(false);
+  const [editing, setEditing] = useState<Secret | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
 
   const tab = searchParams.get("tab") === "custom" ? "custom" : "apps";
 
@@ -69,14 +75,14 @@ export const AgentConnectionsSection = ({ agentId }: { agentId: string }) => {
               className="flex items-center gap-2"
             >
               Apps
-              {countBadge(counts?.apps)}
+              {countBadge(active.appCount)}
             </AnimatedTabTrigger>
             <AnimatedTabTrigger
               value="custom"
               className="flex items-center gap-2"
             >
               Custom
-              {countBadge(counts?.secrets)}
+              {countBadge(active.secretCount)}
             </AnimatedTabTrigger>
           </div>
           {/* The in-place add door: connect an app or mint a custom secret
@@ -102,6 +108,24 @@ export const AgentConnectionsSection = ({ agentId }: { agentId: string }) => {
           agentId={agentId}
           kind="secret"
           onAdd={() => setSecretOpen(true)}
+          onEdit={(secret) => {
+            setEditing(secret);
+            setEditOpen(true);
+          }}
+        />
+      )}
+      {/* Edit door, same as the workspace Custom tab's pencil: rename, or
+          replace the stored value (write-only). Keyed so another row always
+          mounts a fresh form; it stays mounted on close so the exit
+          animation plays. Org secrets get no pencil (SecretGrantsTab). */}
+      {editing && (
+        <SecretDialog
+          key={editing.id}
+          open={editOpen}
+          onOpenChange={(open) => {
+            if (!open) setEditOpen(false);
+          }}
+          secret={editing}
         />
       )}
     </div>

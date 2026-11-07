@@ -4,7 +4,7 @@
 
 use db::{ConnectionProviders, PolicyIdentityRow, PolicyRuleV2Row, PolicyTargetRow, SecretHosts};
 
-use super::types::{Action, Identity, NewRule, RateWindow, Scope, Target};
+use super::types::{Action, Identity, MethodFilter, NewRule, RateWindow, Scope, Target};
 
 /// Decode each identity row to its `Identity` variant. Exactly one principal
 /// column is set (the DB `one_principal` CHECK); the directory kinds
@@ -70,6 +70,7 @@ fn decode_targets(
                     id: id.clone(),
                     provider: provider.clone(),
                     tools: r.app_tools.clone(),
+                    methods: MethodFilter::parse(r.method.as_deref()),
                 },
                 None => Target::Unresolved,
             },
@@ -310,10 +311,12 @@ mod tests {
                 id,
                 provider,
                 tools,
+                methods,
             }] => {
                 assert_eq!(id, "c1");
                 assert_eq!(provider, "gmail");
                 assert!(tools.is_empty());
+                assert_eq!(*methods, MethodFilter::Any);
             }
             other => panic!("expected a connection target, got {other:?}"),
         }

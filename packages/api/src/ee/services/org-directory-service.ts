@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "../../services/errors";
+import { assertCanInviteMember } from "./quota-service";
 import {
   suspendMember,
   reinstateMember,
@@ -141,6 +142,14 @@ export const provisionMember = async (
       userCreated: user.created,
     };
   }
+  // A NEW membership takes a seat, so it answers to the plan's seat cap
+  // exactly like an invitation does: SCIM and the first-party provisioning
+  // route both land here, and SSO (which brings them) sells from Scale, a
+  // seat-capped plan. Checked after the already-a-member answer so an IdP
+  // re-push of an existing user keeps its 409, never a quota refusal. A
+  // refused provision can leave the User row behind; that is the same row
+  // the person's first sign-in would mint, and a retry adopts it.
+  await assertCanInviteMember(organizationId);
   try {
     const membership = await db.organizationMember.create({
       data: {

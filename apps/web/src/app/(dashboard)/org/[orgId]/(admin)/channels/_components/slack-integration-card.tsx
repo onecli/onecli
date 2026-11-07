@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ExternalLink, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -19,7 +19,6 @@ import {
   Card,
   CardContent,
   CardDescription,
-  CardFooter,
   CardHeader,
   CardTitle,
 } from "@onecli/ui/components/card";
@@ -36,6 +35,7 @@ import {
   useDisconnectChannelIntegration,
   useOrgChannels,
 } from "@/hooks/use-org-channels";
+import { SlackTokenHowTo, slackTokenOpenStep } from "./slack-token-how-to";
 
 /**
  * The org's Slack integration: the automation credential (an App
@@ -157,12 +157,17 @@ export const SlackIntegrationCard = ({ choice }: SlackIntegrationCardProps) => {
     );
   };
 
+  // The paste field leads; the walkthrough behind "How do I get this?" and
+  // the one-line hint under the field come from `slack-token-how-to`.
   const pasteForm = (
-    <form onSubmit={submitToken} className="grid gap-2">
-      <Label htmlFor="slack-config-token">
-        App Configuration refresh token
-      </Label>
-      <div className="flex max-w-lg gap-2">
+    <form onSubmit={submitToken} className="grid max-w-lg gap-2">
+      <div className="flex items-baseline justify-between gap-3">
+        <Label htmlFor="slack-config-token">
+          App Configuration refresh token
+        </Label>
+        <SlackTokenHowTo />
+      </div>
+      <div className="flex gap-2">
         <SecretInput
           id="slack-config-token"
           value={token}
@@ -182,21 +187,7 @@ export const SlackIntegrationCard = ({ choice }: SlackIntegrationCardProps) => {
           {connect.isPending ? "Connecting…" : "Connect"}
         </Button>
       </div>
-      <p className="text-muted-foreground text-xs">
-        Generate one at{" "}
-        <a
-          href="https://api.slack.com/apps"
-          target="_blank"
-          rel="noreferrer"
-          className="hover:text-foreground inline-flex items-center gap-0.5 underline underline-offset-2"
-        >
-          api.slack.com/apps
-          <ExternalLink className="size-3" />
-        </a>{" "}
-        → Your App Configuration Tokens and paste the Refresh Token (not the
-        Access Token) right away. Each refresh token works once; OneCLI rotates
-        it automatically from then on.
-      </p>
+      <p className="text-muted-foreground text-xs">{slackTokenOpenStep}</p>
     </form>
   );
 
@@ -234,10 +225,12 @@ export const SlackIntegrationCard = ({ choice }: SlackIntegrationCardProps) => {
                   </Badge>
                 )}
               </div>
-              <CardDescription className="mt-1">
+              <CardDescription className="mt-1.5">
                 {choice?.role === "alternative"
                   ? "For workspaces that can't install the OneCLI app. Each agent gets its own Slack app, created in one click."
-                  : "Each agent gets its own Slack app, created in one click."}
+                  : slack?.hasCredentials
+                    ? "Each agent joins Slack as its own private app, with its own name."
+                    : "Connect your Slack workspace once. Then add any agent to Slack in one click."}
               </CardDescription>
               {choice?.role === "alternative" && (
                 <button
@@ -273,24 +266,40 @@ export const SlackIntegrationCard = ({ choice }: SlackIntegrationCardProps) => {
           ) : (
             <>
               {slack.needsCredentials && !mintsViaShared && (
-                <p className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm dark:border-amber-500/40 dark:bg-amber-500/15">
-                  The stored token could not be refreshed: Slack refused the
-                  rotation. This happens when the token is revoked, or its
-                  refresh token is used by another tool. Generate a new one and
-                  paste it to restore one-click setup.
+                <p className="mb-4 max-w-lg rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm dark:border-amber-500/40 dark:bg-amber-500/15">
+                  Slack refused to rotate the stored token. It was revoked, or
+                  another tool used it. Paste a fresh one to restore one-click
+                  setup.
                 </p>
               )}
               {slack.hasCredentials ? (
-                <p className="text-muted-foreground text-sm">
-                  <span className="text-foreground font-medium">
-                    {slack.name ?? slack.externalId}
-                  </span>{" "}
-                  is connected with{" "}
-                  {slack.presenceCount === 1
-                    ? "1 agent app"
-                    : `${slack.presenceCount} agent apps`}
-                  .
-                </p>
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-muted-foreground min-w-0 truncate text-sm">
+                    Connected to{" "}
+                    <span
+                      className={
+                        slack.name
+                          ? "text-foreground font-medium"
+                          : "text-foreground font-mono text-xs"
+                      }
+                      translate="no"
+                    >
+                      {/* The raw T… id only when there is no name: it is
+                          the one thing that tells two unnamed workspaces
+                          apart. */}
+                      {slack.name ?? slack.externalId}
+                    </span>
+                    .
+                  </p>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-muted-foreground hover:text-destructive shrink-0"
+                    onClick={() => setConfirmOpen(true)}
+                  >
+                    Disconnect
+                  </Button>
+                </div>
               ) : mintsViaShared ? (
                 // The shared install's user token does the minting; the
                 // config-token paste stays reachable as a small fallback.
@@ -328,10 +337,10 @@ export const SlackIntegrationCard = ({ choice }: SlackIntegrationCardProps) => {
                 // Connected via hand-made apps only, or the credential died —
                 // either way the paste form is the way (back) to one-click,
                 // and removal must not depend on holding a live credential.
-                <>
+                <div className="space-y-4">
                   {pasteForm}
                   {removeIsNoop ? (
-                    <p className="text-muted-foreground text-sm">
+                    <p className="text-muted-foreground max-w-lg text-sm">
                       This workspace stays listed while it&apos;s still in use:{" "}
                       {usage}. Detach those to remove it.
                     </p>
@@ -345,7 +354,7 @@ export const SlackIntegrationCard = ({ choice }: SlackIntegrationCardProps) => {
                       Remove
                     </Button>
                   )}
-                </>
+                </div>
               )}
             </>
           )}
@@ -356,21 +365,6 @@ export const SlackIntegrationCard = ({ choice }: SlackIntegrationCardProps) => {
             </p>
           )}
         </CardContent>
-        {!isPending && slack?.hasCredentials && (
-          <CardFooter className="justify-between border-t">
-            <p className="text-muted-foreground min-w-0 truncate font-mono text-xs">
-              {slack.externalId}
-            </p>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-destructive hover:text-destructive shrink-0"
-              onClick={() => setConfirmOpen(true)}
-            >
-              Disconnect
-            </Button>
-          </CardFooter>
-        )}
       </Card>
 
       <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>

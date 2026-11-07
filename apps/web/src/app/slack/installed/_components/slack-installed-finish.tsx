@@ -6,12 +6,18 @@ import { Loader2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import {
+  useFinishAgentInstall,
   useFinishSharedInstall,
   useInspectSharedInstall,
 } from "@/hooks/use-org-channels";
 
 /**
- * The signed-in arm: spend the parked code against the NAMED org — in two
+ * The signed-in arm. It first offers the code to this org's waiting AGENT
+ * apps (see the effect below); only when none takes it, and the deployment
+ * has a shared app, does it fall through to the shared-app bind described
+ * next.
+ *
+ * The shared-app bind spends the parked code against the NAMED org — in two
  * steps, so the confirmation names BOTH ends.
  *
  * ⚠️ THE CONFIRMATION IS A SECURITY CONTROL, NOT A COURTESY. Binding on mount
@@ -41,21 +47,54 @@ export const SlackInstalledFinish = ({
   organization: { id: string; name: string } | null;
 }) => {
   const router = useRouter();
+  const agentInstall = useFinishAgentInstall();
   const inspect = useInspectSharedInstall();
   const finish = useFinishSharedInstall();
   const [error, setError] = useState<string | null>(null);
 
-  // One-shot: the inspect EXCHANGES the single-use code (outrunning its
-  // ten-minute expiry), so it must never re-fire — strict-mode remounts
-  // included. A mutation, not a query: it burns state server-side.
-  const inspected = useRef(false);
+  // One-shot: both steps EXCHANGE the single-use code, so the chain must
+  // never re-fire (strict-mode remounts included). Mutations, not queries:
+  // they spend state server-side.
+  //
+  // The AGENT arm goes first: most installs that begin in Slack are an
+  // agent's own app (the admin-approval message, "Install to Workspace"). The
+  // server offers the code only to this org's waiting agent apps and finishes
+  // the match, which binds nothing new to the org, so no confirm is owed. A
+  // miss leaves the code spendable, so the shared-app inspect runs next, but
+  // only when the deployment has a shared app to inspect with.
+  const started = useRef(false);
   const organizationId = organization?.id;
+  const agentInstallMutate = agentInstall.mutate;
   const inspectMutate = inspect.mutate;
   useEffect(() => {
-    if (!organizationId || inspected.current) return;
-    inspected.current = true;
-    inspectMutate({ provider: "slack", code, organizationId });
-  }, [organizationId, code, inspectMutate]);
+    if (!organizationId || started.current) return;
+    started.current = true;
+    agentInstallMutate(
+      { provider: "slack", code, organizationId },
+      {
+        onSuccess: ({ agent, sharedAppConfigured }) => {
+          if (agent) {
+            // A socket app still owes its app-level token: land on the
+            // "one step left" marker, never "connected".
+            const landing = agent.awaitingTransportCredential
+              ? "installed"
+              : "connected";
+            router.replace(
+              `/w/${encodeURIComponent(agent.workspaceId)}/agents/${encodeURIComponent(agent.id)}/channels?${landing}=slack`,
+            );
+          } else if (sharedAppConfigured) {
+            inspectMutate({ provider: "slack", code, organizationId });
+          }
+        },
+      },
+    );
+  }, [organizationId, code, agentInstallMutate, inspectMutate, router]);
+
+  // No agent app took the code, and there is no shared app to try next.
+  const unmatched =
+    agentInstall.data !== undefined &&
+    agentInstall.data.agent === null &&
+    !agentInstall.data.sharedAppConfigured;
 
   // Signed in but org-less (a brand-new account mid-onboarding): a Connect
   // click would be refused server-side, so offer the way forward instead of
@@ -80,6 +119,32 @@ export const SlackInstalledFinish = ({
     );
   }
 
+  // The AGENT arm failed or matched nothing (and there is no shared app to
+  // try): the way forward is the waiting agent's own page.
+  if (unmatched || agentInstall.isError) {
+    return (
+      <div className="flex min-h-svh flex-col items-center justify-center px-4">
+        <Card className="w-full max-w-md p-8 text-center">
+          <h1 className="text-sm font-medium">
+            This Slack install didn&apos;t finish
+          </h1>
+          <p className="text-muted-foreground mt-2 text-sm" role="alert">
+            {agentInstall.error?.message ??
+              "No agent in your organization is waiting for this Slack app."}
+          </p>
+          <p className="text-muted-foreground mt-2 text-sm">
+            Open the agent in OneCLI, go to its Slack page, and click Resume
+            setup.
+          </p>
+          <Button className="mt-6" onClick={() => router.replace("/")}>
+            Go to OneCLI
+          </Button>
+        </Card>
+      </div>
+    );
+  }
+
+  // The SHARED-app arm's refusal: the workspace install itself, no agent.
   if (inspect.isError) {
     return (
       <div className="flex min-h-svh flex-col items-center justify-center px-4">

@@ -1,5 +1,11 @@
 import { getApp } from "@onecli/api/apps/registry";
 import type { AppDefinition } from "@onecli/api/apps/types";
+import { bareToolName } from "@onecli/agent-protocol/activity";
+import {
+  GITHUB_OAUTH_PROVIDER,
+  isGitHubOrgLogin,
+} from "@onecli/api/lib/github-org-access";
+import type { ToolCall } from "./transcript";
 
 /**
  * Recognition of the gateway's "connect this app" links in agent output —
@@ -7,12 +13,20 @@ import type { AppDefinition } from "@onecli/api/apps/types";
  * renderer (which suppresses them in the chat) and the ConnectorSuggestions
  * card (which renders them as the call to action).
  *
- * TWO gateway refusals mint dashboard links the card can absorb:
+ * FOUR gateway refusals mint dashboard links the card can absorb:
  * - `app_not_connected` → `…/connections?connect=<provider>&source=agent…`
  *   (nothing connected: the card's Connect button opens the OAuth popup)
- * - `access_restricted` → `…/connections/apps/<provider>` (an account exists
- *   but THIS agent has no grant: the card's Manage button opens the
- *   permissions dialog, which is exactly the attach surface)
+ * - `access_restricted` → `…/agents/<id>/connections?attach=<provider>`, or
+ *   `…/connections/apps/<provider>` when the gateway knows no agent (an
+ *   account exists but THIS agent is not switched on for it: the card's
+ *   Attach button opens the attach dialog). Its `connect_url` alternative
+ *   names the same app, so the attach row wins over the connect row.
+ * - `connection_needs_reconnect` → `…/connections/apps/<provider>?reconnect=<id>`
+ *   (the provider rejected that account's saved login: the card's Reconnect
+ *   button re-authorizes exactly that account in the OAuth popup)
+ * - `github_org_access_required` → `…/connections/apps/github?org_access=<org>`
+ *   (one GitHub organization refused the account: the card names the
+ *   organization and links to the account page, where its fix steps live)
  *
  * Only an app connection the registry can name gets the app-page link. Every
  * other restricted credential (a custom secret, an LLM key, an app connection
@@ -26,13 +40,24 @@ export interface ConnectSuggestion {
   provider: string;
   agentName?: string;
   /** Why the gateway minted the link — decides the card's action verb:
-   * "connect" opens the OAuth popup, "attach" opens the Manage dialog. */
-  kind: "connect" | "attach";
+   * "connect" opens the OAuth popup, "attach" opens the Manage dialog,
+   * "reconnect" re-authorizes `connectionId` in the OAuth popup,
+   * "org_access" sends the user to the fix steps for `org`. */
+  kind: "connect" | "attach" | "reconnect" | "org_access";
+  /** The account to re-authorize (`reconnect` only). */
+  connectionId?: string;
+  /** The GitHub organization that refused the account (`org_access` only). */
+  org?: string;
 }
+
+/** Connection ids are uuids today; bounded and charset-limited so a crafted
+ * link can only ever name an id, which the card then looks up in the user's
+ * own connections list. */
+const CONNECTION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 const PROVIDER_ID_RE = /^[a-z0-9-]{1,64}$/;
 
-/** A connect link as the GATEWAY mints it (both shapes above). Origin
+/** A connect link as the GATEWAY mints it (the shapes above). Origin
  * deliberately unchecked — self-host and cloud bake different dashboard
  * URLs, and the provider id is validated against the app catalog before
  * anything renders. */
@@ -42,6 +67,13 @@ export const parseConnectLink = (href: string): ConnectSuggestion | null => {
     url = new URL(href);
   } catch {
     return null;
+  }
+
+  // access_restricted, agent-scoped: /agents/<id>/connections?attach=<provider>
+  if (/\/agents\/[^/]+\/connections$/.test(url.pathname)) {
+    const provider = url.searchParams.get("attach");
+    if (!provider || !PROVIDER_ID_RE.test(provider)) return null;
+    return { provider, kind: "attach" };
   }
 
   // app_not_connected: /connections?connect=<provider>
@@ -60,6 +92,25 @@ export const parseConnectLink = (href: string): ConnectSuggestion | null => {
     url.pathname,
   );
   if (attachMatch?.[1]) {
+    // connection_needs_reconnect: the same page, naming the dead account.
+    const reconnect = url.searchParams.get("reconnect");
+    if (reconnect && CONNECTION_ID_RE.test(reconnect)) {
+      return {
+        provider: attachMatch[1],
+        kind: "reconnect",
+        connectionId: reconnect,
+      };
+    }
+    // github_org_access_required: the GitHub app page, naming the
+    // organization. Only the GitHub OAuth app mints it.
+    const org = url.searchParams.get("org_access");
+    if (
+      attachMatch[1] === GITHUB_OAUTH_PROVIDER &&
+      org &&
+      isGitHubOrgLogin(org)
+    ) {
+      return { provider: attachMatch[1], kind: "org_access", org };
+    }
     return { provider: attachMatch[1], kind: "attach" };
   }
 
@@ -82,27 +133,56 @@ export const isCardConnectLink = (href: string): boolean => {
  * call to action vanishes. */
 const TRAILING_PUNCTUATION_RE = /[.,;:!?*_~`…]+$/;
 
+/** A connect link resolved against the catalog: one row of the card. */
+export type CardSuggestion = Omit<ConnectSuggestion, "provider"> & {
+  app: AppDefinition;
+};
+
 /** Every connect link in one turn's text, deduped by provider and resolved
  * against the catalog — an unknown provider renders nothing (its link stays
  * in the prose as the fallback, see `isCardConnectLink`). A provider named
- * by BOTH shapes keeps the first occurrence. */
-export const extractConnectSuggestions = (
-  text: string,
-): { app: AppDefinition; agentName?: string; kind: "connect" | "attach" }[] => {
-  const seen = new Set<string>();
-  const out: {
-    app: AppDefinition;
-    agentName?: string;
-    kind: "connect" | "attach";
-  }[] = [];
+ * by more than one shape keeps its first occurrence, except that an attach
+ * link replaces a connect link: `access_restricted` offers both for one app,
+ * and switching the existing account on is the fix it leads with. */
+export const extractConnectSuggestions = (text: string): CardSuggestion[] => {
+  const byProvider = new Map<string, CardSuggestion>();
   for (const match of text.matchAll(/https?:\/\/[^\s)\]>"']+/g)) {
     const parsed = parseConnectLink(
       match[0].replace(TRAILING_PUNCTUATION_RE, ""),
     );
-    if (!parsed || seen.has(parsed.provider)) continue;
-    seen.add(parsed.provider);
-    const app = getApp(parsed.provider);
-    if (app) out.push({ app, agentName: parsed.agentName, kind: parsed.kind });
+    if (!parsed) continue;
+    const { provider, ...rest } = parsed;
+    const seen = byProvider.get(provider);
+    if (seen && !(seen.kind === "connect" && rest.kind === "attach")) continue;
+    const app = getApp(provider);
+    if (app) byProvider.set(provider, { app, ...rest });
   }
-  return out;
+  return [...byProvider.values()];
 };
+
+/** The platform tool whose result carries a built-in app's connect (or
+ * manage) link, minted by the control plane in the gateway's exact shapes. */
+const APP_CONNECTION_TOOL = "request_app_connection";
+
+/**
+ * The connect links a turn's `request_app_connection` calls returned, as
+ * one text for `extractConnectSuggestions`. This is what makes the card
+ * independent of the agent's wording: the agent may paraphrase, shorten or
+ * drop the link, and the Connect card still renders from the tool's own
+ * result. Failed calls are skipped (an error carries no link).
+ *
+ * Trust is unchanged: the output is sandbox-reported text like the answer
+ * itself, and every link still passes `parseConnectLink`'s shape check and
+ * the catalog lookup, and the card only ever opens OneCLI's own connect flow
+ * for a catalog app. MCP names arrive prefixed (`mcp__onecli__<tool>`).
+ */
+export const connectLinkTextFromTools = (tools: readonly ToolCall[]): string =>
+  tools
+    .filter(
+      (tool) =>
+        bareToolName(tool.name) === APP_CONNECTION_TOOL &&
+        tool.isError !== true &&
+        typeof tool.output === "string",
+    )
+    .map((tool) => tool.output)
+    .join("\n");

@@ -13,7 +13,7 @@ use tracing::{debug, info, warn};
 
 use approval::{
     unix_now, ApprovalDecision, ApprovalStore, DecisionOutcome, DecisionReceiver, DecisionWait,
-    DecisionWaitError, PendingApproval,
+    DecisionWaitError, NewApprovalReceiver, NewApprovalWait, PendingApproval,
 };
 
 /// TTL for Redis keys — approval timeout + buffer.
@@ -93,6 +93,7 @@ fn decode_wait_result(
                 Ok(DecisionOutcome {
                     decision,
                     approved_by: None,
+                    reason: None,
                 })
             });
             match outcome {
@@ -116,6 +117,49 @@ fn decode_wait_result(
             Err(DecisionWaitError::Receive)
         }
     }
+}
+
+// ── New-approval subscription ─────────────────────────────────────────────
+
+/// A pub/sub subscription on its own connection (SUBSCRIBE blocks the
+/// connection). `None` when it could not be opened: the wait then answers
+/// `false` at once, as before. Once `subscribe` has returned, the server
+/// delivers every later PUBLISH to this connection, and the stream buffers
+/// it until `wait` reads it, so a store between the subscribe and the wait
+/// is not lost.
+struct RedisNewApprovalWait {
+    stream: Option<redis::aio::PubSubStream>,
+    channel: String,
+}
+
+#[async_trait]
+impl NewApprovalWait for RedisNewApprovalWait {
+    async fn wait(self: Box<Self>, timeout: Duration) -> bool {
+        let Some(mut stream) = self.stream else {
+            return false;
+        };
+        let notified = matches!(
+            tokio::time::timeout(timeout, stream.next()).await,
+            Ok(Some(_))
+        );
+        debug!(channel = %self.channel, notified, "approval long-poll completed");
+        notified
+    }
+}
+
+/// Open a dedicated pub/sub connection subscribed to `channel`.
+async fn subscribe_channel(channel: String) -> NewApprovalReceiver {
+    let stream = async {
+        let client = redis::Client::open(super::redis_url_from_env().as_str()).ok()?;
+        let mut pubsub = client.get_async_pubsub().await.ok()?;
+        pubsub.subscribe(&channel).await.ok()?;
+        Some(pubsub.into_on_message())
+    }
+    .await;
+    if stream.is_none() {
+        warn!(channel = %channel, "approval long-poll: redis subscribe failed");
+    }
+    Box::new(RedisNewApprovalWait { stream, channel })
 }
 
 // ── Redis implementation ───────────────────────────────────────────────
@@ -350,67 +394,23 @@ impl ApprovalStore for RedisApprovalStore {
         debug!(approval_id = %id, "approval removed from Redis");
     }
 
-    async fn wait_for_new(&self, org_id: &str, workspace_id: &str, timeout: Duration) -> bool {
-        // Use a separate connection for SUBSCRIBE (it blocks the connection).
-        let client = match redis::Client::open(super::redis_url_from_env().as_str()) {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-        let mut pubsub = match client.get_async_pubsub().await {
-            Ok(ps) => ps,
-            Err(_) => return false,
-        };
-
-        let channel = format!("approval:new:{org_id}:{workspace_id}");
-        if pubsub.subscribe(&channel).await.is_err() {
-            return false;
-        }
-
-        let notified = matches!(
-            tokio::time::timeout(timeout, pubsub.into_on_message().next()).await,
-            Ok(Some(_))
-        );
-        debug!(org_id = %org_id, workspace_id = %workspace_id, notified, "approval long-poll completed");
-        notified
+    async fn subscribe_new(&self, org_id: &str, workspace_id: &str) -> NewApprovalReceiver {
+        subscribe_channel(format!("approval:new:{org_id}:{workspace_id}")).await
     }
 
-    async fn wait_for_new_for_org(&self, org_id: &str, timeout: Duration) -> bool {
-        // Use a separate connection for SUBSCRIBE (it blocks the connection).
-        let client = match redis::Client::open(super::redis_url_from_env().as_str()) {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-        let mut pubsub = match client.get_async_pubsub().await {
-            Ok(ps) => ps,
-            Err(_) => return false,
-        };
-
-        let channel = format!("approval:new:{org_id}");
-        if pubsub.subscribe(&channel).await.is_err() {
-            return false;
-        }
-
-        let notified = matches!(
-            tokio::time::timeout(timeout, pubsub.into_on_message().next()).await,
-            Ok(Some(_))
-        );
-        debug!(org_id = %org_id, notified, "org approval long-poll completed");
-        notified
+    async fn subscribe_new_for_org(&self, org_id: &str) -> NewApprovalReceiver {
+        subscribe_channel(format!("approval:new:{org_id}")).await
     }
 
-    async fn submit_decision(
+    async fn submit_outcome(
         &self,
         org_id: &str,
         workspace_id: &str,
         id: &str,
-        decision: ApprovalDecision,
-        approved_by: Option<String>,
+        outcome: DecisionOutcome,
     ) -> bool {
         let mut conn = self.conn.clone();
-        let outcome = DecisionOutcome {
-            decision,
-            approved_by,
-        };
+        let decision = outcome.decision;
         let value = match serde_json::to_string(&outcome) {
             Ok(v) => v,
             Err(e) => {
@@ -475,7 +475,8 @@ mod tests {
                 decode_wait_result(Ok(Some(("key".into(), payload.into()))), "key"),
                 Ok(Some(DecisionOutcome {
                     decision,
-                    approved_by: approved_by.map(str::to_owned)
+                    approved_by: approved_by.map(str::to_owned),
+                    reason: None,
                 }))
             );
         }

@@ -5,10 +5,13 @@ import { DeadIntegrationCredentialError } from "./errors";
 import { channelProvider } from "./registry";
 import type {
   ChannelProviderId,
+  ChannelTransport,
   UserLinkSource,
   ValidatedIntegrationCredential,
 } from "./types";
 import { logger } from "../../lib/logger";
+import { agentImageUrlOrNull } from "../agent-image-service";
+import { defaultTransport } from "./posture";
 
 const log = logger.child({ component: "channel-integration-service" });
 
@@ -677,4 +680,124 @@ export const removeUserLink = async (
   if (removed.count === 0) {
     throw new ServiceError("NOT_FOUND", "Link not found");
   }
+};
+
+/** One agent's place on the org Channels page. `none` = never added;
+ * `pending` = the app exists but the install never finished (the stuck
+ * state a skipped Allow leaves behind); `active` = in the workspace;
+ * `attention` = disabled or needs re-auth. */
+export type AgentChannelState = "none" | "pending" | "active" | "attention";
+
+export interface OrgChannelAgent {
+  id: string;
+  name: string;
+  /** The agent's avatar (null = the default mark). */
+  imageUrl: string | null;
+  state: AgentChannelState;
+  /** `pending` only: the transport the half-finished app was stamped with.
+   * A socket app finishes by pasting tokens on the agent's own page, not by
+   * a consent click, so the org page must know which it is. */
+  pendingTransport: ChannelTransport | null;
+  /** Live in the provider: where to open it and how to @mention it. */
+  slack: { appId: string; teamId: string; handle: string | null } | null;
+}
+
+export interface OrgChannelWorkspace {
+  id: string;
+  name: string | null;
+  agents: OrgChannelAgent[];
+}
+
+export interface OrgChannelAgents {
+  /** What a fresh "Add to Slack" from this page would be stamped with:
+   * events (a consent click) or socket (a create, then tokens pasted on the
+   * agent's page). The same posture the agent's own page reads. */
+  posture: { transport: ChannelTransport };
+  workspaces: OrgChannelWorkspace[];
+}
+
+const stateOf = (status: string | undefined): AgentChannelState => {
+  if (status === undefined) return "none";
+  if (status === "active") return "active";
+  if (status === "pending_setup") return "pending";
+  return "attention";
+};
+
+/**
+ * Every hosted agent in the org, grouped by OneCLI workspace, with where it
+ * stands in one provider: the org Channels page's one-click list, so an
+ * admin who connected the org token can see which agents are in Slack and
+ * finish an install they started.
+ *
+ * Visibility: the org Channels routes are org-ADMIN only (the guard), and an
+ * admin manages every workspace in the org (`canManageAllWorkspaces`), so
+ * the org fence IS the caller's visibility here; on non-RBAC editions every
+ * member manages every workspace too. The org is the only filter, applied
+ * once at the workspace level: a foreign workspace never contributes a row,
+ * and its agents are never read. One query, no per-workspace fan-out.
+ */
+export const listOrgChannelAgents = async (input: {
+  organizationId: string;
+  provider: ChannelProviderId;
+}): Promise<OrgChannelAgents> => {
+  const workspaces = await db.workspace.findMany({
+    where: { organizationId: input.organizationId },
+    select: {
+      id: true,
+      name: true,
+      agents: {
+        // BYO agents cannot join channels, so they are not offered.
+        where: { kind: "hosted" },
+        select: {
+          id: true,
+          name: true,
+          imageKey: true,
+          // At most one row per (agent, provider) by constraint.
+          channels: {
+            where: { provider: input.provider },
+            select: {
+              status: true,
+              transport: true,
+              externalId: true,
+              identityName: true,
+              integration: { select: { externalId: true } },
+            },
+          },
+        },
+        orderBy: { createdAt: "asc" },
+      },
+    },
+    orderBy: { createdAt: "asc" },
+  });
+  return {
+    posture: { transport: defaultTransport() },
+    workspaces: workspaces.map((workspace) => ({
+      id: workspace.id,
+      name: workspace.name,
+      agents: workspace.agents.map((agent) => {
+        const presence = agent.channels[0];
+        const state = stateOf(presence?.status);
+        return {
+          id: agent.id,
+          name: agent.name,
+          imageUrl: agentImageUrlOrNull(agent.id, agent.imageKey),
+          state,
+          pendingTransport:
+            state === "pending" && presence
+              ? (presence.transport as ChannelTransport)
+              : null,
+          // Only a LIVE app can be opened or mentioned: a pending one isn't
+          // installed yet, so the link would land on nothing.
+          slack:
+            state === "active" && presence
+              ? {
+                  appId: presence.externalId,
+                  teamId: presence.integration.externalId,
+                  handle: presence.identityName,
+                }
+              : null,
+        };
+      }),
+    })),
+  };
 };

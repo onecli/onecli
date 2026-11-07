@@ -175,6 +175,37 @@ describe("the dashboard surface", () => {
     expect(services.updateCron).not.toHaveBeenCalled();
   });
 
+  it("edit and run-now act as the caller, and a non-manager reads 403", async () => {
+    const actor = { userId: "user-1", organizationId: "org-1" };
+    await app.request("/v1/agents/ag-1/crons/cr-1", {
+      method: "PATCH",
+      headers: AUTH,
+      body: JSON.stringify({ prompt: "changed" }),
+    });
+    expect(services.updateCron).toHaveBeenCalledWith(
+      "p1",
+      "ag-1",
+      "cr-1",
+      { prompt: "changed" },
+      actor,
+    );
+    services.runCronNow.mockRejectedValue(
+      new ServiceError("FORBIDDEN", "Only the person who created it"),
+    );
+    const refused = await app.request("/v1/agents/ag-1/crons/cr-1/run", {
+      method: "POST",
+      headers: AUTH,
+      body: "{}",
+    });
+    expect(services.runCronNow).toHaveBeenCalledWith(
+      "p1",
+      "ag-1",
+      "cr-1",
+      actor,
+    );
+    expect(refused.status).toBe(403);
+  });
+
   it("passes a service NOT_FOUND through as 404", async () => {
     services.runCronNow.mockRejectedValue(
       new ServiceError("NOT_FOUND", "Schedule not found"),

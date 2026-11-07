@@ -15,6 +15,12 @@ import { intersectPolicies } from "@onecli/api/lib/resource-axis";
 import { granularAccessConfigs } from "@/ee/granular-access";
 import { usePlanGate } from "@/lib/plan-gate";
 import type { Connection } from "@/lib/api";
+import { usePathname } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
+import { queryKeys } from "@/lib/api/keys";
+import { openConnectPopup } from "@/lib/connect-popup";
+import { useAppMessages } from "@/hooks/use-app-connected";
+import { WORKSPACE_PATH_RE } from "@/lib/navigation";
 
 export interface ResourceScopeFieldsProps {
   /** The single connection this rule targets (per-connection granular scoping). */
@@ -57,6 +63,22 @@ export const ResourceScopeFields = ({
   // Draft while the dialog is open — committed on Save, discarded on Cancel.
   const [draft, setDraft] = useState<Record<string, unknown> | null>(policy);
   const [open, setOpen] = useState(false);
+  const pathname = usePathname();
+  const queryClient = useQueryClient();
+  // A reconnect from the picker refreshes the connection (its grant may now
+  // include what was missing), so the warning clears and the Drive listing,
+  // skipped while read access was missing, loads.
+  useAppMessages({
+    onConnected: (event) => {
+      if (event.provider !== connection.provider) return;
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.connections.all(),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.googleDrive.all(),
+      });
+    },
+  });
 
   if (!config || !config.isSupported(meta) || !config.PolicyDialogContent) {
     return null;
@@ -73,11 +95,9 @@ export const ResourceScopeFields = ({
   const emptyScope = effective !== null && selected.length === 0;
   const summary = emptyScope
     ? `No ${plural}`
-    : config.formatSummary
-      ? config.formatSummary(effective, meta)
-      : selected.length > 0
-        ? `${selected.length} ${selected.length === 1 ? singular : plural}`
-        : `All ${plural}`;
+    : selected.length > 0
+      ? `${selected.length} ${selected.length === 1 ? singular : plural}`
+      : `All ${plural}`;
   const editable = !readOnly;
 
   return (
@@ -136,9 +156,24 @@ export const ResourceScopeFields = ({
             </DialogHeader>
             <Content
               connectionId={connection.id}
+              connectionScope={
+                connection.scope === "organization"
+                  ? "organization"
+                  : "workspace"
+              }
               metadata={meta}
               policy={draft}
               orgBoundary={orgPolicy}
+              missingPermissions={connection.missingPermissions ?? []}
+              onReconnect={
+                connection.scope === "organization"
+                  ? undefined
+                  : () =>
+                      openConnectPopup(connection.provider, {
+                        connectionId: connection.id,
+                        workspaceId: pathname.match(WORKSPACE_PATH_RE)?.[1],
+                      })
+              }
               onPolicyChange={setDraft}
               onSave={() => {
                 // An empty selection ≡ "all" — normalize it to null so the stored

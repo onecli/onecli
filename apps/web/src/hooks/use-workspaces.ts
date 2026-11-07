@@ -33,6 +33,16 @@ export const useRenameWorkspace = () =>
       ),
   });
 
+export const useSetWorkspaceTimezone = () =>
+  useMutation({
+    mutationFn: ({ id, timezone }: { id: string; timezone: string | null }) =>
+      workspaces.setTimezone(id, timezone),
+    onError: (err) =>
+      toast.error(
+        err instanceof Error ? err.message : "Failed to update timezone",
+      ),
+  });
+
 export const useDeleteWorkspace = () =>
   useMutation({
     mutationFn: (id: string) => workspaces.remove(id),

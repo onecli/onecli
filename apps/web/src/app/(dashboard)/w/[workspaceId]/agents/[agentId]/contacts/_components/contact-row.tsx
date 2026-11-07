@@ -1,14 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import {
-  Check,
-  ChevronDown,
-  Loader2,
-  ShieldCheck,
-  Slash,
-  UserCheck,
-} from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -20,170 +12,161 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@onecli/ui/components/alert-dialog";
-import { Badge } from "@onecli/ui/components/badge";
-import { Button, buttonVariants } from "@onecli/ui/components/button";
+import { buttonVariants } from "@onecli/ui/components/button";
+import type { ChannelPersonReach, ChannelSpaceReach } from "@/lib/api";
+import { Undo2 } from "lucide-react";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@onecli/ui/components/dropdown-menu";
-import type { AgentContact } from "@/lib/api";
-import { useDeleteContact, useSetContactPolicy } from "@/hooks/use-channels";
+  useDismissPersonReach,
+  useDismissReachRow,
+  useForgetSendAsPreference,
+  useSendAsPreferences,
+} from "@/hooks/use-channels";
+import type { ActAsYouRowExtras } from "./act-as-you-slot";
+import { ChannelControl } from "./channel-control";
+import { ChannelListenControl } from "./channel-listen-control";
 import { ContactRowFrame } from "./contact-row-frame";
+import { nameOf, type MergedEntry } from "./merge-contacts";
+import { PersonAvatar } from "./person-avatar";
+import { PersonControl } from "./person-control";
 
-interface ContactRowProps {
-  agentId: string;
-  contact: AgentContact;
-}
-
-type Policy = AgentContact["policy"];
-
-/** One policy's face: the badge word, its tone, and the menu line. */
-const POLICIES: Record<
-  Policy,
-  {
-    badge: string;
-    badgeClass: string;
-    Icon: typeof Check;
-    menu: string;
-    hint: string;
-    toast: string;
-  }
-> = {
-  allow: {
-    badge: "Always allowed",
-    badgeClass:
-      "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-    Icon: UserCheck,
-    menu: "Always allow",
-    hint: "No approval needed.",
-    toast: "always allowed",
-  },
-  ask: {
-    badge: "Asks first",
-    badgeClass: "",
-    Icon: ShieldCheck,
-    menu: "Ask me first",
-    hint: "You approve each message.",
-    toast: "asks first",
-  },
-  blocked: {
-    badge: "Blocked",
-    badgeClass:
-      "border-destructive/30 bg-destructive/10 text-destructive dark:text-red-400",
-    Icon: Slash,
-    menu: "Block",
-    hint: "No messages, no mentions.",
-    toast: "blocked",
-  },
+type ContactRowBase = {
+  /** What "acts as you" adds (licensed); absent = nothing. */
+  extras?: ActAsYouRowExtras | null;
 };
 
-const ORDER: readonly Policy[] = ["allow", "ask", "blocked"];
+export type ContactRowProps = ContactRowBase &
+  (
+    | {
+        kind: "person";
+        agentId: string;
+        agentName: string;
+        entry: MergedEntry<ChannelPersonReach>;
+      }
+    | {
+        kind: "channel";
+        agentId: string;
+        agentName: string;
+        entry: MergedEntry<ChannelSpaceReach>;
+      }
+  );
+
+/** What Remove clears: the row's one setting. */
+const removeDescription = (
+  kind: "person" | "channel",
+  agentName: string,
+): string => {
+  if (kind === "channel") {
+    // Remove forgets the setting only: the bot cannot leave a channel on its
+    // own (no channels:manage scope), so say where removal really happens.
+    return `Clears what ${agentName} replies to here. The next message there will ask you again. ${agentName} stays in the channel. Remove it in Slack to take it out.`;
+  }
+  return `Clears their setting. Their next DM, and ${agentName}'s next message to them, will ask you again.`;
+};
 
 /**
- * One row of the agent's OUTBOUND address book: someone the agent messaged
- * on its own with send_message, and the standing decision that send left
- * behind. The same shape as every other Contacts row (the shared frame):
- * the badge is the reading and, pressed, offers the other two words; the
- * `…` holds Remove. The kind (person / channel / app) is said by the group
- * the row sits in, never repeated per row.
+ * One person or channel and its ONE setting. Remove clears that setting, so
+ * the next message either way asks you again. A pending row is an open ask
+ * in the bell, not a setting, and a workspace owner's row is fixed: neither
+ * offers Remove.
  */
-export const ContactRow = ({ agentId, contact }: ContactRowProps) => {
-  const setPolicy = useSetContactPolicy(agentId);
-  const remove = useDeleteContact(agentId);
+export const ContactRow = (props: ContactRowProps) => {
+  const { kind, agentId, agentName, entry, extras } = props;
+  const { provider, value } = entry.reach;
+  const dismissPerson = useDismissPersonReach(agentId, provider);
+  const dismissSpace = useDismissReachRow(agentId, provider);
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const mine = POLICIES[contact.policy];
-  const busy =
-    (setPolicy.isPending && setPolicy.variables?.contactId === contact.id) ||
-    (remove.isPending && remove.variables === contact.id);
+  const title = nameOf(entry);
+  const isOwner = props.kind === "person" && props.entry.reach.value.isOwner;
+  const removable = value.state !== "pending" && !isOwner;
+  // The caller's own remembered sender for this recipient (send_message's
+  // "send as the agent or as you?"): a quiet label and a Forget item.
+  const { data: sendAsPrefs } = useSendAsPreferences(agentId);
+  const forgetSendAs = useForgetSendAsPreference(agentId);
+  const sendAs = sendAsPrefs?.get(value.externalRef) ?? null;
+  const sendAsLabel =
+    sendAs === "you"
+      ? "sends as you"
+      : sendAs === "agent"
+        ? `sends as ${agentName}`
+        : null;
+  const subtitle =
+    [isOwner ? "Workspace owner" : null, sendAsLabel]
+      .filter(Boolean)
+      .join(" · ") || null;
+  const actions = [
+    ...(extras?.actions ?? []),
+    ...(sendAs
+      ? [
+          {
+            label: "Forget send-as choice",
+            icon: <Undo2 className="size-4" aria-hidden />,
+            onSelect: () =>
+              forgetSendAs.mutate(value.externalRef, {
+                onSuccess: () =>
+                  toast.success(
+                    `Forgot who sends to ${title}. The next message asks again.`,
+                  ),
+                onError: () => toast.error("Couldn't forget the choice"),
+              }),
+            disabled: forgetSendAs.isPending,
+          },
+        ]
+      : []),
+  ];
 
-  const choose = (policy: Policy) => {
-    if (policy === contact.policy) return;
-    setPolicy.mutate(
-      { contactId: contact.id, policy },
-      {
-        onSuccess: () =>
-          toast.success(`${contact.displayName}: ${POLICIES[policy].toast}`),
-        onError: (err) =>
-          toast.error(err instanceof Error ? err.message : "Update failed"),
-      },
-    );
+  // Instant: the row leaves on click and the confirm closes. The hook puts
+  // it back (and says why) if the server refuses.
+  const confirmRemove = () => {
+    setConfirmOpen(false);
+    (kind === "person" ? dismissPerson : dismissSpace)
+      .mutateAsync({ externalRef: value.externalRef })
+      .then(() => toast.success(`${title} removed`))
+      .catch(() => undefined);
   };
 
-  const confirmRemove = () =>
-    remove.mutate(contact.id, {
-      onSuccess: () => {
-        setConfirmOpen(false);
-        toast.success(`${contact.displayName} removed`);
-      },
-      onError: (err) => {
-        setConfirmOpen(false);
-        toast.error(err instanceof Error ? err.message : "Remove failed");
-      },
-    });
-
   return (
-    <>
+    <div>
       <ContactRowFrame
-        label={contact.displayName}
-        disabled={busy}
-        onRemove={() => setConfirmOpen(true)}
+        label={title}
+        mono={kind === "channel"}
+        {...(props.kind === "person" && {
+          leading: (
+            <PersonAvatar
+              name={title}
+              imageUrl={props.entry.reach.value.avatarUrl}
+            />
+          ),
+        })}
+        subtitle={subtitle}
+        {...(removable && { onRemove: () => setConfirmOpen(true) })}
+        actions={actions}
+        {...(extras && { asYou: extras.cells })}
         status={
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild disabled={busy}>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="gap-1.5 px-2"
-                aria-label={`Whether the agent may message ${contact.displayName} on its own: ${mine.badge.toLowerCase()}. Change`}
-              >
-                {setPolicy.isPending &&
-                setPolicy.variables?.contactId === contact.id ? (
-                  <Loader2
-                    className="size-3.5 animate-spin motion-reduce:hidden"
-                    aria-hidden
-                  />
-                ) : null}
-                <Badge variant="secondary" className={mine.badgeClass}>
-                  <mine.Icon className="size-3" aria-hidden />
-                  {mine.badge}
-                </Badge>
-                <ChevronDown
-                  className="text-muted-foreground size-3.5"
-                  aria-hidden
-                />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-72">
-              <DropdownMenuLabel className="font-normal text-pretty">
-                Message <span translate="no">{contact.displayName}</span>
-              </DropdownMenuLabel>
-              <DropdownMenuSeparator />
-              {ORDER.map((policy) => (
-                <DropdownMenuItem
-                  key={policy}
-                  onSelect={() => choose(policy)}
-                  className="items-start gap-2"
-                >
-                  <Check
-                    className={`mt-0.5 size-3.5 shrink-0 ${contact.policy === policy ? "" : "invisible"}`}
-                    aria-hidden
-                  />
-                  <span className="min-w-0">
-                    <span className="block text-sm">
-                      {POLICIES[policy].menu}
-                    </span>
-                    <span className="text-muted-foreground block text-xs text-pretty">
-                      {POLICIES[policy].hint}
-                    </span>
-                  </span>
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
+          props.kind === "channel" ? (
+            <div className="flex min-w-0 items-center gap-1 sm:gap-2">
+              {/* The allow/never icons lead so they line up with person
+                  rows; what it replies to follows, only while allowed. */}
+              <ChannelControl
+                agentId={agentId}
+                agentName={agentName}
+                subject={title}
+                reach={props.entry.reach}
+              />
+              <ChannelListenControl
+                agentId={agentId}
+                agentName={agentName}
+                subject={title}
+                reach={props.entry.reach}
+              />
+            </div>
+          ) : (
+            <PersonControl
+              agentId={agentId}
+              agentName={agentName}
+              subject={title}
+              reach={props.entry.reach}
+            />
+          )
         }
       />
 
@@ -191,39 +174,23 @@ export const ContactRow = ({ agentId, contact }: ContactRowProps) => {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle className="text-pretty">
-              Remove <span translate="no">{contact.displayName}</span>?
+              Remove <span translate="no">{title}</span>?
             </AlertDialogTitle>
             <AlertDialogDescription className="text-pretty">
-              The agent will ask you again before messaging them.
+              {removeDescription(kind, agentName)}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={remove.isPending}>
-              Cancel
-            </AlertDialogCancel>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              onClick={(event) => {
-                event.preventDefault();
-                confirmRemove();
-              }}
-              disabled={remove.isPending}
+              onClick={confirmRemove}
               className={buttonVariants({ variant: "destructive" })}
             >
-              {remove.isPending ? (
-                <>
-                  <Loader2
-                    className="size-3.5 animate-spin motion-reduce:hidden"
-                    aria-hidden
-                  />
-                  Removing…
-                </>
-              ) : (
-                "Remove"
-              )}
+              Remove
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </>
+    </div>
   );
 };

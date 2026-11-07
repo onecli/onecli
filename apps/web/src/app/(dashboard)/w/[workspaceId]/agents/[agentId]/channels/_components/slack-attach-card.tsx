@@ -7,6 +7,7 @@ import { AppIcon } from "@/lib/components/app-icon";
 import {
   SLACK_DISPLAY_NAME,
   SLACK_ICON_SRC,
+  slackAppSettingsUrl,
 } from "@/lib/agents/slack-presence";
 import { toast } from "sonner";
 import { Button } from "@onecli/ui/components/button";
@@ -19,6 +20,7 @@ import {
 } from "@onecli/ui/components/card";
 import type { ChannelTransport } from "@/lib/api";
 import { useAttachChannel, useDetachChannel } from "@/hooks/use-channels";
+import { openInstallPopup } from "@/lib/agents/install-popup";
 import { SlackDetachDialog } from "./slack-detach-dialog";
 import { SlackGuidedSocketSteps } from "./slack-guided-socket-steps";
 import { SlackManifestFloor } from "./slack-manifest-floor";
@@ -49,33 +51,16 @@ interface SlackAttachCardProps {
   /** The bot's handle, for the removed copy ("@donna"), where known. */
   identityName?: string | null;
   /**
-   * The removed app's own id (`A0…`). The manual floor uses it to re-attach
-   * THAT app: no "create a new app" step, no App ID field to retype. Null
-   * when nothing is removed.
+   * The resumable app's own id (`A0…`): a detached or half-finished setup,
+   * or an app removed on the Slack side. The manual floor uses it to
+   * re-attach THAT app: no "create a new app" step, no App ID field to
+   * retype. Null when there is nothing to resume.
    */
-  removedAppId?: string | null;
+  resumeAppId?: string | null;
+  /** The resumable socket app was installed by consent and waits only for
+   * its app-level token (server-decided). */
+  awaitingTransportCredential?: boolean;
 }
-
-/**
- * Opens a centered, *blank* popup (the app-connect sizing) synchronously inside
- * a click — to be pointed at the install URL once the create resolves. Opening
- * it blank up front is the only way `window.open` survives a popup blocker: the
- * events-arm create round-trips through Slack's `apps.manifest.create`, so
- * `onSuccess` fires long after the click's transient activation is gone.
- * Returns `null` when the browser blocked it even here — the caller then offers
- * the URL as a plain link, whose click is a fresh gesture the blocker allows.
- */
-const openInstallPopup = (): Window | null => {
-  const w = 520;
-  const h = 700;
-  const left = Math.round(window.screenX + (window.outerWidth - w) / 2);
-  const top = Math.round(window.screenY + (window.outerHeight - h) / 2);
-  return window.open(
-    "",
-    "_blank",
-    `width=${w},height=${h},left=${left},top=${top},scrollbars=yes,resizable=yes`,
-  );
-};
 
 /**
  * The unattached (and resume) face of the Slack card. Three arms, decided by
@@ -95,7 +80,8 @@ export const SlackAttachCard = ({
   resuming,
   removed = false,
   identityName = null,
-  removedAppId = null,
+  resumeAppId = null,
+  awaitingTransportCredential = false,
 }: SlackAttachCardProps) => {
   const attach = useAttachChannel(agentId, "slack");
   const detach = useDetachChannel(agentId, "slack");
@@ -124,6 +110,19 @@ export const SlackAttachCard = ({
   // servers get nothing: the old attach route reads no body (the choice would
   // be silently ignored) and the old strict complete schema rejects the key.
   const requestedTransport = posture.available ? transport : undefined;
+  // A socket app can install by consent where the server can also serve
+  // webhooks: both need the same public HTTPS origin (Slack's redirect rule).
+  const canInstallSocket =
+    transport === "socket" && (posture.available?.includes("events") ?? false);
+  // No org credential splits two ways (the render below): the events posture
+  // points at the org setup, the socket posture falls to the manual paste
+  // floor. Named once so the resume hint and the arm shown never disagree.
+  const needsOrgSetup = !hasOrgCredentials && transport === "events";
+  const onPasteFloor = !hasOrgCredentials && !needsOrgSetup;
+  // Installed by consent, one paste left. Needs no org credential: the app
+  // exists and holds its bot token, so this arm wins over the paste floor.
+  const awaitingAppId =
+    resuming && awaitingTransportCredential ? resumeAppId : null;
 
   const pickTransport = (next: ChannelTransport) => {
     setPicked(next);
@@ -151,12 +150,14 @@ export const SlackAttachCard = ({
 
   const startGuided = () => {
     setBlockedInstallUrl(null);
-    // Events arm only: the consent page opens in a popup, but `onSuccess` runs
-    // after Slack's `apps.manifest.create` round-trip — too late for
-    // `window.open` to count as user-initiated. So open a blank placeholder
-    // now, inside the gesture, and point it at the URL when the create returns.
-    // The socket "Create app" has no install URL and opens nothing.
-    const popup = transport === "events" ? openInstallPopup() : null;
+    // The consent page opens in a popup, but `onSuccess` runs after Slack's
+    // `apps.manifest.create` round-trip, too late for `window.open` to count
+    // as user-initiated. So open a blank placeholder now, inside the
+    // gesture, and point it at the URL when the create returns. Socket gets
+    // one too when the deployment can install it by consent (a public HTTPS
+    // origin); otherwise its create returns no URL and the popup closes.
+    const popup =
+      transport === "events" || canInstallSocket ? openInstallPopup() : null;
 
     attach.mutate(
       requestedTransport ? { transport: requestedTransport } : undefined,
@@ -168,7 +169,7 @@ export const SlackAttachCard = ({
           }
           if (popup) {
             popup.location.href = result.installUrl;
-          } else if (transport === "events") {
+          } else {
             // Blocked despite the in-gesture open — fall back to a link.
             setBlockedInstallUrl(result.installUrl);
             toast.error(
@@ -231,8 +232,16 @@ export const SlackAttachCard = ({
         )}
         {resuming && !removed && (
           <div className="flex flex-wrap items-center justify-between gap-2">
+            {/* Slack never tells us a request is waiting on an admin, so the
+                guided hint names that case instead of claiming to know. The
+                floor and the waiting install have no Resume button: the form
+                below IS the resume. */}
             <p className="text-muted-foreground text-sm">
-              Setup was started but not finished. Pick up where it left off.
+              {awaitingAppId
+                ? "Installed in Slack. Paste the app-level token below to finish, or start over to use a different app."
+                : onPasteFloor
+                  ? "Not connected. Paste the app's tokens below to reconnect it, or start over to use a different app."
+                  : "Not finished yet. If your Slack admin has to approve the app, click Resume setup once they do."}
             </p>
             {/* The escape hatch: without it a half-finished setup pins the
                 agent to its stamped transport forever (posture changes and
@@ -258,7 +267,7 @@ export const SlackAttachCard = ({
             socket posture keeps the floor — its manual steps are physically
             unavoidable (Slack has no API for app-level tokens), and the org
             token alone cannot finish a socket install. */}
-        {!hasOrgCredentials && transport === "events" ? (
+        {needsOrgSetup ? (
           <div className="flex flex-col items-center gap-1.5 rounded-xl border border-dashed px-6 py-10 text-center">
             <span className="bg-card mb-2 flex size-12 items-center justify-center rounded-2xl border shadow-sm">
               <AppIcon
@@ -289,7 +298,16 @@ export const SlackAttachCard = ({
               </p>
             )}
           </div>
-        ) : !hasOrgCredentials ? (
+        ) : awaitingAppId ? (
+          // The one manual step Slack leaves after the consent. The settings
+          // link is rebuilt from the app id, so a reload never strands it.
+          <SlackGuidedSocketSteps
+            agentId={agentId}
+            settingsUrl={slackAppSettingsUrl(awaitingAppId)}
+            installUrl={null}
+            installed
+          />
+        ) : onPasteFloor ? (
           // Reachable only on the SOCKET posture — the events posture routed
           // to the org-setup pointer above. The floor keeps its events arm
           // for generality; unused from here by design.
@@ -297,12 +315,14 @@ export const SlackAttachCard = ({
             agentId={agentId}
             transport={transport}
             requestedTransport={requestedTransport}
-            reattachAppId={removed ? removedAppId : null}
+            reattachAppId={resuming ? resumeAppId : null}
           />
         ) : attach.data?.transport === "socket" ? (
           <SlackGuidedSocketSteps
             agentId={agentId}
             settingsUrl={attach.data.settingsUrl}
+            installUrl={attach.data.installUrl}
+            installed={false}
           />
         ) : (
           <div className="flex flex-col items-center gap-1.5 rounded-xl border border-dashed px-6 py-10 text-center">
@@ -323,7 +343,9 @@ export const SlackAttachCard = ({
             <p className="text-muted-foreground max-w-sm text-sm">
               {transport === "events"
                 ? "One click creates the app and opens the install page. Nothing to paste."
-                : "Creates the Slack app from your workspace credential. Then paste two tokens to finish."}
+                : canInstallSocket
+                  ? "One click creates the app and opens the install page. Then paste one token to finish."
+                  : "Creates the Slack app from your workspace credential. Then paste two tokens to finish."}
             </p>
             <Button
               size="sm"
@@ -332,14 +354,14 @@ export const SlackAttachCard = ({
               loading={attach.isPending}
             >
               {attach.isPending
-                ? transport === "events"
+                ? transport === "events" || canInstallSocket
                   ? "Adding…"
                   : "Creating…"
                 : removed
                   ? "Re-attach"
                   : resuming
                     ? "Resume setup"
-                    : transport === "events"
+                    : transport === "events" || canInstallSocket
                       ? "Add to Slack"
                       : "Create app"}
             </Button>

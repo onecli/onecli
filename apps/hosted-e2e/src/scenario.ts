@@ -5,10 +5,14 @@ import { newTestIds, type TestIds } from "./ids.js";
 import { createTestDatabase, type TestDatabase } from "./db.js";
 import { startGateway, type GatewayHandle } from "./gateway.js";
 import { startApiServer, type ApiServerHandle } from "./api-server.js";
-import { startTestRunner, type TestRunnerHandle } from "./runner.js";
+import {
+  startTestRunner,
+  type StartRunnerOptions,
+  type TestRunnerHandle,
+} from "./runner.js";
+import { startTestBalancer, type TestBalancer } from "./balancer.js";
 import { startStubUpstream, type StubUpstream } from "./upstream.js";
 import { dockerNetworkRm } from "./docker.js";
-import { freePort } from "./ports.js";
 import { v1Client, type V1Client } from "./v1.js";
 
 /**
@@ -49,117 +53,164 @@ export interface Cx {
   readonly prisma: PrismaClient;
   /** Boot the topology (gateway → api → runner unless `withRunner:false`). */
   startStack(options?: StartStackOptions): Promise<Stack>;
+  /**
+   * One more runner COPY on the scenario's token (same Runner row, its own
+   * replica), torn down with the scenario like the stack's own runner.
+   */
+  startCopy(
+    options: Omit<StartRunnerOptions, "ids" | "config">,
+  ): Promise<TestRunnerHandle>;
+  /** A test balancer in front of copies, closed with the scenario. */
+  startBalancer(): Promise<TestBalancer>;
   upstreamTls(): Promise<StubUpstream>;
   /** A second /v1 client for the second tenant. */
   v1For(apiOrigin: string, which: "first" | "second"): V1Client;
 }
 
+export interface ScenarioOptions {
+  /** Per-scenario ceiling; the suite default (vitest.config) otherwise. */
+  timeoutMs?: number;
+  /**
+   * An opt-in leg's precondition: when it returns a reason, the scenario
+   * registers as SKIPPED with that reason in its name, never as a pass that
+   * asserted nothing (the silent skip this package exists to replace).
+   */
+  skipUnless?: (config: HostedE2EConfig) => string | null;
+}
+
 export const scenario = (
   name: string,
   body: (cx: Cx) => Promise<void>,
+  /** A per-scenario ceiling, or the full options. */
+  options?: number | ScenarioOptions,
 ): void => {
+  const { timeoutMs, skipUnless }: ScenarioOptions =
+    typeof options === "number" ? { timeoutMs: options } : (options ?? {});
   const config = e2eConfig();
   if (config === null) {
     test.skip(name, () => undefined);
     return;
   }
+  const skipReason = skipUnless?.(config) ?? null;
+  if (skipReason !== null) {
+    test.skip(`${name} (${skipReason})`, () => undefined);
+    return;
+  }
 
-  test(name, async () => {
-    const ids = newTestIds();
-    const db = await createTestDatabase(ids, config);
-    const gateways: GatewayHandle[] = [];
-    const apis: ApiServerHandle[] = [];
-    const runners: TestRunnerHandle[] = [];
-    const upstreams: StubUpstream[] = [];
+  test(
+    name,
+    async () => {
+      const ids = newTestIds();
+      const db = await createTestDatabase(ids, config);
+      const gateways: GatewayHandle[] = [];
+      const apis: ApiServerHandle[] = [];
+      const runners: TestRunnerHandle[] = [];
+      const upstreams: StubUpstream[] = [];
+      const balancers: TestBalancer[] = [];
 
-    const cx: Cx = {
-      ids,
-      db,
-      config,
-      prisma: db.prisma,
-      startStack: async (options = {}) => {
-        const gateway = await startGateway({
-          databaseUrl: db.url,
-          ...(options.gatewayEnv && { env: options.gatewayEnv }),
-        });
-        gateways.push(gateway);
-        const api = await startApiServer({
-          databaseUrl: db.url,
-          gateway,
-          runnerToken: ids.runnerToken,
-          port: await freePort(),
-          config,
-          ...(options.apiEnv && { env: options.apiEnv }),
-        });
-        apis.push(api);
-        let runner: TestRunnerHandle | null = null;
-        if (options.withRunner !== false) {
-          runner = await startTestRunner({
-            controlPlaneUrl: api.origin,
-            ids,
-            config,
-            ...(options.maxSandboxes !== undefined && {
-              maxSandboxes: options.maxSandboxes,
-            }),
-            ...(options.orphanGraceSeconds !== undefined && {
-              orphanGraceSeconds: options.orphanGraceSeconds,
-            }),
-            ...(options.orphanReap !== undefined && {
-              orphanReap: options.orphanReap,
-            }),
+      const cx: Cx = {
+        ids,
+        db,
+        config,
+        prisma: db.prisma,
+        startStack: async (options = {}) => {
+          const gateway = await startGateway({
+            databaseUrl: db.url,
+            ...(options.gatewayEnv && { env: options.gatewayEnv }),
           });
-          runners.push(runner);
-        }
-        return {
-          gateway,
-          api,
-          runner,
-          v1: v1Client(api.origin, ids.apiKey, ids.workspace),
-        };
-      },
-      upstreamTls: async () => {
-        const stub = await startStubUpstream({ tls: true });
-        upstreams.push(stub);
-        return stub;
-      },
-      v1For: (apiOrigin, which) =>
-        which === "first"
-          ? v1Client(apiOrigin, ids.apiKey, ids.workspace)
-          : v1Client(apiOrigin, ids.secondApiKey, ids.secondWorkspace),
-    };
+          gateways.push(gateway);
+          const api = await startApiServer({
+            databaseUrl: db.url,
+            gateway,
+            runnerToken: ids.runnerToken,
+            config,
+            ...(options.apiEnv && { env: options.apiEnv }),
+          });
+          apis.push(api);
+          let runner: TestRunnerHandle | null = null;
+          if (options.withRunner !== false) {
+            runner = await startTestRunner({
+              controlPlaneUrl: api.origin,
+              ids,
+              config,
+              ...(options.maxSandboxes !== undefined && {
+                maxSandboxes: options.maxSandboxes,
+              }),
+              ...(options.orphanGraceSeconds !== undefined && {
+                orphanGraceSeconds: options.orphanGraceSeconds,
+              }),
+              ...(options.orphanReap !== undefined && {
+                orphanReap: options.orphanReap,
+              }),
+            });
+            runners.push(runner);
+          }
+          return {
+            gateway,
+            api,
+            runner,
+            v1: v1Client(api.origin, ids.apiKey, ids.workspace),
+          };
+        },
+        startCopy: async (options) => {
+          const copy = await startTestRunner({ ...options, ids, config });
+          runners.push(copy);
+          return copy;
+        },
+        startBalancer: async () => {
+          const balancer = await startTestBalancer();
+          balancers.push(balancer);
+          return balancer;
+        },
+        upstreamTls: async () => {
+          const stub = await startStubUpstream({ tls: true });
+          upstreams.push(stub);
+          return stub;
+        },
+        v1For: (apiOrigin, which) =>
+          which === "first"
+            ? v1Client(apiOrigin, ids.apiKey, ids.workspace)
+            : v1Client(apiOrigin, ids.secondApiKey, ids.secondWorkspace),
+      };
 
-    try {
-      await body(cx);
-    } catch (error) {
-      const logs = [
-        ...gateways.map(
-          (g, i) => `--- gateway #${i + 1} ---\n${g.logs.text()}`,
-        ),
-        ...apis.map(
-          (a, i) => `--- api-server #${i + 1} ---\n${a.service.logs.text()}`,
-        ),
-      ].join("\n");
-      if (logs !== "") {
-        const detail = error instanceof Error ? error.message : String(error);
-        throw new Error(`${detail}\n\n${logs}\n--- database: ${db.name} ---`, {
-          cause: error,
-        });
-      }
-      throw error;
-    } finally {
-      // Waves: runner loop first (nothing new spawns), then its sandboxes
-      // and homes (runner.stop leaves them by design), then the children,
-      // then the per-test network, then — unconditionally — the database.
-      await Promise.allSettled(runners.map((r) => r.stop()));
-      await Promise.allSettled(runners.map((r) => r.reap()));
-      await Promise.allSettled(apis.map((a) => a.stop()));
-      await Promise.allSettled(gateways.map((g) => g.stop()));
-      await Promise.allSettled(upstreams.map((u) => u.close()));
       try {
-        await dockerNetworkRm(ids.network);
+        await body(cx);
+      } catch (error) {
+        const logs = [
+          ...gateways.map(
+            (g, i) => `--- gateway #${i + 1} ---\n${g.logs.text()}`,
+          ),
+          ...apis.map(
+            (a, i) => `--- api-server #${i + 1} ---\n${a.service.logs.text()}`,
+          ),
+        ].join("\n");
+        if (logs !== "") {
+          const detail = error instanceof Error ? error.message : String(error);
+          throw new Error(
+            `${detail}\n\n${logs}\n--- database: ${db.name} ---`,
+            {
+              cause: error,
+            },
+          );
+        }
+        throw error;
       } finally {
-        await db.drop();
+        // Waves: runner loop first (nothing new spawns), then its sandboxes
+        // and homes (runner.stop leaves them by design), then the children,
+        // then the per-test network, then — unconditionally — the database.
+        await Promise.allSettled(runners.map((r) => r.stop()));
+        await Promise.allSettled(runners.map((r) => r.reap()));
+        await Promise.allSettled(balancers.map((b) => b.close()));
+        await Promise.allSettled(apis.map((a) => a.stop()));
+        await Promise.allSettled(gateways.map((g) => g.stop()));
+        await Promise.allSettled(upstreams.map((u) => u.close()));
+        try {
+          await dockerNetworkRm(ids.network);
+        } finally {
+          await db.drop();
+        }
       }
-    }
-  });
+    },
+    timeoutMs,
+  );
 };

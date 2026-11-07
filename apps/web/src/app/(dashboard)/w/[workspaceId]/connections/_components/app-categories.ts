@@ -29,6 +29,7 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   "google-meet": "google",
   "google-photos": "google",
   "google-tasks": "google",
+  "google-keep": "google",
   "google-admin": "google",
   "google-classroom": "google",
   "google-search-console": "google",
@@ -44,6 +45,7 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   // Development
   github: "development",
   "github-app": "development",
+  bitbucket: "development",
   docker: "development",
   vercel: "development",
   cloudflare: "development",
@@ -51,6 +53,7 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   sentry: "development",
   linear: "development",
   posthog: "development",
+  webflow: "development",
 
   // Project Management
   jira: "project-management",
@@ -68,7 +71,9 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   dropbox: "cloud-data",
   datadog: "cloud-data",
   snowflake: "cloud-data",
+  postgres: "cloud-data",
   "vertex-ai": "cloud-data",
+  tavily: "cloud-data",
 
   // Communication
   resend: "communication",
@@ -82,5 +87,15 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   "zoho-crm": "communication",
   granola: "communication",
   fathom: "communication",
+  timeless: "communication",
+  circleback: "communication",
+  heyreach: "communication",
+  pylon: "communication",
+  pagerduty: "development",
+  coralogix: "cloud-data",
+  onyx: "communication",
+  zendesk: "communication",
+  twilio: "communication",
+  dripify: "communication",
   x: "communication",
 };

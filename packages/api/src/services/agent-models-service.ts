@@ -7,7 +7,7 @@ import {
 } from "./llm-credential-service";
 import { injectableSecretWhere } from "./injectable-secrets";
 import { getModelCatalog } from "../llm/catalog-cache";
-import { llmProvider } from "../llm/registry";
+import { forAuthMode, llmProvider } from "../llm/registry";
 import { resolveAgentModel } from "../llm/resolve";
 import type { LlmProviderId, ModelOption } from "../llm/types";
 
@@ -27,9 +27,17 @@ export interface AgentModelsView {
   providerScope: string | null;
   models: ModelOption[];
   efforts: readonly { id: AgentEffort; label: string }[];
-  /** What this agent runs when nothing is overridden. */
+  /**
+   * What this agent runs when nothing is overridden. `effort` is the level
+   * the DEFAULT model runs at; a chosen model with no chosen level runs at
+   * its own default.
+   */
   defaults: { model: string; effort: AgentEffort | null };
-  /** What it runs right now, and whether that came from the user. */
+  /**
+   * What it runs right now, and whether that came from the user. `effort` is
+   * the level the USER chose (null = none), so the picker can tell a choice
+   * from a default.
+   */
   selected: { model: string; effort: AgentEffort | null; overridden: boolean };
   /** The list is pinned or stale rather than freshly fetched. */
   degraded: boolean;
@@ -98,7 +106,11 @@ export const getAgentModels = async (
         : null,
     credential.authMode,
   );
-  const selected = resolveAgentModel(agent, credential.provider);
+  const selected = resolveAgentModel(
+    agent,
+    credential.provider,
+    credential.authMode,
+  );
 
   return {
     provider: credential.provider,
@@ -107,12 +119,12 @@ export const getAgentModels = async (
     models,
     efforts: provider.efforts,
     defaults: {
-      model: provider.defaultModel,
+      model: forAuthMode(provider, credential.authMode).defaultModel,
       effort: provider.defaultEffort ?? null,
     },
     selected: {
       model: selected.model,
-      effort: selected.effort ?? null,
+      effort: selected.chosenEffort,
       overridden: selected.overridden,
     },
     degraded,

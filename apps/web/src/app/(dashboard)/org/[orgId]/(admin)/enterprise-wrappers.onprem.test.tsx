@@ -2,12 +2,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, cleanup } from "@testing-library/react";
 
-// ── The four admin EE route wrappers, unlicensed arm ────────────────────────
+// ── The three admin EE route wrappers, unlicensed arm ───────────────────────
 //
-// Each wrapper is the ONLY server gate for org-sso-page and org-domains-page
-// (those inner pages have no self-gate — groups/app-availability do, tested
-// in their own onprem suites). Before this suite, deleting a wrapper's
-// isEntitled branch was invisible to every test. Each arm is
+// Each wrapper is the ONLY server gate for org-sso-page (that inner page has
+// no self-gate; groups/app-availability do, tested in their own onprem
+// suites). Domains no longer has a wrapper of its own: it is a section of
+// the SSO page, so the sso arm below covers it. Before this suite, deleting a
+// wrapper's isEntitled branch was invisible to every test. Each arm is
 // mutation-detectable: unlicensed → the locked card renders and the inner
 // page module does NOT; licensed → the inner page renders.
 
@@ -28,22 +29,17 @@ vi.mock("@/ee/groups/groups-page", () => ({
 vi.mock("@/ee/settings/org-sso-page", () => ({
   default: () => <div data-testid="inner-sso" />,
 }));
-vi.mock("@/ee/settings/org-domains-page", () => ({
-  default: () => <div data-testid="inner-domains" />,
-}));
 vi.mock("@/ee/app-availability/app-availability-page", () => ({
   default: () => <div data-testid="inner-app-availability" />,
 }));
 
 import GroupsWrapper from "./groups/page";
 import SsoWrapper from "./settings/sso/page";
-import DomainsWrapper from "./settings/domains/page";
 import AppAvailabilityWrapper from "./settings/app-availability/page";
 
 const WRAPPERS = [
   { name: "groups", Page: GroupsWrapper, inner: "inner-groups" },
   { name: "sso", Page: SsoWrapper, inner: "inner-sso" },
-  { name: "domains", Page: DomainsWrapper, inner: "inner-domains" },
   {
     name: "app-availability",
     Page: AppAvailabilityWrapper,

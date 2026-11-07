@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.hoisted(() => {
   process.env.COGNITO_USER_POOL_ID = "us-east-1_test";
@@ -222,24 +222,39 @@ describe("client list updates", () => {
     expect(state.updateInputs).toHaveLength(0);
   });
 
+  // The retry backoff is a real setTimeout (500ms per attempt); fake it so
+  // the retry arms run in milliseconds with the same assertions.
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("retries ConcurrentModificationException with a fresh describe", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
     state.poolProviders = ["Google", "org-abc"];
     state.failUpdatesWith = ["ConcurrentModificationException"];
-    await mergeProviderIntoClient("org-abc", held, makeClient(state));
+    const run = mergeProviderIntoClient("org-abc", held, makeClient(state));
+    await vi.runAllTimersAsync();
+    await run;
     expect(state.describeCount).toBe(2); // fresh state per attempt
     expect(state.updateInputs).toHaveLength(1);
   });
 
   it("gives up after repeated concurrent modifications", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
     state.poolProviders = ["Google", "org-abc"];
     state.failUpdatesWith = [
       "ConcurrentModificationException",
       "ConcurrentModificationException",
       "ConcurrentModificationException",
     ];
-    await expect(
+    // Attach the rejection expectation before advancing, so it is never
+    // reported as unhandled.
+    const settled = expect(
       mergeProviderIntoClient("org-abc", held, makeClient(state)),
     ).rejects.toThrow("ConcurrentModificationException");
+    await vi.runAllTimersAsync();
+    await settled;
+    expect(state.describeCount).toBe(3); // a fresh describe per attempt
   });
 
   it("refuses to write after the lock is lost", async () => {

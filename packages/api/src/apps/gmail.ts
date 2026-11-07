@@ -8,8 +8,11 @@ import {
 
 export const gmail: AppDefinition = {
   id: "gmail",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/gmail",
   name: "Gmail",
   icon: "/icons/gmail.svg",
+  apiDocsUrl:
+    "https://developers.google.com/workspace/gmail/api/reference/rest",
   description: "Read, compose, and send emails via Gmail.",
   connectionMethod: {
     type: "oauth",
@@ -58,6 +61,7 @@ export const gmail: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
     envDefaults: googleEnvDefaults,
   },
 };

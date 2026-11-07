@@ -20,7 +20,6 @@ import { cn } from "@onecli/ui/lib/utils";
 import { validateDisplayName } from "@onecli/api/validations/display-name";
 import { INSTRUCTIONS_MAX_LENGTH } from "@onecli/api/validations/agent";
 import { agentChatPath } from "@/lib/navigation";
-import { nameToIdentifier } from "@/lib/agents/agent-identifier";
 import { useCreateHostedAgent } from "@/hooks/use-agents";
 import {
   useHomeDurabilityMessage,
@@ -31,11 +30,16 @@ import {
   hostedCreateRefusalCopy,
 } from "@/lib/agents/availability";
 import { SecretDialog } from "@/app/(dashboard)/w/[workspaceId]/connections/_components/secret-dialog";
+import { useHasConnectionsToChoose } from "@/hooks/use-counts";
+import { ChooseConnectionsDialog } from "./choose-connections-dialog";
 
 interface NewHostedAgentDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
+
+/** The agent creation just made, carried through the steps that follow. */
+type CreatedAgentRef = { id: string; name: string };
 
 /** The name the field opens with, so nobody faces an empty required box. */
 const DEFAULT_AGENT_NAME = "Donna";
@@ -63,18 +67,33 @@ export const NewHostedAgentDialog = ({
   // one place agent-file durability is stated (§3.9), in agent words only.
   const durabilityNote = useHomeDurabilityMessage();
   const createAgent = useCreateHostedAgent();
+  // The submit door, closed from the first submit until the request settles.
+  // `createAgent.isPending` is a render-time value: a second submit inside
+  // the same tick (Enter and a click that lands together, a double Enter)
+  // runs before React re-renders and would send a second POST, which the
+  // server answers 409 on the derived identifier.
+  const submittingRef = useRef(false);
 
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
   const [instructions, setInstructions] = useState("");
   const [briefOpen, setBriefOpen] = useState(false);
-  // A hosted agent with no LLM key cannot answer at all, so landing straight
-  // in the chat would land in a dead room. The key is asked for INSTEAD of
-  // the navigation, never as a step in front of it: saving one goes on to the
-  // chat, and dismissing goes there too — the agent exists either way.
-  const [pendingChatAgentId, setPendingChatAgentId] = useState<string | null>(
-    null,
-  );
+  // What follows creation, in order, each step only when it has something to
+  // do, and the chat last (the agent exists either way):
+  //  1. A hosted agent with no LLM key cannot answer at all, so the key is
+  //     asked for first. Saving one or dismissing both go on.
+  //  2. A new agent starts with no connection, so the user chooses them,
+  //     when the workspace has any to offer.
+  const [keyFor, setKeyFor] = useState<CreatedAgentRef | null>(null);
+  const [choosingFor, setChoosingFor] = useState<CreatedAgentRef | null>(null);
+  const hasConnectionsToChoose = useHasConnectionsToChoose();
+  const toChat = (agent: CreatedAgentRef) =>
+    router.push(agentChatPath(workspaceId, agent.id));
+  // Asked when the step is reached, never from the render that scheduled it.
+  const afterKey = async (agent: CreatedAgentRef) => {
+    if (await hasConnectionsToChoose()) setChoosingFor(agent);
+    else toChat(agent);
+  };
   const nameInput = useRef<HTMLInputElement>(null);
 
   // A default in the field rather than a blank to fill, with the caret parked
@@ -93,9 +112,7 @@ export const NewHostedAgentDialog = ({
   }, [open]);
 
   const nameError = validateDisplayName(name);
-  const identifier = nameToIdentifier(name);
-  const isNameValid =
-    name.trim().length > 0 && nameError === null && identifier.length > 0;
+  const isNameValid = name.trim().length > 0 && nameError === null;
   const showNameError = nameTouched && name.length > 0 && nameError !== null;
   const briefTooLong = instructions.length > INSTRUCTIONS_MAX_LENGTH;
   // Creation genuinely needs a live agent host (the server 422s without one).
@@ -108,24 +125,25 @@ export const NewHostedAgentDialog = ({
 
   const handleCreate = () => {
     setNameTouched(true);
-    if (!canSubmit) return;
+    if (!canSubmit || submittingRef.current) return;
+    submittingRef.current = true;
     createAgent.mutate(
       {
         name,
-        identifier,
         ...(instructions.trim() ? { instructions: instructions.trim() } : {}),
       },
       {
+        onSettled: () => {
+          submittingRef.current = false;
+        },
         onSuccess: (agent) => {
           handleClose(false);
+          const created = { id: agent.id, name: agent.name };
           // Creating a key server-side attaches it to every keyless agent —
           // which is exactly the agent just created — so saving here is the
           // whole step, with no second attach for the two to disagree about.
-          if (agent.llmKeys.length === 0) {
-            setPendingChatAgentId(agent.id);
-            return;
-          }
-          router.push(agentChatPath(workspaceId, agent.id));
+          if (agent.llmKeys.length === 0) setKeyFor(created);
+          else void afterKey(created);
         },
       },
     );
@@ -283,17 +301,24 @@ export const NewHostedAgentDialog = ({
         </DialogContent>
       </Dialog>
       <SecretDialog
-        open={pendingChatAgentId !== null}
+        open={keyFor !== null}
         onOpenChange={(value) => {
-          if (value) return;
-          const agentId = pendingChatAgentId;
-          setPendingChatAgentId(null);
-          if (agentId) router.push(agentChatPath(workspaceId, agentId));
+          if (value || !keyFor) return;
+          setKeyFor(null);
+          void afterKey(keyFor);
         }}
         allowedTypes={["anthropic", "openai"]}
         onSaved={() =>
           toast.success("LLM key added and attached to your agent")
         }
+      />
+      <ChooseConnectionsDialog
+        agent={choosingFor}
+        onClose={() => {
+          if (!choosingFor) return;
+          setChoosingFor(null);
+          toChat(choosingFor);
+        }}
       />
     </>
   );

@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 
 import { SetupError } from "./errors.mjs";
 import { log, spinner } from "./ui.mjs";
+import { AGENT_DEV_TAG, buildAgentImages } from "../lib/agent-image.mjs";
 
 // Re-exported so callers have one import site for the image decisions; the
 // logic itself lives in scripts/lib/ so it stays testable without this
@@ -56,17 +57,10 @@ export const buildImages = (mode, { includeAgent = true } = {}) => {
   // --no-runner install must neither spend the ~3 min nor be able to FAIL
   // over an image it will never run.
   if (!includeAgent) return;
-  log.step("Building the agent sandbox image (docker/agent.Dockerfile)");
-  if (
-    run([
-      "build",
-      "-f",
-      "docker/agent.Dockerfile",
-      "-t",
-      "onecli-agent:dev",
-      ".",
-    ]).status !== 0
-  )
+  log.step(
+    "Building the agent sandbox image (docker/agent-base.Dockerfile, then docker/agent.Dockerfile)",
+  );
+  if (!buildAgentImages(ROOT, AGENT_DEV_TAG))
     throw new SetupError("Building the agent image failed.", [
       "Scroll up for the failing build step",
       "Hosted agents need this image; retry with: pnpm agent:build",

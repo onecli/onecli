@@ -2,11 +2,28 @@ import type { AppDefinition } from "./types";
 
 export const monday: AppDefinition = {
   id: "monday",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/monday",
   name: "monday.com",
+  apiDocsUrl: "https://developer.monday.com/api-reference/docs/basics",
   icon: "/icons/monday.svg",
   description: "Boards, items, docs, and workspace management.",
+  connectNote: {
+    text: "Only a monday.com account admin can install OneCLI.",
+    fallback: "Not an admin? Ask yours to install it from the marketplace.",
+    link: {
+      // Mintlify derives the anchor from the heading "If you’re not a
+      // Monday.com admin", keeping its curly apostrophe and splitting on the
+      // dot, so this is the id the live page actually has.
+      url: "https://onecli.sh/docs/integrations/monday#if-you’re-not-a-monday-com-admin",
+      label: "How to get it installed",
+    },
+  },
   connectionMethod: {
     type: "oauth",
+    // No `scope` is sent on authorize, so monday grants the full list ticked
+    // on the app in its Developer Center (OAuth & Permissions). Keep this list
+    // identical to that page, or every connection reads as "Missing
+    // permissions" for the scopes only listed here.
     defaultScopes: [
       "me:read",
       "account:read",
@@ -131,6 +148,11 @@ export const monday: AppDefinition = {
       url.searchParams.set("client_id", appCredentials.clientId);
       url.searchParams.set("redirect_uri", redirectUri);
       url.searchParams.set("state", state);
+      // monday only lets an account use an app once an account admin has
+      // installed it. This sends an admin whose account lacks OneCLI to the
+      // install page first, then straight back to authorize — no marketplace
+      // detour. Non-admins still need their admin (see connectNote).
+      url.searchParams.set("force_install_if_needed", "true");
       return url.toString();
     },
     exchangeCode: async ({ appCredentials, callbackParams, redirectUri }) => {
@@ -186,7 +208,9 @@ export const monday: AppDefinition = {
         token_type: tokenData.token_type ?? "Bearer",
       };
 
-      const scopes = tokenData.scope?.split(/\s+/).filter(Boolean) ?? [];
+      // monday documents the granted `scope` as comma-separated (its own
+      // example shows spaces), so accept either.
+      const scopes = tokenData.scope?.split(/[\s,]+/).filter(Boolean) ?? [];
 
       const metadata: Record<string, unknown> = {};
       try {

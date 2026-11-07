@@ -64,12 +64,17 @@ export const orgAppAvailabilityRoutes = () => {
       );
     }
 
-    // Gate the Enterprise feature only when the org is actually USING it —
-    // turning restriction on, or storing rules. Resetting to plain "open" with
-    // no rules is always allowed, so an org that has downgraded can never get
+    // Gate only when the org is actually USING the feature — turning
+    // restriction on, or storing rules. Resetting to plain "open" with no
+    // rules is always allowed, so an org that has downgraded can never get
     // locked into a restriction it can no longer edit its way out of.
     if (parsed.data.mode === "restricted" || parsed.data.rules.length > 0) {
-      await assertFeatureAllowed(authCtx.organizationId, "groups");
+      // Availability itself sells from Scale; targeting a directory GROUP
+      // additionally needs the directory, which stays Enterprise.
+      await assertFeatureAllowed(authCtx.organizationId, "app_availability");
+      if (parsed.data.rules.some((rule) => rule.groupIds.length > 0)) {
+        await assertFeatureAllowed(authCtx.organizationId, "groups");
+      }
     }
 
     const result = await withAudit(

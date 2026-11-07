@@ -14,10 +14,9 @@ use hyper::header::HeaderName;
 use hyper::{Request, Response, StatusCode};
 use tracing::{info, warn};
 
-use crate::connect::PolicyEngineExt as _;
-use approval::{
-    ApprovalDecision, ApprovalGuard, ApprovalStore, PendingApproval, APPROVAL_TIMEOUT_SECS,
-};
+use crate::connect::{inactive_app_for, PolicyEngineExt as _, RestrictedCredential};
+use approval::hold::HoldOutcome;
+use approval::{ApprovalStore, PendingApproval, APPROVAL_TIMEOUT_SECS};
 use cache::CacheStore;
 use inject::default_interceptions;
 use policy::PolicyDecision;
@@ -233,26 +232,20 @@ fn content_length_at_most(headers: &hyper::HeaderMap, max: usize) -> bool {
 
 // ── Request forwarding ──────────────────────────────────────────────────
 
-/// Forward a single HTTP request to the real upstream server and stream the response back.
-///
-/// Both request and response bodies are streamed — no full buffering in memory.
-/// This is critical for SSE (Server-Sent Events) and large payloads.
-///
-/// The flow:
-/// 1. Check policy rules (block/rate-limit → 403/429)
-/// 2. Apply injection rules to request headers
-/// 3. Send to upstream
-/// 4. If no credentials were injected and upstream returns 401/403, check if the
-///    host belongs to a known app → return an actionable error for the agent
-/// 5. Stream response back to client
-///
-/// For `ManualApproval`, the gateway peeks a bounded prefix of the body to build
-/// a human-readable approval summary and a redacted preview, then chains it back
-/// with the remaining stream for forwarding. No full-body buffering — the body
-/// stays in the TCP pipe during the approval wait. 16 KB is enough to decode the
-/// RFC822 headers / first MIME part for the summary while staying tiny next to a
-/// multi-megabyte attachment.
-const APPROVAL_BODY_PEEK: usize = 16 * 1024;
+/// How much of a body the approval card reads when it must read it whole: a
+/// bulk change (Salesforce's 200-record cap with long values) or a new Flow
+/// version (see [`summary::reads_whole_body`]). Bounded, held only for the
+/// approval.
+const BULK_BODY_PEEK: usize = 512 * 1024;
+
+/// How much of a possible multi-file upload (a Salesforce sObject
+/// Collections create, see [`summary::may_upload_files`]) the card reads:
+/// each record carries a whole file as base64, so a real batch is
+/// megabytes. A longer batch is still forwarded whole; its card lists the
+/// files this much holds and says the rest was not read. The bytes read
+/// wait with the request (they are forwarded once approved); the card's
+/// own copy of them is freed before the wait.
+const FILE_UPLOAD_BODY_PEEK: usize = 10 * 1024 * 1024;
 
 /// Maximum response body to buffer when checking if a 400 is auth-related.
 /// Auth error messages are small JSON; no need to scan large bodies.
@@ -343,19 +336,32 @@ pub async fn materialize_injections<'a>(
     let mut app_rules = Vec::new();
     for pending in &rules.pending_injections {
         match engine.materialize_pending(pending, cache).await {
-            Some(minted) => app_rules.extend(minted),
-            None => {
+            Ok(minted) => app_rules.extend(minted),
+            Err(crate::connect::TokenFailure::NeedsReconnect) => {
                 warn!(
                     connection_id = %pending.conn.id,
                     provider = %pending.conn.provider,
                     %method,
-                    %path,
+                    path = %super::log_redact::redact_for_log(path),
+                    "connection needs reconnect; the allowed request was not forwarded"
+                );
+                return Err(Box::new(response::connection_needs_reconnect(
+                    &crate::connect::ConnectionChoice::from_row(&pending.conn),
+                    Some(pending.workspace_id.as_str()),
+                )));
+            }
+            Err(crate::connect::TokenFailure::Unavailable) => {
+                warn!(
+                    connection_id = %pending.conn.id,
+                    provider = %pending.conn.provider,
+                    %method,
+                    path = %super::log_redact::redact_for_log(path),
                     "could not resolve the connection's credential after the request was allowed"
                 );
                 return Err(Box::new(response::json(
                     StatusCode::BAD_GATEWAY,
                     serde_json::json!({
-                        "error": "credential_unavailable",
+                        "error": response::ERROR_CREDENTIAL_UNAVAILABLE,
                         "message": format!(
                             "OneCLI could not obtain a credential for the {} connection, \
                              so the request was not forwarded.",
@@ -372,6 +378,24 @@ pub async fn materialize_injections<'a>(
     )))
 }
 
+/// Forward a single HTTP request to the real upstream server and stream the response back.
+///
+/// Both request and response bodies are streamed — no full buffering in memory.
+/// This is critical for SSE (Server-Sent Events) and large payloads.
+///
+/// The flow:
+/// 1. Check policy rules (block/rate-limit → 403/429)
+/// 2. Apply injection rules to request headers
+/// 3. Send to upstream
+/// 4. If no credentials were injected and upstream returns 401/403, check if the
+///    host belongs to a known app → return an actionable error for the agent
+/// 5. Stream response back to client
+///
+/// For `ManualApproval`, the gateway peeks a bounded prefix of the body
+/// ([`summary::BODY_PEEK`]) to build a human-readable approval summary and a
+/// redacted preview, then chains it back with the remaining stream for
+/// forwarding. No full-body buffering — the body stays in the TCP pipe during
+/// the approval wait.
 #[allow(clippy::too_many_arguments)]
 pub async fn forward_request(
     req: Request<Incoming>,
@@ -396,7 +420,55 @@ pub async fn forward_request(
         .path_and_query()
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
-    let url = format!("{scheme}://{host}{path}");
+    // The URL as log lines show it: credential-looking query values masked
+    // (`log_redact`). Nothing below sends it: the work reads the raw `path`,
+    // and `upstream_url` (which also gains any injected query secret) is
+    // built from it and never logged.
+    let url = format!(
+        "{scheme}://{host}{}",
+        super::log_redact::redact_for_log(&path)
+    );
+    // Read before anything wraps the body: a request without one is the only
+    // kind a stale-token refusal may resend (see `stale_token`).
+    let has_body = !hyper::body::Body::is_end_stream(req.body());
+
+    // Destination guard, IP-literal half: an IP host never reaches the DNS
+    // resolver, so it is judged here — before approval, injection or anything
+    // else can act on a request that must not leave. Named hosts are judged at
+    // resolution (`egress::GuardedResolver`), mapped to the same 403 at send.
+    // Every refusal is recorded: nothing was dialed, so the normal telemetry
+    // further down never runs for it.
+    let refuse_destination = |refused_host: &str| {
+        warn!(method = %method, url = %url, host = %refused_host, "egress guard: refused non-public destination");
+        hooks::record_destination_refused(proxy_ctx, host, method.as_str(), &path);
+        response::destination_not_allowed(refused_host)
+    };
+    if let Err(refusal) = super::egress::check_url(super::egress::policy(), &url) {
+        return Ok(refuse_destination(&refusal.host));
+    }
+    // The gateway's own data stores are refused whatever the allowlist says.
+    // The resolver never learns the port, so the check runs here, by port.
+    let default_port = if scheme == "https" { 443 } else { 80 };
+    if let Err(refusal) = super::egress::check_own_store(host, default_port).await {
+        return Ok(refuse_destination(&refusal.host));
+    }
+    // Behind an operator's environment proxy the proxy resolves the target,
+    // bypassing the guarded resolver — so judge the name here instead.
+    if super::egress::env_proxy_configured() {
+        if let Err(refusal) = super::egress::check_host_via_proxy(host).await {
+            return Ok(refuse_destination(&refusal.host));
+        }
+    }
+
+    // Everything below judges the request line. A request asking the upstream
+    // to run another method (`?_HttpMethod=DELETE`, `X-HTTP-Method-Override`)
+    // could be judged as one method and run as another, so it is refused
+    // before any rule is consulted or any credential is minted.
+    if let Some(resp) =
+        super::method_override::refuse(proxy_ctx, host, &method, &path, req.headers())
+    {
+        return Ok(resp);
+    }
 
     // An empty resource scope reaches nothing, so refuse before anything can
     // hand out or mint a credential — ahead of the token interception below,
@@ -561,6 +633,7 @@ pub async fn forward_request(
                 method.as_str(),
                 &path,
                 host,
+                proxy_ctx.agent_id.as_deref(),
                 proxy_ctx.workspace_id.as_deref(),
             ));
         }
@@ -576,6 +649,7 @@ pub async fn forward_request(
                 method.as_str(),
                 &path,
                 rule_name,
+                proxy_ctx.agent_id.as_deref(),
                 proxy_ctx.workspace_id.as_deref(),
             ));
         }
@@ -634,8 +708,8 @@ pub async fn forward_request(
             Err(resp) => return Ok(*resp),
         };
 
-    // Apply injection rules — upstream_path may gain query-param secrets;
-    // the original `path`/`url` stays clean for logging and approval metadata.
+    // Apply injection rules. `upstream_path` may gain query-param secrets, so
+    // it is never logged; log lines name the masked `url` instead.
     let mut upstream_path = path.clone();
     let injection_count =
         inject::apply_injections(&mut headers, &mut upstream_path, &injection_rules);
@@ -665,8 +739,48 @@ pub async fn forward_request(
     // The deciding user (for the approved-path telemetry below) is captured
     // here because the approve arm returns the body tuple, not the identity.
     let mut approval_approved_by: Option<String> = None;
+    // What the approved request's result is read with (see
+    // `ApprovedResultTarget`): the app the request matched and its card
+    // title, both already resolved for the card.
+    let mut approval_result_shape: Option<(&'static str, String)> = None;
+    // "Approve similar" (`approval::similar`): the scope a held request would
+    // offer, decided once from the request itself. A reviewer's open window
+    // for it forwards the request without a card, recorded as approved
+    // through that reviewer's approval. The matched app is resolved once,
+    // for the scope and the card alike.
+    let (matched_app, similar_scope, similar_allowance) = match &decision {
+        PolicyDecision::ManualApproval { rule_id } => {
+            let bare_host = common::util::strip_port(host);
+            let matched_app = apps::provider_for_host_and_path(bare_host, &path);
+            let scope = approval::similar::scope_for(&approval::similar::HeldRequest {
+                workspace_id: proxy_ctx.workspace_id.as_deref(),
+                agent_id: proxy_ctx.agent_id.as_deref(),
+                connection_id: rules.winning_connection_id.as_deref(),
+                rule_id,
+                app: matched_app,
+                host: bare_host,
+                method: method.as_str(),
+                path: &path,
+            });
+            let allowance = match &scope {
+                Some(scope) => approval::similar::claim(cache, scope).await,
+                None => None,
+            };
+            (matched_app, scope, allowance)
+        }
+        _ => (None, None, None),
+    };
+    if let Some(allowance) = similar_allowance.as_ref() {
+        info!(
+            url = %url,
+            approval_id = %allowance.approval_id,
+            "APPROVED by an open similar-updates window — forwarding request"
+        );
+    }
     let (forward_body, approval_log_id, approval_id_for_telemetry, approval_triggered_at) =
-        if let PolicyDecision::ManualApproval { rule_id } = &decision {
+        if let (PolicyDecision::ManualApproval { rule_id }, None) =
+            (&decision, similar_allowance.as_ref())
+        {
             info!(method = %method, url = %url, rule_id = %rule_id, "MANUAL APPROVAL required");
 
             let workspace_id = match proxy_ctx.workspace_id.as_deref() {
@@ -683,19 +797,31 @@ pub async fn forward_request(
             // Peek a bounded prefix of the body for the summary + preview, then
             // build the forwarding body. If condition buffering already captured
             // the body, reuse that buffer instead of peeking the stream again.
+            // A bulk change of the matched app (one request for a list of
+            // records) is read whole, up to its own cap, so the card can show
+            // every record it changes: a cut body is never summarized as one.
+            let peek_limit = match matched_app {
+                Some((app, _)) if summary::may_upload_files(app, method.as_str(), &path) => {
+                    FILE_UPLOAD_BODY_PEEK
+                }
+                Some((app, _)) if summary::reads_whole_body(app, method.as_str(), &path) => {
+                    BULK_BODY_PEEK
+                }
+                _ => summary::BODY_PEEK,
+            };
             let (summary_bytes, fwd_body): (Cow<'_, [u8]>, reqwest::Body) = if let Some(ref buf) =
                 condition_buffer
             {
                 // Body already buffered for condition matching — borrow its prefix
                 // for the summary instead of copying it again.
-                let take = buf.bytes.len().min(APPROVAL_BODY_PEEK);
+                let take = buf.bytes.len().min(peek_limit);
                 (Cow::Borrowed(&buf.bytes[..take]), body)
             } else {
                 let mut body_stream = Box::pin(http_body_util::BodyDataStream::new(body));
                 let mut peeked: Vec<Bytes> = Vec::new();
                 let mut peeked_len: usize = 0;
 
-                while peeked_len < APPROVAL_BODY_PEEK {
+                while peeked_len < peek_limit {
                     match body_stream.next().await {
                         Some(Ok(data)) => {
                             peeked_len += data.len();
@@ -708,11 +834,11 @@ pub async fn forward_request(
                     }
                 }
 
-                let mut buf = Vec::with_capacity(peeked_len.min(APPROVAL_BODY_PEEK));
+                let mut buf = Vec::with_capacity(peeked_len.min(peek_limit));
                 for chunk in &peeked {
-                    let take = (APPROVAL_BODY_PEEK - buf.len()).min(chunk.len());
+                    let take = (peek_limit - buf.len()).min(chunk.len());
                     buf.extend_from_slice(&chunk[..take]);
-                    if buf.len() >= APPROVAL_BODY_PEEK {
+                    if buf.len() >= peek_limit {
                         break;
                     }
                 }
@@ -730,8 +856,6 @@ pub async fn forward_request(
             // gracefully: unknown provider → generic summary, no content-type →
             // best-effort sniffing. The summary/preview never embed raw base64 or
             // oversized JSON, so the approval card can't overflow a chat client.
-            let matched_app =
-                apps::provider_for_host_and_path(common::util::strip_port(host), &path);
             let (summary_provider, _) = matched_app.unwrap_or((host, host));
             let content_type = parts
                 .headers
@@ -745,6 +869,11 @@ pub async fn forward_request(
                 content_type,
                 summary_body,
             );
+            // An answer that carries a secret says so, whichever rule (or the
+            // gateway's own floor) held it.
+            if let Some(why) = policy_engine::secret_read(policy_host, &path, has_injections) {
+                approval_summary.push("Why it asks", why);
+            }
             // Records the card names by id are linked and, where the agent
             // could read them itself, shown by name; the title then says
             // which record ("Update Contact Dana Reyes"). See `approval_enrich`
@@ -762,17 +891,24 @@ pub async fn forward_request(
                     &rules.policy_rules_v2,
                 )
             };
+            // The read carries the credential injection set on this request
+            // (Authorization, or an app's own key header), never the agent's.
+            let credential_headers = inject::injected_header_names(&injection_rules, &path);
             let enrich = approval_enrich::EnrichContext {
                 http: &http_client,
                 scheme,
                 host,
+                method: method.as_str(),
+                path: &path,
                 headers: &headers,
+                credential_headers: &credential_headers,
                 connection_id: rules
                     .winning_connection_id
                     .as_deref()
                     .filter(|_| injection_count > 0),
                 cache,
                 may_get: &may_get,
+                body: summary_body,
             };
             let app = matched_app.map(|(provider, _)| provider);
             approval_enrich::enrich(&mut approval_summary, app, &enrich).await;
@@ -781,6 +917,8 @@ pub async fn forward_request(
             // card instead of raw JSON/base64. The structured `summary` is sent
             // alongside for richer rendering.
             let body_preview = Some(approval_summary.render_text());
+            approval_result_shape = Some((app.unwrap_or(""), approval_summary.action.clone()));
+            let generic_card = approval_summary.is_generic();
 
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -812,141 +950,78 @@ pub async fn forward_request(
                         .get(name)
                         .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
                 }),
+                similar: similar_scope,
                 created_at: now,
                 expires_at: now + APPROVAL_TIMEOUT_SECS,
             };
-
-            let decision_rx = approval_store
-                .prepare_wait(org_id, workspace_id, &approval_id)
-                .await;
-
-            // Guard cleans up the approval if the agent disconnects (future cancelled).
-            // Created BEFORE store() so there's no window where cancellation misses cleanup.
-            let mut guard = ApprovalGuard::new(
-                approval_id.clone(),
-                org_id.to_string(),
-                workspace_id.to_string(),
-                Arc::clone(approval_store),
-            );
-
-            if let Err(e) = approval_store.store(&approval).await {
-                warn!(url = %url, error = ?e, "failed to store pending approval");
-                guard.defuse();
-                approval_store
-                    .remove(org_id, workspace_id, &approval_id)
-                    .await;
-                return Ok(response::approval_store_unavailable());
-            }
+            // The card's copy of the body (up to `FILE_UPLOAD_BODY_PEEK`) is
+            // done with: free it before the wait, which can last minutes.
+            drop(summary_bytes);
 
             let triggered_at = hooks::iso_now();
+            let log_id = uuid::Uuid::new_v4().to_string();
             // The telemetry row for each step of this approval: the pending
             // INSERT carries no latency yet; a resolution carries the wait.
             let approval_meta = |status: u16, latency_ms: u32| {
                 hooks::request_meta(proxy_ctx, host, method.as_str(), &path, status, latency_ms)
+                    .map(|mut meta| {
+                        hooks::attribute_to_connection(&mut meta, rules, injection_count);
+                        meta
+                    })
             };
-
-            let log_id = uuid::Uuid::new_v4().to_string();
-            guard.set_log_context(log_id.clone(), engine.pool.clone());
-            emit_approval_telemetry(
-                approval_meta(202, 0),
-                telemetry::core::RequestDecision::ApprovalPending {
-                    approval_id: approval_id.clone(),
-                    triggered_at: triggered_at.clone(),
-                },
-                Some(log_id.clone()),
-                None,
-                // The pending INSERT is what persists the column (approval
-                // resolution is an UPDATE that never writes it).
-                matched_rule.clone(),
-            );
-
-            info!(
-                url = %url,
-                approval_id = %approval_id,
-                agent = %agent_name,
-                injections = injection_count,
-                "holding request for approval"
-            );
-
-            let mut shutdown_signal = shutdown::subscribe();
-            let outcome = tokio::select! {
-                outcome = decision_rx.wait(Duration::from_secs(APPROVAL_TIMEOUT_SECS)) => {
-                    Some(outcome)
-                }
-                // Shutting down with nobody having decided. Left alone this
-                // request would be cut without an answer while its approval
-                // card lingered in the dashboard for another three minutes —
-                // reviewable, and approvable into a process that no longer
-                // exists. Release it explicitly instead.
-                _ = shutdown_signal.wait() => None,
-            };
-
-            let Some(outcome) = outcome else {
-                warn!(
-                    url = %url,
-                    approval_id = %approval_id,
-                    "shutting down — releasing held request for retry"
-                );
-                // Defuse first: the guard's Drop would spawn this same cleanup
-                // detached, racing the pool close that follows the drain.
-                guard.defuse();
-                approval_store
-                    .remove(org_id, workspace_id, &approval_id)
-                    .await;
-                let resolved_at = hooks::iso_now();
+            // A refused hold UPDATEs the pending row with its outcome.
+            let emit_denied = |status: u16, reason: &str, approved_by: Option<String>| {
                 emit_approval_telemetry(
-                    approval_meta(503, start.elapsed().as_millis() as u32),
+                    approval_meta(status, start.elapsed().as_millis() as u32),
                     telemetry::core::RequestDecision::ApprovalDenied {
                         approval_id: approval_id.clone(),
-                        reason: "gateway_restarting".to_string(),
-                        triggered_at,
-                        resolved_at,
-                        approved_by: None,
+                        reason: reason.to_string(),
+                        triggered_at: triggered_at.clone(),
+                        resolved_at: hooks::iso_now(),
+                        approved_by,
                     },
                     None,
-                    Some(log_id),
+                    Some(log_id.clone()),
                     matched_rule.clone(),
                 );
-                return Ok(response::gateway_restarting(&approval_id));
             };
 
-            // Decision received (or timed out) — defuse guard, handle explicitly.
-            guard.defuse();
-
-            let outcome = match outcome {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    warn!(approval_id = %approval_id, %error, "approval wait failed; request not forwarded");
-                    approval_store
-                        .remove(org_id, workspace_id, &approval_id)
-                        .await;
-                    let resolved_at = hooks::iso_now();
+            let held = approval::hold::hold(
+                approval_store,
+                &approval,
+                Some(approval::hold::HoldLog {
+                    log_id: log_id.clone(),
+                    pool: engine.pool.clone(),
+                }),
+                || {
                     emit_approval_telemetry(
-                        approval_meta(502, start.elapsed().as_millis() as u32),
-                        telemetry::core::RequestDecision::ApprovalDenied {
+                        approval_meta(202, 0),
+                        telemetry::core::RequestDecision::ApprovalPending {
                             approval_id: approval_id.clone(),
-                            reason: "approval_store_unavailable".to_string(),
-                            triggered_at,
-                            resolved_at,
-                            approved_by: None,
+                            triggered_at: triggered_at.clone(),
+                            generic_card,
                         },
+                        Some(log_id.clone()),
                         None,
-                        Some(log_id),
+                        // The pending INSERT is what persists the column
+                        // (approval resolution is an UPDATE that never
+                        // writes it).
                         matched_rule.clone(),
                     );
-                    return Ok(response::approval_wait_unavailable(&approval_id));
-                }
-            };
+                    info!(
+                        url = %url,
+                        approval_id = %approval_id,
+                        agent = %agent_name,
+                        injections = injection_count,
+                        "holding request for approval"
+                    );
+                },
+            )
+            .await;
 
-            let decision = outcome.as_ref().map(|o| o.decision);
-            let approved_by = outcome.and_then(|o| o.approved_by);
-
-            match decision {
-                Some(ApprovalDecision::Approve) => {
+            match held {
+                HoldOutcome::Approved { approved_by } => {
                     info!(url = %url, approval_id = %approval_id, "APPROVED — forwarding request");
-                    approval_store
-                        .remove(org_id, workspace_id, &approval_id)
-                        .await;
                     approval_approved_by = approved_by;
                     (
                         fwd_body,
@@ -955,32 +1030,31 @@ pub async fn forward_request(
                         Some(triggered_at),
                     )
                 }
-                other => {
-                    let (reason, rejection) = match other {
-                        Some(ApprovalDecision::Deny) => {
-                            ("denied", response::ApprovalRejection::Declined)
-                        }
-                        _ => ("timed out", response::ApprovalRejection::Expired),
-                    };
+                HoldOutcome::Rejected {
+                    rejection,
+                    decided_by,
+                } => {
+                    let reason = rejection.telemetry_reason();
                     warn!(url = %url, approval_id = %approval_id, reason, "MANUAL APPROVAL rejected");
-                    approval_store
-                        .remove(org_id, workspace_id, &approval_id)
-                        .await;
-                    let resolved_at = hooks::iso_now();
-                    emit_approval_telemetry(
-                        approval_meta(403, start.elapsed().as_millis() as u32),
-                        telemetry::core::RequestDecision::ApprovalDenied {
-                            approval_id: approval_id.clone(),
-                            reason: reason.to_string(),
-                            triggered_at,
-                            resolved_at,
-                            approved_by,
-                        },
-                        None,
-                        Some(log_id),
-                        matched_rule.clone(),
-                    );
+                    emit_denied(403, reason, decided_by);
                     return Ok(response::manual_approval_denied(&approval_id, rejection));
+                }
+                HoldOutcome::StoreUnavailable => {
+                    return Ok(response::approval_store_unavailable());
+                }
+                HoldOutcome::WaitFailed(error) => {
+                    warn!(approval_id = %approval_id, %error, "approval wait failed; request not forwarded");
+                    emit_denied(502, "approval_store_unavailable", None);
+                    return Ok(response::approval_wait_unavailable(&approval_id));
+                }
+                HoldOutcome::ShuttingDown => {
+                    warn!(
+                        url = %url,
+                        approval_id = %approval_id,
+                        "shutting down — releasing held request for retry"
+                    );
+                    emit_denied(503, "gateway_restarting", None);
+                    return Ok(response::gateway_restarting(&approval_id));
                 }
             }
         } else {
@@ -1015,10 +1089,10 @@ pub async fn forward_request(
     };
 
     // ── Provider-specific request signing ─────────────────────────
-    let forward_body = match rules
+    let finalizer = rules
         .finalizer
-        .or_else(|| apps::finalizer_for_host(host.split(':').next().unwrap_or(host)))
-    {
+        .or_else(|| apps::finalizer_for_host(host.split(':').next().unwrap_or(host)));
+    let forward_body = match finalizer {
         Some(apps::RequestFinalizer::AwsSigV4) => {
             super::finalizers::aws_sigv4::finalize_request(
                 host,
@@ -1043,6 +1117,69 @@ pub async fn forward_request(
     };
 
     // ── Forward to upstream ──────────────────────────────────────────
+    // The request's manual-approval outcome, as the telemetry row records it
+    // (`None` when no approval was involved): the card it waited on (its
+    // pending row is updated in place), or the open "Approve similar" window
+    // that let it through (a row of its own). Built once per emission: both
+    // the guidance answers below and the normal path at the end carry it.
+    let approval_decision = || match (
+        &approval_log_id,
+        &approval_id_for_telemetry,
+        &approval_triggered_at,
+    ) {
+        (Some(log_id), Some(approval_id), Some(triggered_at)) => Some((
+            Some(log_id.clone()),
+            telemetry::core::RequestDecision::ApprovalApproved {
+                approval_id: approval_id.clone(),
+                triggered_at: triggered_at.clone(),
+                resolved_at: hooks::iso_now(),
+                approved_by: approval_approved_by.clone(),
+            },
+        )),
+        _ => similar_allowance.as_ref().map(|a| {
+            (
+                None,
+                telemetry::core::RequestDecision::ApprovedBySimilar {
+                    approval_id: a.approval_id.clone(),
+                    approved_by: a.approved_by.clone(),
+                },
+            )
+        }),
+    };
+    // Every guidance answer below replaces the upstream response and returns
+    // before the normal telemetry at the end of this function, so it records
+    // its own row with the status the agent actually received. A request
+    // that first passed a manual approval instead UPDATES that approval's row
+    // with the final status (it still reads "approved"), as the normal path
+    // would, rather than adding a second one.
+    let guidance = |error: &str, resp: Response<hooks::ForwardResponseBody>| {
+        if let Some(mut meta) = hooks::request_meta(
+            proxy_ctx,
+            host,
+            method.as_str(),
+            &path,
+            resp.status().as_u16(),
+            start.elapsed().as_millis() as u32,
+        ) {
+            meta.matched_rule = matched_rule.clone();
+            match approval_decision() {
+                Some((log_id, approved)) => {
+                    meta.existing_log_id = log_id;
+                    meta.decision = Some(approved);
+                    telemetry::on_request(meta.into_event(None));
+                }
+                None => hooks::record_needs_connection(meta, error),
+            }
+        }
+        Ok(resp)
+    };
+
+    // A provider that recovers from a refused token (see `stale_token`) may
+    // send this request a second time, so never a signed or transformed one,
+    // whose headers and bytes are bound to the first send.
+    let recoverable = super::stale_token::applies(rules, injection_count)
+        .filter(|_| finalizer.is_none() && rules.body_transform.is_none());
+
     let mut upstream = http_client.request(method.clone(), &upstream_url);
     for (name, value) in headers.iter() {
         upstream = upstream.header(name.clone(), value.clone());
@@ -1063,7 +1200,16 @@ pub async fn forward_request(
     // sees only its own eventual timeout (issue #493).
     let upstream_resp = match tokio::time::timeout(upstream_header_timeout(), upstream.send()).await
     {
-        Ok(result) => result.with_context(|| format!("forwarding to {url}"))?,
+        Ok(Ok(resp)) => resp,
+        Ok(Err(e)) => {
+            // The resolver refused every address this name resolved to;
+            // nothing was dialed. Same answer and same activity row as the
+            // pre-send half.
+            if let Some(refusal) = super::egress::find_refusal(&e) {
+                return Ok(refuse_destination(&refusal.host));
+            }
+            return Err(send_failure(e, &url));
+        }
         // Deliberately NOT replayed. Once the request has gone upstream its
         // outcome is unknown, and re-sending could double a non-idempotent
         // operation the upstream already performed. Report and stop; the
@@ -1078,6 +1224,113 @@ pub async fn forward_request(
             );
             return Ok(response::upstream_timeout());
         }
+    };
+
+    // The provider refused the access token the gateway injected, though its
+    // stored expiry had not passed (Salesforce ends tokens with the org's
+    // session timeout). Replace it, and send a request without a body again
+    // with the new one. The refusal means the provider performed nothing, so
+    // the second send cannot double an operation.
+    let upstream_resp = match recoverable {
+        Some(target) if upstream_resp.status() == StatusCode::UNAUTHORIZED => {
+            let first_status = upstream_resp.status();
+            let first_version = upstream_resp.version();
+            let first_headers = upstream_resp.headers().clone();
+            let mut stream: UpstreamStream = Box::pin(upstream_resp.bytes_stream());
+            let head = super::body::read_head(&mut stream, super::stale_token::BODY_LIMIT)
+                .await
+                .context("reading the 401 body")?;
+
+            let recovery = match (
+                super::stale_token::injected_bearer(&headers, &parts.headers),
+                proxy_ctx.organization_id.as_deref(),
+                proxy_ctx.workspace_id.as_deref(),
+            ) {
+                (Some(rejected), Some(organization_id), Some(workspace_id))
+                    if super::stale_token::is_stale(target.config, &first_headers, &head) =>
+                {
+                    super::stale_token::recover(
+                        engine,
+                        cache,
+                        target,
+                        rejected,
+                        organization_id,
+                        workspace_id,
+                    )
+                    .await
+                }
+                _ => super::stale_token::Recovery::Unavailable,
+            };
+
+            let refreshed = match recovery {
+                super::stale_token::Recovery::Token(token) => Some(token),
+                // A refresh cannot fix this refusal: the agent gets the
+                // reconnect answer (with the link its chat card renders)
+                // instead of the provider's raw 401, so it asks the user
+                // rather than retrying.
+                super::stale_token::Recovery::Reconnect => {
+                    let connection = super::connect::ConnectionChoice::for_connection(
+                        target.connection_id,
+                        target.provider,
+                        rules.connection_label.clone(),
+                    );
+                    info!(method = %method, url = %url, connection_id = %target.connection_id, "refusal no refresh fixes; answering connection_needs_reconnect");
+                    return guidance(
+                        response::ERROR_CONNECTION_NEEDS_RECONNECT,
+                        response::connection_needs_reconnect(
+                            &connection,
+                            proxy_ctx.workspace_id.as_deref(),
+                        ),
+                    );
+                }
+                super::stale_token::Recovery::Unavailable => None,
+            };
+
+            match refreshed.filter(|_| !has_body) {
+                Some(access_token) => {
+                    let value =
+                        hyper::header::HeaderValue::from_str(&format!("Bearer {access_token}"))
+                            .context("refreshed token is not a valid header value")?;
+                    headers.insert(hyper::header::AUTHORIZATION, value);
+                    let mut retry = http_client.request(method.clone(), &upstream_url);
+                    for (name, value) in headers.iter() {
+                        retry = retry.header(name.clone(), value.clone());
+                    }
+                    info!(method = %method, url = %url, "resending with the refreshed token");
+                    match tokio::time::timeout(upstream_header_timeout(), retry.send()).await {
+                        Ok(Ok(resp)) => resp,
+                        Ok(Err(e)) => {
+                            if let Some(refusal) = super::egress::find_refusal(&e) {
+                                return Ok(refuse_destination(&refusal.host));
+                            }
+                            return Err(send_failure(e, &url));
+                        }
+                        Err(_elapsed) => {
+                            warn!(
+                                method = %method,
+                                url = %url,
+                                timeout_secs = upstream_header_timeout().as_secs(),
+                                "upstream did not send response headers to the resend before the deadline",
+                            );
+                            return Ok(response::upstream_timeout());
+                        }
+                    }
+                }
+                // Forward the provider's 401 byte for byte: the head read
+                // above, then whatever was not read.
+                None => {
+                    let head = Bytes::from(head.bytes);
+                    let replayed =
+                        futures_util::stream::once(async move { Ok(head) }).chain(stream);
+                    let mut rebuilt = hyper::Response::new(reqwest::Body::wrap_stream(replayed));
+                    *rebuilt.status_mut() = first_status;
+                    *rebuilt.version_mut() = first_version;
+                    *rebuilt.headers_mut() = first_headers;
+                    reqwest::Response::from(rebuilt)
+                }
+            }
+        }
+        _ => upstream_resp,
     };
 
     let status = upstream_resp.status();
@@ -1118,146 +1371,43 @@ pub async fn forward_request(
                 .map(|choice| choice.provider.as_str()),
         );
 
-    // The request's manual-approval outcome, as the telemetry row records it
-    // (`None` when no approval was involved). Built once per emission: both
-    // the guidance answers below and the normal path at the end carry it.
-    let approval_decision = || match (
-        &approval_log_id,
-        &approval_id_for_telemetry,
-        &approval_triggered_at,
-    ) {
-        (Some(log_id), Some(approval_id), Some(triggered_at)) => Some((
-            log_id.clone(),
-            telemetry::core::RequestDecision::ApprovalApproved {
-                approval_id: approval_id.clone(),
-                triggered_at: triggered_at.clone(),
-                resolved_at: hooks::iso_now(),
-                approved_by: approval_approved_by.clone(),
-            },
-        )),
-        _ => None,
-    };
-    // Every guidance answer below replaces the upstream response and returns
-    // before the normal telemetry at the end of this function, so it records
-    // its own row with the status the agent actually received. A request
-    // that first passed a manual approval instead UPDATES that approval's row
-    // with the final status (it still reads "approved"), as the normal path
-    // would, rather than adding a second one.
-    let guidance = |error: &str, resp: Response<hooks::ForwardResponseBody>| {
-        if let Some(mut meta) = hooks::request_meta(
-            proxy_ctx,
-            host,
-            method.as_str(),
-            &path,
-            resp.status().as_u16(),
-            start.elapsed().as_millis() as u32,
-        ) {
-            meta.matched_rule = matched_rule.clone();
-            match approval_decision() {
-                Some((log_id, approved)) => {
-                    meta.existing_log_id = Some(log_id);
-                    meta.decision = Some(approved);
-                    telemetry::on_request(meta.into_event(None));
-                }
-                None => hooks::record_needs_connection(meta, error),
-            }
-        }
-        Ok(resp)
-    };
+    // Where an approved request's real result is recorded (see
+    // `ApprovedResultTarget`).
+    let result_target = approval_log_id
+        .as_ref()
+        .zip(approval_result_shape.as_ref())
+        .map(|(log_id, (app, action))| ApprovedResultTarget {
+            pool: engine.pool.clone(),
+            log_id: log_id.clone(),
+            provider: rules.winning_provider.clone(),
+            per_record: summary::outcome::answers_per_record(app, method.as_str(), &path),
+            action: summary::clamp(action, 120),
+        });
     if injection_count == 0
         && !is_real_oauth_exchange
         && (status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN || wrong_host_404)
     {
-        let hostname = common::util::strip_port(host);
-
-        // 0. Host-gated connection on the wrong host — the agent HAS the
-        //    credential; the URL is what is wrong. The most specific
-        //    explanation, checked before `access_restricted` (which is often
-        //    also true here, via the broad suffix match, and would send the
-        //    agent to the grant surface for a grant it already holds).
-        if let Some(connections) = rules.host_mismatch.as_deref() {
-            info!(method = %method, url = %url, status = %status.as_u16(), "connection host mismatch");
-            return guidance(
-                response::ERROR_CONNECTION_HOST_MISMATCH,
-                response::connection_host_mismatch(hostname, &path, connections),
-            );
+        // A Bearer challenge with a URL realm is a container registry /
+        // OAuth2 token exchange the client resolves ITSELF (the anonymous
+        // Docker Registry v2 token dance). Hijacking it with the
+        // credential_not_found nudge strips the `WWW-Authenticate` challenge
+        // and breaks every `podman pull` / `docker run` of a public image from
+        // inside a sandbox, so on an unknown host the real 401 is forwarded
+        // instead. (Basic, label-realm Bearer, and header-less 401s do not
+        // match: they keep the nudge, which is correct for them.)
+        let nudge_unknown_host = !upstream_offers_anonymous_token_challenge(&resp_headers);
+        if let Some((error, resp)) =
+            auth_failure_guidance(status, host, &path, rules, proxy_ctx, nudge_unknown_host)
+        {
+            info!(method = %method, url = %url, status = %status.as_u16(), error, "uncredentialed auth failure answered with guidance");
+            return guidance(error, resp);
         }
-
-        // 1. Access restricted — agent in selective mode, credentials exist but not assigned.
-        //    Applies to ANY host (known apps AND manual secrets).
-        if let Some(credential) = rules.access_restricted {
-            info!(method = %method, url = %url, status = %status.as_u16(), "access restricted");
-            return guidance(
-                response::ERROR_ACCESS_RESTRICTED,
-                response::access_restricted(
-                    status,
-                    credential,
-                    hostname,
-                    &path,
-                    proxy_ctx.workspace_id.as_deref(),
-                    proxy_ctx.agent_id.as_deref(),
-                ),
-            );
-        }
-
-        // 2. Known app host (or a provider's alias host) — not connected.
-        if let Some((provider, display_name)) = apps::guidance_provider_for(hostname, &path) {
-            info!(method = %method, url = %url, status = %status.as_u16(), provider = %provider, "app not connected");
-            return guidance(
-                response::ERROR_APP_NOT_CONNECTED,
-                response::app_not_connected(
-                    status,
-                    provider,
-                    display_name,
-                    proxy_ctx.agent_name.as_deref(),
-                    proxy_ctx.workspace_id.as_deref(),
-                ),
-            );
-        }
-
-        // 2b. Known host but unrecognized API path — pre-fill a custom connection form.
-        if apps::provider_for_host(hostname).is_some() {
-            info!(method = %method, url = %url, status = %status.as_u16(), host = %hostname, "app not connected — no matching provider, custom connection");
-            return guidance(
-                response::ERROR_APP_NOT_CONNECTED,
-                response::app_not_connected_unknown_provider(
-                    status,
-                    hostname,
-                    proxy_ctx.agent_name.as_deref(),
-                    proxy_ctx.workspace_id.as_deref(),
-                ),
-            );
-        }
-
-        // 3. Unknown host — no credentials at all, guide user to create a secret.
-        //
-        // EXCEPT when the upstream advertises a Bearer challenge with a
-        // URL realm: that is a container registry / OAuth2 token-exchange the
-        // client resolves ITSELF (the anonymous Docker Registry v2 token
-        // dance). Hijacking it with the nudge strips the `WWW-Authenticate`
-        // challenge and breaks every `podman pull` / `docker run` of a public
-        // image from inside a sandbox. Forward the real 401 so the client can
-        // mint its token. (Basic, label-realm Bearer, and header-less 401s do
-        // not match — they keep the nudge, which is correct for them.)
-        if upstream_offers_anonymous_token_challenge(&resp_headers) {
-            info!(
-                method = %method,
-                url = %url,
-                status = %status.as_u16(),
-                "forwarding registry/token-exchange auth challenge (no nudge)"
-            );
-        } else {
-            info!(method = %method, url = %url, status = %status.as_u16(), "credential not found");
-            return guidance(
-                response::ERROR_CREDENTIAL_NOT_FOUND,
-                response::credential_not_found(
-                    status,
-                    hostname,
-                    &path,
-                    proxy_ctx.workspace_id.as_deref(),
-                ),
-            );
-        }
+        info!(
+            method = %method,
+            url = %url,
+            status = %status.as_u16(),
+            "forwarding registry/token-exchange auth challenge (no nudge)"
+        );
     }
 
     // Some APIs (e.g. Google) return 400 instead of 401 for invalid/missing API keys.
@@ -1273,69 +1423,19 @@ pub async fn forward_request(
         let check_slice = &body_bytes[..body_bytes.len().min(AUTH_CHECK_BODY_LIMIT)];
 
         if body_indicates_auth_error(check_slice) {
-            let hostname = common::util::strip_port(host);
-
-            // Mirror the 401/403 logic: host_mismatch → access_restricted →
-            // app_not_connected → credential_not_found
-            if let Some(connections) = rules.host_mismatch.as_deref() {
-                info!(method = %method, url = %url, status = 400, "auth-related 400 — connection host mismatch");
-                return guidance(
-                    response::ERROR_CONNECTION_HOST_MISMATCH,
-                    response::connection_host_mismatch(hostname, &path, connections),
-                );
+            if let Some((error, resp)) =
+                auth_failure_guidance(status, host, &path, rules, proxy_ctx, true)
+            {
+                info!(method = %method, url = %url, status = 400, error, "auth-related 400 answered with guidance");
+                return guidance(error, resp);
             }
-            if let Some(credential) = rules.access_restricted {
-                info!(method = %method, url = %url, status = 400, "auth-related 400 — access restricted");
-                return guidance(
-                    response::ERROR_ACCESS_RESTRICTED,
-                    response::access_restricted(
-                        StatusCode::BAD_REQUEST,
-                        credential,
-                        hostname,
-                        &path,
-                        proxy_ctx.workspace_id.as_deref(),
-                        proxy_ctx.agent_id.as_deref(),
-                    ),
-                );
-            }
-            if let Some((provider, display_name)) = apps::guidance_provider_for(hostname, &path) {
-                info!(method = %method, url = %url, status = 400, provider = %provider, "auth-related 400 — app not connected");
-                return guidance(
-                    response::ERROR_APP_NOT_CONNECTED,
-                    response::app_not_connected(
-                        StatusCode::BAD_REQUEST,
-                        provider,
-                        display_name,
-                        proxy_ctx.agent_name.as_deref(),
-                        proxy_ctx.workspace_id.as_deref(),
-                    ),
-                );
-            }
-            if apps::provider_for_host(hostname).is_some() {
-                info!(method = %method, url = %url, status = 400, host = %hostname, "auth-related 400 — no matching provider, custom connection");
-                return guidance(
-                    response::ERROR_APP_NOT_CONNECTED,
-                    response::app_not_connected_unknown_provider(
-                        StatusCode::BAD_REQUEST,
-                        hostname,
-                        proxy_ctx.agent_name.as_deref(),
-                        proxy_ctx.workspace_id.as_deref(),
-                    ),
-                );
-            }
-            info!(method = %method, url = %url, status = 400, "auth-related 400 — credential not found");
-            return guidance(
-                response::ERROR_CREDENTIAL_NOT_FOUND,
-                response::credential_not_found(
-                    StatusCode::BAD_REQUEST,
-                    hostname,
-                    &path,
-                    proxy_ctx.workspace_id.as_deref(),
-                ),
-            );
         }
 
-        // Not auth-related: forward the buffered 400 as-is.
+        // Not auth-related: forward the buffered 400 as-is. An approved
+        // request records what the upstream refused (its log row only).
+        if let Some(target) = &result_target {
+            target.record(status, &resp_headers, Some(&body_bytes));
+        }
         let mut response = Response::new(Either::Left(Full::new(body_bytes)));
         *response.status_mut() = status;
         for (name, value) in resp_headers.iter() {
@@ -1351,6 +1451,108 @@ pub async fn forward_request(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("-");
 
+    // The row the request log records for a forwarded request: status and
+    // latency as the agent receives them, the injection facts, and the manual
+    // approval outcome. Called once: either for the GitHub guidance below or
+    // for the normal path, both answering for a request that was really sent.
+    let forwarded_meta = |status: u16| {
+        let mut meta = hooks::request_meta(
+            proxy_ctx,
+            host,
+            method.as_str(),
+            &path,
+            status,
+            start.elapsed().as_millis() as u32,
+        )?;
+        meta.injection_count = injection_count as u16;
+        meta.injected = injection_count > 0;
+        hooks::attribute_to_connection(&mut meta, rules, injection_count);
+        meta.connection_label = rules.connection_label.clone();
+        if let Some((log_id, approved)) = approval_decision() {
+            meta.existing_log_id = log_id;
+            meta.decision = Some(approved);
+        }
+        meta.matched_rule = matched_rule;
+        Some(meta)
+    };
+
+    // GitHub organization access: an organization refused the GitHub OAuth
+    // connection's token (not approved / not SSO-authorized). See
+    // `github_org_access`: the refusal is answered with guidance instead of
+    // GitHub's body and recorded on the connection; a later success of the
+    // refused endpoint clears it. Every other response streams as before.
+    let upstream_stream: UpstreamStream = Box::pin(upstream_resp.bytes_stream());
+    let upstream_stream = if super::github_org_access::applies(
+        common::util::strip_port(host),
+        rules.winning_provider.as_deref(),
+        injection_count,
+    ) {
+        match github_org_access_check(
+            upstream_stream,
+            status,
+            &resp_headers,
+            &method,
+            &path,
+            rules,
+            engine,
+        )
+        .await?
+        {
+            GitHubOrgAccess::Forward(stream) => stream,
+            GitHubOrgAccess::Refused(refusal) => {
+                info!(
+                    method = %method,
+                    url = %url,
+                    org = %refusal.org,
+                    reason = refusal.reason.as_str(),
+                    "GitHub organization refused the connection; returning guidance"
+                );
+                let resp = response::github_org_access_required(
+                    &refusal,
+                    proxy_ctx.workspace_id.as_deref(),
+                );
+                if let Some(meta) = forwarded_meta(resp.status().as_u16()) {
+                    telemetry::on_request(meta.into_event(None));
+                }
+                return Ok(resp);
+            }
+        }
+    } else {
+        upstream_stream
+    };
+
+    // An APPROVED request: record what the upstream actually did on the
+    // approval's log row ("0 of 9 created: BillingCountry: …"), so the
+    // person who approved it sees what happened. Only an answer that needs
+    // its body read is peeked (a failure, or a per-record success), and the
+    // peeked bytes are replayed in front of the rest: the agent reads the
+    // response byte for byte. A plain success is judged by its status and
+    // streams at once. Never an event stream: it may hold the head open for
+    // minutes, and there is no one answer to read.
+    let result_target = result_target
+        .as_ref()
+        .filter(|_| !content_type.contains("text/event-stream"));
+    let upstream_stream: UpstreamStream = match result_target {
+        None => upstream_stream,
+        Some(target) if !target.reads_body(status) => {
+            target.record(status, &resp_headers, None);
+            upstream_stream
+        }
+        Some(target) => {
+            let mut stream = upstream_stream;
+            let head = super::body::read_head(&mut stream, summary::outcome::RESULT_BODY_PEEK)
+                .await
+                .context("reading an approved request's response")?;
+            target.record(
+                status,
+                &resp_headers,
+                head.complete.then_some(&head.bytes[..]),
+            );
+            let head = Bytes::from(head.bytes);
+            Box::pin(futures_util::stream::once(async move { Ok(head) }).chain(stream))
+        }
+    };
+
     info!(
         method = %method,
         url = %url,
@@ -1362,22 +1564,9 @@ pub async fn forward_request(
 
     // Track all authenticated proxied requests and stream response body.
     // Hooks handle telemetry emission and optional response stream wrapping.
-    let body_stream: hooks::BodyStream = if let Some(mut meta) = hooks::request_meta(
-        proxy_ctx,
-        host,
-        method.as_str(),
-        &path,
-        status.as_u16(),
-        start.elapsed().as_millis() as u32,
-    ) {
-        meta.injection_count = injection_count as u16;
-        meta.injected = injection_count > 0;
-        meta.connection_label = rules.connection_label.clone();
-        (meta.existing_log_id, meta.decision) = approval_decision().unzip();
-        meta.matched_rule = matched_rule;
-        hooks::track_and_wrap(meta, rules, &resp_headers, upstream_resp.bytes_stream())
-    } else {
-        Box::pin(upstream_resp.bytes_stream().map_ok(Frame::data))
+    let body_stream: hooks::BodyStream = match forwarded_meta(status.as_u16()) {
+        Some(meta) => hooks::track_and_wrap(meta, rules, &resp_headers, upstream_stream),
+        None => Box::pin(upstream_stream.map_ok(Frame::data)),
     };
 
     let body = http_body_util::StreamBody::new(body_stream);
@@ -1391,6 +1580,292 @@ pub async fn forward_request(
     }
 
     Ok(response)
+}
+
+/// The upstream body as a stream, so a peeked head can be replayed in front of
+/// what was not read.
+type UpstreamStream = futures_util::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>;
+
+/// The outcome of [`github_org_access_check`].
+enum GitHubOrgAccess {
+    /// Not an organization refusal: forward this stream (the upstream body,
+    /// with any peeked head replayed in front of the unread rest).
+    Forward(UpstreamStream),
+    /// An organization refused the token: answer with guidance instead.
+    Refused(super::github_org_access::OrgRefusal),
+}
+
+/// Read GitHub's answer to a request the GitHub OAuth connection injected
+/// into, and keep the connection's `githubOrgAccess` record in step with it.
+/// Only a 403 is peeked, and only its first `BODY_LIMIT` bytes; anything
+/// beyond streams on untouched, so a 403 that is not a refusal reaches the
+/// agent byte for byte.
+async fn github_org_access_check(
+    mut stream: UpstreamStream,
+    status: StatusCode,
+    headers: &hyper::HeaderMap,
+    method: &hyper::Method,
+    path: &str,
+    rules: &ResolvedRules,
+    engine: &crate::connect::PolicyEngine,
+) -> Result<GitHubOrgAccess> {
+    use super::github_org_access::{classify, record_writes, BODY_LIMIT};
+
+    let mut refusal = None;
+    if status == StatusCode::FORBIDDEN {
+        let head = super::body::read_head(&mut stream, BODY_LIMIT)
+            .await
+            .context("reading GitHub 403 body")?;
+        refusal = classify(status, headers, &head.bytes);
+        if refusal.is_none() {
+            let head = Bytes::from(head.bytes);
+            stream = Box::pin(futures_util::stream::once(async move { Ok(head) }).chain(stream));
+        }
+    }
+
+    if let Some(connection_id) = rules.winning_connection_id.as_deref() {
+        for write in record_writes(
+            rules.github_org_access.as_ref(),
+            refusal.as_ref(),
+            status,
+            method,
+            path,
+        ) {
+            spawn_github_org_access_write(engine.pool.clone(), connection_id.to_string(), write);
+        }
+    }
+
+    Ok(match refusal {
+        Some(refusal) => GitHubOrgAccess::Refused(refusal),
+        None => GitHubOrgAccess::Forward(stream),
+    })
+}
+
+/// Where an APPROVED request's real result is recorded: its approval's
+/// request-log row. `provider` is the provider of the connection whose
+/// credential the request carried (`github-app`, not the `github` its shared
+/// host resolves to), or `None` when none was injected; `per_record` says the
+/// upstream answers record by record (a Salesforce Collections or Composite
+/// call), so even its 200 is read; `action` is the card's own title, whose
+/// verb the result line reads in.
+struct ApprovedResultTarget {
+    pool: sqlx::PgPool,
+    log_id: String,
+    provider: Option<String>,
+    per_record: bool,
+    action: String,
+}
+
+impl ApprovedResultTarget {
+    /// Whether this answer must be read to be judged: a failure (for its
+    /// message) or a per-record success (for its breakdown).
+    fn reads_body(&self, status: StatusCode) -> bool {
+        self.per_record || !status.is_success()
+    }
+
+    /// Record what the upstream answered (`extra_data.approval_result`), off
+    /// the request path. Best-effort: the response reaches the agent either
+    /// way, and a failed write only means the card keeps a plain "Approved".
+    /// `body` is the whole body as received, or `None` when it was not read
+    /// or was cut; a body that does not decode counts as unread. Nothing is
+    /// written when the answer can't be judged.
+    fn record(&self, status: StatusCode, headers: &hyper::HeaderMap, body: Option<&[u8]>) {
+        let decoded =
+            body.and_then(|b| super::body::decoded(headers, b, summary::outcome::RESULT_BODY_PEEK));
+        let Some(mut result) =
+            summary::outcome::request_result(self.per_record, status.as_u16(), decoded.as_deref())
+        else {
+            return;
+        };
+        summary::outcome::unmask_refusal(
+            self.provider.as_deref().unwrap_or_default(),
+            status.as_u16(),
+            summary::outcome::RateLimitHeaders {
+                remaining: headers
+                    .get("x-ratelimit-remaining")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse::<u64>().ok()),
+                retry_after: headers.contains_key(hyper::header::RETRY_AFTER),
+            },
+            &mut result,
+        );
+        let Ok(mut json) = serde_json::to_value(&result) else {
+            return;
+        };
+        json["action"] = serde_json::Value::String(self.action.clone());
+        let pool = self.pool.clone();
+        let log_id = self.log_id.clone();
+        let drain_guard = shutdown::task_guard();
+        tokio::spawn(async move {
+            let _drain_guard = drain_guard;
+            if let Err(error) = db::record_approval_result(&pool, &log_id, &json).await {
+                warn!(log_id = %log_id, %error, "recording an approved request's result failed");
+            }
+        });
+    }
+}
+
+/// Apply one change to a connection's GitHub organization record, off the
+/// request path: the agent's answer never waits on the write, and a failed
+/// write only delays the dashboard until the next refusal or success. Held by
+/// the shutdown drain like the token-refresh write.
+fn spawn_github_org_access_write(
+    pool: sqlx::PgPool,
+    connection_id: String,
+    write: super::github_org_access::RecordWrite,
+) {
+    use super::github_org_access::RecordWrite;
+
+    let drain_guard = shutdown::task_guard();
+    tokio::spawn(async move {
+        let _drain_guard = drain_guard;
+        let (org, result) = match &write {
+            RecordWrite::Record { org, entry } => (
+                org,
+                db::record_github_org_access(&pool, &connection_id, org, entry).await,
+            ),
+            RecordWrite::Clear { org, expected } => (
+                org,
+                db::clear_github_org_access(&pool, &connection_id, org, expected).await,
+            ),
+        };
+        let recorded = matches!(write, RecordWrite::Record { .. });
+        match result {
+            Ok(changed) => tracing::debug!(
+                connection_id = %connection_id,
+                org = %org,
+                recorded,
+                changed,
+                "github org access state written"
+            ),
+            Err(e) => warn!(
+                connection_id = %connection_id,
+                org = %org,
+                recorded,
+                error = %e,
+                "github org access state write failed"
+            ),
+        }
+    });
+}
+
+/// The guidance that replaces an uncredentialed upstream auth failure, most
+/// specific first, as (stable error code, response). `None` only for an
+/// unknown host when `nudge_unknown_host` is off (the upstream's own
+/// challenge must reach the client). Shared by the 401/403 path and the
+/// auth-shaped 400 path, so the two can never answer differently.
+fn auth_failure_guidance(
+    status: StatusCode,
+    host: &str,
+    path: &str,
+    rules: &ResolvedRules,
+    proxy_ctx: &ProxyContext,
+    nudge_unknown_host: bool,
+) -> Option<(&'static str, Response<hooks::ForwardResponseBody>)> {
+    let hostname = common::util::strip_port(host);
+    let workspace_id = proxy_ctx.workspace_id.as_deref();
+    let agent_name = proxy_ctx.agent_name.as_deref();
+    let connecting_agent = proxy_ctx.connecting_agent();
+
+    // 1. A granted host-gated connection on the wrong host: the agent HAS the
+    //    credential, the URL is what is wrong. Checked before
+    //    `access_restricted`, which is often also true here (the broad
+    //    suffix match) and would send the agent to switch on what it holds.
+    if let Some(connections) = rules.host_mismatch.as_deref() {
+        return Some((
+            response::ERROR_CONNECTION_HOST_MISMATCH,
+            response::connection_host_mismatch(hostname, path, connections),
+        ));
+    }
+
+    // 2. A granted secret for this host whose value could not be produced:
+    //    the agent HAS the credential, so the fix is re-entering it, never
+    //    attaching it (`access_restricted` is not even resolved then).
+    if let Some(kind) = rules.credential_unavailable {
+        return Some((
+            response::ERROR_CREDENTIAL_UNAVAILABLE,
+            response::credential_unavailable(
+                status,
+                kind,
+                hostname,
+                path,
+                workspace_id,
+                proxy_ctx.agent_id.as_deref(),
+            ),
+        ));
+    }
+
+    match &rules.access_restricted {
+        // 3. A secret exists for this host that the agent was not given.
+        Some(RestrictedCredential::Secret(kind)) => {
+            return Some((
+                response::ERROR_ACCESS_RESTRICTED,
+                response::secret_access_restricted(
+                    status,
+                    *kind,
+                    hostname,
+                    path,
+                    workspace_id,
+                    proxy_ctx.agent_id.as_deref(),
+                ),
+            ));
+        }
+        // 4. A connected account of THIS request's app is just off for the
+        //    agent: turning it on is the fix (connecting another stays the
+        //    alternative). Anything else (the accounts serve another app on
+        //    this shared host, or each one is waiting on a reconnect) falls
+        //    through to "connect it".
+        Some(RestrictedCredential::AppConnections(inactive)) => {
+            if let Some(app) = inactive_app_for(inactive, hostname, path) {
+                return Some((
+                    response::ERROR_ACCESS_RESTRICTED,
+                    response::app_access_restricted(
+                        status,
+                        app,
+                        proxy_ctx.agent_id.as_deref(),
+                        connecting_agent,
+                        workspace_id,
+                    ),
+                ));
+            }
+        }
+        None => {}
+    }
+
+    // 5. A known app host (or a provider's alias host): connect it.
+    if let Some((provider, display_name)) = apps::guidance_provider_for(hostname, path) {
+        return Some((
+            response::ERROR_APP_NOT_CONNECTED,
+            response::app_not_connected(
+                status,
+                provider,
+                display_name,
+                connecting_agent,
+                workspace_id,
+            ),
+        ));
+    }
+
+    // 6. A known host on a path no app serves: request the app.
+    if apps::provider_for_host(hostname).is_some() {
+        return Some((
+            response::ERROR_APP_NOT_CONNECTED,
+            response::app_not_connected_unknown_provider(
+                status,
+                hostname,
+                agent_name,
+                workspace_id,
+            ),
+        ));
+    }
+
+    // 7. An unknown host: add a custom credential.
+    nudge_unknown_host.then(|| {
+        (
+            response::ERROR_CREDENTIAL_NOT_FOUND,
+            response::credential_not_found(status, hostname, path, workspace_id),
+        )
+    })
 }
 
 /// Whether an uncredentialed upstream 404 means "wrong host" rather than "no
@@ -1464,6 +1939,14 @@ fn body_indicates_auth_error(body: &[u8]) -> bool {
         "not authenticated",
     ];
     AUTH_KEYWORDS.iter().any(|kw| lower.contains(kw))
+}
+
+/// The error for an upstream send that failed, as mitm.rs and the HTTP-proxy
+/// path log it (`error = ?e`). reqwest's own message carries the full upstream
+/// URL, injected query credentials included, so that is dropped and the
+/// masked `url` named instead.
+fn send_failure(e: reqwest::Error, url: &str) -> anyhow::Error {
+    anyhow::Error::new(e.without_url()).context(format!("forwarding to {url}"))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -1958,6 +2441,7 @@ mod tests {
             policy_rules_v2: db::PolicyV2Rules::default(),
             available_apps: db::AvailableApps::default(),
             access_restricted: None,
+            credential_unavailable: None,
             intercept_token: None,
             plan: "free".to_string(),
             rewrite_host: None,
@@ -1966,6 +2450,8 @@ mod tests {
             body_transform: None,
             session_policy: None,
             winning_connection_id: None,
+            winning_provider: None,
+            github_org_access: None,
             budget_bindings: Vec::new(),
             host_mismatch: None,
         }
@@ -1985,6 +2471,17 @@ mod tests {
         upstream_addr: std::net::SocketAddr,
         rules: fn() -> ResolvedRules,
     ) -> std::net::SocketAddr {
+        gateway_serving_one_request_to(upstream_addr.to_string(), "http", rules).await
+    }
+
+    /// [`gateway_serving_one_request_with`] for a request addressed to `host`
+    /// over `scheme` — for behavior keyed on the provider a real host
+    /// identifies (e.g. the Drive guard on `www.googleapis.com`).
+    async fn gateway_serving_one_request_to(
+        host: String,
+        scheme: &'static str,
+        rules: fn() -> ResolvedRules,
+    ) -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind gateway");
@@ -1993,7 +2490,6 @@ mod tests {
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept client");
             let io = hyper_util::rt::TokioIo::new(stream);
-            let host = upstream_addr.to_string();
 
             let service = hyper::service::service_fn(move |req: Request<Incoming>| {
                 let host = host.clone();
@@ -2014,7 +2510,7 @@ mod tests {
                         req,
                         &host,
                         &host,
-                        "http",
+                        scheme,
                         reqwest::Client::builder()
                             .redirect(reqwest::redirect::Policy::none())
                             .build()
@@ -2035,6 +2531,114 @@ mod tests {
         });
 
         gateway_addr
+    }
+
+    /// A GitHub App request's row names the app, not the `github` its shared
+    /// host resolves to. Uncredentialed traffic, and a connection that won
+    /// nothing, keep the host's provider.
+    #[test]
+    fn request_log_rows_name_the_injecting_connection_provider() {
+        let ctx = ProxyContext {
+            workspace_id: Some("ws".into()),
+            organization_id: Some("org".into()),
+            agent_id: Some("agent".into()),
+            agent_name: None,
+            agent_identifier: None,
+            agent_token: "test-token".to_string(),
+        };
+        let row = || {
+            hooks::request_meta(&ctx, "api.github.com:443", "GET", "/repos/o/r", 200, 1)
+                .expect("authenticated request")
+        };
+        let github_app = ResolvedRules {
+            winning_connection_id: Some("conn_1".into()),
+            winning_provider: Some("github-app".into()),
+            ..permissive_rules()
+        };
+
+        let mut injected = row();
+        hooks::attribute_to_connection(&mut injected, &github_app, 1);
+        assert_eq!(injected.provider, "github-app");
+
+        let mut uncredentialed = row();
+        hooks::attribute_to_connection(&mut uncredentialed, &github_app, 0);
+        assert_eq!(uncredentialed.provider, "github");
+
+        let mut no_winner = row();
+        hooks::attribute_to_connection(&mut no_winner, &permissive_rules(), 1);
+        assert_eq!(no_winner.provider, "github");
+    }
+
+    /// Drive-scoped rules: a Google Drive connection restricted to one folder
+    /// chain, exactly as connect resolution hands them to the forward path.
+    fn drive_scoped_rules() -> ResolvedRules {
+        ResolvedRules {
+            session_policy: Some(serde_json::json!({ "driveFolders": ["F1/F2"] })),
+            ..permissive_rules()
+        }
+    }
+
+    /// The Drive folder policy is enforced on the real forward path: the
+    /// guard is reached on the shared Google host, the create's body is
+    /// buffered and read, and the agent gets the structured 403 with the
+    /// allowed scope so it can self-correct. Only refusals are exercised, so
+    /// nothing is ever forwarded upstream.
+    #[tokio::test]
+    async fn drive_folder_policy_is_enforced_through_forward_request() {
+        pin_test_header_timeout();
+        let cases: [(&str, &str, Option<&str>, &str); 5] = [
+            // Unconfined search across all of Drive.
+            (
+                "GET",
+                "/drive/v3/files?q=name%20contains%20%27x%27",
+                None,
+                "confined",
+            ),
+            // Create with no parents (lands in root) — only knowable from the BODY.
+            (
+                "POST",
+                "/drive/v3/files",
+                Some(r#"{"name":"x"}"#),
+                "set `parents`",
+            ),
+            // Batch endpoints can smuggle anything — with or without the
+            // trailing slash, both of which carry the Drive credential.
+            ("POST", "/batch/drive/v3", Some(""), "not permitted"),
+            ("POST", "/batch/drive", Some(""), "not permitted"),
+            // In-scope-shaped read, but no credential to verify ancestry with.
+            ("GET", "/drive/v3/files/abc", None, "no credential"),
+        ];
+        for (method, path, body, expect_detail) in cases {
+            let gateway = gateway_serving_one_request_to(
+                "www.googleapis.com".to_string(),
+                "https",
+                drive_scoped_rules,
+            )
+            .await;
+            let client = reqwest::Client::new();
+            let mut req =
+                client.request(method.parse().unwrap(), format!("http://{gateway}{path}"));
+            if let Some(b) = body {
+                req = req
+                    .header("content-type", "application/json")
+                    .body(b.to_string());
+            }
+            let resp = req.send().await.expect("gateway responded");
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{method} {path}");
+            let json: serde_json::Value = resp.json().await.expect("json");
+            assert_eq!(json["error"], "resource_access_denied", "{method} {path}");
+            assert_eq!(json["allowed"], serde_json::json!(["F1/F2"]));
+            // The agent is told how the chain works — only the LAST folder
+            // and what's inside it are reachable, never its parents.
+            let message = json["message"].as_str().unwrap();
+            assert!(message.contains("only the LAST folder"), "{message}");
+            assert!(message.contains("'<folderId>' in parents"), "{message}");
+            assert!(
+                json["detail"].as_str().unwrap().contains(expect_detail),
+                "{method} {path}: {}",
+                json["detail"]
+            );
+        }
     }
 
     /// An upstream that answers every request with a fixed status and a tiny
@@ -2110,6 +2714,233 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("https://acme.my.salesforce.com/services/data/v60.0/sobjects/"));
+    }
+
+    /// The guidance an uncredentialed auth failure on `host` + `path` gets
+    /// under `access_restricted`, as (error code, `manage_url`).
+    async fn guidance_for(
+        access_restricted: Option<crate::connect::RestrictedCredential>,
+        host: &str,
+        path: &str,
+    ) -> (String, Option<String>) {
+        let rules = ResolvedRules {
+            access_restricted,
+            ..permissive_rules()
+        };
+        guidance_under(&rules, host, path).await
+    }
+
+    /// [`guidance_for`] under any resolved rules.
+    async fn guidance_under(
+        rules: &ResolvedRules,
+        host: &str,
+        path: &str,
+    ) -> (String, Option<String>) {
+        let ctx = ProxyContext {
+            workspace_id: Some("ws".into()),
+            organization_id: Some("org".into()),
+            agent_id: Some("ag".into()),
+            agent_name: Some("Bot".into()),
+            agent_identifier: None,
+            agent_token: "test-token".to_string(),
+        };
+        let (error, resp) =
+            auth_failure_guidance(StatusCode::UNAUTHORIZED, host, path, rules, &ctx, true)
+                .expect("an uncredentialed auth failure always gets guidance here");
+        let body = resp.into_body().collect().await.expect("body").to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["error"], error);
+        let manage_url = json["manage_url"].as_str().map(|url| {
+            url.strip_prefix(response::dashboard_url())
+                .expect("dashboard link")
+                .to_string()
+        });
+        (error.to_string(), manage_url)
+    }
+
+    /// A granted secret whose value could not be produced answers
+    /// `credential_unavailable` on its kind's page. It ranks above
+    /// `access_restricted` (resolution never sets both, but the order must not
+    /// depend on that) and below a host mismatch, which names a URL problem
+    /// the agent can fix itself.
+    #[tokio::test]
+    async fn auth_failure_guidance_puts_an_unreadable_grant_before_a_missing_one() {
+        use crate::connect::{RestrictedCredential, SecretKind};
+        let unreadable = ResolvedRules {
+            credential_unavailable: Some(SecretKind::LlmKey),
+            access_restricted: Some(RestrictedCredential::Secret(SecretKind::LlmKey)),
+            ..permissive_rules()
+        };
+        assert_eq!(
+            guidance_under(&unreadable, "api.anthropic.com", "/v1/messages").await,
+            (
+                "credential_unavailable".into(),
+                Some("/w/ws/agents/ag/models".into())
+            )
+        );
+        let custom = ResolvedRules {
+            credential_unavailable: Some(SecretKind::Custom),
+            ..permissive_rules()
+        };
+        assert_eq!(
+            guidance_under(&custom, "api.unknown-service.test", "/v1").await,
+            (
+                "credential_unavailable".into(),
+                Some("/w/ws/agents/ag/connections?tab=custom".into())
+            )
+        );
+        let mismatch = ResolvedRules {
+            credential_unavailable: Some(SecretKind::Custom),
+            ..host_mismatch_rules()
+        };
+        assert_eq!(
+            guidance_under(&mismatch, "login.salesforce.com", "/services/data/")
+                .await
+                .0,
+            "connection_host_mismatch"
+        );
+    }
+
+    /// The decision order, shared by the 401/403 and auth-shaped 400 paths:
+    /// an ungranted secret first, then an inactive account of THIS request's
+    /// app, else "connect it". Accounts of another app on a shared host, or an
+    /// app with every account granted or waiting on a reconnect, never turn a
+    /// "connect" into a "switch it on".
+    #[tokio::test]
+    async fn auth_failure_guidance_offers_the_switch_only_for_the_requested_app() {
+        use crate::connect::{InactiveApp, RestrictedCredential, SecretKind};
+        let inactive = |provider: &str| {
+            Some(RestrictedCredential::AppConnections(vec![InactiveApp {
+                provider: provider.to_string(),
+                shared_by_organization: true,
+            }]))
+        };
+        let gmail = ("www.googleapis.com", "/gmail/v1/users/me/messages");
+
+        assert_eq!(
+            guidance_for(inactive("resend"), "api.resend.com", "/emails").await,
+            (
+                "access_restricted".into(),
+                Some("/w/ws/agents/ag/connections?attach=resend".into())
+            )
+        );
+        assert_eq!(
+            guidance_for(inactive("gmail"), gmail.0, gmail.1).await,
+            (
+                "access_restricted".into(),
+                Some("/w/ws/agents/ag/connections?attach=gmail".into())
+            )
+        );
+        // A Calendar account does not answer for a Gmail request.
+        assert_eq!(
+            guidance_for(inactive("google-calendar"), gmail.0, gmail.1).await,
+            ("app_not_connected".into(), None)
+        );
+        // Accounts exist, but none can simply be switched on.
+        assert_eq!(
+            guidance_for(
+                Some(RestrictedCredential::AppConnections(Vec::new())),
+                "api.resend.com",
+                "/emails"
+            )
+            .await,
+            ("app_not_connected".into(), None)
+        );
+        assert_eq!(
+            guidance_for(None, "api.resend.com", "/emails").await,
+            ("app_not_connected".into(), None)
+        );
+        // An ungranted secret keeps its own page, wherever the host belongs.
+        assert_eq!(
+            guidance_for(
+                Some(RestrictedCredential::Secret(SecretKind::Custom)),
+                "api.resend.com",
+                "/emails"
+            )
+            .await,
+            (
+                "access_restricted".into(),
+                Some("/w/ws/agents/ag/connections?tab=custom".into())
+            )
+        );
+        assert_eq!(
+            guidance_for(None, "api.unknown-service.test", "/v1").await,
+            ("credential_not_found".into(), None)
+        );
+    }
+
+    /// The "connect it" link names the session's agent, id included, so the
+    /// account the user connects through it lands on for that agent; a
+    /// session without an agent mints the plain workspace link.
+    #[tokio::test]
+    async fn auth_failure_guidance_connect_link_names_the_sessions_agent() {
+        let connect_url = |agent: Option<(&str, &str)>| {
+            let ctx = ProxyContext {
+                workspace_id: Some("ws".into()),
+                organization_id: Some("org".into()),
+                agent_id: agent.map(|(id, _)| id.to_string()),
+                agent_name: agent.map(|(_, name)| name.to_string()),
+                agent_identifier: None,
+                agent_token: "test-token".to_string(),
+            };
+            let (_, resp) = auth_failure_guidance(
+                StatusCode::UNAUTHORIZED,
+                "api.resend.com",
+                "/emails",
+                &permissive_rules(),
+                &ctx,
+                true,
+            )
+            .expect("a known app host always gets guidance");
+            async move {
+                let body = resp.into_body().collect().await.expect("body").to_bytes();
+                let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+                json["connect_url"]
+                    .as_str()
+                    .and_then(|url| url.strip_prefix(response::dashboard_url()))
+                    .expect("dashboard connect link")
+                    .to_string()
+            }
+        };
+
+        assert_eq!(
+            connect_url(Some(("ag-1", "Mail Bot"))).await,
+            "/w/ws/connections?connect=resend&source=agent&agent_name=Mail%20Bot&agent_id=ag%2D1"
+        );
+        assert_eq!(connect_url(None).await, "/w/ws/connections?connect=resend");
+    }
+
+    /// An unknown host whose upstream offers its own token challenge keeps
+    /// it: no guidance replaces the 401 (the anonymous registry token flow).
+    #[test]
+    fn auth_failure_guidance_leaves_an_unknown_host_alone_when_told_to() {
+        let ctx = ProxyContext {
+            workspace_id: None,
+            organization_id: None,
+            agent_id: None,
+            agent_name: None,
+            agent_identifier: None,
+            agent_token: "test-token".to_string(),
+        };
+        let rules = permissive_rules();
+        assert!(auth_failure_guidance(
+            StatusCode::UNAUTHORIZED,
+            "registry.example.test",
+            "/v2/",
+            &rules,
+            &ctx,
+            false
+        )
+        .is_none());
+        assert!(auth_failure_guidance(
+            StatusCode::UNAUTHORIZED,
+            "api.resend.com",
+            "/emails",
+            &rules,
+            &ctx,
+            false
+        )
+        .is_some());
     }
 
     /// A 404 is "wrong host" on an alias ONLY on the bound host's API
@@ -2294,5 +3125,344 @@ mod tests {
             "the body genuinely outlived the 1s header bound (took {:?})",
             started.elapsed(),
         );
+    }
+
+    /// An upstream that answers 200 and hands back the request line it read,
+    /// so a test can see exactly what was forwarded.
+    fn request_line_upstream() -> (std::net::SocketAddr, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind upstream");
+        let addr = listener.local_addr().expect("local addr");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Some(Ok(mut stream)) = listener.incoming().next() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]);
+                let _ = tx.send(head.lines().next().unwrap_or_default().to_string());
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok"
+                );
+            }
+        });
+        (addr, rx)
+    }
+
+    /// Masking is for log lines only: the request that reaches the provider
+    /// keeps its real query credential, or it would be refused upstream.
+    #[tokio::test]
+    async fn the_forwarded_request_keeps_its_real_query_credential() {
+        pin_test_header_timeout();
+        let (upstream_addr, request_line) = request_line_upstream();
+        let gateway_addr = gateway_serving_one_request_with(upstream_addr, permissive_rules).await;
+
+        let response = reqwest::Client::new()
+            .get(format!(
+                "http://{gateway_addr}/upload?guid=a1&tempauth=v1.LIVE&access_token=LIVE2"
+            ))
+            .send()
+            .await
+            .expect("gateway responded");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            request_line
+                .recv_timeout(Duration::from_secs(5))
+                .expect("forwarded"),
+            "GET /upload?guid=a1&tempauth=v1.LIVE&access_token=LIVE2 HTTP/1.1"
+        );
+    }
+
+    /// A failed send is logged by mitm.rs as `error = ?e`. reqwest's own
+    /// message ends with the upstream URL, which carries any injected query
+    /// credential, so neither the raw query nor the URL may be in it.
+    #[tokio::test]
+    async fn a_failed_send_names_the_masked_url_only() {
+        // Nothing listens on a port we just released: the send fails.
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind")
+            .local_addr()
+            .expect("addr");
+        let raw = format!("http://{addr}/x?key=1&api_key=LIVE_SECRET");
+        let e = reqwest::Client::new()
+            .get(&raw)
+            .send()
+            .await
+            .expect_err("nothing listens");
+        assert!(format!("{e}").contains("LIVE_SECRET"), "precondition: {e}");
+
+        let err = send_failure(e, &crate::log_redact::redact_for_log(&raw));
+        for shown in [format!("{err:?}"), format!("{err:#}")] {
+            assert!(!shown.contains("LIVE_SECRET"), "leaked: {shown}");
+            assert!(shown.contains("api_key=***"), "{shown}");
+        }
+        assert!(
+            err.chain().any(|e| e.is::<reqwest::Error>()),
+            "mitm.rs still recognizes an upstream send failure"
+        );
+    }
+
+    // ── GitHub organization access ─────────────────────────────────────
+
+    /// A one-shot GitHub upstream answering every request with `status`,
+    /// `extra_headers` and `body` (raw bytes, so a test can send gzip).
+    fn github_upstream(
+        status: u16,
+        extra_headers: &'static str,
+        body: impl Into<Vec<u8>>,
+    ) -> std::net::SocketAddr {
+        use std::io::{Read, Write};
+
+        let body = body.into();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind github upstream");
+        let addr = listener.local_addr().expect("local addr");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n{extra_headers}content-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
+        });
+        addr
+    }
+
+    /// GitHub's OAuth-app-restriction refusal for `acme-labs`.
+    const RESTRICTED_BODY: &str = r#"{"message":"Although you appear to have the correct authorization credentials, the `Acme-Labs` organization has enabled OAuth App access restrictions, meaning that data access to third-parties is limited."}"#;
+
+    /// The GitHub OAuth connection injecting into `api.github.com`.
+    fn github_oauth_rules() -> ResolvedRules {
+        ResolvedRules {
+            injection_rules: vec![inject::InjectionRule {
+                path_pattern: "*".to_string(),
+                injections: vec![inject::Injection::SetHeader {
+                    name: "authorization".to_string(),
+                    value: "Bearer test-token".to_string(),
+                }],
+                secret: None,
+            }],
+            winning_connection_id: Some("conn_gh".into()),
+            winning_provider: Some("github".into()),
+            // Exactly what the refusals below record (each test's refused
+            // request), so the hot path skips the write and the stub pool
+            // (which never connects) is never touched. The writes themselves
+            // are pinned by `github_org_access::tests` and its Postgres suite.
+            github_org_access: Some(serde_json::json!({
+                "acme": { "reason": "sso_required", "write": false, "endpoint": "repos/acme/api/pulls" },
+                "acme-labs": { "reason": "approval_required", "write": false, "endpoint": "repos/acme-labs/api" }
+            })),
+            ..permissive_rules()
+        }
+    }
+
+    /// Serve one request addressed to `api.github.com` (plain http), with the
+    /// client resolving that name to `upstream`.
+    async fn github_gateway(
+        upstream: std::net::SocketAddr,
+        rules: fn() -> ResolvedRules,
+    ) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind gateway");
+        let gateway_addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept client");
+            let io = hyper_util::rt::TokioIo::new(stream);
+            let service = hyper::service::service_fn(move |req: Request<Incoming>| async move {
+                let cache = cache::in_memory();
+                let approvals = approval::in_memory();
+                let engine = crate::connect::PolicyEngine::test_stub();
+                let proxy_ctx = ProxyContext {
+                    workspace_id: Some("ws_1".into()),
+                    organization_id: None,
+                    agent_id: None,
+                    agent_name: None,
+                    agent_identifier: None,
+                    agent_token: "test-token".to_string(),
+                };
+                let host = format!("api.github.com:{}", upstream.port());
+                forward_request(
+                    req,
+                    &host,
+                    &host,
+                    "http",
+                    reqwest::Client::builder()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .resolve("api.github.com", upstream)
+                        .build()
+                        .expect("client"),
+                    &rules(),
+                    &*cache,
+                    &proxy_ctx,
+                    &approvals,
+                    &engine,
+                )
+                .await
+            });
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(io, service)
+                .await;
+        });
+        gateway_addr
+    }
+
+    #[tokio::test]
+    async fn github_sso_refusal_becomes_org_access_guidance() {
+        pin_test_header_timeout();
+        let upstream = github_upstream(
+            403,
+            "x-github-sso: required; url=https://github.com/orgs/acme/sso?authorization_request=AAZ\r\n",
+            r#"{"message":"Resource protected by organization SAML enforcement."}"#,
+        );
+        let gateway = github_gateway(upstream, github_oauth_rules).await;
+        let response = reqwest::Client::new()
+            .get(format!("http://{gateway}/repos/acme/api/pulls/1"))
+            .send()
+            .await
+            .expect("gateway responded");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-should-retry")
+                .map(|v| v.to_str().unwrap()),
+            Some("false")
+        );
+        let json: serde_json::Value = response.json().await.expect("json body");
+        assert_eq!(json["error"], "github_org_access_required");
+        assert_eq!(json["org"], "acme");
+        assert_eq!(json["reason"], "sso_required");
+        let url = json["connect_url"].as_str().expect("connect_url");
+        assert!(
+            url.ends_with("/w/ws_1/connections/apps/github?org_access=acme"),
+            "{url}"
+        );
+        // GitHub's own (per-call) SSO link never reaches the agent.
+        assert!(!json.to_string().contains("authorization_request"));
+    }
+
+    #[tokio::test]
+    async fn github_app_restriction_refusal_becomes_org_access_guidance() {
+        pin_test_header_timeout();
+        let upstream = github_upstream(403, "", RESTRICTED_BODY);
+        let gateway = github_gateway(upstream, github_oauth_rules).await;
+        let json: serde_json::Value = reqwest::Client::new()
+            .get(format!("http://{gateway}/repos/acme-labs/api"))
+            .send()
+            .await
+            .expect("gateway responded")
+            .json()
+            .await
+            .expect("json body");
+        assert_eq!(json["error"], "github_org_access_required");
+        assert_eq!(json["org"], "acme-labs", "lowercased");
+        assert_eq!(json["reason"], "approval_required");
+    }
+
+    /// The client accepted gzip (as curl --compressed, Node fetch, Python
+    /// requests and Go all do), so GitHub gzipped its refusal: it is still
+    /// read, and the agent gets the plain-JSON guidance.
+    #[tokio::test]
+    async fn gzipped_restriction_refusal_becomes_org_access_guidance() {
+        use std::io::Write;
+
+        pin_test_header_timeout();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(RESTRICTED_BODY.as_bytes()).expect("gzip");
+        let upstream = github_upstream(
+            403,
+            "content-encoding: gzip\r\n",
+            gz.finish().expect("gzip"),
+        );
+        let gateway = github_gateway(upstream, github_oauth_rules).await;
+        let response = reqwest::Client::new()
+            .get(format!("http://{gateway}/repos/acme-labs/api"))
+            .header("accept-encoding", "gzip")
+            .send()
+            .await
+            .expect("gateway responded");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            response.headers().get("content-encoding").is_none(),
+            "the guidance is the gateway's own body, never labelled gzip"
+        );
+        let json: serde_json::Value = response.json().await.expect("json body");
+        assert_eq!(json["error"], "github_org_access_required");
+        assert_eq!(json["org"], "acme-labs");
+    }
+
+    /// Any other GitHub 403 (a permission or rate limit refusal) is buffered
+    /// for classification and then forwarded byte-for-byte.
+    #[tokio::test]
+    async fn other_github_403_is_forwarded_verbatim() {
+        pin_test_header_timeout();
+        let body = r#"{"message":"Must have admin rights to Repository."}"#;
+        let upstream = github_upstream(403, "", body);
+        let gateway = github_gateway(upstream, github_oauth_rules).await;
+        let response = reqwest::Client::new()
+            .get(format!("http://{gateway}/repos/acme/api/hooks"))
+            .send()
+            .await
+            .expect("gateway responded");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(response.headers().get("x-should-retry").is_none());
+        assert_eq!(response.text().await.expect("body"), body);
+    }
+
+    /// A 403 larger than the classification window is read only up to the
+    /// window, then streamed on: the client still gets every byte.
+    #[tokio::test]
+    async fn large_github_403_is_forwarded_intact() {
+        pin_test_header_timeout();
+        static BIG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let body: &'static str = BIG.get_or_init(|| {
+            format!(
+                r#"{{"message":"Forbidden","padding":"{}"}}"#,
+                "x".repeat(3 * super::super::github_org_access::BODY_LIMIT)
+            )
+        });
+        let upstream = github_upstream(403, "", body.as_bytes());
+        let gateway = github_gateway(upstream, github_oauth_rules).await;
+        let response = reqwest::Client::new()
+            .get(format!("http://{gateway}/repos/acme/api"))
+            .send()
+            .await
+            .expect("gateway responded");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.text().await.expect("body"), body);
+    }
+
+    /// Without the GitHub OAuth connection injecting (a GitHub App, a secret),
+    /// the SSO 403 is GitHub's to answer.
+    #[tokio::test]
+    async fn github_app_connection_403_is_not_rewritten() {
+        pin_test_header_timeout();
+        fn github_app_rules() -> ResolvedRules {
+            ResolvedRules {
+                winning_provider: Some("github-app".into()),
+                ..github_oauth_rules()
+            }
+        }
+        let body = r#"{"message":"Resource protected by organization SAML enforcement."}"#;
+        let upstream = github_upstream(
+            403,
+            "x-github-sso: required; url=https://github.com/orgs/acme/sso?x=1\r\n",
+            body,
+        );
+        let gateway = github_gateway(upstream, github_app_rules).await;
+        let response = reqwest::Client::new()
+            .get(format!("http://{gateway}/repos/acme/api"))
+            .send()
+            .await
+            .expect("gateway responded");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.text().await.expect("body"), body);
     }
 }

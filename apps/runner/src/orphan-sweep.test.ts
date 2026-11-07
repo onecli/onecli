@@ -30,12 +30,14 @@ const baseConfig: RunnerConfig = {
   token: "rnr_test",
   controlPlaneUrl: "http://localhost:10256",
   name: "test runner",
+  replicaName: "pod-test",
   backend: "fake",
   agentImage: "onecli-agent:test",
   sandboxNetwork: "onecli-sandboxes",
   networkInternal: true,
   wsPort: 8484,
   advertisedHost: "runner",
+  advertisedPort: 8484,
   maxSandboxes: 2,
   limits: { memoryMb: 1024, cpus: 1, pids: 256 },
   reconcileSeconds: 60,
@@ -43,12 +45,10 @@ const baseConfig: RunnerConfig = {
   sandboxExtraHosts: [],
   orphanReap: true,
   orphanGraceSeconds: 3600,
-  sandboxManagerUrl: null,
-  sandboxManagerToken: null,
-  cloudParkWaitSeconds: 120,
-  cloudWakeWaitSeconds: 900,
-  cloudImageWaitSeconds: 240,
+  sessionKey: null,
   lifecycleConcurrency: 1,
+  portApi: null,
+  noProxyLoopback: true,
 };
 
 const MY_RUNNER_ID = "r-1";
@@ -85,31 +85,41 @@ beforeEach(() => {
   checkError = undefined;
 
   controlPlane = {
-    register: async () => ({ runnerId: MY_RUNNER_ID }),
+    register: async () => ({ runnerId: MY_RUNNER_ID, replicaId: "copy-1" }),
     pollWork: async () => [],
     postEvents: async () => {},
     heartbeat: async () => {},
     listAssignedSandboxes: async () => ({ sandboxIds: [] }),
+    isReconciler: async () => true,
     checkSandboxIds: async (sandboxIds) => {
       if (checkError) throw checkError;
       checkCalls.push(sandboxIds);
       return sandboxIds.filter((id) => missingIds.includes(id));
     },
+    sandboxAllowedPorts: async () => [],
     toolCall: async () => ({ ok: true, result: null }),
     memoryWrite: async () => ({ ok: true }),
     uploadAttachment: async () => ({ ok: true, attachmentId: "att-fake" }),
     fetchAttachment: async () => Buffer.alloc(0),
+    recordSpawn: async () => true,
+    claimChannel: async () => null,
+    releaseChannel: async () => undefined,
+    claimStrayStop: async () => true,
+    retire: async () => {},
   };
 
   wsServer = {
-    issueToken: () => "boot-token",
-    revokeToken: () => {},
-    awaitingConnection: () => false,
+    resumable: true,
+    onDisconnect: () => {},
     connection: ():
       | { sandboxId: string; send(item: WorkItem): void }
       | undefined => undefined,
+    containerRefOf: () => undefined,
     listen: async () => {},
+    boundPort: () => 0,
+    drain: async () => {},
     close: async () => {},
+    crash: async () => {},
   };
 });
 

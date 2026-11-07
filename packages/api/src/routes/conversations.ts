@@ -13,6 +13,7 @@ import {
   createTurn,
   listTurns,
   readTranscript,
+  requestSendNow,
 } from "../services/turn-service";
 import { sendConversationMessage } from "../services/follow-up-service";
 import {
@@ -38,6 +39,7 @@ import {
   MAX_ATTACHMENT_BYTES,
   attachmentDownloadDisposition,
 } from "@onecli/agent-protocol";
+import { parseBody, parsed } from "../lib/request-body";
 
 /**
  * Conversations, turns, and the transcript (step 4; per-user direct threads
@@ -48,30 +50,6 @@ import {
  * these columns. No `withAudit` either — it flushes that cache unconditionally,
  * which is exactly the flush we do not want.
  */
-
-const parseBody = async (raw: Request) =>
-  await raw
-    .clone()
-    .json()
-    .catch(() => null);
-
-/** Validation failures throw so they render as the standard error envelope. */
-const parsed = <T>(
-  result: {
-    success: boolean;
-    data?: T;
-    error?: { issues: { message?: string }[] };
-  },
-  fallback: string,
-): T => {
-  if (!result.success || result.data === undefined) {
-    throw new ServiceError(
-      "UNPROCESSABLE",
-      result.error?.issues[0]?.message ?? fallback,
-    );
-  }
-  return result.data;
-};
 
 export const conversationRoutes = () => {
   const app = new Hono<ApiEnv>();
@@ -369,6 +347,18 @@ export const turnRoutes = () => {
     const workspaceId = requireWorkspaceId(auth);
     return c.json(
       await abortTurn(workspaceId, c.req.param("turnId"), auth.userId),
+    );
+  });
+
+  // POST /turns/:id/send-now: read this waiting mid-run follow-up now. A
+  // request the sandbox acts on, so 202: the outcome
+  // arrives on the conversation's stream as `message.sent_now`.
+  app.post("/:turnId/send-now", async (c) => {
+    const auth = c.get("auth");
+    const workspaceId = requireWorkspaceId(auth);
+    return c.json(
+      await requestSendNow(workspaceId, c.req.param("turnId"), auth.userId),
+      202,
     );
   });
 

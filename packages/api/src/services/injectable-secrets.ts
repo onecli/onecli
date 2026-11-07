@@ -63,14 +63,24 @@ export const injectableSecretWhere = async (
 };
 
 /**
- * Which secret wins when several of a type are reachable. The gateway merges
- * org → workspace with later injections overriding earlier (`connect.rs`), so
- * the WORKSPACE one is what actually gets injected. Descending `scope` orders
- * "workspace" > "organization", reproducing that — an unordered `findFirst`
- * returns whichever row Postgres reaches first, which can hand the container
- * an org secret's auth mode while the gateway injects the workspace's.
+ * Which secret wins when several of a type are reachable. The gateway keeps
+ * ONE credential per LLM provider type, workspace over organization
+ * (`one_credential_per_llm_provider` in `secret_inject.rs`), so the WORKSPACE
+ * one is what actually gets injected. Descending `scope` orders "workspace" >
+ * "organization", reproducing that; an unordered `findFirst` returns whichever
+ * row Postgres reaches first, which can hand the container an org secret's
+ * auth mode while the gateway injects the workspace's.
+ *
+ * The order must be TOTAL, because two keys of one type at the same scope
+ * are a real state: the id breaks the tie exactly as the gateway's
+ * `llm_rank` does, so the auth mode the container is told and the key the
+ * gateway injects are the same key's. Ids are lowercase UUIDs, so byte
+ * order and the database collation agree.
  */
-const SCOPE_PRECEDENCE = { scope: "desc" } as const;
+const SCOPE_PRECEDENCE: Prisma.SecretOrderByWithRelationInput[] = [
+  { scope: "desc" },
+  { id: "asc" },
+];
 
 /** Pick the secret of `type` this agent would actually be handed: the injectable
  * set, narrowed to the type, resolved in the gateway's precedence order. Both

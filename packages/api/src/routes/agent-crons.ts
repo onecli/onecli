@@ -10,7 +10,12 @@ import {
   updateCron,
 } from "../services/agent-cron-service";
 import { ensureDirectConversation } from "../services/conversation-service";
-import { createCronSchema, updateCronSchema } from "../validations/crons";
+import {
+  createCronSchema,
+  parseCronWordsSchema,
+  updateCronSchema,
+} from "../validations/crons";
+import { parseScheduleWords } from "../services/schedule-parse-service";
 import {
   AUDIT_ACTIONS,
   AUDIT_SERVICES,
@@ -98,7 +103,10 @@ export const agentCronRoutes = () => {
         body.error.issues[0]?.message ?? "Invalid body",
       );
     }
-    const cron = await updateCron(workspaceId, agentId, cronId, body.data);
+    const cron = await updateCron(workspaceId, agentId, cronId, body.data, {
+      userId: a.userId,
+      organizationId: a.organizationId,
+    });
     await recordAuditEvent({
       workspaceId,
       userId: a.userId,
@@ -111,6 +119,25 @@ export const agentCronRoutes = () => {
     return c.json(cron);
   });
 
+  // POST /agents/:agentId/crons/parse — the dialog's fallback for "When"
+  // words its own rules did not understand. Reads only; saves nothing.
+  app.post("/:agentId/crons/parse", async (c) => {
+    const a = c.get("auth");
+    const workspaceId = requireWorkspaceId(a);
+    const body = parseCronWordsSchema.safeParse(await parseBody(c.req.raw));
+    if (!body.success) {
+      throw new ServiceError("BAD_REQUEST", "Send the words and a timezone");
+    }
+    return c.json(
+      await parseScheduleWords(
+        workspaceId,
+        a.organizationId,
+        c.req.param("agentId"),
+        body.data,
+      ),
+    );
+  });
+
   // POST /agents/:agentId/crons/:cronId/run — force-fire by pulling
   // nextFireAt to now; the normal poll does the rest, so a forced run
   // exercises exactly the machinery a scheduled one does.
@@ -119,7 +146,10 @@ export const agentCronRoutes = () => {
     const workspaceId = requireWorkspaceId(a);
     const agentId = c.req.param("agentId");
     const cronId = c.req.param("cronId");
-    const cron = await runCronNow(workspaceId, agentId, cronId);
+    const cron = await runCronNow(workspaceId, agentId, cronId, {
+      userId: a.userId,
+      organizationId: a.organizationId,
+    });
     await recordAuditEvent({
       workspaceId,
       userId: a.userId,

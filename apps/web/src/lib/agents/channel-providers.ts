@@ -26,6 +26,10 @@ export interface ChannelProviderDisplay {
   name: string;
   /** The brand mark as served from /public. */
   iconSrc: string;
+  /** Where one of the provider's channels opens, from its id and the
+   * provider tenant it lives in. Optional: a provider without a deep link
+   * simply shows none. */
+  channelUrl?: (channelRef: string, tenantId: string) => string;
 }
 
 /** Props the section hands the ATTACHED face. */
@@ -48,17 +52,28 @@ export interface AttachCardProps {
   removed: boolean;
   identityName: string | null;
   /**
-   * The removed presence's provider-side app id, so a re-attach face can
-   * point at THAT app instead of walking the first-time setup again. Null
-   * unless `removed`.
+   * The provider-side app id of the presence a re-attach would resume (a
+   * detached or half-finished setup, or an app removed on the provider's
+   * side), so the attach face can point at THAT app instead of walking the
+   * first-time setup again. Null unless `resuming`.
    */
-  removedAppId: string | null;
+  resumeAppId: string | null;
+  /**
+   * The resumable presence was installed by consent and waits only for its
+   * transport credential (the provider's own paste, e.g. Slack's app-level
+   * token). The server decides this from credentials the browser never sees.
+   */
+  awaitingTransportCredential: boolean;
 }
 
 export interface ChannelProviderUi extends ChannelProviderDisplay {
   id: string;
   PresenceCard: ComponentType<PresenceCardProps>;
   AttachCard: ComponentType<AttachCardProps>;
+  /** Optional: a pointer under a connected presence to where people's own
+   * accounts are managed (Contacts, "acts as you"; licensed). Rendered only
+   * when the instance is entitled. */
+  ReadAccessCard?: ComponentType<{ agentId: string; agentName: string }>;
 }
 
 /**

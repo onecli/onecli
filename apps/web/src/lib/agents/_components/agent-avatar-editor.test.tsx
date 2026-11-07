@@ -23,15 +23,15 @@ vi.mock("@/hooks/use-agents", () => ({
 const { AgentAvatarEditor } = await import("./agent-avatar-editor");
 
 const IMG = "https://api.example.com/v1/agent-images/ag1/aaa";
+// As the server projects it: already scrolled to where the icon is set.
+const SETTINGS = "https://api.slack.com/apps/A1/general#display";
 const agent = (
   over?: Partial<Parameters<typeof AgentAvatarEditor>[0]["agent"]>,
 ) => ({
   id: "ag1",
   name: "Deploy Agent",
   imageUrl: IMG,
-  channels: [
-    { provider: "slack", settingsUrl: "https://api.slack.com/apps/A1/general" },
-  ],
+  channels: [{ provider: "slack", settingsUrl: SETTINGS }],
   ...over,
 });
 
@@ -50,7 +50,7 @@ describe("AgentAvatarEditor", () => {
   });
 
   it("offers the provider settings deep link ONLY when a channel serves one", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<AgentAvatarEditor agent={agent()} />);
     await user.click(
       screen.getByRole("button", { name: "Change agent image" }),
@@ -58,14 +58,37 @@ describe("AgentAvatarEditor", () => {
     const link = await screen.findByRole("menuitem", {
       name: /Set as Slack app icon/,
     });
-    expect(link).toHaveAttribute(
-      "href",
-      "https://api.slack.com/apps/A1/general",
+    // The server's URL, verbatim: no provider-specific rewriting here.
+    expect(link).toHaveAttribute("href", SETTINGS);
+  });
+
+  it("orders the menu: replace, then the app icon, then remove last", async () => {
+    const user = userEvent.setup({ delay: null });
+    render(<AgentAvatarEditor agent={agent()} />);
+    await user.click(
+      screen.getByRole("button", { name: "Change agent image" }),
     );
+    await screen.findByRole("menuitem", { name: /Replace image/ });
+    expect(
+      screen.getAllByRole("menuitem").map((item) => item.textContent?.trim()),
+    ).toEqual(["Replace image", "Set as Slack app icon…", "Remove image"]);
+  });
+
+  it("still opens the menu with no image when a channel serves an icon link", async () => {
+    const user = userEvent.setup({ delay: null });
+    render(<AgentAvatarEditor agent={agent({ imageUrl: null })} />);
+    await user.click(
+      screen.getByRole("button", { name: "Change agent image" }),
+    );
+    await screen.findByRole("menuitem", { name: /Upload image/ });
+    expect(
+      screen.getByRole("menuitem", { name: /Set as Slack app icon/ }),
+    ).toBeDefined();
+    expect(screen.queryByRole("menuitem", { name: /Remove image/ })).toBeNull();
   });
 
   it("renders NO settings item for a channel without a settingsUrl", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(
       <AgentAvatarEditor
         agent={agent({ channels: [{ provider: "slack" }] })}
@@ -79,7 +102,7 @@ describe("AgentAvatarEditor", () => {
   });
 
   it("removes through the mutation with file: null", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<AgentAvatarEditor agent={agent()} />);
     await user.click(
       screen.getByRole("button", { name: "Change agent image" }),

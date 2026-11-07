@@ -108,6 +108,18 @@ describe("SecretGrantRow", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows the Org badge on an organization key, spelled out on the agent page and short as a chooser tile", () => {
+    const { unmount } = renderRow({
+      secret: makeSecret({ scope: "organization" }),
+    });
+    expect(screen.getByText("Organization")).toBeInTheDocument();
+    unmount();
+
+    renderRow({ secret: makeSecret({ scope: "organization" }), compact: true });
+    expect(screen.getByText("Org")).toBeInTheDocument();
+    expect(screen.queryByText("Organization")).toBeNull();
+  });
+
   it("attaches on toggle-on and detaches on toggle-off", async () => {
     const { unmount } = renderRow();
     await userEvent.click(

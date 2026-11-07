@@ -8,7 +8,10 @@ import {
 
 export const googleSheets: AppDefinition = {
   id: "google-sheets",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/google-sheets",
   name: "Google Sheets",
+  apiDocsUrl:
+    "https://developers.google.com/workspace/sheets/api/reference/rest",
   icon: "/icons/google-sheets.svg",
   description: "Read, create, and edit spreadsheets.",
   connectionMethod: {
@@ -51,6 +54,7 @@ export const googleSheets: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
     envDefaults: googleEnvDefaults,
   },
 };

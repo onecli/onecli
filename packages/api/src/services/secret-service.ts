@@ -2,7 +2,6 @@ import { db, Prisma } from "@onecli/db";
 import { getCrypto } from "../providers";
 import { ServiceError } from "./errors";
 import { attachLlmKeyToKeylessAgents } from "./llm-autoattach-service";
-import { attachNewSecretToAllAgents } from "./workspace-autoattach-service";
 import { isLlmProviderId } from "../llm/registry";
 import type { ResourceScope } from "./resource-scope";
 import { scopeWhere, scopeCreate, scopeOwnership } from "./resource-scope";
@@ -34,10 +33,13 @@ const normalizeOpenaiValue = (
   return { value, hostPattern };
 };
 
+// Provider names, not credential kinds: an `anthropic` secret is a Console
+// API key OR a Claude subscription token (metadata.authMode tells which), the
+// same way an `openai` secret is an API key or Codex OAuth.
 const SECRET_TYPE_LABELS: Record<string, string> = {
-  anthropic: "Anthropic API Key",
+  anthropic: "Anthropic",
   openai: "OpenAI",
-  generic: "Generic Secret",
+  generic: "Custom",
 };
 
 const buildPreview = (plaintext: string): string => {
@@ -141,6 +143,28 @@ const LAST_ERROR_WINDOW_DAYS = 7;
  * key's. */
 const KEY_PROBLEM_STATUSES = new Set([401, 402, 403, 429]);
 
+/** The calls whose status speaks for the KEY: inference and the model list.
+ * Agent runtimes also poll side endpoints with the same key (Claude Code
+ * calls Anthropic's `/api/oauth/usage` at every boot), and providers refuse
+ * those with 403/429 for perfectly good keys, so they must never brand one.
+ * Path prefixes, so query strings and sub-paths (`/v1/messages/count_tokens`)
+ * still count. `/backend-api/codex/` is the inference path of an OAuth-mode
+ * OpenAI key (Codex signed in with ChatGPT, stored under `chatgpt.com`). */
+const KEY_HEALTH_PATH_PREFIXES = [
+  "/v1/messages",
+  "/v1/models",
+  "/v1/chat/completions",
+  "/v1/responses",
+  "/v1/completions",
+  "/v1/embeddings",
+  "/backend-api/codex/",
+] as const;
+const keyHealthPathWhere = {
+  OR: KEY_HEALTH_PATH_PREFIXES.map((prefix) => ({
+    path: { startsWith: prefix },
+  })),
+};
+
 export const listSecrets = async (scope: ResourceScope) => {
   const secrets = await db.secret.findMany({
     where: scopeWhere(scope),
@@ -156,6 +180,7 @@ export const listSecrets = async (scope: ResourceScope) => {
       metadata: true,
       scope: true,
       createdAt: true,
+      updatedAt: true,
     },
     orderBy: { createdAt: "desc" },
   });
@@ -212,14 +237,15 @@ export const listSecrets = async (scope: ResourceScope) => {
           ],
         };
         // Health is decoration on the list — a failed probe degrades to "no
-        // badge" for its host, never to a failed GET /v1/secrets.
+        // badge" for its host, never to a failed GET /v1/secrets. Only calls
+        // whose answer is about the key count (see KEY_HEALTH_PATH_PREFIXES).
         const latest = await db.requestLog
           .findFirst({
             where: {
               workspaceId,
               injectionCount: { gt: 0 },
               createdAt: { gte: healthWindowStart },
-              ...hostWhere,
+              AND: [hostWhere, keyHealthPathWhere],
             },
             orderBy: { createdAt: "desc" },
             select: { status: true, createdAt: true },
@@ -235,26 +261,35 @@ export const listSecrets = async (scope: ResourceScope) => {
     );
   }
 
-  return secrets.map((s) => ({
-    ...s,
-    typeLabel: SECRET_TYPE_LABELS[s.type] ?? s.type,
+  return secrets.map((s) => {
     // LLM keys only, per the published contract — a generic secret that
     // happens to share an LLM host must not inherit that traffic's badge.
-    lastError:
+    const hostError =
       s.type !== "generic"
         ? (lastErrorByHost.get(s.hostPattern) ?? null)
-        : null,
-  }));
+        : null;
+    // Health is per HOST, so a failure logged before the key's last write
+    // (creation, a new value, or any other edit) may belong to whatever key
+    // served the host before: a fresh or rotated key starts clean instead of
+    // inheriting its predecessor's "Key rejected". A real failure of THIS key
+    // re-brands it on its next call.
+    return {
+      ...s,
+      typeLabel: SECRET_TYPE_LABELS[s.type] ?? s.type,
+      lastError: hostError && hostError.at >= s.updatedAt ? hostError : null,
+    };
+  });
 };
 
 /**
- * Hand a newly created WORKSPACE secret to the workspace's agents, applied to
- * BOTH creation arms (inline and 1Password):
- *  - a CUSTOM (generic) secret goes to every agent, so it works right away
- *    (`workspace-autoattach-service`);
- *  - an LLM key goes only to the agents that can reach no key at all
- *    (`llm-autoattach-service`). A second key would re-point an agent's
- *    provider, drop its chosen model, and respawn its sandbox.
+ * Hand a newly created WORKSPACE LLM key to the agents that can reach no key
+ * at all (`llm-autoattach-service`), applied to BOTH creation arms (inline
+ * and 1Password). A second key would re-point an agent's provider, drop its
+ * chosen model, and respawn its sandbox, so an agent that has one is skipped.
+ *
+ * A CUSTOM (generic) secret is granted to no agent: the user picks who gets
+ * it (the workspace's "choose agents" window, or the agent page that created
+ * it, which attaches it to that agent explicitly).
  *
  * Workspace scope only. An ORG-level secret is reachable by every workspace in
  * the org, and quietly granting it across all of them is a widening nobody
@@ -263,33 +298,24 @@ export const listSecrets = async (scope: ResourceScope) => {
  * Best-effort by contract: the secret is already created, and a convenience
  * grant must never turn that into a failed request.
  */
-const attachNewSecret = async (
+const attachNewLlmKey = async (
   scope: ResourceScope,
   secret: { id: string; type: string },
   userId: string | null,
 ): Promise<string[]> => {
-  if (!scope.workspaceId) return [];
-  if (isLlmProviderId(secret.type)) {
-    const { agentIds } = await attachLlmKeyToKeylessAgents(
-      scope.workspaceId,
-      secret.id,
-      userId,
-    ).catch(() => ({ agentIds: [] as string[] }));
-    return agentIds;
-  }
-  // Never throws (it logs and returns nothing instead).
-  const written = await attachNewSecretToAllAgents(
+  if (!scope.workspaceId || !isLlmProviderId(secret.type)) return [];
+  const { agentIds } = await attachLlmKeyToKeylessAgents(
     scope.workspaceId,
     secret.id,
     userId,
-  );
-  return written.secrets.map((s) => s.agentId);
+  ).catch(() => ({ agentIds: [] as string[] }));
+  return agentIds;
 };
 
 export const createSecret = async (
   scope: ResourceScope,
   input: CreateSecretInput,
-  /** Who to record as the grantor of any auto-attached grant. */
+  /** Who to record as the grantor of an auto-attached LLM key grant. */
   userId: string | null = null,
 ) => {
   const name = input.name.trim();
@@ -374,7 +400,7 @@ export const createSecret = async (
 
     return {
       ...opSecret,
-      attachedAgents: await attachNewSecret(scope, opSecret, userId),
+      attachedAgents: await attachNewLlmKey(scope, opSecret, userId),
     };
   }
 
@@ -415,7 +441,7 @@ export const createSecret = async (
   return {
     ...secret,
     preview: buildPreview(value),
-    attachedAgents: await attachNewSecret(scope, secret, userId),
+    attachedAgents: await attachNewLlmKey(scope, secret, userId),
   };
 };
 

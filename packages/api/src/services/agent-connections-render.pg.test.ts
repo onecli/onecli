@@ -33,6 +33,7 @@ const FOREIGN = `${P}conn-foreign`;
 const OTHER_ORG = `${P}other-org`;
 const ORG_CONN = `${P}conn-org`;
 const FOREIGN_ORG_CONN = `${P}conn-foreign-org`;
+const PG = `${P}conn-pg`;
 const SCOPE = { workspaceId: WORKSPACE, organizationId: ORG };
 
 const reset = async () => {
@@ -45,6 +46,7 @@ const reset = async () => {
     },
   });
   await db.appConnection.deleteMany({ where: { id: { startsWith: P } } });
+  await db.secret.deleteMany({ where: { id: { startsWith: P } } });
   await db.agent.deleteMany({ where: { id: { startsWith: P } } });
   await db.workspace.deleteMany({ where: { id: { startsWith: P } } });
   await db.organization.deleteMany({ where: { id: { startsWith: P } } });
@@ -98,6 +100,7 @@ beforeAll(async () => {
   });
   await conn(GMAIL, { provider: "gmail", label: "j@example.com" });
   await conn(UNGRANTED, { provider: "dropbox", label: "nobody" });
+  await conn(PG, { provider: "postgres", label: "orders-db" });
   await conn(FOREIGN, {
     provider: "salesforce",
     label: "foreign",
@@ -117,6 +120,31 @@ beforeEach(async () => {
   providers.initRuleActionGate({ assertAllowed: async () => {} });
   providers.initPolicyValidator({ validate: async () => {} });
 });
+
+/** A published allow rule naming AGENT, written straight to the table so
+ * the test can plant targets the grant API would refuse. */
+const plantRule = (
+  base: { workspaceId: string } | { organizationId: string },
+  target: Record<string, unknown>,
+) =>
+  db.policyRuleV2.create({
+    data: {
+      ...("workspaceId" in base
+        ? { scope: "workspace", workspaceId: base.workspaceId }
+        : { scope: "organization", organizationId: base.organizationId }),
+      status: "published",
+      generation: 999,
+      priority: 1,
+      isDefault: false,
+      enabled: true,
+      source: "custom",
+      logicalId: `${P}${Math.random()}`,
+      name: "planted",
+      action: "allow",
+      identities: { create: [{ agent: { connect: { id: AGENT } } }] },
+      targets: { create: [target as never] },
+    } as never,
+  });
 
 describe.skipIf(!PROOF_URL)("connectionsForRender over real PostgreSQL", () => {
   it("lists only granted connections, with the bound host for host-bound apps", async () => {
@@ -139,7 +167,8 @@ describe.skipIf(!PROOF_URL)("connectionsForRender over real PostgreSQL", () => {
     );
 
     const list = await render.connectionsForRender(AGENT);
-    expect(list).toEqual([
+    // The injection-law fields exactly; the catalog facts ride alongside.
+    expect(list).toMatchObject([
       { provider: "gmail", name: "Gmail", label: "j@example.com", host: null },
       {
         provider: "salesforce",
@@ -154,8 +183,33 @@ describe.skipIf(!PROOF_URL)("connectionsForRender over real PostgreSQL", () => {
         host: "acme-prod.snowflakecomputing.com",
       },
     ]);
+    expect(list).toHaveLength(3);
+    // Catalog facts: a fixed-host app gets its API host and docs; a
+    // tenant-only app gets none (its bound host above is the answer).
+    expect(list[0]).toMatchObject({
+      apiHosts: ["gmail.googleapis.com"],
+      docsUrl:
+        "https://developers.google.com/workspace/gmail/api/reference/rest",
+    });
+    expect(list[1]?.apiHosts).toEqual([]);
     // Another agent in the same workspace holds no grant — sees nothing.
     expect(await render.connectionsForRender(OTHER_AGENT)).toEqual([]);
+  });
+
+  it("names a database by connection id for the front door, with no HTTP facts", async () => {
+    await grants.setConnectionGrant(SCOPE, AGENT, PG, { access: "full" }, null);
+    const database = (await render.connectionsForRender(AGENT)).find(
+      (c) => c.provider === "postgres",
+    );
+    expect(database).toMatchObject({
+      name: "PostgreSQL",
+      label: "orders-db",
+      host: null,
+      apiHosts: [],
+      endpoints: [],
+      database: { engine: "postgres", connectionId: PG },
+    });
+    await grants.removeConnectionGrant(SCOPE, AGENT, PG, null);
   });
 
   it("drops a connection once its grant is removed", async () => {
@@ -163,31 +217,6 @@ describe.skipIf(!PROOF_URL)("connectionsForRender over real PostgreSQL", () => {
     const list = await render.connectionsForRender(AGENT);
     expect(list.map((c) => c.provider)).toEqual(["salesforce", "snowflake"]);
   });
-
-  /** A published allow rule naming AGENT, written straight to the table so
-   * the test can plant targets the grant API would refuse. */
-  const plantRule = (
-    base: { workspaceId: string } | { organizationId: string },
-    target: Record<string, unknown>,
-  ) =>
-    db.policyRuleV2.create({
-      data: {
-        ...("workspaceId" in base
-          ? { scope: "workspace", workspaceId: base.workspaceId }
-          : { scope: "organization", organizationId: base.organizationId }),
-        status: "published",
-        generation: 999,
-        priority: 1,
-        isDefault: false,
-        enabled: true,
-        source: "custom",
-        logicalId: `${P}${Math.random()}`,
-        name: "planted",
-        action: "allow",
-        identities: { create: [{ agent: { connect: { id: AGENT } } }] },
-        targets: { create: [target as never] },
-      } as never,
-    });
 
   it("never lists another workspace's connection, even when a rule names its id", async () => {
     // MUTATION-PROOF: drop the workspace/org fence from the pool query and
@@ -239,3 +268,112 @@ describe.skipIf(!PROOF_URL)("connectionsForRender over real PostgreSQL", () => {
     expect(labels).not.toContain("foreign-org-github");
   });
 });
+
+describe.skipIf(!PROOF_URL)(
+  "customConnectionsForRender over real PostgreSQL",
+  () => {
+    const KEY_A = `${P}sec-a`;
+    const KEY_B = `${P}sec-b`;
+    const LLM = `${P}sec-llm`;
+    const FOREIGN_SEC = `${P}sec-foreign`;
+
+    it("lists granted custom secrets with host and path, never values", async () => {
+      const secret = (id: string, over: Record<string, unknown>) =>
+        db.secret.create({
+          data: {
+            id,
+            name: id,
+            scope: "workspace",
+            workspaceId: WORKSPACE,
+            type: "generic",
+            valueSource: "inline",
+            encryptedValue: "SECRET-CIPHERTEXT",
+            hostPattern: "api.example.com",
+            injectionConfig: { headerName: "x-api-key" },
+            metadata: { note: "SECRET-METADATA" },
+            ...over,
+          } as never,
+        });
+      await secret(KEY_A, { name: "Staging\u0007 key" });
+      await secret(KEY_B, { name: "Prod key", pathPattern: "/v2/*" });
+      await secret(LLM, {
+        type: "anthropic",
+        hostPattern: "api.anthropic.com",
+      });
+      await secret(FOREIGN_SEC, { workspaceId: OTHER_WORKSPACE });
+
+      expect(await render.customConnectionsForRender(AGENT)).toEqual([]);
+      for (const id of [KEY_A, KEY_B, LLM]) {
+        await grants.setSecretGrant(SCOPE, AGENT, id, null);
+      }
+
+      const list = await render.customConnectionsForRender(AGENT);
+      expect(list).toEqual([
+        { id: KEY_A, name: "Staging key", host: "api.example.com" },
+        { id: KEY_B, name: "Prod key", host: "api.example.com", path: "/v2/*" },
+      ]);
+      const wire = JSON.stringify(list);
+      expect(wire).not.toContain("SECRET-CIPHERTEXT");
+      expect(wire).not.toContain("SECRET-METADATA");
+      // The ungranted agent and the foreign workspace's secret stay invisible.
+      expect(await render.customConnectionsForRender(OTHER_AGENT)).toEqual([]);
+    });
+
+    it("a workspace-level grant lists own-scope secrets, never a foreign org's", async () => {
+      const ORG_SEC = `${P}sec-org`;
+      const FOREIGN_ORG_SEC = `${P}sec-foreign-org`;
+      await db.organization.upsert({
+        where: { id: OTHER_ORG },
+        create: { id: OTHER_ORG, name: OTHER_ORG, slug: OTHER_ORG },
+        update: {},
+      });
+      const base = {
+        type: "generic",
+        valueSource: "inline",
+        encryptedValue: "SECRET-CIPHERTEXT",
+        hostPattern: "api.example.com",
+        injectionConfig: { headerName: "x-api-key" },
+      };
+      await db.secret.create({
+        data: {
+          ...base,
+          id: ORG_SEC,
+          name: "\u202eOrg key",
+          scope: "organization",
+          organizationId: ORG,
+        } as never,
+      });
+      await db.secret.create({
+        data: {
+          ...base,
+          id: FOREIGN_ORG_SEC,
+          name: "Foreign org key",
+          scope: "organization",
+          organizationId: OTHER_ORG,
+        } as never,
+      });
+      // Level grants (secret_scopes): every workspace secret and every org
+      // secret, but only in THIS agent's workspace/org pool.
+      await plantRule(
+        { workspaceId: WORKSPACE },
+        { kind: "secret", secretScope: "workspace" },
+      );
+      await plantRule(
+        { organizationId: ORG },
+        { kind: "secret", secretScope: "organization" },
+      );
+
+      const ids = (await render.customConnectionsForRender(AGENT)).map(
+        (c) => c.id,
+      );
+      expect(ids).toContain(ORG_SEC);
+      expect(ids).toContain(KEY_A);
+      expect(ids).not.toContain(FOREIGN_ORG_SEC);
+      expect(ids).not.toContain(FOREIGN_SEC);
+      const org = (await render.customConnectionsForRender(AGENT)).find(
+        (c) => c.id === ORG_SEC,
+      );
+      expect(org?.name).toBe("Org key");
+    });
+  },
+);

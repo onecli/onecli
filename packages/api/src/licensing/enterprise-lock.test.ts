@@ -43,6 +43,17 @@ vi.mock("@onecli/db", () => ({
     // provisionUser's licensed arm sweeps expired provisions before the seat
     // cap; empty keeps the sweep a clean no-op (its failures print).
     userProvision: { findMany: async () => [] },
+    // The send-as-you probe: an active presence and no grants, so a licensed
+    // send stops at "you may not send" (never Slack), unlicensed at the gate.
+    agentChannel: {
+      findFirst: async () => ({
+        id: "pres-1",
+        identityRef: null,
+        credentials: null,
+        agent: { name: "a", workspace: { organizationId: "org-1" } },
+      }),
+    },
+    agentReadGrant: { findMany: async () => [] },
     organizationScimToken: {
       findUnique: async () => ({
         id: "tok-1",
@@ -58,6 +69,7 @@ vi.mock("@onecli/db", () => ({
 import {
   ENTERPRISE_FEATURES,
   initEntitlementForTests,
+  isEntitled,
   type EnterpriseFeature,
 } from "../lib/entitlements";
 import { EDITION_INFO } from "../lib/env";
@@ -71,6 +83,11 @@ import { orgMemberRoutes } from "../ee/routes/org-members";
 import { orgGroupRoutes } from "../ee/routes/org-groups";
 import { orgRoleMappingRoutes } from "../ee/routes/org-role-mappings";
 import { dropboxFolderRoutes } from "../ee/routes/dropbox-folders";
+import { googleDriveFolderRoutes } from "../ee/routes/google-drive-folders";
+import {
+  slackReadOverviewRoutes,
+  slackReadRoutes,
+} from "../ee/slack-read/routes";
 import { teamRoutes } from "../ee/routes/team";
 import { provisionClaimRoutes } from "../ee/routes/provision-claim";
 import { workspaceAccessRoutes } from "../ee/routes/workspace-access";
@@ -93,6 +110,12 @@ import {
 } from "../ee/services/team-service";
 import { getRuleActionGate } from "../providers/hooks/rule-action-gate";
 import { getPolicyValidator } from "../providers/hooks/policy-validator";
+import {
+  canSendAsUser,
+  deleteAsUser,
+  editAsUser,
+  sendAsUser,
+} from "../ee/slack-read/service";
 import { initSession } from "../providers";
 
 // Licensed route probes proceed past the gate into real session auth. A
@@ -209,6 +232,21 @@ const PROBES: Probe[] = [
     run: probeRoute(dropboxFolderRoutes, "/folders"),
   },
   {
+    feature: "granular_access",
+    name: "google drive folders router",
+    run: probeRoute(googleDriveFolderRoutes, "/folders"),
+  },
+  {
+    feature: "granular_access",
+    name: "connect-your-Slack read grants router",
+    run: probeRoute(slackReadRoutes, "/a-1/slack-read/grants"),
+  },
+  {
+    feature: "granular_access",
+    name: "connect-your-Slack agent finder router",
+    run: probeRoute(slackReadOverviewRoutes, "/agents"),
+  },
+  {
     feature: "provisioning",
     name: "team provisioning router",
     run: probeRoute(teamRoutes, "/provisions"),
@@ -267,6 +305,62 @@ const PROBES: Probe[] = [
     name: "assertCanUseGranularAccess",
     run: probeService("granular_access", () =>
       assertCanUseGranularAccess("org-1"),
+    ),
+  },
+  {
+    feature: "granular_access",
+    name: "send_as_me (act as you in Slack) refuses at the service",
+    run: probeService("granular_access", () =>
+      sendAsUser({
+        agentId: "a-1",
+        readerUserId: "user-1",
+        conversation: "#general",
+        text: "hi",
+        originConversationId: null,
+        originTurnId: null,
+      }),
+    ),
+  },
+  {
+    feature: "granular_access",
+    // send_message "ask" offers "Send as me" only where this says yes, so
+    // unlicensed never sees the choice card (it sends as the agent).
+    // canSendAsUser folds every failure to false (on the cloud lane the plan
+    // read also fails against this stubbed db), so only the unlicensed arm
+    // is asserted here; the gate it runs has its own probe above.
+    name: "send_message sender choice: unlicensed never offers Send as me",
+    run: async () => {
+      const offered = await canSendAsUser("a-1");
+      return { refused: isEntitled() ? false : !offered, status: 0 };
+    },
+  },
+  {
+    feature: "granular_access",
+    name: "edit_my_message (act as you in Slack) refuses at the service",
+    run: probeService("granular_access", () =>
+      editAsUser({
+        agentId: "a-1",
+        readerUserId: "user-1",
+        conversation: "#general",
+        messageId: "1700000000.000100",
+        text: "hi",
+        originConversationId: null,
+        originTurnId: null,
+      }),
+    ),
+  },
+  {
+    feature: "granular_access",
+    name: "delete_my_message (act as you in Slack) refuses at the service",
+    run: probeService("granular_access", () =>
+      deleteAsUser({
+        agentId: "a-1",
+        readerUserId: "user-1",
+        conversation: "#general",
+        messageId: "1700000000.000100",
+        originConversationId: null,
+        originTurnId: null,
+      }),
     ),
   },
   {

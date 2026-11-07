@@ -63,7 +63,7 @@ const ReviewerLoginPage = () => {
         );
         const data = (await res.json()) as { workspaceId?: string };
         router.replace(
-          data.workspaceId ? `/w/${data.workspaceId}/overview` : "/workspaces",
+          data.workspaceId ? `/w/${data.workspaceId}` : "/workspaces",
         );
       } else {
         setError("Session sync failed.");

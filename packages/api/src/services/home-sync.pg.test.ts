@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   MAX_SYNC_PART_BYTES,
-  MAX_SYNC_PARTS,
   isUnmodifiedProjection,
   runnerWorkItemSchema,
   syncFrameByteLength,
@@ -78,7 +77,6 @@ const resetAll = async () => {
   await db.skill.deleteMany({
     where: {
       OR: [
-        { workspaceId: { startsWith: P } },
         { organizationId: { startsWith: P } },
         { agent: { identifier: { startsWith: P } } },
       ],
@@ -406,7 +404,7 @@ describe.skipIf(!PROOF_URL)("the bumps", () => {
 
     await skillService.createSkill(
       WORKSPACE,
-      { name: "bumps", description: "d", content: "c" },
+      { name: "bumps", description: "d", content: "c", agentId: agent },
       CREATOR,
     );
     expect(await desired()).toBe(2);
@@ -464,7 +462,7 @@ describe.skipIf(!PROOF_URL)("the composer", () => {
     expect(gw?.content).toBe(gatewaySkill.getGatewaySkill("fake"));
   });
 
-  it("shadows by specificity (agent > workspace > organization); disabled filtered BEFORE the merge", async () => {
+  it("shadows by specificity (agent > organization); disabled filtered BEFORE the merge", async () => {
     const agent = await seedAgent("composer-shadow");
     await db.skill.createMany({
       data: [
@@ -476,13 +474,6 @@ describe.skipIf(!PROOF_URL)("the composer", () => {
           content: "ORG BODY",
         },
         {
-          scope: "workspace",
-          workspaceId: WORKSPACE,
-          name: "deploy",
-          description: "workspace tier",
-          content: "WORKSPACE BODY",
-        },
-        {
           scope: "agent",
           agentId: agent,
           name: "deploy",
@@ -490,16 +481,32 @@ describe.skipIf(!PROOF_URL)("the composer", () => {
           content: "AGENT BODY",
           enabled: false,
         },
+        {
+          scope: "organization",
+          organizationId: ORG,
+          name: "review",
+          description: "org tier",
+          content: "ORG REVIEW",
+        },
+        {
+          scope: "agent",
+          agentId: agent,
+          name: "review",
+          description: "agent tier",
+          content: "AGENT REVIEW",
+        },
       ],
     });
     const files = await syncService.buildHomeFileSet(agent);
-    const skillMd = files.find(
-      (f) => f.path === ".agents/skills/deploy/SKILL.md",
-    );
+    const body = (name: string) =>
+      files.find((f) => f.path === `.agents/skills/${name}/SKILL.md`)?.content;
     // The DISABLED agent row leaves the projection — it never tombstones the
-    // broader tier: the workspace tier wins.
-    expect(skillMd?.content).toContain("WORKSPACE BODY");
-    expect(skillMd?.content).not.toContain("AGENT BODY");
+    // org tier: the org row wins.
+    expect(body("deploy")).toContain("ORG BODY");
+    expect(body("deploy")).not.toContain("AGENT BODY");
+    // An enabled agent row shadows the same-named org row.
+    expect(body("review")).toContain("AGENT REVIEW");
+    expect(body("review")).not.toContain("ORG REVIEW");
   });
 
   it("workspaces memories as files with the index derivation the turn context uses", async () => {
@@ -537,6 +544,7 @@ describe.skipIf(!PROOF_URL)("the composer", () => {
         name: "tricky",
         description: 'colon: and "quotes" and more: colons',
         content: "body",
+        agentId: agent,
       },
       CREATOR,
     );
@@ -547,12 +555,29 @@ describe.skipIf(!PROOF_URL)("the composer", () => {
     );
   });
 
+  it("a description stored before the doors cleaned it reaches the agent clean", async () => {
+    const agent = await seedAgent("composer-dirty");
+    // Written straight to the database, as rows from before the fix are.
+    await db.skill.create({
+      data: {
+        scope: "agent",
+        agentId: agent,
+        name: "legacy",
+        description: `Use${String.fromCharCode(0x07)} it${String.fromCharCode(0x202e)} for${String.fromCharCode(0x85)} notes`,
+        content: "body",
+      },
+    });
+    const files = await syncService.buildHomeFileSet(agent);
+    const md = files.find((f) => f.path === ".agents/skills/legacy/SKILL.md");
+    expect(md?.content).toContain("description: >-\n  Use it for notes\n");
+  });
+
   it("containment braces: a DB-planted traversal file skips its whole skill, the set survives", async () => {
     const agent = await seedAgent("composer-poison");
     const poisoned = await db.skill.create({
       data: {
-        scope: "workspace",
-        workspaceId: WORKSPACE,
+        scope: "agent",
+        agentId: agent,
         name: "poisoned",
         description: "d",
         content: "c",
@@ -567,6 +592,7 @@ describe.skipIf(!PROOF_URL)("the composer", () => {
         name: "healthy",
         description: "d",
         content: "c",
+        agentId: agent,
       },
       CREATOR,
     );
@@ -589,6 +615,7 @@ describe.skipIf(!PROOF_URL)("the composer", () => {
         description: "d",
         content: "c",
         files: [{ path: "references/api.md", content: "ref body" }],
+        agentId: agent,
       },
       CREATOR,
     );
@@ -603,8 +630,8 @@ describe.skipIf(!PROOF_URL)("the composer", () => {
     const agent = await seedAgent("composer-reserved");
     await db.skill.create({
       data: {
-        scope: "workspace",
-        workspaceId: WORKSPACE,
+        scope: "agent",
+        agentId: agent,
         name: "onecli-gateway",
         description: "squatter",
         content: "FAKE GATEWAY",
@@ -671,10 +698,16 @@ describe.skipIf(!PROOF_URL)("the composer", () => {
     // pins the sizing rule, not the current number.
     const agent = await seedAgent("composer-cjk");
     const sb = await seedSandbox("composer-cjk", agent);
-    // The workspace tier at its cap, each skill at MAX_SKILL_TOTAL_CHARS.
+    // Both tiers at their caps (10 agent + 20 org), each skill at
+    // MAX_SKILL_TOTAL_CHARS.
     await db.$executeRaw`
-      INSERT INTO "skills" ("id", "scope", "workspace_id", "name", "description", "content", "created_at", "updated_at")
-      SELECT ${P} || 'cjk-' || i, 'workspace', ${WORKSPACE}, 'cjk-' || i, 'd', repeat('世', 32000), now(), now()
+      INSERT INTO "skills" ("id", "scope", "agent_id", "name", "description", "content", "created_at", "updated_at")
+      SELECT ${P} || 'cjk-a-' || i, 'agent', ${agent}, 'cjk-a-' || i, 'd', repeat('世', 32000), now(), now()
+      FROM generate_series(1, 10) AS i
+    `;
+    await db.$executeRaw`
+      INSERT INTO "skills" ("id", "scope", "organization_id", "name", "description", "content", "created_at", "updated_at")
+      SELECT ${P} || 'cjk-o-' || i, 'organization', ${ORG}, 'cjk-o-' || i, 'd', repeat('世', 32000), now(), now()
       FROM generate_series(1, 20) AS i
     `;
     // The memory tier at its cap, each at MEMORY_CONTENT_MAX_LENGTH.
@@ -688,46 +721,143 @@ describe.skipIf(!PROOF_URL)("the composer", () => {
     if (!item || item.kind !== "skills.changed") throw new Error("refused");
     // Nothing dropped: every authored file made it into the manifest.
     expect(item.parts.at(-1)?.prune?.length).toBe(
-      // 20 skills + 100 memory files + memory/index.md + the gateway skill
-      20 + 100 + 1 + 1,
+      // 30 skills + 100 memory files + memory/index.md + the gateway skill
+      30 + 100 + 1 + 1,
     );
     expect(() => runnerWorkItemSchema.parse(item)).not.toThrow();
   });
 
-  it("past the part cap it TRUNCATES — never refuses — and prunes only to what shipped", async () => {
-    // Pathological authored content: bodies of control characters, which
-    // JSON escapes to six bytes apiece, so each skill nearly fills a whole
-    // 200KB frame. Refusing here would fail identically every 60s forever and
-    // leave the agent with NO projection at all; truncating converges.
-    const agent = await seedAgent("composer-cap");
-    const sb = await seedSandbox("composer-cap", agent);
-    // Raw inserts: the service caps (20 per tier) make this unreachable
-    // through any door — which is exactly why the branch is defensive.
+  it("the IMPORT budgets fit inside MAX_SYNC_PARTS beside a full memory tier", async () => {
+    // Both tiers at SKILL_TIER_BUDGETS (binary, the costliest encoding:
+    // base64 is 4/3) plus the memory tier at its cap in CJK: everything
+    // ships, nothing is left out. ~140 parts of skills and ~20 of memory
+    // leave the library budget (60 parts) room inside the cap.
+    const agent = await seedAgent("composer-import");
+    const sb = await seedSandbox("composer-import", agent);
+    const MB = 1024 * 1024;
+    const seedTier = async (
+      tier: "agent" | "organization",
+      owner: string,
+      budget: number,
+    ) => {
+      const id = `${P}imp-${tier}`;
+      await db.skill.create({
+        data: {
+          id,
+          scope: tier,
+          ...(tier === "agent"
+            ? { agentId: owner }
+            : { organizationId: owner }),
+          name: `imp-${tier}`,
+          description: "d",
+          content: "c",
+        },
+      });
+      await db.$executeRaw`
+        INSERT INTO "skill_files" ("id", "skill_id", "path", "content", "data", "created_at", "updated_at")
+        SELECT ${id} || '-' || i, ${id}, 'data/' || i || '.bin', '', convert_to(repeat('z', ${MB}::int), 'UTF8'), now(), now()
+        FROM generate_series(1, ${Math.floor(budget / MB) - 1}::int) AS i
+      `;
+    };
+    await seedTier("agent", agent, 10 * MB);
+    await seedTier("organization", ORG, 10 * MB);
     await db.$executeRaw`
-      INSERT INTO "skills" ("id", "scope", "workspace_id", "name", "description", "content", "created_at", "updated_at")
-      SELECT ${P} || 'cap-' || i, 'workspace', ${WORKSPACE}, 'cap-' || i, 'd', repeat(E'\\x01', 30000), now(), now()
-      FROM generate_series(1, ${MAX_SYNC_PARTS + 6}) AS i
+      INSERT INTO "agent_memories" ("id", "agent_id", "key", "content", "last_revision_seq", "created_at", "updated_at")
+      SELECT ${P} || 'impmem-' || i, ${agent}, 'imp-mem-' || i, repeat('世', 12000), 1, now(), now()
+      FROM generate_series(1, 100) AS i
     `;
 
-    const item = await syncService.buildHomeSyncItem(agent, sb, 3);
+    const item = await syncService.buildHomeSyncItem(agent, sb, 12);
     if (!item || item.kind !== "skills.changed") throw new Error("refused");
-    expect(item.parts.length).toBe(MAX_SYNC_PARTS);
+    expect(item.parts.at(-1)?.prune?.length).toBe(
+      // 2 skills × (SKILL.md + 9 files) + 100 memories + index + gateway
+      2 * 10 + 100 + 1 + 1,
+    );
+    expect(() => runnerWorkItemSchema.parse(item)).not.toThrow();
+  });
+
+  it("a SKILL.md too big for one frame still ships, as chunks", async () => {
+    // The import limit lets a SKILL.md body run to 120k characters; in CJK
+    // that renders past one frame, so it rides as a chunked blob.
+    const agent = await seedAgent("composer-bigmd");
+    const sb = await seedSandbox("composer-bigmd", agent);
+    await db.skill.create({
+      data: {
+        scope: "agent",
+        agentId: agent,
+        name: "big-md",
+        description: "d",
+        content: "世".repeat(120_000),
+      },
+    });
+    const item = await syncService.buildHomeSyncItem(agent, sb, 13);
+    if (!item || item.kind !== "skills.changed") throw new Error("refused");
+    expect(() => runnerWorkItemSchema.parse(item)).not.toThrow();
+    const chunks = item.parts.flatMap((part) =>
+      (part.blobs ?? []).filter(
+        (blob) => blob.path === ".agents/skills/big-md/SKILL.md",
+      ),
+    );
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(item.parts.at(-1)?.prune).toContain(
+      ".agents/skills/big-md/SKILL.md",
+    );
+    const rebuilt = Buffer.concat(
+      chunks.map((chunk) => Buffer.from(chunk.dataBase64, "base64")),
+    ).toString("utf8");
+    expect(rebuilt).toContain("世".repeat(120_000));
+  });
+
+  it("past the part cap it leaves skills out, never memory, and prunes only to what shipped", async () => {
+    // Pathological authored content: bodies of control characters, which
+    // JSON escapes to six bytes apiece, so each skill nearly fills a whole
+    // 200KB frame. Thirty can't fit a 4-part sync. Refusing here would fail
+    // identically every 60s forever and leave the agent with NO projection
+    // at all; leaving skills out converges, and memory always ships.
+    const SMALL_PARTS = 4;
+    const agent = await seedAgent("composer-cap");
+    const sb = await seedSandbox("composer-cap", agent);
+    await memoryService.upsertMemoryByKey(
+      WORKSPACE,
+      agent,
+      { key: "kept", content: "memory survives" },
+      AUTHOR,
+    );
+    // Raw inserts: 30k bodies are past the 24k content cap, so no door
+    // accepts them; the leave-out is the braces past the authoring caps.
+    await db.$executeRaw`
+      INSERT INTO "skills" ("id", "scope", "agent_id", "name", "description", "content", "created_at", "updated_at")
+      SELECT ${P} || 'cap-' || i, 'agent', ${agent}, 'cap-' || i, 'd', repeat(E'\\x01', 30000), now(), now()
+      FROM generate_series(1, 30) AS i
+    `;
+
+    const item = await syncService.buildHomeSyncItem(agent, sb, 3, {
+      maxParts: SMALL_PARTS,
+      maxBytes: MAX_SYNC_PART_BYTES,
+    });
+    if (!item || item.kind !== "skills.changed") throw new Error("refused");
+    expect(item.parts.length).toBeLessThanOrEqual(SMALL_PARTS);
 
     // Every part still fits the wire, and the manifest names exactly the
     // files that shipped — a wider manifest would prune nothing, a narrower
     // one would delete files we just wrote.
     expect(() => runnerWorkItemSchema.parse(item)).not.toThrow();
-    const shipped = item.parts.flatMap((part) =>
-      part.files.map((file) => file.path),
-    );
-    expect(item.parts.at(-1)?.prune).toEqual(shipped.filter(Boolean).sort());
+    const shipped = item.parts.flatMap((part) => [
+      ...part.files.map((file) => file.path),
+      ...(part.blobs ?? []).map((blob) => blob.path),
+    ]);
+    expect(item.parts.at(-1)?.prune).toEqual([...shipped].sort());
+    expect(shipped).toContain("memory/kept.md");
+    expect(
+      shipped.filter((path) => path.includes("/cap-")).length,
+    ).toBeLessThan(30);
   });
 
   it("is deterministic: two builds produce identical path-sorted sets", async () => {
     const agent = await seedAgent("composer-det");
     await skillService.createSkill(
       WORKSPACE,
-      { name: "one", description: "d", content: "c" },
+      { name: "one", description: "d", content: "c", agentId: agent },
       CREATOR,
     );
     const a = await syncService.buildHomeFileSet(agent);

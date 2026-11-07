@@ -15,4 +15,8 @@ export const list = (options: { organizationId?: string } = {}) =>
 export const rename = (id: string, name: string) =>
   apiPatch<Workspace>(`/v1/workspaces/${id}`, { name });
 
+/** Null restores the platform default. */
+export const setTimezone = (id: string, timezone: string | null) =>
+  apiPatch<Workspace>(`/v1/workspaces/${id}`, { timezone });
+
 export const remove = (id: string) => apiDelete(`/v1/workspaces/${id}`);

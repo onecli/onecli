@@ -34,7 +34,6 @@ describe("unsupported API surfaces stay outside every tool", () => {
     "/services/data/v66.0/composite",
     "/services/data/v66.0/composite/batch",
     "/services/data/v66.0/composite/tree/Account",
-    "/services/data/v66.0/composite/sobjects",
     "/services/data/v66.0/jobs/query",
     "/services/data/v66.0/jobs/ingest",
     "/services/data/v66.0/graphql",
@@ -47,6 +46,38 @@ describe("unsupported API surfaces stay outside every tool", () => {
 });
 
 describe("each tool matches its own endpoint", () => {
+  it.each([
+    "/services/data/v66.0/composite/sobjects",
+    "/services/data/v66.0/composite/sobjects/",
+  ])(
+    "the bulk path %s (sObject Collections) is update/delete_record, never a POST",
+    (path) => {
+      // PATCH and DELETE are their single-record tools, so a grant or block
+      // on either covers the bulk call too. POST stays outside every tool: a
+      // POST can carry a `_HttpMethod` override Salesforce honors, so a
+      // create grant would otherwise also allow a bulk delete.
+      const byMethod = (method: string) =>
+        tools
+          .filter(
+            (t) =>
+              t.methods.includes(method) &&
+              t.patterns.some((p) => pathMatches(path, p)),
+          )
+          .map((t) => t.id);
+      expect(byMethod("PATCH")).toEqual(["update_record"]);
+      expect(byMethod("POST")).toEqual([]);
+      expect(byMethod("DELETE")).toEqual(["delete_record"]);
+      expect(byMethod("GET")).toEqual([]);
+    },
+  );
+  it("the bulk alias reaches no deeper path (upsert by external id, retrieve)", () => {
+    for (const path of [
+      "/services/data/v66.0/composite/sobjects/Contact/Ext_Id__c",
+      "/services/data/v66.0/composite/sobjects/Contact",
+    ]) {
+      expect(matchingTools(path)).toEqual([]);
+    }
+  });
   it.each([
     ["list_versions", "/services/data"],
     ["list_versions", "/services/data/"],

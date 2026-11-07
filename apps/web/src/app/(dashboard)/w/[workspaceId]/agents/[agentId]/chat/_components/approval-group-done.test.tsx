@@ -1,13 +1,15 @@
 // @vitest-environment jsdom
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
+import type { GroupedOutcome } from "@/lib/api/approvals";
 import { ApprovalGroupDone } from "./approval-group-done";
 
-const counts = (over: Partial<Record<string, number>> = {}) => ({
+const counts = (over: Partial<Record<GroupedOutcome, number>> = {}) => ({
   approved: 0,
   denied: 0,
   expired: 0,
-  decided: 0,
+  cancelled: 0,
+  unknown: 0,
   ...over,
 });
 
@@ -22,6 +24,19 @@ describe("ApprovalGroupDone", () => {
     );
     expect(screen.getByRole("status").textContent).toBe(
       "39 × Create Contact· Done: 38 approved, 1 denied",
+    );
+  });
+
+  it("never counts a request no one decided as decided", () => {
+    render(
+      <ApprovalGroupDone
+        count={4}
+        action="Add leads"
+        counts={counts({ approved: 1, cancelled: 2, unknown: 1 })}
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Done: 1 approved, 2 cancelled, 1 no longer waiting",
     );
   });
 

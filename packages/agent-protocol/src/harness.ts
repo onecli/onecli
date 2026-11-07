@@ -1,4 +1,116 @@
 import type { AgentEvent } from "./events";
+import type { TURN_FAILURE_CODES } from "./failure-codes";
+
+/**
+ * A text delta as a harness reports it: the canonical `text.delta`, plus the
+ * MESSAGE it belongs to when the harness frames its output, and the
+ * FOLLOW-UP it answers when the harness can tell.
+ *
+ * `messageId` is the harness's own id for one assistant message. Deltas that
+ * share it are one message; a new id starts the next one. A harness that does
+ * not frame its output omits it, and its whole stream then reads as one
+ * message per tool-free stretch (the supervisor's unframed rule). Opaque:
+ * only equality means anything.
+ *
+ * `replyTo` names the steered follow-up this delta is the agent's reply to:
+ * the first message after that follow-up was injected, as it streams. The
+ * supervisor forwards such a delta under the follow-up's own id, so the
+ * reply is read live under the message it answers, and the durable `text`
+ * the handover stores there replaces it (the delta law). Absent on every
+ * delta that is the turn's own narration, and on a harness that cannot see
+ * where an injection landed.
+ */
+interface HarnessTextDelta {
+  type: "text.delta";
+  text: string;
+  messageId?: string;
+  replyTo?: string;
+}
+
+/**
+ * The harness CORRECTED a message it already streamed: replace that
+ * message's text with this. Empty text retracts it. Harnesses emit it when a
+ * provider attempt is rolled back mid-stream and replayed, or when output is
+ * repaired after the fact, so text the model never really said must not stay
+ * in the answer.
+ */
+interface HarnessTextReplace {
+  type: "text.replace";
+  messageId: string;
+  text: string;
+}
+
+/**
+ * A steered follow-up the run CONSUMED (the canonical `message.joined`):
+ * the harness confirmed the model has the message. Emitted the moment the
+ * harness can tell (at the injection, on a runtime with the live pickup
+ * signal), so the join precedes every delta of the reply, or just before
+ * the terminal event on a runtime that can only tell at the end.
+ */
+interface HarnessMessageJoined {
+  type: "message.joined";
+  followUpId: string;
+}
+
+/**
+ * What the agent said back to a steered follow-up, once the reply is
+ * complete: its first message after the follow-up was injected, written
+ * before it did anything else, as the harness recorded it. Never emitted
+ * when the agent went straight to a tool, when the harness cannot see where
+ * the injection landed, or when it cannot say. Always after that
+ * follow-up's `message.joined`. The supervisor stores it as the follow-up's
+ * own answer, so a mid-turn question is answered under itself rather than
+ * lost to the turn's closing words. Harness-to-supervisor only: no wire
+ * form (the reply reaches the transcript as a durable `text` event).
+ */
+interface HarnessMessageReplied {
+  type: "message.replied";
+  followUpId: string;
+  reply: string;
+}
+
+/**
+ * The turn ended cleanly but UNANSWERED: the model wrote nothing visible
+ * (no text, no tool call) and the harness says why. A provider safety stop
+ * (`model_refused`), or an empty response its own retries could not recover
+ * (`model_empty_response`). Without this a clean end with no words reads as
+ * a normal `turn.done`, and the person is left with silence.
+ *
+ * Emitted at most once, before the terminal event, and only from the
+ * harness's own stop signal: never inferred from the absence of text (a
+ * steered run can legitimately end with its words stored under a follow-up)
+ * and never from anything the model wrote. Never when words the model wrote
+ * after its last tool call still stand either: a reply cut short is still a
+ * reply. `message` is the harness's own explanation; it rides beside the
+ * code as the raw error (operator material: the control plane shows its
+ * canonical copy instead).
+ *
+ * Harness-to-supervisor only, like `message.replied`: the supervisor turns
+ * it into the turn's failure, and it has no wire form.
+ */
+interface HarnessTurnUnanswered {
+  type: "turn.unanswered";
+  code:
+    | typeof TURN_FAILURE_CODES.modelRefused
+    | typeof TURN_FAILURE_CODES.modelEmptyResponse;
+  message: string;
+}
+
+/**
+ * What `HarnessSession.runTurn` yields: the canonical vocabulary, with message
+ * framing, follow-up replies, and an unanswered turn's reason on top. All are
+ * harness-to-supervisor concerns only. The supervisor reads them to build the
+ * turn's answers and outcome, then forwards each event in the wire vocabulary
+ * (`AgentEvent`), which carries none of them: a reply travels as its own
+ * durable `text` event, and an unanswered turn as its `turn.result` failure.
+ */
+export type HarnessEvent =
+  | Exclude<AgentEvent, { type: "text.delta" | "message.joined" }>
+  | HarnessTextDelta
+  | HarnessTextReplace
+  | HarnessMessageJoined
+  | HarnessMessageReplied
+  | HarnessTurnUnanswered;
 
 /**
  * The vendor-neutral harness interface (plans/hosted-agents-v2.md §3.5).
@@ -35,6 +147,14 @@ export interface HarnessCapabilities {
    * control plane owns.
    */
   steer: boolean;
+  /**
+   * Can move the tool an in-flight turn is waiting on to the background
+   * (`HarnessSession.backgroundRunningTool`), so queued steers are read now
+   * instead of after the tool (SEND NOW). Absent it, a
+   * steered follow-up is read at the run's next safe point as before, and
+   * SEND NOW answers `moved: false`.
+   */
+  backgroundTool: boolean;
   /**
    * Home-relative directory the harness natively scans for skills
    * (e.g. ".agents/skills"), or null when it loads none. The materializer
@@ -93,6 +213,14 @@ export interface StartSessionOptions {
    * fixtures that never emit such events need not thread it.
    */
   context?: { conversationId: string };
+  /**
+   * Environment the harness must give THIS session's child processes (its
+   * shells, their background jobs) on top of its own: what the supervisor
+   * learned AFTER the harness launched. Today the desktop's `DISPLAY` and
+   * session bus, which come up after the harness so the first turn never
+   * waits on them. Optional; absent = nothing beyond the launch env.
+   */
+  env?: Record<string, string>;
 }
 
 /**
@@ -116,6 +244,23 @@ export interface TurnInput {
    * cannot carry images ignores it — the files are on disk regardless.
    */
   images?: TurnImage[];
+  /**
+   * The context size, in tokens, this conversation should run at from this
+   * turn on (the platform's context fit). The adapter applies it to the
+   * session before sending the message and skips it when unchanged.
+   * Optional and best-effort: an adapter whose harness has no such knob
+   * ignores it, and a refusal never fails the turn. Absent = leave the
+   * session's size as it is.
+   */
+  contextTokens?: number;
+}
+
+/** What `HarnessSession.backgroundRunningTool` did. */
+export interface BackgroundedTool {
+  /** A running tool was moved to the background. */
+  moved: boolean;
+  /** The moved tool's name, when the harness reports it. */
+  toolName?: string;
 }
 
 export interface SteerInput {
@@ -125,8 +270,21 @@ export interface SteerInput {
    * the live turn consumed this message.
    */
   id: string;
-  /** The user's words, verbatim — injected as a user message. */
+  /**
+   * The model-facing text, injected verbatim as a user message: the person's
+   * words as the supervisor composed them at its boundary (a delivery-only
+   * frame in front, when the control plane sent one). The adapter never
+   * rewrites it, and confirms the join by finding it in the run.
+   */
   message: string;
+  /**
+   * Inline-vision images sent with the follow-up, budget-packed by the
+   * supervisor exactly like a turn's (`TurnInput.images`), injected with the
+   * words as one user message. Optional and additive, like the turn's: an
+   * adapter that cannot carry them ignores it, and the files are on disk
+   * regardless.
+   */
+  images?: TurnImage[];
 }
 
 export interface HarnessSession {
@@ -136,11 +294,11 @@ export interface HarnessSession {
    */
   readonly sessionRef: string | null;
   /**
-   * Run one turn. The iterable yields canonical events in order and always
+   * Run one turn. The iterable yields harness events in order and always
    * terminates with exactly one terminal event (`turn.done` or `error`) —
    * including after `abort()`.
    */
-  runTurn(input: TurnInput): AsyncIterable<AgentEvent>;
+  runTurn(input: TurnInput): AsyncIterable<HarnessEvent>;
   /**
    * Queue a user message into the IN-FLIGHT turn, to be injected at the
    * harness's next safe point. Present only when `capabilities.steer`.
@@ -154,8 +312,28 @@ export interface HarnessSession {
    * re-runs the message as its own turn.
    */
   steer?(input: SteerInput): Promise<void>;
+  /**
+   * Move the tool the in-flight turn is waiting on to the BACKGROUND, so the
+   * run reaches its next safe point now and injects whatever steers are
+   * queued (SEND NOW). The tool keeps running; the model is
+   * told where to collect it. Resolves with what actually happened, and
+   * only says `moved` when the harness confirmed a tool was moved: a
+   * harness that cannot tell resolves `{ moved: false }` rather than guess,
+   * because the answer is shown to the person who asked. Present only when
+   * `capabilities.backgroundTool`.
+   */
+  backgroundRunningTool?(): Promise<BackgroundedTool>;
   /** Stop the in-flight turn; the runTurn iterable still ends cleanly. */
   abort(): Promise<void>;
+  /**
+   * Replace the environment this session's child processes get on top of
+   * the harness's own (`StartSessionOptions.env`, applied late): a session
+   * started before the desktop came up learns `DISPLAY` here, and its
+   * next shell has a screen. Present only where the harness scopes an
+   * environment per session; absent = the session's children see the
+   * launch env alone, and the supervisor restarts the session instead.
+   */
+  setEnv?(env: Record<string, string>): Promise<void>;
   /**
    * Let go of this session WITHOUT ending it, so a later `startSession`
    * with its `sessionRef` resumes the same transcript in THIS process. The
@@ -234,6 +412,16 @@ export interface Harness {
    */
   readonly backgroundTasks?: HarnessBackgroundTasks;
   startSession(options: StartSessionOptions): Promise<HarnessSession>;
+  /**
+   * Start whatever backs this adapter now, ahead of the first session, so
+   * the first turn does not pay for it. Best effort and idempotent: the
+   * first `startSession` reuses what this started, and a start that failed
+   * surfaces there exactly as it would have without the head start. The
+   * backing process inherits this process's environment, so the supervisor
+   * calls this only once that environment is final. Adapters with nothing
+   * worth starting early omit it.
+   */
+  prewarm?(homeDir: string): void;
   /**
    * Register the listener for TERMINAL failure of whatever backs this adapter
    * — the process died, the socket closed, the runtime never came up.

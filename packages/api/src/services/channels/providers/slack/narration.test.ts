@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { slackProvider } from "./provider";
+import type { WaitingMessage } from "../../types";
 
 /**
  * SLACK NARRATION — the task card that says what the agent is doing while it
@@ -78,6 +79,8 @@ describe("posting the card", () => {
       threadTs: null,
       activities: ["Running a command"],
       cardTs: null,
+      stoppable: false,
+      waiting: [],
     });
 
     expect(result).toEqual({ cardTs: "1788200000.000100" });
@@ -95,6 +98,8 @@ describe("posting the card", () => {
       threadTs: "1788199999.000001",
       activities: ["Running a command"],
       cardTs: null,
+      stoppable: false,
+      waiting: [],
     });
 
     expect(requestAt(0).form.get("thread_ts")).toBe("1788199999.000001");
@@ -107,6 +112,8 @@ describe("posting the card", () => {
       threadTs: null,
       activities: ["Running a command", "Reading a file", "Editing a file"],
       cardTs: null,
+      stoppable: false,
+      waiting: [],
     });
 
     // The agent moved on from the earlier steps, so they are done by
@@ -125,6 +132,8 @@ describe("posting the card", () => {
       threadTs: null,
       activities: ["Running a command"],
       cardTs: null,
+      stoppable: false,
+      waiting: [],
     });
 
     expect(planOf(requestAt(0)).title).toBe("Working on your request");
@@ -139,6 +148,8 @@ describe("advancing the card", () => {
       threadTs: null,
       activities: ["Running a command", "Reading a file"],
       cardTs: "1788200000.000100",
+      stoppable: false,
+      waiting: [],
     });
 
     expect(result).toEqual({ cardTs: "1788200000.000100" });
@@ -153,6 +164,8 @@ describe("advancing the card", () => {
       threadTs: null,
       activities: ["Running a command", "Reading a file"],
       cardTs: "1788200000.000100",
+      stoppable: false,
+      waiting: [],
     });
 
     expect(planOf(requestAt(0)).tasks).toHaveLength(2);
@@ -169,6 +182,8 @@ describe("when Slack will not narrate", () => {
       threadTs: null,
       activities: ["Running a command"],
       cardTs: null,
+      stoppable: false,
+      waiting: [],
     });
 
     // Null, not a throw: narration decorates a loader that is already
@@ -183,6 +198,8 @@ describe("when Slack will not narrate", () => {
       threadTs: null,
       activities: ["Running a command"],
       cardTs: null,
+      stoppable: false,
+      waiting: [],
     });
 
     expect(result).toBeNull();
@@ -223,6 +240,8 @@ describe("untrusted text", () => {
       threadTs: null,
       activities: ["x".repeat(5_000)],
       cardTs: null,
+      stoppable: false,
+      waiting: [],
     });
 
     // The shared derivation already bounds this to one short line; the
@@ -240,6 +259,8 @@ describe("untrusted text", () => {
       threadTs: null,
       activities: ["<script>alert(1)</script>"],
       cardTs: null,
+      stoppable: false,
+      waiting: [],
     });
 
     // Verbatim in a typed field — Slack renders a task title as plain text,
@@ -247,5 +268,149 @@ describe("untrusted text", () => {
     expect(planOf(requestAt(0)).tasks[0]!.title).toBe(
       "<script>alert(1)</script>",
     );
+  });
+});
+
+describe("the card's own Stop (no native loader, so no native Stop)", () => {
+  const blocksOf = (request: SlackRequest) =>
+    JSON.parse(request.form.get("blocks") ?? "[]") as {
+      type: string;
+      elements?: { type: string; action_id: string; text: { text: string } }[];
+    }[];
+
+  it("a stoppable card carries a Stop button under the steps, on the post AND on every update", async () => {
+    await slackProvider.narrateThreadWork!({
+      credentialsJson: CREDS,
+      channel: "D123",
+      threadTs: null,
+      activities: ["Running a command"],
+      cardTs: null,
+      stoppable: true,
+      waiting: [],
+    });
+    await slackProvider.narrateThreadWork!({
+      credentialsJson: CREDS,
+      channel: "D123",
+      threadTs: null,
+      activities: ["Running a command", "Reading a file"],
+      cardTs: "1788200000.000100",
+      stoppable: true,
+      waiting: [],
+    });
+
+    for (const request of [requestAt(0), requestAt(1)]) {
+      const blocks = blocksOf(request);
+      expect(blocks.map((b) => b.type)).toEqual(["plan", "actions"]);
+      expect(blocks[1]?.elements).toEqual([
+        expect.objectContaining({
+          type: "button",
+          action_id: "turn_stop",
+          text: expect.objectContaining({ text: "Stop" }),
+        }),
+      ]);
+    }
+  });
+
+  it("a plain card (the native loader stands beside it) has no button: a reader never sees two Stops", async () => {
+    await slackProvider.narrateThreadWork!({
+      credentialsJson: CREDS,
+      channel: "C123",
+      threadTs: "1788199999.000001",
+      activities: ["Running a command"],
+      cardTs: null,
+      stoppable: false,
+      waiting: [],
+    });
+    expect(blocksOf(requestAt(0)).map((b) => b.type)).toEqual(["plan"]);
+  });
+});
+
+describe("the messages waiting to be read (one row each, with Send now)", () => {
+  type RowBlock = {
+    type: string;
+    text?: { type: string; text: string };
+    accessory?: {
+      type: string;
+      action_id: string;
+      value: string;
+      visible_to_user_ids?: string[];
+    };
+  };
+  const blocksOf = (request: SlackRequest) =>
+    JSON.parse(request.form.get("blocks") ?? "[]") as RowBlock[];
+
+  const narrate = (waiting: WaitingMessage[], stoppable = true) =>
+    slackProvider.narrateThreadWork!({
+      credentialsJson: CREDS,
+      channel: "D123",
+      threadTs: null,
+      activities: ["Running a command"],
+      cardTs: "1788200000.000100",
+      stoppable,
+      waiting,
+    });
+
+  it("lists each waiting message under the steps, oldest first, with Stop still last", async () => {
+    await narrate([
+      { id: "fu-1", text: "first", authorExternalUserId: "U1" },
+      { id: "fu-2", text: "second", authorExternalUserId: "U2" },
+    ]);
+    const blocks = blocksOf(requestAt(0));
+    expect(blocks.map((b) => b.type)).toEqual([
+      "plan",
+      "section",
+      "section",
+      "actions",
+    ]);
+    expect(blocks[1]?.text?.text).toContain("\u201cfirst\u201d");
+    expect(blocks[2]?.text?.text).toContain("\u201csecond\u201d");
+  });
+
+  it("puts Send now on a row for its author ALONE, naming that row", async () => {
+    await narrate([{ id: "fu-1", text: "hi", authorExternalUserId: "U1" }]);
+    expect(blocksOf(requestAt(0))[1]?.accessory).toEqual({
+      type: "button",
+      action_id: "follow_up_send_now",
+      text: { type: "plain_text", text: "Send now" },
+      value: "fu-1",
+      visible_to_user_ids: ["U1"],
+    });
+  });
+
+  it("shows an unlinked author's row with no control: nobody could press it", async () => {
+    await narrate([{ id: "fu-1", text: "hi", authorExternalUserId: null }]);
+    const row = blocksOf(requestAt(0))[1];
+    expect(row?.type).toBe("section");
+    expect(row?.accessory).toBeUndefined();
+  });
+
+  it("makes the person's words inert and short: escaped, one line, bounded", async () => {
+    await narrate([
+      {
+        id: "fu-1",
+        text: `<!channel> look\n\nhere <@U9> ${"x".repeat(5_000)}`,
+        authorExternalUserId: "U1",
+      },
+    ]);
+    const text = blocksOf(requestAt(0))[1]?.text?.text ?? "";
+    // A live directive in a person's message must never ping anyone from
+    // the agent's card.
+    expect(text).not.toContain("<!channel>");
+    expect(text).not.toContain("<@U9>");
+    expect(text).toContain("&lt;!channel&gt; look here &lt;@U9&gt;");
+    expect(text).not.toContain("\n");
+    expect(text.length).toBeLessThan(260);
+  });
+
+  it("says a message of files alone is waiting, rather than quoting nothing", async () => {
+    await narrate([{ id: "fu-1", text: "  ", authorExternalUserId: "U1" }]);
+    expect(blocksOf(requestAt(0))[1]?.text?.text).toContain(
+      "a message with files",
+    );
+  });
+
+  it("a card with nothing waiting is exactly the card it was", async () => {
+    await narrate([], false);
+    expect(blocksOf(requestAt(0)).map((b) => b.type)).toEqual(["plan"]);
   });
 });

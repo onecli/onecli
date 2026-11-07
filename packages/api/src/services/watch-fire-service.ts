@@ -58,9 +58,35 @@ const triggerSentence = (watch: DueWatchFire): string => {
       return "the process went quiet";
     case "lost":
       return "the process was lost when the machine restarted — it is no longer running";
+    case "parked":
+      return "the machine was put to sleep — it is no longer running";
     default:
       return "the watched condition occurred";
   }
+};
+
+/**
+ * A PARKED watch is settled without a turn. The platform chose to sleep the
+ * box because nothing was using it, so waking the agent to say so would
+ * only recreate the hold it just released (observed live: park → "lost"
+ * wake → the agent restarts the server → held again). The person gets one
+ * born-done line in the origin chat instead — enough to know the app is
+ * down and why — and the watch is marked fired like any other outcome. No
+ * origin (an unverifiable arm) means nobody to tell: fired silently.
+ */
+const settleParkedWatch = async (watch: DueWatchFire): Promise<void> => {
+  if (watch.originConversationId) {
+    await materializeAutomationDelivery(
+      watch.originConversationId,
+      `Background process "${cleanName(watch.processName ?? watch.processCommand)}" parked`,
+      "The machine was put to sleep (it was idle, or it was restarted), so this process is no longer running. It starts again when it is needed: open its preview link if it has one, or ask the agent to start it.",
+      "watch",
+    );
+  }
+  await db.processWatch.updateMany({
+    where: { id: watch.id, status: "triggered" },
+    data: { status: "fired", firedAt: new Date() },
+  });
 };
 
 export const buildWatchRunMessage = (watch: DueWatchFire): string => {
@@ -241,24 +267,32 @@ interface WakeBucket {
  * - created (running or born-failed) → every watch marked fired in one
  *   guarded batch. A born-failed turn (door 1) is ITSELF visible in the
  *   thread, so no delivery duplicate is materialized.
- * - CONFLICT (the thread's one-active slot is taken) → JOIN first: the wake
- *   steers into the running turn as a follow-up, and the watches are marked
- *   fired only once that row exists. When there is no running turn to join,
- *   or the join fails, the older behavior stands — nothing marked, unexpired
- *   watches stay claimed and retry on the fire lease (the path before that
- *   marked them fired and silently dropped the wake), and expired ones
+ * - CONFLICT (the thread's one-active slot is taken) → JOIN first when the
+ *   running turn is itself a wake: the new wake steers into it as a
+ *   follow-up, and the watches are marked fired only once that row exists.
+ *   Otherwise (a person's exchange is running, nothing is running yet, or
+ *   the join fails) nothing is marked: unexpired watches stay claimed and
+ *   retry (released the moment the running turn closes), and expired ones
  *   downgrade to the hidden path so a forever-busy thread cannot retry past
  *   the watch's own deadline.
  * - anything else → nothing marked; the lease retries.
  */
 /**
- * Steer a busy conversation's wake INTO the turn that is already running,
- * rather than queueing behind it.
+ * Steer a busy conversation's wake INTO the wake turn that is already
+ * running, rather than queueing behind it, so a batch finishing seconds
+ * apart is reported once, by the turn already reporting it (#1013).
  *
- * Returns whether the join landed. `false` means the caller keeps today's
- * behavior exactly — unexpired watches stay claimed and retry, expired ones
- * downgrade to the hidden path — so this can only ever REDUCE doubled wakes,
- * never lose one.
+ * ONLY a running WAKE is joined, never a person's exchange: steering
+ * automation into a human's live turn hijacks their answer (the agent
+ * answers the wake instead of the question) and, on a channel thread, puts
+ * the platform's instruction text in front of them. That wake waits for the
+ * person's turn to close instead and arrives as its own turn, the same
+ * posture the message door holds for every automation (follow-up-service).
+ *
+ * Returns whether the join landed. `false` means the caller keeps the
+ * waiting path exactly (unexpired watches stay claimed and retry, expired
+ * ones downgrade to the hidden path), so this can only ever REDUCE doubled
+ * wakes, never lose one.
  *
  * ORDERING IS THE CONTRACT. The watches are marked fired only once the join
  * row exists: a crash between the two would otherwise leave them claimed and
@@ -270,18 +304,23 @@ interface WakeBucket {
  * `listConversationsWithParkedFollowUps` promotes the parked row into its
  * own turn, which is today's behavior.
  */
-const joinRunningTurn = async (
+const joinRunningWake = async (
   bucket: WakeBucket,
   message: string,
   ids: string[],
 ): Promise<boolean> => {
   try {
     const running = await db.turn.findFirst({
-      where: { conversationId: bucket.conversationId, status: "running" },
+      where: {
+        conversationId: bucket.conversationId,
+        status: "running",
+        source: "watch",
+      },
       select: { id: true },
     });
-    // The conflict was something other than a live turn (a queued one, a
-    // race that resolved). Nothing to steer into.
+    // The conflict was something other than a live wake: a person's turn
+    // (never steered into, see above), a queued one, or a race that
+    // resolved. Nothing to join.
     if (!running) return false;
 
     await createFollowUp(bucket.conversationId, running.id, message, {
@@ -330,16 +369,13 @@ const fireBucket = async (bucket: WakeBucket): Promise<void> => {
     });
   } catch (error) {
     if (error instanceof ServiceError && error.code === "CONFLICT") {
-      // The thread's one active slot is taken — the agent is mid-answer,
-      // very often about the FIRST watch of this same batch. Waiting is what
+      // The thread's one active slot is taken. When a wake holds it (very
+      // often one about the FIRST watch of this same batch), waiting is what
       // produced the running commentary: agent A finishes, the wake fires,
       // agent B finishes 10s later, and its wake queues behind a turn that
-      // is already talking about A.
-      //
-      // JOIN it instead. `createFollowUp` is built for exactly this — a
-      // `joining` row that steers into the running turn — so the batch is
-      // reported once, by the turn already speaking.
-      if (await joinRunningTurn(bucket, message, ids)) return;
+      // is already talking about A. JOIN that wake instead. A person's
+      // exchange is never joined; the wake waits for it to close.
+      if (await joinRunningWake(bucket, message, ids)) return;
 
       const now = Date.now();
       const expired = bucket.watches.filter(
@@ -452,16 +488,37 @@ export const fireDueWatches = async (): Promise<number> => {
   await sweepLostProcesses();
   await sweepWatchCoherence();
   await sweepExpiredWatches();
-  const due = await claimTriggeredWatches();
+  const claimed = await claimTriggeredWatches();
+  // Parked watches never become turns: settle them as they are claimed, and
+  // let only the rest reach the partition (a parked watch in a bucket would
+  // otherwise wake the origin for a batch that is partly "nothing to do").
+  const settleParked = async (
+    watches: DueWatchFire[],
+  ): Promise<DueWatchFire[]> => {
+    const rest: DueWatchFire[] = [];
+    for (const watch of watches) {
+      if (watch.trigger !== "parked") {
+        rest.push(watch);
+        continue;
+      }
+      await settleParkedWatch(watch).catch((err: unknown) =>
+        log.error({ err, watchId: watch.id }, "parked watch settle failed"),
+      );
+    }
+    return rest;
+  };
+  const due = await settleParked(claimed);
   const { buckets, singles } = await partitionDue(due);
 
   if (buckets.length > 0) {
     const stragglers = await claimTriggeredWatchesForOrigins(
       buckets.map((bucket) => bucket.conversationId),
-    ).catch((err) => {
-      log.warn({ err }, "straggler claim failed; firing the first batch");
-      return [] as DueWatchFire[];
-    });
+    )
+      .then(settleParked)
+      .catch((err) => {
+        log.warn({ err }, "straggler claim failed; firing the first batch");
+        return [] as DueWatchFire[];
+      });
     if (stragglers.length > 0) {
       const claimedIds = new Set(due.map((watch) => watch.id));
       const fresh = stragglers.filter((watch) => !claimedIds.has(watch.id));
@@ -505,5 +562,5 @@ export const fireDueWatches = async (): Promise<number> => {
       log.error({ err, watchId: watch.id }, "watch fire failed");
     }
   }
-  return due.length;
+  return claimed.length;
 };

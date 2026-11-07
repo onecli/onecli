@@ -23,6 +23,13 @@
 export const escapeSlackText = (raw: string): string =>
   raw.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 
+/** The exact inverse of `escapeSlackText`, in one pass, so `&amp;lt;` reads
+ * back as the literal `&lt;` someone typed and never as `<`. */
+export const unescapeSlackText = (escaped: string): string =>
+  escaped.replace(/&(amp|lt|gt);/g, (_, entity: string) =>
+    entity === "amp" ? "&" : entity === "lt" ? "<" : ">",
+  );
+
 /** Slack header blocks cap plain_text at 150 chars — clamp with room for a
  * short "… · " template prefix. */
 export const clampHeader = (value: string): string =>
@@ -38,6 +45,39 @@ export const clampLabel = (value: string): string =>
  * multiline anchors mid-line — normalized to `\n` first. */
 export const normalizeLines = (value: string): string =>
   value.replace(/\r\n?|[\u{2028}\u{2029}]/gu, "\n");
+
+/** Slack's per-section text cap is 3,000 (a longer one rejects the WHOLE
+ * post, `invalid_blocks`): cut with headroom. */
+const SECTION_TEXT_LIMIT = 2900;
+
+/**
+ * Converted mrkdwn split into section-sized chunks, at a newline where one
+ * exists in the back half of the window. Never cut inside a `<url|label>`
+ * token (the tail half would render as literal angle-bracket soup): a
+ * still-open `<` before the cut moves the cut to just before it; a
+ * degenerate token longer than half the window keeps the hard cut.
+ */
+export const sectionChunks = (text: string): string[] => {
+  const chunks: string[] = [];
+  let rest = text;
+  while (rest.length > SECTION_TEXT_LIMIT) {
+    const window = rest.slice(0, SECTION_TEXT_LIMIT);
+    const newline = window.lastIndexOf("\n");
+    let cut = newline > SECTION_TEXT_LIMIT / 2 ? newline : SECTION_TEXT_LIMIT;
+    const open = rest.lastIndexOf("<", cut - 1);
+    if (open > SECTION_TEXT_LIMIT / 2) {
+      const close = rest.indexOf(">", open);
+      if (close === -1 || close >= cut) cut = open;
+    }
+    // Never cut between a surrogate pair: each half would render as a
+    // replacement character (same rule as the caption clip).
+    if (/[\uD800-\uDBFF]/.test(rest.charAt(cut - 1))) cut -= 1;
+    chunks.push(rest.slice(0, cut));
+    rest = rest.slice(cut).replace(/^\n/, "");
+  }
+  if (rest) chunks.push(rest);
+  return chunks;
+};
 
 /**
  * The user-mention token — Slack's `<@U…>` directive
@@ -101,6 +141,10 @@ const MAX_MENTION_LOOKUPS = 20;
  *                          exactly this: clients that cannot render);
  *   6. anything else    → URL link       → `label (url)` or the bare url.
  *
+ * Text outside tokens is unescaped (`&amp;` `&lt;` `&gt;` → `&` `<` `>`, the
+ * docs' "Escaping text"), in the SAME pass as the tokens: a `<` that an
+ * entity decodes to is text someone typed, never read as a token.
+ *
  * WHY: the model otherwise sees `<@U0B0WPLS8MC>` and cannot know who that
  * is — it pattern-matches the token, stores broken habits, and cannot even
  * recognize its OWN name in `<@UBOT>`. Decoded names are attacker-chosen
@@ -117,7 +161,7 @@ export const decodeSlackTokens = async (
 ): Promise<string> => {
   const tokenRe = /<(.*?)>/g;
   const matches = [...text.matchAll(tokenRe)];
-  if (matches.length === 0) return text;
+  if (matches.length === 0) return unescapeSlackText(text);
 
   // Resolve unique user ids first (dedup + cap), so a repeated mention
   // costs one lookup and the flood cap is on PEOPLE, not occurrences.
@@ -148,63 +192,73 @@ export const decodeSlackTokens = async (
     if (name) channelNames.set(id, cleanDecodedName(name.replace(/^#/, "")));
   }
 
-  return text.replace(tokenRe, (token, innerRaw: string) => {
-    const inner = innerRaw ?? "";
+  // A label inside a token is escaped like the text around it.
+  const label = (raw: string | undefined): string | null =>
+    raw ? cleanDecodedName(unescapeSlackText(raw)) || null : null;
 
-    // 3. user mention (label accepted, never trusted) — decoded to the
-    // OUTBOUND mention grammar `@[Name]`, not plain `@Name`, on purpose:
-    // the model writes mentions by imitating its transcript, so the read
-    // side must show exactly the form the write side resolves (the live
-    // walk proved plain decodes teach plain habits that ping nobody).
-    // Groups and broadcasts stay plain — they are not writable mentions.
-    const user = /^@([UW][A-Z0-9]{2,})(?:\|(.*))?$/.exec(inner);
-    if (user?.[1]) {
-      const resolved = names.get(user[1]);
-      if (resolved) return `@[${resolved}]`;
-      const label = user[2] ? cleanDecodedName(user[2]) : null;
-      return label ? `@[${label}]` : token;
-    }
+  return text.replace(
+    /<(.*?)>|&(?:amp|lt|gt);/g,
+    (token, innerRaw: string | undefined) => {
+      if (innerRaw === undefined) return unescapeSlackText(token);
+      const inner = innerRaw;
 
-    // 2. channel link: inline label first, resolver for the label-less
-    // form live Slack actually sends. An UNRESOLVABLE ref (a private
-    // channel the bot is not in - conversations.info answers
-    // channel_not_found, mirroring Slack's own "private channel"
-    // placeholder for non-members) decodes to a readable marker carrying
-    // the id: the model can say "a channel I can't see" and the id is
-    // still there for anything that needs it. A raw <#C…> would read as
-    // noise (the live walk proved exactly this).
-    const channel = /^#(C[A-Z0-9]{2,})(?:\|(.*))?$/.exec(inner);
-    if (channel?.[1]) {
-      const label = channel[2] ? cleanDecodedName(channel[2]) : null;
-      if (label) return `#${label}`;
-      const resolved = channelNames.get(channel[1]);
-      if (resolved) return `#${resolved}`;
-      return resolveChannelName ? `#[private channel ${channel[1]}]` : token;
-    }
+      // 3. user mention (label accepted, never trusted) — decoded to the
+      // OUTBOUND mention grammar `@[Name]`, not plain `@Name`, on purpose:
+      // the model writes mentions by imitating its transcript, so the read
+      // side must show exactly the form the write side resolves (the live
+      // walk proved plain decodes teach plain habits that ping nobody).
+      // Groups and broadcasts stay plain — they are not writable mentions.
+      const user = /^@([UW][A-Z0-9]{2,})(?:\|(.*))?$/.exec(inner);
+      if (user?.[1]) {
+        const resolved = names.get(user[1]);
+        if (resolved) return `@[${resolved}]`;
+        const named = label(user[2]);
+        return named ? `@[${named}]` : token;
+      }
 
-    // 4. user-group mention.
-    const group = /^!subteam\^(S[A-Z0-9]{2,})(?:\|(.*))?$/.exec(inner);
-    if (group) {
-      const label = group[2] ? cleanDecodedName(group[2]) : null;
-      return label ? `@${label.replace(/^@/, "")}` : token;
-    }
+      // 2. channel link: inline label first, resolver for the label-less
+      // form live Slack actually sends. An UNRESOLVABLE ref (a private
+      // channel the bot is not in - conversations.info answers
+      // channel_not_found, mirroring Slack's own "private channel"
+      // placeholder for non-members) decodes to a readable marker carrying
+      // the id: the model can say "a channel I can't see" and the id is
+      // still there for anything that needs it. A raw <#C…> would read as
+      // noise (the live walk proved exactly this).
+      const channel = /^#(C[A-Z0-9]{2,})(?:\|(.*))?$/.exec(inner);
+      if (channel?.[1]) {
+        const named = label(channel[2]);
+        if (named) return `#${named}`;
+        const resolved = channelNames.get(channel[1]);
+        if (resolved) return `#${resolved}`;
+        return resolveChannelName ? `#[private channel ${channel[1]}]` : token;
+      }
 
-    // 5. special mentions + date formatting.
-    const special = /^!(here|channel|everyone)(?:\|.*)?$/.exec(inner);
-    if (special) return `@${special[1]}`;
-    const date = /^!date\^.*\|(.*)$/.exec(inner);
-    if (date?.[1]) return cleanDecodedName(date[1]);
+      // 4. user-group mention.
+      const group = /^!subteam\^(S[A-Z0-9]{2,})(?:\|(.*))?$/.exec(inner);
+      if (group) {
+        const named = label(group[2]);
+        return named ? `@${named.replace(/^@/, "")}` : token;
+      }
 
-    // 6. URL link (label kept, url kept — both matter to a model).
-    const link = /^(https?:\/\/[^|]+)\|(.*)$/.exec(inner);
-    if (link?.[1] && link[2]) {
-      return `${cleanDecodedName(link[2])} (${link[1]})`;
-    }
-    if (/^https?:\/\//.test(inner)) return inner;
+      // 5. special mentions + date formatting.
+      const special = /^!(here|channel|everyone)(?:\|.*)?$/.exec(inner);
+      if (special) return `@${special[1]}`;
+      const date = /^!date\^.*\|(.*)$/.exec(inner);
+      if (date?.[1]) return label(date[1]) ?? "";
 
-    // Unrecognized: verbatim (mailto:, tel:, future grammar).
-    return token;
-  });
+      // 6. URL link (label kept, url kept — both matter to a model).
+      const link = /^(https?:\/\/[^|]+)\|(.*)$/.exec(inner);
+      if (link?.[1]) {
+        const url = unescapeSlackText(link[1]);
+        const named = label(link[2]);
+        return named ? `${named} (${url})` : url;
+      }
+      if (/^https?:\/\//.test(inner)) return unescapeSlackText(inner);
+
+      // Unrecognized: verbatim (mailto:, tel:, future grammar).
+      return token;
+    },
+  );
 };
 
 /** Clean one decoded dynamic field before it enters model context: strip

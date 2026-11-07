@@ -13,10 +13,11 @@ import { isSessionPolicy } from "../validations/policy";
 import { GRANT_SOURCE } from "./grants-compile";
 
 // ── Unified policy engine service (policy_rules_v2) ─────────────────────────
-// CRUD + reorder + publish over the priority-ordered, first-match rule model.
-// Each scope has a draft (editable) set and published (active) snapshots; the
-// gateway will read only the active published generation — this service is
-// otherwise inert in step 2.
+// CRUD + reorder over the priority-ordered, first-match rule model. Each scope
+// keeps a draft (working copy) and published snapshots; the gateway reads only
+// the active published generation. Every write here publishes the draft in the
+// same locked transaction (`publishDraftInTx`), so an edit is enforced the
+// moment the request returns. There is no staged state.
 
 type PolicyStatus = "draft" | "published";
 
@@ -308,12 +309,6 @@ const hasDirectoryIdentity = (
 const hasGroupIdentity = (
   identities: PolicyIdentityInput[] | undefined,
 ): boolean => (identities ?? []).some((i) => i.type === "group");
-
-export const rowHasDirectoryIdentity = (rows: RuleRow["identities"]): boolean =>
-  rows.some((i) => i.userId != null || i.groupId != null);
-
-export const rowHasGroupIdentity = (rows: RuleRow["identities"]): boolean =>
-  rows.some((i) => i.groupId != null);
 
 // The paid-plan gate keys off the modifiers + directory identities, reusing the
 // existing RuleActionGate (requireApproval → "manual_approval" [team], rateLimit
@@ -732,17 +727,15 @@ export const createPolicyRule = async (
   );
   try {
     // The max-read + insert run under the per-scope advisory lock every other
-    // priority writer (reorder / publish) takes — without the
-    // retired auto-resort re-densifying after every write, an unlocked
-    // read-then-append could mint DUPLICATE priorities under concurrency, and
-    // tied priorities make the gateway's first-match order nondeterministic.
+    // priority writer takes, so concurrent appends can't mint DUPLICATE
+    // priorities (tied priorities make first-match order nondeterministic).
     const rule = await db.$transaction(async (tx) => {
       await lockScope(tx, base);
       const agg = await tx.policyRuleV2.aggregate({
         where: { ...base, status: "draft", isDefault: false },
         _max: { priority: true },
       });
-      return tx.policyRuleV2.create({
+      const created = await tx.policyRuleV2.create({
         data: {
           ...base,
           status: "draft",
@@ -769,6 +762,8 @@ export const createPolicyRule = async (
         },
         include: RULE_INCLUDE,
       });
+      await publishDraftInTx(tx, base, userId);
+      return created;
     });
     // Manual ordering: a new rule APPENDS (max+1 priority above) and stays
     // where the user can see it; order changes only via explicit reorder.
@@ -782,6 +777,7 @@ export const updatePolicyRule = async (
   scope: ResourceScope,
   id: string,
   input: UpdatePolicyRuleInput,
+  userId: string,
 ): Promise<PolicyRuleDto> => {
   const base = policyScope(scope);
   const existing = await db.policyRuleV2.findFirst({
@@ -877,13 +873,14 @@ export const updatePolicyRule = async (
 
   try {
     const rule = await db.$transaction(async (tx) => {
+      await lockScope(tx, base);
       if (input.identities !== undefined) {
         await tx.policyRuleIdentity.deleteMany({ where: { ruleId: id } });
       }
       if (input.targets !== undefined) {
         await tx.policyRuleTarget.deleteMany({ where: { ruleId: id } });
       }
-      return tx.policyRuleV2.update({
+      const updated = await tx.policyRuleV2.update({
         where: { id },
         data: {
           ...(input.name !== undefined ? { name: input.name } : {}),
@@ -923,6 +920,8 @@ export const updatePolicyRule = async (
         },
         include: RULE_INCLUDE,
       });
+      await publishDraftInTx(tx, base, userId);
+      return updated;
     });
     // Manual ordering: an edit NEVER moves the rule (priority is not written
     // here) — the position the user chose is part of the policy.
@@ -935,13 +934,23 @@ export const updatePolicyRule = async (
 export const deletePolicyRule = async (
   scope: ResourceScope,
   id: string,
+  userId: string,
 ): Promise<void> => {
-  const existing = await db.policyRuleV2.findFirst({
-    where: { id, ...policyScope(scope), status: "draft", isDefault: false },
-    select: { id: true },
+  const base = policyScope(scope);
+  await db.$transaction(async (tx) => {
+    await lockScope(tx, base);
+    // The scope fence and the existence check are the delete itself, under the
+    // lock: a rule gone between a pre-check and the delete would otherwise
+    // surface as P2025 (a 500) instead of a 404, and a foreign id must never
+    // match. Zero rows = not found, nothing published.
+    const { count } = await tx.policyRuleV2.deleteMany({
+      where: { id, ...base, status: "draft", isDefault: false },
+    });
+    if (count === 0) {
+      throw new ServiceError("NOT_FOUND", "Policy rule not found.");
+    }
+    await publishDraftInTx(tx, base, userId);
   });
-  if (!existing) throw new ServiceError("NOT_FOUND", "Policy rule not found.");
-  await db.policyRuleV2.delete({ where: { id } });
   // Manual ordering: deleting leaves a priority gap — harmless (only relative
   // order matters to first-match; the UI numbers rows by index) and renumbered
   // densely by the next explicit reorder.
@@ -950,13 +959,13 @@ export const deletePolicyRule = async (
 export const reorderPolicyRules = async (
   scope: ResourceScope,
   orderedIds: string[],
+  userId: string,
 ): Promise<PolicyRuleDto[]> => {
   const base = policyScope(scope);
   try {
     await db.$transaction(async (tx) => {
-      // Validate + write under the per-scope advisory lock publish and the
-      // publish path takes, so a reorder can't interleave with a concurrent
-      // snapshot rewriting the same draft.
+      // Validate + write under the per-scope advisory lock, so a reorder can't
+      // interleave with a concurrent write rewriting the same draft.
       await lockScope(tx, base);
       const draft = await tx.policyRuleV2.findMany({
         where: { ...base, status: "draft", isDefault: false },
@@ -981,10 +990,13 @@ export const reorderPolicyRules = async (
           data: { priority: i + 1 },
         });
       }
+      await publishDraftInTx(tx, base, userId);
     });
   } catch (err) {
-    // A delete committed between the in-tx read and an update (deletes don't
-    // take the scope lock) surfaces as P2025 — same staleness, same 409.
+    // Every rule writer holds the scope lock, so the in-tx read is current; a
+    // row that still vanishes before its update (the scope itself being
+    // deleted cascades without the lock) surfaces as P2025 — same staleness,
+    // same 409.
     if (
       err instanceof Prisma.PrismaClientKnownRequestError &&
       err.code === "P2025"
@@ -1032,9 +1044,7 @@ const findDefault = async (
 };
 
 // Create the default if absent — callers hold the per-scope lock (writes only).
-// Exported for feature-owned rule compilers (grants) that publish atomically
-// inside their own locked transaction.
-export const ensureDefault = async (
+const ensureDefault = async (
   tx: Prisma.TransactionClient,
   base: PolicyScopeBase,
 ): Promise<RuleRow> => {
@@ -1093,16 +1103,19 @@ export const getPolicyDefault = async (
 export const setPolicyDefaultAction = async (
   scope: ResourceScope,
   action: "allow" | "block",
+  userId: string,
 ): Promise<PolicyRuleDto> => {
   const base = policyScope(scope);
   const updated = await db.$transaction(async (tx) => {
     await lockScope(tx, base);
     const def = await ensureDefault(tx, base);
-    return tx.policyRuleV2.update({
+    const row = await tx.policyRuleV2.update({
       where: { id: def.id },
       data: { action },
       include: RULE_INCLUDE,
     });
+    await publishDraftInTx(tx, base, userId);
+    return row;
   });
   return toRuleDto(updated);
 };
@@ -1133,11 +1146,11 @@ export type DeletedPrincipal =
  * and conditions cascade), whatever its source; a rule naming other principals
  * too just loses this one by the cascade, which is exactly right.
  *
- * Applied to the live generation in place rather than by republishing: a
- * republish would also ship whatever the scope has staged in its draft,
- * past the plan gates `publishPolicy` re-asserts. Retained generations are
- * rollback targets, so they are cleaned too (rolling back to one would
- * otherwise resurrect the rule identity-less).
+ * Applied to the live generation in place rather than by republishing: this
+ * is a system cleanup riding the principal's own delete, not a policy edit,
+ * so it mints no generation (and no publish provenance) of its own. Retained
+ * generations are rollback targets, so they are cleaned too (rolling back to
+ * one would otherwise resurrect the rule identity-less).
  *
  * Locking: what closes the race is the principal's ROW lock. Inserting an
  * identity takes a share lock on the row it references (the FK check), so
@@ -1224,15 +1237,14 @@ export interface PublishResult {
 }
 
 // How many published generations to retain per scope for rollback; older ones
-// are pruned on publish so frequent republishes don't grow the table unbounded.
+// are pruned on publish. Every write publishes, so this window is what keeps
+// the table bounded under steady editing.
 const PUBLISHED_GENERATION_RETENTION = 10;
 
 // Gate-less snapshot of the given draft rows into a fresh published generation
 // (active published set = max(generation)). Callers hold the scope lock and have
-// already read `draftRules`; the plan gate — if any — is the caller's job.
-// Exported for feature-owned rule compilers (grants) that publish atomically
-// inside their own locked transaction.
-export const snapshotDraftRules = async (
+// already read `draftRules`.
+const snapshotDraftRules = async (
   tx: Prisma.TransactionClient,
   base: PolicyScopeBase,
   draftRules: RuleRow[],
@@ -1268,9 +1280,9 @@ export const snapshotDraftRules = async (
       },
     });
   }
-  // Prune published generations beyond the rollback retention window so frequent
-  // republishes (every coherence-bridge run) can't grow the table unbounded. The
-  // gateway reads only max(generation); older ones exist only for rollback.
+  // Prune published generations beyond the rollback retention window so the
+  // per-write publish can't grow the table unbounded. The gateway reads only
+  // max(generation); older ones exist only for rollback.
   if (generation > PUBLISHED_GENERATION_RETENTION) {
     await tx.policyRuleV2.deleteMany({
       where: {
@@ -1283,59 +1295,40 @@ export const snapshotDraftRules = async (
   return { generation, ruleCount: draftRules.length };
 };
 
-// "Apply Changes": snapshot the scope's draft set into a fresh published
-// generation. Active published set = max(generation); rollback (later) =
-// re-snapshot a prior generation. Draft rows keep their ids (the working copy).
+/**
+ * Publish the scope's whole draft as a fresh generation, inside the caller's
+ * transaction. Callers hold the scope lock. Every policy write (and every
+ * grant write) ends here, so the draft and the live generation never drift:
+ * there is nothing staged to review. Gate-less on purpose: each write already
+ * gated exactly what it changed, and re-gating the whole draft would block a
+ * downgraded org from even deleting a grandfathered rule.
+ */
+export const publishDraftInTx = async (
+  tx: Prisma.TransactionClient,
+  base: PolicyScopeBase,
+  userId: string | null,
+): Promise<PublishResult> => {
+  await ensureDefault(tx, base);
+  // The draft publishes exactly as the user arranged it: the priorities ARE
+  // the policy (top-down first-match).
+  const draftRules = await tx.policyRuleV2.findMany({
+    where: { ...base, status: "draft" },
+    include: RULE_INCLUDE,
+    orderBy: [{ priority: "asc" }, { id: "asc" }],
+  });
+  return snapshotDraftRules(tx, base, draftRules, userId);
+};
+
+/** Republish the draft on demand. Writes already publish, so this is only a
+ * compatibility endpoint for older CLIs (`onecli org policy publish`). */
 export const publishPolicy = async (
   scope: ResourceScope,
   userId: string,
 ): Promise<PublishResult> => {
   const base = policyScope(scope);
-  // Manual ordering: the draft publishes exactly as the user arranged it —
-  // the priorities ARE the policy (top-down first-match).
   return db.$transaction(async (tx) => {
     await lockScope(tx, base);
-    await ensureDefault(tx, base);
-    const draftRules = await tx.policyRuleV2.findMany({
-      where: { ...base, status: "draft" },
-      include: RULE_INCLUDE,
-    });
-    // Re-assert the plan gate: what's about to go live must still be entitled.
-    const actions = [
-      ...new Set(
-        draftRules.flatMap((r) =>
-          gatedActions({
-            rateLimit: r.rateLimit,
-            requireApproval: r.requireApproval,
-            hasDirectoryIdentity: rowHasDirectoryIdentity(r.identities),
-            hasGroupIdentity: rowHasGroupIdentity(r.identities),
-          }),
-        ),
-      ),
-    ];
-    if (actions.length > 0) {
-      await getRuleActionGate().assertAllowed(scope, actions);
-    }
-    // Re-assert the granular-scoping entitlement too — symmetric with the plan
-    // gate above: a session policy entitled at author time must still be entitled
-    // (and still valid against the connection) to go live. No-ops for behavioral /
-    // absent conditions; the per-provider validator is a cheap metadata check.
-    for (const r of draftRules) {
-      if (!isSessionPolicy(r.conditions)) continue;
-      const connTargets = r.targets
-        .filter((t) => t.kind === "connection" && t.appConnectionId != null)
-        .map((t) => ({
-          kind: "connection" as const,
-          connectionId: t.appConnectionId as string,
-        }));
-      await assertSessionPolicyValid(
-        base,
-        connTargets,
-        r.conditions,
-        r.action as "allow" | "block",
-      );
-    }
-    return snapshotDraftRules(tx, base, draftRules, userId);
+    return publishDraftInTx(tx, base, userId);
   });
 };
 
@@ -1509,15 +1502,16 @@ export interface LastPublishDto {
   generation: number;
   ruleCount: number;
   appliedAt: Date;
-  /** Who clicked Apply — null for a system publish (the new-scope seeder) or a
-   * pre-provenance generation. */
+  /** Who made the write that minted the live generation — null for a system
+   * publish (the new-scope seeder) or a pre-provenance generation. */
   appliedBy: { name: string | null; email: string } | null;
 }
 
-/** The scope's most recent publish — who applied it and when. Null = never
- * published. A zero-schema read: the newest generation's rows already carry the
- * author (`createdByUserId` → the `createdByUser` relation) and the publish
- * instant (`createdAt`). */
+/** The scope's most recent publish — who made the last write and when. Null =
+ * never published. Served to older CLIs (`onecli org policy status`). A
+ * zero-schema read: the newest generation's rows already carry the author
+ * (`createdByUserId` → the `createdByUser` relation) and the publish instant
+ * (`createdAt`). */
 export const getLastPublish = async (
   scope: ResourceScope,
 ): Promise<LastPublishDto | null> => {

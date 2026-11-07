@@ -1,11 +1,13 @@
 import { db, Prisma } from "@onecli/db";
 import {
+  runnerAdvertises,
   TURN_FAILURE_CODES,
   type AgentEvent,
   type TurnUsage,
 } from "@onecli/agent-protocol";
 import { ServiceError } from "./errors";
 import {
+  markSandboxEngaged,
   releaseWatchFireClaimsForConversation,
   signalWork,
   type SweptTurn,
@@ -19,26 +21,36 @@ import {
 } from "./conversation-service";
 import { findAgentLlmBlocker } from "./llm-credential-service";
 import { CRON_FAILURE_DISABLE_THRESHOLD } from "./agent-cron-service";
+import { webhookRunOutcome } from "../validations/webhooks";
 import {
   ACTIVE_TURN_STATUSES,
   AGENT_RESTARTED_MESSAGE,
+  AGENT_RESUMING_NOTICE,
   AGENT_START_FAILED_MESSAGE,
   AUTOMATION_SOURCES,
+  isRawErrorPayload,
+  TURN_FAILED_RAW_ERROR_MESSAGE,
   TURN_FAILURE_COPY,
   PEER_TASK_SOURCE,
   TURNS_PAGE_DEFAULT,
   TURNS_PAGE_MAX,
-  type ConversationSource,
   type TurnSource,
   type TurnStatus,
 } from "../validations/conversation";
 import { logger } from "../lib/logger";
 import { stripControl } from "../lib/text";
 import {
+  GATE_WAKE_NOTICE_PREFIX,
+  isNoReply,
+} from "@onecli/agent-protocol/text";
+import {
   attachmentMetaSelect,
+  NOT_IN_REPLY_STATUSES,
   bindAttachmentsToTurn,
   firstAttachmentName,
 } from "./attachment-service";
+import { isPlatformJobRun, platformJobRunSources } from "./platform-jobs";
+import { writeConversationNotice } from "./conversation-notice";
 
 const log = logger.child({ component: "turn-service" });
 
@@ -94,10 +106,15 @@ const DURABILITY = {
   "text.delta": false,
   "thinking.delta": false,
   // A control-plane state transition, not transcript content: the follow-up
-  // row settling `joined` is the durable record, and `turn.result.followUps`
-  // is how it gets there — this event is only the adapter's live confirmation
-  // riding the stream.
+  // row settling `joined` is the durable record. `applyTurnEvents` settles
+  // it the moment this event arrives (the live pickup signal), with
+  // `turn.result.followUps` as the close-time backstop, so the event itself
+  // is never stored.
   "message.joined": false,
+  // SEND NOW's answer: shown to whoever is watching when it
+  // arrives, and moot a moment later (the message joins, or the turn
+  // ends). The follow-up row's status is the record, so it is never stored.
+  "message.sent_now": false,
   // `satisfies` rather than a Set: a new event kind is then a COMPILE error
   // here until someone decides whether it persists, instead of silently
   // defaulting to "streams but is never recorded".
@@ -109,30 +126,35 @@ const DURABILITY = {
  */
 const NUL = String.fromCharCode(0);
 
+/** Half of a UTF-16 surrogate pair standing alone: not valid Unicode. */
+const LONE_SURROGATE =
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
 /**
- * Strip U+0000 from every string an event carries, however deeply nested.
+ * Make every string a report carries storable, however deeply nested: strip
+ * U+0000 and replace a lone surrogate with U+FFFD.
  *
- * The runner already does this at the source, and this repeats it anyway for
- * the same reason every other runner-supplied value is re-checked here: the
- * control plane does not take a reporter's word for anything. Without it, one
- * NUL byte in a tool output raises inside the transaction, rolls back the
- * whole batch, and loses that stretch of transcript — a self-inflicted outage
- * for that conversation, triggerable by an agent reading a binary file.
+ * The runner already strips NUL from transcript events at the source, and
+ * this repeats it anyway for the same reason every other runner-supplied
+ * value is re-checked here: the control plane does not take a reporter's
+ * word for anything. Postgres refuses U+0000 in text and jsonb, and the
+ * database client refuses a lone surrogate outright, so without this one bad
+ * character in a tool output rolls back a whole event batch (that stretch of
+ * transcript is lost), and one in a turn's closing error fails the close on
+ * every delivery. An agent reading a binary file is enough to trigger either.
  *
  * Sanitized rather than rejected: nobody typed this, and dropping a few bytes
  * beats dropping a minute of the turn.
  */
-const withoutNulBytes = <T>(value: T): T => {
+const storable = <T>(value: T): T => {
   if (typeof value === "string") {
-    return (value.includes(NUL) ? value.split(NUL).join("") : value) as T;
+    const withoutNul = value.includes(NUL) ? value.split(NUL).join("") : value;
+    return withoutNul.replace(LONE_SURROGATE, "\uFFFD") as T;
   }
-  if (Array.isArray(value)) return value.map(withoutNulBytes) as T;
+  if (Array.isArray(value)) return value.map(storable) as T;
   if (value && typeof value === "object") {
     return Object.fromEntries(
-      Object.entries(value).map(([key, inner]) => [
-        key,
-        withoutNulBytes(inner),
-      ]),
+      Object.entries(value).map(([key, inner]) => [key, storable(inner)]),
     ) as T;
   }
   return value;
@@ -154,6 +176,9 @@ const turnSelect = {
   createdAt: true,
   // Metadata only (attachmentMetaSelect) — bytes never ride a turn payload.
   attachments: {
+    // A file staged for send_message is not part of this reply: it goes to
+    // another conversation, through its own approval.
+    where: { status: { notIn: NOT_IN_REPLY_STATUSES } },
     select: attachmentMetaSelect,
     orderBy: { createdAt: "asc" as const },
   },
@@ -202,7 +227,10 @@ export const deriveTitle = (message: string): string | null => {
  * write into a direct thread they could not read.
  */
 export interface TurnOrigin {
-  source: ConversationSource;
+  /** A conversation source for a person's or a channel's door; a turn-only
+   * source (the desktop resume) for a platform door with `userId: null`.
+   * The greeting keeps its own raw insert; no client reaches this type. */
+  source: TurnSource;
   /**
    * The speaker — or `null` for a turn the PLATFORM creates (a cron fire,
    * step 7; watch fires). Null is not "anonymous": it routes through
@@ -231,6 +259,13 @@ export interface TurnOrigin {
    * door derives it from the provider's own event, never from client input.
    */
   sourceThreadId?: string | null;
+  /**
+   * The provider event that created this turn (a channel door's own event
+   * id; see `Turn.sourceEventId`). Door-stamped like `sourceThreadId`, never
+   * from client input. Stored on the row so a redelivered event whose first
+   * processing died after the turn landed finds it instead of adding one.
+   */
+  sourceEventId?: string;
 }
 
 /**
@@ -242,13 +277,19 @@ export interface TurnOrigin {
  * thread. Shared by `createTurn` and the send door's follow-up arm, so the
  * two arms can never disagree about the same origin (a follow-up landing in
  * a busy direct thread is fenced exactly like the turn it joins).
+ *
+ * A platform job's conversation takes that job's own runs and nothing else,
+ * and the job's source is refused anywhere else (platform-jobs, rule 3):
+ * what is written there decides the job's dueness, so a person speaking in
+ * it could silence another thread's runs. NOT_FOUND, like every other
+ * refusal here.
  */
-export const requireConversationFor = (
+export const requireConversationFor = async (
   workspaceId: string,
   conversationId: string,
   origin: TurnOrigin,
-) =>
-  origin.userId === null
+) => {
+  const conversation = await (origin.userId === null
     ? origin.directWake
       ? requireDirectWakeConversation(
           workspaceId,
@@ -256,7 +297,35 @@ export const requireConversationFor = (
           origin.directWake.agentId,
         )
       : requireSystemConversation(workspaceId, conversationId)
-    : requireConversation(workspaceId, conversationId, origin.userId);
+    : requireConversation(workspaceId, conversationId, origin.userId));
+  if (
+    (isPlatformJobRun(conversation.source) ||
+      isPlatformJobRun(origin.source)) &&
+    conversation.source !== origin.source
+  ) {
+    throw new ServiceError("NOT_FOUND", "Conversation not found");
+  }
+  return conversation;
+};
+
+/**
+ * The turn a channel event already created for this agent, found by the
+ * door-stamped `sourceEventId` (null when there is none): how a redelivered
+ * event whose first run died after the turn committed finds it.
+ */
+export const findTurnBySourceEvent = (input: {
+  agentId: string;
+  source: TurnSource;
+  sourceEventId: string;
+}) =>
+  db.turn.findFirst({
+    where: {
+      sourceEventId: input.sourceEventId,
+      source: input.source,
+      conversation: { agentId: input.agentId },
+    },
+    select: turnSelect,
+  });
 
 /**
  * Create a turn row, binding its attachments in the SAME transaction when the
@@ -271,7 +340,7 @@ const createTurnRowWithAttachments = async (
     conversationId: string;
     message: string;
     status: string;
-    source: ConversationSource;
+    source: TurnSource;
     userId: string | null;
     followUpOfTurnId?: string;
   },
@@ -287,6 +356,9 @@ const createTurnRowWithAttachments = async (
     ...data,
     ...(origin.sourceThreadId != null && {
       sourceThreadId: origin.sourceThreadId,
+    }),
+    ...(origin.sourceEventId !== undefined && {
+      sourceEventId: origin.sourceEventId,
     }),
   };
   if (!attachmentIds || attachmentIds.length === 0) {
@@ -323,8 +395,8 @@ export const createTurn = async (
   try {
     // The turn row and its attachment binds commit TOGETHER: `signalWork()`
     // below fires before this function returns, and both the dispatch
-    // composer and the steer arm's carve-out read the attachment table — a
-    // turn observable without its rows would ship bare, silently. A bind
+    // composer and the steer arm's attachment gate read the attachment
+    // table: a turn observable without its rows would ship bare, silently. A bind
     // that cannot complete aborts the transaction: no turn row, honest 422.
     const turn = await createTurnRowWithAttachments(
       {
@@ -394,6 +466,13 @@ export const createTurn = async (
     }
 
     await wakeSandboxFor(conversation.agentId);
+    // A message is engagement: a box already up has its clocks restarted
+    // now, not only once the turn's first event lands (a queued turn behind
+    // a long-running one could otherwise sit inside a closing cap window).
+    // A platform job's run is not (platform-jobs, rule 2).
+    if (!isPlatformJobRun(origin.source)) {
+      await markSandboxEngaged(db, { agentId: conversation.agentId });
+    }
     // Wake any held runner poll so a queued turn dispatches now rather than
     // after the next re-check.
     signalWork();
@@ -432,6 +511,14 @@ export const createTurn = async (
 export const promoteOldestParkedFollowUp = async (
   conversationId: string,
 ): Promise<boolean> => {
+  // A follow-up stopped while its run held it (`abortTurn` flags those) is
+  // never promoted: its run ended without settling it (it died, or a sweep
+  // failed it), and running the message now would break the Stop. It
+  // closes `aborted` instead, the outcome the person asked for.
+  await db.turn.updateMany({
+    where: { conversationId, status: "joining", abortRequested: true },
+    data: { status: "aborted", finishedAt: new Date() },
+  });
   const oldest = await db.turn.findFirst({
     where: { conversationId, status: "joining" },
     orderBy: { createdAt: "asc" },
@@ -476,7 +563,8 @@ export const promoteOldestParkedFollowUp = async (
  * starting and its `turn.started` batch landing re-runs a turn that had, at
  * most, just begun (a side effect needs a tool call, seconds later — and the
  * once-fence caps even that residue at one re-run). A turn that reached
- * `running` NEVER matches: its death must stay visible. `retriedAt` is the
+ * `running` NEVER matches: side effects may exist, so its recovery must be
+ * visible (`resumeInterruptedTurns`). `retriedAt` is the
  * once-fence: set on the first revival, checked by the next, never cleared.
  *
  * In place, never a clone: attachments, the Slack receipt, and the
@@ -523,6 +611,99 @@ export const reviveColdTurns = async (
   return count;
 };
 
+/** A turn `resumeInterruptedTurns` put back in the queue. */
+export interface ResumedTurn {
+  id: string;
+  conversationId: string;
+}
+
+/**
+ * THE MID-RUN RESUME: the one automatic recovery of a turn whose sandbox
+ * died after the harness STARTED it. Back to `queued` in place, exactly
+ * once, so the ordinary delivery machinery runs it again on a fresh boot,
+ * in the same harness session: the conversation's `harnessSessionRef`,
+ * which the running turn's heartbeat keeps current (`applyTurnProgress`),
+ * and which the harness keeps on the home volume step by step, so the run
+ * continues from its last completed step instead of starting over.
+ *
+ * The sibling of `reviveColdTurns` and the same law (in place, never a
+ * clone; `retriedAt` is the once-fence, so a second death closes the turn
+ * with today's honest copy through `failStrandedTurns`), with two
+ * differences that follow from the turn having RUN. It is visible: the
+ * person sees a notice (`writeResumeNotices`), and the agent is told on the
+ * re-dispatch that it is resuming (`RESUMED_TURN_CONTEXT`, keyed on the
+ * same two columns), because a step may have half-happened. And it keeps
+ * `startedAt`: the run is one run (the Runs view measures from it), and a
+ * started turn is never mistaken for a cold one.
+ *
+ * Never resumed:
+ * - a turn someone asked to stop (`abortRequested`): the stop wins.
+ * - a platform job's run: it never resumes a session (platform-jobs,
+ *   rule 1), and the job's next pass re-runs it anyway.
+ * - a turn whose resume was already spent (`retriedAt`), and a cold turn
+ *   (`startedAt` null, `reviveColdTurns` owns those).
+ * - anything outside the death doors: an agent restart is a person's reset
+ *   (`requestAgentRestart` fails its turns on purpose), and a turn the
+ *   stall or ceiling sweep closed may still be alive somewhere.
+ *
+ * The clocks restart with the attempt, as for a revived turn: the ceiling
+ * and the claim latency measure from `retriedAt`. `lastProgressAt` is
+ * cleared so the stall sweep waits for the new run's first beat instead of
+ * reading the dead run's silence, and `ceilingWarnedAt` so the new attempt
+ * is warned before its own ceiling.
+ *
+ * Runs BEFORE `failStrandedTurns` in the same transaction: what that one
+ * then sees as started is exactly the resume-spent remainder. The callers
+ * own the wake and the notices (after commit), as for the revival.
+ */
+export const resumeInterruptedTurns = async (
+  tx: Prisma.TransactionClient,
+  where: Prisma.TurnWhereInput,
+): Promise<ResumedTurn[]> =>
+  tx.turn.updateManyAndReturn({
+    where: {
+      ...where,
+      status: { in: ["dispatched", "running"] },
+      startedAt: { not: null },
+      retriedAt: null,
+      abortRequested: false,
+      source: { notIn: platformJobRunSources() },
+    },
+    data: {
+      status: "queued",
+      retriedAt: new Date(),
+      lastProgressAt: null,
+      ceilingWarnedAt: null,
+    },
+    select: { id: true, conversationId: true },
+  });
+
+/**
+ * Tell each resumed turn's conversation the agent is picking the turn back
+ * up: a durable notice under the turn, live in the web transcript. After
+ * the commit of the resume that produced them, and best-effort like every
+ * notice (a lost one costs the person a line, never the resume).
+ */
+export const writeResumeNotices = async (
+  resumed: readonly ResumedTurn[],
+): Promise<void> => {
+  for (const turn of resumed) {
+    try {
+      const written = await writeConversationNotice({
+        conversationId: turn.conversationId,
+        turnId: turn.id,
+        level: "info",
+        text: AGENT_RESUMING_NOTICE,
+      });
+      if (!written) {
+        log.warn({ turnId: turn.id }, "resume notice skipped: no conversation");
+      }
+    } catch (err) {
+      log.warn({ err, turnId: turn.id }, "resume notice write failed");
+    }
+  }
+};
+
 /**
  * The terminal half of the strand law: fail the in-flight turns a dead
  * sandbox leaves behind, with copy that tells the truth PER TURN — one that
@@ -532,14 +713,32 @@ export const reviveColdTurns = async (
  * both sandbox-death doors (`applyRunnerEvent`, `requestSandboxRespawn`) and
  * matching `finishTurn`'s code-mapped copy, so both death-report orders
  * converge on identical words for the identical failure. Runs AFTER
- * `reviveColdTurns` in the same transaction — order matters: what this sees
- * as dispatched-never-started is exactly the revival-spent remainder.
+ * `reviveColdTurns` and `resumeInterruptedTurns` in the same transaction,
+ * and the order matters: what this sees is exactly the remainder whose one
+ * recovery was already spent (or never applies: a stop someone asked for, a
+ * platform job's run).
  */
 export const failStrandedTurns = async (
   tx: Prisma.TransactionClient,
   where: Prisma.TurnWhereInput,
+  /** Copy for every stranded turn when the cause is known and outranks the
+   * per-phase death sentences (a read-only home: neither "couldn't start"
+   * nor "had to restart" tells the person what happened). */
+  cause?: { message: string; code: string },
 ): Promise<number> => {
   const finishedAt = new Date();
+  if (cause) {
+    const { count } = await tx.turn.updateMany({
+      where: { ...where, status: { in: ["dispatched", "running"] } },
+      data: {
+        status: "failed",
+        error: cause.message,
+        errorCode: cause.code,
+        finishedAt,
+      },
+    });
+    return count;
+  }
   const { count: neverStarted } = await tx.turn.updateMany({
     where: { ...where, status: "dispatched", startedAt: null },
     data: {
@@ -578,10 +777,10 @@ export const createFollowUp = async (
   origin: TurnOrigin,
   attachmentIds?: string[],
 ) => {
-  // Bind-in-transaction matters MOST here: the steer arm's carve-out ("an
-  // attachment-carrying follow-up never steers") reads the attachment table,
-  // and `signalWork()` races it — a follow-up observable before its rows
-  // would steer text-only and orphan the files on a `joined` row forever
+  // Bind-in-transaction matters MOST here: the steer arm reads the
+  // attachment table (its gate, and whether to compose the files), and
+  // `signalWork()` races it. A follow-up observable before its rows would
+  // steer words-only and orphan the files on a `joined` row forever
   // (steers are at-most-once).
   const followUp = await createTurnRowWithAttachments(
     {
@@ -643,6 +842,34 @@ const bridgeLabel = (message: string): string => {
     .slice(0, BRIDGE_LABEL_MAX_CHARS)
     .replace(/[\uD800-\uDBFF]$/, "")
     .trimEnd()}…`;
+};
+
+/**
+ * When the model last RAN in this conversation before the turn created at
+ * `before`: the previous turn's `startedAt`, counting only turns a harness
+ * actually picked up. The `turn.started` event is what tells a run apart
+ * from a born-done record or a greeting, which carry a `startedAt` (or none)
+ * but never reached a model. Null when the model has never run here.
+ *
+ * The window a per-turn note uses for "news since you were last here":
+ * anything that landed after this instant is something the model has not
+ * seen, and a record the platform wrote in between does not consume it.
+ */
+export const previousRunStartedAt = async (
+  conversationId: string,
+  before: Date,
+): Promise<Date | null> => {
+  const previousRun = await db.turn.findFirst({
+    where: {
+      conversationId,
+      createdAt: { lt: before },
+      startedAt: { not: null },
+      events: { some: { type: "turn.started" } },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { startedAt: true },
+  });
+  return previousRun?.startedAt ?? null;
 };
 
 /**
@@ -798,11 +1025,20 @@ export const buildOpenPromiseNote = async (
  * container that is already on its way. Exported for the SSH front door
  * (step 5): session-open and cert-mint ride the same flip; the corresponding
  * poll-time dueness arms in due-work.ts keep both honest if the flip races.
+ *
+ * `reason` says WHY, for the start payload: `preview` (a person opened a
+ * preview link) makes the boot relaunch the shares' apps; the default (a
+ * message, a schedule, SSH, the desktop) wakes a quiet box. The reason lands
+ * only where the flip does, so a box already up is never relabelled, and
+ * the ready report clears it.
  */
-export const wakeSandboxFor = async (agentId: string): Promise<void> => {
+export const wakeSandboxFor = async (
+  agentId: string,
+  reason: "preview" | null = null,
+): Promise<void> => {
   await db.sandbox.updateMany({
     where: { agentId, status: { in: ["stopped", "failed"] } },
-    data: { status: "unprovisioned" },
+    data: { status: "unprovisioned", wakeReason: reason },
   });
 };
 
@@ -934,10 +1170,15 @@ export const abortTurn = async (
     // Stop means silence (decided with the user): aborting the active turn
     // also cancels every follow-up still steering toward it. Swept here at
     // request time, and again on the aborted close (`finishTurn`) for any
-    // follow-up that lands in the request→confirm window.
-    const sweepFollowUps = () =>
+    // follow-up that lands in the request→confirm window or that the run
+    // was handed but never took in.
+    const sweepFollowUps = (where: Prisma.TurnWhereInput = {}) =>
       db.turn.updateMany({
-        where: { conversationId: turn.conversationId, status: "joining" },
+        where: {
+          ...where,
+          conversationId: turn.conversationId,
+          status: "joining",
+        },
         data: { status: "aborted", finishedAt: new Date() },
       });
 
@@ -948,7 +1189,23 @@ export const abortTurn = async (
         data: { status: "aborted", finishedAt: new Date() },
       });
       if (count === 0) continue; // dispatched under us — the flag arm owns it
+      // No close will ever come for this turn, so this sweep is the only
+      // one: it takes everything, even a follow-up handed over on a run
+      // the cold-boot revival rolled back to `queued`.
       await sweepFollowUps();
+      // And no `finishTurn` either, so the automation it belonged to (a
+      // schedule's run stopped before it began) settles here, exactly as an
+      // in-flight stop does at its close.
+      await settleAutomationRun({
+        conversationId: turn.conversationId,
+        turnId: turn.id,
+        status: "aborted",
+      }).catch((err) =>
+        log.error(
+          { err, turnId: turn.id, conversationId: turn.conversationId },
+          "automation settle failed after a queued stop",
+        ),
+      );
       return { aborted: true, delivered: false };
     }
 
@@ -962,7 +1219,28 @@ export const abortTurn = async (
       where: { id: turn.id },
       data: { abortRequested: true },
     });
-    await sweepFollowUps();
+    // Everything the run was never handed (undelivered, or left over from
+    // an earlier run) dies now.
+    await sweepFollowUps({
+      NOT: { followUpOfTurnId: turn.id, steerDeliveredAt: { not: null } },
+    });
+    // A follow-up already handed to THIS run is in flight like the turn
+    // itself, so it gets the same treatment: the Stop is a REQUEST on it,
+    // and the close is the outcome. The agent may have read it and answered
+    // before the Stop, and that answer is kept (it was said), so the close
+    // settles it `joined`; anything the run never took in, the aborted
+    // close sweeps. If no close ever comes (the sandbox died, or a sweep
+    // failed the run), promotion finds the flag and aborts it instead of
+    // running it: Stop still means silence.
+    await db.turn.updateMany({
+      where: {
+        conversationId: turn.conversationId,
+        followUpOfTurnId: turn.id,
+        status: "joining",
+        steerDeliveredAt: { not: null },
+      },
+      data: { abortRequested: true },
+    });
     signalWork();
     return { aborted: false, delivered: true };
   }
@@ -972,6 +1250,111 @@ export const abortTurn = async (
   // and the honest answer is the in-flight shape (the flag write above) or
   // the retry the user will make.
   throw new ServiceError("CONFLICT", "This turn has already finished");
+};
+
+/**
+ * SEND NOW: ask the agent to read a waiting mid-run
+ * follow-up now, instead of after the tool its run is waiting on.
+ *
+ * Only a request, like Stop: the flag rides the runner's claim to the
+ * sandbox, which moves the running tool to the background and reports what
+ * actually happened as a live `message.sent_now` under the follow-up. The
+ * claim hands it over only once the follow-up was delivered to the run, so
+ * a request made before delivery simply waits for it, and the person never
+ * has to time the click.
+ *
+ * One fenced read and one guarded write, fenced like `abortTurn` (a person
+ * who can read the thread may act on it; a foreign direct thread's row
+ * reads NOT_FOUND), and conditional on the two facts that make the request
+ * meaningful: the row is still WAITING (`joining`) and the run it rides is
+ * still live. A message with files whose runner cannot deliver files into a
+ * live run never steers, nor one queued behind it, so those are refused too.
+ * Anything else is a CONFLICT the caller can say plainly
+ * ("already read", "the agent finished"). Repeating it is harmless: the
+ * flag is already set. A row that moves between the read and the write
+ * (read, promoted, aborted) fails the write's status guard and answers
+ * CONFLICT rather than claiming a request that changed nothing.
+ */
+export const requestSendNow = async (
+  workspaceId: string,
+  followUpId: string,
+  viewerUserId: string,
+): Promise<{ requested: true }> => {
+  const row = await db.turn.findFirst({
+    where: {
+      id: followUpId,
+      conversation: {
+        agent: { workspaceId },
+        OR: [{ direct: false }, { userId: viewerUserId }],
+      },
+    },
+    select: {
+      status: true,
+      conversationId: true,
+      createdAt: true,
+      followUpOfTurnId: true,
+      _count: { select: { attachments: true } },
+      conversation: {
+        select: {
+          agent: {
+            select: {
+              sandbox: {
+                select: { runner: { select: { capabilities: true } } },
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+  if (!row) throw new ServiceError("NOT_FOUND", "Message not found");
+  if (row.status !== "joining" || !row.followUpOfTurnId) {
+    throw new ServiceError("CONFLICT", "The agent already has this message");
+  }
+  // A message with files joins a live run only through a runner that
+  // delivers files into one (the steer arm's attachment gate). Through an
+  // older runner it waits for the run to end, and so does every message
+  // sent after it (the arm's FIFO guard keeps order): all of them run as
+  // their own turns, so there is nothing to read now.
+  const behindFiles =
+    !runnerAdvertises(
+      row.conversation.agent.sandbox?.runner.capabilities,
+      "steerAttachments",
+    ) &&
+    (row._count.attachments > 0 ||
+      (await db.turn.count({
+        where: {
+          conversationId: row.conversationId,
+          status: "joining",
+          createdAt: { lt: row.createdAt },
+          attachments: { some: {} },
+        },
+      })) > 0);
+  if (behindFiles) {
+    throw new ServiceError(
+      "CONFLICT",
+      "Messages with files are read once the agent finishes",
+    );
+  }
+  const target = await db.turn.findUnique({
+    where: { id: row.followUpOfTurnId },
+    select: { status: true },
+  });
+  if (!target || !isActiveTurnStatus(target.status)) {
+    throw new ServiceError(
+      "CONFLICT",
+      "The agent finished before it could read this message",
+    );
+  }
+  const { count } = await db.turn.updateMany({
+    where: { id: followUpId, status: "joining" },
+    data: { sendNowRequested: true },
+  });
+  if (count === 0) {
+    throw new ServiceError("CONFLICT", "The agent already has this message");
+  }
+  signalWork();
+  return { requested: true };
 };
 
 /**
@@ -992,14 +1375,17 @@ export const abortTurn = async (
  * every other conversation on its runner — which in a single-runner install is
  * every tenant. `Sandbox.agentId` is `@unique`, so this resolves to at most one
  * row and "the agent that owns this sandbox" is exact.
+ *
+ * Returns the turn's source on a match (the caller's engagement decision
+ * needs it, and the row is already in hand), null when the fence refuses.
  */
 const turnBelongsToReporter = async (
   tx: Prisma.TransactionClient,
   reporter: ReporterIdentity,
   conversationId: string,
   turnId: string,
-): Promise<boolean> => {
-  const turn = await tx.turn.findFirst({
+): Promise<{ source: string } | null> =>
+  tx.turn.findFirst({
     where: {
       id: turnId,
       conversationId,
@@ -1009,9 +1395,42 @@ const turnBelongsToReporter = async (
         },
       },
     },
-    select: { id: true },
+    select: { source: true },
   });
-  return turn !== null;
+
+/**
+ * Settle steered follow-ups the run CONSUMED as `joined`. Called from two
+ * places with the same fence: live, as the adapter's `message.joined`
+ * events arrive (the row flips the moment the model has the
+ * message, not at turn end), and at the close from `turn.result.followUps`,
+ * the backstop for a join the live stream never carried (an older runner,
+ * a lost batch). Idempotent across the two: a row already `joined` no
+ * longer matches `status: "joining"`.
+ *
+ * Every clause of the where is load-bearing: the conversation + target
+ * binding reuses the reporter fence the caller just proved; `status:
+ * "joining"` means an abort that won the race sticks; `steerDeliveredAt`
+ * non-null means "joined" is only reachable through a claim the control
+ * plane itself stamped: a sandbox cannot swallow messages that were never
+ * delivered to it.
+ */
+const settleJoinedFollowUps = async (
+  tx: Prisma.TransactionClient,
+  conversationId: string,
+  targetTurnId: string,
+  followUpIds: readonly string[],
+): Promise<void> => {
+  if (followUpIds.length === 0) return;
+  await tx.turn.updateMany({
+    where: {
+      id: { in: [...followUpIds] },
+      conversationId,
+      followUpOfTurnId: targetTurnId,
+      status: "joining",
+      steerDeliveredAt: { not: null },
+    },
+    data: { status: "joined", finishedAt: new Date() },
+  });
 };
 
 /**
@@ -1048,10 +1467,16 @@ export const applyTurnEvents = async (
   // it depends on nothing inside. Doing it under the conversation row lock
   // would serialize that CPU against the whole conversation, on the hottest
   // write path in the system.
-  const clean = events.map(withoutNulBytes);
+  const clean = events.map(storable);
 
   const published = await db.$transaction(async (tx) => {
-    if (!(await turnBelongsToReporter(tx, reporter, conversationId, turnId))) {
+    const owned = await turnBelongsToReporter(
+      tx,
+      reporter,
+      conversationId,
+      turnId,
+    );
+    if (!owned) {
       log.warn(
         { ...reporter, conversationId, turnId },
         "ignoring turn events from a sandbox that does not host this turn",
@@ -1090,23 +1515,43 @@ export const applyTurnEvents = async (
     // `turn.started` is the sandbox saying the model is actually working, as
     // opposed to `dispatched` (handed over, maybe still booting). Recording it
     // here rather than over a separate wire message keeps one signal doing one
-    // job — and it is what gives `startedAt` a value.
+    // job, and it is what gives `startedAt` a value. Only the FIRST start
+    // stamps it: a resumed turn (`resumeInterruptedTurns`) starts again, and
+    // its run is still the one that began then (the Runs view measures it from
+    // there, and a death before this attempt's own start is still a started
+    // turn's death).
     if (events.some((event) => event.type === "turn.started")) {
-      await tx.turn.updateMany({
-        where: { id: turnId, status: "dispatched" },
-        data: { status: "running", startedAt: new Date() },
-      });
+      await tx.$executeRaw`
+        UPDATE turns
+        SET status = 'running',
+            started_at = COALESCE(started_at, now()),
+            updated_at = now()
+        WHERE id = ${turnId} AND status = 'dispatched'
+      `;
     }
 
+    // The live pickup signal: the adapter confirmed the run consumed these
+    // steered follow-ups. Settled here, under the fence this batch just
+    // passed, so a reader sees `joined` while the turn still runs.
+    await settleJoinedFollowUps(
+      tx,
+      conversationId,
+      turnId,
+      clean.flatMap((event) =>
+        event.type === "message.joined" ? [event.followUpId] : [],
+      ),
+    );
+
     // A turn producing events is a live conversation: keep the idle reaper
-    // away from a sandbox that is mid-answer.
+    // away from a sandbox that is mid-answer, and restart the background
+    // cap's clock (a turn IS engagement). Except a platform job's run
+    // (platform-jobs, rule 2).
     // By primary key: the fence above already proved this sandbox hosts the
     // turn, so walking agent → conversations → some(id) would be a
     // three-level correlated subquery to reach a row we already have.
-    await tx.sandbox.updateMany({
-      where: { id: reporter.sandboxId },
-      data: { lastActiveAt: new Date() },
-    });
+    if (!isPlatformJobRun(owned.source)) {
+      await markSandboxEngaged(tx, { id: reporter.sandboxId });
+    }
 
     return numbered;
   });
@@ -1131,14 +1576,29 @@ export const applyTurnEvents = async (
  * load-bearing twice over — a heartbeat for a turn a sweep already failed is
  * an orphan's, and an orphan must move neither the stall clock nor the idle
  * clock — which is why `sandbox.lastActiveAt` is stamped only when the turn
- * row matched.
+ * row matched. A platform job's run moves the stall clock and never the
+ * idle one (platform-jobs, rule 2).
+ *
+ * `sessionRef` is the harness session the turn is running in, carried on
+ * the beat so the conversation holds its resume handle while the turn runs:
+ * a sandbox that dies mid-turn never sends the terminal report that
+ * otherwise persists it (`finishTurn`), and the interrupted turn is resumed
+ * in this session (`resumeInterruptedTurns`). Written under the same facts
+ * as `finishTurn`'s persist: only behind a matched beat (this reporter's own
+ * RUNNING turn, the conversation's one active turn, so no newer turn's ref
+ * can be repointed), never on a boot an agent restart discarded
+ * (`stopRequestedAt`), never for a platform job's run (rule 1: its session
+ * is never resumed), and only when it changed: a turn's session does not
+ * move mid-run, so the steady state costs no write.
  */
 export const applyTurnProgress = async (
   reporter: ReporterIdentity,
   conversationId: string,
   turnId: string,
+  sessionRef?: string,
 ): Promise<void> => {
-  const { count } = await db.turn.updateMany({
+  // One fenced statement: the stamp, and the source the idle decision needs.
+  const [turn] = await db.turn.updateManyAndReturn({
     where: {
       id: turnId,
       conversationId,
@@ -1150,12 +1610,23 @@ export const applyTurnProgress = async (
       },
     },
     data: { lastProgressAt: new Date() },
+    select: { source: true },
   });
-  if (count === 0) return;
-  await db.sandbox.updateMany({
-    where: { id: reporter.sandboxId },
-    data: { lastActiveAt: new Date() },
-  });
+  if (!turn || isPlatformJobRun(turn.source)) return;
+  if (sessionRef) {
+    await db.conversation.updateMany({
+      where: {
+        id: conversationId,
+        agent: { sandbox: { stopRequestedAt: null } },
+        OR: [
+          { harnessSessionRef: null },
+          { harnessSessionRef: { not: sessionRef } },
+        ],
+      },
+      data: { harnessSessionRef: sessionRef },
+    });
+  }
+  await markSandboxEngaged(db, { id: reporter.sandboxId });
 };
 
 export interface FinishTurnInput {
@@ -1201,7 +1672,12 @@ const knownFailureCopy = (
  * from, so an unfenced write here would let one sandbox point another tenant's
  * conversation at a harness session it controls.
  */
-export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
+export const finishTurn = async (report: FinishTurnInput): Promise<void> => {
+  // Every string here is the sandbox's, and one the database cannot store
+  // (a NUL, a lone surrogate) fails it as a stored value and as a query
+  // parameter alike: this report would then 500 on every delivery, and the
+  // turn could never close.
+  const input = storable(report);
   const reporterFence = {
     conversation: {
       agent: {
@@ -1229,19 +1705,24 @@ export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
     (input.errorCode === TURN_FAILURE_CODES.agentStartFailed ||
       input.errorCode === TURN_FAILURE_CODES.agentRestarted);
 
-  const { revived, count } = await db.$transaction(async (tx) => {
-    // THE REVIVAL DOOR: a death report for a turn the harness never started
-    // re-queues it invisibly instead of closing it (see `reviveColdTurns` for
-    // the whole safety argument). Checked FIRST, inside the same transaction,
-    // so the close below can never race it; the reporter fence rides the
-    // where so this door proves the same ownership the close would.
+  const { revived, resumed, count } = await db.$transaction(async (tx) => {
+    // THE RECOVERY DOOR: a death report re-queues the turn instead of
+    // closing it, once: invisibly when the harness never started it (see
+    // `reviveColdTurns` for the safety argument), in its own session when it
+    // did (`resumeInterruptedTurns`). Checked FIRST, inside the same
+    // transaction, so the close below can never race it; the reporter fence
+    // rides the where so this door proves the same ownership the close would.
     if (deathReport) {
-      const revivedCount = await reviveColdTurns(tx, {
+      const own = {
         id: input.turnId,
         conversationId: input.conversationId,
         ...reporterFence,
-      });
-      if (revivedCount > 0) return { revived: true, count: 0 };
+      };
+      if ((await reviveColdTurns(tx, own)) > 0)
+        return { revived: true, resumed: [], count: 0 };
+      const resumedTurns = await resumeInterruptedTurns(tx, own);
+      if (resumedTurns.length > 0)
+        return { revived: true, resumed: resumedTurns, count: 0 };
     }
 
     const result = await tx.turn.updateMany({
@@ -1281,49 +1762,49 @@ export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
     });
 
     // Same transaction as the close, deliberately. Two statements would leave
-    // a window where the turn is finished but the session ref is not written
-    // — and the runner never retries a failed report — so the conversation
-    // would silently lose its resume handle and every later turn would start
-    // a fresh context. The same window also lets a fast follow-up message
-    // dispatch with `resumeSessionRef: null` and lose the thread.
+    // a window where the turn is finished but the session ref is not written,
+    // and the runner never repeats a report that may have landed, so the
+    // conversation would silently lose its resume handle and every later
+    // turn would start a fresh context. The same window also lets a fast
+    // follow-up message dispatch with `resumeSessionRef: null` and lose the
+    // thread.
+    //
+    // Never from a boot an agent restart discarded (`stopRequestedAt`, held
+    // until the next fresh start): that ref is exactly what the restart
+    // cleared, and keeping it would resume the session it threw away.
     if (result.count > 0 && input.sessionRef) {
       await tx.conversation.updateMany({
-        where: { id: input.conversationId },
+        where: {
+          id: input.conversationId,
+          agent: { sandbox: { stopRequestedAt: null } },
+        },
         data: { harnessSessionRef: input.sessionRef },
       });
     }
 
     // Settle steered follow-ups — same transaction, and ONLY when the close
     // won: the stale-dispatch window can hand a turn out twice, and a late
-    // duplicate's outcomes must not overrule the winning report's. Every
-    // clause of the where is load-bearing: the conversation + target binding
-    // reuses the reporter fence the close just proved; `status: "joining"`
-    // means an abort that won the race sticks; `steerDeliveredAt` non-null
-    // means "joined" is only reachable through a claim the control plane
-    // itself stamped — a sandbox cannot swallow messages that were never
-    // delivered to it. Missed outcomes need no write: anything left
+    // duplicate's outcomes must not overrule the winning report's. The
+    // backstop behind the live settle (`settleJoinedFollowUps`): normally
+    // every join already landed as its `message.joined` event arrived, and
+    // this matches nothing. Missed outcomes need no write: anything left
     // `joining` after the close is the promotion path's to run.
     if (result.count > 0) {
-      const joinedIds = (input.followUps ?? [])
-        .filter((entry) => entry.outcome === "joined")
-        .map((entry) => entry.turnId);
-      if (joinedIds.length > 0) {
-        await tx.turn.updateMany({
-          where: {
-            id: { in: joinedIds },
-            conversationId: input.conversationId,
-            followUpOfTurnId: input.turnId,
-            status: "joining",
-            steerDeliveredAt: { not: null },
-          },
-          data: { status: "joined", finishedAt: new Date() },
-        });
-      }
+      await settleJoinedFollowUps(
+        tx,
+        input.conversationId,
+        input.turnId,
+        (input.followUps ?? [])
+          .filter((entry) => entry.outcome === "joined")
+          .map((entry) => entry.turnId),
+      );
 
-      // Stop means silence: an aborted close also cancels follow-ups that
-      // landed in the abort's request→confirm window. After the settle, so
-      // a genuinely-consumed follow-up stays `joined` (the injection
-      // happened; the discarded answer is the abort's normal cost).
+      // Stop means silence: an aborted close also cancels what the
+      // request-time sweep left: follow-ups that landed in the abort's
+      // request→confirm window, and ones handed to the run that it never
+      // took in. After the settle, so a genuinely-consumed follow-up stays
+      // `joined` with its reply (the injection happened, and what the agent
+      // said back was said).
       if (input.status === "aborted") {
         await tx.turn.updateMany({
           where: { conversationId: input.conversationId, status: "joining" },
@@ -1331,17 +1812,18 @@ export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
         });
       }
     }
-    return { revived: false, count: result.count };
+    return { revived: false, resumed: [], count: result.count };
   });
 
   if (revived) {
-    // Invisible on purpose: no terminal write happened, so nothing else may
-    // run — no session-ref persist (the dead boot's ref resumes nothing), no
-    // follow-up settle or promotion (the conversation is NOT free; the same
-    // turn will run again), and above all no automation settle — a revived
-    // cron run must not count a failure strike. The raw error lands here, in
-    // the log, which is the only place it goes. No signal either: the death's
-    // own sandbox report wakes the box (see `reviveColdTurns`).
+    // No terminal write happened, so nothing else may run: no session-ref
+    // persist (the dying boot's word is not news: the heartbeat kept the
+    // running session, and a cold turn had none), no follow-up settle or
+    // promotion (the conversation is NOT free; the same turn will run again),
+    // and above all no automation settle (a re-queued cron run must not
+    // count a failure strike). The raw error lands here, in the log. No
+    // signal either: the death's own sandbox report wakes the box (see
+    // `reviveColdTurns`). A resumed turn's notice is the one visible effect.
     log.info(
       {
         ...input.reporter,
@@ -1349,9 +1831,11 @@ export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
         conversationId: input.conversationId,
         error: input.error,
         errorCode: input.errorCode,
+        resumed: resumed.length > 0,
       },
-      "cold-dead turn revived in place; it will run again on a fresh boot",
+      "interrupted turn re-queued in place; it will run again on a fresh boot",
     );
+    await writeResumeNotices(resumed);
     return;
   }
 
@@ -1419,6 +1903,7 @@ export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
       // The extra `none: active` leg is the dying-boot guard: if a NEWER
       // turn is already underway, its own close will persist a fresher ref —
       // a stale boot's ref must not repoint a conversation that moved on.
+      // `stopRequestedAt: null` is its restart twin (see the won close).
       await db.conversation.updateMany({
         where: {
           id: input.conversationId,
@@ -1426,6 +1911,7 @@ export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
             sandbox: {
               id: input.reporter.sandboxId,
               runnerId: input.reporter.runnerId,
+              stopRequestedAt: null,
             },
           },
           turns: {
@@ -1483,11 +1969,27 @@ export const finishTurn = async (input: FinishTurnInput): Promise<void> => {
         "watch fire-claim release failed after turn close",
       ),
   );
+
+  // A failed channel turn left a person with an error and no answer: tell
+  // the owners. Detached on purpose: a Slack call must never hold the
+  // runner's report (the service swallows its own failures too).
+  if (input.status === "failed") alertOwnersOfFailure(input.turnId);
+};
+
+/** The failed-turn owner alert, detached. Dynamic import: the channels
+ * provider registry reaches this module through the ingestion service, so
+ * a static import back would be a cycle (the settlePairTurn idiom). */
+const alertOwnersOfFailure = (turnId: string): void => {
+  void import("./channels/turn-failure-notice-service")
+    .then(({ notifyOwnersOfFailedTurn }) => notifyOwnersOfFailedTurn(turnId))
+    .catch((err: unknown) =>
+      log.warn({ err, turnId }, "failed-turn owner alert could not start"),
+    );
 };
 
 /** Delivery headers repeat the automation's operator/agent-named label —
  * clamped and stripped like every other name spliced into platform text. */
-const cleanAutomationName = (raw: string): string =>
+export const cleanAutomationName = (raw: string): string =>
   stripControl(raw).replace(/\n/g, " ").trim().slice(0, 100);
 
 /**
@@ -1513,6 +2015,10 @@ type AutomationSettleInput = Pick<
  */
 export const settleSweptTurns = async (swept: SweptTurn[]): Promise<void> => {
   for (const turn of swept) {
+    // A swept turn failed too (a stall, the time limit): same owner alert
+    // as a reported failure. The service re-reads the row and skips
+    // anything that is not a person's channel turn.
+    alertOwnersOfFailure(turn.turnId);
     await settleAutomationRun({
       conversationId: turn.conversationId,
       turnId: turn.turnId,
@@ -1536,20 +2042,32 @@ const runReport = async (input: AutomationSettleInput): Promise<string> => {
   // Either detail also makes the transcript read below unnecessary.
   if (input.status !== "done") {
     const detail = knownFailureCopy(input)?.message ?? input.error;
-    if (detail) return `The run failed: ${detail}`;
+    if (detail) return `The run failed: ${failureLine(detail)}`;
   }
-  const textEvent = await db.turnEvent.findFirst({
-    where: { turnId: input.turnId, type: "text" },
-    orderBy: { seq: "desc" },
-    select: { payload: true },
-  });
-  const answer = String(
-    (textEvent?.payload as { text?: unknown } | null)?.text ?? "",
-  ).trim();
-  return input.status === "done"
-    ? answer || "The run finished without producing a report."
-    : `The run failed: ${answer || "no detail was reported."}`;
+  // The sandbox often reports a failure as an `error` EVENT (a provider 4xx
+  // mid-run) with no error on the finish report: that event is the detail.
+  const lastEvent = async (type: string, key: string) => {
+    const e = await db.turnEvent.findFirst({
+      where: { turnId: input.turnId, type },
+      orderBy: { seq: "desc" },
+      select: { payload: true },
+    });
+    return String(
+      (e?.payload as Record<string, unknown> | null)?.[key] ?? "",
+    ).trim();
+  };
+  const answer = await lastEvent("text", "text");
+  if (input.status === "done")
+    return answer || "The run finished without producing a report.";
+  const error = await lastEvent("error", "message");
+  if (error) return `The run failed: ${failureLine(error)}`;
+  return `The run failed: ${answer || "no detail was reported."}`;
 };
+
+/** A raw provider payload is never relayed (it can be long and leak wire
+ * detail): it gets the same canonical line the chat shows. */
+const failureLine = (detail: string) =>
+  isRawErrorPayload(detail) ? TURN_FAILED_RAW_ERROR_MESSAGE : detail;
 
 /** A finished non-human run settles its automation source. Dispatches on the
  * conversation's `source`: crons carry outcome bookkeeping + auto-disable;
@@ -1578,6 +2096,10 @@ const settleAutomationRun = async (
     await settleWatchRun(input, conversation.externalRef);
     return;
   }
+  if (conversation.source === "webhook") {
+    await settleWebhookRun(input, conversation.externalRef);
+    return;
+  }
   if (conversation.source !== "cron") return;
 
   const cron = await db.agentCron.findUnique({
@@ -1587,6 +2109,7 @@ const settleAutomationRun = async (
       name: true,
       originConversationId: true,
       consecutiveFailures: true,
+      gate: true,
     },
   });
   if (!cron) return; // schedule deleted while its last run was in flight
@@ -1613,11 +2136,11 @@ const settleAutomationRun = async (
       },
     });
   } else {
-    // Aborted = a human stopped it. An outcome worth showing, but not a
-    // symptom of a broken schedule — no failure count, no delivery.
+    // Aborted = a person stopped it. Its own outcome, not a symptom of a
+    // broken schedule: no failure count, no delivery.
     await db.agentCron.update({
       where: { id: cron.id },
-      data: { lastOutcome: "failed" },
+      data: { lastOutcome: "stopped" },
     });
     return;
   }
@@ -1627,9 +2150,32 @@ const settleAutomationRun = async (
   await materializeAutomationDelivery(
     cron.originConversationId,
     `Scheduled run "${cleanAutomationName(cron.name)}"`,
-    await runReport(input),
+    await cronReport(input, cron.gate !== null),
     "cron",
   );
+};
+
+/**
+ * A cron run's report. A run its check WOKE is never silent: the check is
+ * the deterministic decision that something happened, so if the agent still
+ * answered `[no reply]` (it re-judged the condition), the person gets the
+ * check's own output. Only a gated cron honors the wake notice.
+ */
+const cronReport = async (
+  input: AutomationSettleInput,
+  gated: boolean,
+): Promise<string> => {
+  const report = await runReport(input);
+  if (!gated || !isNoReply(report)) return report;
+  const notices = await db.turnEvent.findMany({
+    where: { turnId: input.turnId, type: "notice" },
+    orderBy: { seq: "asc" },
+    select: { payload: true },
+  });
+  const found = notices
+    .map((n) => String((n.payload as { text?: unknown }).text ?? ""))
+    .find((text) => text.startsWith(GATE_WAKE_NOTICE_PREFIX));
+  return found ? found.trim() : report;
 };
 
 /**
@@ -1663,6 +2209,38 @@ const settleWatchRun = async (
 };
 
 /**
+ * A webhook's run finished: outcome bookkeeping (`webhookRunOutcome`, shared
+ * with the receive door's create-time failure arm) and the report to the
+ * origin chat. An aborted run (a human stopped it) records nothing and
+ * delivers nothing.
+ */
+const settleWebhookRun = async (
+  input: AutomationSettleInput,
+  webhookId: string,
+): Promise<void> => {
+  const hook = await db.agentWebhook.findUnique({
+    where: { id: webhookId },
+    select: {
+      id: true,
+      name: true,
+      originConversationId: true,
+      consecutiveFailures: true,
+    },
+  });
+  if (!hook) return; // deleted while its last run was in flight
+  const outcome = webhookRunOutcome(input.status, hook.consecutiveFailures);
+  if (!outcome) return;
+  await db.agentWebhook.update({ where: { id: hook.id }, data: outcome });
+  if (!hook.originConversationId) return;
+  await materializeAutomationDelivery(
+    hook.originConversationId,
+    `Webhook "${cleanAutomationName(hook.name)}"`,
+    await runReport(input),
+    "webhook",
+  );
+};
+
+/**
  * The report lands in the ORIGIN conversation as a completed turn — decided
  * with the user (2026-08-07): output goes where the schedule was born. This
  * shape is the whole delivery mechanism: the web thread renders it from the
@@ -1673,14 +2251,19 @@ const settleWatchRun = async (
  *
  * Same seq discipline as `applyTurnEvents`: the conversation-row lock makes
  * seq order commit order, and the publish happens after commit.
+ *
+ * A run that answered exactly `[no reply]` decided there was nothing worth
+ * surfacing (a gated watcher's quiet tick): it delivers nothing. A failure
+ * report never reads as the token, so failures always arrive.
  */
 export const materializeAutomationDelivery = async (
   originConversationId: string,
   header: string,
   report: string,
   /** The delivery turn's source — the mirror keys its per-run shape on it. */
-  source: "cron" | "watch",
+  source: "cron" | "watch" | "webhook",
 ): Promise<void> => {
+  if (isNoReply(report)) return;
   await materializeBornDoneTurn(originConversationId, {
     message: header,
     source,

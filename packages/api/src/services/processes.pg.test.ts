@@ -40,6 +40,8 @@ beforeAll(async () => {
   process.env.EDITION = "onprem";
   process.env.NEXT_PUBLIC_EDITION = "onprem";
   process.env.SANDBOX_IDLE_STOP_SECONDS = "600";
+  // The background cap, short enough to prove with hours-old stamps.
+  process.env.SANDBOX_BACKGROUND_CAP_SECONDS = String(2 * 3600);
 
   ({ db } = await import("@onecli/db"));
   processes = await import("./sandbox-process-service");
@@ -122,8 +124,12 @@ const seedSandbox = async (
     containerRef?: string;
     runnerId?: string;
     lastActiveAt?: Date;
+    /** When a person or turn last touched it; defaults to `lastActiveAt`,
+     * i.e. inside the background cap unless a test says otherwise. */
+    lastEngagedAt?: Date | null;
   } = {},
 ) => {
+  const lastActiveAt = overrides.lastActiveAt ?? new Date();
   await db.sandbox.create({
     data: {
       id: `${P}sb-${suffix}`,
@@ -131,12 +137,37 @@ const seedSandbox = async (
       runnerId: overrides.runnerId ?? RUNNER_A,
       status,
       containerRef: overrides.containerRef ?? `cont-${suffix}`,
-      lastActiveAt: overrides.lastActiveAt ?? new Date(),
+      lastActiveAt,
+      lastEngagedAt:
+        overrides.lastEngagedAt === undefined
+          ? lastActiveAt
+          : overrides.lastEngagedAt,
       homeAppliedGeneration: 1,
     },
   });
   return `${P}sb-${suffix}`;
 };
+
+/** A BUSY running process on `containerRef`: output inside the idle window
+ * (a merely-running process no longer holds a box). */
+const seedBusyProcess = async (
+  sandboxId: string,
+  containerRef: string,
+  busy: { lastOutputAt?: Date; cpuBusy?: boolean } = { cpuBusy: true },
+) =>
+  db.sandboxProcess.create({
+    data: {
+      sandboxId,
+      ref: "p-1",
+      containerRef,
+      command: "sleep 999",
+      status: "running",
+      startedAt: new Date(),
+      ...(busy.lastOutputAt && { lastOutputAt: busy.lastOutputAt }),
+      ...(busy.cpuBusy !== undefined && { cpuBusy: busy.cpuBusy }),
+    },
+    select: { id: true },
+  });
 
 const stateEvent = (
   sandboxId: string,
@@ -349,6 +380,132 @@ describe.skipIf(!PROOF_URL)("fencing", () => {
       ).originConversationId,
     ).toBe(own.id);
   });
+
+  /**
+   * A scheduled run that starts long work and watches it (Dashi's routine:
+   * a 40-minute compare, then the PR) reports what the watch finds. The run
+   * itself lives in a hidden conversation, so the work anchors to the chat
+   * the schedule reports to. Before, it anchored to nothing, and the PR
+   * link was kept only as the run's record.
+   */
+  describe("work started by an automation run", () => {
+    const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+    const watchFrame = (ref: string) => ({
+      ref,
+      kind: "exit",
+      prompt: "report",
+      status: "armed",
+      expiresAt,
+    });
+    const cronRun = async (
+      agentId: string,
+      origin: string | null,
+      suffix: string,
+    ) => {
+      const cron = await db.agentCron.create({
+        data: {
+          agentId,
+          name: `${P}${suffix}`,
+          prompt: "do it",
+          schedule: "0 9 * * *",
+          timezone: "UTC",
+          nextFireAt: new Date(Date.now() + 86_400_000),
+          originConversationId: origin,
+          createdByUserId: USER,
+        },
+        select: { id: true },
+      });
+      return db.conversation.create({
+        data: { agentId, source: "cron", externalRef: cron.id },
+        select: { id: true },
+      });
+    };
+    const anchorOf = async (sb: string, ref: string) => {
+      const proc = await db.sandboxProcess.findUniqueOrThrow({
+        where: { sandboxId_ref: { sandboxId: sb, ref } },
+        select: {
+          originConversationId: true,
+          createdByUserId: true,
+          watches: {
+            select: { originConversationId: true, createdByUserId: true },
+          },
+        },
+      });
+      return proc;
+    };
+
+    it("anchors to the chat the schedule reports to, with no creator", async () => {
+      const agentId = await seedAgent("cron-anchor");
+      const sb = await seedSandbox("cron-anchor", agentId, "running", {
+        containerRef: "c",
+      });
+      const dm = await db.conversation.create({
+        data: { agentId, source: "slack", direct: true, userId: USER },
+        select: { id: true },
+      });
+      const run = await cronRun(agentId, dm.id, "cron-anchor");
+      const runTurn = await db.turn.create({
+        data: { conversationId: run.id, source: "cron", message: "go" },
+        select: { id: true },
+      });
+      await processes.applyProcessState(
+        RUNNER_A,
+        stateEvent(sb, "c", {
+          ref: "compare",
+          conversationId: run.id,
+          turnId: runTurn.id,
+          watches: [
+            {
+              ...watchFrame("w-compare"),
+              conversationId: run.id,
+              turnId: runTurn.id,
+            },
+          ],
+        }),
+      );
+      const row = await anchorOf(sb, "compare");
+      // MUTATION-PROOF: restore the old refusal (return no anchor for an
+      // automation conversation) and both anchors read null.
+      expect(row.originConversationId).toBe(dm.id);
+      expect(row.watches).toEqual([
+        { originConversationId: dm.id, createdByUserId: null },
+      ]);
+      // Nobody typed a scheduled run: it never borrows a person's standing.
+      expect(row.createdByUserId).toBeNull();
+    });
+
+    it("never anchors to a hidden run, a schedule with no chat, or another agent's chat", async () => {
+      const agentId = await seedAgent("cron-anchor-no");
+      const other = await seedAgent("cron-anchor-other");
+      const sb = await seedSandbox("cron-anchor-no", agentId, "running", {
+        containerRef: "c",
+      });
+      const noChat = await cronRun(agentId, null, "cron-nochat");
+      // A schedule whose origin is itself a hidden run (a cron created by a
+      // cron): the anchor must not chain into another hidden thread.
+      const hidden = await cronRun(agentId, null, "cron-hidden");
+      const chained = await cronRun(agentId, hidden.id, "cron-chained");
+      // A schedule pointing at a chat of a DIFFERENT agent.
+      const foreignChat = await db.conversation.create({
+        data: { agentId: other, source: "web", direct: true, userId: USER },
+        select: { id: true },
+      });
+      const foreign = await cronRun(agentId, foreignChat.id, "cron-foreign");
+
+      for (const [ref, run] of [
+        ["no-chat", noChat],
+        ["chained", chained],
+        ["foreign", foreign],
+      ] as const) {
+        await processes.applyProcessState(
+          RUNNER_A,
+          stateEvent(sb, "c", { ref, conversationId: run.id }),
+        );
+        const row = await anchorOf(sb, ref);
+        expect(row.originConversationId, ref).toBeNull();
+      }
+    });
+  });
 });
 
 describe.skipIf(!PROOF_URL)("the state machine", () => {
@@ -553,31 +710,81 @@ describe.skipIf(!PROOF_URL)("the state machine", () => {
 
 describe.skipIf(!PROOF_URL)("keep-awake (the stop arm)", () => {
   const stale = () => new Date(Date.now() - 60 * 60 * 1000);
+  const pastCap = () => new Date(Date.now() - 3 * 60 * 60 * 1000);
   const claimStop = async () =>
     (await dueWork.claimDueWork(RUNNER_A, 5)).filter((i) => i.kind === "stop");
+  const stopReasonOf = async (sb: string) =>
+    (
+      await db.sandbox.findUniqueOrThrow({
+        where: { id: sb },
+        select: { stopReason: true },
+      })
+    ).stopReason;
 
-  it("a running process on the CURRENT container blocks the stop; exited does not", async () => {
+  it("a BUSY process on the CURRENT container blocks the stop; exited does not", async () => {
     const agentId = await seedAgent("ka-run");
     const sb = await seedSandbox("ka-run", agentId, "running", {
       containerRef: "c-cur",
       lastActiveAt: stale(),
     });
-    await db.sandboxProcess.create({
-      data: {
-        sandboxId: sb,
-        ref: "p-1",
-        containerRef: "c-cur",
-        command: "sleep 999",
-        status: "running",
-        startedAt: new Date(),
-      },
-    });
+    await seedBusyProcess(sb, "c-cur", { cpuBusy: true });
     expect(await claimStop()).toEqual([]); // held awake
 
     // Flip it to exited → nothing keeps it awake now.
     await db.sandboxProcess.updateMany({
       where: { sandboxId: sb, ref: "p-1" },
       data: { status: "exited", endedAt: new Date() },
+    });
+    const stops = await claimStop();
+    expect(stops.map((s) => s.sandboxId)).toContain(sb);
+    // The park says why, for the lost sweep's verdict.
+    expect(await stopReasonOf(sb)).toBe("idle");
+  });
+
+  it("a running process that is IDLE (no recent output, no CPU) does NOT hold the box", async () => {
+    const agentId = await seedAgent("ka-idle");
+    const sb = await seedSandbox("ka-idle", agentId, "running", {
+      containerRef: "c",
+      lastActiveAt: stale(),
+    });
+    // The hello-world server: alive, listening, doing nothing. Its last
+    // output predates the idle window and it burns no CPU.
+    await seedBusyProcess(sb, "c", { lastOutputAt: stale(), cpuBusy: false });
+    // MUTATION-PROOF: drop the busy term and this box is held forever.
+    const stops = await claimStop();
+    expect(stops.map((s) => s.sandboxId)).toContain(sb);
+  });
+
+  it("recent OUTPUT alone holds the box (a chatty job with no CPU sample)", async () => {
+    const agentId = await seedAgent("ka-out");
+    const sb = await seedSandbox("ka-out", agentId, "running", {
+      containerRef: "c",
+      lastActiveAt: stale(),
+    });
+    await seedBusyProcess(sb, "c", {
+      lastOutputAt: new Date(Date.now() - 60_000),
+      cpuBusy: false,
+    });
+    expect(await claimStop()).toEqual([]);
+  });
+
+  it("a process from a supervisor that predates the busy fields reads idle (the fail-safe direction)", async () => {
+    const agentId = await seedAgent("ka-old");
+    const sb = await seedSandbox("ka-old", agentId, "running", {
+      containerRef: "c",
+      lastActiveAt: stale(),
+    });
+    // No lastOutputAt, cpuBusy at its default: the row carries no evidence
+    // of work, so it must not hold the box.
+    await db.sandboxProcess.create({
+      data: {
+        sandboxId: sb,
+        ref: "p-1",
+        containerRef: "c",
+        command: "sleep 999",
+        status: "running",
+        startedAt: new Date(),
+      },
     });
     const stops = await claimStop();
     expect(stops.map((s) => s.sandboxId)).toContain(sb);
@@ -589,22 +796,56 @@ describe.skipIf(!PROOF_URL)("keep-awake (the stop arm)", () => {
       containerRef: "c-current",
       lastActiveAt: stale(),
     });
-    // The row's container is NOT the sandbox's current one — it is a corpse.
-    await db.sandboxProcess.create({
-      data: {
-        sandboxId: sb,
-        ref: "p-old",
-        containerRef: "c-previous",
-        command: "sleep 999",
-        status: "running",
-        startedAt: new Date(),
-      },
-    });
+    // The row's container is NOT the sandbox's current one — it is a corpse,
+    // however busy it claims to be.
+    await seedBusyProcess(sb, "c-previous", { cpuBusy: true });
     const stops = await claimStop();
     expect(stops.map((s) => s.sandboxId)).toContain(sb);
   });
 
-  it("an armed watch blocks the stop; a fired/expired one does not", async () => {
+  it("the BACKGROUND CAP: a busy process past the cap since the last engagement is parked", async () => {
+    const agentId = await seedAgent("ka-cap");
+    const sb = await seedSandbox("ka-cap", agentId, "running", {
+      containerRef: "c",
+      lastActiveAt: stale(),
+      // Nobody has talked to this agent for longer than the cap (2h here).
+      lastEngagedAt: pastCap(),
+    });
+    await seedBusyProcess(sb, "c", { cpuBusy: true });
+    // MUTATION-PROOF: drop the `last_engaged_at > capBefore` term and the
+    // busy loop holds this box forever.
+    const stops = await claimStop();
+    expect(stops.map((s) => s.sandboxId)).toContain(sb);
+    expect(await stopReasonOf(sb)).toBe("idle");
+  });
+
+  it("the cap counts from the last PERSON or TURN: a fresh engagement re-arms it", async () => {
+    const agentId = await seedAgent("ka-cap-re");
+    const sb = await seedSandbox("ka-cap-re", agentId, "running", {
+      containerRef: "c",
+      lastActiveAt: stale(),
+      lastEngagedAt: pastCap(),
+    });
+    await seedBusyProcess(sb, "c", { cpuBusy: true });
+    // A turn's heartbeat / a person's preview hit: the one write that
+    // restarts both clocks.
+    await dueWork.markSandboxEngaged(db, { id: sb });
+    expect(await claimStop()).toEqual([]);
+  });
+
+  it("a box NEVER engaged (null) has no hold at all", async () => {
+    const agentId = await seedAgent("ka-never");
+    const sb = await seedSandbox("ka-never", agentId, "running", {
+      containerRef: "c",
+      lastActiveAt: stale(),
+      lastEngagedAt: null,
+    });
+    await seedBusyProcess(sb, "c", { cpuBusy: true });
+    const stops = await claimStop();
+    expect(stops.map((s) => s.sandboxId)).toContain(sb);
+  });
+
+  it("an AGENT-armed watch blocks the stop; a fired/expired one does not", async () => {
     const agentId = await seedAgent("ka-watch");
     const sb = await seedSandbox("ka-watch", agentId, "running", {
       containerRef: "c",
@@ -629,6 +870,7 @@ describe.skipIf(!PROOF_URL)("keep-awake (the stop arm)", () => {
         kind: "exit",
         prompt: "go",
         status: "armed",
+        origin: "agent",
         expiresAt: new Date(Date.now() + 3_600_000),
       },
       select: { id: true },
@@ -641,6 +883,57 @@ describe.skipIf(!PROOF_URL)("keep-awake (the stop arm)", () => {
     });
     const stops = await claimStop();
     expect(stops.map((s) => s.sandboxId)).toContain(sb);
+  });
+
+  it("a PLATFORM-armed watch (the turn-end safety net) never holds the box", async () => {
+    const agentId = await seedAgent("ka-platform");
+    const sb = await seedSandbox("ka-platform", agentId, "running", {
+      containerRef: "c",
+      lastActiveAt: stale(),
+    });
+    const proc = await db.sandboxProcess.create({
+      data: {
+        sandboxId: sb,
+        ref: "p-1",
+        containerRef: "c",
+        command: "python3 server.py",
+        status: "running",
+        startedAt: new Date(),
+      },
+      select: { id: true },
+    });
+    // The original incident's shape exactly: the safety net's 24h exit watch
+    // on an idle server. It REPORTS when the process dies; it must not keep
+    // it alive.
+    await db.processWatch.create({
+      data: {
+        processId: proc.id,
+        ref: "w-safety",
+        kind: "exit",
+        prompt: "report",
+        status: "armed",
+        origin: "platform",
+        expiresAt: new Date(Date.now() + 24 * 3_600_000),
+      },
+    });
+    // MUTATION-PROOF: drop the `w.origin = 'agent'` term and this holds.
+    const stops = await claimStop();
+    expect(stops.map((s) => s.sandboxId)).toContain(sb);
+  });
+
+  it("a RESTART request parks with reason 'restart', never 'idle'", async () => {
+    const agentId = await seedAgent("ka-restart");
+    const sb = await seedSandbox("ka-restart", agentId, "running", {
+      containerRef: "c",
+      lastActiveAt: new Date(), // fresh: only the restart makes it due
+    });
+    await db.sandbox.update({
+      where: { id: sb },
+      data: { stopRequestedAt: new Date() },
+    });
+    const stops = await claimStop();
+    expect(stops.map((s) => s.sandboxId)).toContain(sb);
+    expect(await stopReasonOf(sb)).toBe("restart");
   });
 });
 
@@ -664,8 +957,9 @@ describe.skipIf(!PROOF_URL)("the held-awake ceiling (the eviction arm)", () => {
     });
   };
 
-  /** A held-awake box: running, idle past the window, live process on the
-   * CURRENT container ref. */
+  /** A held-awake box: running, idle past the window, a BUSY process on
+   * the CURRENT container ref, engaged inside the background cap (the
+   * hold is real; only the ceiling may evict it). */
   const seedHeldBox = async (
     suffix: string,
     lastActiveAt: Date,
@@ -675,18 +969,10 @@ describe.skipIf(!PROOF_URL)("the held-awake ceiling (the eviction arm)", () => {
     const sb = await seedSandbox(suffix, agentId, "running", {
       containerRef: `c-${suffix}`,
       lastActiveAt,
+      lastEngagedAt: new Date(),
       runnerId,
     });
-    await db.sandboxProcess.create({
-      data: {
-        sandboxId: sb,
-        ref: "p-1",
-        containerRef: `c-${suffix}`,
-        command: "sleep 999",
-        status: "running",
-        startedAt: new Date(),
-      },
-    });
+    await seedBusyProcess(sb, `c-${suffix}`, { cpuBusy: true });
     return { agentId, sb };
   };
 
@@ -754,16 +1040,7 @@ describe.skipIf(!PROOF_URL)("the held-awake dashboard signal", () => {
     const sb = await seedSandbox(suffix, agentId, "running", {
       containerRef: `c-${suffix}`,
     });
-    await db.sandboxProcess.create({
-      data: {
-        sandboxId: sb,
-        ref: "p-1",
-        containerRef: `c-${suffix}`,
-        command: "sleep 999",
-        status: "running",
-        startedAt: new Date(),
-      },
-    });
+    await seedBusyProcess(sb, `c-${suffix}`, { cpuBusy: true });
     return agentId;
   };
 
@@ -800,20 +1077,12 @@ describe.skipIf(!PROOF_URL)("the held-awake dashboard signal", () => {
         status: "running",
         containerRef: "c-foreign",
         lastActiveAt: new Date(),
+        lastEngagedAt: new Date(),
         homeAppliedGeneration: 1,
       },
       select: { id: true },
     });
-    await db.sandboxProcess.create({
-      data: {
-        sandboxId: foreignSb.id,
-        ref: "p-1",
-        containerRef: "c-foreign",
-        command: "sleep 999",
-        status: "running",
-        startedAt: new Date(),
-      },
-    });
+    await seedBusyProcess(foreignSb.id, "c-foreign", { cpuBusy: true });
 
     const busy = await dueWork.agentIdsWithLiveBackgroundWork(WORKSPACE);
     expect(busy.has(mine)).toBe(true);
@@ -869,6 +1138,153 @@ describe.skipIf(!PROOF_URL)("the sweeps", () => {
       select: { status: true, trigger: true },
     });
     expect(w).toMatchObject({ status: "triggered", trigger: "lost" });
+  });
+
+  it("a PARKED sandbox (stop_reason idle, same container) marks its processes 'parked', and the watch fires as a NOTICE, never a turn", async () => {
+    const agentId = await seedAgent("sweep-parked");
+    const sb = await seedSandbox("sweep-parked", agentId, "stopped", {
+      containerRef: "c",
+    });
+    // The stop claim's verdict: the control plane chose to sleep this box.
+    await db.sandbox.update({
+      where: { id: sb },
+      data: { stopReason: "idle" },
+    });
+    // The watch's origin: the chat the agent started the server from.
+    const origin = await db.conversation.create({
+      data: { agentId, source: "web" },
+      select: { id: true },
+    });
+    const proc = await db.sandboxProcess.create({
+      data: {
+        sandboxId: sb,
+        ref: "p-1",
+        containerRef: "c",
+        command: "python3 server.py",
+        name: "server",
+        status: "running",
+        startedAt: new Date(),
+      },
+      select: { id: true },
+    });
+    await db.processWatch.create({
+      data: {
+        processId: proc.id,
+        ref: "w-safety",
+        kind: "exit",
+        prompt: "report",
+        status: "armed",
+        origin: "platform",
+        originConversationId: origin.id,
+        expiresAt: new Date(Date.now() + 24 * 3_600_000),
+      },
+    });
+    const turnsBefore = await db.turn.count({
+      where: { conversation: { agentId } },
+    });
+
+    await watchFire.fireDueWatches();
+
+    // The process is parked, not lost: a known, intended end.
+    expect(
+      (
+        await db.sandboxProcess.findUniqueOrThrow({
+          where: { id: proc.id },
+          select: { status: true },
+        })
+      ).status,
+    ).toBe("parked");
+    // The watch fired with the parked trigger…
+    const w = await db.processWatch.findFirstOrThrow({
+      where: { processId: proc.id },
+      select: { status: true, trigger: true },
+    });
+    expect(w).toMatchObject({ status: "fired", trigger: "parked" });
+    // …as ONE born-done notice in the origin, and NO wake turn anywhere
+    // (the old restart loop: park → "lost" wake → server restarted).
+    // MUTATION-PROOF: route 'parked' through the turn path and the count
+    // below grows by a watch-source conversation's turn.
+    const turns = await db.turn.findMany({
+      where: { conversation: { agentId } },
+      select: { conversationId: true, source: true, status: true },
+    });
+    expect(turns).toHaveLength(turnsBefore + 1);
+    expect(turns[0]).toMatchObject({
+      conversationId: origin.id,
+      source: "watch",
+      status: "done",
+    });
+    expect(
+      await db.conversation.count({ where: { agentId, source: "watch" } }),
+    ).toBe(0);
+  });
+
+  it("every CLAIMED stop parks: restart and evict read 'parked'; a death nobody claimed reads 'lost'", async () => {
+    const verdictFor = async (suffix: string, stopReason: string | null) => {
+      const agentId = await seedAgent(`sweep-${suffix}`);
+      const sb = await seedSandbox(`sweep-${suffix}`, agentId, "stopped", {
+        containerRef: "c",
+      });
+      await db.sandbox.update({ where: { id: sb }, data: { stopReason } });
+      const proc = await db.sandboxProcess.create({
+        data: {
+          sandboxId: sb,
+          ref: "p-1",
+          containerRef: "c",
+          command: "x",
+          status: "running",
+          startedAt: new Date(),
+        },
+        select: { id: true },
+      });
+      await dueWork.sweepLostProcesses();
+      return (
+        await db.sandboxProcess.findUniqueOrThrow({
+          where: { id: proc.id },
+          select: { status: true },
+        })
+      ).status;
+    };
+    // A person's restart: "stop everything" must not wake the agent back
+    // into the work it was told to drop (observed live). An eviction is
+    // the platform's own choice too.
+    expect(await verdictFor("restart", "restart")).toBe("parked");
+    expect(await verdictFor("evict", "evict")).toBe("parked");
+    // No claim stamped a reason: the box died on its own. That is a wake.
+    expect(await verdictFor("crash", null)).toBe("lost");
+  });
+
+  it("a stop_reason of 'idle' on a REPLACED container still reads 'lost' (the ref guard)", async () => {
+    const agentId = await seedAgent("sweep-parked-ref");
+    const sb = await seedSandbox("sweep-parked-ref", agentId, "stopped", {
+      containerRef: "c-new",
+    });
+    await db.sandbox.update({
+      where: { id: sb },
+      data: { stopReason: "idle" },
+    });
+    // The process ran on a PREVIOUS container: whatever parked the new one,
+    // this process died with the old one.
+    const proc = await db.sandboxProcess.create({
+      data: {
+        sandboxId: sb,
+        ref: "p-old",
+        containerRef: "c-old",
+        command: "x",
+        status: "running",
+        startedAt: new Date(),
+      },
+      select: { id: true },
+    });
+    await dueWork.sweepLostProcesses();
+    expect(
+      (
+        await db.sandboxProcess.findUniqueOrThrow({
+          where: { id: proc.id },
+          select: { status: true },
+        })
+      ).status,
+    ).toBe("lost");
   });
 
   it("a dropped exit-trigger is recovered by the coherence sweep as 'exited'", async () => {
@@ -1586,6 +2002,105 @@ describe.skipIf(!PROOF_URL)("the in-origin wake (direct origins)", () => {
     });
     expect(turns).toHaveLength(1);
     expect(turns[0]?.source).toBe("watch");
+    expect(
+      (
+        await db.processWatch.findUniqueOrThrow({
+          where: { id: watch.id },
+          select: { status: true },
+        })
+      ).status,
+    ).toBe("fired");
+  });
+
+  it("a wake NEVER steers into a person's running exchange: it waits, then fires as its own turn", async () => {
+    // Live 2026-10-03: a wake joined the person's running answer, so the
+    // agent answered the wake instead of the question, and the Slack mirror
+    // posted the platform's instruction as a web quote. A person's
+    // turn is never a join target; the wake waits and arrives on its own.
+    // MUTATION-PROOF: drop `source: "watch"` from the join lookup and the
+    // follow-up row below appears.
+    const agentId = await seedAgent("inorigin-human");
+    const sb = await seedSandbox("inorigin-human", agentId, "running", {
+      containerRef: "c",
+    });
+    const origin = await directOrigin(agentId);
+    const asking = await db.turn.create({
+      data: {
+        conversationId: origin.id,
+        message: "is there disk space?",
+        status: "running",
+        source: "slack",
+        userId: USER,
+      },
+      select: { id: true },
+    });
+    const watch = await armTriggeredWithOrigin(sb, origin.id, "human");
+
+    await watchFire.fireDueWatches();
+
+    expect(
+      await db.turn.count({ where: { followUpOfTurnId: asking.id } }),
+    ).toBe(0);
+    expect(
+      (
+        await db.processWatch.findUniqueOrThrow({
+          where: { id: watch.id },
+          select: { status: true },
+        })
+      ).status,
+    ).toBe("triggered");
+
+    // The person's turn closes: the release puts the wake back in reach,
+    // and it fires as its OWN turn in the thread.
+    await db.turn.update({
+      where: { id: asking.id },
+      data: { status: "done", finishedAt: new Date() },
+    });
+    await dueWork.releaseWatchFireClaimsForConversation(origin.id);
+    await watchFire.fireDueWatches();
+
+    const wakes = await db.turn.findMany({
+      where: { conversationId: origin.id, source: "watch" },
+      select: { followUpOfTurnId: true },
+    });
+    expect(wakes).toEqual([{ followUpOfTurnId: null }]);
+    expect(
+      (
+        await db.processWatch.findUniqueOrThrow({
+          where: { id: watch.id },
+          select: { status: true },
+        })
+      ).status,
+    ).toBe("fired");
+  });
+
+  it("a wake JOINS a running wake in the same thread (#1013): one report, not two", async () => {
+    const agentId = await seedAgent("inorigin-join");
+    const sb = await seedSandbox("inorigin-join", agentId, "running", {
+      containerRef: "c",
+    });
+    const origin = await directOrigin(agentId);
+    const reporting = await db.turn.create({
+      data: {
+        conversationId: origin.id,
+        message: "[Watch on process ...]",
+        status: "running",
+        source: "watch",
+        userId: null,
+      },
+      select: { id: true },
+    });
+    const watch = await armTriggeredWithOrigin(sb, origin.id, "join");
+
+    await watchFire.fireDueWatches();
+
+    const joined = await db.turn.findMany({
+      where: { followUpOfTurnId: reporting.id },
+      select: { source: true, status: true, userId: true },
+    });
+    expect(joined).toEqual([
+      { source: "watch", status: "joining", userId: null },
+    ]);
     expect(
       (
         await db.processWatch.findUniqueOrThrow({

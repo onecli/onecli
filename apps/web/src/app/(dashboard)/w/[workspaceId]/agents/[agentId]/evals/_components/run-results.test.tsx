@@ -1,0 +1,470 @@
+// @vitest-environment jsdom
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { EvalResultView } from "@onecli/api/validations/evals";
+import type { EvalRunDetail } from "@/lib/api";
+
+/** One run's results through the real polling hook (API client mocked). */
+
+const api = vi.hoisted(() => ({ getRun: vi.fn() }));
+vi.mock("@/lib/api", () => ({ evals: { getRun: api.getRun } }));
+
+const { RunResults } = await import("./run-results");
+
+const result = (patch: Partial<EvalResultView> = {}): EvalResultView => ({
+  questionId: "q-pass",
+  question: "How many customers?",
+  expected: "42",
+  kind: "numeric",
+  expectedApps: [],
+  outcome: "passed",
+  answer: "We have 42 customers.",
+  missingApps: [],
+  turnId: "turn-pass",
+  conversationId: "conv-pass",
+  error: null,
+  judgement: null,
+  judgeError: null,
+  change: "same",
+  ...patch,
+});
+
+const run = (patch: Partial<EvalRunDetail> = {}): EvalRunDetail => ({
+  id: "run-1",
+  status: "done",
+  trigger: "manual",
+  configVersion: "cfg-2",
+  model: null,
+  total: 2,
+  counts: { pending: 0, passed: 1, mismatch: 1, error: 0, inconclusive: 0 },
+  error: null,
+  createdAt: "2026-10-07T10:00:00Z",
+  startedAt: "2026-10-07T10:00:01Z",
+  finishedAt: "2026-10-07T10:01:00Z",
+  results: [
+    result(),
+    result({
+      questionId: "q-broke",
+      question: "Who renewed?",
+      expected: "Acme",
+      kind: "text",
+      outcome: "mismatch",
+      answer: "Nobody renewed.",
+      turnId: "turn-broke",
+      change: "regressed",
+      expectedApps: ["gmail", "host:crm.example.com"],
+      missingApps: ["host:crm.example.com"],
+    }),
+  ],
+  previous: { id: "run-0", configVersion: "cfg-1" },
+  ...patch,
+});
+
+const labels: Record<string, string> = {
+  gmail: "Gmail",
+  "host:crm.example.com": "CRM",
+};
+
+const mount = (editable: string[] = ["q-pass", "q-broke"]) => {
+  const onInspect = vi.fn();
+  const onEdit = vi.fn();
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  render(
+    <QueryClientProvider client={client}>
+      <RunResults
+        agentId="ag-1"
+        runId="run-1"
+        appLabel={(id) => labels[id] ?? id}
+        editableQuestionIds={new Set(editable)}
+        onInspect={onInspect}
+        onEdit={onEdit}
+      />
+    </QueryClientProvider>,
+  );
+  return { onInspect, onEdit };
+};
+
+/** Open every result (they start closed), once the run has loaded. */
+const openAll = async () => {
+  const list = await screen.findByRole("list", { name: "Results" });
+  const user = userEvent.setup();
+  for (const trigger of within(list).queryAllByRole("button", {
+    name: /^Show result/,
+  }))
+    await user.click(trigger);
+  return list;
+};
+
+beforeEach(() => api.getRun.mockReset());
+afterEach(() => cleanup());
+
+describe("RunResults", () => {
+  it("lists questions in run order, all closed until opened", async () => {
+    api.getRun.mockResolvedValue(run());
+    mount();
+    const list = await screen.findByRole("list", { name: "Results" });
+    const user = userEvent.setup();
+    const [first, second] = [...list.children].map((item) =>
+      item instanceof HTMLElement ? item : null,
+    );
+    expect(first).toHaveTextContent("1.How many customers?");
+    expect(second).toHaveTextContent("2.Who renewed?");
+    // Every result starts closed, whatever its outcome.
+    expect(screen.queryByText("Nobody renewed.")).toBeNull();
+    expect(screen.queryByText("We have 42 customers.")).toBeNull();
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Show result 2, Mismatch: Who renewed?",
+      }),
+    );
+    expect(screen.getByText("Nobody renewed.")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", {
+        name: "Hide result 2, Mismatch: Who renewed?",
+      }),
+    );
+    expect(screen.queryByText("Nobody renewed.")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Expand all" }));
+    expect(screen.getByText("We have 42 customers.")).toBeInTheDocument();
+    expect(screen.getByText("Nobody renewed.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Collapse all" }));
+    expect(screen.queryByText("Nobody renewed.")).toBeNull();
+  });
+
+  it("filters to an outcome by clicking its count, and back", async () => {
+    api.getRun.mockResolvedValue(run());
+    mount();
+    const list = await screen.findByRole("list", { name: "Results" });
+    const user = userEvent.setup();
+    const mismatches = screen.getByRole("button", {
+      name: "Show only 1 mismatch",
+    });
+    await user.click(mismatches);
+    expect(mismatches).toHaveAttribute("aria-pressed", "true");
+    expect(list.children).toHaveLength(1);
+    expect(list).toHaveTextContent("2.Who renewed?");
+    await user.click(mismatches);
+    expect(list.children).toHaveLength(2);
+  });
+
+  it("drops a filter whose count went to 0, instead of an empty list nobody can clear", async () => {
+    vi.useFakeTimers();
+    try {
+      api.getRun
+        .mockResolvedValueOnce(
+          run({
+            status: "running",
+            counts: {
+              pending: 1,
+              passed: 1,
+              mismatch: 0,
+              error: 0,
+              inconclusive: 0,
+            },
+            results: [result()],
+          }),
+        )
+        .mockResolvedValue(run());
+      mount();
+      await act(() => vi.advanceTimersByTimeAsync(10));
+      act(() =>
+        screen.getByRole("button", { name: "Show only 1 waiting" }).click(),
+      );
+      // The run finishes: nothing is waiting, and the Waiting chip is gone.
+      await act(() => vi.advanceTimersByTimeAsync(2_010));
+      expect(
+        screen.queryByRole("button", { name: /Show only \d+ waiting/ }),
+      ).toBeNull();
+      expect(
+        screen.getByRole("list", { name: "Results" }).children,
+      ).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows the expected answer beside the agent's, and how it moved", async () => {
+    api.getRun.mockResolvedValue(run());
+    mount();
+    const list = await openAll();
+    const second = list.children[1];
+    expect(second).toHaveTextContent("Who renewed?");
+    expect(second).toHaveTextContent("Broke since last run");
+    expect(
+      within(second as HTMLElement).getByRole("img", { name: "Mismatch" }),
+    ).toBeInTheDocument();
+    expect(second).toHaveTextContent("Acme");
+    expect(second).toHaveTextContent("Nobody renewed.");
+    expect(api.getRun).toHaveBeenCalledWith("ag-1", "run-1");
+  });
+
+  it("says which required apps were reached, in words, not color alone", async () => {
+    api.getRun.mockResolvedValue(run());
+    mount();
+    await openAll();
+    expect(screen.getByText("Gmail").parentElement).toHaveTextContent(
+      "Gmailreached",
+    );
+    expect(screen.getByText("CRM").parentElement).toHaveTextContent(
+      "CRMnot reached",
+    );
+  });
+
+  it("offers editing only for questions that still exist, and inspects by turn", async () => {
+    api.getRun.mockResolvedValue(run());
+    const { onInspect, onEdit } = mount(["q-pass"]);
+    const user = userEvent.setup();
+    await openAll();
+
+    expect(
+      screen.queryByRole("button", {
+        name: "Edit test question: Who renewed?",
+      }),
+    ).toBeNull();
+    await user.click(
+      screen.getByRole("button", {
+        name: "Edit test question: How many customers?",
+      }),
+    );
+    expect(onEdit).toHaveBeenCalledWith("q-pass");
+    await user.click(
+      screen.getByRole("button", { name: "Inspect run: Who renewed?" }),
+    );
+    expect(onInspect).toHaveBeenCalledWith("turn-broke");
+  });
+
+  it("says which model answered the run", async () => {
+    api.getRun.mockResolvedValue(run({ model: "claude-opus-4-7" }));
+    mount();
+    expect(await screen.findByText("Run details")).toBeInTheDocument();
+    expect(screen.getByText(/Answered by/).parentElement).toHaveTextContent(
+      "Answered by claude-opus-4-7.",
+    );
+  });
+
+  it("names no model for a run recorded without one", async () => {
+    api.getRun.mockResolvedValue(run());
+    mount();
+    expect(await screen.findByText("Run details")).toBeInTheDocument();
+    expect(screen.queryByText(/Answered by/)).toBeNull();
+  });
+
+  it("shows a stopped run's reason", async () => {
+    api.getRun.mockResolvedValue(
+      run({ status: "failed", error: "The agent is unavailable" }),
+    );
+    mount();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "This run stopped early: The agent is unavailable",
+    );
+  });
+
+  it("polls an active run until it settles, then stops", async () => {
+    vi.useFakeTimers();
+    try {
+      api.getRun
+        .mockResolvedValueOnce(
+          run({
+            status: "running",
+            counts: {
+              pending: 1,
+              passed: 1,
+              mismatch: 0,
+              error: 0,
+              inconclusive: 0,
+            },
+            results: [result()],
+          }),
+        )
+        .mockResolvedValue(run());
+      mount();
+      await act(() => vi.advanceTimersByTimeAsync(10));
+      expect(screen.getByRole("status")).toHaveTextContent("Asking 2 of 2");
+      expect(screen.getByText("1 more question waiting")).toBeInTheDocument();
+
+      await act(() => vi.advanceTimersByTimeAsync(2_010));
+      expect(api.getRun).toHaveBeenCalledTimes(2);
+      expect(screen.queryByRole("status")).toBeNull();
+
+      await act(() => vi.advanceTimersByTimeAsync(10_000));
+      expect(api.getRun).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("renders the answer as text, never as markup", async () => {
+    api.getRun.mockResolvedValue(
+      run({
+        results: [result({ answer: '<img src=x onerror="alert(1)">' })],
+        total: 1,
+        counts: {
+          pending: 0,
+          passed: 1,
+          mismatch: 0,
+          error: 0,
+          inconclusive: 0,
+        },
+      }),
+    );
+    mount();
+    await openAll();
+    expect(
+      await screen.findByText('<img src=x onerror="alert(1)">'),
+    ).toBeInTheDocument();
+    expect(document.querySelector("img[src='x']")).toBeNull();
+  });
+
+  it("calls an unfinished question 'did not finish', never a mismatch, and cannot inspect a turn that never started", async () => {
+    api.getRun.mockResolvedValue(
+      run({
+        total: 1,
+        counts: {
+          pending: 0,
+          passed: 0,
+          mismatch: 0,
+          error: 1,
+          inconclusive: 0,
+        },
+        results: [
+          result({
+            outcome: "error",
+            answer: null,
+            turnId: null,
+            error: "The agent did not answer in time",
+          }),
+        ],
+      }),
+    );
+    mount();
+    const list = await openAll();
+    expect(
+      within(list).getByRole("img", { name: "Did not finish" }),
+    ).toBeInTheDocument();
+    expect(within(list).queryByText("Mismatch")).toBeNull();
+    expect(list).toHaveTextContent("The agent did not answer in time");
+    expect(
+      screen.getByRole("button", { name: "Inspect run: How many customers?" }),
+    ).toBeDisabled();
+  });
+
+  it("keeps app checks neutral when the evidence could not be read", async () => {
+    api.getRun.mockResolvedValue(
+      run({
+        total: 1,
+        counts: {
+          pending: 0,
+          passed: 0,
+          mismatch: 0,
+          error: 0,
+          inconclusive: 1,
+        },
+        results: [
+          result({
+            outcome: "inconclusive",
+            expectedApps: ["gmail"],
+            missingApps: null,
+          }),
+        ],
+      }),
+    );
+    mount();
+    await openAll();
+    expect(screen.getByText("(could not be checked)")).toBeInTheDocument();
+    expect(screen.getByText("Gmail").parentElement).toHaveTextContent(
+      "Gmailnot checked",
+    );
+  });
+
+  it("clips a long answer and lets it be read in full", async () => {
+    const answer = `${"word ".repeat(80)}THE END`;
+    api.getRun.mockResolvedValue(
+      run({
+        total: 1,
+        counts: {
+          pending: 0,
+          passed: 1,
+          mismatch: 0,
+          error: 0,
+          inconclusive: 0,
+        },
+        results: [result({ answer })],
+      }),
+    );
+    mount();
+    await openAll();
+    const user = userEvent.setup();
+    const more = await screen.findByRole("button", { name: "Show more" });
+    expect(screen.queryByText(/THE END/)).toBeNull();
+    await user.click(more);
+    expect(screen.getByText(/THE END/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show less" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+  });
+
+  const customRun = (patch: Partial<EvalResultView>) =>
+    run({
+      total: 1,
+      counts: { pending: 0, passed: 0, mismatch: 1, error: 0, inconclusive: 0 },
+      results: [
+        result({
+          kind: "custom",
+          expected: "- Currency moved to USD\n- Pass at 70%",
+          outcome: "mismatch",
+          ...patch,
+        }),
+      ],
+    });
+
+  it("shows a custom check's verdict criterion by criterion, in words", async () => {
+    api.getRun.mockResolvedValue(
+      customRun({
+        judgement: {
+          passed: false,
+          summary: "One of two facts present, below the 70% rule.",
+          criteria: [
+            { criterion: "Currency moved to USD", met: true, note: "“USD”" },
+            {
+              criterion: "Moved in late 2025",
+              met: false,
+              note: "No date given",
+            },
+          ],
+          model: "claude-sonnet-5",
+        },
+      }),
+    );
+    mount();
+    await openAll();
+    expect(screen.getByText("Success criteria")).toBeInTheDocument();
+    expect(screen.getByText("failed it")).toBeInTheDocument();
+    // In the row header and in the judge's verdict.
+    expect(screen.getAllByText(/1 of 2 criteria met/)).toHaveLength(2);
+    const criteria = screen.getByRole("list", { name: "Criteria" });
+    expect(criteria).toHaveTextContent("Met: Currency moved to USD");
+    expect(criteria).toHaveTextContent("Not met: Moved in late 2025");
+    expect(criteria).toHaveTextContent("No date given");
+  });
+
+  it("says why a custom check could not be judged", async () => {
+    api.getRun.mockResolvedValue(
+      customRun({
+        outcome: "inconclusive",
+        judgeError: "The judge timed out",
+      }),
+    );
+    mount();
+    await openAll();
+    expect(
+      screen.getByText("The answer could not be judged: The judge timed out"),
+    ).toBeInTheDocument();
+  });
+});

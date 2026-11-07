@@ -13,9 +13,11 @@ import type {
 } from "@/lib/api/policy-visibility";
 import {
   useDetachConnectionForAgent,
+  useGrantSettling,
   useSetConnectionGrantForAgent,
 } from "@/hooks/use-grants";
 import { agentSectionPath } from "@/lib/navigation";
+import { agentConnectionState } from "./agent-connection-state";
 
 // One agent row of the connection "Agent access" dialog — the step-4 editable
 // version, mirroring the agent page's row-state machine: workspace-granted
@@ -101,14 +103,14 @@ export const ConnectionAgentAccessRow = ({
   const pathname = usePathname();
   const attach = useSetConnectionGrantForAgent();
   const detach = useDetachConnectionForAgent();
-  const busy = attach.isPending || detach.isPending;
+  // While this agent's write settles, the effective view still describes
+  // the state before the click: its status element is held back, never
+  // guessed, so it can't contradict the switch.
+  const settling = useGrantSettling(agent.agentId, "connection", connectionId);
 
   // Injected by an ORG rule (not a workspace grant): locked on — not detachable
   // at workspace level.
-  const orgGranted =
-    !workspaceGranted &&
-    agent.credential.status === "viaRule" &&
-    agent.credential.provenance.some((p) => p.scope === "organization");
+  const { orgGranted, on } = agentConnectionState(agent, workspaceGranted);
 
   const detail = attachDetail(orgGranted);
 
@@ -118,8 +120,9 @@ export const ConnectionAgentAccessRow = ({
   const decisions = agent.credential.status !== "none" ? agent.decisions : null;
   const narrowed =
     decisions !== null && decisions.allowedTools < decisions.totalTools;
-  const status: "pill" | "count" | "approval" | null =
-    agent.access === "blocked" || agent.access === "unknown"
+  const status: "pill" | "count" | "approval" | null = settling
+    ? null
+    : agent.access === "blocked" || agent.access === "unknown"
       ? "pill"
       : narrowed
         ? "count"
@@ -179,15 +182,18 @@ export const ConnectionAgentAccessRow = ({
         </Button>
         <Switch
           size="sm"
-          checked={workspaceGranted || orgGranted}
-          disabled={busy || orgGranted}
-          aria-label={`${workspaceGranted || orgGranted ? "Detach" : "Attach"} ${agent.name}`}
+          checked={on}
+          // Locked only by the org, never by an in-flight write: the switch
+          // moves on click (the grants hooks are optimistic), and its
+          // success needs no toast. A failure puts it back and says why.
+          disabled={orgGranted}
+          aria-label={`${on ? "Detach" : "Attach"} ${agent.name}`}
           onCheckedChange={(next) => {
             if (next) {
               attach.mutate({
                 connectionId,
                 agentId: agent.agentId,
-                input: { access: "full" },
+                input: { access: "default" },
               });
             } else {
               detach.mutate({ connectionId, agentId: agent.agentId });

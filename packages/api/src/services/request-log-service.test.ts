@@ -2,10 +2,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { LLM_HOST_FRAGMENTS } from "../lib/llm-hosts";
 import { initRoleResolver } from "../providers";
+import { activityPageSchema } from "../validations/request-logs";
 import {
   buildActivityWhere,
+  getDatabaseRequestView,
   getMatchedRuleScope,
   getRequestLogs,
+  getStatement,
+  type RequestLogEntry,
 } from "./request-log-service";
 
 const dbState = vi.hoisted(() => ({
@@ -44,6 +48,73 @@ describe("getMatchedRuleScope", () => {
   });
 });
 
+describe("getStatement", () => {
+  const withData = (
+    extraData: unknown,
+  ): Pick<RequestLogEntry, "extraData"> => ({
+    extraData,
+  });
+
+  it("reads a database row's normalized statement", () => {
+    const log = withData({ statement: "SELECT * FROM t WHERE a = $1" });
+    expect(getStatement(log as RequestLogEntry)).toBe(
+      "SELECT * FROM t WHERE a = $1",
+    );
+  });
+
+  it("is null for HTTP rows and malformed values", () => {
+    for (const extraData of [null, {}, { statement: "" }, { statement: 3 }]) {
+      expect(getStatement(withData(extraData) as RequestLogEntry)).toBeNull();
+    }
+  });
+});
+
+describe("getDatabaseRequestView", () => {
+  const row = (
+    over: Partial<
+      Pick<RequestLogEntry, "provider" | "host" | "path" | "extraData">
+    > = {},
+  ) => ({
+    provider: "postgres",
+    host: "conn-1.postgres.onecli.invalid",
+    path: "/sql/read",
+    extraData: { connection_label: "Orders", statement: "SELECT $1" },
+    ...over,
+  });
+
+  it("shows a database row by kind, connection and statement", () => {
+    expect(getDatabaseRequestView(row())).toEqual({
+      kind: "READ",
+      connection: "Orders",
+      statement: "SELECT $1",
+    });
+  });
+
+  it("shortens a legacy generated `db on host` label", () => {
+    expect(
+      getDatabaseRequestView(
+        row({
+          path: "/sql/write",
+          extraData: { connection_label: "orders on db.example.com" },
+        }),
+      ),
+    ).toEqual({ kind: "WRITE", connection: "orders", statement: null });
+  });
+
+  it("leaves HTTP rows alone, including a look-alike host", () => {
+    // An agent's HTTP request to a host that merely contains the zone is
+    // logged with that host as its provider: it must keep its host and path.
+    const spoof = "conn-1.postgres.onecli.invalid.example.com";
+    for (const log of [
+      row({ provider: spoof, host: spoof }),
+      row({ host: spoof }),
+      row({ provider: "github", host: "api.github.com" }),
+      row({ path: "/sql/drop" }),
+    ])
+      expect(getDatabaseRequestView(log)).toBeNull();
+  });
+});
+
 describe("buildActivityWhere", () => {
   it("scopes to the workspace when given no filter or cursor", () => {
     expect(buildActivityWhere(WORKSPACE_ID)).toEqual({
@@ -75,12 +146,6 @@ describe("buildActivityWhere", () => {
     });
   });
 
-  it("classifies anthropic.com as AI but leaves non-AI hosts like github.com", () => {
-    const fragments: readonly string[] = LLM_HOST_FRAGMENTS;
-    expect(fragments).toContain("anthropic.com");
-    expect(fragments).not.toContain("github.com");
-  });
-
   it('keeps the keyset cursor clauses alongside the "hide-llm" exclusion', () => {
     const cursor = { createdAt: "2026-06-26T12:00:00.000Z", id: "log_42" };
     const where = buildActivityWhere(WORKSPACE_ID, {
@@ -93,6 +158,41 @@ describe("buildActivityWhere", () => {
       { createdAt: { lt: new Date(cursor.createdAt) } },
       { createdAt: new Date(cursor.createdAt), id: { lt: cursor.id } },
     ]);
+  });
+
+  it("narrows to one agent and a time window (a run's requests), still workspace-scoped", () => {
+    const where = buildActivityWhere(WORKSPACE_ID, {
+      agentId: "agent-1",
+      from: "2026-09-01T10:00:00.000Z",
+      to: "2026-09-01T10:00:30.000Z",
+    });
+    expect(where).toEqual({
+      workspaceId: WORKSPACE_ID,
+      agentId: "agent-1",
+      createdAt: {
+        gte: new Date("2026-09-01T10:00:00.000Z"),
+        lte: new Date("2026-09-01T10:00:30.000Z"),
+      },
+    });
+  });
+
+  it("refuses a malformed agent id, window bound or cursor before it reaches the query", () => {
+    for (const bad of [
+      { from: "nope" },
+      { to: "2026-13-01" },
+      { agentId: "" },
+      { agentId: "x".repeat(101) },
+      { cursor: { createdAt: "yesterday", id: "log-1" } },
+      { filter: "everything" },
+    ]) {
+      expect(activityPageSchema.safeParse(bad).success).toBe(false);
+    }
+    expect(
+      activityPageSchema.safeParse({
+        agentId: "agent-1",
+        from: "2026-09-01T10:00:00.000Z",
+      }).success,
+    ).toBe(true);
   });
 });
 

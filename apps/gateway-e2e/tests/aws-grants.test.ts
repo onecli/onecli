@@ -113,4 +113,30 @@ describe("aws per-tool grants (wire-level refusals)", () => {
       expect(logs).toMatch(/"injection_count":0/);
     },
   );
+
+  scenario(
+    "an unlisted service's delete sent as a GET is blocked, not a read",
+    async (cx) => {
+      // AWS query-protocol services run any Action sent as a GET, deletes
+      // included, so a GET is no safe "read" here. The default customization
+      // (Never on both catch-alls) refuses it; the API refuses to save
+      // "Other reads: Always allow" for AWS at all (grants-service tests).
+      await cx.seed({
+        appConnections: [{ provider: "aws-role" }],
+        rules: s3ReadGrantStack,
+      });
+      const gw = await cx.startGateway();
+
+      const res = await throughProxy(gw.origin, {
+        url: "http://sqs.us-east-1.amazonaws.com/?Action=DeleteQueue&QueueUrl=https%3A%2F%2Fsqs.us-east-1.amazonaws.com%2F123456789012%2Fe2e",
+        token: cx.ids.agentToken,
+      });
+
+      expect(res.status).toBe(403);
+      expect(res.json()).toMatchObject({
+        error: "blocked_by_policy",
+        rule_name: "Grant: e2e · aws-role: everything else",
+      });
+    },
+  );
 });

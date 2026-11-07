@@ -58,7 +58,7 @@ const signature = (mode: string, rules: RuleDraft[]) =>
 
 export const AppAvailabilityEditor = () => {
   const planGate = usePlanGate();
-  const locked = planGate.isLocked("groups");
+  const locked = planGate.isLocked("app_availability");
   const { data, isError } = useAppAvailability(!locked);
   const setMutation = useSetAppAvailability();
 
@@ -113,12 +113,15 @@ export const AppAvailabilityEditor = () => {
           <CardTitle className="text-base">App availability</CardTitle>
           <CardDescription>
             Restrict which apps each workspace may connect based on who has
-            access to it. This is an Enterprise feature.
+            access to it. Available on the Scale plan.
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <Button type="button" onClick={() => planGate.guard("groups")}>
-            Upgrade to Enterprise
+          <Button
+            type="button"
+            onClick={() => planGate.guard("app_availability")}
+          >
+            Upgrade to Scale
           </Button>
         </CardContent>
       </Card>

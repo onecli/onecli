@@ -54,7 +54,7 @@ import { RoleMappingDialog } from "./role-mapping-dialog";
  */
 export const RoleMappingList = () => {
   const planGate = usePlanGate();
-  const { data, isPending, isFetching } = useRoleMappings();
+  const { data, isPending } = useRoleMappings();
   const { data: groupsData } = useGroups();
   const createMapping = useCreateRoleMapping();
   const updateMapping = useUpdateRoleMapping();
@@ -70,10 +70,6 @@ export const RoleMappingList = () => {
   const availableGroups = (groupsData ?? [])
     .filter((g) => !mappedGroupIds.has(g.id))
     .map((g) => ({ id: g.id, name: g.name }));
-  // Also block reorder while the list refetches after a reorder — until the
-  // fresh order lands, `mappings` is stale and a fast click would swap from it.
-  const reorderBusy = reorder.isPending || isFetching;
-
   const handleNew = () => {
     if (planGate.guard("groups")) return;
     setCreateOpen(true);
@@ -81,7 +77,9 @@ export const RoleMappingList = () => {
 
   const move = (index: number, dir: -1 | 1) => {
     const target = index + dir;
-    if (target < 0 || target >= mappings.length || reorderBusy) return;
+    // The list reorders on click (optimistic), so `mappings` is already the
+    // order the previous click asked for: a fast second click swaps from it.
+    if (target < 0 || target >= mappings.length) return;
     const next = mappings.map((m) => m.id);
     const moved = next[index];
     const displaced = next[target];
@@ -151,7 +149,7 @@ export const RoleMappingList = () => {
                         variant="ghost"
                         size="icon-xs"
                         aria-label="Move up"
-                        disabled={index === 0 || reorderBusy}
+                        disabled={index === 0}
                         onClick={() => move(index, -1)}
                       >
                         <ChevronUp />
@@ -160,7 +158,7 @@ export const RoleMappingList = () => {
                         variant="ghost"
                         size="icon-xs"
                         aria-label="Move down"
-                        disabled={index === mappings.length - 1 || reorderBusy}
+                        disabled={index === mappings.length - 1}
                         onClick={() => move(index, 1)}
                       >
                         <ChevronDown />
@@ -266,21 +264,18 @@ export const RoleMappingList = () => {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleteMapping.isPending}>
-              Cancel
-            </AlertDialogCancel>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              onClick={(e) => {
-                e.preventDefault();
+              // Instant: the row leaves and the confirm closes on click; the
+              // hook confirms, or puts the row back and says why.
+              onClick={() => {
                 if (!deleteTarget) return;
-                deleteMapping.mutate(deleteTarget.id, {
-                  onSuccess: () => setDeleteTarget(null),
-                });
+                deleteMapping.mutate(deleteTarget.id);
+                setDeleteTarget(null);
               }}
-              disabled={deleteMapping.isPending}
               className="bg-destructive hover:bg-destructive/90 text-white"
             >
-              {deleteMapping.isPending ? "Removing..." : "Remove"}
+              Remove
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

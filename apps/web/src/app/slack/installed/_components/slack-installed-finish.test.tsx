@@ -33,11 +33,57 @@ const state = vi.hoisted(() => ({
   }[],
   fail: null as string | null,
   replaced: [] as string[],
+  agentCalls: [] as {
+    provider: string;
+    code: string;
+    organizationId: string;
+  }[],
+  agentResult: {
+    agent: null as {
+      id: string;
+      workspaceId: string;
+      awaitingTransportCredential?: boolean;
+    } | null,
+    sharedAppConfigured: true,
+  },
+  agentFail: null as string | null,
 }));
 
 vi.mock("@/hooks/use-org-channels", async () => {
   const { useState } = await import("react");
   return {
+    useFinishAgentInstall: () => {
+      const [error, setError] = useState<Error | null>(null);
+      const [data, setData] = useState<typeof state.agentResult | undefined>(
+        undefined,
+      );
+      return {
+        isError: error !== null,
+        error,
+        data,
+        mutate: (
+          vars: { provider: string; code: string; organizationId: string },
+          opts: {
+            onSuccess: (r: {
+              agent: {
+                id: string;
+                workspaceId: string;
+                awaitingTransportCredential?: boolean;
+              } | null;
+              sharedAppConfigured: boolean;
+            }) => void;
+          },
+        ) => {
+          state.agentCalls.push(vars);
+          if (state.agentFail) {
+            setError(new Error(state.agentFail));
+          } else {
+            setData(state.agentResult);
+            opts.onSuccess(state.agentResult);
+          }
+        },
+      };
+    },
     useInspectSharedInstall: () => {
       const [result, setResult] = useState<
         | { team: { externalId: string; name: string | null }; claim: string }
@@ -97,7 +143,69 @@ afterEach(() => {
   state.finishCalls = [];
   state.fail = null;
   state.replaced = [];
+  state.agentCalls = [];
+  state.agentResult = { agent: null, sharedAppConfigured: true };
+  state.agentFail = null;
   cleanup();
+});
+
+describe("SlackInstalledFinish (an agent's own app, installed from Slack)", () => {
+  it("finishes the matched agent and goes straight to it — no shared-app inspect, no confirm", async () => {
+    state.agentResult = {
+      agent: { id: "agent-1", workspaceId: "ws-1" },
+      sharedAppConfigured: true,
+    };
+    render(<SlackInstalledFinish code="agent-code" organization={ORG} />);
+    await waitFor(() =>
+      expect(state.replaced).toEqual([
+        "/w/ws-1/agents/agent-1/channels?connected=slack",
+      ]),
+    );
+    expect(state.agentCalls).toEqual([
+      { provider: "slack", code: "agent-code", organizationId: "org-1" },
+    ]);
+    expect(state.inspectCalls).toHaveLength(0);
+    expect(state.finishCalls).toHaveLength(0);
+  });
+
+  it("a matched SOCKET app lands on the one-step-left marker, never 'connected'", async () => {
+    state.agentResult = {
+      agent: {
+        id: "agent-1",
+        workspaceId: "ws-1",
+        awaitingTransportCredential: true,
+      },
+      sharedAppConfigured: true,
+    };
+    render(<SlackInstalledFinish code="socket-code" organization={ORG} />);
+    await waitFor(() =>
+      expect(state.replaced).toEqual([
+        "/w/ws-1/agents/agent-1/channels?installed=slack",
+      ]),
+    );
+    expect(state.inspectCalls).toHaveLength(0);
+  });
+
+  it("no match and no shared app: points at the agent's Resume setup, never the shared-app refusal", async () => {
+    state.agentResult = { agent: null, sharedAppConfigured: false };
+    render(<SlackInstalledFinish code="orphan" organization={ORG} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "No agent in your organization is waiting for this Slack app.",
+    );
+    // The button the waiting agent's Slack page actually shows.
+    expect(screen.getByText(/click Resume setup/)).toBeInTheDocument();
+    expect(state.inspectCalls).toHaveLength(0);
+  });
+
+  it("an agent-arm refusal shows the server's words and the agent guidance, and never inspects", async () => {
+    state.agentFail = "Slack rejected the request (invalid_code).";
+    render(<SlackInstalledFinish code="broken" organization={ORG} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Slack rejected the request (invalid_code).",
+    );
+    expect(screen.getByText(/click Resume setup/)).toBeInTheDocument();
+    expect(state.inspectCalls).toHaveLength(0);
+  });
 });
 
 describe("SlackInstalledFinish (login-CSRF control)", () => {
@@ -185,7 +293,7 @@ describe("SlackInstalledFinish (login-CSRF control)", () => {
     expect(state.replaced).toHaveLength(0);
   });
 
-  it("an expired/invalid code shows the inspect refusal, not a Connect button", async () => {
+  it("an expired/invalid code shows the inspect refusal, not a Connect button, and no agent guidance", async () => {
     state.inspectFail =
       "This Slack install link has expired (Slack codes last ten minutes).";
     render(<SlackInstalledFinish code="expired" organization={ORG} />);
@@ -194,6 +302,11 @@ describe("SlackInstalledFinish (login-CSRF control)", () => {
     expect(
       screen.queryByRole("button", { name: "Connect Slack" }),
     ).not.toBeInTheDocument();
+    // A workspace install has no agent to resume: the agent hint is not owed.
+    expect(screen.queryByText(/Resume setup/)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Go to Channels" }),
+    ).toBeInTheDocument();
     expect(state.finishCalls).toHaveLength(0);
   });
 });

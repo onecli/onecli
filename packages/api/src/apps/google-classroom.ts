@@ -7,7 +7,10 @@ import {
 
 export const googleClassroom: AppDefinition = {
   id: "google-classroom",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/google-classroom",
   name: "Google Classroom",
+  apiDocsUrl:
+    "https://developers.google.com/workspace/classroom/reference/rest",
   icon: "/icons/google-classroom.svg",
   description: "Manage classes, rosters, and invitations.",
   connectionMethod: {
@@ -43,5 +46,6 @@ export const googleClassroom: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
   },
 };

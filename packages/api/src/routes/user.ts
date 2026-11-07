@@ -2,12 +2,15 @@ import { Hono } from "hono";
 import type { ApiEnv } from "../types";
 import { auth, requireWorkspaceId, sessionAuth } from "../middleware/auth";
 import { getUser, updateProfile } from "../services/user-service";
-import { ensureApiKey, regenerateApiKey } from "../services/api-key-service";
 import {
-  recordAuditEvent,
+  ensureWorkspaceApiKey,
+  regenerateApiKey,
+} from "../services/api-key-service";
+import {
   AUDIT_ACTIONS,
   AUDIT_SERVICES,
   AUDIT_SOURCE,
+  recordAuditEvent,
 } from "../services/audit-service";
 import {
   createSshKey,
@@ -82,29 +85,29 @@ export const userRoutes = () => {
   // GET /user/api-key
   app.get("/api-key", identity, async (c) => {
     const auth = c.get("auth");
-    const workspaceId = requireWorkspaceId(auth);
-    const { apiKey, created } = await ensureApiKey(auth.userId, {
-      workspaceId,
+    const apiKey = await ensureWorkspaceApiKey({
+      userId: auth.userId,
+      userEmail: auth.userEmail,
+      workspaceId: requireWorkspaceId(auth),
     });
-    if (created) {
-      await recordAuditEvent({
-        workspaceId,
-        userId: auth.userId,
-        userEmail: auth.userEmail,
-        action: AUDIT_ACTIONS.CREATE,
-        service: AUDIT_SERVICES.API_KEY,
-        source: AUDIT_SOURCE.API,
-        metadata: { scope: "workspace", autoProvisioned: true },
-      });
-    }
     return c.json({ apiKey });
   });
 
-  // POST /user/api-key/regenerate
+  // POST /user/api-key/regenerate: rotates the caller's personal key for this
+  // workspace. Audited: it is a credential lifecycle event (the old key stops
+  // working at once), and the dashboard's API Key page and the CLI share
+  // this one door.
   app.post("/api-key/regenerate", identity, async (c) => {
     const auth = c.get("auth");
-    const result = await regenerateApiKey(auth.userId, {
-      workspaceId: requireWorkspaceId(auth),
+    const workspaceId = requireWorkspaceId(auth);
+    const result = await regenerateApiKey(auth.userId, { workspaceId });
+    await recordAuditEvent({
+      workspaceId,
+      userId: auth.userId,
+      userEmail: auth.userEmail,
+      action: AUDIT_ACTIONS.REGENERATE,
+      service: AUDIT_SERVICES.API_KEY,
+      source: AUDIT_SOURCE.API,
     });
     return c.json(result);
   });

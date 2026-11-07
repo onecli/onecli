@@ -1,4 +1,8 @@
 import { db } from "@onecli/db";
+import {
+  SANDBOX_PG_PASS_FILE,
+  SANDBOX_PG_SERVICE_FILE,
+} from "@onecli/agent-protocol";
 import { agentProxyAddress } from "../lib/public-origins";
 import { loadCaCertificate } from "../lib/gateway-ca";
 import {
@@ -15,6 +19,8 @@ import {
   resolveAgentLlmCredential,
   type ResolvedLlmCredential,
 } from "./llm-credential-service";
+import { agentTokenIsUserVisible } from "./agent-token-visibility";
+import { SANDBOX_DEFAULT_TIMEZONE } from "../lib/env";
 
 // Moved to `injectable-secrets` so this module and `llm-credential-service`
 // can both use them without importing each other. Re-exported because the
@@ -32,12 +38,30 @@ export { findInjectableSecretOfType, injectableSecretWhere };
  * token nobody asked for.
  *
  * The hosted/runner plane never calls this — it resolves its agent off the
- * Sandbox row and passes it to `buildContainerConfig` explicitly (§5.1).
+ * Sandbox row and passes it to `buildContainerConfig` explicitly. So
+ * a hosted agent is refused here (`hosted-agent`): its config carries the
+ * agent's gateway token, which no person needs (`agentTokenIsUserVisible`).
  */
 export type ContainerAgentResolution =
   | { outcome: "resolved"; agent: { id: string; accessToken: string } }
+  /** The agent runs in the platform's sandbox: its config is never handed
+   * out (`agentTokenIsUserVisible`). */
+  | { outcome: "hosted-agent" }
   | { outcome: "identifier-not-found" }
   | { outcome: "no-legacy-default"; hasAgents: boolean };
+
+/** A found agent resolves, unless its config may never leave the platform. */
+const resolvedUnlessHosted = (agent: {
+  id: string;
+  accessToken: string;
+  kind: string;
+}): ContainerAgentResolution =>
+  agentTokenIsUserVisible(agent.kind)
+    ? {
+        outcome: "resolved",
+        agent: { id: agent.id, accessToken: agent.accessToken },
+      }
+    : { outcome: "hosted-agent" };
 
 export const resolveContainerConfigAgent = async (
   workspaceId: string,
@@ -46,10 +70,10 @@ export const resolveContainerConfigAgent = async (
   if (agentIdentifier) {
     const agent = await db.agent.findFirst({
       where: { workspaceId, identifier: agentIdentifier },
-      select: { id: true, accessToken: true },
+      select: { id: true, accessToken: true, kind: true },
     });
     return agent
-      ? { outcome: "resolved", agent }
+      ? resolvedUnlessHosted(agent)
       : { outcome: "identifier-not-found" };
   }
 
@@ -60,9 +84,9 @@ export const resolveContainerConfigAgent = async (
   const legacyDefault = await db.agent.findFirst({
     where: { workspaceId, isDefault: true },
     orderBy: { createdAt: "asc" },
-    select: { id: true, accessToken: true },
+    select: { id: true, accessToken: true, kind: true },
   });
-  if (legacyDefault) return { outcome: "resolved", agent: legacyDefault };
+  if (legacyDefault) return resolvedUnlessHosted(legacyDefault);
 
   const hasAgents = (await db.agent.count({ where: { workspaceId } })) > 0;
   return { outcome: "no-legacy-default", hasAgents };
@@ -143,6 +167,15 @@ export const buildContainerConfig = async ({
     workspaceId,
     organizationId,
   );
+
+  // The zone the sandbox keeps time in: the workspace's choice, else the
+  // platform default. Baked into the environment, so a change reaches a
+  // live sandbox only by replacing it (`updateOrgWorkspace` does that).
+  const workspace = await db.workspace.findUnique({
+    where: { id: workspaceId },
+    select: { timezone: true },
+  });
+  const timezone = workspace?.timezone ?? SANDBOX_DEFAULT_TIMEZONE;
 
   // Detect auth mode from the agent's Anthropic secret metadata. OAuth
   // tokens need CLAUDE_CODE_OAUTH_TOKEN so the SDK does the token exchange;
@@ -244,6 +277,13 @@ export const buildContainerConfig = async ({
         HTTP_PROXY: gatewayUrl,
         https_proxy: gatewayUrl,
         http_proxy: gatewayUrl,
+        // Loopback is the sandbox talking to itself (the open proxy, a
+        // browser's DevTools port, a dev server the agent started) and must
+        // never be sent to the gateway, which refuses private addresses:
+        // every proxy-env reader (curl, Node with NODE_USE_ENV_PROXY,
+        // Python, git) honours this list. The runner appends its own host.
+        NO_PROXY: "localhost,127.0.0.1",
+        no_proxy: "localhost,127.0.0.1",
         // Node.js
         NODE_EXTRA_CA_CERTS: CA_CONTAINER_PATH,
         NODE_USE_ENV_PROXY: "1",
@@ -260,6 +300,18 @@ export const buildContainerConfig = async ({
         GIT_TERMINAL_PROMPT: "0",
         GIT_HTTP_PROXY_AUTHMETHOD: "basic",
         GIT_SSL_CAINFO: CA_CONTAINER_PATH,
+        // PostgreSQL clients (libpq and the drivers built on it): the
+        // supervisor writes the agent's attached databases as services and
+        // its token as their password, and the gateway's database front
+        // door presents a certificate from the same CA.
+        PGSERVICEFILE: SANDBOX_PG_SERVICE_FILE,
+        PGPASSFILE: SANDBOX_PG_PASS_FILE,
+        PGSSLROOTCERT: CA_CONTAINER_PATH,
+        // The clock. A container without TZ reports UTC, which no one's own
+        // computer does; `date`, a browser's Intl, and every file timestamp
+        // follow it. The locale is the image's to set (it is the image that
+        // generates one), never the control plane's.
+        TZ: timezone,
         ...authEnv,
         ...openaiEnv,
       },

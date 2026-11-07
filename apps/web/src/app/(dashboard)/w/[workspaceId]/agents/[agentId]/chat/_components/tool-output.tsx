@@ -5,10 +5,10 @@ import { cn } from "@onecli/ui/lib/utils";
 
 /**
  * A step's output, with MINIMAL coloring so the lines that matter stand out:
- * error lines and a non-zero exit code in red, a zero exit code in green,
- * everything else in the normal foreground color. A failed step also gets
- * the whole panel tinted red (like Claude's failed "Output" block), so the
- * reader sees which step went wrong without reading every line.
+ * error lines in red, everything else in the normal foreground color. A
+ * failed step also gets the whole panel tinted red (like Claude's failed
+ * "Output" block), so the reader sees which step went wrong without reading
+ * every line.
  *
  * The coloring keys on the SHAPES tools write, never on words anywhere in a
  * line: output is often a file or a search result, and a README that
@@ -22,15 +22,6 @@ import { cn } from "@onecli/ui/lib/utils";
 
 // ESC [ ... final-byte: the SGR/CSI sequences a CLI prints for its own colors.
 const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
-
-/**
- * The exit-code trailer the agent runtime appends to a shell command's
- * output, as a whole line: `Exit code: 2` (a foreground command that exited
- * non-zero) or `--- Command finished with exit code: 0 ---` (a background
- * one, any code).
- */
-const EXIT_TRAILER =
-  /^(?:---\s*)?(?:command finished with )?exit code:?\s*(-?\d+)(?:\s*---)?$/i;
 
 /**
  * A line that reports an error, in the shapes tools actually print:
@@ -63,48 +54,13 @@ const ERROR_LINE = new RegExp(
   "i",
 );
 
-const exitCodeOfLine = (line: string): number | null => {
-  const match = EXIT_TRAILER.exec(line.trim());
-  return match ? Number(match[1]) : null;
-};
-
 const cleanLines = (text: string): string[] =>
   text.replace(ANSI, "").replace(/\r/g, "").split("\n");
 
-/** The exit code a command's output ENDS with, or null when it reports
- *  none. Only the last non-blank line counts: an "exit code: 1" quoted
- *  in the middle of a file the agent read is not this command's. Reads the
- *  tail only, so it stays cheap on outputs re-checked every render. */
-export const exitCodeOf = (text: string | undefined): number | null => {
-  const trimmed = (text ?? "").trimEnd();
-  const last = trimmed.slice(trimmed.lastIndexOf("\n") + 1);
-  return exitCodeOfLine(last.replace(ANSI, ""));
-};
+export const isErrorLine = (line: string): boolean =>
+  ERROR_LINE.test(line.trimStart());
 
-/** A step failed when the tool reported an error, or its command exited
- *  non-zero (the runtime still counts that as a step that ran). */
-export const stepFailed = (tool: {
-  isError?: boolean;
-  output?: string;
-}): boolean => {
-  if (tool.isError) return true;
-  const code = exitCodeOf(tool.output);
-  return code !== null && code !== 0;
-};
-
-type LineTone = "error" | "ok" | "plain";
-
-export const toneOf = (line: string): LineTone => {
-  const code = exitCodeOfLine(line);
-  if (code !== null) return code === 0 ? "ok" : "error";
-  return ERROR_LINE.test(line.trimStart()) ? "error" : "plain";
-};
-
-const TONE_CLASS: Record<LineTone, string | undefined> = {
-  error: "text-red-700 dark:text-red-400",
-  ok: "text-green-700 dark:text-green-400",
-  plain: undefined,
-};
+const ERROR_LINE_CLASS = "text-red-700 dark:text-red-400";
 
 /** Memoized on the props, like ChatMarkdown: the thread re-renders on every
  *  stream read, and an open panel would otherwise re-split and re-test up to
@@ -135,7 +91,10 @@ export const ToolOutput = memo(
         >
           {lines.map((line, index) => (
             // Positional keys are safe: the output is immutable once rendered.
-            <span key={index} className={TONE_CLASS[toneOf(line)]}>
+            <span
+              key={index}
+              className={isErrorLine(line) ? ERROR_LINE_CLASS : undefined}
+            >
               {line}
               {index < lines.length - 1 ? "\n" : null}
             </span>

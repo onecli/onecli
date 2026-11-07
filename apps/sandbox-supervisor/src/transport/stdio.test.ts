@@ -1,6 +1,6 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
-import type { WorkItem } from "@onecli/agent-protocol";
+import type { SupervisorWorkItem } from "@onecli/agent-protocol";
 import { createStdioTransport } from "./stdio";
 
 describe("stdio transport", () => {
@@ -14,13 +14,16 @@ describe("stdio transport", () => {
     );
     input.write("not json at all\n");
     input.write('{"kind":"nope"}\n');
+    // The WS driver's transport-level items: valid on the wire, never work.
+    input.write('{"kind":"session","credential":"v1.k.ab","ack":0}\n');
+    input.write('{"kind":"ack","seq":1}\n');
     input.write('{"kind":"shutdown"}\n');
     input.write(
       '{"kind":"turn.deliver","turnId":"after","conversationId":"cv1","message":"x"}\n',
     );
     input.end();
 
-    const items: WorkItem[] = [];
+    const items: SupervisorWorkItem[] = [];
     for await (const item of transport.incoming()) items.push(item);
 
     expect(items).toEqual([

@@ -27,6 +27,7 @@ export const LICENSED_ROOTS = [
   "apps/web/src/ee",
   "packages/api/src/ee",
   "apps/gateway/crates/ee",
+  "apps/sandbox-supervisor/src/ee",
 ] as const;
 
 /** Licensed files that sit outside a licensed directory (module roots).
@@ -58,13 +59,13 @@ export interface Seam {
 export const SEAMS: readonly Seam[] = [
   {
     from: "packages/api/src/edition-defaults.ts",
-    why: "The boot-time injector: the one place that wires cloud provider implementations into the shared seams. Called from server entry points only, never from a client-reachable module. (+1: the S3 attachment blob store, selected by entitlement + bucket config.)",
-    count: 16,
+    why: "The boot-time injector: the one place that wires cloud provider implementations into the shared seams. Called from server entry points only, never from a client-reachable module. (+1: the S3 attachment blob store, selected by entitlement + bucket config. +1: the 'Connect your Slack' conversation reader and OAuth completer, one import. +1: the agent's hosted desktop, cloud only.)",
+    count: 18,
     permanent: true,
   },
   {
     from: "apps/web/src/app/**",
-    why: "Next.js route files are mount points, not libraries — the app must be able to route to a licensed page when licensed. Each is a one-line re-export or a thin entitlement wrapper (server-side isEntitled() check → the licensed page or the locked card) carrying no feature logic. The two former residuals (`p/[workspaceId]/layout.tsx`, `(admin)/layout.tsx`) now mount free implementations that route role questions through the provider seam. The aws-marketplace fulfillment routes (cloud-billing-only pages; dark off cloud) mount the licensed billing actions the same way.",
+    why: "Next.js route files are mount points, not libraries — the app must be able to route to a licensed page when licensed. Each is a one-line re-export or a thin entitlement wrapper (server-side isEntitled() check → the licensed page or the locked card) carrying no feature logic. The two former residuals (`p/[workspaceId]/layout.tsx`, `(admin)/layout.tsx`) now mount free implementations that route role questions through the provider seam. The aws-marketplace fulfillment routes (cloud-billing-only pages; dark off cloud) mount the licensed billing actions the same way. The agent's full-page Computer (hosted platform only; notFound off cloud) mounts the licensed desktop page the same way.",
     count: 15,
     permanent: true,
   },
@@ -88,8 +89,14 @@ export const SEAMS: readonly Seam[] = [
   },
   {
     from: "apps/gateway/crates/proxy/**",
-    why: "The proxy pipeline calls the licensed features at defined points: connect-time budget bindings, granular-access scoping and the platform trial credential; the forward/websocket app-availability check; the hooks' budget + granular guards; and the licensed agent-facing responses. One binary, so these are direct calls rather than a runtime seam.",
-    count: 11,
+    why: "The proxy pipeline calls the licensed features at defined points: connect-time budget bindings, granular-access scoping and the platform trial credential; the forward/websocket/tunnel app-availability check (the open tunnel lane gates a CONNECT on the same allowlist, and answers with the same licensed response); the hooks' budget + granular guards; and the licensed agent-facing responses. One binary, so these are direct calls rather than a runtime seam.",
+    count: 13,
+    permanent: true,
+  },
+  {
+    from: "apps/gateway/crates/dbproxy/**",
+    why: "The database front door gates every judged statement on the licensed app-availability allowlist (`gate.rs`), exactly as the HTTP, WebSocket and tunnel lanes do in `proxy`: a restricted workspace reaches only the apps it was granted, on every lane. Unrestricted (a no-op) unlicensed, for open orgs, and when enforcement is off.",
+    count: 1,
     permanent: true,
   },
   {
@@ -144,6 +151,48 @@ export interface DynamicSeam {
 
 export const DYNAMIC_SEAMS: readonly DynamicSeam[] = [
   {
+    // The shared approval row (bell + inline chat) lazily names the licensed
+    // "act as you in Slack" access card (Connect / Allow), rendered only for
+    // slack_access_request items, which the server raises only when entitled.
+    from: "apps/web/src/lib/components/approvals/action-approval-row.tsx",
+    specifiers: ["@/ee/slack-read/slack-access-card"],
+  },
+  {
+    // The agent Contacts section lazily names the licensed "acts as you"
+    // layer (the caller's own Slack: read/write grants), which wraps the
+    // free list and hands it a slot (top line, per-row "As you" blocks,
+    // rows for unmatched shares); mounted only when the instance is entitled.
+    from: "apps/web/src/app/(dashboard)/w/[workspaceId]/agents/[agentId]/contacts/_components/contacts-section.tsx",
+    specifiers: ["@/ee/slack-read/act-as-you-contacts"],
+  },
+  {
+    // The Connections Apps tab lazily names the licensed Slack read-access
+    // tile (an agent finder: connecting stays per agent); rendered only when
+    // the instance is entitled.
+    from: "apps/web/src/app/(dashboard)/w/[workspaceId]/connections/_components/apps-tab.tsx",
+    specifiers: ["@/ee/slack-read/slack-read-tile"],
+  },
+  {
+    // The agent Connections list lazily names the licensed row that shows
+    // the caller's connected Slack (read access); rendered only when the
+    // instance is entitled, and it renders nothing until connected.
+    from: "apps/web/src/app/(dashboard)/w/[workspaceId]/agents/[agentId]/_components/apps-tab.tsx",
+    specifiers: ["@/ee/slack-read/slack-read-connection-row"],
+  },
+  {
+    // Direct chat lazily names the agent's hosted desktop dock; rendered
+    // only on the hosted platform (IS_CLOUD), so a self-host never loads it.
+    from: "apps/web/src/app/(dashboard)/w/[workspaceId]/agents/[agentId]/chat/_components/direct-thread-section.tsx",
+    specifiers: ["@/ee/desktop/desktop-dock"],
+  },
+  {
+    // The agent page header lazily names the hosted agent's Computer
+    // button, beside the agent menu; rendered only on the hosted platform
+    // (IS_CLOUD) for hosted agents, so a self-host never loads it.
+    from: "apps/web/src/app/(dashboard)/w/[workspaceId]/agents/[agentId]/_components/agent-page-header.tsx",
+    specifiers: ["@/ee/desktop/desktop-header-chip"],
+  },
+  {
     from: "apps/web/src/lib/auth/auth-provider.tsx",
     specifiers: ["@/ee/auth/cognito-provider"],
   },
@@ -154,6 +203,10 @@ export const DYNAMIC_SEAMS: readonly DynamicSeam[] = [
   {
     from: "apps/web/src/lib/auth/login-content.tsx",
     specifiers: ["@/ee/auth/login-content"],
+  },
+  {
+    from: "apps/web/src/lib/dashboard/org-layout.tsx",
+    specifiers: ["@/ee/billing/_components/payment-issue-banner"],
   },
   {
     from: "apps/web/src/lib/onboarding/onboarding-layout.tsx",
@@ -173,7 +226,10 @@ export const DYNAMIC_SEAMS: readonly DynamicSeam[] = [
   },
   {
     from: "apps/web/src/lib/workspaces/workspace-layout.tsx",
-    specifiers: ["@/ee/billing/_components/over-quota-banner"],
+    specifiers: [
+      "@/ee/billing/_components/over-quota-banner",
+      "@/ee/billing/_components/payment-issue-banner",
+    ],
   },
   {
     // Account deletion tears down the user's organizations on the way out.
@@ -188,6 +244,13 @@ export const DYNAMIC_SEAMS: readonly DynamicSeam[] = [
   {
     from: "packages/api/src/services/policy-onprem-validator.ts",
     specifiers: ["../ee/granular-access/shape"],
+  },
+  {
+    // The in-sandbox supervisor's entrypoint loads the hosted platform's
+    // agent desktop only when the hosted runner turns it on; a self-hosted
+    // sandbox never evaluates it.
+    from: "apps/sandbox-supervisor/src/index.ts",
+    specifiers: ["./ee/desktop"],
   },
 ];
 

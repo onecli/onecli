@@ -18,12 +18,14 @@ const services = vi.hoisted(() => ({
   createConversation: vi.fn(),
   ensureDirectConversation: vi.fn(),
   greetEmptyDirectThread: vi.fn(async () => {}),
+  warmAgentSandbox: vi.fn(async () => {}),
   listConversations: vi.fn(),
   getConversation: vi.fn(),
   requireConversation: vi.fn(),
   createTurn: vi.fn(),
   listTurns: vi.fn(),
   abortTurn: vi.fn(),
+  requestSendNow: vi.fn(),
   readTranscript: vi.fn(),
   sendConversationMessage: vi.fn(),
   createPendingAttachment: vi.fn(),
@@ -78,7 +80,12 @@ vi.mock("../services/turn-service", () => ({
   createTurn: services.createTurn,
   listTurns: services.listTurns,
   abortTurn: services.abortTurn,
+  requestSendNow: services.requestSendNow,
   readTranscript: services.readTranscript,
+}));
+
+vi.mock("../services/sandbox-warm-service", () => ({
+  warmAgentSandbox: services.warmAgentSandbox,
 }));
 
 vi.mock("../services/follow-up-service", () => ({
@@ -187,6 +194,7 @@ beforeEach(() => {
     oldestSeq: 1,
   });
   services.abortTurn.mockResolvedValue({ aborted: true, delivered: false });
+  services.requestSendNow.mockResolvedValue({ requested: true });
   services.readTranscript.mockResolvedValue({
     events: [],
     nextSince: 0,
@@ -207,6 +215,7 @@ describe("authentication", () => {
       { method: "POST", body: '{"message":"hi"}' },
     ],
     ["/v1/turns/t-1/abort", { method: "POST" }],
+    ["/v1/turns/t-1/send-now", { method: "POST" }],
     ["/v1/agents/ag-1/conversations/direct", { method: "PUT" }],
   ];
 
@@ -271,6 +280,30 @@ describe("conversations", () => {
       body: JSON.stringify({ agentId: "ag-1", source: "carrier-pigeon" }),
     });
     expect(res.status).toBe(422);
+  });
+
+  it("refuses the platform-only eval source: no client can pass its turns off as test runs", async () => {
+    const res = await app.request("/v1/conversations", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ agentId: "ag-1", source: "eval" }),
+    });
+    expect(res.status).toBe(422);
+    expect(services.createConversation).not.toHaveBeenCalled();
+  });
+
+  it("refuses the platform-only memory review source: no client can fake a review of another thread", async () => {
+    const res = await app.request("/v1/conversations", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({
+        agentId: "ag-1",
+        source: "memory_review",
+        externalRef: "someone-elses-thread",
+      }),
+    });
+    expect(res.status).toBe(422);
+    expect(services.createConversation).not.toHaveBeenCalled();
   });
 
   it("lists, filtered by agent when asked — as the session's user", async () => {
@@ -345,6 +378,9 @@ describe("the direct door — PUT /v1/agents/:agentId/conversations/direct", () 
       headers: AUTH,
     });
     expect(services.greetEmptyDirectThread).not.toHaveBeenCalled();
+    // Same rule for the thread-open wake: a program's open is not a person
+    // about to type, and must not start a machine as a side effect.
+    expect(services.warmAgentSandbox).not.toHaveBeenCalled();
   });
 
   it("refuses a RUNNER token — token families do not cross", async () => {
@@ -480,6 +516,35 @@ describe("turns", () => {
     });
     expect(res.status).toBe(409);
   });
+
+  it("accepts SEND NOW with 202: the outcome arrives on the stream", async () => {
+    const res = await app.request("/v1/turns/f-1/send-now", {
+      method: "POST",
+      headers: AUTH,
+    });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ requested: true });
+    // Fenced like Stop: the viewer travels with the call.
+    expect(services.requestSendNow).toHaveBeenCalledWith("p1", "f-1", "user-1");
+  });
+
+  it.each([
+    ["CONFLICT", 409, "The agent already has this message"],
+    ["NOT_FOUND", 404, "Message not found"],
+  ] as const)(
+    "maps a SEND NOW %s to %i with the error shape",
+    async (code, status, message) => {
+      services.requestSendNow.mockRejectedValue(
+        new ServiceError(code, message),
+      );
+      const res = await app.request("/v1/turns/f-1/send-now", {
+        method: "POST",
+        headers: AUTH,
+      });
+      expect(res.status).toBe(status);
+      expect(await res.json()).toMatchObject({ error: { message } });
+    },
+  );
 });
 
 describe("attachments", () => {

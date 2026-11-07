@@ -9,10 +9,11 @@ import { loadInjectionRules } from "./policy-simulate/load-rules";
 import { resolvePrincipalSet } from "./policy-simulate/principal-set";
 
 /**
- * The agents-list chips feed (`GET /v1/agents?include=grants-summary`): per
- * agent, the distinct credentials that would INJECT for it — the attach list,
- * not effective verdicts (Usable/Limited/Blocked stays a per-agent-page
- * reflection; chips must be cheap for a whole list).
+ * Each agent's attach summary (`GET /v1/agents?include=grants-summary`, read
+ * by the CLI's and the SDK's agent listings): per agent, the distinct
+ * credentials that would INJECT for it — the attach list, not effective
+ * verdicts (Usable/Limited/Blocked stays a per-agent-page reflection; a
+ * summary must be cheap for a whole list).
  *
  * Derived from the INJECTION LAW across every rule source — inject_select's
  * predicate: published, enabled, non-default allow rules whose identity
@@ -48,7 +49,9 @@ export interface AgentWithGrantsSummary {
   id: string;
   name: string;
   identifier: string;
-  accessToken: string;
+  /** BYO agents only: a hosted agent's token is never user-visible
+   * (`agentTokenIsUserVisible`). */
+  accessToken?: string;
   kind: string;
   createdAt: Date;
   /** Attached channel presences — what deletion also removes from the

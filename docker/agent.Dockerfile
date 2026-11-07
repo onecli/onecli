@@ -1,30 +1,45 @@
-# OneCLI agent sandbox — the hosted agent's computer (hosted-agents v2, step 2)
+# OneCLI agent sandbox — the hosted agent's computer
 # Build context: repo root (run with `docker build -f docker/agent.Dockerfile .`)
+#
+# Two images: docker/agent-base.Dockerfile is the OS surface (the
+# one big apt layer and what depends only on it); THIS file builds the app
+# and stacks it on that base through `ARG AGENT_BASE_IMAGE` (Stage 7). Build
+# the base first (`pnpm agent:build` does both), or pass a registry
+# reference. Stages 1 to 6 never leave the builder.
 #
 # Three deliberate divergences from the sibling images, all load-bearing:
 # - Base is trixie-slim, NOT alpine: the jcode runtime is a glibc binary —
 #   musl can't run it, and it requires glibc >= 2.39 (bookworm's 2.36 is too
-#   old) plus a dynamic libssl. The build PROVES the fit below.
+#   old) plus a dynamic libssl. The build PROVES the fit below. The build
+#   stages here and the agent base image share the same Node pin.
 # - The jcode RUNTIME is vendored from the pinned GitHub release and
-#   checksum-verified, NOT taken from npm: the npm platform packages lag
-#   upstream (they still ship the broken v0.67.1), and the runtime
+#   checksum-verified, NOT taken from npm: the npm platform packages are a
+#   second, unverified copy (they lagged upstream for months, once shipping a
+#   broken v0.67.1), and the runtime
 #   self-updates by default — checking on every process start and exec()ing
 #   itself mid-run when a newer release exists, which killed every fresh
 #   agent's first turn. The pin is three parts: this vendored binary
 #   (ONECLI_JCODE_BINARY), JCODE_NO_AUTO_UPDATE baked below, and the
 #   supervisor deleting the updater's builds/ dirs from persistent volumes
 #   at boot (harness/jcode.ts). @1jehuang/jcode-sdk stays as the CLIENT
-#   library only (its wire protocol major is 1 across 0.67.x–0.81.x);
-#   its bundled npm binary is deleted from the final image so a
-#   misconfiguration fails loudly instead of silently running 0.67.1.
+#   library only (its wire protocol major is 1 across 0.67.x through
+#   1.0.0-preview); its bundled npm binary is deleted from the final image so
+#   the vendored, checksum-verified one is the only jcode that can run.
 # - pnpm install must NEVER use --omit=optional: other packages' optional
 #   deps must still resolve normally (the jcode binaries are pruned
 #   explicitly, afterwards, by path).
 
+# The base the runner stage (Stage 7) stacks on. Declared HERE, before any
+# FROM: an ARG used in a FROM line must be a global one (Dockerfile rule),
+# and a later re-declaration would reset it to blank. The default is the tag
+# `pnpm agent:build` builds first; a deployment and publish.yml pass a
+# registry reference pinned by digest.
+ARG AGENT_BASE_IMAGE=onecli-agent-base:local
+
 # ──────────────────────────────────────────────
 # Stage 1: Prepare Node.js base
 # ──────────────────────────────────────────────
-FROM node:22.23.2-trixie-slim AS base
+FROM node:22.23.4-trixie-slim AS base
 # openssl: the jcode linux binaries link libssl dynamically (found by the
 # proof below — the darwin build is self-contained, the linux one is not);
 # installing `openssl` pulls the release's matching libssl runtime.
@@ -58,15 +73,15 @@ RUN pnpm install --frozen-lockfile
 # own updater verified only opportunistically, and it is disabled anyway).
 FROM base AS jcode-runtime
 ARG TARGETARCH
-ARG JCODE_VERSION=v0.90.0
+ARG JCODE_VERSION=v1.0.0-preview.136
 RUN apt-get update \
   && apt-get install -y --no-install-recommends curl ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 RUN case "$TARGETARCH" in \
     arm64) ASSET="jcode-linux-aarch64"; \
-      SHA="8b44b717e1085950cf1fc5b1a5005e087c9e38c1e0293b6009fee1ab0b2c451f";; \
+      SHA="892fb2da280c1d8a289521282bd766e20642493067a262a0246fa640c6a75046";; \
     amd64) ASSET="jcode-linux-x86_64"; \
-      SHA="b963b7cd53ec0dc39c805c4549e9752ab194d4e1bd338b536d587c9bf8851516";; \
+      SHA="7ecbf2fd936d4b0c2c44b2491c41db12178923744d77fe60dd64aa2da97bb383";; \
     *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1;; \
   esac \
   && curl -fsSL -o /tmp/jcode.tar.gz \
@@ -100,7 +115,7 @@ RUN JCODE_NO_AUTO_UPDATE=1 JCODE_NO_TELEMETRY=1 /opt/jcode/jcode --version \
 
 # ──────────────────────────────────────────────
 # Stage 4b: Vendor the PINNED Nix release (checksum-gated), UNPACKED — the
-# agent's durable-install path (plans/agent-owns-its-machine.md Tier 1.5)
+# agent's durable-install path
 # ──────────────────────────────────────────────
 # Same law as the jcode pin: version and per-arch checksums travel together
 # and a mismatch fails the build. The hashes are the ones the OFFICIAL
@@ -163,437 +178,29 @@ RUN echo "node-linker=hoisted" >> .npmrc \
   && pnpm install --prod --frozen-lockfile --ignore-scripts
 
 # ──────────────────────────────────────────────
-# Stage 7: Production runner
+# Stage 7: Production runner — the app on top of the agent base image
 # ──────────────────────────────────────────────
-FROM node:22.23.2-trixie-slim AS runner
+# The OS surface (Debian, the one big apt layer, podman/browser/toolchain
+# wiring and their gates, the durable-home passwd + profile.d, the OS-level
+# ENV) is docker/agent-base.Dockerfile: built only when THAT file
+# changes, so an app change ships only this stage's ~90 MB. The default tag
+# is what `pnpm agent:build` builds first; a deployment and publish.yml
+# pass a registry reference pinned BY DIGEST (a re-tagged base must never
+# change a thin image that did not rebuild). Everything this stage adds is
+# ours: the app, the vendored runtime and Nix release, the entrypoint, the
+# app-level ENV, and the privilege drop. AGENT_BASE_IMAGE is the global ARG
+# at the top of this file.
+FROM ${AGENT_BASE_IMAGE} AS runner
 # Dual-licensed image contents: Apache-2.0 plus the enterprise-licensed ee/
 # paths compiled/bundled into every edition — see LICENSE and
 # LICENSE-ENTERPRISE at the repository root.
 LABEL org.opencontainers.image.licenses="Apache-2.0 AND LicenseRef-OneCLI-Enterprise"
 WORKDIR /app
 
-# tini as PID 1: Node is not an init (signal handling differs, orphans are
-# never reaped). Common tools are the agent's hands — every outbound request
-# they make still exits through the gateway (§3.4).
-# e2fsprogs + util-linux let a deployment that hands the sandbox a raw disk
-# format and mount it as the home; inert under the Docker backend, where the
-# home arrives as a pre-mounted volume.
-# openssh-sftp-server + openssh-client serve the SSH front door:
-# the terminator's relay execs /usr/lib/openssh/sftp-server for sftp and
-# modern scp (≥9.0 rides sftp), and openssh-client provides the in-guest scp
-# binary legacy `scp -O` targets — no daemon, no listener, the no-inbound
-# posture is untouched (and agents get a useful ssh client of their own).
-# podman + friends give the agent `docker run`-class work as ROOTLESS
-# containers (the `docker` CLI itself arrives via podman-docker). Explicitly
-# listed because they are only Recommends of podman: uidmap (setuid
-# newuidmap/newgidmap — the user-namespace helpers), passt (pasta, the
-# default rootless network) + slirp4netns (fallback), fuse-overlayfs
-# (storage fallback; native overlay is the expected driver), aardvark-dns +
-# iptables (netavark named networks / compose), catatonit (pod infra /
-# --init). This is a capability of sandboxes that own a whole kernel (a
-# per-sandbox VM); under the self-host Docker backend the same
-# binaries are deliberately inert — the runner pins `no-new-privileges` +
-# `CapDrop: ALL` on every sandbox (apps/runner/src/backend/docker/
-# docker-backend.ts, pinned by its test), which neuters the setuid helpers.
-# Never weaken those guards to chase this feature on a shared kernel; see
-# /etc/containers/README.onecli (baked below) for the agent-visible note.
-# python3 + python3-pip + python3-venv: the agent's second toolchain (node is
-# the runtime; python is the lingua franca of one-off scripting). Debian
-# marks the interpreter externally-managed (PEP 668), so pip refuses every
-# install out of the box — PIP_BREAK_SYSTEM_PACKAGES (env, below) opens it,
-# and as uid 1000 the system site-packages is unwritable anyway, so installs
-# land in the user scheme under the DURABLE home (~/.local — bin dir shared
-# with npm's global prefix). python3-venv also ships the offline pip wheel
-# the durable-home gate below installs from.
-# nano + less: the SSH front door needs an editor and a pager (neither ships
-# in slim, and --no-install-recommends keeps git from pulling less in);
-# EDITOR/PAGER/LESS pin them below.
-# The browser stack — chromium + chromium-sandbox + dbus-x11 + xvfb + fonts +
-# ffmpeg: agents need browsers (decided 2026-09-09, plans/agent-owns-its-
-# machine.md Tier 1). Playwright/Puppeteer from npm or pip drive the baked
-# binary at /usr/bin/chromium; the alternative — the harness's own
-# Firefox-extension browser tool — can never work in a headless guest and is
-# disabled in the adapter. Four load-bearing details:
-# - dbus-x11 is listed BEFORE chromium on purpose: chromium's dbus dependency
-#   is satisfied by either dbus-x11 or dbus-user-session, and apt's default
-#   pick (dbus-user-session) drags in systemd + systemd-sysv + libpam-systemd
-#   — an init system this tini-PID-1 image must never carry. Naming dbus-x11
-#   first makes the resolver take it instead (measured: 162 packages, no
-#   systemd, vs 168 with). The gate below pins systemd's ABSENCE.
-# - chromium-sandbox is the setuid helper (400 KB) that lets chromium's
-#   DEFAULT sandbox run as uid 1000 where user namespaces are available —
-#   a sandbox with its own kernel. Under the self-host Docker backend the same
-#   `no-new-privileges` + `CapDrop: ALL` that neuter podman's setuid helpers
-#   neuter this one too, and chromium must be told `--no-sandbox` (Playwright:
-#   `chromiumSandbox: false`). Same law as podman: never weaken the Docker
-#   guards for it; /etc/onecli/README.browser (baked below) tells the agent.
-# - xvfb is the fallback display for the rare tool that refuses headless
-#   mode; fonts-liberation + fonts-noto-color-emoji stop pages rendering as
-#   empty boxes (slim ships no fonts at all).
-# - ffmpeg is the video half: Playwright records .webm natively, and frames
-#   or screenshots are stitched with ffmpeg. The gate proves VP9 encoding.
-# - libnss3-tools is `certutil`, the only way to add a CA to the NSS shared
-#   DB — and that DB is the ONLY trust store chromium reads on Linux
-#   (chromium docs, linux/cert_management.md): it ignores SSL_CERT_FILE and
-#   NODE_EXTRA_CA_CERTS. Every page here is re-signed by the gateway CA, so
-#   without the import agent-entrypoint.sh does with this tool, every load
-#   fails ERR_CERT_AUTHORITY_INVALID and the agent's escape by trial is
-#   ignoreHTTPSErrors — verification off for every site (measured live,
-#   2026-09-09). The gate below proves the import is what chromium
-#   trusts, on a real handshake.
-# gcc + g++ + make + libc6-dev + python3-dev: the C toolchain for native npm
-# and pip modules (better-sqlite3, sharp, bcrypt, psycopg2, lxml…) that ship
-# no prebuilt binary for this platform/runtime pairing and fall back to
-# compiling at install time — without a compiler the install fails with a
-# wall of gyp/gcc errors and the agent concludes the package is broken.
-# Deliberately NOT build-essential: same compilers, minus 57 MB of dpkg-dev
-# nothing here uses.
-# procps + jq + zip + unzip + wget: the baseline any Linux box has and slim
-# does not (`ps` in particular — an agent that cannot list its own processes
-# burns turns on it).
-# xz-utils: `.tar.xz` is the release format of half the tools an agent will
-# fetch (Nix itself ships that way); slim has no xz.
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends \
-    tini git curl ripgrep ca-certificates openssl e2fsprogs util-linux \
-    openssh-sftp-server openssh-client \
-    podman podman-docker uidmap passt slirp4netns fuse-overlayfs aardvark-dns catatonit iptables \
-    python3 python3-pip python3-venv \
-    nano less \
-    dbus-x11 chromium chromium-sandbox xvfb fonts-liberation fonts-noto-color-emoji ffmpeg libnss3-tools \
-    gcc g++ make libc6-dev python3-dev \
-    procps jq zip unzip wget xz-utils \
-  && rm -rf /var/lib/apt/lists/*
-ENTRYPOINT ["/usr/bin/tini", "--"]
-
-# Rootless-podman wiring. Four pieces, each load-bearing:
-# - /etc/subuid + /etc/subgid: OVERWRITTEN, not appended — the base image
-#   already allocates node:100000:65536, and a duplicate row makes newuidmap
-#   fail with EINVAL (rootless dead). The range is a DURABLE-DATA FORMAT
-#   CONTRACT: it is baked into the ownership of every file podman writes on
-#   the persistent home volume, so changing it in a later image strands every
-#   existing agent's container storage. Never "tidy" it; the gate below pins
-#   the exact value.
-# - containers.conf (root-owned): the no-systemd in-sandbox posture —
-#   cgroupfs manager with cgroups disabled (limits come from the sandbox
-#   itself; there is no journald for events/logs either), and
-#   image_copy_tmp_dir="storage" so pull staging lands on the agent's own
-#   home volume instead of /var/tmp on the ephemeral rootfs (which may sit on
-#   storage shared with other sandboxes). base_hosts_file="" pins "copy the
-#   sandbox's /etc/hosts into containers" — the only way a nested container
-#   can resolve the gateway proxy host (sandboxes have no DNS egress).
-# - registries.conf (root-owned): docker.io for unqualified names, so
-#   `podman pull postgres` resolves.
-# - storage.conf (node-owned, USER-level — rootless podman ignores the
-#   graphroot in /etc/containers/storage.conf): graphroot on /workspace, the
-#   durable home, so images/containers/volumes survive relaunch and
-#   sleep. The file stays at its /home/node path ON PURPOSE, even now
-#   that ~ lives at /workspace/.home: this copy is image-baked and
-#   self-heals every boot (an agent-editable durable copy would not), and
-#   the storage path inside it is a DURABLE-DATA FORMAT CONTRACT — moving
-#   either strands every existing agent's container store.
-#   CONTAINERS_STORAGE_CONF (env, below) pins the same file regardless of
-#   where $HOME points.
-RUN printf 'node:100000:65536\n' > /etc/subuid \
-  && printf 'node:100000:65536\n' > /etc/subgid \
-  # Debian installs these setuid already; assert-by-construction, not trust.
-  && chmod u+s /usr/bin/newuidmap /usr/bin/newgidmap \
-  && printf '%s\n' \
-    '# OneCLI agent sandbox defaults — see README.onecli beside this file.' \
-    '[containers]' \
-    'log_driver = "k8s-file"' \
-    'cgroups = "disabled"' \
-    'base_hosts_file = ""' \
-    '' \
-    '[engine]' \
-    'cgroup_manager = "cgroupfs"' \
-    'events_logger = "file"' \
-    'runtime = "crun"' \
-    'image_copy_tmp_dir = "storage"' \
-    > /etc/containers/containers.conf \
-  && printf '%s\n' \
-    '# OneCLI agent sandbox defaults — see README.onecli beside this file.' \
-    'unqualified-search-registries = ["docker.io"]' \
-    > /etc/containers/registries.conf \
-  && install -d -o node -g node /home/node/.config /home/node/.config/containers \
-  && printf '%s\n' \
-    '# OneCLI agent sandbox defaults — see /etc/containers/README.onecli.' \
-    '# Storage lives on /workspace (the durable home). This path is a' \
-    '# durable-data format contract — never move it, even though ~ is now' \
-    '# durable too (/workspace/.home): existing agents own storage HERE.' \
-    '# rootless_storage_path is the load-bearing key — rootless podman IGNORES' \
-    '# [storage] graphroot from the user config (that is the ROOTFUL path).' \
-    '# graphroot is deliberately NOT set: pointing it at the durable home would' \
-    '# aim a rootful invocation (e.g. a root kubectl exec, which inherits the' \
-    '# global CONTAINERS_STORAGE_CONF) INTO the tenant rootless store, writing' \
-    '# root-owned db/lock files that brick it. A rootful podman falls back to' \
-    '# ephemeral /var/lib/containers, which is harmless. The store tree itself' \
-    '# is pre-created node-owned by agent-entrypoint.sh (podman does not create' \
-    '# <graphroot>/tmp before the first pull needs it).' \
-    '[storage]' \
-    'driver = "overlay"' \
-    'rootless_storage_path = "/workspace/.local/share/containers/storage"' \
-    > /home/node/.config/containers/storage.conf \
-  && chown node:node /home/node/.config/containers/storage.conf \
-  && printf '%s\n' \
-    'OneCLI agent sandbox — nested containers (podman, plus the `docker` CLI shim).' \
-    '' \
-    'Rootless podman works on the hosted microVM substrate, where each sandbox' \
-    'owns a whole kernel. Under the self-host Docker backend it is intentionally' \
-    'disabled: the sandbox hardening (no-new-privileges, CapDrop ALL, and the' \
-    'container runtime default seccomp profile) prevents the user-namespace' \
-    'setup rootless containers need on a shared kernel. Do not weaken any of' \
-    'those to work around it — the shared kernel is the tenant boundary there.' \
-    '' \
-    'Container storage lives under /workspace/.local/share/containers (the' \
-    'durable home), so images, containers, and volumes survive sandbox restarts.' \
-    'Running containers stop when the sandbox sleeps; `podman start` them again.' \
-    'Outbound traffic from pulls follows the sandbox proxy; a nested container' \
-    'inherits the proxy env (both HTTPS_PROXY/HTTP_PROXY and the lowercase' \
-    'https_proxy/http_proxy), which carries a credential, so committing a' \
-    'container bakes all four into the image config. Scrub ALL of them before' \
-    'pushing anywhere, then confirm none survived:' \
-    '  podman commit \' \
-    '    --change "ENV HTTPS_PROXY=" --change "ENV HTTP_PROXY=" \' \
-    '    --change "ENV https_proxy=" --change "ENV http_proxy=" <ctr> <image>' \
-    '  podman inspect <image> | grep -i proxy   # must print nothing' \
-    > /etc/containers/README.onecli
-# The gate (same law as the jcode gate below): prove the runtime surface at
-# build time, not at first agent boot. `podman info` is deliberately absent —
-# it initializes storage/userns, which a build step must not.
-RUN podman --version \
-  && docker --version \
-  # crun is pinned as the OCI runtime in containers.conf, but Debian satisfies
-  # podman's dependency with `crun | runc` — prove the pinned one is actually
-  # present, or every `podman run` dies at first use with the build still green.
-  && crun --version \
-  # The rootless network + storage helpers are Recommends-only (installed
-  # explicitly above under --no-install-recommends); prove they landed.
-  && command -v pasta \
-  && command -v newuidmap \
-  && command -v newgidmap \
-  && test -u /usr/bin/newuidmap \
-  && test -u /usr/bin/newgidmap \
-  && test -f /etc/containers/policy.json \
-  && [ "$(grep -c '^node:' /etc/subuid)" -eq 1 ] \
-  && [ "$(grep -c '^node:' /etc/subgid)" -eq 1 ] \
-  && grep -qx 'node:100000:65536' /etc/subuid \
-  && grep -qx 'node:100000:65536' /etc/subgid
-
-# The browser note the machine fragment cites (one source, no drift — same
-# pattern as /etc/containers/README.onecli). Root-owned: substrate facts,
-# not agent preferences. The proxy paragraph is the load-bearing one,
-# MEASURED 2026-09-09 against an authenticating test proxy: bare chromium
-# reads the proxy HOST from HTTP_PROXY/HTTPS_PROXY but never the userinfo —
-# it answers the 407 challenge with nothing and every page fails — while
-# Playwright's launch({ proxy: { server, username, password } }) authenticates
-# on the first challenge. The sandbox's proxy URL carries the agent's token
-# as userinfo, so a browser started without that option reaches nothing.
-RUN install -d /etc/onecli \
-  && printf '%s\n' \
-    'OneCLI agent sandbox — the browser stack.' \
-    '' \
-    'Chromium is installed at /usr/bin/chromium (headless-capable), with ffmpeg' \
-    'for video and Xvfb as a fallback display. Drive it with Playwright or' \
-    'Puppeteer from npm/pip and point them at the system binary:' \
-    '  npm install -g playwright   # or: pip install --user playwright' \
-    '' \
-    'PROXY — READ THIS FIRST. Every request leaves this machine through the' \
-    'sandbox proxy, whose URL (in HTTPS_PROXY) carries your access token as' \
-    'user:password. Chromium reads the proxy HOST from that variable but never' \
-    'the credentials, so a browser launched without them loads nothing. Hand' \
-    'them to Playwright explicitly:' \
-    '  const u = new URL(process.env.HTTPS_PROXY);' \
-    '  const browser = await chromium.launch({' \
-    '    executablePath: "/usr/bin/chromium",' \
-    '    proxy: { server: `${u.protocol}//${u.host}`,' \
-    '             username: decodeURIComponent(u.username),' \
-    '             password: decodeURIComponent(u.password) },' \
-    '  });' \
-    '(Python: proxy={"server": ..., "username": ..., "password": ...}.)' \
-    'Puppeteer has no proxy-credential launch option; use' \
-    'page.authenticate({ username, password }) after --proxy-server=<host>.' \
-    '' \
-    'TLS: the proxy re-signs every HTTPS site with the sandbox CA. Chromium does' \
-    'not read SSL_CERT_FILE; it trusts the NSS database at ~/.pki/nssdb, and the' \
-    'sandbox CA is imported there at every boot, so pages load with normal' \
-    'certificate checks. Never set ignoreHTTPSErrors or' \
-    '--ignore-certificate-errors: that turns verification off for every site,' \
-    'not just the proxy. If a page fails with ERR_CERT_AUTHORITY_INVALID, check' \
-    'the import: `certutil -d sql:$HOME/.pki/nssdb -L` must list an' \
-    'onecli-gateway-* entry with trust flags C,,.' \
-    '' \
-    'Playwright can also download its own Chromium build (`playwright install' \
-    'chromium`); it lands under ~/.cache/ms-playwright on the durable home and' \
-    'the shared libraries it needs are already here.' \
-    '' \
-    'Sandbox flag: on the hosted platform, Chromium'"'"'s own sandbox works as-is.' \
-    'Under a self-hosted Docker deployment (no-new-privileges, CapDrop ALL) it' \
-    'cannot start and you must pass --no-sandbox (Playwright:' \
-    '`chromiumSandbox: false`). If launch fails with "No usable sandbox", that' \
-    'is the reason. Never try to weaken the container'"'"'s own hardening for it.' \
-    '' \
-    'Video: Playwright records .webm natively (`recordVideo: { dir }`). It needs' \
-    'its OWN small ffmpeg helper for that (~2 MB, separate from the system one):' \
-    'run `npx playwright install ffmpeg` once; it lands on the durable home. The' \
-    'system ffmpeg stitches screenshots or frames into video and converts formats' \
-    '(`ffmpeg -framerate 10 -i f%03d.png out.webm`).' \
-    > /etc/onecli/README.browser
-
-# The browser/toolchain gate (same law as the podman and jcode gates: prove
-# at build time, not at first agent boot).
-RUN chromium --version \
-  && command -v certutil \
-  && ffmpeg -version | head -1 \
-  && Xvfb -help >/dev/null 2>&1 \
-  && fc-list | grep -qi liberation \
-  && gcc --version | head -1 \
-  && g++ --version | head -1 \
-  && make --version | head -1 \
-  && ps --version \
-  && jq --version \
-  && zip -v | head -1 \
-  && unzip -v | head -1 \
-  && wget --version | head -1 \
-  # chromium-sandbox: the setuid helper must actually be setuid, or the
-  # DEFAULT sandbox path dies as uid 1000 where the sandbox owns its kernel.
-  && test -u /usr/lib/chromium/chrome-sandbox \
-  # The systemd guard: the dbus-x11-before-chromium ordering above is what
-  # keeps an init system out of this image, and a dependency change upstream
-  # could silently undo it. Pin the absence, loudly.
-  && ! dpkg-query -W systemd 2>/dev/null \
-  && test -f /etc/onecli/README.browser \
-  # Headless chromium REALLY renders as uid 1000: a screenshot of about:blank
-  # must come out non-empty. --no-sandbox because the build environment has
-  # no user namespaces (the default sandbox is proven live on the hosted
-  # substrate, not here); --disable-gpu because there is no GPU anywhere
-  # this image runs. Both are what a self-host Docker sandbox passes too.
-  # HOME and --user-data-dir are pinned to a throwaway dir: setpriv keeps
-  # root's HOME=/root, which uid 1000 cannot write, and chromium then dies
-  # with "Failed to create headless user data directory" (found live on
-  # this gate's first run). In production HOME is the durable ~ and this is
-  # a non-issue; Playwright manages its own profile dir regardless.
-  && setpriv --reuid node --regid node --init-groups sh -c ' \
-       set -e; d=$(mktemp -d /tmp/gate.XXXXXX); cd "$d"; \
-       HOME="$d" chromium --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage \
-         --user-data-dir="$d/profile" --screenshot="$d/shot.png" --window-size=640,480 \
-         about:blank >/dev/null 2>&1; \
-       test -s "$d/shot.png"; rm -rf "$d"' \
-  # ffmpeg REALLY encodes the codec the browser-recording story needs (VP9 in
-  # WebM — what Playwright produces and what Slack/web render inline).
-  && setpriv --reuid node --regid node --init-groups sh -c ' \
-       set -e; d=$(mktemp -d /tmp/gate.XXXXXX); cd "$d"; \
-       ffmpeg -loglevel error -f lavfi -i testsrc=duration=1:size=64x64:rate=5 \
-         -c:v libvpx-vp9 "$d/clip.webm"; \
-       test -s "$d/clip.webm"; rm -rf "$d"' \
-  # Chromium trusts a CA imported into ~/.pki/nssdb the way agent-entrypoint.sh
-  # imports the gateway CA (certutil -A -t "C,,"), on a REAL TLS handshake: a
-  # throwaway CA signs a localhost leaf, `openssl s_server` serves a page over
-  # it, and headless chromium — no --ignore-certificate-errors — must dump
-  # that page. The NEGATIVE half runs first and pins that the trust really
-  # comes from the import: the same page from a profile without it must NOT
-  # load. Both as uid 1000 with HOME on a throwaway dir, the production shape
-  # (HOME on the durable home, the entrypoint importing as node). The
-  # server-ready wait is bounded, not a fixed sleep.
-  && setpriv --reuid node --regid node --init-groups sh -c ' \
-       set -e; d=$(mktemp -d /tmp/gate.XXXXXX); cd "$d"; export HOME="$d"; \
-       openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 \
-         -subj "/CN=nss-gate-ca" -addext "basicConstraints=critical,CA:TRUE" \
-         -keyout ca.key -out ca.pem 2>/dev/null; \
-       openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
-         -subj "/CN=localhost" -keyout leaf.key -out leaf.csr 2>/dev/null; \
-       printf "subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n" > leaf.ext; \
-       openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 \
-         -extfile leaf.ext -out leaf.pem 2>/dev/null; \
-       echo "<title>nss-gate-ok</title>" > index.html; \
-       openssl s_server -accept 127.0.0.1:8443 -cert leaf.pem -key leaf.key -WWW -quiet >/dev/null 2>&1 & \
-       srv=$!; i=0; until openssl s_client -connect 127.0.0.1:8443 -CAfile ca.pem </dev/null >/dev/null 2>&1; do \
-         i=$((i+1)); [ "$i" -lt 50 ] || { echo "nss gate: s_server never came up" >&2; exit 1; }; sleep 0.1; done; \
-       load() { chromium --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage \
-                  --user-data-dir="$d/$1" --dump-dom https://localhost:8443/index.html 2>/dev/null \
-                | grep -q nss-gate-ok; }; \
-       if load p0; then echo "nss gate: chromium loaded an UNTRUSTED page" >&2; exit 1; fi; \
-       mkdir -p "$HOME/.pki/nssdb"; certutil -d "sql:$HOME/.pki/nssdb" -N --empty-password; \
-       certutil -d "sql:$HOME/.pki/nssdb" -A -t "C,," -n onecli-gateway-nss-gate -i ca.pem; \
-       if ! load p1; then echo "nss gate: chromium did not trust the NSS-imported CA" >&2; exit 1; fi; \
-       kill "$srv" 2>/dev/null || true; cd /; rm -rf "$d"'
-
-# The durable POSIX home: ~ = /workspace/.home, ON the home volume. Three
-# pieces:
-# - usermod: passwd is where the Docker substrate derives HOME from (runc
-#   fills HOME from the passwd entry when the env lacks it — spawn AND
-#   exec); agent-entrypoint.sh, and any deployment that boots the sandbox
-#   itself, export the same literal (AGENT_POSIX_HOME).
-# - the profile.d drop-in: SSH login shells — Debian's /etc/profile RESETS
-#   PATH, so the entrypoint's export cannot survive `bash -l`/`sh -lc`.
-#   APPENDED, never prepended: a tenant-writable dir ahead of the system
-#   dirs would let a planted binary shadow git/node/curl for every session.
-#   POSIX-only syntax — `sh -lc` sessions run dash, which sources
-#   /etc/profile.d too.
-# - the directory itself is created at CONTAINER runtime by
-#   agent-entrypoint.sh as uid 1000 — deliberately NOT here: root must never
-#   create tenant-mount dirs, and content baked under /workspace forks the
-#   substrates (Docker seeds named volumes from image content; the hosted
-#   block mount shadows it).
-RUN usermod -d /workspace/.home node \
-  && printf '%s\n' \
-    '# OneCLI agent sandbox: the durable tool bin (npm -g, pip --user).' \
-    '# Appended, never prepended - image binaries must win name lookups.' \
-    'case ":$PATH:" in' \
-    '  *":/workspace/.home/.local/bin:"*) ;;' \
-    '  *) PATH="$PATH:/workspace/.home/.local/bin" ;;' \
-    'esac' \
-    '' \
-    '# Nix (Tier 1.5), when the agent has installed it. Never SOURCE the' \
-    '# agent-writable profile hook from a system file: set the one thing nix' \
-    '# needs (its bin dir, APPENDED - image binaries win name lookups) and' \
-    '# point it at the gateway CA (the hook would pick the system bundle).' \
-    '# Mirrors agent-entrypoint.sh; POSIX-only (dash sources this too).' \
-    'if [ -n "${HOME:-}" ]; then' \
-    '  _onecli_nix="$HOME/.local/state/nix/profile"' \
-    '  [ -e "$_onecli_nix" ] || _onecli_nix="$HOME/.nix-profile"' \
-    '  if [ -e "$_onecli_nix/bin/nix" ]; then' \
-    '    case ":$PATH:" in' \
-    '      *":$_onecli_nix/bin:"*) ;;' \
-    '      *) PATH="$PATH:$_onecli_nix/bin" ;;' \
-    '    esac' \
-    '    export PATH' \
-    '    if [ -n "${SSL_CERT_FILE:-}" ]; then export NIX_SSL_CERT_FILE="$SSL_CERT_FILE"; fi' \
-    '  fi' \
-    '  unset _onecli_nix' \
-    'fi' \
-    > /etc/profile.d/onecli-path.sh
-
-# The Nix note the machine fragment cites (one source, no drift — same
-# pattern as README.browser / README.onecli). Root-owned.
-RUN printf '%s\n' \
-    'OneCLI agent sandbox — Nix, the durable install path.' \
-    '' \
-    'For a program that should survive restarts and is not on npm or pip, use' \
-    'Nix. It installs as your own user, needs no root, and its store lives on' \
-    'your durable disk (/workspace/.nix, bind-mounted at /nix every boot).' \
-    '' \
-    '  onecli-nix-install                 # once per agent, ~5 s, offline' \
-    '  nix profile add nixpkgs#ripgrep    # then install anything: search.nixos.org' \
-    '  nix profile list / remove / upgrade' \
-    '' \
-    'New shells have nix on PATH automatically. In the shell you ran the' \
-    'installer from, first:  . ~/.nix-profile/etc/profile.d/nix.sh &&' \
-    'export NIX_SSL_CERT_FILE="$SSL_CERT_FILE"   (the profile hook points Nix at' \
-    'the system CA bundle, which lacks the gateway CA; the export fixes that).' \
-    '' \
-    'Downloads come from cache.nixos.org through the sandbox proxy like every' \
-    'other tool. Your settings are in ~/.config/nix/nix.conf (flakes on,' \
-    'build sandbox off — binary-cache installs are unaffected).' \
-    '' \
-    'Hosted agents only: on a self-hosted Docker deployment nothing mounts /nix,' \
-    'and onecli-nix-install says so. Use npm, pip, or a container image there.' \
-    > /etc/onecli/README.nix
-
 ENV NODE_ENV=production
 ENV NO_COLOR=1
 ENV FORCE_COLOR=0
-# Telemetry stays off no matter what spawns the supervisor (§3.5).
+# Telemetry stays off no matter what spawns the supervisor.
 ENV JCODE_NO_TELEMETRY=1
 # The updater stays off no matter what spawns jcode — the supervisor, a
 # docker exec, the agent's own shell. Presence-based upstream: any value
@@ -606,45 +213,22 @@ ENV APP_VERSION=${APP_VERSION}
 # Bundles ship sourcemaps; make Node actually use them in stack traces.
 ENV NODE_OPTIONS=--enable-source-maps
 
-# Rootless podman's runtime state (locks, conmon sockets, the optional API
-# socket) — EPHEMERAL by design: its disappearance across a relaunch is how
-# podman detects a "reboot" and resets stale container state. The dir is baked
-# into the image so it exists on every fresh rootfs regardless of what spawns
-# the process (supervisor, docker exec, an SSH session); a deployment may
-# additionally mount a tmpfs over it. Nothing else
-# in the image reads XDG_RUNTIME_DIR (no systemd/logind here).
-ENV XDG_RUNTIME_DIR=/tmp/onecli-xdg-run
-RUN install -d -m 0700 -o node -g node /tmp/onecli-xdg-run
-# Belt-and-braces for HOME-less invocations: pin the rootless storage config
-# by env too — losing it would land storage on the ephemeral rootfs silently.
-ENV CONTAINERS_STORAGE_CONF=/home/node/.config/containers/storage.conf
-
-# `npm -g` and `pip --user` share ONE durable root: both bin dirs unify at
-# /workspace/.home/.local/bin — the single PATH entry the entrypoint and
-# /etc/profile.d/onecli-path.sh append. ENV (not entrypoint-only) so
-# docker-exec / remote-exec sessions inherit it too. Deliberately NO `ENV
-# HOME` here: it would poison later build-stage RUNs and fork the
-# substrates (Docker seeds named volumes from image content); HOME comes
-# from passwd (usermod above), the deployment's boot, and the entrypoint.
-ENV NPM_CONFIG_PREFIX=/workspace/.home/.local
-# PEP 668 pin — without it every `pip install` on this base refuses. Safe
-# here: no system component uses python, and as uid 1000 the system
-# site-packages is unwritable, so pip lands in the user scheme under the
-# durable ~ (proven by the gate below).
-ENV PIP_BREAK_SYSTEM_PACKAGES=1
-ENV EDITOR=nano
-ENV PAGER=less
-# -F quit-if-one-screen, -R pass colors through, -X no termcap init:
-# behaves for SSH humans and non-interactive reads alike (no hung pager in
-# a harness shell).
-ENV LESS=FRX
-
 # Root-owned on purpose, same law as /opt/jcode below: the container runs as
 # `node`, and a runtime-user-writable supervisor (bundle, deps, entrypoint)
 # would let the agent rewrite its own harness in a live container. The
 # supervisor only ever writes under /workspace and /tmp.
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=builder /app/apps/sandbox-supervisor/dist ./apps/sandbox-supervisor/dist
+# `onecli-browser`: the one way the agent drives the browser (the bundles
+# are in dist/browser-driver, built with the supervisor; the shim is the
+# name on PATH). Root-owned like the rest of /app. The desktop layer stacks
+# on this and does not replace it: the same driver, launching the desktop's
+# Chrome instead of headless Chromium when it sees a DISPLAY.
+COPY docker/onecli-browser /usr/local/bin/onecli-browser
+RUN chmod 0755 /usr/local/bin/onecli-browser \
+  && sh -n /usr/local/bin/onecli-browser \
+  && test -f /app/apps/sandbox-supervisor/dist/browser-driver/cli.mjs \
+  && test -f /app/apps/sandbox-supervisor/dist/browser-driver/daemon.mjs
 # The pinned runtime, and the ONLY jcode in this image (see header): the
 # supervisor resolves the binary from this env var and refuses to guess.
 # The whole DIRECTORY, not one file — on x86_64 `jcode` is a launcher script
@@ -658,26 +242,26 @@ ENV ONECLI_JCODE_BINARY=/opt/jcode/jcode
 COPY --from=nix-dist /opt/nix-dist /opt/nix-dist
 COPY docker/onecli-nix-install /usr/local/bin/onecli-nix-install
 RUN chmod 0755 /usr/local/bin/onecli-nix-install
-# Drop the npm-bundled v0.67.1 binary so nothing can silently fall back to
-# it; the SDK's JS client library stays. Hoisted layout: the platform
+# Drop the npm-bundled binary so nothing can silently fall back to an
+# unverified copy; the SDK's JS client library stays. Hoisted layout: the platform
 # packages sit directly under node_modules/@1jehuang/. Assert the glob
-# actually matched (plain ls fails the build on a miss) — a layout change
-# must fail HERE, not silently resurrect the stale binary.
+# actually matched (plain ls fails the build on a miss): a layout change
+# must fail HERE, not silently leave a second binary behind.
 RUN ls /app/node_modules/@1jehuang/jcode-linux-*/bin/jcode > /dev/null \
   && rm /app/node_modules/@1jehuang/jcode-linux-*/bin/jcode
 
 COPY docker/agent-entrypoint.sh ./agent-entrypoint.sh
 RUN chmod +x ./agent-entrypoint.sh
 
-# The durable home (§3.9): the container is disposable, this is not.
+# The durable home: the container is disposable, this is not.
 RUN mkdir -p /workspace && chown node:node /workspace
 # The durable-home gate (same law as the jcode/podman gates): prove the
 # surface at build time, not at first agent boot. setpriv, never `su -l` —
 # su strips the ENV these pins live in, so it would test a different
 # environment than production runs. The probe home is removed in this same
 # layer and BEFORE the VOLUME line: baked /workspace content would seed
-# Docker named volumes while the hosted block mount shadows it — a
-# substrate fork.
+# Docker named volumes while a backend that mounts the home as a block
+# device shadows it — a substrate fork.
 RUN python3 --version \
   && pip3 --version \
   && nano --version \
@@ -726,6 +310,53 @@ RUN python3 --version \
        [ "$rc" -eq 2 ] || { echo "expected refusal (exit 2) without a /nix mount, got $rc: $out" >&2; exit 1; }; \
        echo "$out" | grep -q "self-hosted Docker" || { echo "refusal lacked the hosted-only note: $out" >&2; exit 1; }; \
        test ! -e /nix/store' \
+  # The browser gate: the driver REALLY drives a page here, as uid 1000 on
+  # a throwaway home, the way an agent's first call goes. No DISPLAY, so
+  # the headless shape; the build container has no user namespaces, so
+  # this also proves the launcher's sandbox probe (first launch dies on
+  # "No usable sandbox", the relaunch with the flag comes up). A local page
+  # over loopback: the build has no network and needs none. A
+  # button opens a native modal: its click must answer with the modal
+  # line, a click behind it must be refused, and its own button must close
+  # it, the one shape an agent cannot work without. Both ways of naming an
+  # element are driven: refs for the field, role and name for the buttons,
+  # and a ref from before a reload is refused with what it is now. The daemon is
+  # stopped and the browser killed by the profile path, then WAITED for,
+  # before the home is removed. Bounded at 5 minutes (normally under 10 s):
+  # a wait that never returns ends the build with the process table and
+  # the browser's log printed, not with a job that sits until cancelled.
+  && timeout --kill-after=10s 300s setpriv --reuid node --regid node --init-groups sh -c ' \
+       set -e; export HOME=/workspace/.home AGENT_HOME_DIR=/workspace/.home; mkdir -p "$HOME"; \
+       trap "rc=\$?; [ \$rc -eq 0 ] || { echo \"browser gate: failed (exit \$rc)\"; ps -o pid,etime,stat,wchan:20,args --sort=pid; cat \$HOME/.chrome/onecli-browser.log 2>/dev/null; }" EXIT; trap "exit 124" TERM; \
+       printf "<title>Gate</title><h1>Hello</h1><a href=\"/two\">Second page</a><input aria-label=\"Name\"><button onclick=d.showModal()>Open</button><dialog id=d><h2>Quota Exceeded</h2><p>Try tomorrow.</p><form method=dialog><button>Dismiss</button></form></dialog>" > "$HOME/index.html"; \
+       ( cd "$HOME" && python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 ) & srv=$!; \
+       i=0; until curl --noproxy "*" -fsS -o /dev/null http://127.0.0.1:8765/; do i=$((i+1)); [ "$i" -lt 50 ] || { echo "browser gate: http.server never came up" >&2; exit 1; }; sleep 0.1; done; \
+       out=$(onecli-browser open http://127.0.0.1:8765/); \
+       echo "$out" | grep -q "^title: Gate$" || { echo "browser gate: open did not print the page: $out" >&2; exit 1; }; \
+       echo "$out" | grep -q "link \"Second page\"" || { echo "browser gate: no link in the snapshot: $out" >&2; exit 1; }; \
+       echo "$out" | grep -q "textbox \"Name\"" || { echo "browser gate: no textbox in the snapshot: $out" >&2; exit 1; }; \
+       ref=$(echo "$out" | sed -n "s/^\(f\?[0-9]*e[0-9]*\) textbox .*/\1/p" | head -n 1); \
+       onecli-browser type "$ref" "Alex" >/dev/null; \
+       v=$(onecli-browser eval "document.querySelector(\"input\").value"); \
+       echo "$v" | grep -q "\"Alex\"" || { echo "browser gate: typed text did not land: $v" >&2; exit 1; }; \
+       onecli-browser screenshot "$HOME/shot.png" >/dev/null; test -s "$HOME/shot.png"; \
+       onecli-browser read | grep -q "Hello"; \
+       onecli-browser click e999 2>&1 | grep -q "not in the last snapshot" || { echo "browser gate: a stale ref was not refused" >&2; exit 1; }; \
+       out=$(onecli-browser click button "Open"); \
+       echo "$out" | grep -q "^modal \"Quota Exceeded\": Try tomorrow\. \[f\?[0-9]*e[0-9]* \"Dismiss\"\]$" || { echo "browser gate: the click did not print the modal: $out" >&2; exit 1; }; \
+       ref=$(echo "$out" | sed -n "s/^\(f\?[0-9]*e[0-9]*\) textbox .*/\1/p"); \
+       onecli-browser type "$ref" x 2>&1 | grep -q "is behind the open dialog \"Quota Exceeded\"" || { echo "browser gate: an action behind the modal was not refused" >&2; exit 1; }; \
+       out=$(onecli-browser click button "Dismiss"); \
+       echo "$out" | grep -q "^modal " && { echo "browser gate: Dismiss did not close the modal: $out" >&2; exit 1; }; \
+       ref=$(echo "$out" | sed -n "s/^\(f\?[0-9]*e[0-9]*\) button \"Open\".*/\1/p"); \
+       onecli-browser open http://127.0.0.1:8765/ >/dev/null; \
+       onecli-browser click "$ref" 2>&1 | grep -q "it was button \"Open\", now f[0-9]*e[0-9]*" || { echo "browser gate: a ref from before the reload was not named" >&2; exit 1; }; \
+       test -S "$HOME/.onecli/browser.sock"; \
+       test "$(stat -c %a "$HOME/.onecli/browser.sock")" = 600; \
+       onecli-browser stop | grep -qx ok; \
+       kill "$srv" 2>/dev/null || true; \
+       pkill -f "user-data-dir=$HOME/.chrome" || true; \
+       i=0; while pgrep -f "user-data-dir=$HOME/.chrome" >/dev/null; do i=$((i+1)); [ "$i" -lt 100 ] || { pkill -9 -f "user-data-dir=$HOME/.chrome" || true; break; }; sleep 0.1; done' \
   && rm -rf /workspace/.home
 VOLUME ["/workspace"]
 

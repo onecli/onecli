@@ -1,7 +1,7 @@
 /* eslint-disable no-control-regex -- U+0000 / U+0001 are this module's
  * stash placeholders and bold sentinels; the regexes must name them. */
 import { replaceMentionTokens } from "../mentions";
-import { escapeSlackText } from "./text";
+import { escapeSlackText, unescapeSlackText } from "./text";
 
 /**
  * Markdown → Slack `mrkdwn` for MODEL-AUTHORED answers.
@@ -128,12 +128,6 @@ const SLACK_USER_ID_RE = /^[UW][A-Z0-9]{2,32}$/;
  * clickable channel link. Pings NOBODY by construction (Slack channel
  * links never notify), which is why no extra gate is needed. */
 const SLACK_CHANNEL_ID_RE = /^[CG][A-Z0-9]{2,32}$/;
-
-/** Reverse of `escapeSlackText`, for the mention pass only: the scan runs
- * over already-escaped text, but the resolution map is keyed on raw
- * normalized names. `&amp;` last, mirroring the escape's `&` first. */
-const unescapeSlackText = (escaped: string): string =>
-  escaped.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 
 export const markdownToMrkdwn = (
   raw: string,

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   AdapterConfigResponse,
   AdapterDecisionRequest,
+  AdapterGroupDecisionRequest,
   AdapterIngestRequest,
   AdapterIngestResponse,
   AdapterPresence,
@@ -10,7 +11,7 @@ import type {
 } from "@onecli/agent-protocol";
 import { createAdapter } from "./adapter";
 import type { AdapterConfig } from "./config";
-import type { ControlPlaneClient } from "./control-plane";
+import { ControlPlaneError, type ControlPlaneClient } from "./control-plane";
 import { FakeSocket } from "./test/fake-socket";
 import {
   createFakeControlPlane,
@@ -72,6 +73,7 @@ const adapterConfig = (): AdapterConfig => ({
   gatewayUrl: gateway.url,
   configPollMs: 25,
   workPollMs: 25,
+  drainMs: 3_000,
   approvalsPollSeconds: 1,
   appUrl: "https://app.example.com",
   appUrlFromLegacyBind: false,
@@ -423,6 +425,43 @@ describe("ingest outcomes answer on the provider side", () => {
     expect(slack.callsTo("chat.postMessage")).toEqual([]);
   });
 
+  it("a refused native Stop posts ONE private note to the clicker, in the thread they clicked in, escaped", async () => {
+    // The stop itself, and the loader settle, happen control-plane-side;
+    // the socket arm only owes the clicker their note. MUTATION-PROOF: drop
+    // the stop arm in respondToOutcome and no ephemeral is posted.
+    await driveEvent([
+      {
+        kind: "stop",
+        notice: {
+          channel: "C7",
+          threadTs: "171.7",
+          user: "U9",
+          message: "You can't stop this agent. Ask its owner <now>.",
+        },
+      },
+    ]);
+
+    await vi.waitFor(() =>
+      expect(slack.callsTo("chat.postEphemeral")).toHaveLength(1),
+    );
+    expect(slack.callsTo("chat.postEphemeral")[0]!.form).toEqual({
+      channel: "C7",
+      thread_ts: "171.7",
+      user: "U9",
+      text: "You can't stop this agent. Ask its owner &lt;now&gt;.",
+    });
+    expect(slack.callsTo("chat.postEphemeral")[0]!.token).toBe("xoxb-bot");
+    // Private only: nothing is posted to the thread for everyone.
+    expect(slack.callsTo("chat.postMessage")).toEqual([]);
+  });
+
+  it("an authorized (or idle) native Stop posts nothing: the close says Stopped. to everyone", async () => {
+    await driveEvent([{ kind: "stop", notice: null }]);
+    await settle();
+    expect(slack.callsTo("chat.postEphemeral")).toEqual([]);
+    expect(slack.callsTo("chat.postMessage")).toEqual([]);
+  });
+
   it("refuses an invite by posting the refusal and STAYING — no leave call exists", async () => {
     // Refuse-and-stay-muted: leaving would need channels:manage/groups:write,
     // scopes the manifest deliberately never requests — so the adapter's whole
@@ -490,6 +529,85 @@ describe("ingest outcomes answer on the provider side", () => {
 });
 
 describe("the completion pass posts once", () => {
+  it("posts a mid-run follow-up's reply the moment the feed serves it, claim first, ahead of finished turns", async () => {
+    // The turn is still running when its follow-up's reply appears on the
+    // feed: the adapter claims it and posts it right away, before any
+    // finished-turn work of the same poll, and never posts it again.
+    const order: string[] = [];
+    let served = false;
+    const { controlPlane } = feedControlPlane([presence()], {
+      getWork: async () => {
+        if (served) return { finished: [] };
+        served = true;
+        return {
+          finished: [
+            workItem({
+              status: "done",
+              finishedAt: "2026-08-06T10:00:05.000Z",
+            }),
+          ],
+          replies: [
+            {
+              linkId: "l1",
+              presenceId: "p1",
+              conversationId: "cv1",
+              externalThreadId: "D100",
+              kind: "direct" as const,
+              turnId: "t9",
+              followUp: {
+                id: "f1",
+                message: "also this",
+                source: "slack",
+                userName: null,
+                sourceThreadId: null,
+              },
+              reply: "On it.",
+            },
+          ],
+        };
+      },
+      readTranscript: async () => ({
+        events: [
+          {
+            seq: 1,
+            turnId: "t1",
+            type: "text",
+            payload: { text: "the whole answer" },
+          },
+        ],
+        nextSince: 1,
+        hasMore: false,
+      }),
+      claimReply: async (followUpId) => {
+        order.push(`claim:${followUpId}`);
+        return true;
+      },
+      advanceCursor: async () => {
+        order.push("cursor");
+        return true;
+      },
+    });
+    slack.onCall = (call) => order.push(`slack:${call.method}`);
+    await startAdapter(controlPlane);
+
+    await vi.waitFor(() =>
+      expect(slack.callsTo("chat.postMessage")).toHaveLength(2),
+    );
+    await settle();
+
+    // The socket dial is config-feed work, not the work loop's.
+    expect(order.filter((o) => o !== "slack:apps.connections.open")).toEqual([
+      "claim:f1",
+      "slack:chat.postMessage",
+      "cursor",
+      "slack:chat.postMessage",
+    ]);
+    expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
+      "On it.",
+      "the whole answer",
+    ]);
+  });
+
   it("posts a finished provider turn's answer exactly once and claims the cursor WITH the turn id", async () => {
     // Nothing posts while the turn is unfinished (there is no live
     // rendering); the finished item drives ONE post, and the CAS claim
@@ -896,6 +1014,55 @@ describe("the socket pump: ingest with bounded retry (finding G)", () => {
     expect(logs).toContain("ingest failed after retries");
     expect(slack.callsTo("chat.postMessage")).toEqual([]); // nothing posted
   });
+
+  it("waits out a dead holder's claim on a 409 instead of burning the retries in seconds", async () => {
+    // The control plane answers 409 while another run holds the event's
+    // claim. If that holder died, its claim lapses after two minutes: the
+    // fast backoff (7.5s in all) would give up long before, dropping the
+    // message. MUTATION-PROOF: drop the 409 branch and the retries are spent
+    // before the claim lapses, so no reply ever posts.
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"],
+    });
+    // Waited time, as the adapter's own backoff sleeps advance it.
+    let waited = 0;
+    let attempts = 0;
+    const { controlPlane } = feedControlPlane([presence()], {
+      ingest: async () => {
+        attempts += 1;
+        // The dead holder's claim lapses two minutes in.
+        if (waited < 2 * 60_000) {
+          throw new ControlPlaneError(409, "event in flight");
+        }
+        return {
+          kind: "refused",
+          message: "taken over",
+          reply: { channel: "D100", threadTs: null },
+        };
+      },
+    });
+    const adapter = createAdapter({
+      config: adapterConfig(),
+      controlPlane,
+      log: () => {},
+    });
+    adapters.push(adapter);
+    await adapter.start();
+    await waitReal(() => sockets.length === 1, "socket opened");
+    sockets[0]!.open();
+    sockets[0]!.emit(eventsEnvelope("Ev1"));
+
+    await waitReal(() => attempts >= 1, "first ingest attempt");
+    for (let i = 0; i < 6 && attempts < 5; i += 1) {
+      waited += 45_000;
+      await vi.advanceTimersByTimeAsync(45_000);
+    }
+    vi.useRealTimers();
+    await vi.waitFor(() =>
+      expect(slack.callsTo("chat.postMessage")).toHaveLength(1),
+    );
+    expect(slack.callsTo("chat.postMessage")[0]?.form.text).toBe("taken over");
+  });
 });
 
 describe("the rotation loop (proactive credential sweep)", () => {
@@ -1070,5 +1237,233 @@ describe("interactive decisions", () => {
 
     await vi.waitFor(() => expect(decides).toHaveLength(1));
     expect(decides[0]).toMatchObject({ approvalId: "app-2", decision: "deny" });
+  });
+});
+
+describe("grouped card clicks (socket arm)", () => {
+  const groupClick = (value: string) =>
+    JSON.stringify({
+      envelope_id: "env-group",
+      type: "interactive",
+      payload: {
+        type: "block_actions",
+        user: { id: "U77" },
+        channel: { id: "D100" },
+        actions: [{ action_id: "channel_group_approve", value }],
+      },
+    });
+
+  const startWithGroupDecide = async (
+    result: Awaited<ReturnType<ControlPlaneClient["decideGroup"]>>,
+  ) => {
+    const requests: AdapterGroupDecisionRequest[] = [];
+    const { controlPlane } = feedControlPlane([presence()], {
+      decideGroup: async (request) => {
+        requests.push(request);
+        return result;
+      },
+    });
+    await startAdapter(controlPlane);
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    sockets[0]!.open();
+    return requests;
+  };
+
+  it("forwards exactly the card's ids and the clicker to the fenced group decide", async () => {
+    const requests = await startWithGroupDecide({
+      kind: "decided",
+      decidedByName: "Dana",
+      decided: ["ap-1", "ap-2"],
+      alreadySettled: [],
+      failed: [],
+    });
+    sockets[0]!.emit(groupClick("ap-1,ap-2"));
+
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    expect(requests[0]).toEqual({
+      presenceId: "p1",
+      approvalIds: ["ap-1", "ap-2"],
+      decision: "approve",
+      clickerExternalUserId: "U77",
+    });
+    // A clean decide tells no one privately.
+    expect(slack.callsTo("chat.postEphemeral")).toHaveLength(0);
+  });
+
+  it("tells ONLY the clicker when the control plane refuses the click", async () => {
+    await startWithGroupDecide({
+      kind: "refused",
+      message: "Only workspace members can decide this <here>.",
+    });
+    sockets[0]!.emit(groupClick("ap-1"));
+
+    await vi.waitFor(() =>
+      expect(slack.callsTo("chat.postEphemeral")).toHaveLength(1),
+    );
+    const notice = slack.callsTo("chat.postEphemeral")[0]!;
+    expect(notice.form).toEqual({
+      channel: "D100",
+      user: "U77",
+      text: "Only workspace members can decide this &lt;here&gt;.",
+    });
+    expect(slack.callsTo("chat.update")).toHaveLength(0);
+  });
+
+  it("tells the clicker how many could not be decided on a partial failure", async () => {
+    await startWithGroupDecide({
+      kind: "decided",
+      decidedByName: "Dana",
+      decided: ["ap-1"],
+      alreadySettled: [],
+      failed: ["ap-2", "ap-3"],
+    });
+    sockets[0]!.emit(groupClick("ap-1,ap-2,ap-3"));
+
+    await vi.waitFor(() =>
+      expect(slack.callsTo("chat.postEphemeral")).toHaveLength(1),
+    );
+    expect(slack.callsTo("chat.postEphemeral")[0]!.form.text).toBe(
+      "2 of these couldn't be decided just now. They're still on the card; try again.",
+    );
+  });
+});
+
+describe("the narration card's Stop (socket arm)", () => {
+  const cardStopClick = (value = "stop") =>
+    JSON.stringify({
+      envelope_id: "env-card-stop",
+      type: "interactive",
+      payload: {
+        type: "block_actions",
+        user: { id: "U77" },
+        container: {
+          type: "message",
+          channel_id: "D100",
+          message_ts: "1700.9",
+        },
+        actions: [{ action_id: "turn_stop", value }],
+      },
+    });
+
+  const startWithCardStop = async (
+    result: Awaited<ReturnType<ControlPlaneClient["stopFromCard"]>>,
+  ) => {
+    const requests: Parameters<ControlPlaneClient["stopFromCard"]>[0][] = [];
+    const { controlPlane } = feedControlPlane([presence()], {
+      stopFromCard: async (request) => {
+        requests.push(request);
+        return result;
+      },
+    });
+    await startAdapter(controlPlane);
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    sockets[0]!.open();
+    return requests;
+  };
+
+  it("forwards ONLY the card's address and the clicker (a forged value goes nowhere); a stop posts nothing", async () => {
+    const requests = await startWithCardStop({ kind: "stopped" });
+    sockets[0]!.emit(cardStopClick("another-turn-id"));
+
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    expect(requests[0]).toEqual({
+      presenceId: "p1",
+      channel: "D100",
+      cardTs: "1700.9",
+      clickerExternalUserId: "U77",
+    });
+    await settle();
+    expect(slack.callsTo("chat.postEphemeral")).toEqual([]);
+    expect(slack.callsTo("chat.postMessage")).toEqual([]);
+  });
+
+  it("tells ONLY the clicker when refused, escaped, top-level (no thread)", async () => {
+    await startWithCardStop({
+      kind: "refused",
+      message: "You can't stop this agent. Ask its owner <now>.",
+    });
+    sockets[0]!.emit(cardStopClick());
+
+    await vi.waitFor(() =>
+      expect(slack.callsTo("chat.postEphemeral")).toHaveLength(1),
+    );
+    expect(slack.callsTo("chat.postEphemeral")[0]!.form).toEqual({
+      channel: "D100",
+      user: "U77",
+      text: "You can't stop this agent. Ask its owner &lt;now&gt;.",
+    });
+    expect(slack.callsTo("chat.update")).toEqual([]);
+  });
+});
+
+describe("a waiting message's Send now on the narration card (socket arm)", () => {
+  const sendNowClick = (followUpId = "fu-1") =>
+    JSON.stringify({
+      envelope_id: "env-card-send-now",
+      type: "interactive",
+      payload: {
+        type: "block_actions",
+        user: { id: "U77" },
+        container: {
+          type: "message",
+          channel_id: "D100",
+          message_ts: "1700.9",
+        },
+        actions: [{ action_id: "follow_up_send_now", value: followUpId }],
+      },
+    });
+
+  const startWithRowAction = async (
+    result: Awaited<ReturnType<ControlPlaneClient["actOnCardFollowUp"]>>,
+  ) => {
+    const requests: Parameters<ControlPlaneClient["actOnCardFollowUp"]>[0][] =
+      [];
+    const { controlPlane } = feedControlPlane([presence()], {
+      actOnCardFollowUp: async (request) => {
+        requests.push(request);
+        return result;
+      },
+    });
+    await startAdapter(controlPlane);
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    sockets[0]!.open();
+    return requests;
+  };
+
+  it("forwards the card's address, the row and the clicker; done posts nothing", async () => {
+    const requests = await startWithRowAction({ kind: "done" });
+    sockets[0]!.emit(sendNowClick("fu-42"));
+
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    expect(requests[0]).toEqual({
+      presenceId: "p1",
+      channel: "D100",
+      cardTs: "1700.9",
+      clickerExternalUserId: "U77",
+      action: "send_now",
+      followUpId: "fu-42",
+    });
+    await settle();
+    // The row leaves the card when the agent reads the message: no note.
+    expect(slack.callsTo("chat.postEphemeral")).toEqual([]);
+    expect(slack.callsTo("chat.postMessage")).toEqual([]);
+  });
+
+  it("tells ONLY the clicker when refused, escaped", async () => {
+    await startWithRowAction({
+      kind: "refused",
+      message: "Only the person who sent this message can do that <yes>.",
+    });
+    sockets[0]!.emit(sendNowClick());
+
+    await vi.waitFor(() =>
+      expect(slack.callsTo("chat.postEphemeral")).toHaveLength(1),
+    );
+    expect(slack.callsTo("chat.postEphemeral")[0]!.form).toEqual({
+      channel: "D100",
+      user: "U77",
+      text: "Only the person who sent this message can do that &lt;yes&gt;.",
+    });
+    expect(slack.callsTo("chat.update")).toEqual([]);
   });
 });

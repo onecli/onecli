@@ -39,6 +39,18 @@ export type FakeStep =
   | { op: "text"; text: string }
   | { op: "sleep"; ms: number }
   | { op: "state" }
+  /**
+   * Echo the delivered prompt's first line: the caller's message comes
+   * after any delivery-only context the supervisor prepends, so this is how
+   * a black-box caller witnesses what framed the turn for the agent.
+   */
+  | { op: "prompt" }
+  /**
+   * Echo the context size the platform delivered with the turn
+   * (`[contextTokens N]`, or `[contextTokens none]`): how a black-box
+   * caller witnesses the size reaching the harness.
+   */
+  | { op: "contextTokens" }
   | {
       op: "http";
       url: string;
@@ -48,6 +60,7 @@ export type FakeStep =
       timeoutMs?: number;
     }
   | { op: "tool"; name: string; args?: unknown }
+  | { op: "bash"; ms: number }
   | { op: "error"; message: string }
   | { op: "failNextStart"; reason?: string };
 
@@ -80,6 +93,10 @@ const parseStep = (
     }
     case "state":
       return { op: "state" };
+    case "prompt":
+      return { op: "prompt" };
+    case "contextTokens":
+      return { op: "contextTokens" };
     case "http": {
       if (typeof raw.url !== "string")
         return { error: `step ${index}: "http" needs a string url` };
@@ -108,6 +125,11 @@ const parseStep = (
       if (typeof raw.name !== "string")
         return { error: `step ${index}: "tool" needs a string name` };
       return { op: "tool", name: raw.name, args: raw.args };
+    case "bash": {
+      if (typeof raw.ms !== "number" || !Number.isFinite(raw.ms))
+        return { error: `step ${index}: "bash" needs a numeric ms` };
+      return { op: "bash", ms: Math.min(Math.max(raw.ms, 0), MAX_SLEEP_MS) };
+    }
     case "error":
       if (typeof raw.message !== "string")
         return { error: `step ${index}: "error" needs a string message` };
@@ -162,15 +184,38 @@ export const parseFakeDirective = (message: string): ParsedDirective => {
 export interface DirectiveContext {
   sessionRef: string;
   turnsRun: () => number;
+  /** The whole prompt the harness was handed for this turn. */
+  prompt: string;
+  /** The context size delivered with this turn, if the platform chose one. */
+  contextTokens: number | undefined;
   /** The platform-tools socket THIS process serves (test seam overridable). */
   toolsSocketPath: () => string;
   /** Arms the harness's one-shot launch failure (the dead-harness leg). */
   armLaunchFailure: (reason?: string) => void;
+  /**
+   * Mark a tool as running so the session's `backgroundRunningTool` can
+   * move it (SEND NOW). `move` ends the tool's wait; the returned function
+   * unmarks it once the tool finished either way.
+   */
+  markRunningTool: (name: string, move: () => void) => () => void;
 }
 
 const excerpt = (value: string): string => value.slice(0, EXCERPT_CHARS);
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Sleep in chunks, so a dispose/process exit is never held behind one long
+ * timer, ending early once `signal` fires.
+ */
+const sleepChunked = async (ms: number, signal?: AbortSignal) => {
+  let remaining = ms;
+  while (remaining > 0 && !signal?.aborted) {
+    const chunk = Math.min(remaining, SLEEP_CHUNK_MS);
+    await sleep(chunk);
+    remaining -= chunk;
+  }
+};
 
 /**
  * One JSONL request/response over the platform-tools Unix socket — the same
@@ -263,21 +308,26 @@ export async function* runDirective(
         yield { type: "text.delta", text: step.text };
         break;
       }
-      case "sleep": {
-        // Chunked so a dispose/process exit is never held behind one long
-        // timer; abort semantics are unchanged (checked at event gaps).
-        let remaining = step.ms;
-        while (remaining > 0) {
-          const chunk = Math.min(remaining, SLEEP_CHUNK_MS);
-          await sleep(chunk);
-          remaining -= chunk;
-        }
+      case "sleep":
+        // Abort semantics are unchanged (checked at event gaps).
+        await sleepChunked(step.ms);
         break;
-      }
       case "state":
         yield {
           type: "text.delta",
           text: `[state sessionRef=${ctx.sessionRef} turnsRun=${ctx.turnsRun()}]`,
+        };
+        break;
+      case "prompt":
+        yield {
+          type: "text.delta",
+          text: `[prompt ${excerpt(ctx.prompt.split("\n", 1)[0] ?? "")}]`,
+        };
+        break;
+      case "contextTokens":
+        yield {
+          type: "text.delta",
+          text: `[contextTokens ${ctx.contextTokens ?? "none"}]`,
         };
         break;
       case "http": {
@@ -329,6 +379,32 @@ export async function* runDirective(
           ...(outcome.ok ? {} : { isError: true }),
         };
         deferred.push(summary);
+        break;
+      }
+      case "bash": {
+        // A long-running harness tool (a build, a `sleep 600`) with the
+        // real adapter's event shape: open, run, close. While it runs a
+        // steer waits for it, exactly the wait SEND NOW exists to end:
+        // `backgroundRunningTool` ends this wait early and the result says
+        // the tool moved, as jcode tells its model. Unlike jcode, the fake's
+        // tool does not live on in the background; nothing reads it there.
+        const callId = randomUUID();
+        const moved = new AbortController();
+        const unmark = ctx.markRunningTool("bash", () => moved.abort());
+        try {
+          yield { type: "tool.started", callId, name: "bash" };
+          await sleepChunked(step.ms, moved.signal);
+        } finally {
+          unmark();
+        }
+        yield {
+          type: "tool.finished",
+          callId,
+          name: "bash",
+          output: moved.signal.aborted
+            ? "[bash moved to background]"
+            : "[bash done]",
+        };
         break;
       }
       case "error": {

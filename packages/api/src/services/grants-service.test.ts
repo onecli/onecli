@@ -315,6 +315,159 @@ describe("setConnectionGrant", () => {
   });
 });
 
+/** The catch-alls ("All other reads" / "All other writes") at the service. */
+describe("setConnectionGrant: requests not listed in the catalog", () => {
+  const custom = { access: "custom" as const, allow: ["t-read"], ask: [] };
+  /** A stored grant row, as `readGrantRows` returns it. */
+  const stored = (
+    suffix: string,
+    approval: boolean,
+    tools: string[],
+    method: string | null = null,
+  ) => ({
+    id: `r-${suffix}`,
+    enabled: true,
+    action: "allow",
+    requireApproval: approval,
+    name: `Grant: Cody · work@example.com: ${suffix}`,
+    conditions: null,
+    identities: [{ agentId: "agent-1", userId: null, groupId: null }],
+    targets: [
+      {
+        kind: "connection",
+        appConnectionId: "conn-1",
+        appTools: tools,
+        method,
+      },
+    ],
+  });
+  /** A stored split: reads Allowed (the plain row), writes Need approval
+   * (the stricter row, narrowed to every method but GET/HEAD). */
+  const STORED_SPLIT = [
+    stored("allowed", false, ["t-read"]),
+    stored("blocked", false, ["t-write", "t-delete"]),
+    stored("all other writes", true, [], "!GET,HEAD"),
+    stored("all other reads", false, []),
+  ].map((r) => (r.id === "r-blocked" ? { ...r, action: "block" } : r));
+  const catchAlls = () =>
+    draftCreates()
+      .slice(-2)
+      .map((c) => ({
+        name: c.name,
+        action: c.action,
+        requireApproval: c.requireApproval,
+        method: (c.targets as { create: { method?: string }[] }).create[0]
+          ?.method,
+      }));
+
+  it("refuses Always allow when the catalog blocks unlisted requests (422)", async () => {
+    registerAppPermission({
+      provider: "granttest-closed",
+      unlisted: "block",
+      groups: [
+        {
+          category: "read",
+          tools: [
+            {
+              id: "c-read",
+              name: "Read",
+              description: "read",
+              hostPattern: "api.closed.example",
+              pathPattern: "/read",
+              method: "GET",
+            },
+          ],
+        },
+      ],
+    });
+    state.results.set("appConnection.findFirst", {
+      ...CONNECTION,
+      provider: "granttest-closed",
+    });
+    const closed = { access: "custom" as const, allow: ["c-read"], ask: [] };
+    for (const choice of [
+      { otherReads: "allow" as const },
+      { otherWrites: "allow" as const },
+    ]) {
+      await expect(
+        setConnectionGrant(
+          SCOPE,
+          "agent-1",
+          "conn-1",
+          { ...closed, ...choice },
+          "user-1",
+        ),
+      ).rejects.toThrow(/not Always allow/);
+    }
+    expect(callsOf("$transaction", "begin")).toHaveLength(0);
+    // Needs approval and Never stay available.
+    await setConnectionGrant(
+      SCOPE,
+      "agent-1",
+      "conn-1",
+      { ...closed, otherReads: "ask", otherWrites: "never" },
+      "user-1",
+    );
+    expect(catchAlls().map((r) => r.name)).toEqual([
+      "Grant: Cody · work@example.com: all other writes",
+      "Grant: Cody · work@example.com: all other reads",
+    ]);
+  });
+
+  it("a save that leaves the catch-alls out keeps the stored ones", async () => {
+    state.results.set("policyRuleV2.findMany", STORED_SPLIT);
+    // A tools-only save (an older client, the SDK): t-write joins as Ask.
+    await setConnectionGrant(
+      SCOPE,
+      "agent-1",
+      "conn-1",
+      { ...custom, ask: ["t-write"] },
+      "user-1",
+    );
+    expect(catchAlls()).toEqual([
+      {
+        name: "Grant: Cody · work@example.com: all other writes",
+        action: "allow",
+        requireApproval: true,
+        method: "!GET,HEAD",
+      },
+      {
+        name: "Grant: Cody · work@example.com: all other reads",
+        action: "allow",
+        requireApproval: false,
+        method: undefined,
+      },
+    ]);
+  });
+
+  it("an explicit choice still replaces the stored one", async () => {
+    state.results.set("policyRuleV2.findMany", STORED_SPLIT);
+    await setConnectionGrant(
+      SCOPE,
+      "agent-1",
+      "conn-1",
+      { ...custom, otherReads: "never", otherWrites: "never" },
+      "user-1",
+    );
+    expect(draftCreates().at(-1)).toMatchObject({
+      name: "Grant: Cody · work@example.com: everything else",
+      action: "block",
+    });
+  });
+
+  it("a first customization of a full grant takes the provider default", async () => {
+    state.results.set("policyRuleV2.findMany", [
+      { ...stored("x", false, []), name: "Grant: Cody · work@example.com" },
+    ]);
+    await setConnectionGrant(SCOPE, "agent-1", "conn-1", custom, "user-1");
+    expect(draftCreates().at(-1)).toMatchObject({
+      name: "Grant: Cody · work@example.com: everything else",
+      action: "allow",
+      requireApproval: true,
+    });
+  });
+});
+
 describe("removeConnectionGrant", () => {
   it("detaching with no existing stack is an idempotent no-op", async () => {
     const result = await removeConnectionGrant(

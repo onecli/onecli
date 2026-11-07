@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { MAX_ATTACHMENTS_PER_MESSAGE } from "./attachments";
 import {
+  ceilingWarningSteerId,
+  isPlatformSteerId,
+  runnerAdvertises,
+  runnerCapabilitiesSchema,
   runnerEventSchema,
   runnerEventsRequestSchema,
   runnerHeartbeatRequestSchema,
@@ -16,6 +21,18 @@ const capabilities = {
   backend: "docker",
   homeDurability: "resident" as const,
 };
+
+describe("the platform's own steer id", () => {
+  it("is recognized, and a follow-up row's id never is", () => {
+    // The supervisor stores a reply under a follow-up's id, and must never
+    // try to under the warning's (no row behind it). The two helpers are
+    // the only place that rule is spelled, so they must agree.
+    expect(isPlatformSteerId(ceilingWarningSteerId("t1"))).toBe(true);
+    expect(isPlatformSteerId("3f2c9a1e-7b4d-4e8a-9c6f-1d2e3f4a5b6c")).toBe(
+      false,
+    );
+  });
+});
 
 const payload = {
   env: {
@@ -378,6 +395,168 @@ describe("turn.deliver context (runner wire)", () => {
     expect(
       runnerWorkItemSchema.parse({ ...base, someFutureField: "x" }),
     ).not.toHaveProperty("someFutureField");
+  });
+
+  it("carries a manifest up to the per-message cap, never past it", () => {
+    const entry = (i: number) => ({
+      id: `att-${i}`,
+      path: `attachments/t-1/f${i}.pdf`,
+      name: `f${i}.pdf`,
+      mimeType: "application/pdf",
+      sizeBytes: 1,
+      sha256: "a".repeat(64),
+    });
+    const withFiles = (n: number) => ({
+      ...base,
+      attachments: Array.from({ length: n }, (_, i) => entry(i)),
+    });
+    expect(
+      runnerWorkItemSchema.safeParse(withFiles(MAX_ATTACHMENTS_PER_MESSAGE))
+        .success,
+    ).toBe(true);
+    expect(
+      runnerWorkItemSchema.safeParse(withFiles(MAX_ATTACHMENTS_PER_MESSAGE + 1))
+        .success,
+    ).toBe(false);
+  });
+});
+
+/** The manifest bound a runner advertises: a count, absent on runners that
+ * predate it (the control plane then sends the legacy bound). */
+describe("maxAttachmentsPerMessage (runner capability)", () => {
+  const base = {
+    maxSandboxes: 1,
+    backend: "docker",
+    homeDurability: "resident",
+  };
+
+  it("is optional, and a positive integer when present", () => {
+    expect(runnerCapabilitiesSchema.parse(base)).not.toHaveProperty(
+      "maxAttachmentsPerMessage",
+    );
+    expect(
+      runnerCapabilitiesSchema.parse({
+        ...base,
+        maxAttachmentsPerMessage: MAX_ATTACHMENTS_PER_MESSAGE,
+      }).maxAttachmentsPerMessage,
+    ).toBe(MAX_ATTACHMENTS_PER_MESSAGE);
+    for (const bad of [0, -1, 2.5, "10", true]) {
+      expect(
+        runnerCapabilitiesSchema.safeParse({
+          ...base,
+          maxAttachmentsPerMessage: bad,
+        }).success,
+      ).toBe(false);
+    }
+  });
+});
+
+/** The steer arm's context (the "a new message arrived" frame for a person's
+ * follow-up): the same field, the same bound, the same stale-peer drop. */
+describe("turn.message context (runner wire)", () => {
+  const base = {
+    kind: "turn.message",
+    sandboxId: "sb-1",
+    conversationId: "conv-1",
+    turnId: "f-1",
+    targetTurnId: "t-1",
+    message: "also check the linter",
+  };
+
+  it("parses with and without context; an automation's follow-up carries none", () => {
+    expect(runnerWorkItemSchema.parse(base)).not.toHaveProperty("context");
+    const parsed = runnerWorkItemSchema.parse({ ...base, context: "[new]" });
+    expect(parsed.kind === "turn.message" && parsed.context).toBe("[new]");
+  });
+
+  it("rejects a context past its cap", () => {
+    expect(
+      runnerWorkItemSchema.safeParse({ ...base, context: "x".repeat(16_001) })
+        .success,
+    ).toBe(false);
+  });
+
+  /** A follow-up's files ride the steer exactly like a turn's: the same
+   * metadata-only manifest, under the same per-message bound. */
+  const entry = (id: string) => ({
+    id,
+    path: `attachments/f-1/${id}.png`,
+    name: `${id}.png`,
+    mimeType: "image/png",
+    sizeBytes: 10,
+    sha256: "a".repeat(64),
+  });
+
+  it("carries a follow-up's attachment manifest, bounded like a turn's", () => {
+    const parsed = runnerWorkItemSchema.parse({
+      ...base,
+      attachments: [entry("a1")],
+    });
+    expect(parsed.kind === "turn.message" && parsed.attachments).toEqual([
+      entry("a1"),
+    ]);
+    const tooMany = Array.from(
+      { length: MAX_ATTACHMENTS_PER_MESSAGE + 1 },
+      (_, i) => entry(`a${i}`),
+    );
+    expect(
+      runnerWorkItemSchema.safeParse({ ...base, attachments: tooMany }).success,
+    ).toBe(false);
+  });
+
+  it("a runner advertises that it delivers a follow-up's files; anything else reads as not", () => {
+    const base = {
+      maxSandboxes: 1,
+      backend: "docker",
+      homeDurability: "resident",
+    };
+    expect(
+      runnerAdvertises({ ...base, steerAttachments: true }, "steerAttachments"),
+    ).toBe(true);
+    // Absent, false, a stale blob that fails the schema, no runner at all:
+    // all the safe degrade (the files wait for their own turn).
+    expect(runnerAdvertises(base, "steerAttachments")).toBe(false);
+    expect(
+      runnerAdvertises(
+        { ...base, steerAttachments: false },
+        "steerAttachments",
+      ),
+    ).toBe(false);
+    expect(
+      runnerAdvertises({ steerAttachments: true }, "steerAttachments"),
+    ).toBe(false);
+    expect(runnerAdvertises(undefined, "steerAttachments")).toBe(false);
+  });
+});
+
+/** SEND NOW: ids only, nothing a sandbox did not already
+ * have; and a runner advertises that it can forward it. */
+describe("turn.send_now (runner wire)", () => {
+  const item = {
+    kind: "turn.send_now",
+    sandboxId: "sb-1",
+    conversationId: "conv-1",
+    turnId: "f-1",
+    targetTurnId: "t-1",
+  };
+
+  it("round-trips, and refuses one missing its target", () => {
+    expect(runnerWorkItemSchema.parse(item)).toEqual(item);
+    const { targetTurnId: _target, ...missing } = item;
+    void _target;
+    expect(runnerWorkItemSchema.safeParse(missing).success).toBe(false);
+  });
+
+  it("the capability is optional: an older runner simply never says it", () => {
+    const base = {
+      maxSandboxes: 1,
+      backend: "docker",
+      homeDurability: "resident",
+    };
+    expect(runnerCapabilitiesSchema.parse(base)).not.toHaveProperty("sendNow");
+    expect(
+      runnerCapabilitiesSchema.parse({ ...base, sendNow: true }).sendNow,
+    ).toBe(true);
   });
 });
 

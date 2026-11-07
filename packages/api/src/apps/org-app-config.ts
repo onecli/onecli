@@ -1,6 +1,7 @@
 import { db } from "@onecli/db";
 import type { OrgAppConfigProvider } from "../providers";
 import { getAppConfig } from "../services/app-config-service";
+import { expandConfigKeys } from "./oauth/groups";
 import { resolveOrgAppCredentials } from "./resolve-org-credentials";
 
 /**
@@ -17,6 +18,8 @@ export const orgAppConfig: OrgAppConfigProvider = {
     resolveOrgAppCredentials(organizationId, app),
 
   getEnabledConfig: async (organizationId, provider) => {
+    // getAppConfig maps a member app to its vendor group row (or a legacy
+    // per-app row), so Drive reports the org's Google client as configured.
     const config = await getAppConfig({ organizationId }, provider);
     // Only a *usable* config counts as configured: an enabled row without
     // stored credentials (e.g. clientId saved without clientSecret) is rejected
@@ -37,8 +40,12 @@ export const orgAppConfig: OrgAppConfigProvider = {
       },
       select: { provider: true },
     });
+    // A group row ("google") configures every member app.
     return Object.fromEntries(
-      configs.map((c) => [c.provider, { hasCredentials: true }]),
+      expandConfigKeys(configs.map((c) => c.provider)).map((p) => [
+        p,
+        { hasCredentials: true },
+      ]),
     );
   },
 };

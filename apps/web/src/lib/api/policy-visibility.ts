@@ -174,16 +174,16 @@ export interface EffectiveCredentialsResult {
   connections: EffectiveCredentialEntry[];
 }
 
-/** The Credential-access dialog's read-only reflection: which
- * credentials can inject for this agent (its published rule grants). Workspace
- * members; org-rule provenance arrives redacted for non-org-admins. */
+/** An agent's injectable credentials and what each can do under the rules
+ * (the agent's Connections section reads it). Workspace members; org-rule
+ * provenance arrives redacted for non-org-admins. */
 export const effectiveCredentials = (agentId: string) =>
   apiGet<EffectiveCredentialsResult>(
     `/v1/agents/${agentId}/effective-credentials`,
   );
 
-/** The Credential-access dialog's read-only reflection (step 9.7b):
- * which credentials can inject for this agent (its published rule grants). */
+/** The effective-credentials reflection (step 9.7b): which credentials can
+ * inject for this agent (its published rule grants). */
 export const useEffectiveCredentials = (agentId: string, enabled = true) =>
   useQuery({
     queryKey: [...queryKeys.agents.all(), agentId, "effective-credentials"],

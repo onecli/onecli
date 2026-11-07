@@ -139,14 +139,23 @@ pub fn app_unavailable(
 /// allowlist). `reason` is the specific cause; `allowed` is the scope the agent
 /// may use, echoed back so the model can self-correct (retry inside scope)
 /// instead of dead-ending.
-pub fn forbidden_resource(reason: &str, allowed: &[String]) -> Response<ForwardBody> {
+pub fn forbidden_resource(
+    reason: &str,
+    allowed: &[String],
+    hint: Option<&str>,
+) -> Response<ForwardBody> {
     let allowed_list = allowed.join(", ");
+    let mut message = format!(
+        "This agent is restricted to: {allowed_list}. The requested resource is \
+         outside its allowed scope — use a location inside one of those."
+    );
+    if let Some(hint) = hint {
+        message.push(' ');
+        message.push_str(hint);
+    }
     let body = serde_json::json!({
         "error": "resource_access_denied",
-        "message": format!(
-            "This agent is restricted to: {allowed_list}. The requested resource is \
-             outside its allowed scope — use a location inside one of those."
-        ),
+        "message": message,
         "allowed": allowed,
         "detail": reason,
     });
@@ -253,9 +262,24 @@ mod tests {
     #[test]
     fn forbidden_resource_is_403() {
         assert_eq!(
-            forbidden_resource("denied", &["/allowed".to_string()]).status(),
+            forbidden_resource("denied", &["/allowed".to_string()], None).status(),
             StatusCode::FORBIDDEN
         );
+    }
+
+    #[tokio::test]
+    async fn forbidden_resource_appends_only_a_given_hint() {
+        use http_body_util::BodyExt;
+        let message = |hint| async move {
+            let resp = forbidden_resource("d", &["/a".to_string()], hint);
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            json["message"].as_str().unwrap().to_string()
+        };
+        let plain = message(None).await;
+        assert!(plain.ends_with("use a location inside one of those."));
+        let hinted = message(Some("Extra guidance.")).await;
+        assert_eq!(hinted, format!("{plain} Extra guidance."));
     }
 
     #[test]

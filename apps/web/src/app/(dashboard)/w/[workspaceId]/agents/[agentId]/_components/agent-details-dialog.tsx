@@ -9,8 +9,12 @@ import {
 } from "@onecli/ui/components/dialog";
 import { useAgentModels } from "@/hooks/use-agents";
 import { useHostedAvailability } from "@/hooks/use-hosted-availability";
-import { AgentStatusPill } from "@/lib/agents/_components/agent-status-pill";
+import {
+  AgentStatusPill,
+  agentStatus,
+} from "@/lib/agents/_components/agent-status-pill";
 import { AgentLastSeen } from "@/lib/agents/_components/agent-last-seen";
+import { AgentRuntimeRow } from "./agent-runtime-row";
 import type { AgentPageAgent } from "./agent-page-frame";
 
 const Row = ({
@@ -61,14 +65,17 @@ export const AgentDetailsDialog = ({
           </DialogDescription>
         </DialogHeader>
         <dl className="divide-border divide-y">
-          {hosted && (
-            <Row label="Status">
-              <AgentStatusPill
-                availability={availability}
-                workingInBackground={agent.workingInBackground}
-              />
-            </Row>
-          )}
+          {/* No row while there is no status to show (online and idle):
+              an empty "Status" row reads as a missing value. */}
+          {hosted &&
+            agentStatus(availability, agent.workingInBackground) !== null && (
+              <Row label="Status">
+                <AgentStatusPill
+                  availability={availability}
+                  workingInBackground={agent.workingInBackground}
+                />
+              </Row>
+            )}
           {hosted && (
             <Row label="Model">
               {/* `||`, not `??`: with no key granted the view is empty rather
@@ -81,6 +88,11 @@ export const AgentDetailsDialog = ({
                   default
                 </span>
               )}
+            </Row>
+          )}
+          {hosted && open && (
+            <Row label="Awake time">
+              <AgentRuntimeRow agentId={agent.id} />
             </Row>
           )}
           <Row label="Identifier">

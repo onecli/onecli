@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import {
   Building2,
   ChevronRight,
+  FolderGit2,
   Globe,
   Loader2,
   MoreVertical,
@@ -14,7 +15,6 @@ import {
   Settings,
   Unplug,
   User,
-  Users,
 } from "lucide-react";
 import { Card } from "@onecli/ui/components/card";
 import { Badge } from "@onecli/ui/components/badge";
@@ -35,41 +35,56 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@onecli/ui/components/alert-dialog";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@onecli/ui/components/dialog";
 import { Button } from "@onecli/ui/components/button";
-import { Input } from "@onecli/ui/components/input";
-import { Label } from "@onecli/ui/components/label";
+import { cn } from "@onecli/ui/lib/utils";
 import {
   useDisconnectConnection,
-  useRenameConnection,
+  usePromoteConnection,
 } from "@/hooks/use-connections";
+import { GITHUB_APP_PROVIDER } from "@/hooks/use-github-app-share";
+import { useOrgMembership } from "@/hooks/use-org";
 import type { PageScope } from "@/lib/api";
+import { connectionAccessLevelLabel } from "@onecli/api/apps/access-level";
 import {
+  connectionTags,
+  connectsAsSuperuser,
+  displayConnectionLabel,
   extractBoundHost,
   extractLabel,
 } from "@onecli/api/lib/connection-display";
-// The read-only agent-access reflection, which reads the v2 policy engine.
-// Shared since step 10 — every edition renders it.
-import { ConnectionAgentsReflection } from "@/lib/components/policy-reflect";
+import {
+  extractGitHubOrgAccess,
+  githubOrgAccessSummary,
+} from "@onecli/api/lib/github-org-access";
+import { GitHubOrgAccessNotice } from "./github-org-access-notice";
+import { SuperuserNotice } from "./superuser-notice";
+import { MissingPermissionsNotice } from "@/lib/components/missing-permissions-notice";
+import { ConnectionAgentRows } from "./connection-agent-rows";
+import { RenameConnectionDialog } from "./rename-connection-dialog";
+import { EditRepositoriesDialog } from "./edit-repositories-dialog";
+import {
+  isGitHubUrl,
+  openGitHubSettingsPopup,
+} from "@/lib/github-settings-popup";
+import type { AccountCardConnection } from "./account-card-connection";
+import { accountTypeLabel } from "@/lib/connections/account-type-label";
+import { getApp } from "@onecli/api/apps/registry";
+import { DatabaseConnectionDetails } from "@/lib/connections/database-connection-details";
+import { DatabaseTargetLine } from "@/lib/connections/database-target-line";
+import { TestConnection } from "@/lib/connections/test-connection";
+
+/** A refused login: nothing (including a repo edit) works until reconnect. */
+const needsReconnectFor = (c: AccountCardConnection) => !!c.reauthRequiredAt;
 
 interface ConnectionAccountCardProps {
-  connection: {
-    id: string;
-    label: string | null;
-    status: string;
-    scopes: string[];
-    metadata: Record<string, unknown> | null;
-    connectedAt: string;
-  };
+  connection: AccountCardConnection;
   appName: string;
   onReconnect: (connectionId: string) => void;
   pageScope?: PageScope;
+  /** The agent's reconnect link pointed here (`?reconnect=<id>`). */
+  highlighted?: boolean;
+  /** The agent's `?org_access=<org>` link named this GitHub organization. */
+  highlightedOrg?: string | null;
 }
 
 export const ConnectionAccountCard = ({
@@ -77,40 +92,61 @@ export const ConnectionAccountCard = ({
   appName,
   onReconnect,
   pageScope = "workspace",
+  highlighted = false,
+  highlightedOrg = null,
 }: ConnectionAccountCardProps) => {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
-  const [renameValue, setRenameValue] = useState("");
-  const [agentDialogOpen, setAgentDialogOpen] = useState(false);
+  const [promoteOpen, setPromoteOpen] = useState(false);
   const disconnectMutation = useDisconnectConnection(pageScope);
-  const renameMutation = useRenameConnection(pageScope);
-
-  // Agents are workspace-scoped, so agent access only applies on the workspace page.
-  const showAgentAccess = pageScope === "workspace";
+  const promoteMutation = usePromoteConnection();
+  // Agents are workspace-scoped, so agent access (and moving an account up to
+  // the org) only applies on the workspace page.
+  const isWorkspacePage = pageScope === "workspace";
+  // Org admins can move a workspace account up to Shared Connections. A
+  // shared GitHub connection is already a narrowed copy of an installation
+  // the org can share directly, so it is not offered there (the API refuses).
+  const { data: membership } = useOrgMembership(
+    isWorkspacePage || connection.provider === GITHUB_APP_PROVIDER,
+  );
+  const canPromote =
+    isWorkspacePage &&
+    membership?.isAdmin === true &&
+    !connection.sourceConnectionId;
+  // Which repos a GitHub connection reaches can change after connecting
+  // (org admins, the same rule as sharing; the API refuses anyone else).
+  const canEditRepos =
+    connection.provider === GITHUB_APP_PROVIDER &&
+    membership?.isAdmin === true &&
+    !needsReconnectFor(connection);
+  const [reposOpen, setReposOpen] = useState(false);
 
   const displayName =
-    connection.label ??
+    displayConnectionLabel(connection.label, connection.metadata) ??
     extractLabel(connection.metadata ?? undefined) ??
     "Unknown account";
 
   const avatarUrl = connection.metadata?.avatarUrl as string | undefined;
   const accountType = connection.metadata?.accountType as string | undefined;
-  const tags = (connection.metadata?.tags as string[] | undefined) ?? [];
+  // Which kind of token the account holds, for apps that offer more than one
+  // (Attio's workspace vs personal access).
+  const accessLevel = connectionAccessLevelLabel(
+    connection.provider,
+    connection.metadata,
+  );
   const boundHost = extractBoundHost(connection.metadata);
-
-  const handleRename = () => {
-    const trimmed = renameValue.trim();
-    if (!trimmed) return;
-    renameMutation.mutate(
-      { id: connection.id, label: trimmed },
-      {
-        onSuccess: () => {
-          toast.success("Connection renamed");
-          setRenameOpen(false);
-        },
-      },
-    );
-  };
+  // A host-bound app may also tag its account id (Snowflake does), which the
+  // host line already shows: repeating it only crowds the card.
+  const tags = connectionTags(connection.metadata).filter(
+    (tag) => !boundHost?.toLowerCase().startsWith(`${tag.toLowerCase()}.`),
+  );
+  const needsReconnect = !!connection.reauthRequiredAt;
+  const missing = connection.missingPermissions ?? [];
+  // A refused login outranks it: nothing works until that reconnect anyway.
+  const missingPermissions = !needsReconnect && missing.length > 0;
+  // GitHub organizations that refused this account (recorded by the gateway).
+  // Per-organization: the account stays connected for everything else.
+  const orgAccessIssues = extractGitHubOrgAccess(connection.metadata);
 
   const handleDisconnect = () => {
     disconnectMutation.mutate(connection.id, {
@@ -122,7 +158,14 @@ export const ConnectionAccountCard = ({
 
   return (
     <>
-      <Card className="gap-2 px-4 py-3">
+      <Card
+        className={cn(
+          "gap-2 px-4 py-3",
+          needsReconnect && "border-destructive/50",
+          missingPermissions && "border-amber-500/40",
+          highlighted && "ring-2 ring-ring",
+        )}
+      >
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
             {avatarUrl ? (
@@ -145,6 +188,7 @@ export const ConnectionAccountCard = ({
             )}
             <div className="min-w-0">
               <p className="text-sm font-medium truncate">{displayName}</p>
+              <DatabaseTargetLine metadata={connection.metadata} />
               {boundHost && (
                 <a
                   href={`https://${boundHost}`}
@@ -160,8 +204,31 @@ export const ConnectionAccountCard = ({
                 </a>
               )}
               <p className="text-xs text-muted-foreground">
-                {accountType ?? "Connected"}{" "}
-                <span className="text-muted-foreground/60">
+                {needsReconnect ? (
+                  <span className="text-destructive">Needs reconnect</span>
+                ) : missingPermissions ? (
+                  <span className="text-amber-700 dark:text-amber-400">
+                    Connected &middot; Missing permissions
+                  </span>
+                ) : orgAccessIssues.length > 0 ? (
+                  <span className="text-amber-700 dark:text-amber-400">
+                    Connected &middot;{" "}
+                    {githubOrgAccessSummary(orgAccessIssues.length)}
+                  </span>
+                ) : (
+                  (accountTypeLabel(accountType) ?? "Connected")
+                )}{" "}
+                {accessLevel && (
+                  <span className="text-muted-foreground/60 whitespace-nowrap">
+                    &middot; {accessLevel}{" "}
+                  </span>
+                )}
+                {connection.sourceConnectionId && (
+                  <span className="text-muted-foreground/60">
+                    &middot; Shared{" "}
+                  </span>
+                )}
+                <span className="text-muted-foreground/60 whitespace-nowrap">
                   &middot;{" "}
                   {new Date(connection.connectedAt).toLocaleDateString(
                     "en-US",
@@ -171,90 +238,109 @@ export const ConnectionAccountCard = ({
               </p>
             </div>
           </div>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
+          <div className="flex shrink-0 items-center gap-1">
+            {needsReconnect && !connection.metadata?.manageUrl && (
               <Button
-                variant="ghost"
-                size="icon"
-                className="size-8 shrink-0 text-muted-foreground"
+                variant="outline"
+                size="sm"
+                onClick={() => onReconnect(connection.id)}
               >
-                <MoreVertical className="size-4" />
+                <RefreshCw className="size-3.5" aria-hidden="true" />
+                Reconnect
               </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              {!!connection.metadata?.manageUrl && (
-                <DropdownMenuItem asChild>
-                  <a
-                    href={connection.metadata.manageUrl as string}
-                    target="_blank"
-                    rel="noopener noreferrer"
+            )}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  aria-label={`Actions for ${displayName}`}
+                  variant="ghost"
+                  size="icon"
+                  className="size-8 shrink-0 text-muted-foreground"
+                >
+                  <MoreVertical className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                {canEditRepos && (
+                  <DropdownMenuItem onClick={() => setReposOpen(true)}>
+                    <FolderGit2 className="size-4" />
+                    Edit repositories
+                  </DropdownMenuItem>
+                )}
+                {isGitHubUrl(connection.metadata?.manageUrl) && (
+                  <DropdownMenuItem
+                    onClick={() =>
+                      openGitHubSettingsPopup(connection.metadata?.manageUrl)
+                    }
                   >
                     <Settings className="size-4" />
                     Settings
-                  </a>
-                </DropdownMenuItem>
-              )}
-              {!connection.metadata?.manageUrl && (
-                <DropdownMenuItem onClick={() => onReconnect(connection.id)}>
-                  <RefreshCw className="size-4" />
-                  Reconnect
-                </DropdownMenuItem>
-              )}
-              <DropdownMenuItem
-                onClick={() => {
-                  setRenameValue(
-                    displayName === "Unknown account" ? "" : displayName,
-                  );
-                  setRenameOpen(true);
-                }}
-              >
-                <Pencil className="size-4" />
-                Rename
-              </DropdownMenuItem>
-              {showAgentAccess && (
-                <DropdownMenuItem onClick={() => setAgentDialogOpen(true)}>
-                  <Users className="size-4" />
-                  Agent access
-                </DropdownMenuItem>
-              )}
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                onClick={() => setConfirmOpen(true)}
-                disabled={disconnectMutation.isPending}
-                className="text-destructive focus:text-destructive"
-              >
-                {disconnectMutation.isPending ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <Unplug className="size-4" />
+                  </DropdownMenuItem>
                 )}
-                {disconnectMutation.isPending
-                  ? "Disconnecting..."
-                  : "Disconnect"}
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+                {!connection.metadata?.manageUrl && (
+                  <DropdownMenuItem onClick={() => onReconnect(connection.id)}>
+                    <RefreshCw className="size-4" />
+                    Reconnect
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem onClick={() => setRenameOpen(true)}>
+                  <Pencil className="size-4" />
+                  Rename
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={() => setConfirmOpen(true)}
+                  disabled={disconnectMutation.isPending}
+                  className="text-destructive focus:text-destructive"
+                >
+                  {disconnectMutation.isPending ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Unplug className="size-4" />
+                  )}
+                  {disconnectMutation.isPending
+                    ? "Disconnecting..."
+                    : "Disconnect"}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         </div>
-
-        {showAgentAccess && (
-          // A neutral opener: policy rules decide agent access, so a summary
-          // line can't state it without the reflection's own evaluation.
-          <button
-            type="button"
-            onClick={() => setAgentDialogOpen(true)}
-            aria-label="View agent access"
-            className="flex min-w-0 items-center gap-1.5 rounded-sm text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none"
-          >
-            <Users className="size-3.5 shrink-0" aria-hidden="true" />
-            <span className="truncate">Agent access</span>
-            <ChevronRight
-              className="size-3 shrink-0 opacity-60"
-              aria-hidden="true"
-            />
-          </button>
+        {needsReconnect && (
+          <p className="text-xs text-muted-foreground">
+            {appName} rejected the saved login, so agents can&apos;t use this
+            account until you reconnect it. Agent access and rules are kept.
+          </p>
         )}
-
-        {tags.length > 0 && (
+        {missingPermissions && (
+          <MissingPermissionsNotice
+            permissions={missing}
+            onReconnect={() => onReconnect(connection.id)}
+          />
+        )}
+        {!needsReconnect &&
+          orgAccessIssues.map((issue) => (
+            <GitHubOrgAccessNotice
+              key={issue.org}
+              issue={issue}
+              highlighted={issue.org === highlightedOrg?.toLowerCase()}
+              onReconnect={
+                connection.metadata?.manageUrl
+                  ? undefined
+                  : () => onReconnect(connection.id)
+              }
+            />
+          ))}
+        {connectsAsSuperuser(connection.metadata) && <SuperuserNotice />}
+        {getApp(connection.provider)?.database ? (
+          <DatabaseConnectionDetails tags={tags}>
+            <TestConnection
+              connectionId={connection.id}
+              pageScope={pageScope}
+              hasElevatedAccess={connectsAsSuperuser(connection.metadata)}
+            />
+          </DatabaseConnectionDetails>
+        ) : tags.length > 0 ? (
           <div className="flex flex-wrap gap-1.5">
             {tags.map((tag) => (
               <Badge key={tag} variant="secondary" className="text-xs">
@@ -262,6 +348,20 @@ export const ConnectionAccountCard = ({
               </Badge>
             ))}
           </div>
+        ) : null}
+        {isWorkspacePage && <ConnectionAgentRows connection={connection} />}
+        {canPromote && (
+          <button
+            type="button"
+            onClick={() => setPromoteOpen(true)}
+            className="text-muted-foreground hover:text-foreground hover:bg-muted/60 focus-visible:ring-ring -mx-4 -mb-3 mt-1 flex items-center justify-between gap-2 rounded-b-xl border-t px-4 py-2 text-left text-xs transition-colors focus-visible:ring-2 focus-visible:outline-none"
+          >
+            <span className="flex items-center gap-1.5">
+              <Building2 className="size-3.5" aria-hidden="true" />
+              Share with organization
+            </span>
+            <ChevronRight className="size-3.5 opacity-60" aria-hidden="true" />
+          </button>
         )}
       </Card>
 
@@ -295,47 +395,67 @@ export const ConnectionAccountCard = ({
         </AlertDialogContent>
       </AlertDialog>
 
-      <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Rename connection</DialogTitle>
-          </DialogHeader>
-          <div className="grid gap-1.5 py-2">
-            <Label htmlFor="rename-label">Label</Label>
-            <Input
-              id="rename-label"
-              value={renameValue}
-              onChange={(e) => setRenameValue(e.target.value)}
-              placeholder="e.g. work, personal"
-              className="font-mono text-sm"
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleRename();
-              }}
-              autoFocus
-            />
-          </div>
-          <DialogFooter>
-            <Button
-              onClick={handleRename}
-              disabled={!renameValue.trim() || renameMutation.isPending}
-              loading={renameMutation.isPending}
-              size="sm"
-            >
-              {renameMutation.isPending ? "Saving..." : "Save"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <RenameConnectionDialog
+        connectionId={connection.id}
+        initialLabel={displayName === "Unknown account" ? "" : displayName}
+        scope={pageScope}
+        open={renameOpen}
+        onOpenChange={setRenameOpen}
+      />
 
-      {showAgentAccess && (
-        <ConnectionAgentsReflection
+      {canEditRepos && (
+        <EditRepositoriesDialog
           connectionId={connection.id}
-          connectionLabel={displayName}
-          appName={appName}
-          open={agentDialogOpen}
-          onOpenChange={setAgentDialogOpen}
+          account={displayName}
+          manageUrl={
+            typeof connection.metadata?.manageUrl === "string"
+              ? connection.metadata.manageUrl
+              : null
+          }
+          pageScope={pageScope}
+          open={reposOpen}
+          onOpenChange={setReposOpen}
         />
       )}
+
+      <AlertDialog open={promoteOpen} onOpenChange={setPromoteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Share {displayName} with the organization?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              It moves to Shared Connections and every workspace can use it.
+              Agents here keep their access and permissions. Only organization
+              admins can rename or disconnect it after this.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={promoteMutation.isPending}
+              onClick={(e) => {
+                e.preventDefault();
+                promoteMutation.mutate(connection.id, {
+                  onSuccess: () => {
+                    toast.success(`${displayName} is now shared`);
+                    setPromoteOpen(false);
+                  },
+                });
+              }}
+            >
+              {promoteMutation.isPending ? (
+                <>
+                  <Loader2 className="size-3.5 animate-spin" />
+                  Sharing...
+                </>
+              ) : (
+                "Share"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 };

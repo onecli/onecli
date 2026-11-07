@@ -2,6 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import type { InstanceInfo } from "@/lib/api/types";
+import type { ChannelPresenceStatus } from "@/lib/api/channels";
 import type { AgentPageAgent } from "./agent-page-frame";
 
 /**
@@ -12,12 +13,22 @@ import type { AgentPageAgent } from "./agent-page-frame";
  * attached test.
  */
 
+const nav: { pathname: string } = { pathname: "/w/p1/agents/ag-1/chat" };
 vi.mock("next/navigation", () => ({
-  usePathname: () => "/w/p1/agents/ag-1/chat",
+  usePathname: () => nav.pathname,
 }));
 
 vi.mock("@/hooks/use-counts", () => ({
   useCounts: () => ({ data: undefined }),
+}));
+
+// The Connections badge counts what is active for THIS agent.
+const activeState = {
+  appCount: undefined as number | undefined,
+  secretCount: undefined as number | undefined,
+};
+vi.mock("@/hooks/use-agent-active-connections", () => ({
+  useAgentActiveConnections: () => activeState,
 }));
 
 // The rail reads the instance for the SSH auto-hide gate. Mutable so the
@@ -29,9 +40,13 @@ const instanceWithSsh = (): InstanceInfo => ({
   entitled: true,
   version: "0.0.0-test",
   ssh: { host: "ssh.onecli.test" },
+  previews: { domain: "previews.test" },
 });
 beforeEach(() => {
   instanceState.value = instanceWithSsh();
+  nav.pathname = "/w/p1/agents/ag-1/chat";
+  activeState.appCount = undefined;
+  activeState.secretCount = undefined;
 });
 
 vi.mock("@/hooks/use-instance", () => ({
@@ -54,14 +69,14 @@ const agentWith = (channels: AgentPageAgent["channels"]): AgentPageAgent => ({
   identifier: "donna",
   accessToken: "tok",
   kind: "hosted",
-  createdAt: new Date("2026-01-01T00:00:00Z"),
+  createdAt: "2026-01-01T00:00:00Z",
   channels,
   imageUrl: null,
   lastSeenAt: null,
   workingInBackground: false,
 });
 
-const slackChannel = (status: string) => ({
+const slackChannel = (status: ChannelPresenceStatus) => ({
   provider: "slack",
   identityName: "donna",
   externalId: "A123",
@@ -98,28 +113,89 @@ describe("the rail's Slack connected mark", () => {
 });
 
 /**
- * The SSH auto-hide gate: an instance-gated entry
- * exists only where the deployment has the capability. Loading shows the
- * entry — loading must never render as unavailable (the availability.ts law).
+ * Advanced is a drill-in, like a workspace from All workspaces: the main view
+ * shows ONE Advanced row; an advanced section's URL shows a back link plus
+ * the advanced sections. SSH is instance-gated: hidden once /v1/instance
+ * resolves without it, shown while loading (loading must never render as
+ * unavailable).
  */
-describe("the rail's SSH instance gate", () => {
-  it("shows the SSH entry when the instance has ssh", () => {
+describe("the rail's Advanced drill-in", () => {
+  const ADVANCED_URL = "/w/p1/agents/ag-1/ssh";
+
+  it("shows one Advanced row (not its sections) in the main view", () => {
     render(<AgentSectionRail agent={agentWith([])} />);
+    const rows = screen.getAllByRole("link", { name: "Advanced" });
     // Desktop aside + mobile strip.
-    expect(screen.getAllByText("SSH")).toHaveLength(2);
+    expect(rows).toHaveLength(2);
+    for (const row of rows) expect(row).toHaveAttribute("href", ADVANCED_URL);
+    expect(screen.queryByText("SSH")).not.toBeInTheDocument();
+    expect(screen.queryByText("Back to agent")).not.toBeInTheDocument();
   });
 
-  it("shows the SSH entry while the instance is still loading", () => {
+  it("swaps to the Advanced menu with a back link on an advanced URL", () => {
+    nav.pathname = ADVANCED_URL;
+    render(<AgentSectionRail agent={agentWith([])} />);
+    for (const back of screen.getAllByRole("link", { name: "Back to agent" }))
+      expect(back).toHaveAttribute("href", "/w/p1/agents/ag-1/chat");
+    expect(screen.getAllByText("SSH")).toHaveLength(2);
+    // The open section is marked, under the group table's heading, and the
+    // drill-in row is gone: this view is already inside Advanced.
+    for (const ssh of screen.getAllByRole("link", { name: "SSH" }))
+      expect(ssh).toHaveAttribute("aria-current", "page");
+    expect(screen.getByText("Advanced")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "Advanced" }),
+    ).not.toBeInTheDocument();
+    // The everyday sections are gone from this view.
+    expect(screen.queryByText("Models")).not.toBeInTheDocument();
+    expect(screen.queryByText("Chat")).not.toBeInTheDocument();
+  });
+
+  it("keeps a BYO agent on the main view with no Advanced row, even on an advanced URL", () => {
+    // A BYO agent has no advanced section, so a hand-typed /ssh (the frame
+    // shows its hosted-only notice) must not open an empty drill-in.
+    nav.pathname = ADVANCED_URL;
+    render(<AgentSectionRail agent={{ ...agentWith([]), kind: "byo" }} />);
+    expect(
+      screen.queryByRole("link", { name: "Advanced" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Back to agent")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Connections").length).toBeGreaterThan(0);
+  });
+
+  it("keeps the Advanced row while the instance is still loading", () => {
     instanceState.value = null;
     render(<AgentSectionRail agent={agentWith([])} />);
-    expect(screen.getAllByText("SSH")).toHaveLength(2);
+    expect(screen.getAllByRole("link", { name: "Advanced" })).toHaveLength(2);
   });
 
-  it("hides the SSH entry once the instance resolves without ssh", () => {
+  it("points the Advanced row past SSH once the instance resolves without it", () => {
     instanceState.value = { ...instanceWithSsh(), ssh: undefined };
     render(<AgentSectionRail agent={agentWith([])} />);
-    expect(screen.queryByText("SSH")).not.toBeInTheDocument();
-    // Only the gated entry disappears — the rest of Access stays.
+    for (const row of screen.getAllByRole("link", { name: "Advanced" }))
+      expect(row).toHaveAttribute("href", "/w/p1/agents/ag-1/ports");
+    // The rest of the rail stays.
     expect(screen.getAllByText("Models").length).toBeGreaterThan(0);
+  });
+
+  it("hides Ports once the instance resolves without previews", () => {
+    instanceState.value = {
+      ...instanceWithSsh(),
+      ssh: undefined,
+      previews: undefined,
+    };
+    render(<AgentSectionRail agent={agentWith([])} />);
+    for (const row of screen.getAllByRole("link", { name: "Advanced" }))
+      expect(row).toHaveAttribute("href", "/w/p1/agents/ag-1/webhooks");
+  });
+});
+
+describe("the rail's Connections badge", () => {
+  it("counts only what is active for this agent (apps + custom secrets)", () => {
+    activeState.appCount = 4;
+    activeState.secretCount = 1;
+    render(<AgentSectionRail agent={agentWith([])} />);
+    const row = screen.getAllByRole("link", { name: /Connections/ })[0];
+    expect(row).toHaveTextContent("5");
   });
 });

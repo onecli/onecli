@@ -20,19 +20,12 @@ export const dockerKill = async (container: string): Promise<void> => {
   await exec("docker", ["kill", container]).catch(() => {});
 };
 
-export const dockerRm = async (container: string): Promise<void> => {
-  await exec("docker", ["rm", "-f", container]).catch(() => {});
-};
-
 export const dockerNetworkRm = async (network: string): Promise<void> => {
   await exec("docker", ["network", "rm", network]).catch(() => {});
 };
 
 export const containerNameFor = (sandboxId: string): string =>
   `onecli-sandbox-${sandboxId}`;
-
-export const volumeNameFor = (sandboxId: string): string =>
-  `onecli-home-${sandboxId}`;
 
 const lines = (stdout: string): string[] =>
   stdout
@@ -96,3 +89,16 @@ export const assertDockerReady = async (agentImage: string): Promise<void> => {
     );
   });
 };
+
+/** The container's stdout+stderr so far: the supervisor's own log lines. */
+export const dockerLogs = async (container: string): Promise<string> => {
+  const { stdout, stderr } = await exec("docker", ["logs", container]);
+  return `${stdout}${stderr}`;
+};
+
+/** Whether the container exists AND is running (a missing one is not). */
+export const isRunning = async (container: string): Promise<boolean> =>
+  exec("docker", ["inspect", "--format", "{{.State.Running}}", container]).then(
+    ({ stdout }) => stdout.trim() === "true",
+    () => false,
+  );

@@ -9,7 +9,9 @@ import type { ChannelTransport, CreatePresenceResult } from "@/lib/api";
  * the click — before Slack's `apps.manifest.create` round-trip resolves, so it
  * survives a popup blocker — then be pointed at the URL on success. When the
  * browser blocks it even so, a plain install link takes over (a fresh gesture).
- * The socket "Create app" arm opens nothing.
+ * The socket arm opens a popup only when it can install by consent (the
+ * server also serves webhooks, so it has a public HTTPS origin); without
+ * one, its "Create app" opens nothing and the two-token paste stays.
  *
  * The mode picker: shown only when the server offers a real choice
  * (`posture.available` has both) and nothing is pinned by a pending row; its
@@ -179,6 +181,162 @@ describe("the events arm popup", () => {
   });
 });
 
+describe("the socket arm's one-click install", () => {
+  it("with a public HTTPS origin, socket opens the consent popup like events", async () => {
+    const popup = { location: { href: "" }, close: vi.fn() };
+    const open = vi.fn(() => popup as unknown as Window);
+    vi.stubGlobal("open", open);
+
+    const user = userEvent.setup();
+    render(
+      <SlackAttachCard
+        agentId="ag-1"
+        posture={posture("socket", ["events", "socket"])}
+        hasOrgCredentials
+        organizationId="org-1"
+        viewerIsOrgAdmin
+        resuming={false}
+      />,
+    );
+
+    expect(screen.getByText(/paste one token to finish/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Add to Slack" }));
+    expect(open).toHaveBeenCalledWith("", "_blank", expect.any(String));
+    onSuccess?.(
+      result({
+        transport: "socket",
+        installUrl: "https://slack.com/oauth/v2/authorize?client_id=s",
+      }),
+    );
+    expect(popup.location.href).toBe(
+      "https://slack.com/oauth/v2/authorize?client_id=s",
+    );
+  });
+
+  it("after the create: Allow first, then ONE app-token field (no bot-token field)", () => {
+    state.attachData = result({
+      transport: "socket",
+      installUrl: "https://slack.com/oauth/v2/authorize?client_id=s",
+    });
+    render(
+      <SlackAttachCard
+        agentId="ag-1"
+        posture={posture("socket", ["events", "socket"])}
+        hasOrgCredentials
+        organizationId="org-1"
+        viewerIsOrgAdmin
+        resuming={false}
+      />,
+    );
+    expect(
+      screen.getByRole("link", { name: /Allow in Slack/ }),
+    ).toHaveAttribute(
+      "href",
+      "https://slack.com/oauth/v2/authorize?client_id=s",
+    );
+    expect(screen.getByLabelText("App-level token")).toBeInTheDocument();
+    // Where to find it on Slack's page, shown right beside the field.
+    expect(
+      screen.getByRole("img", { name: /App-Level Tokens section/ }),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Bot token")).not.toBeInTheDocument();
+    // Not installed yet: finishing is held until the Allow lands.
+    expect(screen.getByRole("button", { name: "Finish setup" })).toBeDisabled();
+  });
+
+  it("once installed, the paste alone finishes: the request carries NO bot token", async () => {
+    const user = userEvent.setup();
+    render(
+      <SlackAttachCard
+        agentId="ag-1"
+        posture={posture("socket", ["events", "socket"])}
+        pendingTransport="socket"
+        hasOrgCredentials
+        organizationId="org-1"
+        viewerIsOrgAdmin
+        resuming
+        resumeAppId="A777"
+        awaitingTransportCredential
+      />,
+    );
+    expect(screen.getByText("Installed in Slack")).toBeInTheDocument();
+    // The hint names the one step left, not the admin-approval wait.
+    expect(
+      screen.getByText(/Paste the app-level token below to finish/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Resume setup once they do/)).toBeNull();
+    expect(
+      screen.getByRole("link", { name: /Open app settings/ }),
+    ).toHaveAttribute("href", "https://api.slack.com/apps/A777/general");
+
+    await user.type(screen.getByLabelText("App-level token"), "xapp-1-abc");
+    await user.click(screen.getByRole("button", { name: "Finish setup" }));
+    expect(mocks.complete.mock.calls[0]?.[0]).toEqual({
+      appToken: "xapp-1-abc",
+    });
+  });
+
+  it("a DETACHED socket app (not awaiting) gets the full resume, never the one-field paste", () => {
+    // The regression this guards: a detach leaves a pending socket row with a
+    // bot identity, but its install is revoked. Only the server's flag may
+    // put the card in the waiting state.
+    render(
+      <SlackAttachCard
+        agentId="ag-1"
+        posture={posture("socket", ["events", "socket"])}
+        pendingTransport="socket"
+        hasOrgCredentials
+        organizationId="org-1"
+        viewerIsOrgAdmin
+        resuming
+        resumeAppId="A777"
+        awaitingTransportCredential={false}
+      />,
+    );
+    expect(screen.queryByText("Installed in Slack")).toBeNull();
+    expect(screen.queryByLabelText("App-level token")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Resume setup" }),
+    ).toBeInTheDocument();
+  });
+
+  it("the waiting install needs no org credential: it wins over the paste floor", () => {
+    render(
+      <SlackAttachCard
+        agentId="ag-1"
+        posture={posture("socket", ["events", "socket"])}
+        pendingTransport="socket"
+        hasOrgCredentials={false}
+        organizationId="org-1"
+        viewerIsOrgAdmin
+        resuming
+        resumeAppId="A777"
+        awaitingTransportCredential
+      />,
+    );
+    expect(screen.getByText("Installed in Slack")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Bot token")).toBeNull();
+    expect(mocks.manifestHook).not.toHaveBeenCalled();
+  });
+
+  it("without a public HTTPS origin, socket keeps the two-token paste", () => {
+    state.attachData = result({ transport: "socket", installUrl: null });
+    render(
+      <SlackAttachCard
+        agentId="ag-1"
+        posture={posture("socket", ["socket"])}
+        hasOrgCredentials
+        organizationId="org-1"
+        viewerIsOrgAdmin
+        resuming={false}
+      />,
+    );
+    expect(screen.getByLabelText("App-level token")).toBeInTheDocument();
+    expect(screen.getByLabelText("Bot token")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Allow in Slack/ })).toBeNull();
+  });
+});
+
 describe("the mode picker", () => {
   it("renders only when the server offers both transports", () => {
     render(
@@ -254,7 +412,9 @@ describe("the mode picker", () => {
     // A create result belongs to the mode it was made for.
     expect(mocks.attachReset).toHaveBeenCalled();
 
-    await user.click(screen.getByRole("button", { name: "Create app" }));
+    // This server can also serve webhooks, so it has the public HTTPS origin
+    // Slack's redirect needs: Socket Mode installs by consent too.
+    await user.click(screen.getByRole("button", { name: "Add to Slack" }));
     expect(mocks.attach.mock.calls[0]?.[0]).toEqual({ transport: "socket" });
   });
 
@@ -399,8 +559,10 @@ describe("the mode picker", () => {
       />,
     );
     expect(screen.queryByText(/app-level token/i)).not.toBeInTheDocument();
+    // This server also offers webhooks, so the socket arm installs by
+    // consent: its start button reads "Add to Slack".
     expect(
-      screen.getByRole("button", { name: "Create app" }),
+      screen.getByRole("button", { name: "Add to Slack" }),
     ).toBeInTheDocument();
   });
 });

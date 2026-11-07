@@ -5,7 +5,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import type { Turn } from "@/lib/api/types";
 import { queryKeys } from "@/lib/api/keys";
+import { ApiError } from "@/lib/api/client";
 import type { RenderedTurn } from "@/lib/chat/transcript";
+import {
+  MODEL_EMPTY_RESPONSE_MESSAGE,
+  MODEL_REFUSED_MESSAGE,
+} from "@onecli/api/validations/conversation";
 import { TurnBlock } from "./turn-block";
 
 // Only the connect-card wiring test below renders the card's subtree; the
@@ -18,6 +23,37 @@ vi.mock("next/navigation", () => ({
 vi.mock("../../_components/manage-permissions-dialog", () => ({
   ManagePermissionsDialog: () => null,
 }));
+// The greeting's actions bring the connect card's live graph and the app
+// picker; this suite's contract is WHEN they show, so they are a marker.
+vi.mock("./greeting-actions", () => ({
+  GreetingActions: () => <div data-testid="greeting-actions" />,
+}));
+
+// SEND NOW's request, observable without a network.
+const sendNow = vi.hoisted(() => vi.fn());
+const toasts = vi.hoisted(() => ({ info: vi.fn(), error: vi.fn() }));
+vi.mock("sonner", () => ({ toast: toasts }));
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>();
+  return {
+    ...actual,
+    conversations: { ...actual.conversations, sendNow },
+  };
+});
+
+/** A waiting follow-up's status line can hold SEND NOW, a mutation. A
+ *  wrapper (not a parent element), so `rerender` keeps the client and the
+ *  tree's state. */
+const withQuery = (ui: React.ReactElement) => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(ui, {
+    wrapper: ({ children }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    ),
+  });
+};
 
 const turn = (overrides: Partial<Turn> = {}): Turn => ({
   id: "t1",
@@ -43,6 +79,8 @@ const rendered = (overrides: Partial<RenderedTurn> = {}): RenderedTurn => ({
   lead: "",
   liveText: "",
   notices: [],
+  supersededApprovalIds: [],
+  desktopRequests: new Map(),
   peerMessages: [],
   peerMessagesOpeningTask: new Set<number>(),
   tools: [],
@@ -51,6 +89,72 @@ const rendered = (overrides: Partial<RenderedTurn> = {}): RenderedTurn => ({
 });
 
 describe("TurnBlock", () => {
+  it("renders the agent's open desktop ask with an Open computer button, and a settled one as a plain line", async () => {
+    const onOpenComputer = vi.fn();
+    const { rerender } = render(
+      <TurnBlock
+        turn={turn()}
+        rendered={rendered({
+          notices: [
+            "Needs you on the desktop: sign in",
+            "Alex took over the desktop and is done.",
+          ],
+          desktopRequests: new Map([
+            [0, { id: "req-1", outcome: "pending" }],
+            [1, { id: "req-1", outcome: "done" }],
+          ]),
+        })}
+        onOpenComputer={onOpenComputer}
+        computerHref={(id) => `/computer?takeover=${id}`}
+      />,
+    );
+    const open = screen.getByRole("button", { name: "Open computer" });
+    await userEvent.click(open);
+    expect(onOpenComputer).toHaveBeenCalledTimes(1);
+    expect(onOpenComputer).toHaveBeenCalledWith("req-1");
+    expect(screen.queryByRole("link", { name: "Open computer" })).toBeNull();
+    expect(
+      screen.getAllByRole("button", { name: "Open computer" }),
+    ).toHaveLength(1);
+    // Where there is no screen to open: plain text.
+    rerender(
+      <TurnBlock
+        turn={turn()}
+        rendered={rendered({
+          notices: ["Needs you on the desktop: sign in"],
+          desktopRequests: new Map([[0, { id: "req-1", outcome: "pending" }]]),
+        })}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Open computer" })).toBeNull();
+    expect(
+      screen.getByText("Needs you on the desktop: sign in"),
+    ).toBeInTheDocument();
+  });
+
+  it("deep-links a pending desktop ask when no in-place callback is available", () => {
+    render(
+      <TurnBlock
+        turn={turn()}
+        rendered={rendered({
+          notices: ["Needs you: sign in", "Desktop request finished"],
+          desktopRequests: new Map([
+            [0, { id: "req-1", outcome: "pending" }],
+            [1, { id: "req-2", outcome: "done" }],
+          ]),
+        })}
+        computerHref={(id) => `/computer?takeover=${id}`}
+      />,
+    );
+    expect(screen.getAllByRole("link", { name: "Open computer" })).toHaveLength(
+      1,
+    );
+    expect(screen.getByRole("link", { name: "Open computer" })).toHaveAttribute(
+      "href",
+      "/computer?takeover=req-1",
+    );
+  });
+
   it("renders the user message and the agent's markdown answer", () => {
     render(
       <TurnBlock
@@ -95,6 +199,58 @@ describe("TurnBlock", () => {
     expect(screen.getByRole("list")).toHaveAttribute("dir", "rtl");
   });
 
+  it("never shows an approval resume prompt as a message: a turn renders only the answer, a follow-up a quiet line", () => {
+    const prompt =
+      "Sent as Helper to Sam. Already delivered: don't send it again.";
+    const { unmount } = render(
+      <TurnBlock
+        turn={turn({ source: "approval", message: prompt })}
+        rendered={rendered({ text: "Sent to Sam." })}
+      />,
+    );
+    expect(screen.queryByText(prompt)).toBeNull();
+    expect(screen.getByText("Sent to Sam.")).toBeTruthy();
+    unmount();
+    render(
+      <TurnBlock
+        turn={turn()}
+        rendered={rendered({ text: "Done." })}
+        followUps={[
+          turn({
+            id: "f1",
+            status: "joined",
+            source: "approval",
+            message: prompt,
+            followUpOfTurnId: "t1",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.queryByText(prompt)).toBeNull();
+    expect(screen.getByText("Continued after your choice")).toBeTruthy();
+  });
+
+  it("a desktop resume follow-up shows neither its prompt nor the approval line", () => {
+    const prompt = "The person handed the desktop back. Continue.";
+    render(
+      <TurnBlock
+        turn={turn()}
+        rendered={rendered({ text: "Done." })}
+        followUps={[
+          turn({
+            id: "f1",
+            status: "joined",
+            source: "desktop",
+            message: prompt,
+            followUpOfTurnId: "t1",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.queryByText(prompt)).toBeNull();
+    expect(screen.queryByText("Continued after your choice")).toBeNull();
+  });
+
   it("renders follow-ups BETWEEN the question and the answer — the answer stays last", () => {
     // The live-found ordering bug: a joined follow-up used to render below
     // the whole answer block, so the reply visually attached to the first
@@ -127,8 +283,45 @@ describe("TurnBlock", () => {
     ).toBeTruthy();
   });
 
-  it("a still-steering follow-up carries the received hint; a joined one is plain", () => {
+  it("answers a follow-up UNDER its own bubble, and the turn's answer still comes last", () => {
+    // The agent replied to the mid-turn message, then kept working.
+    // The reply belongs under the message it answers, rendered as the
+    // agent's own markdown; the turn's closing answer stays the last word.
+    // MUTATION-PROOF: drop the reply and the follow-up reads as ignored.
     render(
+      <TurnBlock
+        turn={turn()}
+        rendered={rendered({ text: "Report sent." })}
+        followUps={[
+          turn({
+            id: "f1",
+            status: "joined",
+            message: "use the Q3 numbers",
+            followUpOfTurnId: "t1",
+          }),
+        ]}
+        followUpRendered={(id) =>
+          id === "f1"
+            ? rendered({ turnId: "f1", text: "Using the **Q3** numbers." })
+            : undefined
+        }
+      />,
+    );
+    const followUp = screen.getByText("use the Q3 numbers");
+    const reply = screen.getByText("Q3");
+    const answer = screen.getByText("Report sent.");
+    expect(reply.tagName).toBe("STRONG");
+    expect(
+      followUp.compareDocumentPosition(reply) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      reply.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("a still-steering follow-up carries the received hint; a joined one is plain", () => {
+    withQuery(
       <TurnBlock
         turn={turn({ status: "running" })}
         rendered={rendered({ ended: false })}
@@ -141,6 +334,354 @@ describe("TurnBlock", () => {
     expect(screen.getByText(/Received, folding it in/)).toBeInTheDocument();
     expect(screen.getByText("first tweak")).toBeInTheDocument();
     expect(screen.getByText("second tweak")).toBeInTheDocument();
+  });
+
+  it("a JOINING follow-up sits BELOW the live work; a JOINED one sits in the exchange above it", () => {
+    // A message the agent has not reached yet belongs after what the agent
+    // is doing now; the moment it is picked up it moves up into the
+    // exchange. MUTATION-PROOF: render both groups in one place and one of
+    // the two orderings below breaks.
+    withQuery(
+      <TurnBlock
+        turn={turn({ status: "running" })}
+        rendered={rendered({ ended: false, liveText: "Checking the logs" })}
+        followUps={[
+          turn({ id: "f1", status: "joined", message: "already read" }),
+          turn({ id: "f2", status: "joining", message: "not yet read" }),
+        ]}
+      />,
+    );
+    const question = screen.getByText("run the report");
+    const liveWork = screen.getByText("Checking the logs");
+    const joined = screen.getByText("already read");
+    const joining = screen.getByText("not yet read");
+    const follows = (a: Element, b: Element) =>
+      Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(follows(question, joined)).toBe(true);
+    expect(follows(joined, liveWork)).toBe(true);
+    expect(follows(liveWork, joining)).toBe(true);
+  });
+
+  describe("SEND NOW on a waiting follow-up", () => {
+    // The run is inside a tool: a step with no result yet.
+    const inTool = rendered({
+      ended: false,
+      tools: [{ callId: "c1", name: "bash" }],
+    });
+    const waiting = (overrides: Partial<Turn> = {}) =>
+      turn({
+        id: "f1",
+        status: "joining",
+        message: "stop and check prod",
+        followUpOfTurnId: "t1",
+        ...overrides,
+      });
+    const file = {
+      id: "a1",
+      name: "notes.txt",
+      mimeType: "text/plain",
+      sizeBytes: 3,
+      status: "bound",
+    };
+    const sendNowButton = () =>
+      screen.queryByRole("button", { name: "Send now" });
+
+    it("is offered while the run is inside a tool, beside the received hint", () => {
+      withQuery(
+        <TurnBlock
+          turn={turn({ status: "running" })}
+          rendered={inTool}
+          followUps={[waiting()]}
+        />,
+      );
+      expect(screen.getByText(/Received, folding it in/)).toBeInTheDocument();
+      expect(sendNowButton()).toBeInTheDocument();
+    });
+
+    it("is NOT offered with nothing to move, before the run started, once read, or for a message with files (and those behind it)", () => {
+      const cases: {
+        turn: Turn;
+        rendered: RenderedTurn;
+        followUps: Turn[];
+      }[] = [
+        // Between tools: nothing running to move.
+        {
+          turn: turn({ status: "running" }),
+          rendered: rendered({
+            ended: false,
+            tools: [{ callId: "c1", name: "bash", output: "ok" }],
+          }),
+          followUps: [waiting()],
+        },
+        // The turn has not started its run yet.
+        {
+          turn: turn({ status: "dispatched" }),
+          rendered: inTool,
+          followUps: [waiting()],
+        },
+        // Already read.
+        {
+          turn: turn({ status: "running" }),
+          rendered: inTool,
+          followUps: [waiting({ status: "joined" })],
+        },
+      ];
+      for (const scenario of cases) {
+        const { unmount } = withQuery(
+          <TurnBlock
+            turn={scenario.turn}
+            rendered={scenario.rendered}
+            followUps={scenario.followUps}
+          />,
+        );
+        expect(sendNowButton()).toBeNull();
+        unmount();
+      }
+    });
+
+    it("a message with files, and one sent after it, get it like any other: both join the live run", () => {
+      withQuery(
+        <TurnBlock
+          turn={turn({ status: "running" })}
+          rendered={inTool}
+          followUps={[
+            waiting({ attachments: [file] }),
+            waiting({ id: "f2", message: "and this" }),
+          ]}
+        />,
+      );
+      expect(screen.getAllByRole("button", { name: "Send now" })).toHaveLength(
+        2,
+      );
+    });
+
+    it("asks once: in flight it reads 'Sending now…' and is disabled, then 'Asked to read it now'", async () => {
+      let accept: (value: { requested: true }) => void = () => {};
+      sendNow.mockReturnValueOnce(
+        new Promise((resolve) => {
+          accept = resolve;
+        }),
+      );
+      withQuery(
+        <TurnBlock
+          turn={turn({ status: "running" })}
+          rendered={inTool}
+          followUps={[waiting()]}
+        />,
+      );
+      await userEvent.click(sendNowButton()!);
+      const inFlight = screen.getByRole("button", { name: /Sending now/ });
+      expect(inFlight).toBeDisabled();
+      expect(sendNow).toHaveBeenCalledTimes(1);
+      expect(sendNow.mock.calls[0]?.[0]).toBe("f1");
+      accept({ requested: true });
+      expect(
+        await screen.findByText("Asked to read it now"),
+      ).toBeInTheDocument();
+      expect(sendNowButton()).toBeNull();
+    });
+
+    it("keeps the request's state after the tool ended (the move itself ends it), then shows the agent's answer", async () => {
+      sendNow.mockResolvedValueOnce({ requested: true });
+      const { rerender } = withQuery(
+        <TurnBlock
+          turn={turn({ status: "running" })}
+          rendered={inTool}
+          followUps={[waiting()]}
+        />,
+      );
+      await userEvent.click(sendNowButton()!);
+      expect(
+        await screen.findByText("Asked to read it now"),
+      ).toBeInTheDocument();
+      // The tool is moved: it reports back, so no tool runs any more.
+      const afterMove = rendered({
+        ended: false,
+        tools: [{ callId: "c1", name: "bash", output: "moved" }],
+      });
+      rerender(
+        <TurnBlock
+          turn={turn({ status: "running" })}
+          rendered={afterMove}
+          followUps={[waiting()]}
+        />,
+      );
+      expect(screen.getByText("Asked to read it now")).toBeInTheDocument();
+      rerender(
+        <TurnBlock
+          turn={turn({ status: "running" })}
+          rendered={afterMove}
+          followUps={[waiting()]}
+          followUpRendered={() =>
+            rendered({
+              turnId: "f1",
+              ended: false,
+              sentNow: { moved: true, toolName: "bash" },
+            })
+          }
+        />,
+      );
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Moved bash to the background, reading it now",
+      );
+      // Read: the row flips, the whole status line goes with the hint.
+      rerender(
+        <TurnBlock
+          turn={turn({ status: "running" })}
+          rendered={afterMove}
+          followUps={[waiting({ status: "joined" })]}
+        />,
+      );
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(screen.queryByText(/Received, folding it in/)).toBeNull();
+    });
+
+    it("a refusal that is a state (already read, run ended) is said quietly, and the button comes back", async () => {
+      sendNow.mockRejectedValueOnce(
+        new ApiError("The agent already has this message", 409),
+      );
+      withQuery(
+        <TurnBlock
+          turn={turn({ status: "running" })}
+          rendered={inTool}
+          followUps={[waiting()]}
+        />,
+      );
+      await userEvent.click(sendNowButton()!);
+      await vi.waitFor(() =>
+        expect(toasts.info).toHaveBeenCalledWith(
+          "The agent already has this message",
+        ),
+      );
+      expect(toasts.error).not.toHaveBeenCalled();
+      expect(sendNowButton()).toBeInTheDocument();
+    });
+
+    it("says what the agent did: the tool it moved, by its bare name, as text", () => {
+      withQuery(
+        <TurnBlock
+          turn={turn({ status: "running" })}
+          rendered={rendered({ ended: false })}
+          followUps={[waiting()]}
+          followUpRendered={() =>
+            rendered({
+              turnId: "f1",
+              ended: false,
+              sentNow: { moved: true, toolName: "mcp__x__<b>bash</b>" },
+            })
+          }
+        />,
+      );
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Moved <b>bash</b> to the background, reading it now",
+      );
+      expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
+    });
+
+    it("says plainly when nothing was moved", () => {
+      withQuery(
+        <TurnBlock
+          turn={turn({ status: "running" })}
+          rendered={inTool}
+          followUps={[waiting()]}
+          followUpRendered={() =>
+            rendered({ turnId: "f1", ended: false, sentNow: { moved: false } })
+          }
+        />,
+      );
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Nothing to move, it'll be read after this step",
+      );
+    });
+
+    it("a waiting follow-up never shows a reply under it (only its outcome)", () => {
+      withQuery(
+        <TurnBlock
+          turn={turn({ status: "running" })}
+          rendered={inTool}
+          followUps={[waiting()]}
+          followUpRendered={() =>
+            rendered({ turnId: "f1", ended: false, liveText: "on it" })
+          }
+        />,
+      );
+      expect(screen.queryByText("on it")).toBeNull();
+    });
+  });
+
+  it("streams a follow-up's reply as it is written, then settles it to markdown", () => {
+    // The reply's deltas ride the follow-up's own id while the agent
+    // writes; the durable `text` replaces them. Live: transient narration
+    // (plain text, never markdown: untrusted mid-turn output). Settled: the
+    // agent's markdown answer.
+    const followUps = [
+      turn({ id: "f1", status: "joined", message: "use the Q3 numbers" }),
+    ];
+    const { rerender } = render(
+      <TurnBlock
+        turn={turn({ status: "running" })}
+        rendered={rendered({ ended: false })}
+        followUps={followUps}
+        followUpRendered={() =>
+          rendered({ turnId: "f1", liveText: "Using the **Q3**", ended: false })
+        }
+      />,
+    );
+    // Streaming: the raw words, asterisks and all, inside a paragraph.
+    const live = screen.getByText("Using the **Q3**");
+    expect(live.tagName).toBe("P");
+    expect(screen.queryByText("Q3")).toBeNull();
+
+    rerender(
+      <TurnBlock
+        turn={turn({ status: "running" })}
+        rendered={rendered({ ended: false })}
+        followUps={followUps}
+        followUpRendered={() =>
+          rendered({ turnId: "f1", text: "Using the **Q3** numbers." })
+        }
+      />,
+    );
+    expect(screen.getByText("Q3").tagName).toBe("STRONG");
+    expect(screen.queryByText("Using the **Q3**")).toBeNull();
+  });
+
+  it("drops a follow-up's live tail when the turn ends with those words as ITS answer", () => {
+    // The agent answered the follow-up and said nothing more before the
+    // turn ended (a stop, or the reply was its last words): the supervisor
+    // keeps those words as the TURN's answer, so no `text` ever lands under
+    // the follow-up, and the row has no terminal event to clear its tail.
+    // The tail must die with the turn, like the turn's own, or the words
+    // show twice: as a stale live tail under the bubble and as the answer.
+    const followUps = [
+      turn({ id: "f1", status: "joined", message: "what is 7 times 6?" }),
+    ];
+    const live = rendered({
+      turnId: "f1",
+      liveText: "7 times 6 is 42.",
+      ended: false,
+    });
+    const { rerender } = render(
+      <TurnBlock
+        turn={turn({ status: "running" })}
+        rendered={rendered({ ended: false })}
+        followUps={followUps}
+        followUpRendered={() => live}
+      />,
+    );
+    expect(screen.getByText("7 times 6 is 42.")).toBeTruthy();
+
+    rerender(
+      <TurnBlock
+        turn={turn({ status: "done" })}
+        rendered={rendered({ text: "7 times 6 is 42.\n\nALL DONE." })}
+        followUps={followUps}
+        followUpRendered={() => live}
+      />,
+    );
+    // Once, as the turn's answer; never again under the bubble.
+    expect(screen.getAllByText(/7 times 6 is 42\./)).toHaveLength(1);
+    expect(screen.getByText("ALL DONE.")).toBeTruthy();
   });
 
   it("shows a tool call with its output behind a disclosure, as text", async () => {
@@ -169,6 +710,44 @@ describe("TurnBlock", () => {
     const output = screen.getByText(/results/);
     expect(output.textContent).toContain("<script>alert(1)</script>");
     expect(document.querySelector("script")).toBeNull();
+  });
+
+  it("discloses optional input while running and retains failed output after settling", async () => {
+    const user = userEvent.setup();
+    const tool = {
+      callId: "input-call",
+      name: "bash",
+      input: JSON.stringify({ command: "echo '<script>bad()</script>'" }),
+    };
+    const { container, rerender } = render(
+      <TurnBlock
+        turn={turn({ status: "running" })}
+        rendered={rendered({ ended: false, tools: [tool] })}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /Running a command/ }));
+    await user.click(screen.getByRole("button", { name: /echo/ }));
+    expect(screen.getByText("Request")).toBeInTheDocument();
+    expect(container.querySelector("pre")?.textContent).toBe(
+      JSON.stringify(JSON.parse(tool.input), null, 2),
+    );
+    expect(screen.queryByText("Output")).toBeNull();
+    expect(container.querySelector("script")).toBeNull();
+
+    rerender(
+      <TurnBlock
+        turn={turn()}
+        rendered={rendered({
+          tools: [{ ...tool, output: "bash: denied", isError: true }],
+        })}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /Ran a command/ }));
+    await user.click(screen.getByRole("button", { name: /echo/ }));
+    expect(screen.getByText("Request")).toBeInTheDocument();
+    expect(screen.getByText("Output")).toBeInTheDocument();
+    expect(screen.getByText("Failed")).toBeInTheDocument();
+    expect(screen.getByText("bash: denied")).toHaveClass("text-red-700");
   });
 
   it("renders the running turn as a work log, in order, as plain text", () => {
@@ -365,16 +944,26 @@ describe("TurnBlock", () => {
     expect(screen.getByText("the stream's own error")).toBeInTheDocument();
   });
 
-  it("says it is waking before the agent runs, thinking once it does", () => {
+  it("says thinking from the first beat, whatever the lifecycle: a waking machine is never announced", () => {
     const { rerender } = render(
       <TurnBlock turn={turn({ status: "queued" })} rendered={undefined} />,
     );
-    expect(screen.getByText("Waking the agent…")).toBeInTheDocument();
+    expect(screen.getByText("Thinking…")).toBeInTheDocument();
+    expect(screen.queryByText(/waking/i)).toBeNull();
+    // The lifecycle still rides the line for support, as data, never copy.
+    expect(screen.getByText("Thinking…").closest("p")).toHaveAttribute(
+      "data-turn-status",
+      "queued",
+    );
 
     rerender(
       <TurnBlock turn={turn({ status: "running" })} rendered={undefined} />,
     );
     expect(screen.getByText("Thinking…")).toBeInTheDocument();
+    expect(screen.getByText("Thinking…").closest("p")).toHaveAttribute(
+      "data-turn-status",
+      "running",
+    );
   });
 
   it("marks an aborted turn as stopped", () => {
@@ -408,6 +997,31 @@ describe("a platform automation delivery turn", () => {
     expect(screen.queryByText(/via watch/i)).not.toBeInTheDocument();
   });
 
+  it("renders a wake that JOINED the turn as a system label, never a user bubble", () => {
+    // A wake joining a running wake rides as a follow-up row; it is the
+    // platform's instruction, so it gets the same quiet header a standalone
+    // delivery does. MUTATION-PROOF: render every follow-up as <UserBubble>
+    // and the "via watch" chip and a second end-aligned bubble reappear.
+    const { container } = render(
+      <TurnBlock
+        turn={turn({ source: "watch", message: 'Watch on "tests"' })}
+        rendered={rendered({ text: "Both runs passed." })}
+        followUps={[
+          turn({
+            id: "f1",
+            status: "joined",
+            source: "watch",
+            message: 'Watch on "lint"',
+            followUpOfTurnId: "t1",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByText('Watch on "lint"')).toBeInTheDocument();
+    expect(container.querySelector('[data-align="end"]')).toBeNull();
+    expect(screen.queryByText(/via watch/i)).not.toBeInTheDocument();
+  });
+
   it("renders a scheduled-run (cron) report the same system way", () => {
     const { container } = render(
       <TurnBlock
@@ -424,6 +1038,65 @@ describe("a platform automation delivery turn", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Digest ready.")).toBeInTheDocument();
     expect(container.querySelector('[data-align="end"]')).toBeNull();
+  });
+});
+
+describe("the onboarding agent's greeting turn", () => {
+  const greeting = (overrides: Partial<Turn> = {}) =>
+    turn({
+      source: "greeting",
+      message: "This is the very first message… (the platform's brief)",
+      ...overrides,
+    });
+
+  it("shows the agent's own reply as a normal answer, never the brief", () => {
+    render(
+      <TurnBlock
+        turn={greeting()}
+        rendered={rendered({ text: "Hi Alex, I'm Donna. What's your name?" })}
+      />,
+    );
+    expect(
+      screen.getByText("Hi Alex, I'm Donna. What's your name?"),
+    ).toBeInTheDocument();
+    // The brief is plumbing: no user bubble, no header.
+    expect(screen.queryByText(/platform's brief/)).toBeNull();
+    expect(screen.getByTestId("greeting-actions")).toBeInTheDocument();
+  });
+
+  it("holds the Gmail card until the agent's words have landed", () => {
+    render(
+      <TurnBlock
+        turn={greeting({ status: "running" })}
+        rendered={rendered({ ended: false })}
+      />,
+    );
+    expect(screen.queryByTestId("greeting-actions")).toBeNull();
+  });
+
+  it("still offers the first step under a greeting the agent could not answer", () => {
+    // No words are invented for the agent: the failure reads as the
+    // product's notice, and connecting Gmail stays one click away.
+    // MUTATION-PROOF: render the actions only beside the answer text and
+    // this row loses its card.
+    render(
+      <TurnBlock
+        turn={greeting({
+          status: "failed",
+          error: "The agent couldn't start. Try again in a moment.",
+        })}
+        rendered={undefined}
+      />,
+    );
+    expect(
+      screen.getByText("The agent couldn't start. Try again in a moment."),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("greeting-actions")).toBeInTheDocument();
+  });
+
+  it("never adds the card to an ordinary turn", () => {
+    render(<TurnBlock turn={turn()} rendered={rendered({ text: "Done." })} />);
+    expect(screen.queryByTestId("greeting-actions")).toBeNull();
   });
 });
 
@@ -459,8 +1132,6 @@ describe("a turn that could not run for a reason the reader can fix", () => {
     );
     const action = screen.getByRole("link", { name: "Connect a model key" });
     expect(action).toHaveAttribute("href", "/w/p1/agents/a1/models");
-    // Guidance, not a crash: none of the destructive treatment.
-    expect(document.querySelector(".text-destructive")).toBeNull();
   });
 
   it("opens the in-place door instead of navigating when one is wired", async () => {
@@ -509,6 +1180,42 @@ describe("a turn that could not run for a reason the reader can fix", () => {
     ).toBeNull();
   });
 
+  it.each([
+    ["model_refused", MODEL_REFUSED_MESSAGE],
+    ["model_empty_response", MODEL_EMPTY_RESPONSE_MESSAGE],
+  ])(
+    "an unanswered turn (%s) reads as its notice under the message, never an empty bubble",
+    (errorCode, message) => {
+      // The exact row the control plane stores, with the transcript the run
+      // left: started and a clean end, no text, no error event. Not a key
+      // problem, so no Models-page door; the sentence itself says what to do.
+      render(
+        <TurnBlock
+          turn={turn({ status: "failed", error: message, errorCode })}
+          rendered={rendered({ text: "", ended: true })}
+          modelsHref="/w/p1/agents/a1/models"
+        />,
+      );
+      expect(screen.getByRole("status")).toHaveTextContent(message);
+      expect(screen.queryByRole("link")).toBeNull();
+      expect(screen.queryByText(/stop_reason|guardrail/)).toBeNull();
+    },
+  );
+
+  it("the SAME turn closed `done` (the old outcome) renders nothing at all", () => {
+    // The before-state the fix exists for: a done turn with no words shows
+    // no reply and no notice. Kept as a pin so the failed close stays the
+    // only way a refusal becomes visible.
+    const { container } = render(
+      <TurnBlock
+        turn={turn({ status: "done" })}
+        rendered={rendered({ text: "", ended: true })}
+      />,
+    );
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(container).not.toHaveTextContent(/declined|empty answer/);
+  });
+
   it("offers the key check for a model-provider refusal — same door, its own label", () => {
     // A key EXISTS but the provider refused it (limit, expiry): the fix
     // lives on the same Models page, and the label says "check", not
@@ -527,7 +1234,6 @@ describe("a turn that could not run for a reason the reader can fix", () => {
     );
     const action = screen.getByRole("link", { name: "Check the model key" });
     expect(action).toHaveAttribute("href", "/w/p1/agents/a1/models");
-    expect(document.querySelector(".text-destructive")).toBeNull();
   });
 
   it("a provider refusal without a models href keeps the notice, minus the door", () => {
@@ -547,7 +1253,6 @@ describe("a turn that could not run for a reason the reader can fix", () => {
       "The agent's model provider rejected the request.",
     );
     expect(screen.queryByRole("link")).toBeNull();
-    expect(document.querySelector(".text-destructive")).toBeNull();
   });
 
   it("trial-credit exhaustion opens the in-place add-key door, like no_model_key", async () => {
@@ -574,8 +1279,6 @@ describe("a turn that could not run for a reason the reader can fix", () => {
       screen.getByRole("button", { name: "Add your own model key" }),
     );
     expect(onConnectModelKey).toHaveBeenCalledTimes(1);
-    // Guidance, not a crash: none of the destructive treatment.
-    expect(document.querySelector(".text-destructive")).toBeNull();
   });
 
   it("trial-credit exhaustion navigates to Models when no in-place door is wired", () => {
@@ -595,59 +1298,186 @@ describe("a turn that could not run for a reason the reader can fix", () => {
       name: "Add your own model key",
     });
     expect(action).toHaveAttribute("href", "/w/p1/agents/a1/models");
-    expect(document.querySelector(".text-destructive")).toBeNull();
   });
 
+  // Every failure is guidance with the sentence it carries, whatever its
+  // code (or none): a lifecycle hiccup, a gateway refusal with no one-click
+  // fix, or an uncoded readable sentence. None gets an action, and none is
+  // painted as a crash.
   it.each([
-    "agent_restarted",
-    "agent_start_failed",
-    "at_capacity",
-    "image_unavailable",
-    "turn_stalled",
-    "turn_time_limit",
-  ])("renders a %s failure as a quiet notice, not the red box", (errorCode) => {
-    // A platform hiccup whose copy already says what to do — red would say
-    // the agent is broken. Read off the CODE, never the message text.
+    ["agent_restarted", "The agent had to restart while working on this."],
+    ["agent_start_failed", "The agent couldn't start."],
+    ["at_capacity", "Too many agents are running right now."],
+    ["image_unavailable", "Its software isn't installed yet."],
+    ["turn_stalled", "The agent stopped responding."],
+    ["turn_time_limit", "This turn reached its time limit."],
+    ["blocked_by_policy", "A OneCLI policy stopped this request."],
+    ["gateway_unavailable", "OneCLI couldn't reach the model provider."],
+    ["home_read_only", "The agent hit a storage problem and is restarting."],
+    ["home_read_only_held", "The agent could not restart by itself."],
+    [null, "harness event stream ended unexpectedly"],
+  ])(
+    "renders a %s failure as a notice with its own sentence",
+    (errorCode, error) => {
+      render(
+        <TurnBlock
+          turn={turn({ status: "failed", error, errorCode })}
+          rendered={undefined}
+          modelsHref="/w/p1/agents/a1/models"
+        />,
+      );
+      // The POSITIVE pin: the notice treatment (role=status) with the text as
+      // written, not merely the absence of red.
+      expect(screen.getByRole("status")).toHaveTextContent(error);
+      expect(screen.queryByRole("link")).toBeNull();
+      expect(screen.queryByRole("button")).toBeNull();
+      expect(document.querySelector(".text-destructive")).toBeNull();
+    },
+  );
+
+  // The gateway said the workspace holds a key this agent was not given.
+  // The fix is attaching it on the Models page, so the notice links there
+  // (never the add-key dialog: adding a second key is not the fix), and the
+  // raw gateway body stays folded away.
+  it("offers Attach the key for model_key_not_attached, with the raw body folded", async () => {
+    const user = userEvent.setup();
+    const onConnectModelKey = vi.fn();
+    const raw =
+      'Anthropic API error (401 Unauthorized): {"error":"access_restricted","message":"attach the key"}';
     render(
       <TurnBlock
         turn={turn({
           status: "failed",
-          error: "The agent had to restart while working on this.",
-          errorCode,
+          error: "This agent doesn't have access to your model key yet.",
+          errorCode: "model_key_not_attached",
+        })}
+        rendered={rendered({ error: raw })}
+        modelsHref="/w/p1/agents/a1/models"
+        onConnectModelKey={onConnectModelKey}
+      />,
+    );
+    expect(
+      screen.getByRole("link", { name: "Attach the key" }),
+    ).toHaveAttribute("href", "/w/p1/agents/a1/models");
+    expect(screen.queryByText(/access_restricted/)).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Technical details" }));
+    expect(screen.getByText(/access_restricted/).textContent).toBe(raw);
+    expect(onConnectModelKey).not.toHaveBeenCalled();
+  });
+
+  // The agent HAS the key, but its saved value could not be read. The fix is
+  // re-entering it on the Models page: never the add-key dialog, and never
+  // a provider-refusal label that blames a usage limit.
+  it("offers Re-enter the key for model_key_unreadable, never the add-key dialog", () => {
+    const onConnectModelKey = vi.fn();
+    render(
+      <TurnBlock
+        turn={turn({
+          status: "failed",
+          error: "OneCLI couldn't read this agent's saved model key.",
+          errorCode: "model_key_unreadable",
         })}
         rendered={undefined}
         modelsHref="/w/p1/agents/a1/models"
+        onConnectModelKey={onConnectModelKey}
       />,
     );
-    // The POSITIVE pin: the notice treatment (role=status), not merely the
-    // absence of red — a bare unstyled <p> would otherwise pass.
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "The agent had to restart while working on this.",
-    );
-    expect(document.querySelector(".text-destructive")).toBeNull();
-    // And no action link — the sentence is the whole guidance.
-    expect(screen.queryByRole("link")).toBeNull();
+    expect(
+      screen.getByRole("link", { name: "Re-enter the key" }),
+    ).toHaveAttribute("href", "/w/p1/agents/a1/models");
+    expect(screen.queryByRole("button", { name: /key/i })).toBeNull();
+    expect(onConnectModelKey).not.toHaveBeenCalled();
   });
 
-  it("keeps the plain error treatment for every other failure", () => {
-    // The code is what switches the rendering — never the message text.
+  it("keeps a policy refusal's raw answer, which names the rule, one click away", async () => {
+    const user = userEvent.setup();
+    const raw =
+      'API Error: 403 {"error":"blocked_by_policy","message":"Blocked by OneCLI policy rule \\"No weekend calls\\"."}';
     render(
       <TurnBlock
         turn={turn({
           status: "failed",
-          error: "The agent restarted. Send the message again.",
+          error: "A OneCLI policy or spending limit stopped this request.",
+          errorCode: "blocked_by_policy",
+        })}
+        rendered={rendered({ error: raw })}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Technical details" }));
+    expect(screen.getByText(/No weekend calls/).textContent).toBe(raw);
+  });
+
+  // An uncoded failure that carries a provider's raw response body: nothing
+  // classified it, so no fix is offered, but the reader never gets the blob
+  // as the message.
+  const RAW_PROVIDER_ERROR =
+    'Claude API error (500 Internal Server Error): {"type":"error","error":{"type":"api_error","message":"Internal server error"}}';
+
+  it("folds an uncoded raw provider body behind Technical details", async () => {
+    const user = userEvent.setup();
+    render(
+      <TurnBlock
+        turn={turn({
+          status: "failed",
+          error: RAW_PROVIDER_ERROR,
           errorCode: null,
         })}
         rendered={undefined}
         modelsHref="/w/p1/agents/a1/models"
       />,
     );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "The agent ran into an error and couldn't finish this message.",
+    );
+    // Nothing classified it, so no key fix is claimed.
+    expect(screen.queryByRole("link")).toBeNull();
+    // Collapsed: the blob is not on screen until asked for.
+    const trigger = screen.getByRole("button", { name: "Technical details" });
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText(/Internal Server Error/)).toBeNull();
+
+    await user.click(trigger);
+    const details = screen.getByText(/Internal Server Error/);
+    expect(details.textContent).toBe(RAW_PROVIDER_ERROR);
+    // Outside the live region: expanding never reads the blob aloud.
+    expect(screen.getByRole("status")).not.toContainElement(details);
+  });
+
+  it("folds the stream's raw error too, once the turn settles", () => {
+    // The uncoded harness failure's usual shape: turn.error is NULL and the
+    // transcript's error event is the only witness.
+    render(
+      <TurnBlock
+        turn={turn({ status: "failed", error: null })}
+        rendered={rendered({ error: RAW_PROVIDER_ERROR })}
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "The agent ran into an error and couldn't finish this message.",
+    );
     expect(
-      screen.queryByRole("link", { name: "Connect a model key" }),
-    ).toBeNull();
-    expect(
-      screen.getByText("The agent restarted. Send the message again."),
-    ).toHaveClass("text-destructive");
+      screen.getByRole("button", { name: "Technical details" }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the payload as text, never as markup", async () => {
+    const user = userEvent.setup();
+    render(
+      <TurnBlock
+        turn={turn({
+          status: "failed",
+          error:
+            'Claude API error (502 Bad Gateway): <html><body><script>alert(1)</script><img src=x onerror="alert(2)"></body></html>',
+        })}
+        rendered={undefined}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Technical details" }));
+    expect(screen.getByText(/502 Bad Gateway/).textContent).toContain(
+      "<script>alert(1)</script>",
+    );
+    expect(document.querySelector("script")).toBeNull();
+    expect(document.querySelector("img")).toBeNull();
   });
 
   it("renders a notice alongside an answer, without ending the turn", () => {
@@ -693,27 +1523,57 @@ describe("a turn that could not run for a reason the reader can fix", () => {
         />
       </QueryClientProvider>,
     );
-    expect(screen.getByText("Apps that could help")).toBeInTheDocument();
+    // The card under an answer is the rows alone: the agent's sentence
+    // introduces it, so no consent line.
+    expect(screen.queryByText(/Only this agent gets access/)).toBeNull();
     expect(
       screen.getByRole("button", { name: "Connect Gmail" }),
     ).toBeInTheDocument();
     expect(container.textContent).not.toContain("connections?connect");
   });
 
-  describe("the agent's files (send_file)", () => {
-    const withQuery = (ui: React.ReactElement) =>
-      render(
-        <QueryClientProvider
-          client={
-            new QueryClient({
-              defaultOptions: { queries: { retry: false } },
-            })
-          }
-        >
-          {ui}
-        </QueryClientProvider>,
-      );
+  it("renders the connect card from a request_app_connection result even when the answer carries no link", () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    queryClient.setQueryData(queryKeys.connections.list("workspace"), []);
+    queryClient.setQueryData(queryKeys.grants.agent("agent-1"), {
+      agentId: "agent-1",
+      mode: "grants",
+      connections: [],
+      secrets: [],
+    });
+    queryClient.setQueryData(
+      [...queryKeys.agents.all(), "agent-1", "effective-credentials"],
+      { agentId: "agent-1", mode: "selective", secrets: [], connections: [] },
+    );
+    render(
+      <QueryClientProvider client={queryClient}>
+        <TurnBlock
+          turn={turn()}
+          rendered={rendered({
+            text: "Jira isn't connected yet. Use the button below.",
+            tools: [
+              {
+                callId: "c1",
+                name: "mcp__onecli__request_app_connection",
+                output: JSON.stringify({
+                  status: "connect",
+                  connectUrl:
+                    "https://app.onecli.sh/w/a/connections?connect=jira&source=agent&agent_name=Arik&agent_id=agent%2D1",
+                }),
+              },
+            ],
+          })}
+        />
+      </QueryClientProvider>,
+    );
+    expect(
+      screen.getByRole("button", { name: "Connect Jira" }),
+    ).toBeInTheDocument();
+  });
 
+  describe("the agent's files (send_file)", () => {
     it("renders outbound files under the AGENT's answer and inbound files under the PERSON's bubble — never mixed", () => {
       const { container } = withQuery(
         <TurnBlock
@@ -747,11 +1607,9 @@ describe("a turn that could not run for a reason the reader can fix", () => {
       expect(personSide?.textContent).not.toContain("clip.webm");
       expect(agentSide?.textContent).toContain("Recorded it.");
       expect(agentSide?.textContent).toContain("clip.webm");
-      expect(agentSide?.textContent).toContain("3.0MB");
-      expect(agentSide?.textContent).toContain("the run, recorded");
       expect(agentSide?.textContent).not.toContain("brief.txt");
       expect(
-        screen.getByRole("button", { name: "Save clip.webm" }),
+        screen.getByRole("button", { name: "Preview clip.webm" }),
       ).toBeInTheDocument();
     });
 
@@ -772,12 +1630,14 @@ describe("a turn that could not run for a reason the reader can fix", () => {
           rendered={rendered({ text: "ok" })}
         />,
       );
+      // A PDF tile shows its page, not its name: find it by its label.
+      const tile = '[aria-label="Preview legacy.pdf"]';
       expect(
-        container.querySelector('[data-align="end"]')?.textContent,
-      ).toContain("legacy.pdf");
+        container.querySelector(`[data-align="end"] ${tile}`),
+      ).not.toBeNull();
       expect(
-        container.querySelector('[data-align="start"]')?.textContent,
-      ).not.toContain("legacy.pdf");
+        container.querySelector(`[data-align="start"] ${tile}`),
+      ).toBeNull();
     });
 
     it("an expired file (retention took the bytes) is a quiet inert chip: named, struck, not a button, never previewed", () => {
@@ -804,7 +1664,7 @@ describe("a turn that could not run for a reason the reader can fix", () => {
       expect(agentSide?.textContent).toContain("shot.png");
       expect(agentSide?.textContent).toContain("expired");
       expect(
-        screen.queryByRole("button", { name: "Save shot.png" }),
+        screen.queryByRole("button", { name: "Preview shot.png" }),
       ).toBeNull();
       expect(container.querySelector("img")).toBeNull();
       expect(
@@ -831,7 +1691,7 @@ describe("a turn that could not run for a reason the reader can fix", () => {
         />,
       );
       expect(
-        screen.getByRole("button", { name: "Save report.pdf" }),
+        screen.getByRole("button", { name: "Preview report.pdf" }),
       ).toBeInTheDocument();
     });
   });

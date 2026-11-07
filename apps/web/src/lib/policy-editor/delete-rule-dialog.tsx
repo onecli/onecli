@@ -22,8 +22,7 @@ export interface DeleteRuleDialogProps {
   loading: boolean;
 }
 
-/** Destructive-confirm for removing a rule. Deletion stages into the draft like
- * any edit — it takes effect on the next Publish.
+/** Destructive-confirm for removing a rule. Takes effect immediately.
  *
  * An `equipment` rule is a credential GRANT, not a permission: deleting it takes
  * a credential away from an agent, which the generic "delete this rule" wording

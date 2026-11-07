@@ -33,7 +33,9 @@ const meMetadata = (me: PostHogMe, region: Region) => {
 
 export const posthog: AppDefinition = {
   id: "posthog",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/posthog",
   name: "PostHog",
+  apiDocsUrl: "https://posthog.com/docs/api",
   icon: "/icons/posthog.svg",
   darkIcon: "/icons/posthog-light.svg",
   description: "Product analytics, insights, feature flags, and experiments.",

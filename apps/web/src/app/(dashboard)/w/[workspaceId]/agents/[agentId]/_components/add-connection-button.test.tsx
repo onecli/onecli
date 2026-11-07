@@ -4,8 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { grants, secrets } from "@/lib/api";
-import type { SecretActions } from "@/app/(dashboard)/w/[workspaceId]/connections/_components/types";
+import { grants, secrets, type SavedSecret } from "@/lib/api";
 import { AddConnectionButton } from "./add-connection-button";
 
 vi.mock("next/navigation", () => ({
@@ -15,25 +14,24 @@ vi.mock("next/navigation", () => ({
 
 // The dialogs bring their own data graphs; the unit here is the button's
 // create-then-attach seam and the deep link it mints. The stubs mimic the
-// real dialogs' contracts: SecretDialog awaits createSecret and calls onSaved
-// only on success; the picker fires onConnected with the fresh connection id.
+// real dialogs' contracts: SecretDialog creates the secret and calls onSaved
+// with it only on success (and with nothing after an edit); the picker fires
+// onConnected with the fresh connection id.
 vi.mock(
   "@/app/(dashboard)/w/[workspaceId]/connections/_components/secret-dialog",
   () => ({
     SecretDialog: ({
       onSaved,
-      secretActions,
     }: {
-      onSaved?: () => void;
-      secretActions?: Partial<SecretActions>;
+      onSaved?: (created: SavedSecret | undefined) => void;
     }) => (
       <>
         <button
           data-testid="save-secret"
           onClick={() => {
-            void secretActions
-              ?.createSecret?.({ name: "n", type: "generic" } as never)
-              .then(() => onSaved?.())
+            void secrets
+              .create({ name: "n", type: "generic" } as never)
+              .then(({ id }) => onSaved?.({ id, name: "n" }))
               .catch(() => {
                 /* the real dialog toasts and does NOT call onSaved */
               });
@@ -41,8 +39,11 @@ vi.mock(
         >
           save
         </button>
-        {/* An onSaved with no create behind it — the edit-save shape. */}
-        <button data-testid="save-no-create" onClick={() => onSaved?.()}>
+        {/* An edit save: onSaved with no created secret. */}
+        <button
+          data-testid="save-no-create"
+          onClick={() => onSaved?.(undefined)}
+        >
           save edit
         </button>
       </>
@@ -109,20 +110,11 @@ describe("AddConnectionButton", () => {
       expect(grants.attachSecret).toHaveBeenCalledWith("agent-1", "sec-9"),
     );
 
-    // The ref is consumed on save: an onSaved with no create behind it must
-    // not replay the previous id.
+    // An edit save carries no created secret: nothing to attach, and never
+    // the previous id.
     await userEvent.click(screen.getByTestId("save-no-create"));
     await new Promise((r) => setTimeout(r, 0));
     expect(grants.attachSecret).toHaveBeenCalledTimes(1);
-  });
-
-  it("never attaches when the create failed", async () => {
-    vi.mocked(secrets.create).mockRejectedValue(new Error("nope"));
-    renderButton();
-
-    await userEvent.click(screen.getByTestId("save-secret"));
-    await new Promise((r) => setTimeout(r, 0));
-    expect(grants.attachSecret).not.toHaveBeenCalled();
   });
 
   it("routes the button by tab — apps opens the picker, custom the secret dialog", async () => {

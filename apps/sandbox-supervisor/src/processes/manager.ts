@@ -11,7 +11,9 @@ import {
   type HarnessBackgroundTask,
   type ProcessState,
   type SupervisorMessage,
+  type WatchOrigin,
 } from "@onecli/agent-protocol";
+import { createCpuProbe, type CpuProbe } from "./cpu-probe";
 
 /**
  * Background processes inside the sandbox (step 10, §3.9).
@@ -56,7 +58,12 @@ const PATTERN_WINDOW_CHARS = 4_096;
 /** Watch expiry bounds/default (seconds). */
 export const WATCH_EXPIRES_MIN_SECONDS = 60;
 export const WATCH_EXPIRES_MAX_SECONDS = 86_400;
-export const WATCH_EXPIRES_DEFAULT_SECONDS = 14_400;
+/** An armed agent watch holds the box awake until it fires or expires, so
+ * the default is what an un-tuned watch on an idle process costs. One hour
+ * covers the waits agents typically arm without a duration; a longer wait
+ * passes `expiresInSeconds`, and the platform's own implicit watches pass
+ * the MAX. */
+export const WATCH_EXPIRES_DEFAULT_SECONDS = 3_600;
 export const WATCH_SILENCE_MIN_SECONDS = 5;
 export const WATCH_SILENCE_MAX_SECONDS = 86_400;
 /** Terminal processes kept for the periodic re-send (FIFO evicted). */
@@ -95,6 +102,7 @@ export interface ProcessManagerOptions {
   sweepIntervalMs?: number;
   resendEveryTicks?: number;
   stopGraceMs?: number;
+  cpuProbe?: CpuProbe;
 }
 
 export interface ProcessManager {
@@ -112,6 +120,9 @@ export interface ProcessManager {
       silenceSeconds?: number;
       prompt: string;
       expiresInSeconds?: number;
+      /** Who is arming: the agent's own tool (holds the box awake) or the
+       * platform (report-only). Defaults to `agent`, the tool's case. */
+      origin?: WatchOrigin;
     },
     context: TurnContext | null,
   ): ToolOutcome;
@@ -159,6 +170,7 @@ interface WatchEntry {
   excerpt?: string;
   triggeredAt?: number;
   expiresAt: number;
+  origin: WatchOrigin;
   context: TurnContext | null;
 }
 
@@ -174,6 +186,8 @@ interface ProcessEntry {
   tail: string;
   patternWindow: string;
   lastOutputAt: number;
+  /** The CPU probe's last verdict for this entry (see `sampleCpu`). */
+  cpuBusy: boolean;
   stopRequested: boolean;
   child?: ChildProcess;
   watches: WatchEntry[];
@@ -197,6 +211,7 @@ export const createProcessManager = (
   const sweepIntervalMs = options.sweepIntervalMs ?? 1_000;
   const resendEveryTicks = options.resendEveryTicks ?? 30;
   const stopGraceMs = options.stopGraceMs ?? STOP_GRACE_MS;
+  const cpuProbe = options.cpuProbe ?? createCpuProbe();
 
   const processes = new Map<string, ProcessEntry>();
   let closed = false;
@@ -219,6 +234,10 @@ export const createProcessManager = (
         MAX_PROCESS_TAIL_WIRE_CHARS,
       ),
     }),
+    // The busy signal, on every frame: output recency is cheap and exact;
+    // the CPU verdict is the sampler's latest (see `sampleCpu`).
+    lastOutputAt: new Date(entry.lastOutputAt).toISOString(),
+    cpuBusy: entry.cpuBusy,
     ...(entry.context ?? {}),
     watches: entry.watches.slice(0, MAX_WATCHES_PER_PROCESS_WIRE).map((w) => ({
       ref: w.ref,
@@ -239,6 +258,7 @@ export const createProcessManager = (
         triggeredAt: new Date(w.triggeredAt).toISOString(),
       }),
       expiresAt: new Date(w.expiresAt).toISOString(),
+      origin: w.origin,
       ...(w.context ?? {}),
     })),
   });
@@ -273,7 +293,9 @@ export const createProcessManager = (
     if (exitCode !== null) entry.exitCode = exitCode;
     if (signal) entry.signal = signal;
     entry.endedAt = now();
+    if (entry.child?.pid) cpuProbe.forget(entry.child.pid);
     entry.child = undefined;
+    entry.cpuBusy = false;
     // EVERY armed watch fires on process end, whatever its kind — a watch
     // must never outlive its process armed, and "the process ended before
     // the pattern matched" is exactly what its owner needs to hear.
@@ -343,6 +365,42 @@ export const createProcessManager = (
     if (tick % resendEveryTicks === 0) {
       for (const entry of processes.values()) sendFrame(entry);
     }
+    // The CPU sample rides the same tick but never blocks the watch sweep
+    // (a /proc walk is async); a verdict that CHANGES sends a frame at once
+    // so the control plane's busy read is at most one tick stale.
+    void sampleCpu();
+  };
+
+  /**
+   * One CPU sample per running entry. Spawned children are judged by their
+   * own process group (exact); observed tasks, whose pid the harness keeps
+   * to itself, share the sandbox-wide verdict (a quiet box with one busy
+   * task reads busy, which errs toward holding it: acceptable, bounded by
+   * the control plane's cap). Never stacks: a slow walk skips a tick.
+   */
+  let sampling = false;
+  const sampleCpu = async (): Promise<void> => {
+    if (closed || sampling) return;
+    sampling = true;
+    try {
+      let sandboxVerdict: boolean | null = null;
+      for (const entry of processes.values()) {
+        if (entry.status !== "running") continue;
+        let busy: boolean;
+        if (entry.child?.pid) {
+          busy = await cpuProbe.groupBusy(entry.child.pid);
+        } else {
+          sandboxVerdict ??= await cpuProbe.sandboxBusy();
+          busy = sandboxVerdict;
+        }
+        if (busy !== entry.cpuBusy) {
+          entry.cpuBusy = busy;
+          sendFrame(entry);
+        }
+      }
+    } finally {
+      sampling = false;
+    }
   };
 
   // ONE shared sweeper, unref'd (the standing rule: no supervisor handle may
@@ -364,6 +422,7 @@ export const createProcessManager = (
       silenceSeconds?: number;
       prompt: string;
       expiresInSeconds?: number;
+      origin?: WatchOrigin;
     },
     context: TurnContext | null,
   ): ToolOutcome => {
@@ -382,9 +441,14 @@ export const createProcessManager = (
         error: "Too many watches on this process — start a fresh one.",
       };
     }
+    // A silence watch cannot fire before its window has passed, so its
+    // default lifetime counts from then: a bare default would expire a 1h
+    // silence watch on the very sweep it could first fire.
+    const defaultSeconds =
+      (args.silenceSeconds ?? 0) + WATCH_EXPIRES_DEFAULT_SECONDS;
     const expiresInSeconds = Math.min(
       Math.max(
-        args.expiresInSeconds ?? WATCH_EXPIRES_DEFAULT_SECONDS,
+        args.expiresInSeconds ?? defaultSeconds,
         WATCH_EXPIRES_MIN_SECONDS,
       ),
       WATCH_EXPIRES_MAX_SECONDS,
@@ -399,6 +463,7 @@ export const createProcessManager = (
       prompt: args.prompt,
       status: "armed",
       expiresAt: now() + expiresInSeconds * 1000,
+      origin: args.origin ?? "agent",
       context,
     };
     entry.watches.push(watch);
@@ -454,6 +519,7 @@ export const createProcessManager = (
         tail: "",
         patternWindow: "",
         lastOutputAt: now(),
+        cpuBusy: false,
         stopRequested: false,
         watches: [],
         context,
@@ -511,7 +577,7 @@ export const createProcessManager = (
           processId: ref,
           ...(args.name && { name: args.name }),
           startedAt: new Date(entry.startedAt).toISOString(),
-          note: "Running in the background. Arm process_watch if you want to be woken when something happens — the machine may otherwise sleep once conversations go idle.",
+          note: "Running in the background. It keeps the machine awake only while it is busy (output or CPU). Read it with process_status and arm process_watch with this processId to be woken when something happens. Your runtime's own background-task tools do not know this id.",
         },
       };
     },
@@ -638,6 +704,9 @@ export const createProcessManager = (
             // The MAX, not the default: a day-long build's report must
             // still land (the observer's implicit-wake choice).
             expiresInSeconds: WATCH_EXPIRES_MAX_SECONDS,
+            // Platform-armed: it reports, it never holds the box awake —
+            // the process's own busyness decides that.
+            origin: "platform",
           },
           // The process's own first-sight context is the honest origin —
           // "the chat where the task was started" — and it also keeps a
@@ -675,6 +744,7 @@ export const createProcessManager = (
           tail: "",
           patternWindow: "",
           lastOutputAt: now(),
+          cpuBusy: false,
           stopRequested: false,
           watches: [],
           context,

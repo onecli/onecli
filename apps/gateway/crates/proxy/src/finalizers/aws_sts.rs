@@ -246,7 +246,7 @@ pub async fn finalize_request(
     info!(
         method = %method,
         host = %host,
-        path = %path,
+        path = %crate::log_redact::redact_for_log(path),
         role_arn = %params.role_arn,
         "AWS SigV4 signed (AssumeRole)"
     );

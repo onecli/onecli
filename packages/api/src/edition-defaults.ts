@@ -1,5 +1,6 @@
-import { IS_CLOUD } from "./lib/env";
+import { IS_CLOUD, SECRET_ENCRYPTION_KEY } from "./lib/env";
 import { cryptoService as kmsCrypto } from "./ee/kms-crypto";
+import { cryptoService as localCrypto } from "./lib/crypto";
 import { getRedis, hasRedisConfigured } from "./ee/clients/redis-client";
 import { createRedisEventBus } from "./ee/event-bus/redis-event-bus";
 import { createInProcessEventBus } from "./services/event-bus";
@@ -56,6 +57,21 @@ import {
 } from "./providers/hooks/team-hooks";
 import { setDefaultRuleActionGate } from "./providers/hooks/rule-action-gate";
 import { setDefaultPolicyValidator } from "./providers/hooks/policy-validator";
+import {
+  initConversationReader,
+  initConversationSender,
+  initUserReadConnectCompleter,
+  setDefaultConversationReader,
+  setDefaultConversationSender,
+  setDefaultUserReadConnectCompleter,
+} from "./providers/hooks/conversation-reader";
+import {
+  eeConversationReader,
+  eeConversationSender,
+  eeUserReadConnectCompleter,
+} from "./ee/slack-read";
+import { eeAgentDesktop } from "./ee/desktop";
+import { setDefaultAgentDesktop } from "./providers/hooks/agent-desktop";
 import { setDefaultNewOrgPolicySeeder } from "./providers/hooks/new-org-policy-seeder";
 import { markEditionDefaultsApplied } from "./providers/edition-state";
 
@@ -121,7 +137,12 @@ export const ensureEditionDefaults = (): void => {
   }
 
   if (IS_CLOUD) {
-    setDefaultCrypto(kmsCrypto);
+    // Secret crypto follows config presence, by the same rule as the gateway's
+    // `wiring::create_crypto_service`: an explicit SECRET_ENCRYPTION_KEY
+    // selects local AES, otherwise KMS envelope. The two MUST agree — the
+    // gateway decrypts only the format its own backend writes, so a row this
+    // side encrypts with the other backend is unreadable at injection time.
+    setDefaultCrypto(SECRET_ENCRYPTION_KEY ? localCrypto : kmsCrypto);
     // The SSH CA is nullable by design: null (no SSH_CA_KMS_KEY_ARN) keeps
     // the front-door surface dark rather than failing the boot — the same
     // config-presence posture as RUNNER_TOKEN.
@@ -149,7 +170,13 @@ export const ensureEditionDefaults = (): void => {
     setDefaultTeamHooks(eeTeamHooks);
     setDefaultRuleActionGate(eeRuleActionGate);
     setDefaultPolicyValidator(eePolicyValidator);
+    setDefaultConversationReader(eeConversationReader);
+    setDefaultConversationSender(eeConversationSender);
+    setDefaultUserReadConnectCompleter(eeUserReadConnectCompleter);
     setDefaultNewOrgPolicySeeder(eeNewOrgPolicySeeder);
+    // The agent's hosted desktop: hosted platform only. The self-host arm
+    // is the slot's null default (nothing claimed, the tool refuses).
+    setDefaultAgentDesktop(eeAgentDesktop);
     // Platform trial credit: dark by config (no PLATFORM_ANTHROPIC_API_KEY →
     // the provider answers false), like the SSH CA above — injection never
     // fails the boot.
@@ -192,6 +219,12 @@ export const ensureEditionDefaults = (): void => {
       // predicates delegate to the licensed admin-or-binding resolution the
       // moment CAPS.rbac flips on, in lockstep with the resolver.
       initWorkspaceAccessChecker(eeWorkspaceAccessChecker);
+      // "Connect your Slack" reads (granular_access): only a licensed
+      // self-host gets the reader; unlicensed keeps the null slot, so the
+      // tool refuses and is never listed.
+      initConversationReader(eeConversationReader);
+      initConversationSender(eeConversationSender);
+      initUserReadConnectCompleter(eeUserReadConnectCompleter);
       // Same reasoning for the team hooks: a licensed self-host reconciles
       // invited roles against directory group mappings. Its seat-cap half is
       // inert here — quotas are a billing concept and this edition has none —

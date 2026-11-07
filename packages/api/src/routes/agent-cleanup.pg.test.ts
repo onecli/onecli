@@ -52,7 +52,10 @@ beforeAll(async () => {
       request.resume();
       request.on("end", () => {
         const method = (request.url ?? "").slice(1);
-        methods.push(method);
+        // The gateway cache flush is fire-and-forget from the DELETE route,
+        // so it can land after a test resets `methods`. It is not a Slack
+        // call; answer it without recording it.
+        if (method !== "v1/cache/invalidate") methods.push(method);
         response.writeHead(200, { "content-type": "application/json" });
         const result =
           method === "apps.uninstall"

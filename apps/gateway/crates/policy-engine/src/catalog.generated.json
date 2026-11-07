@@ -1331,6 +1331,442 @@
       ]
     }
   },
+  "bitbucket": {
+    "approve_pull_request": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/pullrequests/*/approve"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "comment_pull_request": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/pullrequests/*/comments/"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_branch": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/refs/branches/"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_pull_request": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/pullrequests/"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "decline_pull_request": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/pullrequests/*/decline"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_branch": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/refs/branches/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_pull_request": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/pullrequests/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_repository": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/",
+        "/2.0/repositories/*/*/src/",
+        "/2.0/repositories/*/*/src/*",
+        "/2.0/repositories/*/*/commits/",
+        "/2.0/repositories/*/*/commits/*",
+        "/2.0/repositories/*/*/commit/*",
+        "/2.0/repositories/*/*/refs/",
+        "/2.0/repositories/*/*/refs/*",
+        "/2.0/repositories/*/*/diff/*",
+        "/2.0/repositories/*/*/diffstat/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_user": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/user"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "git_clone": {
+      "hosts": [
+        "bitbucket.org"
+      ],
+      "paths": [
+        "/*/*/git-upload-pack"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "git_push": {
+      "hosts": [
+        "bitbucket.org"
+      ],
+      "paths": [
+        "/*/*/git-receive-pack"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_pipelines": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/pipelines/",
+        "/2.0/repositories/*/*/pipelines/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_pull_requests": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/pullrequests/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_repositories": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_workspaces": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/user/workspaces"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "merge_pull_request": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/pullrequests/*/merge"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_pull_request": {
+      "hosts": [
+        "api.bitbucket.org"
+      ],
+      "paths": [
+        "/2.0/repositories/*/*/pullrequests/*/"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    }
+  },
+  "circleback": {
+    "create_action_item": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/action-items"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_action_item": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/action-item/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_meeting": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/meeting/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_account": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/oauth/test"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_company": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/company/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_meeting": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/meeting/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_person": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/person/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_transcript": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/meeting/*/transcript"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "import_meeting": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/meetings"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_action_items": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/action-items"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_calendar_events": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/calendar/events"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_companies": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/companies"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_meetings": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/meetings"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_people": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/people"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_tags": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/tag"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "manage_tags": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/tag",
+        "/api/tag/*/"
+      ],
+      "methods": [
+        "POST",
+        "PUT",
+        "DELETE"
+      ]
+    },
+    "search_meetings": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/search"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "share_meeting": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/meeting/*/share"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "update_action_item": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/action-item/*/"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "update_calendar_event_meeting": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/calendar/events/*/meeting"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "update_meeting": {
+      "hosts": [
+        "circleback.ai"
+      ],
+      "paths": [
+        "/api/meeting/*/"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    }
+  },
   "clay": {
     "get_credit_balance": {
       "hosts": [
@@ -1757,6 +2193,406 @@
       ]
     }
   },
+  "coralogix": {
+    "delete_alert": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/alerts/alerts/v3/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_dashboard": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/dashboards/dashboards/v1/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "filter_cases": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/cases/cases/v1"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "filter_incidents": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/incidents/incidents/v1"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_alert_events": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/alerts/events/v3",
+        "/mgmt/openapi/*/alerts/events/v3/*/",
+        "/mgmt/openapi/*/alerts/events/v3/all/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_alerts": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/alerts/alerts/v3",
+        "/mgmt/openapi/*/alerts/alerts/v3/*/",
+        "/mgmt/openapi/*/alerts/alerts/v3/all/*",
+        "/mgmt/openapi/*/alerts/alerts/v3/version-ids/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_cases": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/cases/cases/v1/*/",
+        "/mgmt/openapi/*/cases/cases/v1/*/events",
+        "/mgmt/openapi/*/cases/events/v1/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_dashboards": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/dashboards/dashboards/v1/catalog/list",
+        "/mgmt/openapi/*/dashboards/dashboards/v1/*/",
+        "/mgmt/openapi/*/dashboards/folders/v1"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_incidents": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/incidents/incidents/v1",
+        "/mgmt/openapi/*/incidents/incidents/v1/*/",
+        "/mgmt/openapi/*/incidents/incidents/v1/*/events",
+        "/mgmt/openapi/*/incidents/events/v1",
+        "/mgmt/openapi/*/incidents/events/v1/*/",
+        "/mgmt/openapi/*/incidents/events/v1/all/count"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_slos": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/slo/slos/v1",
+        "/mgmt/openapi/*/slo/slos/v1/*/",
+        "/mgmt/openapi/*/slo/slos/v1/*/status"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_views": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/data-exploration/views/v1/views",
+        "/mgmt/openapi/*/data-exploration/views/v1/views/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "manage_alerts": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/alerts/alerts/v3",
+        "/mgmt/openapi/*/alerts/alerts/v3/all/*"
+      ],
+      "methods": [
+        "POST",
+        "PUT"
+      ]
+    },
+    "manage_dashboards": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/dashboards/dashboards/v1",
+        "/mgmt/openapi/*/dashboards/dashboards/v1/*/default",
+        "/mgmt/openapi/*/dashboards/dashboards/v1/*/folder"
+      ],
+      "methods": [
+        "POST",
+        "PUT"
+      ]
+    },
+    "query_logs": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/api/v1/dataprime/query"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "query_metrics": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/metrics/api/v1/*"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ]
+    },
+    "update_cases": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/cases/cases/v1/*/comments",
+        "/mgmt/openapi/*/cases/cases/v1/*/",
+        "/mgmt/openapi/*/cases/acknowledged/v1",
+        "/mgmt/openapi/*/cases/acknowledged/v1/*/",
+        "/mgmt/openapi/*/cases/assigned/v1",
+        "/mgmt/openapi/*/cases/assigned/v1/*/",
+        "/mgmt/openapi/*/cases/resolved/v1",
+        "/mgmt/openapi/*/cases/resolved/v1/*/",
+        "/mgmt/openapi/*/cases/closed/v1",
+        "/mgmt/openapi/*/cases/closed/v1/*/",
+        "/mgmt/openapi/*/cases/events/v1/*/comments"
+      ],
+      "methods": [
+        "POST",
+        "PUT",
+        "DELETE"
+      ]
+    },
+    "update_incidents": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/incidents/incidents/v1/all/*",
+        "/mgmt/openapi/*/incidents/events/v1/*/acknowledge",
+        "/mgmt/openapi/*/incidents/events/v1/*/resolve"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "whoami": {
+      "hosts": [
+        "api.*.coralogix.com",
+        "ng-api-http.*.coralogix.com",
+        "api.coralogix.com",
+        "ng-api-http.coralogix.com",
+        "api.coralogix.us",
+        "ng-api-http.coralogix.us",
+        "api.coralogix.in",
+        "ng-api-http.coralogix.in",
+        "api.coralogixsg.com",
+        "ng-api-http.coralogixsg.com"
+      ],
+      "paths": [
+        "/mgmt/openapi/*/aaa/identity/v1/whoami"
+      ],
+      "methods": [
+        "GET"
+      ]
+    }
+  },
   "datadog": {
     "apm_services": {
       "hosts": [
@@ -1873,7 +2709,8 @@
         "*.datadoghq.com"
       ],
       "paths": [
-        "/api/v2/logs/*"
+        "/api/v2/logs/events/search",
+        "/api/v2/logs/analytics/aggregate"
       ],
       "methods": [
         "POST"
@@ -2088,6 +2925,159 @@
       ],
       "methods": [
         "PATCH"
+      ]
+    }
+  },
+  "dripify": {
+    "add_leads_to_campaign": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/campaigns/*/leads",
+        "/v1/open-api/lead-lists/*/leads"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_tag": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/tags"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_lead": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/leads/*/",
+        "/v1/open-api/leads/*/activity"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_campaigns": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/campaigns",
+        "/v1/open-api/campaigns/*/lead-lists",
+        "/v1/open-api/campaigns/*/statistics"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_fields_and_tags": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/custom-lead-fields",
+        "/v1/open-api/tags"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_leads": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/leads"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_teams": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/teams",
+        "/v1/open-api/teams/*/members"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "mcp_access": {
+      "hosts": [
+        "app.dripify.com"
+      ],
+      "paths": [
+        "/api/v1/mcp",
+        "/api/v1/mcp/*"
+      ],
+      "methods": []
+    },
+    "read_conversations": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/leads/*/conversation",
+        "/v1/open-api/conversations/*/messages"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "search_leads": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/leads/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "send_message": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/leads/*/messages"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "set_custom_field": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/leads/*/custom-fields/*/"
+      ],
+      "methods": [
+        "PUT",
+        "DELETE"
+      ]
+    },
+    "tag_leads": {
+      "hosts": [
+        "api.dripify.com"
+      ],
+      "paths": [
+        "/v1/open-api/leads/tags"
+      ],
+      "methods": [
+        "PUT",
+        "DELETE"
       ]
     }
   },
@@ -2400,7 +3390,7 @@
         "api.machines.dev"
       ],
       "paths": [
-        "/v1/apps/*"
+        "/v1/apps/*/"
       ],
       "methods": [
         "GET"
@@ -2971,7 +3961,8 @@
         "gitlab.com"
       ],
       "paths": [
-        "/api/v4/projects/*"
+        "/api/v4/projects/*/",
+        "/api/v4/projects/*/repository/*"
       ],
       "methods": [
         "GET"
@@ -4117,6 +5108,86 @@
       ]
     }
   },
+  "google-keep": {
+    "create_note": {
+      "hosts": [
+        "keep.googleapis.com"
+      ],
+      "paths": [
+        "/v1/notes"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_note": {
+      "hosts": [
+        "keep.googleapis.com"
+      ],
+      "paths": [
+        "/v1/notes/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "download_attachment": {
+      "hosts": [
+        "keep.googleapis.com"
+      ],
+      "paths": [
+        "/v1/notes/*/attachments/*",
+        "/download/v1/notes/*/attachments/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_note": {
+      "hosts": [
+        "keep.googleapis.com"
+      ],
+      "paths": [
+        "/v1/notes/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_notes": {
+      "hosts": [
+        "keep.googleapis.com"
+      ],
+      "paths": [
+        "/v1/notes"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "share_note": {
+      "hosts": [
+        "keep.googleapis.com"
+      ],
+      "paths": [
+        "/v1/notes/*/permissions:batchCreate"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "unshare_note": {
+      "hosts": [
+        "keep.googleapis.com"
+      ],
+      "paths": [
+        "/v1/notes/*/permissions:batchDelete"
+      ],
+      "methods": [
+        "POST"
+      ]
+    }
+  },
   "google-meet": {
     "create_space": {
       "hosts": [
@@ -4514,6 +5585,526 @@
       ],
       "methods": [
         "GET"
+      ]
+    }
+  },
+  "heyreach": {
+    "add_leads_to_campaign": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/AddLeadsToCampaignV2",
+        "/api/public/campaign/AddLeadsToCampaign"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "add_leads_to_list": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/list/AddLeadsToListV2",
+        "/api/public/list/AddLeadsToList"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "check_api_key": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/auth/CheckApiKey"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "create_api_key": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/management/organizations/api-keys/workspaces/*/"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_campaign": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/Create",
+        "/api/public/campaign/CreateCampaignFromTemplate"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_list": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/list/CreateEmptyList"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_tags": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/lead_tags/CreateTags"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "edit_blacklist": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/blacklist/AddLeads",
+        "/api/public/blacklist/RemoveLeads",
+        "/api/public/blacklist/AddCompanies",
+        "/api/public/blacklist/RemoveCompanies"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "edit_campaign": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/UpdateSettings",
+        "/api/public/campaign/UpdateSchedule",
+        "/api/public/campaign/UpdateAccounts",
+        "/api/public/campaign/AddLinkedInAccountsToCampaign",
+        "/api/public/campaign/RemoveLinkedInAccountsFromCampaign"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "edit_campaign_sequence": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/UpdateSequence"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "find_email": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/enrichment/enrich-email"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_campaign": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/GetById",
+        "/api/public/campaign/GetCampaignSequence"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_email_search": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/enrichment/enrich-email/check-job/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_lead": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/lead/GetLead",
+        "/api/public/lead/GetTags"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_lead_list": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/list/GetById"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_sender_account": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/li_account/GetById",
+        "/api/public/li_account/GetAccountStatus/*/",
+        "/api/public/li_account/GetProxyCountries"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_stats": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/stats/GetOverallStats",
+        "/api/public/stats/GetOverallStatsByCampaign"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "invite_users": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/management/organizations/users/invite/admins",
+        "/api/public/management/organizations/users/invite/members",
+        "/api/public/management/organizations/users/invite/managers"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_campaign_leads": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/GetLeadsFromCampaign"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_campaigns": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/GetAll",
+        "/api/public/campaign/GetCampaignsForLead"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_lead_lists": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/list/GetAll",
+        "/api/public/list/GetListsForLead"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_list_leads": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/list/GetLeadsFromList",
+        "/api/public/list/GetCompaniesFromList"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_organization_members": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/management/organizations/users",
+        "/api/public/management/organizations/users/workspaces/*/",
+        "/api/public/management/organizations/linkedin-accounts"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_sender_accounts": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/li_account/GetAll"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "manage_organization_accounts": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/management/organizations/linkedin-accounts/MoveToWorkspace",
+        "/api/public/management/organizations/linkedin-accounts/*/"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "manage_sender_accounts": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/li_account/Connect",
+        "/api/public/li_account/ConnectWithCookies",
+        "/api/public/li_account/SubmitPin",
+        "/api/public/li_account/Reconnect",
+        "/api/public/li_account/ReloginSalesNavigator",
+        "/api/public/li_account/ReloginRecruiter",
+        "/api/public/li_account/Resync",
+        "/api/public/li_account/UpdateProxy",
+        "/api/public/li_account/UpdateInboxConfiguration"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "manage_webhooks": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/webhooks/CreateWebhook",
+        "/api/public/webhooks/UpdateWebhook",
+        "/api/public/webhooks/DeleteWebhook"
+      ],
+      "methods": [
+        "POST",
+        "PATCH",
+        "DELETE"
+      ]
+    },
+    "manage_workspaces": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/management/organizations/workspaces",
+        "/api/public/management/organizations/workspaces/*/"
+      ],
+      "methods": [
+        "POST",
+        "PATCH"
+      ]
+    },
+    "mark_conversation_seen": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/inbox/SetSeenStatus"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "pause_campaign": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/Pause"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "read_blacklist": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/blacklist/GetLeads",
+        "/api/public/blacklist/GetCompanies"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "read_conversation": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/inbox/GetChatroom/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "read_inbox": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/inbox/GetConversationsV2",
+        "/api/public/inbox/GetConversationsV3"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "read_network": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/MyNetwork/GetMyNetworkForSender",
+        "/api/public/MyNetwork/IsConnection"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "read_organization": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/management/organizations/workspaces",
+        "/api/public/management/organizations/users/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "remove_leads_from_list": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/list/DeleteLeadsFromList",
+        "/api/public/list/DeleteLeadsFromListByProfileUrl"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "remove_sender_account": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/li_account/RemoveAccount/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "resume_campaign": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/Resume"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "send_message": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/inbox/SendMessage"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "start_campaign": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/StartCampaign"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "stop_lead_in_campaign": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/StopLeadInCampaign"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "tag_lead": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/lead/AddTags",
+        "/api/public/lead/ReplaceTags"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_lead_fields": {
+      "hosts": [
+        "api.heyreach.io"
+      ],
+      "paths": [
+        "/api/public/campaign/UpdateLeadCustomFields/campaigns/*/leads/custom-fields",
+        "/api/public/list/UpdateLeadCustomFields/lists/*/leads/custom-fields"
+      ],
+      "methods": [
+        "PATCH"
       ]
     }
   },
@@ -5327,7 +6918,8 @@
       ],
       "methods": [
         "POST"
-      ]
+      ],
+      "graphqlOps": "mutation"
     },
     "mutate_boards": {
       "hosts": [
@@ -5338,7 +6930,8 @@
       ],
       "methods": [
         "POST"
-      ]
+      ],
+      "graphqlOps": "mutation"
     },
     "mutate_docs": {
       "hosts": [
@@ -5349,7 +6942,8 @@
       ],
       "methods": [
         "POST"
-      ]
+      ],
+      "graphqlOps": "mutation"
     },
     "mutate_updates": {
       "hosts": [
@@ -5360,7 +6954,8 @@
       ],
       "methods": [
         "POST"
-      ]
+      ],
+      "graphqlOps": "mutation"
     },
     "query_boards": {
       "hosts": [
@@ -5371,7 +6966,8 @@
       ],
       "methods": [
         "POST"
-      ]
+      ],
+      "graphqlOps": "query"
     },
     "query_docs": {
       "hosts": [
@@ -5382,7 +6978,8 @@
       ],
       "methods": [
         "POST"
-      ]
+      ],
+      "graphqlOps": "query"
     },
     "query_updates": {
       "hosts": [
@@ -5393,7 +6990,8 @@
       ],
       "methods": [
         "POST"
-      ]
+      ],
+      "graphqlOps": "query"
     },
     "query_users": {
       "hosts": [
@@ -5404,7 +7002,8 @@
       ],
       "methods": [
         "POST"
-      ]
+      ],
+      "graphqlOps": "query"
     },
     "query_workspaces": {
       "hosts": [
@@ -5415,7 +7014,8 @@
       ],
       "methods": [
         "POST"
-      ]
+      ],
+      "graphqlOps": "query"
     },
     "send_notifications": {
       "hosts": [
@@ -5426,7 +7026,8 @@
       ],
       "methods": [
         "POST"
-      ]
+      ],
+      "graphqlOps": "mutation"
     }
   },
   "mongodb-atlas": {
@@ -5618,6 +7219,327 @@
       ]
     }
   },
+  "navan": {
+    "get_custom_field": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/custom-fields/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_gl_code": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/gl-codes/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_gl_code_settings": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/gl-code-settings"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_tax_mapping": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/tax-mappings/by-tax-code"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_transaction": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/transactions/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_adjustments": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/adjustments"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_bookings": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/bookings"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_card_transactions": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/card-transactions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_connect_transactions": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/connect-transactions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_custom_fields": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/custom-fields"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_daily_rebates": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/daily-rebates"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_disputes": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/disputes"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_fees": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/fees"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_gl_codes": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/gl-codes"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_manual_transactions": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/manual-transactions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_receipts": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/transactions/receipts"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_repayments": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/repayments"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_statement_payments": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/statement-payments"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_tax_mappings": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/tax-mappings"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_transactions": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/transactions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "manage_custom_field_options": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/custom-fields/*/options"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "manage_gl_code_exclusions": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/gl-code-exclusions",
+        "/v1/expense/gl-code-exclusions/*"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "manage_gl_codes": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/gl-codes",
+        "/v1/expense/gl-codes/*"
+      ],
+      "methods": [
+        "PUT",
+        "PATCH"
+      ]
+    },
+    "manage_tax_mappings": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/tax-mappings",
+        "/v1/expense/tax-mappings/*"
+      ],
+      "methods": [
+        "PUT",
+        "PATCH",
+        "POST",
+        "DELETE"
+      ]
+    },
+    "read_all": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_gl_code_settings": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/gl-code-settings"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_transactions": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/expense/transactions"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "write_all": {
+      "hosts": [
+        "api.navan.com"
+      ],
+      "paths": [
+        "/v1/*"
+      ],
+      "methods": [
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE"
+      ]
+    }
+  },
   "notion": {
     "append_blocks": {
       "hosts": [
@@ -5760,6 +7682,233 @@
       ],
       "methods": [
         "PATCH"
+      ]
+    }
+  },
+  "onyx": {
+    "chat": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/chat/send-chat-message",
+        "/api/chat/create-chat-session"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "connector_indexing_status": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/manage/admin/connector/indexing-status"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_agent": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/persona"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_chat_session": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/chat/delete-chat-session/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_ingested_document": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/onyx-api/ingestion/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_me": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/me",
+        "/api/me/permissions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "ingest_documents": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/onyx-api/ingestion"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_agents": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/persona",
+        "/api/persona/*/",
+        "/api/agents"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_chat_sessions": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/chat/get-user-chat-sessions",
+        "/api/chat/get-chat-session/*/",
+        "/api/chat/search"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_connectors": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/manage/admin/connector",
+        "/api/manage/admin/connector/status",
+        "/api/manage/admin/connector/failed-indexing-status"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_document_sets": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/manage/document-set",
+        "/api/manage/document-set-public"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_ingested_documents": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/onyx-api/ingestion",
+        "/api/onyx-api/connector-docs/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_projects": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/user/projects",
+        "/api/user/projects/*/",
+        "/api/user/projects/*/details"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "manage_connectors": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/manage/admin/connector",
+        "/api/manage/admin/connector/run-once"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "mcp_access": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/mcp",
+        "/mcp/*"
+      ],
+      "methods": []
+    },
+    "search": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/search",
+        "/api/search/send-search-message",
+        "/api/search/search-flow-classification"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_history": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/search/search-history"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_agent": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/persona/*/"
+      ],
+      "methods": [
+        "PATCH",
+        "DELETE"
+      ]
+    },
+    "update_connector": {
+      "hosts": [
+        "cloud.onyx.app"
+      ],
+      "paths": [
+        "/api/manage/admin/connector/*/"
+      ],
+      "methods": [
+        "PATCH",
+        "DELETE"
       ]
     }
   },
@@ -5975,6 +8124,432 @@
       ],
       "methods": [
         "PATCH"
+      ]
+    }
+  },
+  "pagerduty": {
+    "add_incident_note": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/notes"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "add_responders": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/responder_requests"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_change_event": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/change_events"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_incident": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_incident": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_abilities": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/abilities",
+        "/abilities/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_business_services": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/business_services",
+        "/business_services/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_change_events": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/change_events",
+        "/change_events/*/",
+        "/services/*/change_events"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_escalation_policies": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/escalation_policies",
+        "/escalation_policies/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_incident_alerts": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/alerts",
+        "/incidents/*/alerts/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_incident_log_entries": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/log_entries",
+        "/log_entries",
+        "/log_entries/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_incident_notes": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/notes"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_incident_related": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/related_incidents",
+        "/incidents/*/past_incidents",
+        "/incidents/*/outlier_incident"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_incidents": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_maintenance_windows": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/maintenance_windows",
+        "/maintenance_windows/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_oncalls": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/oncalls"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_priorities": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/priorities"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_schedules": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/schedules",
+        "/schedules/*/",
+        "/schedules/*/users",
+        "/schedules/*/overrides"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_services": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/services",
+        "/services/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_teams": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/teams",
+        "/teams/*/",
+        "/teams/*/members"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_users": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/users",
+        "/users/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "manage_alerts": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/alerts",
+        "/incidents/*/alerts/*/"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "manage_maintenance_windows": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/maintenance_windows",
+        "/maintenance_windows/*/"
+      ],
+      "methods": [
+        "POST",
+        "PUT",
+        "DELETE"
+      ]
+    },
+    "manage_schedule_overrides": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/schedules/*/overrides",
+        "/schedules/*/overrides/*/"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "manage_services": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/services",
+        "/services/*/"
+      ],
+      "methods": [
+        "POST",
+        "PUT",
+        "DELETE"
+      ]
+    },
+    "merge_incidents": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/merge"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "read_analytics": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/analytics/*"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ]
+    },
+    "send_status_update": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/status_updates"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "snooze_incident": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/snooze"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_incident": {
+      "hosts": [
+        "api.pagerduty.com",
+        "api.eu.pagerduty.com"
+      ],
+      "paths": [
+        "/incidents/*/",
+        "/incidents"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    }
+  },
+  "postgres": {
+    "sql_read": {
+      "hosts": [
+        "*.postgres.onecli.invalid"
+      ],
+      "paths": [
+        "/sql/read"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "sql_schema": {
+      "hosts": [
+        "*.postgres.onecli.invalid"
+      ],
+      "paths": [
+        "/sql/schema"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "sql_write": {
+      "hosts": [
+        "*.postgres.onecli.invalid"
+      ],
+      "paths": [
+        "/sql/write"
+      ],
+      "methods": [
+        "POST"
       ]
     }
   },
@@ -6312,6 +8887,1618 @@
       ]
     }
   },
+  "pylon": {
+    "create_account": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_account_activity": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/*/activities"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_account_notebook_note": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/*/notebook-blocks/*/notes"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_article": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/articles"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_attachment": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/attachments"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_collection": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/collections"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_contact": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/contacts"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_custom_object": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/custom-objects/*/"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_feature_request": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/feature-requests"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_issue": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_issue_ai_response": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/ai-response"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_issue_note": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/note"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_issue_thread": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/threads"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_milestone": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/milestones"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_project": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/projects"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_route_redirect": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/route-redirects"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_task": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tasks"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_team": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/teams"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_account": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_article": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/articles/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_call_recording": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/call-recordings/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_collection": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/collections/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_contact": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/contacts/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_custom_object": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/custom-objects/*/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_email_suppression": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/email-suppressions/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_feature_request": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/feature-requests/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_issue": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_message": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/messages/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_milestone": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/milestones/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_project": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/projects/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_task": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tasks/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "draft_issue_reply": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/draft-reply"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_account": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_account_activities": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/*/activities"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_account_notebook_notes": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/*/notebook-blocks/*/notes"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_account_relationships": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/*/relationships"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_article": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/articles/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_call_recording": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/call-recordings/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_collection": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/collections/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_contact": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/contacts/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_custom_field": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/custom-fields/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_custom_object": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/custom-objects/*/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_feature_request": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/feature-requests/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_issue": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_issue_followers": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/followers"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_issue_messages": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/messages"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_issue_threads": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/threads"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_issue_voice_calls": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/voice-calls"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_knowledge_base": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_knowledge_base_theme": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/themes/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_macro": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/macros/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_me": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/me"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_milestone": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/milestones/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_project": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/projects/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_survey": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/surveys/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_survey_responses": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/surveys/*/responses"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_tag": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tags/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_task": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tasks/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_task_comments": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tasks/*/comments"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_team": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/teams/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_ticket_form": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/ticket-forms/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_training_data": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/training-data/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_user": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/users/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "link_external_issue": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/external-issues"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "link_feature_request_evidence": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/feature-requests/*/evidence"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "link_task_issue": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tasks/*/issues",
+        "/tasks/*/external-issues"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "list_accounts": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_activity_types": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/activity-types"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_article_feedback": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/article-feedback"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_articles": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/articles"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_audit_logs": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/audit-logs"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_collections": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/collections"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_contacts": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/contacts"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_custom_fields": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/custom-fields"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_custom_objects": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/custom-objects/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_email_suppressions": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/email-suppressions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_issue_statuses": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issue-statuses"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_issues": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_knowledge_bases": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_macro_groups": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/macro-groups"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_macros": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/macros"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_surveys": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/surveys"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_tags": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tags"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_tasks": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tasks"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_teams": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/teams"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_ticket_forms": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/ticket-forms"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_training_data": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/training-data"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_user_roles": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/user-roles"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_users": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/users"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "manage_account_relationships": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/*/relationship",
+        "/accounts/*/relationships/*/"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "manage_custom_fields": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/custom-fields",
+        "/custom-fields/*/",
+        "/custom-fields/*/select-options"
+      ],
+      "methods": [
+        "POST",
+        "PATCH",
+        "DELETE"
+      ]
+    },
+    "manage_issue_followers": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/followers"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "manage_issue_groups": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issue-groups",
+        "/issue-groups/*/children",
+        "/issue-groups/*/children/*/"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "manage_knowledge_base_theme": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/themes/*/",
+        "/knowledge-bases/*/themes/*/publish"
+      ],
+      "methods": [
+        "PATCH",
+        "POST"
+      ]
+    },
+    "manage_macros": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/macros",
+        "/macros/*/"
+      ],
+      "methods": [
+        "POST",
+        "PATCH",
+        "DELETE"
+      ]
+    },
+    "manage_tags": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tags",
+        "/tags/*/"
+      ],
+      "methods": [
+        "POST",
+        "PATCH",
+        "DELETE"
+      ]
+    },
+    "manage_task_comments": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tasks/*/comments",
+        "/tasks/*/comments/*/"
+      ],
+      "methods": [
+        "POST",
+        "PATCH",
+        "DELETE"
+      ]
+    },
+    "manage_training_data": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/training-data",
+        "/training-data/upload",
+        "/training-data/upload-content",
+        "/training-data/*/documents"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "merge_accounts": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/merge"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "merge_feature_requests": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/feature-requests/merge"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "redact_message": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/messages/*/redact"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "reply_to_issue": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/reply"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "request_article_review": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/articles/*/request-review"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_accounts": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_audit_logs": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/audit-logs/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_call_recordings": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/call-recordings/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_contacts": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/contacts/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_custom_objects": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/custom-objects/*/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_feature_requests": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/feature-requests/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_issues": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_milestones": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/milestones/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_projects": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/projects/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_surveys": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/surveys/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_tasks": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tasks/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search_users": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/users/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "set_feature_request_portal_visibility": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/feature-requests/*/set-portal-visibility"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "snooze_issue": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/snooze"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "submit_ticket_form": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/ticket-forms/*/submissions"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_account": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_accounts": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/accounts"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_article": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/articles/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_call_recording": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/call-recordings/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_collection": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/knowledge-bases/*/collections/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_contact": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/contacts/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_custom_objects": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/custom-objects/*/*/",
+        "/custom-objects/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_feature_request": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/feature-requests/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_issue": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/issues/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_milestone": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/milestones/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_project": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/projects/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_task": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/tasks/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_team": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/teams/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_user": {
+      "hosts": [
+        "api.usepylon.com",
+        "api.eu.usepylon.com"
+      ],
+      "paths": [
+        "/users/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    }
+  },
   "resend": {
     "create_batch": {
       "hosts": [
@@ -6375,7 +10562,9 @@
         "*.my.salesforce.com"
       ],
       "paths": [
-        "/services/data/v*/sobjects/*/*"
+        "/services/data/v*/sobjects/*/*",
+        "/services/data/v*/composite/sobjects",
+        "/services/data/v*/composite/sobjects/"
       ],
       "methods": [
         "DELETE"
@@ -6501,7 +10690,9 @@
         "*.my.salesforce.com"
       ],
       "paths": [
-        "/services/data/v*/sobjects/*/*"
+        "/services/data/v*/sobjects/*/*",
+        "/services/data/v*/composite/sobjects",
+        "/services/data/v*/composite/sobjects/"
       ],
       "methods": [
         "PATCH"
@@ -6569,7 +10760,7 @@
         "*.sentry.io"
       ],
       "paths": [
-        "/api/0/projects/*/*"
+        "/api/0/projects/*/*/"
       ],
       "methods": [
         "GET"
@@ -7172,7 +11363,7 @@
         "api.supabase.com"
       ],
       "paths": [
-        "/v1/projects/*"
+        "/v1/projects/*/"
       ],
       "methods": [
         "GET"
@@ -7278,6 +11469,329 @@
         "PUT",
         "PATCH",
         "DELETE"
+      ]
+    }
+  },
+  "tavily": {
+    "crawl": {
+      "hosts": [
+        "api.tavily.com"
+      ],
+      "paths": [
+        "/crawl"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "extract": {
+      "hosts": [
+        "api.tavily.com"
+      ],
+      "paths": [
+        "/extract"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "feedback": {
+      "hosts": [
+        "api.tavily.com"
+      ],
+      "paths": [
+        "/feedback"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "get_research": {
+      "hosts": [
+        "api.tavily.com"
+      ],
+      "paths": [
+        "/research/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "logs": {
+      "hosts": [
+        "api.tavily.com"
+      ],
+      "paths": [
+        "/logs"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "map": {
+      "hosts": [
+        "api.tavily.com"
+      ],
+      "paths": [
+        "/map"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "mcp_access": {
+      "hosts": [
+        "mcp.tavily.com"
+      ],
+      "paths": [
+        "/mcp",
+        "/mcp/*"
+      ],
+      "methods": []
+    },
+    "org_usage": {
+      "hosts": [
+        "api.tavily.com"
+      ],
+      "paths": [
+        "/org-usage"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "research": {
+      "hosts": [
+        "api.tavily.com"
+      ],
+      "paths": [
+        "/research"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search": {
+      "hosts": [
+        "api.tavily.com"
+      ],
+      "paths": [
+        "/search"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "usage": {
+      "hosts": [
+        "api.tavily.com"
+      ],
+      "paths": [
+        "/usage"
+      ],
+      "methods": [
+        "GET"
+      ]
+    }
+  },
+  "timeless": {
+    "cancel_bot": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings/*/bot"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_document": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/documents/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_notetaker_automation": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/settings/notetaker-automation"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_recording": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings/*/recording"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_transcript": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings/*/transcript"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_meeting_permissions": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings/*/permissions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_meetings": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_rooms": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/rooms"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_upcoming_meetings": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings/upcoming"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_webhooks": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/webhooks"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "manage_webhooks": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/webhooks",
+        "/v1/webhooks/*"
+      ],
+      "methods": [
+        "POST",
+        "PATCH",
+        "DELETE"
+      ]
+    },
+    "mcp_access": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/mcp/*"
+      ],
+      "methods": []
+    },
+    "revoke_meeting_permission": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings/*/permissions/*"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "schedule_bot": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings/*/bot"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "send_bot_to_link": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings/bot"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "set_meeting_permission": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings/*/permissions"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "set_notetaker_automation": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/settings/notetaker-automation"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "upload_media": {
+      "hosts": [
+        "api.timeless.day"
+      ],
+      "paths": [
+        "/v1/meetings/upload"
+      ],
+      "methods": [
+        "PUT"
       ]
     }
   },
@@ -7472,6 +11986,268 @@
       ]
     }
   },
+  "twilio": {
+    "lookup_phone_number": {
+      "hosts": [
+        "lookups.twilio.com",
+        "lookups.dublin.ie1.twilio.com",
+        "lookups.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/v2/PhoneNumbers/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "manage_calls": {
+      "hosts": [
+        "api.twilio.com",
+        "api.dublin.ie1.twilio.com",
+        "api.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/2010-04-01/Accounts/*/Calls/*",
+        "/2010-04-01/Accounts/*/Recordings/*"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "manage_conversations": {
+      "hosts": [
+        "conversations.twilio.com",
+        "conversations.dublin.ie1.twilio.com",
+        "conversations.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/v1/Conversations",
+        "/v1/Conversations/*",
+        "/v1/Services/*"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "manage_messages": {
+      "hosts": [
+        "api.twilio.com",
+        "api.dublin.ie1.twilio.com",
+        "api.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/2010-04-01/Accounts/*/Messages/*"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "manage_messaging_services": {
+      "hosts": [
+        "messaging.twilio.com",
+        "messaging.dublin.ie1.twilio.com",
+        "messaging.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/v1/Services",
+        "/v1/Services/*"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "manage_phone_numbers": {
+      "hosts": [
+        "api.twilio.com",
+        "api.dublin.ie1.twilio.com",
+        "api.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/2010-04-01/Accounts/*/IncomingPhoneNumbers.json",
+        "/2010-04-01/Accounts/*/IncomingPhoneNumbers/*"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "manage_verify_services": {
+      "hosts": [
+        "verify.twilio.com",
+        "verify.dublin.ie1.twilio.com",
+        "verify.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/v2/Services",
+        "/v2/Services/*/"
+      ],
+      "methods": [
+        "POST",
+        "DELETE"
+      ]
+    },
+    "place_call": {
+      "hosts": [
+        "api.twilio.com",
+        "api.dublin.ie1.twilio.com",
+        "api.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/2010-04-01/Accounts/*/Calls.json"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "read_calls": {
+      "hosts": [
+        "api.twilio.com",
+        "api.dublin.ie1.twilio.com",
+        "api.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/2010-04-01/Accounts/*/Calls.json",
+        "/2010-04-01/Accounts/*/Calls/*",
+        "/2010-04-01/Accounts/*/Recordings.json",
+        "/2010-04-01/Accounts/*/Recordings/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "read_conversations": {
+      "hosts": [
+        "conversations.twilio.com",
+        "conversations.dublin.ie1.twilio.com",
+        "conversations.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/v1/Conversations",
+        "/v1/Conversations/*",
+        "/v1/Services/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "read_messages": {
+      "hosts": [
+        "api.twilio.com",
+        "api.dublin.ie1.twilio.com",
+        "api.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/2010-04-01/Accounts/*/Messages.json",
+        "/2010-04-01/Accounts/*/Messages/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "read_messaging_services": {
+      "hosts": [
+        "messaging.twilio.com",
+        "messaging.dublin.ie1.twilio.com",
+        "messaging.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/v1/Services",
+        "/v1/Services/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "read_phone_numbers": {
+      "hosts": [
+        "api.twilio.com",
+        "api.dublin.ie1.twilio.com",
+        "api.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/2010-04-01/Accounts/*/IncomingPhoneNumbers.json",
+        "/2010-04-01/Accounts/*/IncomingPhoneNumbers/*",
+        "/2010-04-01/Accounts/*/OutgoingCallerIds.json",
+        "/2010-04-01/Accounts/*/AvailablePhoneNumbers.json",
+        "/2010-04-01/Accounts/*/AvailablePhoneNumbers/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "read_usage": {
+      "hosts": [
+        "api.twilio.com",
+        "api.dublin.ie1.twilio.com",
+        "api.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/2010-04-01/Accounts/*/Balance.json",
+        "/2010-04-01/Accounts/*/Usage/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "read_verify_services": {
+      "hosts": [
+        "verify.twilio.com",
+        "verify.dublin.ie1.twilio.com",
+        "verify.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/v2/Services",
+        "/v2/Services/*"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "send_message": {
+      "hosts": [
+        "api.twilio.com",
+        "api.dublin.ie1.twilio.com",
+        "api.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/2010-04-01/Accounts/*/Messages.json"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "send_verification": {
+      "hosts": [
+        "verify.twilio.com",
+        "verify.dublin.ie1.twilio.com",
+        "verify.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/v2/Services/*/Verifications",
+        "/v2/Services/*/VerificationCheck"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_verification": {
+      "hosts": [
+        "verify.twilio.com",
+        "verify.dublin.ie1.twilio.com",
+        "verify.sydney.au1.twilio.com"
+      ],
+      "paths": [
+        "/v2/Services/*/Verifications/*"
+      ],
+      "methods": [
+        "POST"
+      ]
+    }
+  },
   "vercel": {
     "add_domain": {
       "hosts": [
@@ -7533,7 +12309,7 @@
         "api.vercel.com"
       ],
       "paths": [
-        "/v9/projects/*"
+        "/v9/projects/*/"
       ],
       "methods": [
         "GET"
@@ -7668,6 +12444,478 @@
       ],
       "paths": [
         "/v1/projects/*/locations/*/endpoints/*:predict"
+      ],
+      "methods": [
+        "POST"
+      ]
+    }
+  },
+  "webflow": {
+    "create_collection": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/collections"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_collection_field": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/collections/*/fields"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_items": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/collections/*/items/insert",
+        "/v2/collections/*/items",
+        "/v2/collections/*/items/bulk",
+        "/v2/collections/*/items/live"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_asset": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/assets/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_collection": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/collections/*/",
+        "/v2/collections/*/fields/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_form_submission": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/form_submissions/*/",
+        "/v2/form_submissions/*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_items": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/collections/*/items",
+        "/v2/collections/*/items/live",
+        "/v2/collections/*/items/*/",
+        "/v2/collections/*/items/*/live"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_site_config": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/robots_txt",
+        "/v2/sites/*/well_known"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_asset": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/assets/*/",
+        "/v2/asset_folders/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_authorized_user": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/token/authorized_by",
+        "/v2/token/introspect"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_collection": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/collections/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_component": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/components/*/dom",
+        "/v2/sites/*/components/*/properties"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_form": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/forms/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_form_submission": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/form_submissions/*/",
+        "/v2/form_submissions/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_item": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/collections/*/items/*/",
+        "/v2/collections/*/items/*/live"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_page": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/pages/*/",
+        "/v2/pages/*/dom"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_robots_txt": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/robots_txt"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_site": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/",
+        "/v2/sites/*/custom_domains"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_site_activity": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/activity_logs"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_assets": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/assets",
+        "/v2/sites/*/asset_folders"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_collections": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/collections"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_comments": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/comments",
+        "/v2/sites/*/comments/*/",
+        "/v2/sites/*/comments/*/replies"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_components": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/components"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_form_submissions": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/form_submissions",
+        "/v2/sites/*/forms/*/submissions",
+        "/v2/forms/*/submissions"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_forms": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/forms"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_items": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/collections/*/items",
+        "/v2/collections/*/items/live"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_pages": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/pages"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_sites": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "publish_items": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/collections/*/items/publish"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "publish_site": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/publish"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "set_well_known_file": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/well_known"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "update_asset": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/assets/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_collection": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/collections/*/",
+        "/v2/collections/*/fields/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_component": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/components/*/dom",
+        "/v2/sites/*/components/*/properties"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_form_submission": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/form_submissions/*/",
+        "/v2/form_submissions/*/"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_items": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/collections/*/items",
+        "/v2/collections/*/items/live",
+        "/v2/collections/*/items/*/",
+        "/v2/collections/*/items/*/live"
+      ],
+      "methods": [
+        "PATCH"
+      ]
+    },
+    "update_page_content": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/pages/*/dom"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "update_page_settings": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/pages/*/"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "update_robots_txt": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/robots_txt"
+      ],
+      "methods": [
+        "PUT",
+        "PATCH"
+      ]
+    },
+    "upload_asset": {
+      "hosts": [
+        "api.webflow.com"
+      ],
+      "paths": [
+        "/v2/sites/*/assets",
+        "/v2/sites/*/asset_folders"
       ],
       "methods": [
         "POST"
@@ -8085,6 +13333,303 @@
       ]
     }
   },
+  "zendesk": {
+    "create_article": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/help_center/*/sections/*/articles",
+        "/api/v2/help_center/*/sections/*/articles.json",
+        "/api/v2/help_center/sections/*/articles",
+        "/api/v2/help_center/sections/*/articles.json"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_ticket": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/tickets",
+        "/api/v2/tickets.json"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "create_user": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/users",
+        "/api/v2/users.json"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "delete_tickets": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/tickets/0*/",
+        "/api/v2/tickets/1*/",
+        "/api/v2/tickets/2*/",
+        "/api/v2/tickets/3*/",
+        "/api/v2/tickets/4*/",
+        "/api/v2/tickets/5*/",
+        "/api/v2/tickets/6*/",
+        "/api/v2/tickets/7*/",
+        "/api/v2/tickets/8*/",
+        "/api/v2/tickets/9*/",
+        "/api/v2/tickets/destroy_many",
+        "/api/v2/tickets/destroy_many.json"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "delete_user": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/users/0*/",
+        "/api/v2/users/1*/",
+        "/api/v2/users/2*/",
+        "/api/v2/users/3*/",
+        "/api/v2/users/4*/",
+        "/api/v2/users/5*/",
+        "/api/v2/users/6*/",
+        "/api/v2/users/7*/",
+        "/api/v2/users/8*/",
+        "/api/v2/users/9*/"
+      ],
+      "methods": [
+        "DELETE"
+      ]
+    },
+    "get_job_status": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/job_statuses/*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_organization": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/organizations/0*/",
+        "/api/v2/organizations/1*/",
+        "/api/v2/organizations/2*/",
+        "/api/v2/organizations/3*/",
+        "/api/v2/organizations/4*/",
+        "/api/v2/organizations/5*/",
+        "/api/v2/organizations/6*/",
+        "/api/v2/organizations/7*/",
+        "/api/v2/organizations/8*/",
+        "/api/v2/organizations/9*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_ticket": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/tickets/0*/",
+        "/api/v2/tickets/1*/",
+        "/api/v2/tickets/2*/",
+        "/api/v2/tickets/3*/",
+        "/api/v2/tickets/4*/",
+        "/api/v2/tickets/5*/",
+        "/api/v2/tickets/6*/",
+        "/api/v2/tickets/7*/",
+        "/api/v2/tickets/8*/",
+        "/api/v2/tickets/9*/"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "get_user": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/users/0*/",
+        "/api/v2/users/1*/",
+        "/api/v2/users/2*/",
+        "/api/v2/users/3*/",
+        "/api/v2/users/4*/",
+        "/api/v2/users/5*/",
+        "/api/v2/users/6*/",
+        "/api/v2/users/7*/",
+        "/api/v2/users/8*/",
+        "/api/v2/users/9*/",
+        "/api/v2/users/me",
+        "/api/v2/users/me.json"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_articles": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/help_center/*/articles",
+        "/api/v2/help_center/*/articles.json",
+        "/api/v2/help_center/articles",
+        "/api/v2/help_center/articles.json"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_organizations": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/organizations",
+        "/api/v2/organizations.json"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_ticket_comments": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/tickets/*/comments",
+        "/api/v2/tickets/*/comments.json"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_tickets": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/tickets",
+        "/api/v2/tickets.json"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "list_users": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/users",
+        "/api/v2/users.json"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "mark_ticket_spam": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/tickets/*/mark_as_spam",
+        "/api/v2/tickets/*/mark_as_spam.json",
+        "/api/v2/tickets/mark_many_as_spam",
+        "/api/v2/tickets/mark_many_as_spam.json"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "merge_tickets": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/tickets/*/merge",
+        "/api/v2/tickets/*/merge.json"
+      ],
+      "methods": [
+        "POST"
+      ]
+    },
+    "search": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/search",
+        "/api/v2/search.json"
+      ],
+      "methods": [
+        "GET"
+      ]
+    },
+    "update_ticket": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/tickets/0*/",
+        "/api/v2/tickets/1*/",
+        "/api/v2/tickets/2*/",
+        "/api/v2/tickets/3*/",
+        "/api/v2/tickets/4*/",
+        "/api/v2/tickets/5*/",
+        "/api/v2/tickets/6*/",
+        "/api/v2/tickets/7*/",
+        "/api/v2/tickets/8*/",
+        "/api/v2/tickets/9*/",
+        "/api/v2/tickets/update_many",
+        "/api/v2/tickets/update_many.json"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    },
+    "update_user": {
+      "hosts": [
+        "*.zendesk.com"
+      ],
+      "paths": [
+        "/api/v2/users/0*/",
+        "/api/v2/users/1*/",
+        "/api/v2/users/2*/",
+        "/api/v2/users/3*/",
+        "/api/v2/users/4*/",
+        "/api/v2/users/5*/",
+        "/api/v2/users/6*/",
+        "/api/v2/users/7*/",
+        "/api/v2/users/8*/",
+        "/api/v2/users/9*/"
+      ],
+      "methods": [
+        "PUT"
+      ]
+    }
+  },
   "zoho-crm": {
     "create_account": {
       "hosts": [
@@ -8256,7 +13801,20 @@
         "www.zohoapis.com"
       ],
       "paths": [
-        "/crm/v8/settings/*"
+        "/crm/v8/settings/modules",
+        "/crm/v8/settings/modules/*/",
+        "/crm/v8/settings/fields",
+        "/crm/v8/settings/fields/*/",
+        "/crm/v8/settings/layouts",
+        "/crm/v8/settings/layouts/*/",
+        "/crm/v8/settings/custom_views",
+        "/crm/v8/settings/custom_views/*/",
+        "/crm/v8/settings/related_lists",
+        "/crm/v8/settings/related_lists/*/",
+        "/crm/v8/settings/roles",
+        "/crm/v8/settings/roles/*/",
+        "/crm/v8/settings/profiles",
+        "/crm/v8/settings/profiles/*/"
       ],
       "methods": [
         "GET"

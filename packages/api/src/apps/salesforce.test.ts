@@ -107,6 +107,39 @@ describe("authorization URL", () => {
       }),
     ).rejects.toThrow(/production or sandbox/);
   });
+
+  // The dialog renders `environment` as a fixed choice, so the options ARE the
+  // contract: every value a user can pick must be one `loginOrigin` accepts,
+  // and Developer Edition orgs (the usual evaluation org) sign in through the
+  // production host, never the sandbox one. Add an option the switch doesn't
+  // know, or relabel the hosts, and this fails.
+  it("maps every environment option to its Salesforce login host", async () => {
+    const field = salesforce.configurable?.fields.find(
+      (f) => f.name === "environment",
+    );
+    if (!field?.options) throw new Error("expected environment options");
+
+    const hostFor = async (environment: string) =>
+      new URL(
+        await method.buildAuthUrl({
+          appCredentials: { ...credentials, environment },
+          redirectUri: "https://api.onecli.sh/v1/apps/salesforce/callback",
+          scopes: ["api"],
+          state: "signed-state",
+        }),
+      ).origin;
+
+    const hosts = Object.fromEntries(
+      await Promise.all(
+        field.options.map(async (o) => [o.value, await hostFor(o.value)]),
+      ),
+    );
+    expect(hosts).toEqual({
+      production: "https://login.salesforce.com",
+      sandbox: "https://test.salesforce.com",
+    });
+    expect(field.defaultValue).toBe("production");
+  });
 });
 
 describe("code exchange", () => {

@@ -1,0 +1,28 @@
+.screen {
+  animation: screen-appear 200ms ease-out;
+}
+
+@keyframes screen-appear {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+:global(:root):has(.screen)::view-transition-group(onecli-desktop-screen) {
+  animation-duration: 260ms;
+  animation-timing-function: ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .screen {
+    animation: none;
+  }
+  :global(:root):has(.screen)::view-transition-group(onecli-desktop-screen),
+  :global(:root):has(.screen)::view-transition-old(onecli-desktop-screen),
+  :global(:root):has(.screen)::view-transition-new(onecli-desktop-screen) {
+    animation: none;
+  }
+}

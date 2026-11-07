@@ -294,6 +294,21 @@ vi.mock("./team-service", () => ({
   },
 }));
 
+// The seat cap: `seats.full` makes the plan refuse a new member, the way a
+// Scale org at its 10 seats does.
+const seats = vi.hoisted(() => ({ full: false, checks: [] as string[] }));
+vi.mock("./quota-service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./quota-service")>();
+  return {
+    ...actual,
+    assertCanInviteMember: async (organizationId: string) => {
+      seats.checks.push(organizationId);
+      if (seats.full)
+        throw new actual.QuotaExceededError("members", 10, 10, "scale");
+    },
+  };
+});
+
 vi.mock("./group-service", () => ({
   createGroupCore: async (...args: unknown[]) => {
     groupCalls.create.push(args);
@@ -375,6 +390,8 @@ beforeEach(() => {
   for (const key of Object.keys(groupCalls) as (keyof typeof groupCalls)[]) {
     groupCalls[key] = [];
   }
+  seats.full = false;
+  seats.checks = [];
 });
 
 describe("upsertUserByEmail", () => {
@@ -445,6 +462,30 @@ describe("provisionMember", () => {
       status: "suspended",
     });
     expect(state.calls.membershipCreateData).toHaveLength(0);
+  });
+
+  it("a new member takes a seat: a full plan refuses before any membership row", async () => {
+    seats.full = true;
+    await expect(provisionMember("org-1", "new@x.com")).rejects.toMatchObject({
+      name: "QuotaExceededError",
+      code: "FORBIDDEN",
+    });
+    expect(seats.checks).toEqual(["org-1"]);
+    expect(state.calls.membershipCreateData).toHaveLength(0);
+  });
+
+  it("an existing member never trips the cap (an IdP re-push keeps its 409 path)", async () => {
+    seats.full = true;
+    state.users.push({
+      id: "usr-1",
+      email: "a@x.com",
+      name: null,
+      externalAuthId: "sub-1",
+    });
+    seedMembership();
+    const result = await provisionMember("org-1", "a@x.com");
+    expect(result).toMatchObject({ created: false });
+    expect(seats.checks).toEqual([]);
   });
 });
 

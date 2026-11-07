@@ -1,15 +1,19 @@
 import {
   Brain,
   Cpu,
+  Globe,
   MessageSquare,
+  Monitor,
   Slack,
   Plug,
   ScrollText,
   Sparkles,
   Terminal,
   Users,
+  Webhook,
   type LucideIcon,
   CalendarClock,
+  FlaskConical,
 } from "lucide-react";
 
 /**
@@ -37,9 +41,11 @@ export interface AgentSection {
   /**
    * Which rail cluster it sits in, in render order: Work (the thread), then
    * what the agent is given (Access: the connections it can reach and the
-   * model it runs on), then how it behaves (Behavior).
+   * model it runs on), then how it behaves (Behavior), then Advanced: the
+   * optional, technical tools you set up once. The rail shows Advanced as a
+   * drill-in (one row, then its own view), not as a cluster beside the rest.
    */
-  group: "chat" | "access" | "behavior";
+  group: "chat" | "access" | "behavior" | "advanced";
   /** Hosted only: a BYO agent has no computer to talk to and no brief. */
   hostedOnly?: boolean;
   /**
@@ -51,18 +57,20 @@ export interface AgentSection {
    * frame's guard stays kind-only, so a hand-typed URL still reaches the
    * section, which renders its own quiet empty state.
    */
-  instanceGated?: "ssh";
+  instanceGated?: "ssh" | "previews";
   /** Owns the page's full height — no scrolling section shell. */
   fullHeight?: boolean;
+  /** Standalone screen host: no dashboard chrome and no rail entry. */
+  theater?: boolean;
   /** The rail's ONE primary action — weight and colour on the ordinary row
    *  shape. A property of the section, not its cluster: Slack shares Chat's
    *  cluster without sharing its prominence. */
   prominent?: boolean;
 }
 
-/** The rail's cluster order and their labels — three plain answers: where
- *  you WORK with the agent, what it is given (Access), and how it behaves
- *  (Behavior). */
+/** The rail's cluster order and their labels: where you WORK with the agent,
+ *  what it is given (Access), how it behaves (Behavior), and the occasional
+ *  tools you set up once and rarely revisit (Advanced). */
 export const AGENT_SECTION_GROUPS: readonly {
   group: AgentSection["group"];
   label: string | null;
@@ -70,6 +78,7 @@ export const AGENT_SECTION_GROUPS: readonly {
   { group: "chat", label: "Work" },
   { group: "access", label: "Access" },
   { group: "behavior", label: "Behavior" },
+  { group: "advanced", label: "Advanced" },
 ] as const;
 
 export const AGENT_SECTIONS: readonly AgentSection[] = [
@@ -95,6 +104,18 @@ export const AGENT_SECTIONS: readonly AgentSection[] = [
     group: "chat",
     hostedOnly: true,
   },
+  {
+    // The standalone screen host for deep links and pop-outs. Kept in the
+    // table for the guard and switcher, but never offered in the rail.
+    // Hosted-only and preview-capable, just like the screen in Chat.
+    section: "computer",
+    title: "Computer",
+    icon: Monitor,
+    group: "chat",
+    hostedOnly: true,
+    instanceGated: "previews",
+    theater: true,
+  },
   // Access: everything the agent can reach, in ONE section (§3.18 as
   // amended). Apps and custom secrets were two rail entries asking the same
   // question — they are now the two tabs of Connections.
@@ -115,17 +136,6 @@ export const AGENT_SECTIONS: readonly AgentSection[] = [
   // The model sits under Access too: it is the other thing the agent is
   // GIVEN, beside the connections it can reach.
   { section: "models", title: "Models", icon: Cpu, group: "access" },
-  {
-    // A shell on the agent's computer (SSH) is the other
-    // way IN — an Access entry. Hosted-only (a BYO agent has no computer) and
-    // instance-gated: only deployments with the SSH front door show it.
-    section: "ssh",
-    title: "SSH",
-    icon: Terminal,
-    group: "access",
-    hostedOnly: true,
-    instanceGated: "ssh",
-  },
   {
     section: "instructions",
     title: "Instructions",
@@ -156,6 +166,48 @@ export const AGENT_SECTIONS: readonly AgentSection[] = [
     group: "behavior",
     hostedOnly: true,
   },
+  // Advanced: optional, technical tools you set up once, kept out of the
+  // everyday clusters above.
+  {
+    // A shell on the agent's computer. Hosted-only (a BYO agent has no
+    // computer) and instance-gated: only deployments with the SSH front door
+    // show it.
+    section: "ssh",
+    title: "SSH",
+    icon: Terminal,
+    group: "advanced",
+    hostedOnly: true,
+    instanceGated: "ssh",
+  },
+  {
+    // Shared ports (plans/sandbox-ports.md): private preview links to
+    // services running on the agent's computer, the web twin of SSH.
+    // Hosted-only (a BYO agent has no computer) and instance-gated: only
+    // deployments that serve previews show it.
+    section: "ports",
+    title: "Ports",
+    icon: Globe,
+    group: "advanced",
+    hostedOnly: true,
+    instanceGated: "previews",
+  },
+  {
+    // Inbound webhooks: an external app's event triggers the agent.
+    section: "webhooks",
+    title: "Webhooks",
+    icon: Webhook,
+    group: "advanced",
+    hostedOnly: true,
+  },
+  {
+    // Test questions with known answers, run against the live agent after
+    // a change: the agent's regression tests.
+    section: "evals",
+    title: "Evals",
+    icon: FlaskConical,
+    group: "advanced",
+    hostedOnly: true,
+  },
 ] as const;
 
 /**
@@ -184,6 +236,9 @@ export const agentSectionBlocked = (section: string, kind: string): boolean =>
 /** Does this section own the page's full height (no scrolling shell)? */
 export const isFullHeightAgentSection = (section: string): boolean =>
   AGENT_SECTIONS.some((s) => s.section === section && s.fullHeight === true);
+
+export const isTheaterAgentSection = (section: string): boolean =>
+  AGENT_SECTIONS.some((s) => s.section === section && s.theater === true);
 
 /**
  * The section's display title for URL-derived surfaces (the header

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { TriangleAlert } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Message, MessageContent } from "@onecli/ui/components/message";
 import { cn } from "@onecli/ui/lib/utils";
@@ -11,6 +12,9 @@ import { ApprovalDetailsDialog } from "@/lib/components/approvals/approval-detai
 import { ApprovalPreview } from "@/lib/components/approvals/approval-preview";
 import { rowsBesideTitle } from "@/lib/components/approvals/approval-rows";
 import { ApprovalTitle } from "@/lib/components/approvals/approval-title";
+import { withDecidedVia } from "@/lib/components/approvals/decided-via";
+import { approvalResultLine } from "@onecli/api/lib/approval-result";
+import type { ApprovalResult } from "@/lib/api/approval-outcomes";
 import {
   formatCountdown,
   useCountdown,
@@ -19,12 +23,16 @@ import {
 /** How much of a long detail value (e.g. an email body) the card shows. */
 const DETAIL_CLAMP_CLASS = "line-clamp-4";
 
-/** What the settled record says about how the approval ended. */
+/** What the settled record says about how the approval ended. "Unknown" is
+ * all this browser saw (the request left the list) until the API's record
+ * says how. */
 const SETTLED_COPY: Record<SettledOutcome, string> = {
   approved: "Approved",
   denied: "Denied",
-  decided: "Decided",
+  unknown: "No longer waiting",
+  cancelled: "Cancelled · the agent stopped waiting",
   expired: "Expired (no response) · denied",
+  replaced: "Replaced by your message",
 };
 
 /**
@@ -38,11 +46,17 @@ const SETTLED_COPY: Record<SettledOutcome, string> = {
 export const InlineApprovalItem = ({
   approval,
   settled,
+  via,
+  result,
 }: {
   approval: PendingApproval;
   /** Present once the approval left the pending set: how it ended. The card
    * stays in the thread as a quiet record instead of vanishing. */
   settled?: SettledOutcome;
+  /** Where a person decided it (`slack`, `web`), when known. */
+  via?: string;
+  /** What an approved request actually did upstream, when known. */
+  result?: ApprovalResult;
 }) => {
   const remaining = useCountdown(approval.expiresAt);
   const urgent = remaining <= 30;
@@ -55,20 +69,49 @@ export const InlineApprovalItem = ({
   // must not hide the Approve/Deny buttons the header bell still offers,
   // so the countdown parks at 0:00 on the actionable card instead.
   if (settled) {
+    // An approval that did not do what it said ("Created 0 of 9") is not a
+    // quiet record: it is why the agent is about to ask again.
+    const outcome =
+      settled === "approved" ? approvalResultLine(result) : undefined;
     return (
       <Message align="start">
         <MessageContent>
           <div
             role="status"
-            className="bg-muted/50 text-muted-foreground flex w-fit max-w-[80%] items-baseline gap-1 rounded-xl border px-4 py-2 text-sm"
+            className={cn(
+              "text-muted-foreground flex w-fit max-w-[80%] flex-col gap-0.5 rounded-xl border px-4 py-2 text-sm",
+              outcome?.failed
+                ? "border-amber-500/40 bg-amber-500/10"
+                : "bg-muted/50",
+            )}
           >
-            <span className="min-w-0 truncate font-medium">
-              <ApprovalTitle
-                summary={approval.summary}
-                fallback={`${approval.method} request`}
-              />
-            </span>
-            <span className="shrink-0">· {SETTLED_COPY[settled]}</span>
+            <div className="flex items-baseline gap-1">
+              <span className="min-w-0 truncate font-medium">
+                <ApprovalTitle
+                  summary={approval.summary}
+                  fallback={`${approval.method} request`}
+                />
+              </span>
+              <span className="shrink-0">
+                · {withDecidedVia(SETTLED_COPY[settled], settled, via)}
+              </span>
+            </div>
+            {outcome && (
+              <p
+                className={cn(
+                  "flex items-start gap-1.5",
+                  outcome.failed && "text-amber-800 dark:text-amber-300",
+                )}
+              >
+                {outcome.failed && (
+                  <TriangleAlert
+                    aria-hidden="true"
+                    className="mt-0.5 size-3.5 shrink-0"
+                  />
+                )}
+                <span className="line-clamp-2">{outcome.text}</span>
+              </p>
+            )}
           </div>
         </MessageContent>
       </Message>
@@ -78,7 +121,15 @@ export const InlineApprovalItem = ({
   return (
     <Message align="start">
       <MessageContent>
-        <div className="bg-muted/50 w-fit max-w-[80%] overflow-hidden rounded-xl border">
+        <div
+          className={cn(
+            "bg-muted/50 overflow-hidden rounded-xl border",
+            // A record change is a table: it takes the chat column's full
+            // width (phone and desktop) so its columns read without
+            // scrolling; other cards stay sized to their content.
+            approval.summary?.bulk ? "w-full" : "w-fit max-w-[80%]",
+          )}
+        >
           {/* Header: what the agent wants to do, and how long the offer lasts. */}
           <div className="flex items-center gap-2.5 px-4 pt-3 pb-2">
             <ApprovalAppIcon appId={approval.app} />
@@ -112,10 +163,13 @@ export const InlineApprovalItem = ({
           {/* The parsed request (To / Subject / Body for an email), minus
               the record the title already names. The endpoint lives in
               Details; a card with no rows left keeps it, since then it is the
-              only hint of what the request does. */}
-          {details.length > 0 ? (
+              only hint of what the request does. A bulk change is its table,
+              rows or not (a bulk create or delete carries none). */}
+          {details.length > 0 || approval.summary?.bulk ? (
             <ApprovalPreview
               kind={approval.summary?.kind}
+              bulk={approval.summary?.bulk}
+              titled={!!approval.summary?.subject}
               details={details}
               className="px-4 pb-3"
             />
@@ -147,6 +201,8 @@ export const InlineApprovalItem = ({
             </p>
             <ApprovalActions
               approvalId={approval.id}
+              similar={approval.similar}
+              agentName={approval.agent.name}
               size="xs"
               className="ms-auto shrink-0"
             />

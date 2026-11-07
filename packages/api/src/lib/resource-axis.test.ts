@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   axisOf,
+  canonicalPolicy,
   coveredBy,
   deniesEverything,
   entriesOutside,
@@ -16,6 +17,7 @@ describe("axisOf", () => {
   it("recognizes each axis and nothing else", () => {
     expect(axisOf({ repositories: ["org/a"] })?.key).toBe("repositories");
     expect(axisOf({ folders: ["/x"] })?.key).toBe("folders");
+    expect(axisOf({ driveFolders: ["A"] })?.key).toBe("driveFolders");
     expect(axisOf({})).toBeUndefined();
     expect(axisOf(null)).toBeUndefined();
     expect(axisOf([{ type: "body_contains", value: "x" }])).toBeUndefined();
@@ -143,8 +145,10 @@ describe("parity with the gateway's value semantics", () => {
     });
   });
 
-  it("a non-list axis value is not a restriction", () => {
-    // Rust's `raw_entries` returns None for these, so they deny nothing.
+  it("a non-list axis value is not an empty allowlist", () => {
+    // Mirrors Rust's `denies_everything` (its `raw_entries` is None here).
+    // Such a value can't be saved — the session-policy schema rejects it —
+    // and the gateway's request guards refuse every request under one.
     expect(deniesEverything({ repositories: "org/a" })).toBe(false);
     expect(deniesEverything(undefined)).toBe(false);
     expect(deniesEverything([{ type: "body_contains" }])).toBe(false);
@@ -169,5 +173,80 @@ describe("entriesOutside", () => {
     expect(
       entriesOutside({ repositories: ["org/a"] }, { folders: ["org"] }),
     ).toEqual(["org/a"]);
+  });
+});
+
+// Mirrors `google_drive.rs` (coverage_is_chain_containment) and
+// `granular_access.rs` (drive_policies_compose_on_their_own_axis).
+describe("driveFolders axis", () => {
+  it("covers by chain containment, case-sensitively", () => {
+    expect(coveredBy("A/B", { driveFolders: ["A"] })).toBe(true);
+    expect(coveredBy("A", { driveFolders: ["A"] })).toBe(true);
+    expect(coveredBy("A/B/", { driveFolders: ["A/"] })).toBe(true);
+    expect(coveredBy("A", { driveFolders: ["A/B"] })).toBe(false);
+    expect(coveredBy("AB", { driveFolders: ["A"] })).toBe(false);
+    expect(coveredBy("a", { driveFolders: ["A"] })).toBe(false);
+  });
+
+  it("intersects to the narrower chain, and never across axes", () => {
+    expect(
+      intersectPolicies(
+        { driveFolders: ["A"] },
+        { driveFolders: ["A/B", "C"] },
+      ),
+    ).toEqual({ driveFolders: ["A/B"] });
+    expect(
+      intersectPolicies({ driveFolders: ["A/B"] }, { driveFolders: ["A"] }),
+    ).toEqual({ driveFolders: ["A/B"] });
+    expect(
+      deniesEverything(
+        intersectPolicies({ driveFolders: ["A"] }, { driveFolders: ["C"] }),
+      ),
+    ).toBe(true);
+    expect(
+      deniesEverything(
+        intersectPolicies({ driveFolders: ["A"] }, { folders: ["/A"] }),
+      ),
+    ).toBe(true);
+    expect(deniesEverything({ driveFolders: [] })).toBe(true);
+  });
+
+  it("reports chains outside a boundary", () => {
+    expect(
+      entriesOutside({ driveFolders: ["A/B", "C"] }, { driveFolders: ["A"] }),
+    ).toEqual(["C"]);
+  });
+});
+
+describe("canonicalPolicy", () => {
+  it("keeps one axis, sorted, for every provider", () => {
+    expect(canonicalPolicy({ repositories: ["o/b", "o/a"] })).toEqual({
+      repositories: ["o/a", "o/b"],
+    });
+    expect(canonicalPolicy({ folders: ["/z", "/a"] })).toEqual({
+      folders: ["/a", "/z"],
+    });
+    expect(canonicalPolicy({ driveFolders: ["B", "A/C"] })).toEqual({
+      driveFolders: ["A/C", "B"],
+    });
+    // Non-string entries are dropped, never sent on.
+    expect(canonicalPolicy({ folders: ["/x", 42] })).toEqual({
+      folders: ["/x"],
+    });
+  });
+
+  it("maps everything that restricts nothing to null", () => {
+    // An empty list is the pickers' "all" — never the deny-all sentinel.
+    for (const empty of [
+      { repositories: [] },
+      { folders: [] },
+      { driveFolders: [] },
+    ]) {
+      expect(canonicalPolicy(empty)).toBeNull();
+    }
+    expect(canonicalPolicy(null)).toBeNull();
+    expect(canonicalPolicy({})).toBeNull();
+    expect(canonicalPolicy({ folders: "/x" })).toBeNull();
+    expect(canonicalPolicy([{ type: "body_contains" }])).toBeNull();
   });
 });

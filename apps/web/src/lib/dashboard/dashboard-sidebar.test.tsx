@@ -45,6 +45,12 @@ vi.mock("next/navigation", () => ({
 }));
 
 // Structural chrome the sidebar imports but this proof is not about.
+// The New agent row owns the create flow (its own suite covers it); these
+// suites are about the agent rows.
+vi.mock("@/lib/dashboard/new-agent-row", () => ({
+  NewAgentRow: () => <li>New agent</li>,
+}));
+
 vi.mock("next/image", () => ({
   default: ({ src, alt }: { src: unknown; alt?: string }) => (
     // eslint-disable-next-line @next/next/no-img-element
@@ -151,7 +157,7 @@ describe("workspace tier: the agent rows through the real wire", () => {
     // The 2026-08-16 amendment: the agent list is availability-independent —
     // a runnerless cloud deployment still shows the user's own agents.
     state.runners = { registered: false, online: false };
-    state.pathname = "/w/p1/overview";
+    state.pathname = "/w/p1/activity";
     state.agents = [{ id: "ag-b", name: "Laptop", kind: "byo" }];
     renderSidebar();
     const byoRow = await screen.findByRole("link", { name: /Laptop/ });
@@ -161,7 +167,7 @@ describe("workspace tier: the agent rows through the real wire", () => {
 
   it("ready renders real thread links", async () => {
     state.runners = { registered: true, online: true };
-    state.pathname = "/w/p1/overview";
+    state.pathname = "/w/p1/activity";
     state.agents = [{ id: "ag-1", name: "Support Triage", kind: "hosted" }];
     renderSidebar();
     const thread = await screen.findByRole("link", { name: /Support Triage/ });

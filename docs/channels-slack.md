@@ -72,7 +72,8 @@ begun in its own dashboard fails review.
 per-agent apps need none of this. To run your own anyway: create the app
 once from `GET /v1/org/channels/slack/shared-manifest` (requires a public
 HTTPS `API_URL`; the shared app is events-mode only), then set the four env
-vars in the install `.env` and restart the api:
+vars in the install `.env` and restart the api (on Kubernetes, put them in
+a Secret and name it in `slackSharedApp.existingSecret`):
 
 ```bash
 SLACK_SHARED_CLIENT_ID=...      # Basic Information → App Credentials
@@ -109,6 +110,20 @@ docker compose up -d
 No ports, no database, no docker socket. Its traffic goes directly to Slack —
 deliberately not through the gateway (platform traffic, not agent traffic).
 
+**On Kubernetes (the Helm chart):** turn on `channelAdapter.enabled`. The
+adapter reads `CHANNEL_ADAPTER_TOKEN` from the chart's application Secret
+(`secrets.generate` mints it; with your own Secret, the upgrade refuses
+with the `kubectl patch` that adds it):
+
+```bash
+helm upgrade onecli oci://ghcr.io/onecli/charts/onecli --namespace onecli \
+  --reset-then-reuse-values --set channelAdapter.enabled=true
+```
+
+The chart's README has the details
+([Slack](../charts/onecli/README.md#6-slack)), including the shared app's
+`slackSharedApp.existingSecret`.
+
 The adapter uses `APP_URL` for the "Connect a model key" button in its Slack
 posts; the compose default points at the install's own address, so set
 `APP_URL` in the install `.env` when OneCLI is reached at another address (a
@@ -142,6 +157,13 @@ On the agent's page → **Channels**:
   (a TLS'd self-host or cloud): click **Add to Slack**, click **Allow** in
   the popup — done. No tokens, no pastes (this is Slack's Events mode; no
   app-level token even exists).
+- **With the org token, Socket Mode on a deployment with a public HTTPS
+  address** (a self-host that picks Socket Mode, e.g. because Slack cannot
+  reach it): click **Add to Slack**, click **Allow**, then paste the one
+  thing Slack has no API for: the **app-level token** (Basic Information →
+  App-Level Tokens, scope `connections:write`). OneCLI checks it with Slack
+  before saving it. The Allow redirect is a hop through your browser, not a
+  call from Slack to your server.
 - **With the org token, no public HTTPS** (a laptop, a homelab): OneCLI
   creates the app, then Slack requires two manual steps it has no API for —
   generate the **app-level token** (Basic Information → App-Level Tokens,
@@ -155,10 +177,25 @@ On the agent's page → **Channels**:
   manifest_ → paste the manifest the page shows you, then the same
   generate/install/paste steps (plus the **App ID**).
 
+Leave **Token rotation** off when you generate an app-level token. Slack
+cannot turn it off again on that app, and its rotating tokens (`xoxe.xapp-`)
+expire after 12 hours, so OneCLI refuses them.
+
 Then open Slack and DM the agent. Only workspace members who map to a OneCLI
 user **with access to the agent's workspace** get answers — everyone else gets
 a polite refusal before anything reaches the agent. Accounts are matched by
 verified email automatically; explicit links live on the org's Channels page.
+
+**Workspaces that require admin approval:** the **Allow** click becomes a
+request, and the agent waits as not finished. Once the Slack admin approves,
+finish either way: click **Resume setup** on the agent's Slack page, or
+install from Slack's side (the approval message's install link, or **Install
+to Workspace** in the app's settings). An install from Slack's side lands on
+`/slack/installed`: sign in as an org admin and OneCLI offers the install to
+your organization's waiting agent apps and finishes the one Slack issued it
+for (falling back to the shared-app confirmation above when none match). A
+Socket Mode app installed this way lands on its Slack page with only the
+app-level token left to paste.
 
 When a message is accepted you'll see an emoji reaction land on it — the
 "seen" mark, picked to fit what you wrote. The full answer arrives as one
@@ -223,11 +260,11 @@ list those tools; the answer is what keeps the agent from retrying.
   descriptive. Generate a new token under **Your App Configuration Tokens**
   and paste the new Refresh Token. `invalid_refresh_token` means the same for
   a malformed or truncated paste.
-- **The org card says the token could not be refreshed** — Slack refused a
-  rotation as final: the pair was revoked, or another tool consumed the
-  single-use refresh token (a refresh token that keeps being refused after its
-  access token expires counts as dead too). A passing Slack outage does _not_
-  do this: rotation keeps the stored pair through transient refusals and
+- **The org card says Slack refused to rotate the stored token** — Slack
+  refused a rotation as final: the pair was revoked, or another tool consumed
+  the single-use refresh token (a refresh token that keeps being refused after
+  its access token expires counts as dead too). A passing Slack outage does
+  _not_ do this: rotation keeps the stored pair through transient refusals and
   retries on the next hourly sweep. Paste a fresh refresh token; nothing else
   stops working meanwhile.
 - **"Approvals need re-attaching" on an agent** — the member who attached

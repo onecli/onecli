@@ -46,6 +46,7 @@ export const startFakeSlackServer = async (): Promise<FakeSlackServer> => {
   >();
   let tsCounter = 0;
   let fileCounter = 0;
+  const sharedAt = new Map<string, { channel: string; ts: string }>();
 
   const defaultResponse = (
     method: string,
@@ -80,7 +81,25 @@ export const startFakeSlackServer = async (): Promise<FakeSlackServer> => {
       } catch {
         // Malformed — an empty share, which the client's schema still parses.
       }
+      // A share into a channel posts a message; files.info reports it,
+      // as Slack does (what a card shared with its file reads back).
+      if (form.channel_id) {
+        tsCounter += 1;
+        const ts = `1700.${String(tsCounter).padStart(4, "0")}`;
+        for (const f of files)
+          sharedAt.set(f.id, { channel: form.channel_id, ts });
+      }
       return { ok: true, files: files.map((f) => ({ id: f.id })) };
+    }
+    if (method === "files.info") {
+      const at = sharedAt.get(form.file ?? "");
+      return {
+        ok: true,
+        file: {
+          id: form.file,
+          ...(at && { shares: { private: { [at.channel]: [{ ts: at.ts }] } } }),
+        },
+      };
     }
     return { ok: true };
   };

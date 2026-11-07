@@ -8,9 +8,7 @@
 
 use serde_json::Value;
 
-use super::{Denial, RequestGuard, ResourceAxis};
-
-const RULE_NAME: &str = "Dropbox folder policy";
+use super::{RequestGuard, ResourceAxis};
 
 pub(super) struct Dropbox;
 
@@ -38,28 +36,28 @@ impl ResourceAxis for Dropbox {
     }
 }
 
+#[async_trait::async_trait]
 impl RequestGuard for Dropbox {
-    fn needs_body(&self, policy: &Value, host: &str, _method: &str, _path: &str) -> bool {
-        // Only the RPC host carries the target path in the JSON body; content-host
-        // calls carry it in the `Dropbox-API-Arg` header (no buffering needed).
-        host == "api.dropboxapi.com" && folders(policy).is_some()
+    fn rule_name(&self) -> &'static str {
+        "Dropbox folder policy"
     }
 
-    fn check(
+    fn needs_body(&self, host: &str, _method: &str, _path: &str) -> bool {
+        // Only the RPC host carries the target path in the JSON body; content-host
+        // calls carry it in the `Dropbox-API-Arg` header (no buffering needed).
+        host == "api.dropboxapi.com"
+    }
+
+    async fn check(
         &self,
-        policy: &Value,
+        allowed: &[String],
         host: &str,
+        _method: &str,
         path: &str,
         headers: &hyper::HeaderMap,
         body: Option<&[u8]>,
-    ) -> Option<Denial> {
-        let allowed = folders(policy)?;
-        let reason = enforce(&allowed, host, path, headers, body)?;
-        Some(Denial {
-            reason,
-            allowed,
-            rule_name: RULE_NAME,
-        })
+    ) -> Option<String> {
+        enforce(allowed, host, path, headers, body)
     }
 }
 
@@ -67,22 +65,6 @@ impl RequestGuard for Dropbox {
 /// and `/`-separated; the account root is the empty string.
 fn normalize_path(p: &str) -> String {
     p.to_ascii_lowercase().trim_end_matches('/').to_string()
-}
-
-/// Extracts a non-empty, normalized folder allowlist from a session policy.
-fn folders(policy: &Value) -> Option<Vec<String>> {
-    let arr = policy.get("folders")?.as_array()?;
-    let folders: Vec<String> = arr
-        .iter()
-        .filter_map(|v| v.as_str())
-        .map(normalize_path)
-        .filter(|s| !s.is_empty())
-        .collect();
-    if folders.is_empty() {
-        None
-    } else {
-        Some(folders)
-    }
 }
 
 /// True when `target` equals one of `allowed` or sits beneath one of them
@@ -208,7 +190,7 @@ fn enforce(
 
 #[cfg(test)]
 mod tests {
-    use super::{enforce, folders, path_allowed, Dropbox};
+    use super::{enforce, path_allowed, Dropbox};
     use crate::granular_access::ResourceAxis;
 
     fn allowed() -> Vec<String> {
@@ -437,16 +419,5 @@ mod tests {
         assert!(path_allowed("/clients/acme/deep/file.txt", &a));
         assert!(!path_allowed("/clients", &a));
         assert!(!path_allowed("rev:123", &a));
-    }
-
-    #[test]
-    fn folders_normalizes_and_drops_root() {
-        let policy = serde_json::json!({ "folders": ["/Clients/Acme/", "/Marketing", "/"] });
-        assert_eq!(
-            folders(&policy).unwrap(),
-            vec!["/clients/acme", "/marketing"]
-        );
-        assert!(folders(&serde_json::json!({ "folders": [] })).is_none());
-        assert!(folders(&serde_json::json!({})).is_none());
     }
 }

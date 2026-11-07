@@ -3,6 +3,10 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PendingApproval } from "@/lib/api/approvals";
+import {
+  MAX_OUTCOME_IDS,
+  type ApprovalOutcome,
+} from "@/lib/api/approval-outcomes";
 
 /**
  * The chat's inline approval strip: a held request must surface INSIDE the
@@ -16,6 +20,16 @@ const state = vi.hoisted(() => ({
   agent: { id: "ag-1", name: "Support Triage" } as {
     id: string;
     name: string;
+  },
+  /** The API's record of how departed approvals ended. */
+  outcomes: new Map<string, ApprovalOutcome>(),
+  outcomeAsks: [] as string[][],
+}));
+
+vi.mock("@/hooks/use-approval-outcomes", () => ({
+  useApprovalOutcomes: (_agentId: string | undefined, ids: string[]) => {
+    if (ids.length > 0) state.outcomeAsks.push([...ids]);
+    return state.outcomes;
   },
 }));
 
@@ -44,16 +58,22 @@ const { recordLocalDecision, forgetLocalDecision, takeLocalDecision } =
 
 /** Test harness: every card as one column — what the chat thread does with
  * `useApprovalCards`, minus the timeline slotting. */
-const Cards = () => {
-  const cards = useApprovalCards();
+const Cards = ({
+  replaced,
+}: {
+  replaced?: ReadonlySet<string>;
+} = {}) => {
+  const cards = useApprovalCards(replaced);
   if (cards.length === 0) return null;
   return (
     <div>
-      {cards.map(({ approval, settled }) => (
+      {cards.map(({ approval, settled, via, result }) => (
         <InlineApprovalItem
           key={approval.id}
           approval={approval}
           settled={settled}
+          via={via}
+          result={result}
         />
       ))}
     </div>
@@ -80,6 +100,8 @@ beforeEach(() => {
   state.approvals = [];
   state.mutate.mockClear();
   state.agent = { id: "ag-1", name: "Support Triage" };
+  state.outcomes = new Map();
+  state.outcomeAsks = [];
   // The local-decision map is module-level session memory — drain the ids
   // these tests use so one test's click never leaks into the next.
   for (const id of ["ap-1", "ap-2", "ap-a", "ap-b", "ap-donna"]) {
@@ -182,10 +204,158 @@ describe("inline approval cards", () => {
     state.approvals = [];
     view.rerender(<Cards />);
 
-    // Far from its deadline and no own click on record → some other
-    // surface decided it.
-    expect(screen.getByText(/· Decided/)).toBeInTheDocument();
+    // Far from its deadline and no own click on record: this browser
+    // doesn't know how it ended, and says only what it saw.
+    expect(screen.getByText(/· No longer waiting/)).toBeInTheDocument();
     expect(screen.queryByText(/Approved/)).not.toBeInTheDocument();
+  });
+
+  it("a long session asks the record about its newest departures only, never more than the route answers", () => {
+    // The route refuses more than MAX_OUTCOME_IDS ids (422): asking about
+    // every card a long session ever saw leave would break the read for all.
+    const many = Array.from({ length: MAX_OUTCOME_IDS + 5 }, (_, i) =>
+      approval({ id: `ap-${String(i).padStart(3, "0")}` }),
+    );
+    state.approvals = many;
+    const view = render(<Cards />);
+    state.approvals = [];
+    view.rerender(<Cards />);
+    const asked = state.outcomeAsks.at(-1) ?? [];
+    expect(asked).toHaveLength(MAX_OUTCOME_IDS);
+    expect(asked).toContain(many.at(-1)!.id);
+    expect(asked).not.toContain(many[0]!.id);
+  });
+
+  it("names a decision made in Slack once the API's record says so", () => {
+    // The live confusion: the person approved in Slack, and the web card
+    // read a vague "Decided elsewhere". The record names how and where.
+    state.approvals = [approval()];
+    const view = render(<Cards />);
+    state.approvals = [];
+    view.rerender(<Cards />);
+    expect(screen.getByText(/· No longer waiting/)).toBeInTheDocument();
+    // Only the guessed departure is asked about.
+    expect(state.outcomeAsks.at(-1)).toEqual(["ap-1"]);
+
+    state.outcomes = new Map([
+      [
+        "ap-1",
+        {
+          approvalId: "ap-1",
+          outcome: "approved",
+          via: "slack",
+          decidedAt: new Date().toISOString(),
+        },
+      ],
+    ]);
+    view.rerender(<Cards />);
+    expect(screen.getByRole("status")).toHaveTextContent("Approved in Slack");
+  });
+
+  it("says the agent stopped waiting, never a decision, once the record says no one decided", () => {
+    // Live: the agent's connection dropped while the card waited. The card
+    // read "Decided", as if a person had chosen; no one had.
+    state.approvals = [approval()];
+    const view = render(<Cards />);
+    state.approvals = [];
+    view.rerender(<Cards />);
+    expect(screen.getByRole("status")).toHaveTextContent("No longer waiting");
+
+    state.outcomes = new Map([
+      [
+        "ap-1",
+        {
+          approvalId: "ap-1",
+          outcome: "cancelled",
+          decidedAt: new Date().toISOString(),
+        },
+      ],
+    ]);
+    view.rerender(<Cards />);
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("Cancelled · the agent stopped waiting");
+    expect(status).not.toHaveTextContent(/Approved|Denied|Decided/);
+  });
+
+  it("says an approved request did nothing, and why, once the record has its result", () => {
+    // Live: approved in Slack, Salesforce answered 200 and created none.
+    // Without this the agent's fixed resend read as a mystery approval.
+    state.approvals = [
+      approval({ summary: { action: "Create 9 Accounts", details: [] } }),
+    ];
+    const view = render(<Cards />);
+    state.approvals = [];
+    state.outcomes = new Map([
+      [
+        "ap-1",
+        {
+          approvalId: "ap-1",
+          outcome: "approved",
+          via: "slack",
+          decidedAt: new Date().toISOString(),
+          result: {
+            ok: false,
+            succeeded: 0,
+            total: 9,
+            error: "BillingCountry: bad country",
+            action: "Create 9 Accounts",
+          },
+        },
+      ],
+    ]);
+    view.rerender(<Cards />);
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("Approved in Slack");
+    expect(status).toHaveTextContent(
+      "Created 0 of 9 · BillingCountry: bad country",
+    );
+  });
+
+  it("asks the record about this browser's own approval too (for its result)", () => {
+    state.approvals = [approval()];
+    const view = render(<Cards />);
+    recordLocalDecision("ap-1", "approved");
+    state.approvals = [];
+    view.rerender(<Cards />);
+    expect(state.outcomeAsks.at(-1)).toEqual(["ap-1"]);
+  });
+
+  it("never asks the record about this browser's own click", () => {
+    state.approvals = [approval()];
+    const view = render(<Cards />);
+    recordLocalDecision("ap-1", "denied");
+    state.approvals = [];
+    view.rerender(<Cards />);
+    expect(screen.getByRole("status")).toHaveTextContent("Denied");
+    expect(state.outcomeAsks).toEqual([]);
+  });
+
+  it("labels a request the person's newer message withdrew as replaced", () => {
+    state.approvals = [approval()];
+    const view = render(<Cards />);
+
+    state.approvals = [];
+    view.rerender(<Cards replaced={new Set(["ap-1"])} />);
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Replaced by your message",
+    );
+  });
+
+  it("relabels an unknown record once the supersede notice arrives", () => {
+    // The poll can see the card leave a beat BEFORE the transcript notice
+    // names it: the record must not stay a generic "No longer waiting".
+    state.approvals = [approval()];
+    const view = render(<Cards />);
+    state.approvals = [];
+    view.rerender(<Cards />);
+    expect(screen.getByText(/· No longer waiting/)).toBeInTheDocument();
+
+    view.rerender(<Cards replaced={new Set(["ap-1"])} />);
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Replaced by your message",
+    );
+    expect(screen.queryByText(/· No longer waiting/)).not.toBeInTheDocument();
   });
 
   it("labels a deadline departure with the auto-deny outcome", () => {
@@ -243,7 +413,7 @@ describe("inline approval cards", () => {
     // session records a settled row.
     state.approvals = [];
     view.rerender(<Cards />);
-    expect(screen.getByText(/Decided/)).toBeInTheDocument();
+    expect(screen.getByText(/No longer waiting/)).toBeInTheDocument();
 
     // The mutation fails and React Query rolls back — the id is live again.
     // Exactly one card, the actionable one: the settled record must give way.
@@ -251,11 +421,11 @@ describe("inline approval cards", () => {
     view.rerender(<Cards />);
     expect(screen.getAllByText("Create a GitHub issue")).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
-    expect(screen.queryByText(/Decided/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/No longer waiting/)).not.toBeInTheDocument();
 
     // Departing for real afterwards records the settled row exactly once.
     state.approvals = [];
     view.rerender(<Cards />);
-    expect(screen.getAllByText(/Decided/)).toHaveLength(1);
+    expect(screen.getAllByText(/No longer waiting/)).toHaveLength(1);
   });
 });

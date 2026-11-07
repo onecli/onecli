@@ -375,4 +375,184 @@ describe("send_file: the fragment", () => {
     expect(flat).toMatch(/read it before telling/);
     expect(sendFileFragment.body).not.toMatch(/jcode/i);
   });
+
+  it("says viewing a file is not sending it, and to never point at anything unsent", () => {
+    // Observed live: an agent opened its chart with the read tool, then wrote
+    // "here's the pie chart" without sending it; another pointed at an applet
+    // card "right above your message". The person saw nothing either time.
+    const flat = sendFileFragment.body.replace(/\s+/g, " ");
+    expect(flat).toContain(
+      "send_file is the only way a file reaches the person",
+    );
+    expect(flat).toContain("shows it to you alone");
+    expect(flat).toContain("render it to an image (PNG) and send the file");
+    expect(flat).toContain(
+      "Never point the person at a file, chart, card or panel you have not sent",
+    );
+    expect(tool().description).toContain("shows it to you alone");
+  });
+});
+
+/**
+ * send_message `files`: the same containment and caps as send_file, every
+ * path checked BEFORE a byte leaves, and each file streamed STAGED
+ * (`purpose: "send"`) so it never lands under the reply.
+ */
+describe("stageFiles (send_message files)", () => {
+  /** A deadline comfortably ahead (the call's share of its clock). */
+  const soon = () => Date.now() + 5_000;
+  /** Answer every upload the staging run emits, in order. */
+  const stageAnswering = async (
+    paths: string[],
+    context: { conversationId: string; turnId: string } | null = CONTEXT,
+  ) => {
+    let answered = 0;
+    const timer = setInterval(() => {
+      const ids = [...new Set(parts().map((p) => p.uploadId))];
+      while (answered < ids.length) {
+        tools.handleResult({
+          kind: "file.result",
+          uploadId: ids[answered]!,
+          ok: true,
+          attachmentId: `att-${answered}`,
+        });
+        answered += 1;
+      }
+    }, 1);
+    try {
+      return await tools.stageFiles(paths, context, soon());
+    } finally {
+      clearInterval(timer);
+    }
+  };
+
+  it("streams every file staged (purpose send) and answers their ids in order", async () => {
+    write("a.csv", Buffer.from("a"));
+    write("dir/b.png", Buffer.from("b"));
+    const result = await stageAnswering(["a.csv", join(home, "dir/b.png")]);
+    expect(result).toEqual({ ok: true, attachmentIds: ["att-0", "att-1"] });
+    expect(parts().map((p) => [p.name, p.purpose])).toEqual([
+      ["a.csv", "send"],
+      ["b.png", "send"],
+    ]);
+  });
+
+  it("a path outside the home refuses the whole send before any frame", async () => {
+    write("ok.csv", Buffer.from("ok"));
+    writeFileSync(join(outside, "secret"), "x");
+    const result = await tools.stageFiles(
+      ["ok.csv", join(outside, "secret")],
+      CONTEXT,
+      soon(),
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("home directory"),
+    });
+    expect(parts()).toHaveLength(0);
+  });
+
+  it("a symlink pointing out of the home is refused", async () => {
+    writeFileSync(join(outside, "secret"), "x");
+    symlinkSync(join(outside, "secret"), join(home, "link"));
+    const result = await tools.stageFiles(["link"], CONTEXT, soon());
+    expect(result.ok).toBe(false);
+    expect(parts()).toHaveLength(0);
+  });
+
+  it("a missing file or a directory refuses with Nothing was sent", async () => {
+    mkdirSync(join(home, "dir"));
+    for (const path of ["nope.csv", "dir"]) {
+      const result = await tools.stageFiles([path], CONTEXT, soon());
+      expect(result).toMatchObject({
+        ok: false,
+        error: expect.stringContaining("Nothing was sent"),
+      });
+    }
+    expect(parts()).toHaveLength(0);
+  });
+
+  it("an over-size file refuses before any frame", async () => {
+    write("small.csv", Buffer.from("x"));
+    write("big.bin", Buffer.alloc(MAX_OUTBOUND_ATTACHMENT_BYTES + 1));
+    const result = await tools.stageFiles(
+      ["small.csv", "big.bin"],
+      CONTEXT,
+      soon(),
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("capped at"),
+    });
+    expect(parts()).toHaveLength(0);
+  });
+
+  it("more files than the per-reply count refuses before any frame", async () => {
+    const paths = Array.from(
+      { length: MAX_OUTBOUND_ATTACHMENTS_PER_TURN + 1 },
+      (_, i) => {
+        write(`f${i}.txt`, Buffer.from("x"));
+        return `f${i}.txt`;
+      },
+    );
+    const result = await tools.stageFiles(paths, CONTEXT, soon());
+    expect(result).toMatchObject({
+      ok: false,
+      error: expect.stringContaining(
+        `at most ${MAX_OUTBOUND_ATTACHMENTS_PER_TURN} files`,
+      ),
+    });
+    expect(parts()).toHaveLength(0);
+  });
+
+  it("needs a live turn", async () => {
+    write("a.csv", Buffer.from("a"));
+    const result = await tools.stageFiles(["a.csv"], null, soon());
+    expect(result.ok).toBe(false);
+    expect(parts()).toHaveLength(0);
+  });
+
+  it("a platform refusal names the file and says nothing was sent", async () => {
+    write("a.csv", Buffer.from("a"));
+    const call = tools.stageFiles(["a.csv"], CONTEXT, soon());
+    await new Promise((r) => setTimeout(r, 5));
+    tools.handleResult({
+      kind: "file.result",
+      uploadId: parts()[0]!.uploadId,
+      ok: false,
+      error: "This conversation has reached its daily limit.",
+    });
+    expect(await call).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/^a\.csv: .*daily limit.*Nothing was sent/),
+    });
+  });
+
+  it("stops at the call's deadline with a retry-with-less answer, never 'check if it arrived'", async () => {
+    write("a.csv", Buffer.from("a"));
+    write("b.csv", Buffer.from("b"));
+    // Nobody answers the upload: the per-file wait ends at the deadline.
+    const result = await tools.stageFiles(
+      ["a.csv", "b.csv"],
+      CONTEXT,
+      Date.now() + 30,
+    );
+    expect(result).toEqual({
+      ok: false,
+      error:
+        "The files took too long to upload. Nothing was sent. Send fewer or smaller files at once.",
+    });
+    // The second file never left: the deadline was spent on the first.
+    expect(new Set(parts().map((p) => p.uploadId)).size).toBe(1);
+  });
+
+  it("a deadline already past streams nothing", async () => {
+    write("a.csv", Buffer.from("a"));
+    const result = await tools.stageFiles(["a.csv"], CONTEXT, Date.now() - 1);
+    expect(result).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("took too long"),
+    });
+    expect(parts()).toHaveLength(0);
+  });
 });

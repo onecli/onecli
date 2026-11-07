@@ -7,7 +7,9 @@ import {
 
 export const googleDocs: AppDefinition = {
   id: "google-docs",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/google-docs",
   name: "Google Docs",
+  apiDocsUrl: "https://developers.google.com/workspace/docs/api/reference/rest",
   icon: "/icons/google-docs.svg",
   description: "Read, create, and edit Google Docs documents.",
   connectionMethod: {
@@ -60,5 +62,6 @@ export const googleDocs: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
   },
 };

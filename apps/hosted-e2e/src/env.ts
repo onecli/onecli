@@ -16,6 +16,12 @@ export interface HostedE2EConfig {
   readonly templateDb: string;
   /** The agent sandbox image the runner spawns. */
   readonly agentImage: string;
+  /**
+   * A PRE-FEATURE agent image (its supervisor predates the resumable
+   * session), for the compatibility leg that proves a keyed runner keeps the
+   * old contract with an old supervisor. Optional: the leg skips without it.
+   */
+  readonly oldAgentImage: string | undefined;
   readonly dockerSocket: string;
   /**
    * How a sandbox container addresses processes on the HOST (the per-test
@@ -74,6 +80,7 @@ const resolve = (): HostedE2EConfig | null => {
     adminDatabaseUrl,
     templateDb,
     agentImage: read("E2E_AGENT_IMAGE") ?? "onecli-agent:dev",
+    oldAgentImage: read("E2E_OLD_AGENT_IMAGE"),
     dockerSocket: read("E2E_DOCKER_SOCKET") ?? "/var/run/docker.sock",
     hostGatewayHost: read("E2E_HOST_GATEWAY_HOST") ?? "host.docker.internal",
     redisHost: read("E2E_REDIS_HOST"),

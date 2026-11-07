@@ -2,11 +2,13 @@ import { randomBytes } from "crypto";
 import { db, Prisma } from "@onecli/db";
 import type { AgentEffort } from "@onecli/agent-protocol";
 import { ServiceError } from "./errors";
+import { agentTokenIsUserVisible } from "./agent-token-visibility";
 import { agentImageUrlOrNull } from "./agent-image-service";
 import { LAST_SEEN_WINDOW_MS } from "../lib/agent-activity";
 import { agentIdsWithLiveBackgroundWork, signalWork } from "./due-work";
 import { pickRunnerForSandbox } from "./placement";
-import { requestSandboxRespawn } from "./sandbox-service";
+import { requestAgentRestart, requestSandboxRespawn } from "./sandbox-service";
+import { closeRuntimeInterval } from "./runtime-ledger";
 import { bumpHomeForAgent } from "./home-sync-service";
 import { resolveAgentLlmCredential } from "./llm-credential-service";
 import { syncAgentPresenceNames } from "./channels/agent-channel-service";
@@ -18,10 +20,10 @@ import {
 } from "./channels/channel-cleanup-service";
 import { presenceSettingsUrlFor } from "./channels/registry";
 import { autoAttachLlmKeys } from "./llm-autoattach-service";
-import { attachWorkspaceResourcesToNewAgent } from "./workspace-autoattach-service";
 import { dropPrincipalFromPolicyInTx, lockScope } from "./policy-service";
 import { llmProvider } from "../llm/registry";
 import { isOnpremEdition } from "../lib/policy-flags";
+import { getSandboxLifecycleHooks } from "../providers/hooks/sandbox-lifecycle-hooks";
 import { logger } from "../lib/logger";
 import {
   AGENT_CONFLICT_REASON_EXISTING,
@@ -29,20 +31,95 @@ import {
   createLogAgentConflict,
 } from "./agent-conflict-log";
 import {
+  IDENTIFIER_MESSAGE,
   IDENTIFIER_REGEX,
   INSTRUCTIONS_MAX_LENGTH,
+  identifierFromName,
   type AgentKind,
 } from "../validations/agent";
 
 /** The #1115 conflict line. Module scope: one child, not one per create. */
 const logAgentConflict = createLogAgentConflict(logger);
+const log = logger.child({ component: "agent-service" });
 
 export const generateAccessToken = () =>
   `aoc_${randomBytes(32).toString("hex")}`;
 
+/**
+ * A derived identifier's fallback: a name with no character the identifier
+ * alphabet keeps ("✨", "ドンナ") derives to the empty string.
+ */
+const DERIVED_IDENTIFIER_FALLBACK = "agent";
+
+/**
+ * How many `-N` suffixes a derived identifier may try before giving up. Far
+ * past any real workspace (the agent quota is single digits to low
+ * hundreds); the bound exists so a pathological workspace cannot turn one
+ * create into an unbounded scan.
+ */
+const DERIVED_IDENTIFIER_MAX_SUFFIX = 1000;
+
+/**
+ * The identifier a hosted agent gets from its name: the derivation, then
+ * the first free of `<base>`, `<base>-2`, `<base>-3`, ... in this workspace,
+ * skipping `self` (a rename back to a name whose derivation the agent
+ * already holds keeps it). One indexed read of the workspace's identifiers
+ * on the base prefix, then the walk is in memory. The suffix room is taken
+ * off the base so the result always fits the identifier's 50 characters.
+ *
+ * A collision here is never a 409 (the BYO rule): nobody typed this
+ * identifier, so there is nothing for the person to correct, and "Max" and
+ * "Max" are two fine agents named `max` and `max-2`. The race two
+ * concurrent creates of the same name can still lose (the unique index)
+ * surfaces as the create's existing 409 arm, exactly like a typed one.
+ */
+const freeDerivedIdentifier = async (
+  workspaceId: string,
+  name: string,
+  self?: string,
+): Promise<string> => {
+  const derived = identifierFromName(name) || DERIVED_IDENTIFIER_FALLBACK;
+  // Room for the longest suffix this walk can append (`-1000`), so no
+  // candidate ever exceeds the identifier's length.
+  const base = derived.slice(
+    0,
+    50 - `-${String(DERIVED_IDENTIFIER_MAX_SUFFIX)}`.length,
+  );
+  const taken = new Set(
+    (
+      await db.agent.findMany({
+        where: { workspaceId, identifier: { startsWith: base } },
+        select: { identifier: true },
+      })
+    ).map((row) => row.identifier),
+  );
+  if (self !== undefined) taken.delete(self);
+  if (!taken.has(base)) return base;
+  for (let n = 2; n <= DERIVED_IDENTIFIER_MAX_SUFFIX; n += 1) {
+    const candidate = `${base}-${String(n)}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  throw new ServiceError(
+    "CONFLICT",
+    `Too many agents share the name "${name}"; pick another name`,
+  );
+};
+
+/** The `accessToken` field for an agent row, present only when visible. */
+const exposedAccessToken = (
+  kind: string,
+  accessToken: string,
+): { accessToken?: string } =>
+  agentTokenIsUserVisible(kind) ? { accessToken } : {};
+
 export interface CreateAgentInput {
   name: string;
-  identifier: string;
+  /**
+   * The machine-readable handle. Required for a BYO agent (the public
+   * `ensureAgent` / `container-config?agent=` contract). Optional for a
+   * hosted one: derived from the name when absent, honored when sent.
+   */
+  identifier?: string;
   /** Defaults to "byo" — today's bring-your-own agents. */
   kind?: AgentKind;
   /** Hosted only. Defaults to "jcode" for hosted agents (§3.5 seam). */
@@ -101,8 +178,9 @@ export const listAgents = async (workspaceId: string) => {
     lastSeenRows.map((r) => [r.agentId, r._max.createdAt]),
   );
 
-  return agents.map(({ imageKey, ...a }) => ({
+  return agents.map(({ imageKey, accessToken, ...a }) => ({
     ...a,
+    ...exposedAccessToken(a.kind, accessToken),
     channels: a.channels.map((c) => ({
       ...c,
       settingsUrl: presenceSettingsUrlFor(c.provider, c.externalId),
@@ -185,7 +263,7 @@ export const agentExistsByIdentifier = async (
 export const createAgent = async (
   workspaceId: string,
   input: CreateAgentInput,
-  /** Who to record as the grantor of every auto-attached grant. */
+  /** Who to record as the grantor of an auto-attached LLM key grant. */
   userId: string | null = null,
 ) => {
   const trimmed = input.name.trim();
@@ -193,14 +271,6 @@ export const createAgent = async (
     throw new ServiceError(
       "BAD_REQUEST",
       "Name must be between 1 and 255 characters",
-    );
-  }
-
-  const trimmedIdentifier = input.identifier.trim();
-  if (!IDENTIFIER_REGEX.test(trimmedIdentifier)) {
-    throw new ServiceError(
-      "BAD_REQUEST",
-      "Identifier must be 1-50 characters, start with a letter or number, and contain only lowercase letters, numbers, and hyphens",
     );
   }
 
@@ -225,10 +295,33 @@ export const createAgent = async (
     );
   }
 
-  const existing = await db.agent.findFirst({
-    where: { workspaceId, identifier: trimmedIdentifier },
-    select: { id: true },
-  });
+  // A typed identifier is a contract (BYO: the handle a machine is pinned
+  // to; hosted: the SDK's `ensureAgent` may still send one) and collides
+  // with the 409 below. An absent one is only legal for a hosted agent and
+  // is derived from the name, where a collision takes a suffix instead.
+  const typedIdentifier = input.identifier?.trim();
+  if (
+    typedIdentifier !== undefined &&
+    !IDENTIFIER_REGEX.test(typedIdentifier)
+  ) {
+    throw new ServiceError("BAD_REQUEST", IDENTIFIER_MESSAGE);
+  }
+  if (typedIdentifier === undefined && !hosted) {
+    throw new ServiceError(
+      "BAD_REQUEST",
+      "identifier is required for byo agents",
+    );
+  }
+  const trimmedIdentifier =
+    typedIdentifier ?? (await freeDerivedIdentifier(workspaceId, trimmed));
+
+  const existing =
+    typedIdentifier === undefined
+      ? null
+      : await db.agent.findFirst({
+          where: { workspaceId, identifier: trimmedIdentifier },
+          select: { id: true },
+        });
   if (existing) {
     // The idempotent-`ensureAgent` arm (#1115): expected, and the ONLY record
     // that says so — the access log sees an anonymous 409. See
@@ -327,6 +420,27 @@ export const createAgent = async (
       },
     });
 
+    // A hosted extension's after-create step (best-effort by contract, like
+    // the LLM auto-attach: a failure here must never make "created" false).
+    const afterSandboxCreated = getSandboxLifecycleHooks().afterSandboxCreated;
+    if (hosted && runnerId && afterSandboxCreated) {
+      try {
+        const born = await db.sandbox.findUnique({
+          where: { agentId: agent.id },
+          select: { id: true },
+        });
+        if (born) {
+          await afterSandboxCreated({
+            agentId: agent.id,
+            sandboxId: born.id,
+            runnerId,
+          });
+        }
+      } catch (err: unknown) {
+        log.warn({ err, agentId: agent.id }, "after-create hook failed");
+      }
+    }
+
     // Wake any held runner poll so the sandbox starts now rather than after
     // the next re-check.
     if (hosted) signalWork();
@@ -341,10 +455,9 @@ export const createAgent = async (
       userId,
     ).catch(() => ({ secretIds: [] as string[] }));
 
-    // Every workspace connection and custom secret is on for a new agent too
-    // (`workspace-autoattach-service`), so it can work right away. Runs after
-    // the LLM attach and is best-effort the same way: it never fails create.
-    await attachWorkspaceResourcesToNewAgent(workspaceId, agent.id, userId);
+    // Nothing else is granted: a new agent starts with no connection and no
+    // custom secret, and the user picks what it gets (the dashboard's "choose
+    // connections" step right after creation).
 
     // `llmKeys` is part of the create contract: an empty array means the
     // workspace has no LLM key, which is the one thing a caller must be able
@@ -401,6 +514,15 @@ export const deleteAgent = async (workspaceId: string, agentId: string) => {
       id: agentId,
       workspaceId,
     });
+    // The ledger row outlives the agent (plain ids, no cascade), so the
+    // delete is also the end of whatever run is open: close it here, in
+    // the same transaction, before the sandbox row the close is keyed on
+    // cascades away.
+    const sandbox = await tx.sandbox.findUnique({
+      where: { agentId },
+      select: { id: true },
+    });
+    if (sandbox) await closeRuntimeInterval(tx, sandbox.id, "deleted");
     await tx.agent.delete({ where: { id: agentId } });
     return ids;
   });
@@ -427,6 +549,7 @@ export const updateAgent = async (
 ) => {
   const data: {
     name?: string;
+    identifier?: string;
     instructions?: string | null;
     model?: string | null;
     effort?: string | null;
@@ -474,6 +597,7 @@ export const updateAgent = async (
       kind: true,
       workspaceId: true,
       name: true,
+      identifier: true,
       instructions: true,
       model: true,
       effort: true,
@@ -491,6 +615,24 @@ export const updateAgent = async (
       "BAD_REQUEST",
       "instructions, model and effort are only valid for hosted agents",
     );
+  }
+
+  // A hosted agent's identifier follows its name (it was derived from it at
+  // creation, and nothing external pins to it): a rename re-derives it, so
+  // "Donna" renamed "Max" does not stay `donna` forever. A BYO identifier is
+  // the handle machines are pinned to and never moves. Same-name renames
+  // and renames whose derivation the agent already holds change nothing.
+  if (
+    data.name !== undefined &&
+    data.name !== agent.name &&
+    agent.kind === "hosted"
+  ) {
+    const identifier = await freeDerivedIdentifier(
+      workspaceId,
+      data.name,
+      agent.identifier,
+    );
+    if (identifier !== agent.identifier) data.identifier = identifier;
   }
 
   if (changingModel) {
@@ -553,12 +695,35 @@ export const updateAgent = async (
       model === null && effort === null ? null : credential.provider;
   }
 
-  await db.agent.update({
-    where: { id: agentId },
-    data,
-    // The bare update would read the whole row back — image_data included.
-    select: { id: true },
-  });
+  await db.agent
+    .update({
+      where: { id: agentId },
+      data,
+      // The bare update would read the whole row back — image_data included.
+      select: { id: true },
+    })
+    .catch((err: unknown) => {
+      // The derived identifier's race arm, as on create: two renames to the
+      // same name in the same workspace at once can both pick the same free
+      // suffix, and the unique index refuses the second. A retry re-derives
+      // past the first, so the person just sends the rename again.
+      if (
+        data.identifier !== undefined &&
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === "P2002"
+      ) {
+        logAgentConflict({
+          workspaceId,
+          identifier: data.identifier,
+          reason: AGENT_CONFLICT_REASON_RACE,
+        });
+        throw new ServiceError(
+          "CONFLICT",
+          "Another agent just took this name's identifier; try the rename again",
+        );
+      }
+      throw err;
+    });
 
   // A renamed agent's Slack app keeps answering to the old name unless the
   // remote manifest moves with it. Fire-and-forget by design (the helper
@@ -613,7 +778,7 @@ export const updateAgent = async (
 export const regenerateAgentToken = async (
   workspaceId: string,
   agentId: string,
-) => {
+): Promise<{ accessToken: string } | { rotated: true }> => {
   const agent = await db.agent.findFirst({
     where: { id: agentId, workspaceId },
     select: { id: true, kind: true },
@@ -638,5 +803,34 @@ export const regenerateAgentToken = async (
     signalWork();
   }
 
-  return { accessToken: updated.accessToken };
+  // Rotation still revokes a hosted agent's token (its sandbox picks up the
+  // new one on respawn); only the value stays server-side.
+  return agentTokenIsUserVisible(agent.kind)
+    ? { accessToken: updated.accessToken }
+    : { rotated: true };
+};
+
+/**
+ * "Restart agent": every conversation of this hosted agent starts a fresh
+ * harness session, in-flight work ends, and a running sandbox stops so the
+ * next message cold-starts a new one (see `requestAgentRestart`). The way
+ * out of any state the agent cannot answer from: a damaged saved history, a
+ * stuck run, or an agent image the running box predates.
+ */
+export const restartAgent = async (
+  workspaceId: string,
+  agentId: string,
+): Promise<void> => {
+  const agent = await db.agent.findFirst({
+    where: { id: agentId, workspaceId },
+    select: { id: true, kind: true },
+  });
+  if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
+  if (agent.kind !== "hosted") {
+    throw new ServiceError(
+      "UNPROCESSABLE",
+      "Only hosted agents can be restarted",
+    );
+  }
+  await requestAgentRestart(agent.id, workspaceId);
 };

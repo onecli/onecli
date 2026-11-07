@@ -1,5 +1,6 @@
 import { cryptoService } from "@onecli/api/lib/crypto";
 import { compileConnectionStack } from "@onecli/api/services/grants-compile";
+import type { ConnectionGrantInput } from "@onecli/api/validations/grants";
 import type { Prisma, PrismaClient } from "@prisma/client";
 
 import type { TestIds } from "./ids.js";
@@ -61,6 +62,9 @@ export interface SecretSpec extends InjectionSpec {
    * only shape `find_secrets_by_org` returns. Defaults to `workspace`.
    */
   readonly scope?: "workspace" | "organization";
+  /** Display name. Defaults to the row id. Shown to the agent when two
+   * custom secrets collide on one injection slot. */
+  readonly name?: string;
 }
 
 /**
@@ -107,7 +111,7 @@ export interface ConditionSpec {
  *
  * The asymmetry worth knowing: an empty identity set means "any principal" for
  * a DECISION, but never matches for INJECTION selection
- * (`ee/policy_engine/inject_select.rs`).
+ * (`apps/gateway/crates/policy-engine/src/inject_select.rs`).
  */
 export type IdentitySpec =
   | "agent"
@@ -184,6 +188,11 @@ export interface AppConnectionSpec {
    * agent that called one of the provider's generic hosts.
    */
   readonly metadata?: Prisma.InputJsonObject;
+  /**
+   * The provider refused the stored refresh token: the account is waiting on
+   * a reconnect (`reauth_required_at` set), as the gateway marks it.
+   */
+  readonly reauthRequired?: boolean;
 }
 
 export interface WorldSpec {
@@ -250,8 +259,10 @@ const targetRow = (
     return { id, kind, ...narrowing, secret: { connect: { id: secretId } } };
   }
   if (kind === "connection") {
-    // The CHECK rejects path/method narrowing columns on a connection row;
-    // narrowing is the `appTools` axis (`tools` - the grant stacks' shape).
+    // Narrowing is the `appTools` axis (`tools` - the grant stacks' shape);
+    // `method` narrows only a whole-app row (a split catch-all's
+    // `GET,HEAD` / `!GET,HEAD`). The CHECK rejects host columns on a
+    // connection row.
     const connectionId = connectionIds[target.connectionIndex ?? -1];
     if (connectionId === undefined) {
       throw new Error(
@@ -265,6 +276,7 @@ const targetRow = (
       ...(target.tools !== undefined && target.tools.length > 0
         ? { appTools: [...target.tools] }
         : {}),
+      ...(target.method !== undefined ? { method: target.method } : {}),
     };
   }
   if (kind === "app") {
@@ -400,27 +412,46 @@ export const grantSecret = async (
 };
 
 /**
- * The stack the REAL grant compiler emits for "custom access, `allow` only" on
- * the world's first app connection, as spec rules bound to the main agent and
- * named `Grant: e2e · <provider>…`. Production-shaped by construction, so a
- * suite asserting on a grant row (its action, approval modifier, or name) can
- * never drift from what a customized grant actually writes.
+ * The stack the REAL grant compiler emits for "custom access" (`allow`, plus
+ * the tools that need approval in `ask`, and the "Not listed above" choices
+ * `otherReads` / `otherWrites`) on the world's first app connection, as spec
+ * rules bound to the main agent and named `Grant: e2e · <provider>…`.
+ * Production-shaped by construction, so a suite asserting on a grant row (its
+ * action, approval modifier, or name) can never drift from what a customized
+ * grant actually writes.
  */
 export const compiledGrantStack = (
   provider: string,
   allow: string[],
+  {
+    ask = [],
+    ...other
+  }: Partial<
+    Pick<
+      Extract<ConnectionGrantInput, { access: "custom" }>,
+      "ask" | "otherReads" | "otherWrites"
+    >
+  > = {},
 ): RuleSpec[] =>
   compileConnectionStack(`Grant: e2e · ${provider}`, provider, {
     access: "custom",
     allow,
-    ask: [],
+    ask,
+    ...other,
   }).map((rule) => ({
     name: rule.name,
     action: rule.action,
     requireApproval: rule.requireApproval,
     source: "grant",
     identities: ["agent"],
-    targets: [{ kind: "connection", connectionIndex: 0, tools: rule.tools }],
+    targets: [
+      {
+        kind: "connection",
+        connectionIndex: 0,
+        tools: rule.tools,
+        ...(rule.method ? { method: rule.method } : {}),
+      },
+    ],
   }));
 
 /**
@@ -451,7 +482,7 @@ export const addSecret = async (
   await prisma.secret.create({
     data: {
       id,
-      name: id,
+      name: secret.name ?? id,
       type: secret.type ?? "generic",
       scope,
       // An org-scoped row must have a NULL workspace: `find_secrets_by_workspace`
@@ -540,6 +571,9 @@ export const seedWorld = async (
         label: connection.label ?? `${connection.provider}-${String(i)}`,
         status: "connected",
         ...(connection.metadata ? { metadata: connection.metadata } : {}),
+        ...(connection.reauthRequired === true
+          ? { reauthRequiredAt: new Date() }
+          : {}),
         credentials: await cryptoService.encrypt(
           JSON.stringify(
             connection.credentials ?? {

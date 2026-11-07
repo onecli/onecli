@@ -3,23 +3,31 @@ import {
   MAX_OUTBOUND_ATTACHMENT_BYTES,
   RUNNER_ATTACHMENT_HEADERS,
   runnerAttachmentUploadHeadersSchema,
+  runnerChannelClaimRequestSchema,
   runnerEventsRequestSchema,
   runnerHeartbeatRequestSchema,
   runnerRegisterRequestSchema,
   runnerMemoryWriteRequestSchema,
   runnerSandboxCheckRequestSchema,
+  runnerSpawnRequestSchema,
+  runnerStrayStopRequestSchema,
   runnerToolCallRequestSchema,
   runnerWorkRequestSchema,
+  type RunnerReplicaSelfResponse,
   type RunnerWorkItem,
 } from "@onecli/agent-protocol";
 import { readCappedBinaryBody } from "@onecli/channels";
 import { attachmentMimeSchema } from "../validations/attachments";
 import { runnerAuth, type RunnerEnv } from "../middleware/runner-auth";
-import { NO_MODEL_KEY_MESSAGE } from "../validations/conversation";
+import {
+  NO_MODEL_KEY_MESSAGE,
+  RESUMED_TURN_CONTEXT,
+} from "../validations/conversation";
 import {
   claimDueWork,
   expireWedgedFollowUps,
   failStalledTurns,
+  heldIdleSummary,
   reclaimStaleTurns,
   releaseClaim,
   parkUnstartableClaim,
@@ -28,28 +36,50 @@ import {
 } from "../services/due-work";
 import { createLogClaimWait } from "../services/claim-wait-log";
 import { fireDueCrons } from "../services/cron-fire-service";
+import { fireDueEvalSchedules } from "../services/eval-schedule-fire-service";
+import { refreshDueSkillSources } from "../services/skill-library-service";
 import { fireDueWatches } from "../services/watch-fire-service";
+import { platformJobs } from "../services/platform-jobs";
 import { promoteParkedFollowUps } from "../services/follow-up-service";
-import { applyProcessState } from "../services/sandbox-process-service";
+import {
+  applyProcessState,
+  applySandboxDesktop,
+  applySandboxPorts,
+} from "../services/sandbox-process-service";
+import { allowedPortsForRunner } from "../services/sandbox-port-service";
 import {
   heartbeatRunner,
   registerRunner,
-  runnerSupportsAttachments,
+  runnerAttachmentSupport,
+  type RunnerAttachmentSupport,
 } from "../services/runner-service";
 import {
   getAttachmentBytesForRunner,
   planTurnAttachments,
   sweepExpiredAttachments,
+  sweepStaleStagedAttachments,
   sweepStalePendingAttachments,
 } from "../services/attachment-service";
 import { sweepSshSessions } from "../services/ssh-service";
+import { sweepRuntimeLedger } from "../services/runtime-ledger";
 import { sweepPeerTasks } from "../services/channels/agent-link-service";
+import { getAgentDesktop } from "../providers/hooks/agent-desktop";
+import { getSandboxLifecycleHooks } from "../providers/hooks/sandbox-lifecycle-hooks";
 import {
   applyRunnerEvent,
   buildSandboxStartPayload,
   listMissingSandboxIds,
-  listRunnerSandboxes,
 } from "../services/sandbox-service";
+import {
+  claimChannel,
+  claimStrayStop,
+  isReconcilerReplica,
+  isReplicaRetired,
+  listRunnerSandboxes,
+  recordSpawn,
+  releaseChannel,
+  retireReplica,
+} from "../services/runner-channel-service";
 import {
   applyTurnEvents,
   applyTurnProgress,
@@ -57,10 +87,15 @@ import {
   settleSweptTurns,
 } from "../services/turn-service";
 import { buildTurnContext } from "../services/turn-context-service";
+import { deliveredContextTokens } from "../services/llm-credential-service";
 import { MAX_TURN_CONTEXT_CHARS } from "@onecli/agent-protocol";
 import { activityForTool } from "@onecli/agent-protocol/activity";
 import type { AgentEvent } from "@onecli/agent-protocol";
-import { narrateTurnActivity } from "../services/channels/turn-receipt-service";
+import {
+  markFollowUpRead,
+  narrateTurnActivity,
+  refreshTurnCard,
+} from "../services/channels/turn-receipt-service";
 import { buildHomeSyncItem } from "../services/home-sync-service";
 import {
   executeAttachmentUpload,
@@ -105,6 +140,33 @@ export const pushTurnNarration = (
   void narrateTurnActivity(turnId, activity);
 };
 
+/**
+ * Flip the "read" mark on every mid-run follow-up a batch confirmed the
+ * run picked up (`message.joined`, the live pickup signal): the person's
+ * waiting mark on their channel message becomes the read mark the moment
+ * the agent has the message, not when the answer posts. Where the waiting
+ * mark is a row on the turn's card instead (a thread under a loader), the
+ * card is refreshed so the row leaves, once per batch however many joined.
+ * Coarse like the narration above (a handful per turn, never per token),
+ * and detached for the same reason: a mark decorates a message already
+ * accepted and must never delay an ack or fail a batch.
+ *
+ * Exported for its test, beside `pushTurnNarration`: which event moves a
+ * mark is the whole behavior.
+ */
+export const markJoinedFollowUpsRead = (
+  turnId: string,
+  events: AgentEvent[],
+): void => {
+  let joined = false;
+  for (const event of events) {
+    if (event.type !== "message.joined") continue;
+    joined = true;
+    void markFollowUpRead(event.followUpId);
+  }
+  if (joined) void refreshTurnCard(turnId);
+};
+
 /** The turn-queue telemetry line — see services/claim-wait-log.ts. */
 const logClaimWait = createLogClaimWait(logger);
 
@@ -124,6 +186,28 @@ const MAX_WAIT_SECONDS = 25;
  * process (module state: one api process, one clock). */
 const RETENTION_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 let lastRetentionSweepAt = 0;
+/**
+ * The poll's recovery sweeps run at most once per this per api process.
+ * They are fleet-wide (every sandbox, every turn), so running them on every
+ * poll made their load grow with the number of runner copies polling, for
+ * no gain: one pass a second is far inside every window they enforce. The
+ * check-and-set is synchronous, so of the polls arriving together exactly
+ * one pays for the pass.
+ */
+const POLL_SWEEP_INTERVAL_MS = 1000;
+let lastPollSweepAt = 0;
+/** The held_idle line is a gauge, not an event: once a minute is plenty. */
+const HELD_IDLE_LOG_INTERVAL_MS = 60_000;
+let lastHeldIdleLogAt = 0;
+/** When each platform job's pass last ran in this process, by job name
+ * (each job keeps its own interval, see platform-jobs). */
+const lastJobPassAt = new Map<string, number>();
+/** Test seam: let the next poll run its sweeps (every platform job's pass
+ * included) whatever ran before. */
+export const resetPollSweepThrottle = (): void => {
+  lastPollSweepAt = 0;
+  lastJobPassAt.clear();
+};
 const DEFAULT_LIMIT = 5;
 /** Re-check cadence inside a held poll — the floor on wake latency when the
  * in-process signal is missed (a second api instance, a signal thrown away). */
@@ -134,6 +218,168 @@ const parseBody = async (raw: Request) =>
     .clone()
     .json()
     .catch(() => null);
+
+/**
+ * The control plane has no background loop (§3.3), so the poll is also
+ * where overdue work gets swept (throttled: `POLL_SWEEP_INTERVAL_MS`).
+ * Failure is not fatal: each sweep is a recovery path, and losing one pass
+ * costs one interval, never taking the poll itself down, which would stop
+ * dispatch entirely.
+ */
+const runPollSweeps = async (): Promise<void> => {
+  // Each sweep's settle rides its own chain: the sweeps' raw UPDATEs bypass
+  // `finishTurn` (whose late real report is a fenced no-op), so the
+  // returned rows are the ONLY chance to book a swept cron/watch run's
+  // outcome and deliver its report. Paired here rather than inside
+  // due-work because turn-service already imports due-work (`signalWork`).
+  await reclaimStaleTurns()
+    .then(settleSweptTurns)
+    .catch((err: unknown) => log.warn({ err }, "stale-turn sweep failed"));
+
+  // The liveness arm: RUNNING turns whose supervisor heartbeat went silent.
+  // Right after the ceiling sweep, same posture — recovery first, dispatch
+  // second. The abort the sweep flags is claimed by the poll's claim right
+  // after this pass (claimDueWork's abort arm), so fail and stop land
+  // together.
+  await failStalledTurns()
+    .then(settleSweptTurns)
+    .catch((err: unknown) => log.warn({ err }, "stalled-turn sweep failed"));
+
+  // Scheduled tasks fire here too (step 7): dueness is computed at poll
+  // time, and a fire is just a turn creation: the claim arms then deliver
+  // it like any other queued work. Same non-fatal posture as the sweep;
+  // poll cadence bounds cron precision (seconds), which is the right
+  // precision for cron (§3.3).
+  await fireDueCrons().catch((err: unknown) =>
+    log.warn({ err }, "cron fire pass failed"),
+  );
+
+  // Eval schedules fire here too, the same way: a fire admits an ordinary
+  // eval run, whose worker then asks its questions as normal queued turns.
+  await fireDueEvalSchedules().catch((err: unknown) =>
+    log.warn({ err }, "eval schedule fire pass failed"),
+  );
+
+  // Skill library refresh: a connected repo whose check is due is compared
+  // to its branch head and its in-use skills are re-fetched. Detached from
+  // the poll (`void`): GitHub latency must never hold dispatch, and the
+  // claim's clock stamp keeps concurrent polls from fetching the same repo
+  // twice.
+  void refreshDueSkillSources().catch((err: unknown) =>
+    log.warn({ err }, "skill library refresh pass failed"),
+  );
+
+  // Background-process watches fire here too (step 10). Its internal sweeps
+  // (lost/coherence/expiry) run first, so the claim right after already sees
+  // a lost process's conversions: a dying process never spuriously holds a
+  // sandbox awake for one extra interval. Same non-fatal posture.
+  await fireDueWatches().catch((err: unknown) =>
+    log.warn({ err }, "watch fire pass failed"),
+  );
+
+  // Platform jobs ride the same tick (platform-jobs: memory review today),
+  // each throttled further on its own interval, per process. Sequential
+  // and isolated: one job's failure costs that job's pass only, never the
+  // next job's, the poll, or dispatch.
+  for (const job of platformJobs()) {
+    const now = Date.now();
+    if (now - (lastJobPassAt.get(job.name) ?? 0) <= job.passIntervalMs) {
+      continue;
+    }
+    lastJobPassAt.set(job.name, now);
+    try {
+      await job.pass();
+    } catch (err) {
+      log.warn({ err, job: job.name }, "platform job pass failed");
+    }
+  }
+
+  // Parked follow-ups whose target closed without promoting them (a crash
+  // in the close window, a settle frame that never arrived). The PRIMARY
+  // promotion is inline in finishTurn — this is the recovery backstop,
+  // same non-fatal posture as the sweeps above. The wedge sweep runs AFTER
+  // it, deliberately: promotion re-occupies a just-freed conversation, so
+  // the sweep only ever reaches follow-ups nothing can promote.
+  await promoteParkedFollowUps().catch((err: unknown) =>
+    log.warn({ err }, "follow-up promotion pass failed"),
+  );
+  await expireWedgedFollowUps().catch((err: unknown) =>
+    log.warn({ err }, "wedged follow-up sweep failed"),
+  );
+  // Peer tasks (the PR after 5b): idle tasks close with their line, and
+  // queued tasks whose pair is free start. Two indexed probes, empty
+  // almost always; same non-fatal posture as the sweeps above.
+  await sweepPeerTasks().catch((err: unknown) =>
+    log.warn({ err }, "peer task sweep failed"),
+  );
+  // A hosted-platform capability's own expiries. Absent (self-host): none.
+  await getAgentDesktop()
+    ?.sweep()
+    .catch((err: unknown) => log.warn({ err }, "agent desktop sweep failed"));
+  // Uploads nobody ever sent (a closed tab, an abandoned draft). Indexed
+  // and empty almost always; same non-fatal posture as the sweeps above.
+  await sweepStalePendingAttachments().catch((err: unknown) =>
+    log.warn({ err }, "stale attachment sweep failed"),
+  );
+  // Retention (30 days, either direction): drops bytes, keeps metadata.
+  // Throttled further, per process: a day's worth of expiries is a
+  // handful of rows.
+  if (Date.now() - lastRetentionSweepAt > RETENTION_SWEEP_INTERVAL_MS) {
+    lastRetentionSweepAt = Date.now();
+    await sweepExpiredAttachments().catch((err: unknown) =>
+      log.warn({ err }, "attachment retention sweep failed"),
+    );
+    await sweepStaleStagedAttachments().catch((err: unknown) =>
+      log.warn({ err }, "staged attachment sweep failed"),
+    );
+  }
+  // SSH sessions a crashed terminator abandoned:
+  // lease-expired rows are closed here so the per-agent cap and the audit
+  // record stay honest — keep-awake already ignores them (the lease is the
+  // truth). Same non-fatal posture.
+  await sweepSshSessions().catch((err: unknown) =>
+    log.warn({ err }, "ssh session sweep failed"),
+  );
+  // The awake-time ledger's reconcile: close runs nothing reported, open
+  // runs nothing recorded, fold closed rows into the daily rollup. Same
+  // non-fatal posture; every statement is idempotent, so a lost pass costs
+  // one interval of staleness, never a number.
+  await sweepRuntimeLedger().catch((err: unknown) =>
+    log.warn({ err }, "runtime ledger sweep failed"),
+  );
+  // The hold's cost, once a minute: sandboxes kept up past their idle
+  // window by keep-awake alone, and the oldest hold. One structured line
+  // an operator's log alerting can key on.
+  if (Date.now() - lastHeldIdleLogAt >= HELD_IDLE_LOG_INTERVAL_MS) {
+    lastHeldIdleLogAt = Date.now();
+    await heldIdleSummary()
+      .then((summary) => {
+        if (summary.held > 0) log.info(summary, "held_idle");
+      })
+      .catch((err: unknown) => log.warn({ err }, "held_idle read failed"));
+  }
+};
+
+/**
+ * A message's attachments, composed at dispatch time for a turn and for a
+ * steered follow-up alike: the manifest the runner pulls by and the note
+ * that tells the agent where the files landed. Non-blocking like the memory
+ * context: a failed plan ships the words without the files rather than
+ * holding the message back (the agent's read fails honestly).
+ */
+const planMessageAttachments = (turnId: string, maxFiles: number) =>
+  planTurnAttachments(turnId, maxFiles).catch((err: unknown) => {
+    log.warn({ err, turnId }, "attachment plan failed; delivering without it");
+    return null;
+  });
+
+/** Delivery-only context parts in order, joined under the one wire cap
+ * (`MAX_TURN_CONTEXT_CHARS`); null when there is nothing to say. */
+const joinContext = (...parts: (string | null | undefined)[]): string | null =>
+  parts
+    .filter((part): part is string => Boolean(part))
+    .join("\n\n")
+    .slice(0, MAX_TURN_CONTEXT_CHARS) || null;
 
 export const runnerRoutes = () => {
   const app = new Hono<RunnerEnv>();
@@ -161,8 +407,14 @@ export const runnerRoutes = () => {
     const result = await registerRunner({ token, ...parsed.data });
     if (!result.ok) return c.json({ error: "Unauthorized" }, 401);
 
-    log.info({ runnerId: result.runnerId }, "runner registered");
-    return c.json({ runnerId: result.runnerId });
+    log.info(
+      { runnerId: result.runnerId, replicaId: result.replicaId },
+      "runner registered",
+    );
+    return c.json({
+      runnerId: result.runnerId,
+      ...(result.replicaId !== undefined && { replicaId: result.replicaId }),
+    });
   });
 
   app.use("*", runnerAuth);
@@ -174,7 +426,7 @@ export const runnerRoutes = () => {
    * without a background loop anywhere.
    */
   app.post("/work", async (c) => {
-    const { runnerId } = c.get("runner");
+    const { runnerId, replicaId } = c.get("runner");
     const body = await parseBody(c.req.raw);
     const parsed = runnerWorkRequestSchema.safeParse(body ?? {});
     if (!parsed.success) {
@@ -184,94 +436,22 @@ export const runnerRoutes = () => {
       );
     }
 
-    // The control plane has no background loop (§3.3), so the poll is also
-    // where overdue work gets swept. Failure is not fatal: the sweep is a
-    // recovery path, and losing one pass costs one poll interval — never
-    // taking the poll itself down, which would stop dispatch entirely.
-    //
-    // Each sweep's settle rides its own chain: the sweeps' raw UPDATEs bypass
-    // `finishTurn` (whose late real report is a fenced no-op), so the
-    // returned rows are the ONLY chance to book a swept cron/watch run's
-    // outcome and deliver its report. Paired here rather than inside
-    // due-work because turn-service already imports due-work (`signalWork`).
-    await reclaimStaleTurns()
-      .then(settleSweptTurns)
-      .catch((err: unknown) => log.warn({ err }, "stale-turn sweep failed"));
-
-    // The liveness arm: RUNNING turns whose supervisor heartbeat went silent.
-    // Right after the ceiling sweep, same posture — recovery first, dispatch
-    // second. The abort the sweep flags is claimed further down this very
-    // poll (claimDueWork's abort arm), so fail and stop land together.
-    await failStalledTurns()
-      .then(settleSweptTurns)
-      .catch((err: unknown) => log.warn({ err }, "stalled-turn sweep failed"));
-
-    // Scheduled tasks fire here too (step 7): dueness is computed at poll
-    // time, and a fire is just a turn creation — the claim arms below then
-    // deliver it like any other queued work. Same non-fatal posture as the
-    // sweep; poll cadence bounds cron precision (seconds), which is the
-    // right precision for cron (§3.3).
-    await fireDueCrons().catch((err: unknown) =>
-      log.warn({ err }, "cron fire pass failed"),
-    );
-
-    // Background-process watches fire here too (step 10). Its internal sweeps
-    // (lost/coherence/expiry) run first, so THIS poll's stop-arm below already
-    // sees a lost process's conversions — a dying process never spuriously
-    // holds a sandbox awake for one extra interval. Same non-fatal posture.
-    await fireDueWatches().catch((err: unknown) =>
-      log.warn({ err }, "watch fire pass failed"),
-    );
-
-    // Parked follow-ups whose target closed without promoting them (a crash
-    // in the close window, a settle frame that never arrived). The PRIMARY
-    // promotion is inline in finishTurn — this is the recovery backstop,
-    // same non-fatal posture as the sweeps above. The wedge sweep runs AFTER
-    // it, deliberately: promotion re-occupies a just-freed conversation, so
-    // the sweep only ever reaches follow-ups nothing can promote.
-    await promoteParkedFollowUps().catch((err: unknown) =>
-      log.warn({ err }, "follow-up promotion pass failed"),
-    );
-    await expireWedgedFollowUps().catch((err: unknown) =>
-      log.warn({ err }, "wedged follow-up sweep failed"),
-    );
-    // Peer tasks (the PR after 5b): idle tasks close with their line, and
-    // queued tasks whose pair is free start. Two indexed probes, empty
-    // almost always; same non-fatal posture as the sweeps above.
-    await sweepPeerTasks().catch((err: unknown) =>
-      log.warn({ err }, "peer task sweep failed"),
-    );
-    // Uploads nobody ever sent (a closed tab, an abandoned draft). Indexed
-    // and empty almost always; same non-fatal posture as the sweeps above.
-    await sweepStalePendingAttachments().catch((err: unknown) =>
-      log.warn({ err }, "stale attachment sweep failed"),
-    );
-    // Retention (30 days, either direction): drops bytes, keeps metadata.
-    // Throttled per process — a day's worth of expiries is a handful of
-    // rows, and the poll runs every second across every runner.
-    if (Date.now() - lastRetentionSweepAt > RETENTION_SWEEP_INTERVAL_MS) {
-      lastRetentionSweepAt = Date.now();
-      await sweepExpiredAttachments().catch((err: unknown) =>
-        log.warn({ err }, "attachment retention sweep failed"),
-      );
+    if (Date.now() - lastPollSweepAt >= POLL_SWEEP_INTERVAL_MS) {
+      lastPollSweepAt = Date.now();
+      await runPollSweeps();
     }
-    // SSH sessions a crashed terminator abandoned:
-    // lease-expired rows are closed here so the per-agent cap and the audit
-    // record stay honest — keep-awake already ignores them (the lease is the
-    // truth). Same non-fatal posture.
-    await sweepSshSessions().catch((err: unknown) =>
-      log.warn({ err }, "ssh session sweep failed"),
-    );
 
     const limit = parsed.data.limit ?? DEFAULT_LIMIT;
     const deadline =
       Date.now() + Math.min(parsed.data.wait ?? 0, MAX_WAIT_SECONDS) * 1000;
 
-    // Resolved lazily, once per poll, only when a claimed turn needs it.
-    let attachmentsCapable: boolean | null = null;
+    // Resolved lazily, once per poll, only when a claimed message needs it.
+    let attachmentSupport: RunnerAttachmentSupport | null = null;
+    const attachmentSupportOnce = async () =>
+      (attachmentSupport ??= await runnerAttachmentSupport(runnerId));
 
     for (;;) {
-      const claimed = await claimDueWork(runnerId, limit);
+      const claimed = await claimDueWork(runnerId, limit, replicaId);
       if (claimed.length > 0) {
         const items: RunnerWorkItem[] = [];
         for (const due of claimed) {
@@ -297,23 +477,39 @@ export const runnerRoutes = () => {
             // Attachments (metadata + note only — the runner PULLS bytes).
             // Composed exclusively for capable runners: telling the agent
             // about files that cannot arrive would be worse than silence.
-            // Same non-blocking posture as the context builder.
-            attachmentsCapable ??= await runnerSupportsAttachments(runnerId);
-            const plan = attachmentsCapable
-              ? await planTurnAttachments(due.turnId).catch((err: unknown) => {
-                  log.warn(
-                    { err, turnId: due.turnId },
-                    "attachment plan failed; delivering without it",
-                  );
-                  return null;
-                })
+            const support = await attachmentSupportOnce();
+            const plan = support.supported
+              ? await planMessageAttachments(due.turnId, support.maxFiles)
               : null;
             // The note leads (the files belong to THIS message); the memory
-            // context follows; one slice holds the combined budget.
-            const combinedContext = [plan?.note, context]
-              .filter((part): part is string => Boolean(part))
-              .join("\n\n")
-              .slice(0, MAX_TURN_CONTEXT_CHARS);
+            // context follows; one slice holds the combined budget. A resumed
+            // run's frame goes first of all: it says what this whole delivery
+            // is, before anything it carries.
+            const combinedContext = joinContext(
+              due.resumed ? RESUMED_TURN_CONTEXT : null,
+              plan?.note,
+              context,
+            );
+
+            // The conversation's size (context fit), clamped to what the
+            // agent's credential allows: a trial-credit agent never runs
+            // past the deployment's limit, and its own key lifts it with no
+            // other change. A failed lookup ships the turn with no size, so
+            // its session keeps the size it already had, rather than
+            // blocking the turn or clamping blind: a blind clamp would make
+            // the harness summarize a paying conversation's context away on
+            // a database hiccup, while the trial's spend stays bounded by the
+            // gateway's own credit cap either way.
+            const contextTokens = await deliveredContextTokens(
+              due.agentId,
+              due.contextTokens,
+            ).catch((err: unknown) => {
+              log.warn(
+                { err, turnId: due.turnId },
+                "context limit lookup failed; the session keeps its current size",
+              );
+              return undefined;
+            });
 
             items.push({
               kind: "turn.deliver",
@@ -324,7 +520,10 @@ export const runnerRoutes = () => {
               ...(due.resumeSessionRef && {
                 resumeSessionRef: due.resumeSessionRef,
               }),
+              ...(due.ephemeralSession && { ephemeralSession: true }),
               ...(combinedContext && { context: combinedContext }),
+              ...(due.gate && { gate: due.gate }),
+              ...(contextTokens !== undefined && { contextTokens }),
               ...(plan && plan.manifest.length > 0
                 ? { attachments: plan.manifest }
                 : {}),
@@ -341,9 +540,22 @@ export const runnerRoutes = () => {
             continue;
           }
           if (due.kind === "turn.message") {
-            // Steers carry the raw follow-up text only — no dispatch-time
-            // context: the live turn's session already has the target's, and
-            // the message rides into it verbatim.
+            // Steers carry the follow-up text verbatim and, for a sender's
+            // message, the claim's own delivery-only frame. Never the
+            // dispatch-time memory context: the live turn's session already
+            // has the target's. A follow-up with files carries them like a
+            // turn does (the claim routed it here only because this runner
+            // advertised `steerAttachments`): the manifest, and the note
+            // after the frame, which says a message arrived before the note
+            // says what came with it. Bounded to what this runner's wire
+            // schema parses, like a turn's manifest.
+            const plan = due.hasAttachments
+              ? await planMessageAttachments(
+                  due.turnId,
+                  (await attachmentSupportOnce()).maxFiles,
+                )
+              : null;
+            const context = joinContext(due.context, plan?.note);
             items.push({
               kind: "turn.message",
               sandboxId: due.sandboxId,
@@ -351,6 +563,28 @@ export const runnerRoutes = () => {
               turnId: due.turnId,
               targetTurnId: due.targetTurnId,
               message: due.message,
+              ...(context && { context }),
+              ...(plan &&
+                plan.manifest.length > 0 && { attachments: plan.manifest }),
+            });
+            continue;
+          }
+          if (due.kind === "turn.send_now") {
+            items.push({
+              kind: "turn.send_now",
+              sandboxId: due.sandboxId,
+              conversationId: due.conversationId,
+              turnId: due.turnId,
+              targetTurnId: due.targetTurnId,
+            });
+            continue;
+          }
+          if (due.kind === "desktop.control") {
+            items.push({
+              kind: "desktop.control",
+              sandboxId: due.sandboxId,
+              controlled: due.controlled,
+              ...(due.controllerName && { controllerName: due.controllerName }),
             });
             continue;
           }
@@ -400,6 +634,13 @@ export const runnerRoutes = () => {
                   message: NO_MODEL_KEY_MESSAGE,
                   code: "no_model_key",
                 });
+              } else if (spawn.reason === "unstartable") {
+                // The hosted extension refused the start for a reason that
+                // stays true until an operator acts: park it, same as above.
+                await parkUnstartableClaim(due.sandboxId, runnerId, {
+                  message: spawn.message,
+                  code: spawn.code,
+                });
               } else {
                 // The agent vanished, or the CA is not ready — put the claim
                 // back rather than shipping a half-formed spawn.
@@ -433,6 +674,17 @@ export const runnerRoutes = () => {
       const remaining = deadline - Date.now();
       if (remaining <= 0) return c.json({ items: [] });
       const signaled = await waitForWork(Math.min(remaining, RECHECK_MS));
+      // A copy that retired while this poll was parked is handed nothing
+      // (the claim fences refuse it) and its shutdown is waiting for this
+      // poll: answer now. Asked on a SIGNAL wake only (retiring signals),
+      // never on the steady re-check.
+      if (
+        signaled &&
+        replicaId !== undefined &&
+        (await isReplicaRetired(runnerId, replicaId))
+      ) {
+        return c.json({ items: [] });
+      }
       // A SIGNAL wake with the watch-fire mark pending means a watch just
       // flipped to triggered — run the fire pass here so trigger→fire is
       // ~a second. The take() is one-shot, so of all the polls a signal
@@ -448,7 +700,7 @@ export const runnerRoutes = () => {
 
   /** POST /runner/events — batched lifecycle reports, fenced by runner. */
   app.post("/events", async (c) => {
-    const { runnerId } = c.get("runner");
+    const { runnerId, replicaId } = c.get("runner");
     const body = await parseBody(c.req.raw);
     const parsed = runnerEventsRequestSchema.safeParse(body);
     if (!parsed.success) {
@@ -475,7 +727,7 @@ export const runnerRoutes = () => {
     // event exists to correct the control plane's stale `running` belief. A
     // throw on the first taking the rest of the batch with it would strand
     // exactly the sandbox the pair was sent to rescue — and the runner never
-    // retries a failed report.
+    // repeats a report that may have landed.
     let applied = 0;
     for (const event of parsed.data.events) {
       try {
@@ -483,7 +735,7 @@ export const runnerRoutes = () => {
           case "sandbox.status":
           case "supervisor.ready":
           case "home.synced":
-            await applyRunnerEvent(runnerId, event);
+            await applyRunnerEvent(runnerId, event, replicaId);
             break;
           case "turn.events": {
             const accepted = await applyTurnEvents(
@@ -503,7 +755,10 @@ export const runnerRoutes = () => {
             // batch. Wired HERE rather than inside `applyTurnEvents` because
             // the transcript service has no channel dependency and should
             // not grow one — routes are where the two meet.
-            if (accepted) pushTurnNarration(event.turnId, event.events);
+            if (accepted) {
+              pushTurnNarration(event.turnId, event.events);
+              markJoinedFollowUpsRead(event.turnId, event.events);
+            }
             break;
           }
           case "turn.progress":
@@ -511,6 +766,7 @@ export const runnerRoutes = () => {
               { runnerId, sandboxId: event.sandboxId },
               event.conversationId,
               event.turnId,
+              event.sessionRef,
             );
             break;
           case "turn.finished":
@@ -530,6 +786,14 @@ export const runnerRoutes = () => {
             // Background-process state (step 10): its own service, not
             // applyRunnerEvent — different shape, its own fencing.
             await applyProcessState(runnerId, event);
+            break;
+          case "sandbox.ports":
+            // Port discovery: the same service and fencing as process.state.
+            await applySandboxPorts(runnerId, event);
+            break;
+          case "sandbox.desktop":
+            // The same service and fencing as the ports.
+            await applySandboxDesktop(runnerId, event);
             break;
           default: {
             const unreachable: never = event;
@@ -624,6 +888,7 @@ export const runnerRoutes = () => {
       name: decode(h(RUNNER_ATTACHMENT_HEADERS.name)),
       sha256: h(RUNNER_ATTACHMENT_HEADERS.sha256),
       caption: decode(h(RUNNER_ATTACHMENT_HEADERS.caption)),
+      purpose: h(RUNNER_ATTACHMENT_HEADERS.purpose),
     });
     if (!parsedHeaders.success) {
       return c.json(
@@ -693,14 +958,165 @@ export const runnerRoutes = () => {
    * reaches the compute plane). `statuses` rides along (additive-optional on
    * the wire) so reconcile can also run the reverse diff — a sandbox believed
    * `running` with no backend snapshot is a sandbox that vanished out-of-band.
+   * A copy-aware runner also gets each sandbox's channel facts and whether
+   * the asking copy is the one that reconciles.
    */
   app.get("/sandboxes", async (c) => {
-    const { runnerId } = c.get("runner");
-    const rows = await listRunnerSandboxes(runnerId);
+    const { runnerId, replicaId } = c.get("runner");
+    const listing = await listRunnerSandboxes(runnerId, replicaId);
     return c.json({
-      sandboxIds: rows.map((row) => row.id),
-      statuses: Object.fromEntries(rows.map((row) => [row.id, row.status])),
+      sandboxIds: listing.rows.map((row) => row.id),
+      statuses: Object.fromEntries(
+        listing.rows.map((row) => [row.id, row.status]),
+      ),
+      ...(replicaId !== undefined && {
+        channels: listing.channels,
+        reconciler: listing.reconciler,
+      }),
     });
+  });
+
+  /**
+   * GET /runner/sandboxes/:id/ports — the live shared ports of a sandbox THIS
+   * runner hosts: the only source its port allowlist is armed from. The
+   * preview relay can ask the runner to refresh, but never names ports
+   * itself, so a relay compromise cannot widen what is dialable.
+   */
+  app.get("/sandboxes/:sandboxId/ports", async (c) => {
+    const { runnerId } = c.get("runner");
+    const ports = await allowedPortsForRunner(
+      runnerId,
+      c.req.param("sandboxId"),
+    );
+    if (ports === null) return c.json({ error: "Not found" }, 404);
+    return c.json({ ports });
+  });
+
+  /**
+   * PUT /runner/sandboxes/:sandboxId/spawn: the starting copy records the
+   * container it just created and its bootstrap token's SHA-256, before the
+   * sandbox boots, so whichever copy the supervisor reaches can accept it.
+   * 409 when the sandbox is no longer starting under this runner: the start
+   * stands down.
+   */
+  app.put("/sandboxes/:sandboxId/spawn", async (c) => {
+    const { runnerId, replicaId } = c.get("runner");
+    if (replicaId === undefined) return c.json({ error: "Not found" }, 404);
+    const parsed = runnerSpawnRequestSchema.safeParse(
+      await parseBody(c.req.raw),
+    );
+    if (!parsed.success) return c.json({ error: "Invalid spawn" }, 400);
+    const recorded = await recordSpawn(
+      runnerId,
+      replicaId,
+      c.req.param("sandboxId"),
+      parsed.data,
+    );
+    if (!recorded) return c.json({ error: "Not starting" }, 409);
+    const recordObservation =
+      getSandboxLifecycleHooks().recordResourceObservation;
+    if (parsed.data.resourceObservation && recordObservation) {
+      // The spawn is recorded; the observation is a fact about it, written
+      // outside that transaction. A failure here must not answer 5xx: the
+      // runner treats a failed record as "never recorded" and removes the
+      // container it just started.
+      try {
+        await recordObservation({
+          runnerId,
+          sandboxId: c.req.param("sandboxId"),
+          containerRef: parsed.data.containerRef,
+          observation: parsed.data.resourceObservation,
+          replicaId,
+        });
+      } catch (error) {
+        log.warn(
+          { err: error, sandboxId: c.req.param("sandboxId") },
+          "resource observation not recorded; spawn stands",
+        );
+      }
+    }
+    return c.body(null, 204);
+  });
+
+  /**
+   * POST /runner/sandboxes/:sandboxId/stray-stop: the reconciler claims
+   * the stop of a container that runs although its sandbox is parked. 409
+   * when a start (on any copy) got there first.
+   */
+  app.post("/sandboxes/:sandboxId/stray-stop", async (c) => {
+    const { runnerId, replicaId } = c.get("runner");
+    if (replicaId === undefined) return c.json({ error: "Not found" }, 404);
+    const parsed = runnerStrayStopRequestSchema.safeParse(
+      await parseBody(c.req.raw),
+    );
+    if (!parsed.success) return c.json({ error: "Invalid stop" }, 400);
+    const claimed = await claimStrayStop(
+      runnerId,
+      replicaId,
+      c.req.param("sandboxId"),
+      parsed.data.containerRef,
+    );
+    if (!claimed) return c.json({ error: "Not claimed" }, 409);
+    return c.body(null, 204);
+  });
+
+  /**
+   * POST /runner/channels: a copy claims a supervisor's control channel as
+   * its socket opens (the token door on a first connect, the session door on
+   * a reconnect). Copy-aware runners only: the channel record names the
+   * copy. Every refusal is the same hint-free 404.
+   */
+  app.post("/channels", async (c) => {
+    const { runnerId, replicaId } = c.get("runner");
+    if (replicaId === undefined) return c.json({ error: "Not found" }, 404);
+    const parsed = runnerChannelClaimRequestSchema.safeParse(
+      await parseBody(c.req.raw),
+    );
+    if (!parsed.success) return c.json({ error: "Invalid claim" }, 400);
+    const claimed = await claimChannel(runnerId, replicaId, parsed.data);
+    if (!claimed) return c.json({ error: "Not found" }, 404);
+    return c.json(claimed);
+  });
+
+  /**
+   * DELETE /runner/channels/:connectionId: a copy's socket closed. A no-op
+   * (still 204) when that connection no longer holds the channel.
+   */
+  app.delete("/channels/:connectionId", async (c) => {
+    const { runnerId, replicaId } = c.get("runner");
+    if (replicaId === undefined) return c.json({ error: "Not found" }, 404);
+    await releaseChannel(runnerId, replicaId, c.req.param("connectionId"));
+    return c.body(null, 204);
+  });
+
+  /**
+   * GET /runner/replicas/self: the calling copy's reconciler role, on its
+   * own. Every copy asks each reconcile pass; only the reconciler then
+   * fetches `GET /sandboxes`, so the others no longer pay for every
+   * sandbox's row once a minute. 404 for a runner that names no copy (a
+   * single process always reconciles), which an older runner never asks.
+   */
+  app.get("/replicas/self", async (c) => {
+    const { runnerId, replicaId } = c.get("runner");
+    if (replicaId === undefined) return c.json({ error: "Not found" }, 404);
+    const body: RunnerReplicaSelfResponse = {
+      reconciler: await isReconcilerReplica(runnerId, replicaId),
+    };
+    return c.json(body);
+  });
+
+  /**
+   * DELETE /runner/replicas/self: a copy shutting down cleanly retires its
+   * identity, once and for good: it is handed no new work, and the
+   * sandboxes it owned and the channels it held hand over at once instead
+   * of after the liveness window. Its later calls (final reports, socket
+   * releases) still authenticate; they never make it live again.
+   */
+  app.delete("/replicas/self", async (c) => {
+    const { runnerId, replicaId } = c.get("runner");
+    if (replicaId === undefined) return c.json({ error: "Not found" }, 404);
+    await retireReplica(runnerId, replicaId);
+    return c.body(null, 204);
   });
 
   /**

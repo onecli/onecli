@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
+  LEGACY_RUNNER_ATTACHMENTS_PER_MESSAGE,
+  MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_OUTBOUND_ATTACHMENT_BYTES,
   MAX_OUTBOUND_ATTACHMENT_BYTES_PER_CONVERSATION_DAY,
   MAX_OUTBOUND_ATTACHMENTS_PER_TURN,
+  MAX_PENDING_ATTACHMENTS_PER_CONVERSATION,
 } from "@onecli/agent-protocol";
-import { proofDatabaseUrl } from "../testing/pg-proof.js";
+import { proofDatabaseUrl, waitForLockWaiters } from "../testing/pg-proof.js";
 
 /**
  * The outbound attachment door (`send_file`, Tier 3), against a real
@@ -195,6 +198,131 @@ const upload = (
     bytes,
   );
 
+describe.skipIf(!PROOF_URL)(
+  "an agent's attachment by path (skill_import)",
+  () => {
+    const attach = (
+      ids: { conversationId: string; turnId: string },
+      name: string,
+      bytes: Buffer,
+    ) =>
+      db.conversationAttachment.create({
+        data: {
+          conversationId: ids.conversationId,
+          turnId: ids.turnId,
+          userId: USER,
+          source: "user",
+          name,
+          mimeType: "application/zip",
+          sizeBytes: bytes.length,
+          sha256: sha(bytes),
+          data: new Uint8Array(bytes),
+          status: "bound",
+          direction: "inbound",
+        },
+      });
+
+    it("finds a file sent to this agent, never another agent's at the same path", async () => {
+      const mine = await seed("own");
+      const other = await seed("other");
+      const bytes = Buffer.from("PK zip bytes");
+      await attach(other, "skill.zip", bytes);
+      const path = `attachments/${other.turnId}/skill.zip`;
+      expect(
+        await attachmentService.getAgentAttachmentBytesByPath(
+          mine.agentId,
+          path,
+        ),
+      ).toBeNull();
+      const found = await attachmentService.getAgentAttachmentBytesByPath(
+        other.agentId,
+        path,
+      );
+      expect(found?.equals(bytes)).toBe(true);
+      // The home-absolute form the turn's note names it by works too.
+      const absolute = await attachmentService.getAgentAttachmentBytesByPath(
+        other.agentId,
+        `/workspace/${path}`,
+      );
+      expect(absolute?.equals(bytes)).toBe(true);
+      expect(
+        await attachmentService.getAgentAttachmentBytesByPath(
+          other.agentId,
+          `attachments/${other.turnId}/../skill.zip`,
+        ),
+      ).toBeNull();
+    });
+
+    it("finds a same-named second file under the name it landed at", async () => {
+      const ids = await seed("dup");
+      const first = Buffer.from("first");
+      const second = Buffer.from("second");
+      // Sent one after the other. Two inserts can share a millisecond, and
+      // then the random id decides which one is "first" (the tie case has
+      // its own test below), so the second is dated a second later.
+      const a = await attach(ids, "Skill.zip", first);
+      const b = await attach(ids, "skill.zip", second);
+      await db.conversationAttachment.update({
+        where: { id: b.id },
+        data: { createdAt: new Date(a.createdAt.getTime() + 1000) },
+      });
+      const found = await attachmentService.getAgentAttachmentBytesByPath(
+        ids.agentId,
+        `attachments/${ids.turnId}/skill-2.zip`,
+      );
+      expect(found?.equals(second)).toBe(true);
+    });
+
+    it("same-named files written in the SAME millisecond are read in one fixed order, so the manifest and the by-path read agree on which landed where", async () => {
+      // A message's files are written in a burst, so equal `created_at`
+      // values are normal, and Postgres returns tied rows in whatever order
+      // it meets them on disk, which an UPDATE (a bind, a status flip)
+      // changes. The id breaks the tie. Ids are written in DESCENDING order
+      // and two rows are then updated, so neither insert nor heap order can
+      // pass for the id order by luck.
+      const ids = await seed("tie");
+      const at = new Date(Date.now() - 60_000);
+      const bodies = ["one", "two", "three", "four"].map((s) => Buffer.from(s));
+      const rowIds = bodies.map((_, i) => `${P}tie-${9 - i}`);
+      for (const [i, bytes] of bodies.entries())
+        await db.conversationAttachment.create({
+          data: {
+            id: rowIds[i],
+            conversationId: ids.conversationId,
+            turnId: ids.turnId,
+            userId: USER,
+            source: "user",
+            name: "notes.txt",
+            mimeType: "text/plain",
+            sizeBytes: bytes.length,
+            sha256: sha(bytes),
+            data: new Uint8Array(bytes),
+            status: "bound",
+            direction: "inbound",
+            createdAt: at,
+          },
+        });
+      await db.conversationAttachment.updateMany({
+        where: { id: { in: rowIds.filter((_, i) => i % 2 === 1) } },
+        data: { error: null },
+      });
+      const { manifest } = await attachmentService.planTurnAttachments(
+        ids.turnId,
+        MAX_ATTACHMENTS_PER_MESSAGE,
+      );
+      // The id order, which is the reverse of the order they were written.
+      expect(manifest.map((entry) => entry.id)).toEqual([...rowIds].sort());
+      for (const entry of manifest) {
+        const found = await attachmentService.getAgentAttachmentBytesByPath(
+          ids.agentId,
+          entry.path,
+        );
+        expect(found && sha(found)).toBe(entry.sha256);
+      }
+    });
+  },
+);
+
 describe.skipIf(!PROOF_URL)("outbound attachments (send_file door)", () => {
   it("stores a bound, outbound, agent-sourced row whose bytes read back through the blob seam, and audits it under the turn's author", async () => {
     const ids = await seed("a");
@@ -280,24 +408,6 @@ describe.skipIf(!PROOF_URL)("outbound attachments (send_file door)", () => {
     expect(await db.conversationAttachment.count()).toBe(0);
   });
 
-  it("CAP: the per-turn file count", async () => {
-    const ids = await seed("g");
-    for (let i = 0; i < MAX_OUTBOUND_ATTACHMENTS_PER_TURN; i += 1) {
-      const bytes = Buffer.from(`file ${i}`);
-      expect((await upload(RUNNER, ids, bytes, { name: `f${i}.txt` })).ok).toBe(
-        true,
-      );
-    }
-    const over = await upload(RUNNER, ids, Buffer.from("one more"), {
-      name: "over.txt",
-    });
-    expect(over.ok).toBe(false);
-    expect(!over.ok && over.error).toMatch(/per reply/);
-    expect(await db.conversationAttachment.count()).toBe(
-      MAX_OUTBOUND_ATTACHMENTS_PER_TURN,
-    );
-  });
-
   it("CAP under CONCURRENCY: a turn's files arriving together land exactly the cap — check-then-insert is serialized per conversation", async () => {
     // MUTATION-TESTED: drop the advisory lock in createOutboundAttachment
     // and this lands ~15 rows: every concurrent upload reads the same count.
@@ -311,6 +421,8 @@ describe.skipIf(!PROOF_URL)("outbound attachments (send_file door)", () => {
       MAX_OUTBOUND_ATTACHMENTS_PER_TURN,
     );
     expect(results.filter((r) => !r.ok)).toHaveLength(5);
+    // The model-facing refusal names the per-reply cap.
+    for (const r of results) if (!r.ok) expect(r.error).toMatch(/per reply/);
     expect(
       await db.conversationAttachment.count({
         where: { turnId: ids.turnId, direction: "outbound" },
@@ -474,6 +586,7 @@ describe.skipIf(!PROOF_URL)("outbound attachments: the read side", () => {
   const inbound = (
     ids: { conversationId: string; turnId: string },
     name: string,
+    createdAt?: Date,
   ) =>
     db.conversationAttachment.create({
       data: {
@@ -485,6 +598,7 @@ describe.skipIf(!PROOF_URL)("outbound attachments: the read side", () => {
         sizeBytes: 1,
         sha256: sha(Buffer.from("i")),
         status: "bound",
+        ...(createdAt ? { createdAt } : {}),
       },
       select: { id: true },
     });
@@ -685,7 +799,10 @@ describe.skipIf(!PROOF_URL)("outbound attachments: the read side", () => {
     });
     expect(sent.ok).toBe(true);
 
-    const plan = await attachmentService.planTurnAttachments(ids.turnId);
+    const plan = await attachmentService.planTurnAttachments(
+      ids.turnId,
+      MAX_ATTACHMENTS_PER_MESSAGE,
+    );
     expect(plan.manifest.map((entry) => entry.name)).toEqual(["brief.txt"]);
     expect(plan.note ?? "").not.toContain("out.pdf");
 
@@ -693,6 +810,391 @@ describe.skipIf(!PROOF_URL)("outbound attachments: the read side", () => {
     const own = await seed("r5b");
     await upload(RUNNER, own, Buffer.from("o"), { name: "agent-made.pdf" });
     expect(await attachmentService.firstAttachmentName(own.turnId)).toBeNull();
+  });
+
+  it("unsent uploads past the bound drop the uploader's oldest instead of refusing, and never another uploader's", async () => {
+    const ids = await seed("pend");
+    const OTHER = `${P}user-2`;
+    await db.user.create({
+      data: {
+        id: OTHER,
+        email: `${P}u2@example.com`,
+        externalAuthId: `${P}a2`,
+      },
+    });
+    const put = (userId: string, name: string) =>
+      attachmentService.createPendingAttachment({
+        conversationId: ids.conversationId,
+        userId,
+        source: "web",
+        name,
+        mimeType: "application/pdf",
+        bytes: Buffer.from(name),
+      });
+    const theirs = await put(OTHER, "theirs.pdf");
+    const foreignConversation = await seed("pend-foreign");
+    const foreign = await attachmentService.createPendingAttachment({
+      conversationId: foreignConversation.conversationId,
+      userId: USER,
+      source: "web",
+      name: "foreign.pdf",
+      mimeType: "application/pdf",
+      bytes: Buffer.from("foreign"),
+    });
+    const guest = await attachmentService.createPendingAttachment({
+      conversationId: ids.conversationId,
+      userId: null,
+      source: "slack",
+      name: "guest.pdf",
+      mimeType: "application/pdf",
+      bytes: Buffer.from("guest"),
+    });
+    const first = await put(USER, "u-0.pdf");
+    for (let i = 1; i < MAX_PENDING_ATTACHMENTS_PER_CONVERSATION + 3; i++) {
+      await put(USER, `u-${i}.pdf`);
+    }
+    const mine = await db.conversationAttachment.findMany({
+      where: { conversationId: ids.conversationId, userId: USER },
+      select: { id: true },
+    });
+    expect(mine).toHaveLength(MAX_PENDING_ATTACHMENTS_PER_CONVERSATION);
+    expect(mine.map((r) => r.id)).not.toContain(first.id);
+    // The planted control: the other person's unsent file is untouched.
+    expect(
+      await db.conversationAttachment.count({
+        where: { id: { in: [theirs.id, foreign.id, guest.id] } },
+      }),
+    ).toBe(3);
+  });
+
+  it("parallel uploads never exceed the uploader's pending capacity", async () => {
+    const ids = await seed("pend-race");
+    const results = await Promise.allSettled(
+      Array.from(
+        { length: MAX_PENDING_ATTACHMENTS_PER_CONVERSATION + 8 },
+        (_, i) =>
+          attachmentService.createPendingAttachment({
+            conversationId: ids.conversationId,
+            userId: USER,
+            source: "web",
+            name: `parallel-${i}.txt`,
+            mimeType: "text/plain",
+            bytes: Buffer.from("x"),
+          }),
+      ),
+    );
+    expect(results.some((result) => result.status === "fulfilled")).toBe(true);
+    const rows = await db.conversationAttachment.findMany({
+      where: { conversationId: ids.conversationId, userId: USER },
+      select: { status: true, data: true },
+    });
+    expect(rows).toHaveLength(MAX_PENDING_ATTACHMENTS_PER_CONVERSATION);
+    expect(
+      rows.every((row) => row.status === "pending" && row.data !== null),
+    ).toBe(true);
+  });
+
+  it("an active external upload cannot be evicted or bound from another tab", async () => {
+    const ids = await seed("pend-active");
+    let release = () => {};
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let announce: (id: string) => void = () => {};
+    const started = new Promise<string>((resolve) => {
+      announce = resolve;
+    });
+    const deleted: string[] = [];
+    attachmentStore.initAttachmentStore({
+      ...pgStore.pgAttachmentBlobStore,
+      async put(meta) {
+        announce(meta.id);
+        await blocked;
+        return { storageRef: `fake:${meta.id}` };
+      },
+      async delete(refs) {
+        deleted.push(...refs.map((ref) => ref.id));
+      },
+    });
+    const upload = attachmentService.createPendingAttachment({
+      conversationId: ids.conversationId,
+      userId: USER,
+      source: "web",
+      name: "active.txt",
+      mimeType: "text/plain",
+      bytes: Buffer.from("active"),
+    });
+    try {
+      const activeId = await started;
+      // Other tabs fill the rest of the capacity with in-flight reservations.
+      await db.conversationAttachment.createMany({
+        data: Array.from(
+          { length: MAX_PENDING_ATTACHMENTS_PER_CONVERSATION - 1 },
+          (_, i) => ({
+            conversationId: ids.conversationId,
+            userId: USER,
+            source: "web",
+            name: `active-${i}.txt`,
+            mimeType: "text/plain",
+            sizeBytes: 1,
+            sha256: sha(Buffer.from("x")),
+            status: "uploading",
+          }),
+        ),
+      });
+      await expect(
+        db.$transaction((tx) =>
+          attachmentService.bindAttachmentsToTurn(tx, {
+            ...ids,
+            userId: USER,
+            attachmentIds: [activeId],
+          }),
+        ),
+      ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+      await expect(
+        attachmentService.createPendingAttachment({
+          conversationId: ids.conversationId,
+          userId: USER,
+          source: "web",
+          name: "extra.txt",
+          mimeType: "text/plain",
+          bytes: Buffer.from("extra"),
+        }),
+      ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+      expect(deleted).toEqual([]);
+      release();
+      expect(await upload).toMatchObject({ id: activeId, status: "pending" });
+      expect(
+        await db.conversationAttachment.findUnique({ where: { id: activeId } }),
+      ).toMatchObject({ storageRef: `fake:${activeId}` });
+    } finally {
+      release();
+      await upload.catch(() => {});
+      attachmentStore.initAttachmentStore(pgStore.pgAttachmentBlobStore);
+    }
+  });
+
+  it.each(["sweep", "eviction"])(
+    "%s never deletes the external payload of a concurrently bound row",
+    async (mode) => {
+      const ids = await seed(`pend-bind-${mode}`);
+      const oldest = await db.conversationAttachment.create({
+        data: {
+          conversationId: ids.conversationId,
+          userId: USER,
+          name: "saved.txt",
+          mimeType: "text/plain",
+          sizeBytes: 1,
+          sha256: sha(Buffer.from("x")),
+          status: "pending",
+          storageRef: "fake:saved",
+          createdAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
+        },
+      });
+      if (mode === "eviction") {
+        await db.conversationAttachment.createMany({
+          data: Array.from(
+            { length: MAX_PENDING_ATTACHMENTS_PER_CONVERSATION - 1 },
+            (_, i) => ({
+              conversationId: ids.conversationId,
+              userId: USER,
+              name: `other-${i}.txt`,
+              mimeType: "text/plain",
+              sizeBytes: 1,
+              sha256: sha(Buffer.from("x")),
+              status: "pending",
+            }),
+          ),
+        });
+      }
+      const deleted: string[] = [];
+      attachmentStore.initAttachmentStore({
+        ...pgStore.pgAttachmentBlobStore,
+        async delete(refs) {
+          deleted.push(...refs.map((ref) => ref.id));
+        },
+      });
+      let unlock = () => {};
+      const locked = new Promise<void>((resolve) => {
+        unlock = resolve;
+      });
+      let release = () => {};
+      const hold = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const binding = db.$transaction(
+        async (tx) => {
+          await attachmentService.bindAttachmentsToTurn(tx, {
+            ...ids,
+            userId: USER,
+            attachmentIds: [oldest.id],
+          });
+          unlock();
+          await hold;
+        },
+        { timeout: 15_000 },
+      );
+      let competing: Promise<unknown> | undefined;
+      try {
+        await locked;
+        competing =
+          mode === "sweep"
+            ? attachmentService.sweepStalePendingAttachments()
+            : attachmentService.createPendingAttachment({
+                conversationId: ids.conversationId,
+                userId: USER,
+                source: "web",
+                name: "new.txt",
+                mimeType: "text/plain",
+                bytes: Buffer.from("new"),
+              });
+        // Attach the rejection handler before releasing the bound-row lock.
+        const result = competing.then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error }),
+        );
+        await waitForLockWaiters(db, {
+          queryLike: "%DELETE FROM conversation_attachments%",
+        });
+        release();
+        await binding;
+        expect(await result).toMatchObject(
+          mode === "sweep" ? { value: 0 } : { value: { status: "pending" } },
+        );
+        expect(deleted).not.toContain(oldest.id);
+        expect(
+          await db.conversationAttachment.findUnique({
+            where: { id: oldest.id },
+          }),
+        ).toMatchObject({
+          status: "bound",
+          turnId: ids.turnId,
+          storageRef: "fake:saved",
+        });
+      } finally {
+        release();
+        await binding;
+        await competing?.catch(() => {});
+        attachmentStore.initAttachmentStore(pgStore.pgAttachmentBlobStore);
+      }
+    },
+  );
+
+  it("stale upload reservations are reclaimed, but fresh uploads survive the sweep", async () => {
+    const ids = await seed("pend-stale");
+    const make = (name: string, createdAt: Date) =>
+      db.conversationAttachment.create({
+        data: {
+          conversationId: ids.conversationId,
+          userId: USER,
+          name,
+          mimeType: "text/plain",
+          sizeBytes: 1,
+          sha256: sha(Buffer.from("x")),
+          status: "uploading",
+          createdAt,
+          storageRef: `fake:${name}`,
+        },
+      });
+    const old = await make(
+      "old",
+      new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
+    );
+    const fresh = await make("fresh", new Date());
+    const deleted: string[] = [];
+    attachmentStore.initAttachmentStore({
+      ...pgStore.pgAttachmentBlobStore,
+      async delete(refs) {
+        deleted.push(...refs.map((ref) => ref.id));
+      },
+    });
+    try {
+      expect(await attachmentService.sweepStalePendingAttachments()).toBe(1);
+      expect(deleted).toEqual([old.id]);
+      expect(
+        await db.conversationAttachment.findUnique({ where: { id: fresh.id } }),
+      ).not.toBeNull();
+      expect(await attachmentService.sweepStalePendingAttachments()).toBe(0);
+    } finally {
+      attachmentStore.initAttachmentStore(pgStore.pgAttachmentBlobStore);
+    }
+  });
+
+  it("an external put whose metadata disappeared cleans up the returned object", async () => {
+    const ids = await seed("pend-orphan");
+    const deleted: string[] = [];
+    attachmentStore.initAttachmentStore({
+      ...pgStore.pgAttachmentBlobStore,
+      async put(meta) {
+        // A stale-reservation sweep or a conversation deletion won mid-put.
+        await db.conversationAttachment.delete({ where: { id: meta.id } });
+        return { storageRef: "fake:orphan" };
+      },
+      async delete(refs) {
+        deleted.push(
+          ...refs.flatMap((ref) =>
+            ref.storageRef === null ? [] : [ref.storageRef],
+          ),
+        );
+      },
+    });
+    try {
+      await expect(
+        attachmentService.createPendingAttachment({
+          conversationId: ids.conversationId,
+          userId: USER,
+          source: "web",
+          name: "orphan.txt",
+          mimeType: "text/plain",
+          bytes: Buffer.from("x"),
+        }),
+      ).rejects.toThrow();
+      expect(deleted).toEqual(["fake:orphan"]);
+      expect(
+        await db.conversationAttachment.count({
+          where: { conversationId: ids.conversationId },
+        }),
+      ).toBe(0);
+    } finally {
+      attachmentStore.initAttachmentStore(pgStore.pgAttachmentBlobStore);
+    }
+  });
+
+  it("a full message delivers every file; a runner with a smaller bound names the rest instead of dropping them", async () => {
+    const ids = await seed("r10");
+    const names = Array.from(
+      { length: MAX_ATTACHMENTS_PER_MESSAGE },
+      (_, i) => `dpa-${i}.pdf`,
+    );
+    // One millisecond apart, the order the person attached them in: rows
+    // written in the same millisecond have no defined order (the service
+    // breaks the tie by id, which is stable but not the attach order).
+    const base = Date.now() - 60_000;
+    for (const [i, name] of names.entries())
+      await inbound(ids, name, new Date(base + i));
+
+    // A current runner: every file rides the manifest, none is held back.
+    const full = await attachmentService.planTurnAttachments(
+      ids.turnId,
+      MAX_ATTACHMENTS_PER_MESSAGE,
+    );
+    expect(full.manifest.map((entry) => entry.name)).toEqual(names);
+    expect(full.note ?? "").not.toContain("could not be delivered");
+
+    // A runner built before the raise: the first files up to its bound ride,
+    // and the note names each of the rest so the agent can ask again.
+    const legacy = await attachmentService.planTurnAttachments(
+      ids.turnId,
+      LEGACY_RUNNER_ATTACHMENTS_PER_MESSAGE,
+    );
+    expect(legacy.manifest.map((entry) => entry.name)).toEqual(
+      names.slice(0, LEGACY_RUNNER_ATTACHMENTS_PER_MESSAGE),
+    );
+    for (const name of names.slice(LEGACY_RUNNER_ATTACHMENTS_PER_MESSAGE)) {
+      expect(legacy.note).toContain(`"${name}" but it could not be delivered`);
+    }
+    // Never a limit the person did not exceed: they sent within the cap.
+    expect(legacy.note).not.toMatch(/-file limit/);
   });
 
   it("EXTERNAL STORE: the ref put() returns is written to the row, so every reader dispatches to the arm that holds the bytes", async () => {

@@ -36,8 +36,7 @@ import { EditableRuleRow } from "./editable-rule-row";
 /** Derived sources with no editor of their own that still take effect, so the
  * console must at least be able to disable or delete them: `equipment` injects
  * a credential, and a legacy `app_permission` row still decides. `blocklist` is
- * excluded — the app page's blocklist panel owns those rows. Kept in step with
- * `USER_CHANGEABLE` in lib/policy-diff.ts, or a revoke stages but can't Apply. */
+ * excluded — the app page's blocklist panel owns those rows. */
 const REVOCABLE_SOURCES = new Set(["equipment", "app_permission", "grant"]);
 
 const HEAD =
@@ -62,12 +61,8 @@ export interface PolicyRulesTableProps {
   /** The scope's terminal Default Rule, rendered as the section's last row. */
   defaultRule: PolicyRuleV2 | null;
   scope: PageScope;
-  /** Staged-change chips per rule (logicalId → "new" | "changed"). */
-  diffState?: ReadonlyMap<string, "new" | "changed">;
   /** Provably-dead-rule chips (logicalId → the overlap warning). */
   overlapState?: ReadonlyMap<string, OverlapWarning>;
-  /** The Default Rule's action differs from the published one. */
-  defaultChanged?: boolean;
   /** Commit a new CUSTOM relative order (drag drop / Move up-down). Absent on
    * read-only sections. */
   onReorder?: (newCustomOrder: string[]) => void;
@@ -100,9 +95,7 @@ export const PolicyRulesTable = ({
   emptyLabel,
   defaultRule,
   scope,
-  diffState,
   overlapState,
-  defaultChanged = false,
   onReorder,
   reorderLocked = false,
   onEdit,
@@ -249,7 +242,6 @@ export const PolicyRulesTable = ({
                           ? () => moveCustom(rule.id, 1)
                           : undefined
                       }
-                      changeState={diffState?.get(rule.logicalId)}
                       overlap={overlapState?.get(rule.logicalId)}
                       onEdit={onEdit}
                       onToggleEnabled={onToggleEnabled}
@@ -273,7 +265,6 @@ export const PolicyRulesTable = ({
                   scope={scope}
                   rule={defaultRule}
                   editable={editable}
-                  changed={defaultChanged}
                 />
               )}
             </TableBody>

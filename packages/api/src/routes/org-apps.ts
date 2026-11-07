@@ -9,6 +9,7 @@ import {
 } from "../apps/connect-credentials";
 import { orgAuthorize, orgConnect } from "../apps/oauth-org";
 import { orgConnectionRoutes } from "./org-connections";
+import { registerGitHubAppShareRoutes } from "./github-app-share";
 import {
   getAppConfig,
   upsertAppConfig,
@@ -47,6 +48,9 @@ export const orgAppRoutes = () => {
   // keeps /v1/org/apps/connections* working for deployed CLIs. Remove once
   // all clients (CLI ≥ next release) migrate.
   app.route("/connections", orgConnectionRoutes());
+
+  // ── Shared GitHub App installations (org level) ──────────────────────
+  registerGitHubAppShareRoutes(app, admin, "organization");
 
   // ── Connect ─────────────────────────────────────────────────────────
   // Canonical org-scoped connection creation. The same cores back the legacy

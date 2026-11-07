@@ -5,8 +5,6 @@
 //! service. When a WebSocket upgrade is detected, the request is routed here
 //! instead of the normal reqwest-based forwarding path.
 
-use std::time::Duration;
-
 use anyhow::{Context, Result};
 use http_body_util::{Either, Full};
 use hyper::body::{Bytes, Incoming};
@@ -14,7 +12,6 @@ use hyper::client::conn::http1;
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tracing::{info, warn};
@@ -24,10 +21,9 @@ use policy::PolicyDecision;
 
 use super::hooks;
 use super::mitm::ResolvedRules;
+use super::relay;
 use super::response;
 use context::ProxyContext;
-
-const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
 const WEBSOCKET_HANDSHAKE_HEADERS: &[&str] = &[
     "upgrade",
@@ -111,13 +107,27 @@ pub async fn handle_websocket(
         .path_and_query()
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
+    // Upgrades routinely carry their token in the query: log lines get this.
+    let log_path = super::log_redact::redact_for_log(&path);
+
+    // An upgrade is judged as GET everywhere below; one asking the upstream to
+    // run another method is refused (the HTTP path does the same in forward.rs).
+    if let Some(resp) = super::method_override::refuse(
+        proxy_ctx,
+        policy_host,
+        &hyper::Method::GET,
+        &path,
+        req.headers(),
+    ) {
+        return Ok(resp);
+    }
 
     let has_injections = rules.injects();
 
     // An empty resource scope reaches nothing — refuse the upgrade outright
     // (the HTTP path does the same in forward.rs).
     if let Some(resp) = hooks::refuse_empty_scope(rules, proxy_ctx, policy_host, "GET", &path) {
-        warn!(host = %policy_host, path = %path, "empty resource scope — WebSocket upgrade denied");
+        warn!(host = %policy_host, path = %log_path, "empty resource scope — WebSocket upgrade denied");
         return Ok(resp);
     }
 
@@ -128,7 +138,7 @@ pub async fn handle_websocket(
     if let Some(provider) =
         ee::principals::app_availability_block(policy_host, &path, &rules.available_apps)
     {
-        warn!(host = %policy_host, path = %path, provider = %provider, "WebSocket app unavailable to workspace — refusing request");
+        warn!(host = %policy_host, path = %log_path, provider = %provider, "WebSocket app unavailable to workspace — refusing request");
         return Ok(ee::response::app_unavailable(
             &provider,
             "GET",
@@ -156,20 +166,22 @@ pub async fn handle_websocket(
 
     match &decision {
         PolicyDecision::BlockedByDefaultPolicy => {
-            warn!(host = %host, path = %path, "WebSocket BLOCKED by default deny policy");
+            warn!(host = %host, path = %log_path, "WebSocket BLOCKED by default deny policy");
             return Ok(response::blocked_by_default_policy(
                 "GET",
                 &path,
                 host,
+                proxy_ctx.agent_id.as_deref(),
                 proxy_ctx.workspace_id.as_deref(),
             ));
         }
         PolicyDecision::Blocked { rule_name } => {
-            warn!(host = %host, path = %path, rule = %rule_name, "WebSocket BLOCKED by policy rule");
+            warn!(host = %host, path = %log_path, rule = %rule_name, "WebSocket BLOCKED by policy rule");
             return Ok(response::blocked_by_policy(
                 "GET",
                 &path,
                 rule_name,
+                proxy_ctx.agent_id.as_deref(),
                 proxy_ctx.workspace_id.as_deref(),
             ));
         }
@@ -179,15 +191,16 @@ pub async fn handle_websocket(
             retry_after_secs,
             ..
         } => {
-            warn!(host = %host, path = %path, limit, window, "WebSocket RATE LIMITED");
+            warn!(host = %host, path = %log_path, limit, window, "WebSocket RATE LIMITED");
             return Ok(response::rate_limited(*limit, window, *retry_after_secs));
         }
         PolicyDecision::ManualApproval { .. } => {
-            warn!(host = %host, path = %path, "WebSocket blocked: manual approval not supported for WebSocket");
+            warn!(host = %host, path = %log_path, "WebSocket blocked: manual approval not supported for WebSocket");
             return Ok(response::blocked_by_policy(
                 "GET",
                 &path,
                 "Manual approval required",
+                proxy_ctx.agent_id.as_deref(),
                 proxy_ctx.workspace_id.as_deref(),
             ));
         }
@@ -246,9 +259,17 @@ pub async fn handle_websocket(
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(443);
 
-    let upstream_io = connect_upstream_tls(hostname, port, connector)
-        .await
-        .context("WebSocket: connecting to upstream")?;
+    let upstream_io = match connect_upstream_tls(hostname, port, connector).await {
+        Ok(io) => io,
+        Err(e) => {
+            let Some(refusal) = super::egress::find_refusal_anyhow(&e) else {
+                return Err(e.context("WebSocket: connecting to upstream"));
+            };
+            warn!(host = %hostname, "egress guard: refused non-public WebSocket destination");
+            hooks::record_destination_refused(proxy_ctx, host, "GET", &path);
+            return Ok(response::destination_not_allowed(&refusal.host));
+        }
+    };
 
     let (mut sender, conn) = http1::Builder::new()
         .handshake(upstream_io)
@@ -316,7 +337,7 @@ pub async fn handle_websocket(
         }
     }
 
-    emit_telemetry(proxy_ctx, host, &path, injection_count, start);
+    emit_telemetry(proxy_ctx, host, &path, rules, injection_count, start);
 
     let host_owned = host.to_string();
     tokio::spawn(async move {
@@ -324,13 +345,14 @@ pub async fn handle_websocket(
             Ok(client_io) => {
                 let mut client = TokioIo::new(client_io);
                 let mut upstream = TokioIo::new(upstream_upgraded);
+                let meter = relay::Meter::default();
 
-                match pipe_websocket(&mut client, &mut upstream, WS_IDLE_TIMEOUT).await {
-                    Ok((c2s, s2c)) => {
+                match relay::relay(&mut client, &mut upstream, relay::IDLE_TIMEOUT, &meter).await {
+                    Ok(()) => {
                         info!(
                             host = %host_owned,
-                            client_to_server = c2s,
-                            server_to_client = s2c,
+                            client_to_server = meter.to_server(),
+                            server_to_client = meter.to_client(),
                             "WebSocket closed"
                         );
                     }
@@ -359,7 +381,9 @@ async fn connect_upstream_tls(
     port: u16,
     connector: &TlsConnector,
 ) -> Result<TokioIo<tokio_rustls::client::TlsStream<TcpStream>>> {
-    let tcp = TcpStream::connect((hostname, port))
+    // Guarded dial: resolves, drops non-public addresses, connects to a
+    // checked one — never `TcpStream::connect((host, port))` directly.
+    let tcp = super::egress::connect_tcp(hostname, port)
         .await
         .context("TCP connect to upstream")?;
 
@@ -374,59 +398,19 @@ async fn connect_upstream_tls(
     Ok(TokioIo::new(tls_stream))
 }
 
-async fn pipe_websocket<C, S>(
-    client: &mut C,
-    server: &mut S,
-    timeout: Duration,
-) -> std::io::Result<(u64, u64)>
-where
-    C: AsyncRead + AsyncWrite + Unpin,
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let (cr, cw) = tokio::io::split(client);
-    let (sr, sw) = tokio::io::split(server);
-
-    let c2s = copy_with_idle_timeout(cr, sw, timeout);
-    let s2c = copy_with_idle_timeout(sr, cw, timeout);
-
-    tokio::try_join!(c2s, s2c)
-}
-
-async fn copy_with_idle_timeout<R, W>(
-    mut reader: R,
-    mut writer: W,
-    timeout: Duration,
-) -> std::io::Result<u64>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    let mut buf = vec![0u8; 8192];
-    let mut total = 0u64;
-
-    loop {
-        let n = match tokio::time::timeout(timeout, reader.read(&mut buf)).await {
-            Ok(Ok(0)) => return Ok(total),
-            Ok(Ok(n)) => n,
-            Ok(Err(e)) => return Err(e),
-            Err(_) => return Ok(total),
-        };
-        writer.write_all(&buf[..n]).await?;
-        total += n as u64;
-    }
-}
-
 fn emit_telemetry(
     proxy_ctx: &ProxyContext,
     host: &str,
     path: &str,
+    rules: &ResolvedRules,
     injection_count: usize,
     start: std::time::Instant,
 ) {
+    let log_path = super::log_redact::redact_for_log(path);
     info!(
         method = "WEBSOCKET",
         host = %host,
-        path = %path,
+        path = %log_path,
         injections_applied = injection_count,
         latency_ms = start.elapsed().as_millis() as u32,
         "WebSocket upgrade"
@@ -446,6 +430,7 @@ fn emit_telemetry(
     };
     meta.injection_count = injection_count as u16;
     meta.injected = injection_count > 0;
+    hooks::attribute_to_connection(&mut meta, rules, injection_count);
     telemetry::on_request(meta.into_event(None));
 }
 

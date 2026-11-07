@@ -6,6 +6,7 @@
  * section, the rail mark, the sidebar mark) never import them directly.
  */
 import { SlackAttachCard } from "@/app/(dashboard)/w/[workspaceId]/agents/[agentId]/channels/_components/slack-attach-card";
+import { SlackActAsYouLink } from "@/app/(dashboard)/w/[workspaceId]/agents/[agentId]/channels/_components/slack-act-as-you-link";
 import { SlackPresenceCard } from "@/app/(dashboard)/w/[workspaceId]/agents/[agentId]/channels/_components/slack-presence-card";
 import type { ChannelProviderUi } from "../channel-providers";
 
@@ -14,10 +15,18 @@ import type { ChannelProviderUi } from "../channel-providers";
 export const SLACK_ICON_SRC = "/icons/slack.svg";
 export const SLACK_DISPLAY_NAME = "Slack";
 
+/** Slack's deep link into one channel (docs.slack.dev, "Deep linking into
+ * Slack"): `team=` pins it to the workspace the channel lives in, so a
+ * multi-workspace user does not land in their default workspace's 404. */
+const slackChannelUrl = (channelId: string, teamId: string): string =>
+  `https://slack.com/app_redirect?channel=${encodeURIComponent(channelId)}&team=${encodeURIComponent(teamId)}`;
+
 export const slackProviderUi: ChannelProviderUi = {
   id: "slack",
   name: SLACK_DISPLAY_NAME,
   iconSrc: SLACK_ICON_SRC,
+  channelUrl: slackChannelUrl,
   PresenceCard: SlackPresenceCard,
   AttachCard: SlackAttachCard,
+  ReadAccessCard: SlackActAsYouLink,
 };

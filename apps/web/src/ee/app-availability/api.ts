@@ -2,7 +2,7 @@ import { apiGet, apiPut, queryKeys } from "@/lib/api";
 
 // The org-admin app-availability config surface (policy-engine step 7). The
 // backing endpoints are EE-registered (/v1/org/app-availability), so the
-// client + types live in the EE overlay; the shared `lib/api` keeps only the
+// client + types live under `ee/`; the shared `lib/api` keeps only the
 // workspace-scoped derive-read (`available`), whose route ships in OSS. The
 // config query key SPREADS the shared `queryKeys.appAvailability.all()` so
 // broad invalidations from shared mutations still cover this cache.

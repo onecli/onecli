@@ -41,6 +41,22 @@ export const AUDIT_ACTIONS = {
   // (content recording is deliberately out of scope, privacy posture).
   SESSION_OPEN: "session_open",
   SESSION_CLOSE: "session_close",
+  // Desktop takeover: a person took the mouse and keyboard of an agent's
+  // screen, and gave them back (or an admin took them off a teammate, or
+  // the lease timed out). A human driving the agent's computer is policy
+  // surface, like a shell session.
+  CONTROL_TAKEN: "control_taken",
+  CONTROL_RELEASED: "control_released",
+  // "Restart agent": a person reset every conversation of a hosted agent and
+  // stopped its sandbox. First-class because it ends work in flight.
+  RESTART: "restart",
+  // Runs audit: an org admin READ of a colleague's private conversation with
+  // an agent. Reads are normally never audited; this one is the privacy
+  // exception, and the read is refused when the record cannot be written.
+  // Metadata carries IDs, never the question.
+  VIEW: "view",
+  // Evals: one "Run tests" press (it spends the workspace's model tokens).
+  RUN: "run",
 } as const;
 
 export const AUDIT_SERVICES = {
@@ -68,15 +84,22 @@ export const AUDIT_SERVICES = {
   // audited from the API routes; agent-authored tool calls are not audited
   // here (the fired turns are their own record).
   CRON: "cron",
+  // Agent webhooks: inbound catch URLs that trigger a hosted agent (CRUD
+  // audited from the routes; fired events are their own turn record).
+  WEBHOOK: "webhook",
   // Agent memory (hosted-agents v2 step 8): per-agent durable memory with
   // revision history. Free — audited from the API routes; agent tool WRITES
   // are audited under the resolved creating user (viaAgent), reads never.
   MEMORY: "memory",
   // Skills (hosted-agents v2 step 9): user-authored capabilities materialized
   // into sandboxes. Free — audited from the API routes on both doors
-  // (workspace and org); agent-authored skill_* tool writes are audited under
-  // the resolved creating user (viaAgent), agent-tier rows only.
+  // (/v1/skills for agent skills, /v1/org/skills for org skills);
+  // agent-authored skill_* tool writes are audited under the resolved
+  // creating user (viaAgent), agent-tier rows only.
   SKILL: "skill",
+  // The org's connected Git repo of skills: connect,
+  // disconnect, add/remove a library skill on an agent, its on/off switch.
+  SKILL_LIBRARY: "skill-library",
   // EE-only (policy-engine step 7): the org app-availability allowlist
   // (toggle + per-principal grants).
   APP_AVAILABILITY: "app-availability",
@@ -109,6 +132,16 @@ export const AUDIT_SERVICES = {
   // terminator-reported session open/close. Free shared code, dark without
   // an SSH CA configured; sourceIp in metadata is terminator-reported.
   SSH: "ssh",
+  // Runs audit: an org admin viewing a colleague's private run. Free.
+  CONVERSATION: "conversation",
+  // Agent evals: test-question edits and runs. Free.
+  EVAL: "eval",
+  // Sandbox ports: a port shared as a private preview link (CREATE, by a
+  // person or via an approved agent ask) or unshared (DELETE).
+  PREVIEW: "preview",
+  // The agent's desktop: watched (SESSION_OPEN, like a preview), taken
+  // over, handed back.
+  DESKTOP: "desktop",
 } as const;
 
 export const AUDIT_STATUS = {
@@ -138,6 +171,21 @@ export type AuditService = (typeof AUDIT_SERVICES)[keyof typeof AUDIT_SERVICES];
 export type AuditStatus = (typeof AUDIT_STATUS)[keyof typeof AUDIT_STATUS];
 export type AuditSource = (typeof AUDIT_SOURCE)[keyof typeof AUDIT_SOURCE];
 
+/**
+ * Truthful actor representation. A platform service that acts on its own
+ * authority is a `service` actor, named by its stable identifier
+ * (`AuditServiceActor`, a kebab-case name the service's own code owns); it
+ * is never a fabricated human and never whoever ran SQL.
+ */
+export const AUDIT_ACTOR_KIND = {
+  USER: "user",
+  SERVICE: "service",
+} as const;
+export type AuditActorKind =
+  (typeof AUDIT_ACTOR_KIND)[keyof typeof AUDIT_ACTOR_KIND];
+/** A service's stable kebab-case name, e.g. `scim-provisioner`. */
+export type AuditServiceActor = `${Lowercase<string>}`;
+
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export interface AuditEventParams {
@@ -151,10 +199,17 @@ export interface AuditEventParams {
   source?: AuditSource;
   metadata?: Prisma.InputJsonValue;
 }
+// `actorKind` / `serviceActor` are deliberately NOT on this type: a human
+// row is always `user`, and the only writer of `service` rows is
+// `recordServiceAuditEvent`, so no `withAudit` / `recordAuditEvent` caller
+// can label a human action as a service's or the reverse.
 
 const log = logger.child({ component: "audit" });
 
-const logAuditEvent = async (params: AuditEventParams): Promise<void> => {
+const logAuditEvent = async (
+  params: AuditEventParams,
+  failClosed = false,
+): Promise<void> => {
   const { source = AUDIT_SOURCE.APP, metadata, ...rest } = params;
 
   try {
@@ -166,8 +221,10 @@ const logAuditEvent = async (params: AuditEventParams): Promise<void> => {
       },
     });
   } catch (err) {
-    // Never fail the parent operation due to audit logging
+    // Mutations remain best-effort. Sensitive read overrides may require a
+    // durable audit record before releasing their response.
     log.error({ err, ...params }, "failed to write audit log");
+    if (failClosed) throw err;
   }
 };
 
@@ -218,12 +275,70 @@ export const withAudit = async <T>(
  * Use when the audited state change is conditional or has already happened, so
  * the `withAudit` HOF — which always logs and flushes the gateway cache around a
  * wrapped call — doesn't fit. Example: auditing an API key only when it was
- * actually minted during a read (`ensureApiKey`). Like `logAuditEvent`, it never
- * throws — a failed audit write must not break the parent operation.
+ * actually minted during a read (`ensureApiKey`). Best-effort by default.
+ * Sensitive read overrides opt into `failClosed` so a failed audit write
+ * prevents their response from releasing private content.
  */
-export const recordAuditEvent = async (params: AuditParams): Promise<void> => {
-  await logAuditEvent({
-    ...params,
-    status: params.status ?? AUDIT_STATUS.SUCCESS,
+export const recordAuditEvent = async (
+  params: AuditParams,
+  options: { failClosed?: boolean } = {},
+): Promise<void> => {
+  await logAuditEvent(
+    {
+      ...params,
+      status: params.status ?? AUDIT_STATUS.SUCCESS,
+    },
+    options.failClosed,
+  );
+};
+
+/**
+ * Record an audit event performed by a platform SERVICE, not a person.
+ * The row's required user columns are filled
+ * with the organization owner, the org's fixed-point identity (the SCIM
+ * precedent), and `actorKind = service` + `serviceActor` make the actual
+ * actor unambiguous to every reader. Without an owner there is no identity
+ * the FK may name and the event is dropped, logged, never forged.
+ */
+export const recordServiceAuditEvent = async (
+  tx: Prisma.TransactionClient,
+  params: Omit<
+    AuditEventParams,
+    "userId" | "userEmail" | "actorKind" | "serviceActor" | "status"
+  > & {
+    organizationId: string;
+    serviceActor: AuditServiceActor;
+    status?: AuditStatus;
+  },
+): Promise<void> => {
+  const owner = await tx.organizationMember.findFirst({
+    where: { organizationId: params.organizationId, role: "owner" },
+    select: { userId: true, userEmail: true },
+  });
+  if (!owner) {
+    log.error(
+      {
+        organizationId: params.organizationId,
+        serviceActor: params.serviceActor,
+      },
+      "service audit event dropped: organization has no owner to anchor the row",
+    );
+    return;
+  }
+  const { metadata, source = AUDIT_SOURCE.APP, status } = params;
+  await tx.auditLog.create({
+    data: {
+      workspaceId: params.workspaceId,
+      organizationId: params.organizationId,
+      action: params.action,
+      service: params.service,
+      serviceActor: params.serviceActor,
+      userId: owner.userId,
+      userEmail: owner.userEmail,
+      actorKind: AUDIT_ACTOR_KIND.SERVICE,
+      status: status ?? AUDIT_STATUS.SUCCESS,
+      source,
+      metadata: metadata ?? Prisma.JsonNull,
+    },
   });
 };

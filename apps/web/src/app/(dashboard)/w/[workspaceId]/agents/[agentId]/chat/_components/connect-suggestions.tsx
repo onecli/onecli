@@ -3,29 +3,34 @@
 import { memo, useRef, useState } from "react";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
-import type { AppDefinition } from "@onecli/api/apps/types";
-import { Plug, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@onecli/ui/components/button";
-import { cn } from "@onecli/ui/lib/utils";
-import { AppIcon } from "@/lib/components/app-icon";
-import { extractConnectSuggestions } from "@/lib/chat/connect-links";
+import {
+  extractConnectSuggestions,
+  type CardSuggestion,
+} from "@/lib/chat/connect-links";
+import { resolveConnectRow, type Known } from "@/lib/chat/connect-row-state";
 import {
   WORKSPACE_PATH_RE,
   agentSectionPath,
   connectionsPath,
 } from "@/lib/navigation";
+import { withConnectLinkAgent } from "@/lib/connect-link-agent";
 import { connectPopupHeight, openConnectPopup } from "@/lib/connect-popup";
 import { queryKeys } from "@/lib/api/keys";
 import { useConnections } from "@/hooks/use-connections";
 import { useAgentGrants, useInvalidateGrants } from "@/hooks/use-grants";
+import { useAppPermissionDefinitions } from "@/hooks/use-app-permissions";
+import { defaultGrantConsentForAll } from "@/lib/api/default-grant";
 import { useManageConnectionState } from "@/hooks/use-manage-connection-state";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import { useEffectiveCredentials } from "@/lib/api/policy-visibility";
 import type { Connection } from "@/lib/api";
 import { ManagePermissionsDialog } from "../../_components/manage-permissions-dialog";
-import { AttachConnectionDialog } from "./attach-connection-dialog";
+import { AttachConnectionDialog } from "../../_components/attach-connection-dialog";
 import { ConnectAppPickerDialog } from "../../_components/connect-app-picker-dialog";
+import { ConnectCardRow } from "./connect-card-row";
+import { ConnectSuggestionRow } from "./connect-suggestion-row";
 
 /**
  * The chat's rendering of a gateway "connect this app" link — a card in
@@ -37,13 +42,18 @@ import { ConnectAppPickerDialog } from "../../_components/connect-app-picker-dia
  * connections page opens), so the user never leaves the chat and the agent
  * retries once the credential lands.
  *
- * The card is STATE-AWARE: once the provider has a connection it flips to
- * "Connected" with Reconnect and Manage (the agent page's own permissions
- * dialog, opened in place, under the same read-only law —
- * `useManageConnectionState`). A connect started FROM this card lands already
- * attached, with full access, to every agent of the workspace, this one
- * included (the API's workspace auto-attach); scoping down afterwards is
- * exactly what Manage is for.
+ * The card is STATE-AWARE, and the state is THIS agent's
+ * (`resolveConnectRow`): an app reads "Connected" only once this agent
+ * holds one of its accounts (a workspace grant or an organization rule),
+ * with Manage (the agent page's own permissions dialog, opened in place,
+ * under the same read-only law: `useManageConnectionState`). An account the
+ * workspace holds but this agent does not reads "Connected, not attached to
+ * this agent" with Attach: a new connection is no longer on for every
+ * agent, so the workspace pool alone says nothing about this one. A
+ * connect started FROM this card carries this agent, so the new account
+ * lands switched on for it alone (the API's connecting-agent grant), with
+ * the same default as the "Connect an app" picker; scoping down afterwards
+ * is exactly what Manage is for.
  */
 
 /** The card under an agent answer that carried connect links. Memoized on
@@ -55,7 +65,10 @@ import { ConnectAppPickerDialog } from "../../_components/connect-app-picker-dia
 export const ConnectorSuggestions = memo(({ text }: { text: string }) => {
   const suggestions = extractConnectSuggestions(text);
   if (suggestions.length === 0) return null;
-  return <ConnectorSuggestionsCard suggestions={suggestions} />;
+  // The agent's own sentence above the card says why it is there, so the
+  // card is just the rows and the "Browse all apps" door, with no consent
+  // line: like the agent page's app picker, where Manage shows what landed.
+  return <ConnectorSuggestionsCard suggestions={suggestions} consent={false} />;
 });
 ConnectorSuggestions.displayName = "ConnectorSuggestions";
 
@@ -75,21 +88,24 @@ const NO_CHANNEL_SUGGESTIONS: ChannelSuggestion[] = [];
 export const ConnectorSuggestionsCard = ({
   suggestions,
   channels = NO_CHANNEL_SUGGESTIONS,
-  hideHeader = false,
+  consent = true,
+  bare = false,
 }: {
-  suggestions: {
-    app: AppDefinition;
-    agentName?: string;
-    kind: "connect" | "attach";
-  }[];
+  suggestions: CardSuggestion[];
   /** Chat-app rows ("talk to this agent on Slack"). A channel is a bot
    * install on the agent's Channels page, not an OAuth credential (Slack is
    * no longer in the app registry at all), so these rows carry their own
    * name/icon and link there instead of opening the connect popup. */
   channels?: ChannelSuggestion[];
-  /** Drop the "Apps that could help" header. The greeting already says why
-   * the card is there, so the header would repeat it. */
-  hideHeader?: boolean;
+  /** The consent line above the rows (what a new account may do), shown
+   * while a row offers Connect. On unless the caller opts out: the card
+   * under an agent answer, whose sentence above it introduces the card. */
+  consent?: boolean;
+  /** Just the app rows: no consent line, no "browse all apps" footer. The
+   * onboarding greeting's single Gmail row, where the message above it
+   * already says what to do (its own "Add different tools" button is the
+   * catalog door there). */
+  bare?: boolean;
 }) => {
   const pathname = usePathname();
   const router = useRouter();
@@ -99,29 +115,47 @@ export const ConnectorSuggestionsCard = ({
   // without a router): no id, no agent-scoped dialogs.
   const params = useParams<{ agentId?: string }>();
   const agentId = params?.agentId ?? "";
-  const { data: connections = [] } = useConnections("workspace");
-  // Which connections THIS agent already holds — decides whether the attach
-  // row's button says Attach (none of this app's accounts granted yet) or
-  // Manage (at least one is; the dialog then adjusts the set). Until the
-  // query RESOLVES the card must not claim either way — a cold cache saying
-  // "not attached" about an attached app would be a false negative.
+  const connectionsQuery = useConnections("workspace");
+  const connections = connectionsQuery.data ?? [];
+  // Which connections THIS agent holds: its workspace grants, plus what an
+  // organization rule grants it (the same effective read the attach
+  // dialog's locked rows use; useManageConnectionState fetches it per agent
+  // too, so this is a cache hit). It decides every row's state, so until
+  // BOTH resolve the card claims neither "attached" nor "not attached": a
+  // cold cache saying either about the other would be a false claim.
   const agentGrantsQuery = useAgentGrants(agentId);
-  const attachStateKnown = agentGrantsQuery.isSuccess;
-  const grantedConnectionIds = new Set(
-    (agentGrantsQuery.data?.connections ?? []).map((g) => g.connectionId),
-  );
-  // Org-rule-granted connections count as attached too — the same effective
-  // read the attach dialog's locked rows use (already fetched per-agent by
-  // useManageConnectionState, so this query is a cache hit).
-  const { data: effectiveCredentials } = useEffectiveCredentials(agentId);
-  const orgGrantedConnectionIds = new Set(
-    (effectiveCredentials?.connections ?? [])
-      .filter((c) => c.provenance.some((p) => p.scope === "organization"))
-      .map((c) => c.id),
-  );
-  const [manageConnection, setManageConnection] = useState<Connection | null>(
-    null,
-  );
+  const effectiveCredentialsQuery = useEffectiveCredentials(agentId);
+  const pool: Known<readonly Connection[]> = connectionsQuery.isSuccess
+    ? connectionsQuery.data
+    : connectionsQuery.isError
+      ? "failed"
+      : "pending";
+  const held: Known<ReadonlySet<string>> =
+    agentGrantsQuery.isSuccess && effectiveCredentialsQuery.isSuccess
+      ? new Set([
+          ...agentGrantsQuery.data.connections.map((g) => g.connectionId),
+          ...effectiveCredentialsQuery.data.connections
+            .filter((c) => c.provenance.some((p) => p.scope === "organization"))
+            .map((c) => c.id),
+        ])
+      : agentGrantsQuery.isError || effectiveCredentialsQuery.isError
+        ? "failed"
+        : "pending";
+  // The way out of a failed read: refetch only what failed (a query that
+  // already succeeded would be a needless round trip).
+  const failedQueries = [
+    connectionsQuery,
+    agentGrantsQuery,
+    effectiveCredentialsQuery,
+  ].filter((q) => q.isError);
+  const retrying = failedQueries.some((q) => q.isFetching);
+  const retry = () => {
+    for (const q of failedQueries) void q.refetch();
+  };
+  // The id, not a snapshot: the dialog reads the live row, so a reconnect
+  // from inside it (which refetches the list) shows the refreshed grant.
+  const [manageId, setManageId] = useState<string | null>(null);
+  const manageConnection = connections.find((c) => c.id === manageId) ?? null;
   /** Provider whose Attach dialog is open (all of that app's connections,
    * each with an attach toggle for this agent). The provider survives the
    * close (open flips false) so Radix can play the exit animation instead
@@ -162,14 +196,25 @@ export const ConnectorSuggestionsCard = ({
     }
   };
 
+  // Re-authorize one existing account in place. Claimed like a connect, so
+  // its landing refreshes the list and a cleared needs-reconnect flag shows.
+  const reconnect = (app: CardSuggestion["app"], connectionId: string) => {
+    initiated.current.add(app.id);
+    openPopupOrExplain(app.id, {
+      connectionId,
+      workspaceId,
+      height: connectPopupHeight(app),
+    });
+  };
+
   useAppMessages({
     onConnected: ({ provider }) => {
       if (!provider || !initiated.current.has(provider)) return;
       initiated.current.delete(provider);
       // The pool changed even without a fresh id (the callback dedupes a
-      // repeat connect onto the existing account), and a fresh account
-      // arrives already granted to every agent: refresh the list, the grant
-      // views (this card's Attach/Manage state) and the count badges.
+      // repeat connect onto the existing account), and either way it arrives
+      // switched on for this agent: refresh the list, the grant views (this
+      // card's Attach/Manage state) and the count badges.
       invalidateGrants();
       void queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
     },
@@ -182,238 +227,119 @@ export const ConnectorSuggestionsCard = ({
     onConfigure: (provider) => {
       if (!initiated.current.has(provider)) return;
       initiated.current.delete(provider);
+      // The connect that follows the setup is still this agent's.
       router.push(
-        connectionsPath({ pathname }, `/apps/${encodeURIComponent(provider)}`),
+        withConnectLinkAgent(
+          connectionsPath(
+            { pathname },
+            `/apps/${encodeURIComponent(provider)}`,
+          ),
+          agentId,
+        ),
       );
     },
   });
 
-  const connectionFor = (provider: string): Connection | undefined =>
-    connections.find(
-      (c) => c.provider === provider && c.status === "connected",
-    );
-  const hasUnconnected = suggestions.some(
-    ({ app }) => connectionFor(app.id) === undefined,
-  );
+  // Every row's state, decided once per render for THIS agent.
+  const rows = suggestions.map((suggestion) => ({
+    suggestion,
+    state: resolveConnectRow({
+      provider: suggestion.app.id,
+      kind: suggestion.kind,
+      connectionId: suggestion.connectionId,
+      org: suggestion.org,
+      connections: pool,
+      heldConnectionIds: held,
+    }),
+  }));
+  // The consent line belongs to the Connect clicks only: what a NEW account
+  // may do, said where that click happens.
+  const toConnect = rows.filter(({ state }) => state.type === "connect");
+  const hasUnconnected = toConnect.length > 0;
+  // What connecting grants, said only once the catalog is known (a loading
+  // catalog must not read as "full access" or as "needs approval").
+  const { data: definitions, isSuccess: definitionsKnown } =
+    useAppPermissionDefinitions();
+  const grantLine = definitionsKnown
+    ? ` ${defaultGrantConsentForAll(
+        toConnect.map(({ suggestion }) =>
+          (definitions ?? []).find((d) => d.provider === suggestion.app.id),
+        ),
+      )}`
+    : "";
+
+  const openAttach = (provider: string) => {
+    setAttachProvider(provider);
+    setAttachOpen(true);
+  };
 
   return (
     <>
-      <div className="bg-card max-w-md rounded-xl border">
-        {/* The TITLE is what `hideHeader` drops (the greeting's own words
-            already say why the card is there). The CONSENT LINE is not part
-            of that trade: a new account is on for every agent of the
-            workspace with full access, and that has to be said where the
-            click happens. Most of all on the greeting card, which is the
-            first connect UI a new user ever meets. */}
-        {(!hideHeader || hasUnconnected) && (
-          <div className="border-b px-4 py-2.5">
-            {!hideHeader && (
-              <div className="flex items-center gap-2">
-                <Plug className="text-muted-foreground size-4" aria-hidden />
-                <span className="text-sm font-medium">
-                  Apps that could help
-                </span>
-              </div>
-            )}
-            {hasUnconnected && (
-              <p
-                className={cn(
-                  "text-muted-foreground text-xs",
-                  !hideHeader && "mt-0.5",
-                )}
-              >
-                A new account is on for every agent in this workspace, with full
-                access. Adjust it anytime under Manage.
-              </p>
-            )}
-          </div>
+      {/* Full width up to the cap, so the card keeps one size across states
+          instead of shrinking to its longest line; `text-start` so a
+          centered host (the empty-thread welcome) never centers its rows. */}
+      <div className="bg-card w-full max-w-md divide-y overflow-hidden rounded-xl border text-start">
+        {/* What a NEW account may do, said where the Connect click happens:
+            most of all on the welcome card, the first connect UI a new user
+            ever meets. */}
+        {!bare && consent && hasUnconnected && (
+          <p className="text-muted-foreground px-4 py-2.5 text-xs text-pretty">
+            Only this agent gets access.{grantLine}
+          </p>
         )}
-        {suggestions.map(({ app, agentName, kind }) => {
-          const connection = connectionFor(app.id);
-          // Any of this app's accounts already granted to this agent → the
-          // attach state is partially satisfied; the button reads Manage and
-          // the status line counts what this agent holds. Same pool the
-          // dialog shows (status-connected), workspace grants plus
-          // org-rule-granted — a count the dialog's rows then agree with.
-          const attachedCount = connections.filter(
-            (c) =>
-              c.provider === app.id &&
-              c.status === "connected" &&
-              (grantedConnectionIds.has(c.id) ||
-                orgGrantedConnectionIds.has(c.id)),
-          ).length;
-          const anyAttached = attachedCount > 0;
-          // An org-shared connection is usable here but not re-authable from
-          // a workspace surface — the OAuth callback resolves connectionId in
-          // workspace scope and would 404. Reconnect for those lives on the
-          // org connections page.
-          const reconnectableHere =
-            connection &&
-            (!connection.scope || connection.scope === "workspace");
-          return (
-            <div
-              key={app.id}
-              className="flex items-center gap-3 border-b px-4 py-3 last:border-b-0"
-            >
-              <div className="bg-muted flex size-9 shrink-0 items-center justify-center rounded-lg border dark:bg-white/10 dark:border-white/10">
-                <AppIcon
-                  icon={app.icon}
-                  darkIcon={app.darkIcon}
-                  name={app.name}
-                  size={18}
-                />
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium">{app.name}</p>
-                {connection ? (
-                  kind === "attach" ? (
-                    !attachStateKnown ? (
-                      // Grants unresolved (or failed): the only honest claim
-                      // is the connection's own state.
-                      <p className="text-brand text-xs font-medium">
-                        Connected
-                      </p>
-                    ) : anyAttached ? (
-                      // Attached since the card rendered (or the poll lagged
-                      // the grant): say what this agent holds now — attached
-                      // is the accurate word (the count is grants, and a
-                      // granted account can be expired).
-                      <p className="text-brand text-xs font-medium">
-                        {attachedCount} attached account
-                        {attachedCount === 1 ? "" : "s"}
-                      </p>
-                    ) : (
-                      // The gateway said access_restricted: an account exists
-                      // but THIS agent has no grant — name the actual
-                      // problem; Attach beside it is the fix.
-                      <p className="text-muted-foreground text-xs">
-                        Connected, not attached to this agent
-                      </p>
-                    )
-                  ) : (
-                    <p className="text-brand text-xs font-medium">Connected</p>
-                  )
-                ) : (
-                  app.description && (
-                    <p className="text-muted-foreground truncate text-xs">
-                      {app.description}
-                    </p>
-                  )
-                )}
-              </div>
-              {connection ? (
-                <div className="flex shrink-0 items-center gap-1.5">
-                  {kind === "attach" ? (
-                    // The problem is the missing grant, so the fix is the
-                    // attach dialog: every connection of THIS app, each with
-                    // a toggle for this agent. Once at least one account is
-                    // attached the same door reads Manage — the job shifts
-                    // from "get access" to "adjust which accounts".
-                    <Button
-                      size="xs"
-                      variant={anyAttached ? "ghost" : "default"}
-                      aria-label={`${anyAttached ? "Manage" : "Attach"} ${app.name} for this agent`}
-                      // Also covers the router-less defensive branch: without
-                      // an agentId the grants query never resolves, so the
-                      // door (which needs one) stays shut.
-                      disabled={!attachStateKnown}
-                      onClick={() => {
-                        setAttachProvider(app.id);
-                        setAttachOpen(true);
-                      }}
-                    >
-                      {anyAttached ? (
-                        <>
-                          <Settings2 className="size-3.5" aria-hidden />
-                          Manage
-                        </>
-                      ) : (
-                        "Attach"
-                      )}
-                    </Button>
-                  ) : (
-                    reconnectableHere && (
-                      <Button
-                        variant="ghost"
-                        size="xs"
-                        aria-label={`Reconnect ${app.name}`}
-                        onClick={() =>
-                          openPopupOrExplain(app.id, {
-                            connectionId: connection.id,
-                            workspaceId,
-                            height: connectPopupHeight(app),
-                          })
-                        }
-                      >
-                        Reconnect
-                      </Button>
-                    )
-                  )}
-                  {/* Manage opens the same dialog Attach does — showing both
-                      on an attach row would be two names for one door. */}
-                  {kind !== "attach" && (
-                    <Button
-                      variant="ghost"
-                      size="xs"
-                      aria-label={`Manage ${app.name} access`}
-                      disabled={!grantsReady}
-                      onClick={() => setManageConnection(connection)}
-                    >
-                      <Settings2 className="size-3.5" aria-hidden />
-                      Manage
-                    </Button>
-                  )}
-                </div>
-              ) : (
+        {rows.map(({ suggestion, state }) => (
+          <ConnectSuggestionRow
+            key={suggestion.app.id}
+            suggestion={suggestion}
+            state={state}
+            pathname={pathname}
+            manageReady={grantsReady}
+            retrying={retrying}
+            onRetry={retry}
+            onConnect={() => {
+              initiated.current.add(suggestion.app.id);
+              openPopupOrExplain(suggestion.app.id, {
+                agentName: suggestion.agentName,
+                agentId,
+                workspaceId,
+                height: connectPopupHeight(suggestion.app),
+              });
+            }}
+            onReconnect={(connectionId) =>
+              reconnect(suggestion.app, connectionId)
+            }
+            // The attach dialog needs an agent; without one (the defensive
+            // router-less render) its row stays in the unknown state anyway,
+            // since this agent's grants never resolve.
+            onAttach={() => openAttach(suggestion.app.id)}
+            onManage={setManageId}
+          />
+        ))}
+        {channels.map(({ id, name, icon, label }) => (
+          <ConnectCardRow
+            key={`channel-${id}`}
+            icon={icon}
+            name={name}
+            status={<span className="text-muted-foreground">{label}</span>}
+            action={
+              agentId ? (
                 <Button
                   size="xs"
-                  className="shrink-0"
-                  aria-label={`Connect ${app.name}`}
-                  onClick={() => {
-                    initiated.current.add(app.id);
-                    openPopupOrExplain(app.id, {
-                      agentName,
-                      workspaceId,
-                      height: connectPopupHeight(app),
-                    });
-                  }}
+                  aria-label={`Set up ${name} for this agent`}
+                  onClick={() =>
+                    router.push(agentSectionPath(pathname, agentId, "channels"))
+                  }
                 >
-                  Connect
+                  Set up
                 </Button>
-              )}
-            </div>
-          );
-        })}
-        {channels.map(({ id, name, icon, label }) => (
-          <div
-            key={`channel-${id}`}
-            className="flex items-center gap-3 border-b px-4 py-3 last:border-b-0"
-          >
-            <div className="bg-muted flex size-9 shrink-0 items-center justify-center rounded-lg border dark:bg-white/10 dark:border-white/10">
-              <AppIcon icon={icon} name={name} size={18} />
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-medium">{name}</p>
-              <p className="text-muted-foreground truncate text-xs">{label}</p>
-            </div>
-            {agentId && (
-              <Button
-                size="xs"
-                className="shrink-0"
-                aria-label={`Set up ${name} for this agent`}
-                onClick={() =>
-                  router.push(agentSectionPath(pathname, agentId, "channels"))
-                }
-              >
-                Set up
-              </Button>
-            )}
-          </div>
+              ) : undefined
+            }
+          />
         ))}
         {/* Fenced like the dialog below: without an agent there is no
             auto-grant contract to offer, so no door either. */}
-        {agentId && (
-          <div className="text-muted-foreground px-4 py-2 text-xs">
+        {agentId && !bare && (
+          <div className="bg-muted/40 text-muted-foreground px-4 py-2.5 text-xs">
             Looking for something else?{" "}
             <button
               type="button"
@@ -421,7 +347,7 @@ export const ConnectorSuggestionsCard = ({
                 setPickerMounted(true);
                 setPickerOpen(true);
               }}
-              className="text-foreground cursor-pointer underline underline-offset-2 hover:opacity-80"
+              className="text-foreground focus-visible:ring-ring/50 cursor-pointer rounded-sm font-medium underline underline-offset-2 outline-none hover:opacity-80 focus-visible:ring-[3px]"
             >
               Browse all apps
             </button>
@@ -438,9 +364,7 @@ export const ConnectorSuggestionsCard = ({
           agentId={agentId}
           open={pickerOpen}
           onOpenChange={setPickerOpen}
-          onConnected={() =>
-            toast.success("Connected. Every agent now has full access.")
-          }
+          onConnected={() => toast.success("Connected and on for this agent.")}
         />
       )}
 
@@ -451,7 +375,7 @@ export const ConnectorSuggestionsCard = ({
           grant={manageGrant}
           readOnly={manageReadOnly}
           readOnlyReason={manageReadOnlyReason}
-          onClose={() => setManageConnection(null)}
+          onClose={() => setManageId(null)}
         />
       )}
 
@@ -477,6 +401,7 @@ export const ConnectorSuggestionsCard = ({
             initiated.current.add(attachProvider);
             openPopupOrExplain(attachProvider, {
               agentName: suggestion?.agentName,
+              agentId,
               workspaceId,
               ...(suggestion && {
                 height: connectPopupHeight(suggestion.app),

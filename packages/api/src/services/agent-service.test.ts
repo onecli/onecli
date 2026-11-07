@@ -38,6 +38,7 @@ const store = vi.hoisted(() => ({
   created: [] as Record<string, unknown>[],
   updated: [] as { where: unknown; data: Record<string, unknown> }[],
   createThrows: null as Error | null,
+  updateThrows: null as Error | null,
   // Step 3: what the placement seam sees. Default: one runner with capacity.
   runners: [] as Array<Record<string, unknown>>,
   // The org's creation world behind the workspace join (cloud gate only).
@@ -97,6 +98,21 @@ vi.mock("@onecli/db", () => {
                 ? a.identifier === where.identifier
                 : a.id === where.id),
           ) ?? null,
+        // The derived-identifier probe: every identifier of the workspace on
+        // the derivation's prefix, so the service can walk `-2`, `-3`, ... in
+        // memory.
+        findMany: async ({
+          where,
+        }: {
+          where: { workspaceId: string; identifier: { startsWith: string } };
+        }) =>
+          store.agents
+            .filter(
+              (a) =>
+                a.workspaceId === where.workspaceId &&
+                a.identifier.startsWith(where.identifier.startsWith),
+            )
+            .map((a) => ({ identifier: a.identifier })),
         create: async ({ data }: { data: Record<string, unknown> }) => {
           if (store.createThrows) throw store.createThrows;
           store.created.push(data);
@@ -115,6 +131,7 @@ vi.mock("@onecli/db", () => {
           where: unknown;
           data: Record<string, unknown>;
         }) => {
+          if (store.updateThrows) throw store.updateThrows;
           store.updated.push(args);
           return {};
         },
@@ -174,6 +191,7 @@ beforeEach(() => {
   store.updated = [];
   store.runners = [ONLINE_RUNNER];
   store.createThrows = null;
+  store.updateThrows = null;
   store.orgByoLegacy = false;
   store.orgByoEnabled = false;
   homeSync.bumpHomeForAgent.mockClear();
@@ -273,19 +291,6 @@ describe("createAgent — the creation-world gates (cloud, §3.10 re-decided)", 
   });
 });
 
-describe("createAgent — no parent-mode inheritance (attach-model step 5)", () => {
-  it("creates the agent without threading any parent state", async () => {
-    // The step-5 law: inheritance is gone (the route still accepts
-    // `parentIdentifier` but no longer threads it), and since the
-    // `secret_mode` drop there is no mode to inherit at all — access is
-    // granted solely by policy rules after creation.
-    seedAgent("parent");
-    await createAgent("p1", { name: "Child", identifier: "child" });
-    expect(lastCreated().name).toBe("Child");
-    expect(lastCreated().identifier).toBe("child");
-  });
-});
-
 describe("createAgent — the BYO regression (hosted-agents step 1)", () => {
   it("an unadorned create stamps kind byo explicitly with null hosted fields", async () => {
     await createAgent("p1", { name: "Legacy", identifier: "legacy" });
@@ -356,6 +361,35 @@ describe("createAgent — hosted", () => {
       instructions: "   ",
     });
     expect(lastCreated().instructions).toBeNull();
+  });
+
+  // The identifier was a BYO contract; a hosted agent's is derived from its
+  // name server-side (the person never sees it), and a collision takes a
+  // suffix instead of the BYO 409: nobody typed it, so there is nothing to
+  // correct.
+  it("derives the identifier from the name when none is sent", async () => {
+    await createAgent("p1", { name: "Support Triage!", kind: "hosted" });
+    expect(lastCreated().identifier).toBe("support-triage");
+  });
+
+  it("suffixes a derived identifier that is taken, walking past every taken suffix", async () => {
+    seedAgent("donna", "hosted");
+    seedAgent("donna-2", "hosted");
+    await createAgent("p1", { name: "Donna", kind: "hosted" });
+    expect(lastCreated().identifier).toBe("donna-3");
+    expect(conflictLog.calls).toHaveLength(0);
+  });
+
+  it("falls back to a fixed base for a name with no identifier characters", async () => {
+    await createAgent("p1", { name: "✨", kind: "hosted" });
+    expect(lastCreated().identifier).toBe("agent");
+  });
+
+  it("keeps honoring a typed identifier, 409 included (the SDK's ensureAgent)", async () => {
+    seedAgent("typed", "hosted");
+    await expect(
+      createAgent("p1", { name: "Other", identifier: "typed", kind: "hosted" }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
   });
 });
 
@@ -450,6 +484,60 @@ describe("updateAgent", () => {
     seedAgent("byo-1");
     await updateAgent("p1", "id-byo-1", { name: "  New Name  " });
     expect(store.updated.at(-1)!.data).toEqual({ name: "New Name" });
+  });
+
+  // A hosted identifier follows the name (it was derived from it); a BYO
+  // one is the handle machines are pinned to and never moves.
+  it("re-derives a hosted agent's identifier on a rename, with the suffix rule", async () => {
+    seedAgent("donna", "hosted");
+    seedAgent("max", "hosted");
+    await updateAgent("p1", "id-donna", { name: "Max" });
+    expect(store.updated.at(-1)!.data).toEqual({
+      name: "Max",
+      identifier: "max-2",
+    });
+  });
+
+  it("maps a racing rename's unique-constraint violation to a 409, logged as a race", async () => {
+    seedAgent("donna", "hosted");
+    store.updateThrows = new Prisma.PrismaClientKnownRequestError("unique", {
+      code: "P2002",
+      clientVersion: "test",
+    });
+    await expect(
+      updateAgent("p1", "id-donna", { name: "Max" }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(conflictLog.calls).toEqual([
+      { workspaceId: "p1", identifier: "max", reason: "race" },
+    ]);
+  });
+
+  it("a unique violation on a write that moved no identifier is not a conflict", async () => {
+    // The arm is the identifier's alone: another constraint's P2002 (a
+    // future unique column) must surface as the raw error it is.
+    seedAgent("donna", "hosted");
+    store.updateThrows = new Prisma.PrismaClientKnownRequestError("unique", {
+      code: "P2002",
+      clientVersion: "test",
+    });
+    await expect(
+      updateAgent("p1", "id-donna", { instructions: "be brief" }),
+    ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+    expect(conflictLog.calls).toEqual([]);
+  });
+
+  it("keeps a hosted identifier whose derivation the agent already holds", async () => {
+    // "donna" renamed "DONNA!" derives to `donna` again: its own row is not
+    // a collision, and the write carries no identifier.
+    seedAgent("donna", "hosted");
+    await updateAgent("p1", "id-donna", { name: "DONNA!" });
+    expect(store.updated.at(-1)!.data).toEqual({ name: "DONNA!" });
+  });
+
+  it("never moves a BYO identifier on a rename", async () => {
+    seedAgent("pinned");
+    await updateAgent("p1", "id-pinned", { name: "Renamed" });
+    expect(store.updated.at(-1)!.data).toEqual({ name: "Renamed" });
   });
 
   it("updates the brief on a hosted agent and clears it with null or empty", async () => {

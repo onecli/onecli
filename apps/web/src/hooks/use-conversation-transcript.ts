@@ -84,6 +84,14 @@ export const useConversationTranscript = (
         queryKey: queryKeys.conversations.turns(conversationId),
       });
     },
+    // A tool that can hold an approval card just finished: fetch the card
+    // now (all workspaces' channel entries share this prefix), so it shows
+    // with the agent's "review the card" text instead of up to 15s later.
+    onApprovalRaised: () => {
+      void qc.invalidateQueries({
+        queryKey: [...queryKeys.approvals.all(), "channel"],
+      });
+    },
     // The bounded-replay floor. `undefined` until the first window lands (the
     // stream WAITS — connecting bare would replay the whole history, the
     // exact cost this kills); an empty window (or no events) floors at 0.

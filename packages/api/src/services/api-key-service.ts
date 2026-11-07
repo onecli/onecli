@@ -1,5 +1,11 @@
 import { randomBytes } from "crypto";
 import { db, type Prisma } from "@onecli/db";
+import {
+  AUDIT_ACTIONS,
+  AUDIT_SERVICES,
+  AUDIT_SOURCE,
+  recordAuditEvent,
+} from "./audit-service";
 import type { ResourceScope } from "./resource-scope";
 import { scopeWhere, scopeCreate, isOrgScope } from "./resource-scope";
 
@@ -75,6 +81,33 @@ export const ensureApiKey = async (
     data: { key, userId, userEmail: user.email, ...scopeCreate(scope) },
   });
   return { apiKey: key, created: true };
+};
+
+/**
+ * The person's own workspace key, minting it on first use. A mint is
+ * audited exactly as every auto-provision is (the API's `/user/api-key`,
+ * the supersede check acting for the speaker); a read never is.
+ */
+export const ensureWorkspaceApiKey = async (input: {
+  userId: string;
+  userEmail: string;
+  workspaceId: string;
+}): Promise<string> => {
+  const { apiKey, created } = await ensureApiKey(input.userId, {
+    workspaceId: input.workspaceId,
+  });
+  if (created) {
+    await recordAuditEvent({
+      workspaceId: input.workspaceId,
+      userId: input.userId,
+      userEmail: input.userEmail,
+      action: AUDIT_ACTIONS.CREATE,
+      service: AUDIT_SERVICES.API_KEY,
+      source: AUDIT_SOURCE.API,
+      metadata: { scope: "workspace", autoProvisioned: true },
+    });
+  }
+  return apiKey;
 };
 
 /**

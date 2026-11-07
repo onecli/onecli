@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { AdapterPresence } from "@onecli/agent-protocol";
+import { APPROVAL_GROUP_MAX_IDS } from "@onecli/channels";
+import { CHANNEL_CARD_RECORD_WAIT_MS } from "@onecli/api/lib/channel-card-ending";
 import type { ControlPlaneClient } from "./control-plane";
 import {
   ApprovalsAuthError,
@@ -8,7 +10,12 @@ import {
   fetchPendingApprovals,
   type PendingApproval,
 } from "./approvals";
-import { approvalCardBlocks, slackApprovalCardUi } from "./slack/approval-card";
+import {
+  approvalCardBlocks,
+  bulkCsv,
+  bulkCsvName,
+  slackApprovalCardUi,
+} from "./slack/approval-card";
 import { botTokenOf } from "./slack/credentials";
 import { unpackThreadAddress } from "@onecli/channels/slack";
 import {
@@ -99,6 +106,34 @@ const pendingBody = (id: string, expiresAt?: string): unknown => ({
     },
   ],
 });
+
+/** The control plane's ledger still holding these cards pending: nothing
+ * in the channel has decided them, so an absence or a passed deadline is
+ * the adapter's to settle. */
+const ledgerPending =
+  (...approvalIds: string[]): ControlPlaneClient["listUnsettledPrompts"] =>
+  async () =>
+    approvalIds.map((approvalId) => ({
+      approvalId,
+      agentChannelId: "p1",
+      externalThreadId: "D100",
+      externalMessageRef: null,
+      expiresAt: null,
+      createdAt: new Date().toISOString(),
+    }));
+
+/** The control plane's record of how these approvals ended (`via` names
+ * where a person decided, when one did). */
+const recorded =
+  (
+    outcomes: Record<string, string>,
+    via?: string,
+  ): ControlPlaneClient["listPromptOutcomes"] =>
+  async (ids) =>
+    ids.flatMap((approvalId) => {
+      const outcome = outcomes[approvalId];
+      return outcome ? [{ approvalId, outcome, ...(via && { via }) }] : [];
+    });
 
 const makeManager = (
   controlPlane: ControlPlaneClient,
@@ -226,6 +261,778 @@ describe("fetchPendingApprovals", () => {
       undefined,
     ]);
   });
+
+  it("keeps and links every record-page shape the gateway builds", async () => {
+    // One per gateway template (`summary::record_links`): each must survive
+    // the channel-neutral https check and render as a Slack link, a `?` and
+    // `=` included (Drive's opener).
+    const recordPages = [
+      "https://github.com/acme/web/issues/42",
+      "https://www.notion.so/0123456789abcdef0123456789abcdef",
+      "https://trello.com/c/5f1a2b3c4d5e6f7a8b9c0d1e",
+      "https://app.todoist.com/app/task/6Xm2Pq9RtV4wZc8K",
+      "https://docs.google.com/spreadsheets/d/1SheetId_42/edit",
+      "https://drive.google.com/open?id=1AbCdEf98765",
+    ];
+    gateway.script.push({
+      status: 200,
+      body: {
+        requests: [
+          {
+            id: "app-2",
+            summary: {
+              action: "PATCH request",
+              details: recordPages.map((url) => ({
+                label: "Record",
+                value: "it",
+                url,
+              })),
+            },
+          },
+        ],
+      },
+    });
+
+    const [pending] = await fetchPendingApprovals({
+      gatewayUrl: gateway.url,
+      serviceKey: "svc-key-1",
+      excludeIds: [],
+      timeoutMs: 5_000,
+    });
+    expect(pending?.summary?.details?.map((d) => d.url)).toEqual(recordPages);
+    const card = JSON.stringify(approvalCardBlocks(pending!));
+    for (const url of recordPages) expect(card).toContain(`<${url}|it>`);
+  });
+});
+
+describe("a card's long text", () => {
+  const TEMPLATE = [
+    "*Lead Source Alert*",
+    "*Name:* {!$Record.FirstName} {!$Record.LastName}",
+    "*Title:* {!$Record.Title}",
+    "*Department:* {!$Record.Department}",
+    "*Lead Source:* {!$Record.LeadSource}   ← moved",
+  ].join("\n");
+  const card = (value: string) => {
+    const approval: PendingApproval = {
+      id: "a1",
+      method: "POST",
+      host: "acme.my.salesforce.com",
+      path: "/services/data/v62.0/tooling/sobjects/Flow",
+      summary: {
+        action: "Create Flow version Lead_Source_Alert-3",
+        details: [
+          { label: "Message slack2", value },
+          { label: "Unchanged", value: "26 other settings stay as they are" },
+        ],
+      },
+    };
+    return JSON.stringify(approvalCardBlocks(approval));
+  };
+  const section = (text: string): string =>
+    z
+      .array(z.object({ text: z.object({ text: z.string() }).optional() }))
+      .parse(JSON.parse(text))[1]?.text?.text ?? "";
+
+  it("reads whole, as written, in a code block", () => {
+    const text = card(TEMPLATE);
+    // Every line is there, the last one with its marker: nothing is cut.
+    expect(text).toContain("*Lead Source:* {!$Record.LeadSource}   ← moved");
+    expect(text).toContain("```*Lead Source Alert*");
+    expect(text).toContain("26 other settings stay as they are");
+  });
+
+  it("cannot break out of its block or the card", () => {
+    const text = section(card("a ``` <@U123> <!channel> & b\n".repeat(200)));
+    expect(text).not.toContain("<@U123>");
+    expect(text).not.toContain("<!channel>");
+    expect(text).toContain("&amp;");
+    // Only the block's own fences remain.
+    expect(text.split("```").length).toBe(3);
+    expect(text.length).toBeLessThanOrEqual(3000);
+  });
+
+  it("keeps a backtick at either edge from joining a fence", () => {
+    const text = section(
+      card(`\`starts and ends with a tick\`\n${"x".repeat(90)}\``),
+    );
+    expect(text.split("```").length).toBe(3);
+    expect(text).not.toMatch(/````/);
+  });
+});
+
+describe("the bulk approval card", () => {
+  type Op = "same" | "fill" | "overwrite" | "clear";
+  const row = (i: number, old: string, next: string, op: Op) => ({
+    id: `003AA00000AbCd${String(i).padStart(4, "0")}`,
+    name: `Contact ${i}`,
+    url: `https://acme.my.salesforce.com/003AA00000AbCd${String(i).padStart(4, "0")}`,
+    new: [next],
+    old: [old],
+    ops: [op],
+    op,
+  });
+  type Bulk = NonNullable<NonNullable<PendingApproval["summary"]>["bulk"]>;
+  const bulkOf = (rows: ReturnType<typeof row>[]): Bulk => ({
+    objectLabel: "Contact",
+    fields: [{ api: "MailingCountry", label: "Mailing country" }],
+    rows,
+    oldValuesRead: true,
+  });
+  const bulkApproval = (
+    rows: ReturnType<typeof row>[],
+    label?: string,
+  ): PendingApproval => ({
+    id: "app-bulk",
+    method: "PATCH",
+    host: "acme.my.salesforce.com",
+    path: "/services/data/v60.0/composite/sobjects",
+    summary: { action: "Update Contacts", details: [], bulk: bulkOf(rows) },
+    agent: { id: "ag1", name: "Bot" },
+    ...(label && { batch: { id: "b1", label, total: 1 } }),
+  });
+  const rows = [
+    row(1, "Israel", "", "clear"),
+    row(2, "Canada", "Germany", "overwrite"),
+    ...Array.from({ length: 42 }, (_, i) => row(i + 3, "", "Canada", "fill")),
+    row(45, "Canada", "Canada", "same"),
+    row(46, "Canada", "Canada", "same"),
+  ];
+  type Block = {
+    type: string;
+    text?: { text: string };
+    elements?: { text?: string | { text: string } }[];
+  };
+
+  it("is short: the counts by kind, each with its dot, Approve all, and one way to OneCLI", () => {
+    const blocks = approvalCardBlocks(
+      bulkApproval(rows),
+      "https://app.example/a/1",
+    ) as Block[];
+    expect(blocks.map((b) => b.type)).toEqual([
+      "header",
+      "section",
+      "context",
+      "actions",
+    ]);
+    const text = JSON.stringify(blocks);
+    expect(text).toContain(
+      "🔴 Clears *1* · 🔵 Updates *1* · 🟢 Fills *42* · ⚪ No change *2*",
+    );
+    expect(text).toContain("One approval covers all 46");
+    // One way to the table: the View table button, not a second link.
+    expect(text).not.toContain("|See all");
+    const actions = blocks.find((b) => b.type === "actions")!;
+    expect(
+      actions.elements!.map((e) => (e.text as { text: string }).text),
+    ).toEqual(["Approve all 46", "Deny", "View table"]);
+  });
+
+  it("says which part of a split list it is (once) and how many follow", () => {
+    const text = JSON.stringify(
+      approvalCardBlocks(bulkApproval(rows, "Set mailing country (2 of 5)")),
+    );
+    expect(text).toContain("Update 46 Contacts (part 2 of 5)");
+    expect(text).toContain("This approves these 46 only. 3 more cards follow.");
+    expect(text.match(/part 2 of 5/g)).toHaveLength(1);
+    const lastPart = JSON.stringify(
+      approvalCardBlocks(bulkApproval(rows, "Set mailing country (5 of 5)")),
+    );
+    expect(lastPart).toContain("This approves these 46 only.");
+    expect(lastPart).not.toContain("follow");
+  });
+
+  it("lists every record in the CSV, each value marked with what happens to it", () => {
+    const lines = bulkCsv(bulkOf(rows)).trimEnd().split("\n");
+    expect(lines).toHaveLength(47);
+    expect(lines[0]).toBe('"Contact","Mailing country"');
+    expect(lines[1]).toBe('"Contact 1","🔴 Israel → empty"');
+    expect(lines[2]).toBe('"Contact 2","🔵 Canada → Germany"');
+    expect(lines[3]).toBe('"Contact 3","🟢 Canada"');
+    expect(lines[46]).toBe('"Contact 46","⚪ Canada"');
+    expect(bulkCsvName(bulkOf(rows))).toBe("46-contact-changes.csv");
+  });
+
+  it("says 'no change' for a field an update leaves alone, never a blank cell", () => {
+    // A 10-record update set different fields per record,
+    // and the blank cells read as "set to empty".
+    const lines = bulkCsv({
+      objectLabel: "Account",
+      fields: [
+        { api: "Industry", label: "Industry" },
+        { api: "Phone", label: "Phone" },
+      ],
+      rows: [
+        {
+          id: "001AA00000AbCd0001",
+          name: "Pinecrest Labs",
+          new: ["Surfing", null],
+          old: ["Media", "555"],
+          ops: ["overwrite", "untouched"],
+          op: "overwrite",
+        },
+      ],
+      oldValuesRead: true,
+    })
+      .trimEnd()
+      .split("\n");
+    expect(lines[1]).toBe(
+      '"Pinecrest Labs","🔵 Media → Surfing","⚪ no change"',
+    );
+  });
+
+  it("puts who each record is (account, title) right after its name in the CSV, values inert", () => {
+    // MUTATION-TESTED: without the context columns the CSV has only the
+    // name and the change, the reviewer can't tell which Dana it is.
+    const base = bulkOf([row(1, "Israel", "Canada", "overwrite")]);
+    const lines = bulkCsv({
+      ...base,
+      context: [
+        { api: "Account.Name", label: "Account" },
+        { api: "Title", label: "Title" },
+      ],
+      rows: base.rows.map((r) => ({ ...r, context: ["=Acme", null] })),
+    })
+      .trimEnd()
+      .split("\n");
+    expect(lines[0]).toBe('"Contact","Account","Title","Mailing country"');
+    expect(lines[1]).toBe('"Contact 1","\'=Acme","","🔵 Israel → Canada"');
+  });
+
+  it("never lets a value act as a spreadsheet formula or break a row", () => {
+    const csv = bulkCsv(
+      bulkOf([
+        { ...row(1, "", '=HYPERLINK("x")', "fill"), name: "@evil\nname" },
+      ]),
+    );
+    // The name and every value stay inert in a spreadsheet: a value marked
+    // with its dot can't start a formula, and a bare name is quoted.
+    expect(csv).toContain(`"'@evil name","🟢 =HYPERLINK(""x"")"`);
+    expect(csv.trimEnd().split("\n")).toHaveLength(2);
+    const plain = bulkCsv({
+      ...bulkOf([{ ...row(1, "", "=1+1", "fill"), name: "Ana" }]),
+      oldValuesRead: false,
+    });
+    expect(plain).toContain(`"Ana","'=1+1"`);
+  });
+
+  it("a bulk delete says Delete in words, its CSV the values that go", () => {
+    const del: PendingApproval = {
+      ...bulkApproval([]),
+      summary: {
+        action: "Delete 2 Contacts",
+        details: [],
+        bulk: {
+          kind: "delete",
+          objectLabel: "Contact",
+          fields: [
+            { api: "Title", label: "Title" },
+            { api: "Email", label: "Email" },
+          ],
+          rows: [
+            {
+              id: "003AA00000AbCd0001",
+              name: "Contact 1",
+              new: [],
+              old: ["CTO", "a@example.com"],
+              ops: ["clear", "clear"],
+              op: "clear",
+            },
+            {
+              id: "003AA00000AbCd0002",
+              name: "Contact 2",
+              new: [],
+              old: [null, null],
+              ops: ["clear", "clear"],
+              op: "clear",
+            },
+          ],
+          oldValuesRead: true,
+        },
+      },
+    };
+    const text = JSON.stringify(approvalCardBlocks(del));
+    expect(text).toContain("Approval needed · Delete 2 Contacts");
+    expect(text).toContain("🔴 Deletes *2*");
+    expect(text).toContain("Delete all 2");
+    const lines = bulkCsv(del.summary!.bulk!).trimEnd().split("\n");
+    expect(lines[0]).toBe('"Contact","Title","Email"');
+    // A deleted record is marked on its name; its values are what goes.
+    expect(lines[1]).toBe('"🔴 Contact 1","CTO","a@example.com"');
+    expect(lines[2]).toBe('"🔴 Contact 2","",""');
+  });
+
+  it("a bulk create says Create in words, its CSV each new record's values", () => {
+    const create: PendingApproval = {
+      ...bulkApproval([]),
+      summary: {
+        action: "Create 2 Contacts",
+        details: [],
+        bulk: {
+          kind: "create",
+          objectLabel: "Contact",
+          fields: [
+            { api: "LastName", label: "Last name" },
+            { api: "Title", label: "Title" },
+          ],
+          rows: [
+            {
+              id: "1",
+              name: "Reyes",
+              new: ["Reyes", "CTO"],
+              ops: ["fill", "fill"],
+              op: "fill",
+            },
+            {
+              id: "2",
+              new: ["Okafor", null],
+              ops: ["fill", "untouched"],
+              op: "fill",
+            },
+          ],
+          oldValuesRead: false,
+        },
+      },
+    };
+    const text = JSON.stringify(approvalCardBlocks(create));
+    expect(text).toContain("Approval needed · Create 2 Contacts");
+    expect(text).toContain("🟢 Creates *2*");
+    expect(text).toContain("Approve all 2");
+    const lines = bulkCsv(create.summary!.bulk!).trimEnd().split("\n");
+    expect(lines[1]).toBe('"🟢 Reyes","Reyes","CTO"');
+    expect(lines[2]).toBe('"🟢 New contact 2","Okafor",""');
+  });
+
+  type Cell = {
+    type: string;
+    text?: string;
+    elements?: { elements: { text: string; style?: object }[] }[];
+  };
+  const cellText = (c: Cell) => c.text ?? c.elements![0]!.elements[0]!.text;
+  const cellStyle = (c: Cell) => c.elements?.[0]?.elements[0]?.style;
+  const tableOf = (blocks: unknown[]) =>
+    (blocks as { type: string; rows?: Cell[][] }[]).find(
+      (b) => b.type === "table",
+    )!.rows!;
+
+  it("one record updated: a Field | Now | New table, each field with its change's dot", () => {
+    const one: PendingApproval = {
+      ...bulkApproval([]),
+      summary: {
+        action: "Update Contact Marcus Delgado",
+        details: [],
+        bulk: {
+          kind: "update",
+          objectLabel: "Contact",
+          fields: [
+            { api: "Title", label: "Title" },
+            { api: "Fax", label: "Fax" },
+            { api: "AssistantName", label: "Assistant name" },
+            { api: "Department", label: "Department" },
+          ],
+          rows: [
+            {
+              id: "003AA00000AbCd0001",
+              name: "Marcus Delgado",
+              new: ["VP of Procurement", "(617) 555-0100", "", "Ops"],
+              old: ["Director of Procurement", null, "Leo Park", "Ops"],
+              ops: ["overwrite", "fill", "clear", "same"],
+              op: "clear",
+            },
+          ],
+          oldValuesRead: true,
+        },
+      },
+    };
+    const blocks = approvalCardBlocks(one);
+    expect(JSON.stringify(blocks)).toContain("*Contact:* Marcus Delgado");
+    const [head, title, fax, assistant, dept] = tableOf(blocks);
+    expect(head!.map(cellText)).toEqual(["Field", "Now", "New"]);
+    // Overwrite: the old value struck through, the new one bold.
+    expect(title!.map(cellText)).toEqual([
+      "🔵 Title",
+      "Director of Procurement",
+      "VP of Procurement",
+    ]);
+    expect(cellStyle(title![1]!)).toEqual({ strike: true });
+    expect(cellStyle(title![2]!)).toEqual({ bold: true });
+    // Fill: nothing there now, said in words.
+    expect(fax!.map(cellText)).toEqual(["🟢 Fax", "empty", "(617) 555-0100"]);
+    // Clear and no change: said in words too, not by the dot alone.
+    expect(assistant!.map(cellText)).toEqual([
+      "🔴 Assistant name",
+      "Leo Park",
+      "cleared",
+    ]);
+    expect(dept!.map(cellText)).toEqual(["⚪ Department", "Ops", "no change"]);
+    expect(JSON.stringify(blocks)).toContain('"Approve"');
+  });
+
+  it("one record created or deleted: named by the header and button, its values in a table", () => {
+    const make = (kind: "create" | "delete"): PendingApproval => ({
+      ...bulkApproval([]),
+      summary: {
+        action: kind === "create" ? "Create Contact" : "Delete Contact",
+        details: [],
+        bulk: {
+          kind,
+          objectLabel: "Contact",
+          fields: [{ api: "Title", label: "Title" }],
+          rows: [
+            {
+              id: kind === "create" ? "1" : "003AA00000AbCd0001",
+              name: "Ava Demo01",
+              new: kind === "create" ? ["CTO"] : [],
+              old: kind === "delete" ? ["CTO"] : undefined,
+              ops: kind === "create" ? ["fill"] : ["clear"],
+              op: kind === "create" ? "fill" : "clear",
+            },
+          ],
+          oldValuesRead: kind === "delete",
+        },
+      },
+    });
+    const created = approvalCardBlocks(make("create"));
+    expect(JSON.stringify(created)).toContain("*New contact:* Ava Demo01");
+    expect(tableOf(created)[1]!.map(cellText)).toEqual(["Title", "CTO"]);
+    const deleted = approvalCardBlocks(make("delete"));
+    expect(JSON.stringify(deleted)).toContain("*Deletes contact:* Ava Demo01");
+    expect(tableOf(deleted)[1]!.map(cellText)).toEqual(["Title", "CTO"]);
+    expect(JSON.stringify(deleted)).toContain('"Delete"');
+  });
+
+  it("without the table block, one record falls back to the classic detail rows", () => {
+    const one: PendingApproval = {
+      ...bulkApproval([]),
+      summary: {
+        action: "Update Contact Ava",
+        details: [{ label: "Title", value: "CTO" }],
+        bulk: {
+          objectLabel: "Contact",
+          fields: [{ api: "Title", label: "Title" }],
+          rows: [{ id: "003AA00000AbCd0001", new: ["CTO"] }],
+          oldValuesRead: false,
+        },
+      },
+    };
+    const blocks = approvalCardBlocks(one, undefined, false);
+    expect(JSON.stringify(blocks)).not.toContain('"table"');
+    expect(JSON.stringify(blocks)).toContain("*Title:* CTO");
+  });
+
+  it("offers View table, a link to OneCLI's colored table (Slack's phone app shows a CSV as text)", () => {
+    const blocks = approvalCardBlocks(
+      bulkApproval(rows),
+      "https://app.example/a/1",
+    ) as {
+      type: string;
+      elements?: { text?: { text: string }; url?: string; value?: string }[];
+    }[];
+    const buttons = blocks.find((b) => b.type === "actions")!.elements!;
+    const view = buttons.find((e) => e.text?.text === "View table")!;
+    expect(view.url).toBe("https://app.example/a/1");
+    expect(view.value).toBeUndefined();
+    // No review URL configured: no dead button.
+    const bare = approvalCardBlocks(bulkApproval(rows)) as typeof blocks;
+    expect(JSON.stringify(bare)).not.toContain("View table");
+  });
+
+  it("names the fields the table leaves out", () => {
+    const a = bulkApproval(rows);
+    a.summary!.bulk!.hiddenFields = ["Fax", "Other city"];
+    const text = JSON.stringify(approvalCardBlocks(a));
+    expect(text).toContain(
+      "The table shows 1 of 3 fields. Also set, not shown: Fax, Other city.",
+    );
+    expect(
+      JSON.stringify(approvalCardBlocks(bulkApproval(rows))),
+    ).not.toContain("not shown");
+  });
+
+  it("a settled card (expired too) is one line: its CSV table is dropped", async () => {
+    await slackApprovalCardUi.settle({
+      credential: "xoxb-1",
+      channel: "D1",
+      ts: "1700.0001",
+      title: "Update 20 Contacts",
+      text: "Expired (no response) · denied",
+    } as never);
+    const form = slack.callsTo("chat.update")[0]!.form;
+    expect(form.file_ids).toBe("[]");
+    expect(JSON.parse(form.blocks!)).toHaveLength(1);
+  });
+
+  const post = (approval: PendingApproval) =>
+    slackApprovalCardUi.post({
+      credential: "xoxb-1",
+      channel: "D1",
+      approval,
+      reviewUrl: "https://app.example/a/1",
+    } as never);
+
+  /** Every message Slack shows for these calls: each post, plus each upload
+   *  completed INTO a channel (Slack posts a share message for it). */
+  const messagesPosted = () =>
+    slack.callsTo("chat.postMessage").length +
+    slack
+      .callsTo("files.completeUploadExternal")
+      .filter((c) => "channel_id" in c.form).length;
+
+  it("posts the card and its CSV as ONE message, the file shared with it", async () => {
+    // MUTATION-TESTED: attaching the CSV afterwards (chat.update file_ids)
+    // was accepted by Slack but never shown on the message (measured live);
+    // only a file shared WITH its message shows.
+    const ref = await post(bulkApproval(rows));
+    expect(messagesPosted()).toBe(1);
+    expect(slack.callsTo("chat.postMessage")).toHaveLength(0);
+    const share = slack.callsTo("files.completeUploadExternal")[0]!.form;
+    expect(share.channel_id).toBe("D1");
+    // The card's blocks ride the share itself.
+    expect(JSON.stringify(JSON.parse(share.blocks!))).toContain(
+      "Approve all 46",
+    );
+    // Its ts is the share's message, read back from the file.
+    expect(ref).toEqual({ channel: "D1", ts: expect.any(String) });
+    expect(slack.callsTo("chat.update")).toHaveLength(0);
+  });
+
+  it("a refused upload still posts exactly one card, without the CSV", async () => {
+    slack.respond("files.getUploadURLExternal", () => ({
+      ok: false,
+      error: "missing_scope",
+    }));
+    await post(bulkApproval(rows));
+    expect(messagesPosted()).toBe(1);
+    expect(slack.callsTo("chat.postMessage")).toHaveLength(1);
+  });
+
+  it("an install without files:read gets one card, never a duplicate", async () => {
+    // The share posted the card but its ts can't be read back: posting
+    // again would put a second card with live buttons in the channel.
+    // MUTATION-TESTED: treat this like a refused upload and a second card
+    // posts.
+    slack.respond("files.info", () => ({ ok: false, error: "missing_scope" }));
+    await expect(post(bulkApproval(rows))).rejects.toThrow(
+      "could not be read back",
+    );
+    expect(messagesPosted()).toBe(1);
+    expect(slack.callsTo("chat.postMessage")).toHaveLength(0);
+  });
+
+  it("a Slack that refuses the table block gets the card as detail rows", async () => {
+    let tries = 0;
+    slack.respond("chat.postMessage", (form) => {
+      tries += 1;
+      return form.blocks?.includes('"table"')
+        ? { ok: false, error: "invalid_blocks" }
+        : { ok: true, channel: "D1", ts: "1700.0100" };
+    });
+    const one: PendingApproval = {
+      ...bulkApproval([]),
+      summary: {
+        action: "Update Contact Ava",
+        details: [{ label: "Title", value: "CTO" }],
+        bulk: {
+          objectLabel: "Contact",
+          fields: [{ api: "Title", label: "Title" }],
+          rows: [{ id: "003AA00000AbCd0001", new: ["CTO"] }],
+          oldValuesRead: false,
+        },
+      },
+    };
+    await expect(post(one)).resolves.toEqual({
+      channel: "D1",
+      ts: "1700.0100",
+    });
+    expect(tries).toBe(2);
+  });
+
+  it("claims no current values it could not read", () => {
+    const csv = bulkCsv({ ...bulkOf(rows), oldValuesRead: false });
+    expect(csv).not.toMatch(/[🔴🔵🟢⚪]|→/u);
+    expect(
+      JSON.stringify(
+        approvalCardBlocks({
+          ...bulkApproval(rows),
+          summary: {
+            action: "Update Contacts",
+            details: [],
+            bulk: { ...bulkOf(rows), oldValuesRead: false },
+          },
+        }),
+      ),
+    ).toContain("Current values couldn't be read");
+  });
+});
+
+describe("a batch of record lists", () => {
+  // "Fill the blank industry and employee counts" on 9 accounts, split by
+  // the agent into one bulk call per field set: 6 x industry, 1 x
+  // employees, 2 x both. It reads as ONE table (the rule itself is
+  // `mergeBatchTables`, tested in @onecli/api); here, how Slack shows it.
+  type Bulk = NonNullable<NonNullable<PendingApproval["summary"]>["bulk"]>;
+  const IND = { api: "Industry", label: "Industry" };
+  const EMP = { api: "NumberOfEmployees", label: "Number of employees" };
+  const acct = (i: number, values: (string | null)[]) => ({
+    id: `001AA00000AbCd${String(i).padStart(4, "0")}`,
+    name: `Account ${i}`,
+    url: `https://acme.my.salesforce.com/001AA00000AbCd${String(i).padStart(4, "0")}`,
+    new: values,
+    old: values.map(() => null),
+    ops: values.map(() => "fill" as const),
+    op: "fill" as const,
+  });
+  const at = "2026-10-14T13:06:18.000Z";
+  const request = (
+    id: string,
+    fields: Bulk["fields"],
+    rows: ReturnType<typeof acct>[],
+    total = 3,
+  ): PendingApproval => ({
+    id,
+    method: "PATCH",
+    host: "acme.my.salesforce.com:443",
+    path: "/services/data/v62.0/composite/sobjects",
+    summary: {
+      action: `Update ${rows.length} Accounts`,
+      details: [],
+      bulk: { objectLabel: "Account", fields, rows, oldValuesRead: true },
+    },
+    agent: { id: "ag1", name: "Bot" },
+    app: "salesforce",
+    batch: { id: "b1", label: "Fill blank fields (9 accounts)", total },
+    createdAt: at,
+    expiresAt: "2026-10-14T13:09:18.000Z",
+  });
+  const fieldSplit = (): PendingApproval[] => [
+    request(
+      "req-ind",
+      [IND],
+      [1, 2, 3, 4, 5, 6].map((i) => acct(i, ["Retail"])),
+    ),
+    request("req-emp", [EMP], [acct(7, ["1200"])]),
+    request(
+      "req-both",
+      [IND, EMP],
+      [acct(8, ["Banking", "40"]), acct(9, ["Insurance", "75"])],
+    ),
+  ];
+  type Block = {
+    type: string;
+    elements?: { action_id?: string; value?: string }[];
+  };
+  const post = (live: PendingApproval[]) =>
+    slackApprovalCardUi.post({
+      credential: "xoxb-1",
+      channel: "D1",
+      approval: live[0]!,
+      batch: live,
+      reviewUrl: "https://app.example/a/1",
+    });
+
+  it("posts as the bulk card with its CSV in ONE message; Approve all decides exactly the 3 requests", async () => {
+    await post(fieldSplit());
+    expect(slack.callsTo("chat.postMessage")).toHaveLength(0);
+    const share = slack.callsTo("files.completeUploadExternal")[0]!.form;
+    const blocks = JSON.parse(share.blocks!) as Block[];
+    const text = JSON.stringify(blocks);
+    expect(text).toContain("Approval needed · Update 9 Accounts");
+    expect(text).toContain("🟢 Fills *9*");
+    expect(text).toContain("Fill blank fields (9 accounts)");
+    expect(text).toContain("One approval covers all 9 (3 requests)");
+    expect(text).not.toContain("Not all the same");
+    expect(text).not.toContain(":warning:");
+    const actions = blocks.find((b) => b.type === "actions")!.elements!;
+    expect(actions[0]).toMatchObject({ action_id: "channel_group_approve" });
+    expect(actions[0]!.value!.split(",").sort()).toEqual([
+      "req-both",
+      "req-emp",
+      "req-ind",
+    ]);
+    expect(actions[1]).toMatchObject({
+      action_id: "channel_group_deny",
+      value: actions[0]!.value,
+    });
+    const files = JSON.parse(share.files!) as { title: string }[];
+    expect(files[0]!.title).toBe("9 accounts: what each change does");
+    // The CSV is the merged table: a field a request doesn't set is left
+    // alone on its records, and says so (as on the web table).
+    const { mergeBatchBulk } = await import("./slack/approval-card");
+    const csv = bulkCsv(mergeBatchBulk(fieldSplit())!.bulk).split("\n");
+    expect(csv[0]).toBe('"Account","Industry","Number of employees"');
+    expect(csv).toContain('"Account 1","🟢 Retail","⚪ no change"');
+    expect(csv).toContain('"Account 7","⚪ no change","🟢 1200"');
+  });
+
+  it("a batch of one-record writes keeps its rows: no CSV, each row decidable", async () => {
+    // `PATCH /sobjects/Account/{id}` per record: each carries a one-row
+    // table AND names its record in its title, as the gateway sends it.
+    const one = (id: string, i: number): PendingApproval => {
+      const a = request(id, [IND], [acct(i, ["Retail"])]);
+      a.summary = {
+        ...a.summary!,
+        action: `Update Account Account ${i}`,
+        subject: { verb: "Update Account", record: `Account ${i}`, row: 0 },
+        details: [
+          { label: "Account", value: `Account ${i}` },
+          { label: "Industry", value: "Retail" },
+        ],
+      };
+      return a;
+    };
+    await post([one("a-1", 1), one("a-2", 2), one("a-3", 3)]);
+    expect(slack.callsTo("files.completeUploadExternal")).toHaveLength(0);
+    const text = slack.callsTo("chat.postMessage")[0]!.form.blocks!;
+    expect(text).toContain("Industry → Retail");
+    expect(text).not.toContain("Update 3 Accounts");
+  });
+
+  it("more requests than one group click carries: the rows, never a table it can't decide", async () => {
+    const { mergeBatchBulk } = await import("./slack/approval-card");
+    const batch = (n: number) =>
+      Array.from({ length: n }, (_, i) =>
+        request(`req-${i}`, [IND], [acct(i, ["Retail"])], n),
+      );
+    expect(mergeBatchBulk(batch(APPROVAL_GROUP_MAX_IDS))).not.toBeNull();
+    expect(mergeBatchBulk(batch(APPROVAL_GROUP_MAX_IDS + 1))).toBeNull();
+  });
+
+  it("drops back to rows (and the CSV) once a request is decided elsewhere", async () => {
+    const { groupCardBlocks } = await import("./slack/approval-card");
+    const [ind, emp, both] = fieldSplit();
+    const decided = [
+      {
+        id: "req-emp",
+        title: null,
+        outcome: "decided" as const,
+        createdAt: at,
+      },
+    ];
+    expect(
+      JSON.stringify(
+        groupCardBlocks({ live: [ind!, emp!, both!], settled: [] }),
+      ),
+    ).toContain("Update 9 Accounts");
+    const partial = JSON.stringify(
+      groupCardBlocks({ live: [ind!, both!], settled: decided }),
+    );
+    expect(partial).not.toContain("Update 9 Accounts");
+    expect(partial).toContain("Done: ☑️ 1 decided");
+
+    const render = (view: Parameters<typeof groupCardBlocks>[0]) =>
+      slackApprovalCardUi.renderGroup!({
+        credential: "xoxb-1",
+        channel: "D1",
+        ts: "1700.0001",
+        view,
+      });
+    await render({ live: [ind!, both!], settled: decided });
+    await render({ live: [ind!, emp!, both!], settled: [] });
+    const [rows, table] = slack.callsTo("chat.update");
+    expect(rows!.form.file_ids).toBe("[]");
+    // A still-merged re-render keeps the CSV it was posted with.
+    expect(table!.form.file_ids).toBeUndefined();
+  });
 });
 
 describe("the approval card", () => {
@@ -306,30 +1113,75 @@ describe("the approval card", () => {
     expect(rendered).toContain("POST api.example.com/v1/emails");
   });
 
-  it("says undecided-means-denied when there is no expiry", () => {
-    const rendered = JSON.stringify(approvalCardBlocks(approval));
-    expect(rendered).toContain("Undecided means denied.");
-  });
-
-  it("clamps an oversized detail value (and the header action) with a trailing ellipsis", () => {
-    // The gateway's summary fields are unbounded; a Slack section block caps
-    // at 3,000 chars and a header block at 150. clampDetail keeps each
-    // dynamic field ≤200+ellipsis and clampHeader keeps the action ≤120 so
-    // the card always posts — delete either clamp and a long enough value
-    // kills the entire post with invalid_blocks, silencing the approval.
+  it("names the record the action is about without its id, still linked", () => {
+    // MUTATION-TESTED: the row read "Contact: Dana Reyes (003QO…)", the id
+    // noise on a one-record card.
     const rendered = JSON.stringify(
       approvalCardBlocks({
         ...approval,
         summary: {
-          action: "t".repeat(300),
-          details: [{ label: "Body", value: "v".repeat(300) }],
+          action: "Update Contact Dana Reyes",
+          subject: { verb: "Update Contact", record: "Dana Reyes", row: 0 },
+          details: [
+            {
+              label: "Contact",
+              value: "Dana Reyes (003QO00000AbCdEfGh)",
+              url: "https://example.my.salesforce.com/003QO00000AbCdEfGh",
+            },
+            { label: "Title", value: "VP Sales" },
+          ],
         },
       }),
     );
-    expect(rendered).toContain(`${"v".repeat(200)}…`);
-    expect(rendered).not.toContain("v".repeat(201));
-    expect(rendered).toContain(`${"t".repeat(120)}…`);
-    expect(rendered).not.toContain("t".repeat(121));
+    expect(rendered).toContain(
+      "*Contact:* <https://example.my.salesforce.com/003QO00000AbCdEfGh|Dana Reyes>",
+    );
+    expect(rendered).not.toContain("Dana Reyes (003QO00000AbCdEfGh)");
+  });
+
+  it("ends with one calm line: who asked, the host without its port, and when it expires", () => {
+    // MUTATION-TESTED: the old footer was a robot emoji, the host in a red
+    // code span with ":443", and "Undecided means denied." It read as an alarm.
+    const rendered = JSON.stringify(
+      approvalCardBlocks({
+        ...approval,
+        agent: { id: "ag1", name: "Sales bot" },
+        host: "acme.my.salesforce.com:443",
+        expiresAt: "2026-10-09T21:45:00.000Z",
+      }),
+    );
+    expect(rendered).toContain(
+      "Requested by *Sales bot* · acme.my.salesforce.com · expires <!date^",
+    );
+    expect(rendered).not.toContain(":443");
+    expect(rendered).not.toContain("robot_face");
+    expect(rendered).not.toContain("Undecided means denied");
+  });
+
+  it("clamps an oversized detail value (and the header action) with a trailing ellipsis", () => {
+    // The gateway's summary fields are unbounded; a Slack section block caps
+    // at 3,000 chars and a header block at 150. A short value is clamped to
+    // 200+ellipsis, prose (long or multi-line) reads whole in a code block
+    // cut at its own budget with a closing ellipsis, and clampHeader keeps
+    // the action ≤120, so the card always posts. Delete any clamp and a long
+    // enough value kills the entire post with invalid_blocks.
+    const render = (value: string) =>
+      JSON.stringify(
+        approvalCardBlocks({
+          ...approval,
+          summary: {
+            action: "t".repeat(300),
+            details: [{ label: "Body", value }],
+          },
+        }),
+      );
+    const prose = render("v".repeat(300));
+    expect(prose).toContain(`\`\`\`${"v".repeat(300)}\`\`\``);
+    const huge = render("v".repeat(5000));
+    expect(huge).toContain(`${"v".repeat(1800)}\\n…\`\`\``);
+    expect(huge).not.toContain("v".repeat(1801));
+    expect(prose).toContain(`${"t".repeat(120)}…`);
+    expect(prose).not.toContain("t".repeat(121));
   });
 
   it("keeps the details section under Slack's cap even when escaping expands every char", () => {
@@ -353,6 +1205,22 @@ describe("the approval card", () => {
     // Whole lines past the budget are dropped, and the drop is said aloud.
     expect(section).toMatch(/>_\+\d more_$/);
     expect(section).not.toContain("<".repeat(2));
+  });
+
+  it("lists every row the gateway sent, so a 10-file upload names all 10 files", () => {
+    // A row cap of 8 used to cut files 9 and 10 (or half a file's rows)
+    // without a word; the section budget is the only bound now.
+    const files = Array.from({ length: 10 }, (_, i) => ({
+      label: `Contract ${i + 1}.pdf`,
+      value: `Account ${i + 1} (001${i})`,
+    }));
+    const blocks = approvalCardBlocks({
+      ...approval,
+      summary: { action: "Upload 10 files", details: files },
+    });
+    const section = (blocks[1] as { text: { text: string } }).text.text;
+    for (const f of files) expect(section).toContain(f.label);
+    expect(section).not.toMatch(/more_/);
   });
 });
 
@@ -406,6 +1274,10 @@ describe("posting a card", () => {
     const card = slack.callsTo("chat.postMessage")[0]!;
     expect(card.token).toBe("xoxb-bot");
     expect(card.form.channel).toBe("D100");
+    // MUTATION-TESTED: no link previews under an approval card (a linked
+    // Salesforce record would get the Salesforce app's own preview).
+    expect(card.form.unfurl_app_links).toBe("false");
+    expect(card.form.unfurl_links).toBe("false");
     // No avatar on this presence — no icon_url key on the card either.
     expect("icon_url" in card.form).toBe(false);
     const blocks = cardBlocksSchema.parse(JSON.parse(card.form.blocks!));
@@ -603,6 +1475,7 @@ describe("expiry", () => {
       recordPromptMessage: async (approvalId) => {
         recorded.push(approvalId);
       },
+      listUnsettledPrompts: ledgerPending("app-9"),
     });
     const past = new Date(Date.now() - 1_000).toISOString();
     gateway.script.push({ status: 200, body: pendingBody("app-9", past) });
@@ -630,13 +1503,204 @@ describe("expiry", () => {
   });
 });
 
+describe("a card that left the pending list says how, from the record", () => {
+  // Live: an agent's connection dropped while its card waited, and the card
+  // read "Decided from the dashboard". No one had decided anything. These
+  // rows are the plan's table, one per ending, for every channel provider
+  // (the manager is channel-neutral; Slack renders it here).
+  const departed = async (
+    outcomes: ControlPlaneClient["listPromptOutcomes"],
+  ) => {
+    const settles: [string, string][] = [];
+    const asked: string[][] = [];
+    const controlPlane = createFakeControlPlane({
+      settlePrompt: async (approvalId, state) => {
+        settles.push([approvalId, state]);
+      },
+      listUnsettledPrompts: ledgerPending("app-42"),
+      listPromptOutcomes: async (ids) => {
+        asked.push(ids);
+        return outcomes(ids);
+      },
+    });
+    gateway.script.push({ status: 200, body: pendingBody("app-42") });
+    gateway.script.push({ status: 200, body: { requests: [] } });
+    const manager = makeManager(controlPlane);
+    manager.reconcile([presence()]);
+    return { manager, settles, asked };
+  };
+
+  it.each([
+    ["cancelled", undefined, "Cancelled · the agent stopped waiting"],
+    ["approved", "web", "✅ Approved from the dashboard"],
+    ["denied", "web", "⛔ Denied from the dashboard"],
+    // A dashboard click the gateway alone recorded names no place.
+    ["approved", undefined, "✅ Approved from the dashboard"],
+    // Decided on another channel: the record names the decision, never the
+    // dashboard.
+    ["denied", "slack", "⛔ Denied"],
+    ["replaced", undefined, "Replaced by your message · not sent"],
+  ])("%s (via %s) reads %s", async (outcome, via, line) => {
+    const { settles } = await departed(recorded({ "app-42": outcome }, via));
+    await waitReal(() => settles.length === 1, "settled from the record");
+    expect(settles).toEqual([["app-42", "decided"]]);
+    const updates = slack.callsTo("chat.update");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.form.text).toBe(`Send an email · ${line}`);
+  });
+
+  it("waits for the record, and never guesses a decision meanwhile", async () => {
+    // A cancel is written a beat after the request leaves the list. The
+    // card stays as it was until the record names the ending.
+    let answer: Record<string, string> = {};
+    const { manager, settles, asked } = await departed(async (ids) =>
+      recorded(answer)(ids),
+    );
+    await waitReal(() => asked.length >= 1, "record asked");
+    expect(settles).toEqual([]);
+    expect(slack.callsTo("chat.update")).toEqual([]);
+
+    answer = { "app-42": "cancelled" };
+    await manager.sweepExpired();
+    await waitReal(() => settles.length === 1, "settled once recorded");
+    expect(slack.callsTo("chat.update")[0]?.form.text).toBe(
+      "Send an email · Cancelled · the agent stopped waiting",
+    );
+  });
+
+  it("says only what it saw once the record stays silent past the wait", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const { manager, settles, asked } = await departed(recorded({}));
+    await waitReal(() => asked.length >= 1, "record asked");
+    expect(settles).toEqual([]);
+
+    vi.setSystemTime(Date.now() + CHANNEL_CARD_RECORD_WAIT_MS + 1);
+    await manager.sweepExpired();
+    await waitReal(() => settles.length === 1, "settled past the wait");
+    expect(slack.callsTo("chat.update")[0]?.form.text).toBe(
+      "Send an email · No longer waiting",
+    );
+  });
+
+  it("an older control plane without the read never makes the card guess", async () => {
+    // Version skew: the adapter ships first. The 404 reads as no record;
+    // the card waits, then says only what it saw. It never says "decided".
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const { manager, settles, asked } = await departed(async () => []);
+    await waitReal(() => asked.length >= 1, "record asked");
+    vi.setSystemTime(Date.now() + CHANNEL_CARD_RECORD_WAIT_MS + 1);
+    await manager.sweepExpired();
+    await waitReal(() => settles.length === 1, "settled past the wait");
+    const text = slack.callsTo("chat.update")[0]?.form.text ?? "";
+    expect(text).toBe("Send an email · No longer waiting");
+    expect(text).not.toMatch(/decided/i);
+  });
+
+  it("an ending this build does not know is no answer, never a crash", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const { manager, settles, asked } = await departed(
+      recorded({ "app-42": "teleported" }),
+    );
+    await waitReal(() => asked.length >= 1, "record asked");
+    expect(settles).toEqual([]);
+    vi.setSystemTime(Date.now() + CHANNEL_CARD_RECORD_WAIT_MS + 1);
+    await manager.sweepExpired();
+    await waitReal(() => settles.length === 1, "settled past the wait");
+    expect(slack.callsTo("chat.update")[0]?.form.text).toBe(
+      "Send an email · No longer waiting",
+    );
+  });
+
+  it("a failed record lookup acts on nothing; the next pass retries", async () => {
+    let up = false;
+    const { manager, settles, asked } = await departed(async (ids) => {
+      if (!up) throw new Error("control plane down");
+      return recorded({ "app-42": "cancelled" })(ids);
+    });
+    await waitReal(() => asked.length >= 1, "record asked");
+    expect(settles).toEqual([]);
+    expect(slack.callsTo("chat.update")).toEqual([]);
+
+    up = true;
+    await manager.sweepExpired();
+    await waitReal(() => settles.length === 1, "settled once it answered");
+    expect(slack.callsTo("chat.update")[0]?.form.text).toBe(
+      "Send an email · Cancelled · the agent stopped waiting",
+    );
+  });
+  it("asks about every departed card, past one read's cap", async () => {
+    // More cards leave at once than the read answers in one call. Every
+    // one is asked about. MUTATION-PROOF: ask only the first cap's worth and
+    // the rest read "No longer waiting" with a cancel on record.
+    const n = APPROVAL_GROUP_MAX_IDS + 3;
+    const ids = Array.from({ length: n }, (_, i) => `app-${i}`);
+    const asked: string[][] = [];
+    const settled: string[] = [];
+    const controlPlane = createFakeControlPlane({
+      settlePrompt: async (approvalId) => {
+        settled.push(approvalId);
+      },
+      listUnsettledPrompts: ledgerPending(...ids),
+      listPromptOutcomes: async (batch) => {
+        asked.push(batch);
+        return batch.map((approvalId) => ({
+          approvalId,
+          outcome: "cancelled",
+        }));
+      },
+    });
+    const manager = makeManager(controlPlane);
+    // Recovered from the ledger, then an empty pending list: every one left.
+    await manager.recoverUnsettled();
+    gateway.script.push({ status: 200, body: { requests: [] } });
+    manager.reconcile([presence()]);
+    await waitReal(() => settled.length === n, "every card settled");
+    expect(asked.every((b) => b.length <= APPROVAL_GROUP_MAX_IDS)).toBe(true);
+    expect(new Set(asked.flat()).size).toBe(n);
+  });
+
+  it("a request seen pending again starts its wait over", async () => {
+    // A poll that dropped it was stale; the request is still waiting. Its
+    // first departure must not count toward the next one's wait.
+    // MUTATION-PROOF: keep the first departure's stamp and the card reads
+    // "No longer waiting" while the request is still live.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const asked: string[][] = [];
+    const settles: string[] = [];
+    const controlPlane = createFakeControlPlane({
+      settlePrompt: async (approvalId) => {
+        settles.push(approvalId);
+      },
+      listUnsettledPrompts: ledgerPending("app-42"),
+      listPromptOutcomes: async (ids) => {
+        asked.push(ids);
+        return [];
+      },
+    });
+    gateway.script.push({ status: 200, body: pendingBody("app-42") });
+    gateway.script.push({ status: 200, body: { requests: [] } });
+    gateway.script.push({ status: 200, body: pendingBody("app-42") });
+    const manager = makeManager(controlPlane);
+    manager.reconcile([presence()]);
+    await waitReal(() => gateway.calls.length >= 4, "seen pending again");
+
+    vi.setSystemTime(Date.now() + CHANNEL_CARD_RECORD_WAIT_MS + 1);
+    await manager.sweepExpired();
+    expect(settles).toEqual([]);
+    expect(slack.callsTo("chat.update")).toEqual([]);
+  });
+});
+
 describe("settleDecided", () => {
-  it("rewrites a card whose approval vanished from the pending set (decided on the web)", async () => {
+  it("rewrites a card whose approval was decided on the web, as the record says", async () => {
     const settles: [string, string][] = [];
     const controlPlane = createFakeControlPlane({
       settlePrompt: async (approvalId, state) => {
         settles.push([approvalId, state]);
       },
+      // The dashboard decides at the gateway and never touches the ledger.
+      listUnsettledPrompts: ledgerPending("app-42"),
+      listPromptOutcomes: recorded({ "app-42": "approved" }, "web"),
     });
     // Poll 1 posts the card; poll 2 serves an EMPTY set — the approval was
     // decided elsewhere, and the card must follow without a Slack click.
@@ -650,7 +1714,9 @@ describe("settleDecided", () => {
 
     expect(settles).toContainEqual(["app-42", "decided"]);
     const update = slack.callsTo("chat.update")[0]!;
-    expect(update.form.text).toBe("Send an email · Decided from the dashboard");
+    expect(update.form.text).toBe(
+      "Send an email · ✅ Approved from the dashboard",
+    );
   });
 
   it("keeps the prompt tracked when the rewrite fails — ledger untouched, retried on the next poll", async () => {
@@ -666,6 +1732,8 @@ describe("settleDecided", () => {
       settlePrompt: async (approvalId, state) => {
         settles.push([approvalId, state]);
       },
+      listUnsettledPrompts: ledgerPending("app-42"),
+      listPromptOutcomes: recorded({ "app-42": "approved" }, "web"),
     });
     let failUpdates = true;
     slack.respond("chat.update", (form) =>
@@ -759,6 +1827,8 @@ describe("settleDecided", () => {
       settlePrompt: async (approvalId, state) => {
         settles.push([approvalId, state]);
       },
+      listUnsettledPrompts: ledgerPending("app-42"),
+      listPromptOutcomes: recorded({ "app-42": "cancelled" }),
     });
     slack.respond("chat.update", () => ({
       ok: false,
@@ -769,6 +1839,132 @@ describe("settleDecided", () => {
 
     makeManager(controlPlane).reconcile([presence()]);
     await waitReal(() => settles.length === 1, "settled past the gone card");
+    expect(settles).toEqual([["app-42", "decided"]]);
+  });
+});
+
+describe("a card a channel click already settled", () => {
+  // An events-transport click is decided control-plane-side: it rewrites the
+  // card itself ("✅ Approved by …" via response_url) and settles the
+  // ledger, and this adapter is never told. Live 2026-10-03: the absence
+  // arm then rewrote all four of a person's Slack approvals as "Decided
+  // from the dashboard".
+
+  it("is never rewritten when its approval leaves the pending set", async () => {
+    // MUTATION-PROOF: drop the ledger check from the absence arm and the
+    // dashboard rewrite (and a second ledger settle) lands below.
+    const settles: [string, string][] = [];
+    const controlPlane = createFakeControlPlane({
+      settlePrompt: async (approvalId, state) => {
+        settles.push([approvalId, state]);
+      },
+      listUnsettledPrompts: ledgerPending(),
+    });
+    gateway.script.push({ status: 200, body: pendingBody("app-42") });
+    makeManager(controlPlane).reconcile([presence()]);
+    await waitReal(() => gateway.calls.length >= 2, "second poll held");
+
+    gateway.releaseHeld(200, { requests: [] });
+    await waitReal(() => gateway.calls.length >= 3, "absence handled");
+
+    expect(slack.callsTo("chat.update")).toEqual([]);
+    expect(settles).toEqual([]);
+  });
+
+  it("is never rewritten as expired once its deadline passes", async () => {
+    // A clicked card left tracked would be rewritten "Expired" by the sweep
+    // at its deadline. MUTATION-PROOF: drop the ledger check from the sweep
+    // and the expiry rewrite lands below; keep the card tracked instead of
+    // untracking it and the second sweep asks the ledger again.
+    const settles: [string, string][] = [];
+    const recorded: string[] = [];
+    let ledgerReads = 0;
+    const controlPlane = createFakeControlPlane({
+      settlePrompt: async (approvalId, state) => {
+        settles.push([approvalId, state]);
+      },
+      recordPromptMessage: async (approvalId) => {
+        recorded.push(approvalId);
+      },
+      listUnsettledPrompts: async () => {
+        ledgerReads += 1;
+        return ledgerPending()();
+      },
+    });
+    const past = new Date(Date.now() - 1_000).toISOString();
+    gateway.script.push({ status: 200, body: pendingBody("app-9", past) });
+    const manager = makeManager(controlPlane);
+    manager.reconcile([presence()]);
+    await waitReal(() => recorded.length === 1, "card posted and recorded");
+
+    await manager.sweepExpired();
+    await manager.sweepExpired();
+
+    expect(slack.callsTo("chat.update")).toEqual([]);
+    expect(settles).toEqual([]);
+    // Untracked, not merely skipped: the second sweep had nothing to ask.
+    expect(ledgerReads).toBe(1);
+  });
+
+  it("keeps a socket click's card tracked while its decision round-trips", async () => {
+    // A socket click is decided by the same control-plane call, which
+    // settles the ledger BEFORE settleDecided rewrites the card. A sweep in
+    // that window sees "settled" and must leave the prompt alone, or the
+    // card loses its real outcome. MUTATION-PROOF: untrack regardless of
+    // `deciding` in stillUnsettled and no rewrite lands below.
+    const recorded: string[] = [];
+    const controlPlane = createFakeControlPlane({
+      recordPromptMessage: async (approvalId) => {
+        recorded.push(approvalId);
+      },
+      listUnsettledPrompts: ledgerPending(),
+    });
+    const past = new Date(Date.now() - 1_000).toISOString();
+    gateway.script.push({ status: 200, body: pendingBody("app-9", past) });
+    const manager = makeManager(controlPlane);
+    manager.reconcile([presence()]);
+    await waitReal(() => recorded.length === 1, "card posted and recorded");
+
+    manager.beginDecision("app-9");
+    await manager.sweepExpired();
+    await manager.settleDecided("app-9", "✅ Approved by Ada");
+    manager.endDecision("app-9");
+
+    const updates = slack.callsTo("chat.update");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.form.text).toBe("Send an email · ✅ Approved by Ada");
+  });
+
+  it("stays tracked, untouched, while the ledger cannot be read", async () => {
+    // An outage must not guess either way: no rewrite (it may be a click),
+    // no untrack (it may not be). The next cadence retries.
+    let ledgerUp = false;
+    const settles: [string, string][] = [];
+    const controlPlane = createFakeControlPlane({
+      settlePrompt: async (approvalId, state) => {
+        settles.push([approvalId, state]);
+      },
+      listUnsettledPrompts: async () => {
+        if (!ledgerUp) throw new Error("control plane down");
+        return ledgerPending("app-42")();
+      },
+      listPromptOutcomes: recorded({ "app-42": "denied" }, "web"),
+    });
+    gateway.script.push({ status: 200, body: pendingBody("app-42") });
+    makeManager(controlPlane).reconcile([presence()]);
+    await waitReal(() => gateway.calls.length >= 2, "second poll held");
+
+    gateway.releaseHeld(200, { requests: [] });
+    await waitReal(() => gateway.calls.length >= 3, "absence handled");
+    expect(slack.callsTo("chat.update")).toEqual([]);
+    expect(settles).toEqual([]);
+
+    // Recovered: the same absence now settles as before.
+    ledgerUp = true;
+    await waitReal(() => {
+      gateway.releaseHeld(200, { requests: [] });
+      return settles.length === 1;
+    }, "retry settled once the ledger answered");
     expect(settles).toEqual([["app-42", "decided"]]);
   });
 });
@@ -927,6 +2123,80 @@ describe("stale-links (the running loop reads the LIVE presence view)", () => {
   });
 });
 
+describe("the card goes to the approver's own DM, never a guest's", () => {
+  // The owner let a guest TALK to the agent (a second direct link), but only
+  // the owner approves what it does. Before this fix, with two direct links
+  // the card followed heap order and landed in the guest's DM, where it
+  // expired unanswered while the agent waited.
+  const guestFirst = presence({
+    links: [
+      {
+        id: "l-guest",
+        conversationId: "cv-guest",
+        externalThreadId: "D200",
+        kind: "direct",
+        externalUserId: null,
+        mirrorCursor: null,
+      },
+      {
+        id: "l-owner",
+        conversationId: "cv-owner",
+        externalThreadId: "D100",
+        kind: "direct",
+        externalUserId: "U1",
+        mirrorCursor: null,
+      },
+    ],
+  });
+
+  it("posts to the link the control plane named, even when a guest DM comes first", async () => {
+    const claims: { externalThreadId: string }[] = [];
+    const controlPlane = createFakeControlPlane({
+      claimPrompt: async (input) => {
+        claims.push(input);
+        return true;
+      },
+    });
+    gateway.script.push({ status: 200, body: pendingBody("app-own") });
+
+    makeManager(controlPlane).reconcile([
+      { ...guestFirst, approvalsLinkId: "l-owner" },
+    ]);
+    await waitReal(
+      () => slack.callsTo("chat.postMessage").length === 1,
+      "card posted",
+    );
+
+    expect(slack.callsTo("chat.postMessage")[0]?.form.channel).toBe("D100");
+    expect(claims.map((c) => c.externalThreadId)).toEqual(["D100"]);
+  });
+
+  it("posts NO card when the approver has no DM (null), even though a guest DM exists", async () => {
+    const controlPlane = createFakeControlPlane();
+    gateway.script.push({ status: 200, body: pendingBody("app-none") });
+
+    makeManager(controlPlane).reconcile([
+      { ...guestFirst, approvalsLinkId: null },
+    ]);
+    await waitReal(() => gateway.calls.length >= 2, "loop re-armed");
+
+    expect(slack.callsTo("chat.postMessage")).toEqual([]);
+  });
+
+  it("keeps the legacy first-direct pick when an older control plane omits the field", async () => {
+    const controlPlane = createFakeControlPlane();
+    gateway.script.push({ status: 200, body: pendingBody("app-legacy") });
+
+    makeManager(controlPlane).reconcile([guestFirst]);
+    await waitReal(
+      () => slack.callsTo("chat.postMessage").length === 1,
+      "card posted",
+    );
+
+    expect(slack.callsTo("chat.postMessage")[0]?.form.channel).toBe("D200");
+  });
+});
+
 describe("boot recovery re-arms against the ledger's real deadline (finding E)", () => {
   const unsettled = (expiresAt: string | null) => [
     {
@@ -987,6 +2257,37 @@ describe("boot recovery re-arms against the ledger's real deadline (finding E)",
     await waitReal(() => settles.length === 1, "past deadline swept");
     expect(settles).toEqual([["app-r", "expired"]]);
   });
+
+  it("keeps an expired card tracked until its credential arrives, then settles it", async () => {
+    // Boot order: recovery re-arms the ledger's cards before the config feed
+    // has handed this instance the presence's credential. A sweep in that
+    // window can neither rewrite the card nor settle the ledger, so the
+    // prompt must stay tracked for the sweep that runs once the credential
+    // is in. Untracking it here strands a live-looking card for good.
+    vi.useFakeTimers({ toFake: [...TIMER_FAMILIES, "Date"] });
+    const settles: [string, string][] = [];
+    const controlPlane = createFakeControlPlane({
+      settlePrompt: async (approvalId, state) => {
+        settles.push([approvalId, state]);
+      },
+      listUnsettledPrompts: async () =>
+        unsettled(new Date(Date.now() - 1_000).toISOString()),
+    });
+    const manager = makeManager(controlPlane);
+    await manager.recoverUnsettled();
+
+    // No credential yet: the sweep has nothing it can do.
+    manager.reconcile([presence({ credentialsJson: null })]);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(settles).toEqual([]);
+
+    // The credential arrives; the next sweep settles the card and ledger.
+    manager.reconcile([presence()]);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await waitReal(() => settles.length === 1, "settled once credential in");
+    expect(settles).toEqual([["app-r", "expired"]]);
+    expect(slack.callsTo("chat.update")).toHaveLength(1);
+  });
 });
 
 describe("health-report latch (finding H)", () => {
@@ -1045,5 +2346,1116 @@ describe("health-report latch (finding H)", () => {
     await settle();
     expect(reportCalls).toBe(3);
     expect(reports).toEqual([["p1", false]]);
+  });
+});
+
+// ── Grouped cards ───────────────────────────────────────────────────────────
+
+const contact = (id: string, name: string, extra: object = {}) => ({
+  id,
+  method: "POST",
+  host: "acme.my.salesforce.com",
+  path: "/services/data/v60.0/sobjects/Contact",
+  app: "salesforce",
+  summary: {
+    action: "Create Contact",
+    details: [
+      { label: "Name", value: name },
+      { label: "Email", value: `${name.toLowerCase()}@acme.com` },
+    ],
+  },
+  agent: { id: "ag1", name: "Deploy Agent" },
+  batch: { id: "t1", label: "Import leads", total: 3 },
+  ...extra,
+});
+
+describe("grouped approval cards", () => {
+  const groupedManager = (controlPlane: ControlPlaneClient) => {
+    const manager = createApprovalsManager({
+      controlPlane,
+      gatewayUrl: gateway.url,
+      approvalsPollSeconds: 1,
+      cardUiOf: () => slackApprovalCardUi,
+      threadAddressOf: () => unpackThreadAddress,
+      credentialOf: botTokenOf,
+      pacingMs: 25,
+      groupDebounceMs: 20,
+      onLog: () => {},
+    });
+    managers.push(manager);
+    return manager;
+  };
+
+  const lastBlocks = () => {
+    const update = slack.callsTo("chat.update").at(-1)!;
+    return JSON.stringify(JSON.parse(update.form.blocks!));
+  };
+
+  /**
+   * Answer the loop's next poll with `body`. The fake gateway holds a poll
+   * once its script is empty, and the loop's next poll can go out before or
+   * after the test reaches this line (the pacing sleep races the card
+   * render). Queued on the script, an answer pushed after the poll went out
+   * is never read: the poll stays held and the test times out. So wait for
+   * the poll to be held, whenever that is, and answer it there.
+   */
+  const answerNextPoll = async (body: unknown): Promise<void> => {
+    await waitReal(() => gateway.heldCount() > 0, "the loop's next poll");
+    gateway.releaseHeld(200, body);
+  };
+
+  it("a bulk request never joins a task card: each keeps its table and CSV", async () => {
+    // Two "Update 2 Contacts" requests used to merge into one task card
+    // (same agent, app and action), which flattened each to a line
+    // ("Title → QA Lead · 1 record") and dropped both CSVs.
+    const bulkOf = (id: string, title: string) => ({
+      id,
+      method: "PATCH",
+      host: "acme.my.salesforce.com",
+      path: "/services/data/v62.0/composite/sobjects",
+      app: "salesforce",
+      summary: {
+        action: "Update 2 Contacts",
+        details: [],
+        bulk: {
+          objectLabel: "Contact",
+          fields: [{ api: "Title", label: "Title" }],
+          rows: ["Ada", "Grace"].map((name, i) => ({
+            id: `003${i}`,
+            name,
+            new: [title],
+            old: ["Old"],
+            ops: ["overwrite"],
+          })),
+          oldValuesRead: true,
+        },
+      },
+      agent: { id: "ag1", name: "Deploy Agent" },
+    });
+    gateway.script.push({
+      status: 200,
+      body: { requests: [bulkOf("ap-1", "CTO")] },
+    });
+    // The second arrives while the first card is open, like live.
+    gateway.script.push({
+      status: 200,
+      body: { requests: [bulkOf("ap-1", "CTO"), bulkOf("ap-2", "CEO")] },
+    });
+    groupedManager(createFakeControlPlane()).reconcile([presence()]);
+    // Each bulk card ships as its own CSV share carrying its own blocks
+    // (the card IS that message); joined, the second would be a row on the
+    // first card's task view with no CSV.
+    await waitReal(
+      () => slack.callsTo("files.completeUploadExternal").length >= 2,
+      "a card + CSV per request",
+    );
+    for (const share of slack.callsTo("files.completeUploadExternal")) {
+      expect(share.form.blocks).toContain(
+        "Approval needed · Update 2 Contacts",
+      );
+    }
+    expect(slack.callsTo("chat.update")).toEqual([]);
+  });
+
+  it("a one-record request never joins a bulk card either: it posts its own", async () => {
+    // MUTATION-TESTED: without the open-card guard, the single request
+    // joins the bulk card (same agent, app and action) and turns its table
+    // into a task view with no CSV.
+    const update = (id: string, rows: string[]) => ({
+      id,
+      method: "PATCH",
+      host: "acme.my.salesforce.com",
+      app: "salesforce",
+      summary: {
+        action: "Update Contacts",
+        details: [],
+        bulk: {
+          objectLabel: "Contact",
+          fields: [{ api: "Title", label: "Title" }],
+          rows: rows.map((name, i) => ({
+            id: `003${id}${i}`,
+            name,
+            new: ["CTO"],
+          })),
+        },
+      },
+      agent: { id: "ag1", name: "Deploy Agent" },
+    });
+    gateway.script.push({
+      status: 200,
+      body: { requests: [update("ap-1", ["Ada", "Grace"])] },
+    });
+    gateway.script.push({
+      status: 200,
+      body: {
+        requests: [update("ap-1", ["Ada", "Grace"]), update("ap-2", ["Lin"])],
+      },
+    });
+    groupedManager(createFakeControlPlane()).reconcile([presence()]);
+    await waitReal(
+      () => slack.callsTo("chat.postMessage").length >= 1,
+      "the one-record request's own card",
+    );
+    expect(slack.callsTo("files.completeUploadExternal")).toHaveLength(1);
+    expect(slack.callsTo("chat.update")).toEqual([]);
+  });
+
+  it("counts each expired row once, even when expiry sweeps overlap", async () => {
+    // MUTATION-TESTED: without the once-per-id done list, a sweep that
+    // starts while the last one is still settling (a large batch's ledger
+    // writes can outlast the 5s interval) adds the same rows again and
+    // over-counts the expired total.
+    const past = new Date(Date.now() - 1_000).toISOString();
+    const recorded: string[] = [];
+    const controlPlane = createFakeControlPlane({
+      recordPromptMessage: async (approvalId) => {
+        recorded.push(approvalId);
+      },
+      listUnsettledPrompts: ledgerPending("ap-1", "ap-2", "ap-3"),
+      settlePrompt: () => new Promise((r) => setTimeout(r, 30)),
+    });
+    gateway.script.push({
+      status: 200,
+      body: {
+        requests: ["Ada", "Grace", "Linus"].map((name, i) =>
+          contact(`ap-${i + 1}`, name, { expiresAt: past }),
+        ),
+      },
+    });
+    const manager = groupedManager(controlPlane);
+    manager.reconcile([presence()]);
+    await waitReal(() => recorded.length === 3, "card posted and recorded");
+
+    await Promise.all([manager.sweepExpired(), manager.sweepExpired()]);
+    await waitReal(
+      () => lastBlocks().includes("expired"),
+      "card rewritten as expired",
+    );
+    expect(lastBlocks()).toContain("3 requests");
+    expect(lastBlocks()).toContain("3 expired");
+    expect(lastBlocks()).not.toContain("6 ");
+  });
+
+  it("holds a tagged batch until it is all here, then posts ONE card with every row", async () => {
+    // MUTATION-TESTED: post on the first row and the reviewer sees a
+    // "1 of 3" card grow (or a single card turn into a batch).
+    const now = new Date().toISOString();
+    const row = (id: string, name: string) =>
+      contact(id, name, { createdAt: now });
+    gateway.script.push({
+      status: 200,
+      body: { requests: [row("ap-1", "Ada")] },
+    });
+    gateway.script.push({
+      status: 200,
+      body: {
+        requests: [
+          row("ap-1", "Ada"),
+          row("ap-2", "Grace"),
+          row("ap-3", "Linus"),
+        ],
+      },
+    });
+    // Inside the batch-settle window: still arriving, never posted early.
+    groupedManager(createFakeControlPlane()).reconcile([presence()]);
+    await waitReal(
+      () => slack.callsTo("chat.postMessage").length >= 1,
+      "card posted once complete",
+    );
+    const posts = slack.callsTo("chat.postMessage");
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.form.blocks!).not.toContain("1 of 3 here");
+  });
+
+  it("never counts another agent's request toward a batch, even with the same batch id", async () => {
+    // MUTATION-TESTED: match siblings on the batch id alone (the agent's
+    // claim) and another agent's request counts as arrived, so a 3-request
+    // batch with 2 of its own rows posts early as if complete.
+    const now = new Date().toISOString();
+    gateway.script.push({
+      status: 200,
+      body: {
+        requests: [
+          contact("ap-1", "Ada", { createdAt: now }),
+          contact("ap-2", "Grace", { createdAt: now }),
+          contact("ap-9", "Mallory", {
+            createdAt: now,
+            agent: { id: "ag-other", name: "Other" },
+          }),
+        ],
+      },
+    });
+    groupedManager(createFakeControlPlane()).reconcile([presence()]);
+    // 2 of its 3 are here and the batch is fresh: nothing posts yet.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(slack.callsTo("chat.postMessage")).toHaveLength(0);
+  });
+
+  it("posts ONE message for a task's burst, every ledger row sharing its ref", async () => {
+    const recorded: [string, string][] = [];
+    const controlPlane = createFakeControlPlane({
+      recordPromptMessage: async (approvalId, ref) => {
+        recorded.push([approvalId, ref]);
+      },
+    });
+    gateway.script.push({
+      status: 200,
+      body: {
+        requests: [
+          contact("ap-1", "Ada"),
+          contact("ap-2", "Grace"),
+          contact("ap-3", "Linus"),
+        ],
+      },
+    });
+    groupedManager(controlPlane).reconcile([presence()]);
+    await waitReal(() => recorded.length === 3, "all three recorded");
+    await waitReal(
+      () => slack.callsTo("chat.update").length >= 1,
+      "grouped render",
+    );
+
+    expect(slack.callsTo("chat.postMessage")).toHaveLength(1);
+    expect(new Set(recorded.map(([, ref]) => ref)).size).toBe(1);
+    const blocks = lastBlocks();
+    expect(blocks).toContain("3 approvals needed");
+    expect(blocks).toContain("Grace");
+    expect(blocks).toContain("Import leads");
+    // Approve all carries EXACTLY the live ids.
+    expect(blocks).toContain('"value":"ap-1,ap-2,ap-3"');
+  });
+
+  it("never merges another task, and flags an odd action inside one task", async () => {
+    const controlPlane = createFakeControlPlane();
+    gateway.script.push({
+      status: 200,
+      body: {
+        requests: [
+          contact("ap-1", "Ada"),
+          contact("ap-2", "Grace", {
+            summary: {
+              action: "Delete Contact",
+              details: [{ label: "Name", value: "Grace" }],
+            },
+          }),
+          contact("ap-3", "Linus"),
+          contact("ap-9", "Other", { batch: { id: "t2" } }),
+        ],
+      },
+    });
+    groupedManager(controlPlane).reconcile([presence()]);
+    await waitReal(
+      () =>
+        slack.callsTo("chat.postMessage").length === 2 &&
+        slack.callsTo("chat.update").length >= 1,
+      "two cards",
+    );
+    const blocks = lastBlocks();
+    expect(blocks).toContain("Not all the same");
+    expect(blocks).toContain("1 × Delete Contact");
+    expect(blocks).not.toContain("ap-9");
+  });
+
+  it("never joins a card that sits outside the approver's current DM", async () => {
+    // An older control plane names no home, so the legacy pick puts the card
+    // in the first direct link (a guest's DM). Once the feed names the
+    // approver's own DM, the task's next request must go THERE, not grow
+    // the stranded card where nobody can approve it.
+    const claims: string[] = [];
+    const recorded: [string, string][] = [];
+    const controlPlane = createFakeControlPlane({
+      claimPrompt: async (input) => {
+        claims.push(input.externalThreadId);
+        return true;
+      },
+      recordPromptMessage: async (approvalId, ref) => {
+        recorded.push([approvalId, ref]);
+      },
+    });
+    const link = (id: string, thread: string) => ({
+      id,
+      conversationId: `cv-${id}`,
+      externalThreadId: thread,
+      kind: "direct" as const,
+      externalUserId: null,
+      mirrorCursor: null,
+    });
+    const guestFirst = presence({
+      links: [link("l-guest", "D200"), link("l-owner", "D100")],
+    });
+    gateway.script.push({
+      status: 200,
+      body: { requests: [contact("ap-1", "Ada")] },
+    });
+    const manager = groupedManager(controlPlane);
+    manager.reconcile([guestFirst]);
+    await waitReal(() => recorded.length === 1, "first card");
+    await waitReal(() => gateway.calls.length >= 2, "next poll held");
+
+    manager.reconcile([{ ...guestFirst, approvalsLinkId: "l-owner" }]);
+    gateway.releaseHeld(200, {
+      requests: [contact("ap-1", "Ada"), contact("ap-2", "Grace")],
+    });
+    await waitReal(() => recorded.length === 2, "second request recorded");
+
+    const posts = slack.callsTo("chat.postMessage");
+    expect(posts.map((p) => p.form.channel)).toEqual(["D200", "D100"]);
+    expect(claims).toEqual(["D200", "D100"]);
+    // The ledger row's message is in the thread its claim names.
+    expect(recorded[1]?.[1]).toMatch(/^D100:/);
+  });
+
+  it("never joins a recovered card that sits outside the approver's current DM", async () => {
+    // After a restart the card is rebuilt from the ledger, which records the
+    // thread each row was claimed in. A card left in a guest's DM stays
+    // there; the task's next request starts a card in the approver's DM.
+    const recorded: [string, string][] = [];
+    const controlPlane = createFakeControlPlane({
+      listUnsettledPrompts: async () => [
+        {
+          approvalId: "ap-1",
+          agentChannelId: "p1",
+          externalThreadId: "D200",
+          externalMessageRef: "D200:500.1",
+          expiresAt: new Date(Date.now() + 120_000).toISOString(),
+          createdAt: new Date().toISOString(),
+        },
+      ],
+      recordPromptMessage: async (approvalId, ref) => {
+        recorded.push([approvalId, ref]);
+      },
+    });
+    const manager = groupedManager(controlPlane);
+    await manager.recoverUnsettled();
+    gateway.script.push({
+      status: 200,
+      body: { requests: [contact("ap-1", "Ada"), contact("ap-2", "Grace")] },
+    });
+    manager.reconcile([presence({ approvalsLinkId: "l1" })]);
+    await waitReal(() => recorded.length === 1, "new request recorded");
+
+    expect(recorded[0]?.[0]).toBe("ap-2");
+    expect(recorded[0]?.[1]).toMatch(/^D100:/);
+    expect(slack.callsTo("chat.postMessage")[0]?.form.channel).toBe("D100");
+  });
+
+  it("opens a fresh card once one holds a whole click's worth of rows", async () => {
+    // One click can decide at most APPROVAL_GROUP_MAX_IDS ids (the control
+    // plane's cap), so a card never holds more live rows than that.
+    const recorded: [string, string][] = [];
+    const controlPlane = createFakeControlPlane({
+      recordPromptMessage: async (approvalId, ref) => {
+        recorded.push([approvalId, ref]);
+      },
+    });
+    const burst = Array.from({ length: APPROVAL_GROUP_MAX_IDS + 1 }, (_, i) =>
+      contact(`ap-${i}`, `Name${i}`),
+    );
+    gateway.script.push({ status: 200, body: { requests: burst } });
+    groupedManager(controlPlane).reconcile([presence()]);
+    await waitReal(() => recorded.length === burst.length, "all recorded");
+
+    expect(slack.callsTo("chat.postMessage")).toHaveLength(2);
+    const perRef = new Map<string, number>();
+    for (const [, ref] of recorded) perRef.set(ref, (perRef.get(ref) ?? 0) + 1);
+    expect([...perRef.values()].sort((a, b) => b - a)).toEqual([
+      APPROVAL_GROUP_MAX_IDS,
+      1,
+    ]);
+  });
+
+  it("a grouped click moves decided rows to the done list in one update", async () => {
+    const controlPlane = createFakeControlPlane();
+    gateway.script.push({
+      status: 200,
+      body: { requests: [contact("ap-1", "Ada"), contact("ap-2", "Grace")] },
+    });
+    const manager = groupedManager(controlPlane);
+    manager.reconcile([presence()]);
+    await waitReal(
+      () => slack.callsTo("chat.update").length >= 1,
+      "grouped render",
+    );
+    const before = slack.callsTo("chat.update").length;
+
+    await manager.settleDecidedMany(["ap-1", "ap-2"], {
+      outcome: "approved",
+      by: "Ada",
+    });
+
+    expect(slack.callsTo("chat.update")).toHaveLength(before + 1);
+    const blocks = lastBlocks();
+    expect(blocks).toContain("2 approved");
+    expect(blocks).not.toContain("channel_group_approve");
+    // The finished card keeps the agent's name for the task.
+    expect(blocks).toContain("*Import leads* · 2 requests");
+  });
+
+  it("settles a group decided on the web in ONE rewrite, ledger after the card", async () => {
+    const settles: string[] = [];
+    const controlPlane = createFakeControlPlane({
+      settlePrompt: async (approvalId) => {
+        settles.push(approvalId);
+      },
+      // Decided on the web: the gateway drops both, but no channel click
+      // settled them, so the ledger still holds both pending.
+      listUnsettledPrompts: ledgerPending("ap-1", "ap-2"),
+      listPromptOutcomes: recorded({ "ap-1": "approved", "ap-2": "approved" }),
+    });
+    gateway.script.push({
+      status: 200,
+      body: { requests: [contact("ap-1", "Ada"), contact("ap-2", "Grace")] },
+    });
+    gateway.script.push({ status: 200, body: { requests: [] } });
+    groupedManager(controlPlane).reconcile([presence()]);
+    await waitReal(() => settles.length === 2, "both settled");
+    const blocks = lastBlocks();
+    expect(blocks).toContain("2 approved");
+  });
+
+  it("counts each request's own ending on one grouped card, never a guessed decision", async () => {
+    // One poll sees three requests leave: the agent stopped waiting for
+    // two, and a person approved one on the dashboard. MUTATION-PROOF: settle
+    // the whole group with one ending (the old shape) and the done line
+    // reads "3 decided" or "3 cancelled" instead.
+    const settles: string[] = [];
+    const controlPlane = createFakeControlPlane({
+      settlePrompt: async (approvalId) => {
+        settles.push(approvalId);
+      },
+      listUnsettledPrompts: ledgerPending("ap-1", "ap-2", "ap-3"),
+      listPromptOutcomes: async (ids) =>
+        [
+          ...(await recorded({ "ap-1": "approved" }, "web")(ids)),
+          ...(await recorded({ "ap-2": "cancelled", "ap-3": "cancelled" })(
+            ids,
+          )),
+        ].filter((o) => ids.includes(o.approvalId)),
+    });
+    gateway.script.push({
+      status: 200,
+      body: {
+        requests: [
+          contact("ap-1", "Ada"),
+          contact("ap-2", "Grace"),
+          contact("ap-3", "Linus"),
+        ],
+      },
+    });
+    gateway.script.push({ status: 200, body: { requests: [] } });
+    groupedManager(controlPlane).reconcile([presence()]);
+    await waitReal(() => settles.length === 3, "all three settled");
+    const blocks = lastBlocks();
+    expect(blocks).toContain("1 approved");
+    expect(blocks).toContain("2 cancelled");
+    expect(blocks).not.toContain("decided");
+  });
+
+  it("drops a row an events-arm click already settled from the card's live rows", async () => {
+    // An events (HTTP) click decides ap-1 control-plane-side and settles its
+    // ledger row; this adapter only sees it leave the pending set. The row
+    // must leave the card's live rows too: otherwise the next render still
+    // offers it, and Approve all re-sends an id that is already decided.
+    let ledger = ["ap-1", "ap-2"];
+    const controlPlane = createFakeControlPlane({
+      listUnsettledPrompts: async () =>
+        (await ledgerPending(...ledger)()).filter((p) =>
+          ledger.includes(p.approvalId),
+        ),
+    });
+    gateway.script.push({
+      status: 200,
+      body: { requests: [contact("ap-1", "Ada"), contact("ap-2", "Grace")] },
+    });
+    groupedManager(controlPlane).reconcile([presence()]);
+    await waitReal(
+      () => slack.callsTo("chat.update").length >= 1,
+      "grouped render",
+    );
+    expect(lastBlocks()).toContain('"value":"ap-1,ap-2"');
+
+    ledger = ["ap-2"];
+    await answerNextPoll({ requests: [contact("ap-2", "Grace")] });
+    // A new arrival on the same task forces the card to render again.
+    await answerNextPoll({
+      requests: [contact("ap-2", "Grace"), contact("ap-3", "Linus")],
+    });
+    await waitReal(
+      () => lastBlocks().includes("Linus"),
+      "re-render with the new arrival",
+    );
+    const blocks = lastBlocks();
+    expect(blocks).toContain('"value":"ap-2,ap-3"');
+    expect(blocks).not.toContain("Ada");
+  });
+
+  it("re-renders a grouped card at once when an events-arm click decides one of its rows", async () => {
+    // A one-row click on the HTTP arm answers the clicker privately and
+    // leaves the shared card to this adapter. Without a re-render here the
+    // card keeps showing the decided row until something else changes it.
+    let ledger = ["ap-1", "ap-2", "ap-3"];
+    const controlPlane = createFakeControlPlane({
+      listUnsettledPrompts: async () =>
+        (await ledgerPending(...ledger)()).filter((p) =>
+          ledger.includes(p.approvalId),
+        ),
+    });
+    gateway.script.push({
+      status: 200,
+      body: {
+        requests: [
+          contact("ap-1", "Ada"),
+          contact("ap-2", "Grace"),
+          contact("ap-3", "Linus"),
+        ],
+      },
+    });
+    groupedManager(controlPlane).reconcile([presence()]);
+    await waitReal(
+      () =>
+        slack.callsTo("chat.update").length >= 1 &&
+        lastBlocks().includes('"value":"ap-1,ap-2,ap-3"'),
+      "grouped render",
+    );
+
+    ledger = ["ap-2", "ap-3"];
+    await answerNextPoll({
+      requests: [contact("ap-2", "Grace"), contact("ap-3", "Linus")],
+    });
+    await waitReal(
+      () => lastBlocks().includes('"value":"ap-2,ap-3"'),
+      "re-render without the decided row",
+    );
+    const blocks = lastBlocks();
+    expect(blocks).toContain("1 decided");
+    expect(blocks).not.toContain("Ada");
+  });
+
+  it("leaves a grouped card alone when an events-arm click decided all of it", async () => {
+    // The control plane replaces a fully decided multi-row card itself
+    // ("✅ 2 approved by Ada"); a re-render here would overwrite that.
+    let ledger = ["ap-1", "ap-2"];
+    const controlPlane = createFakeControlPlane({
+      listUnsettledPrompts: async () =>
+        (await ledgerPending(...ledger)()).filter((p) =>
+          ledger.includes(p.approvalId),
+        ),
+    });
+    gateway.script.push({
+      status: 200,
+      body: { requests: [contact("ap-1", "Ada"), contact("ap-2", "Grace")] },
+    });
+    groupedManager(controlPlane).reconcile([presence()]);
+    await waitReal(
+      () => slack.callsTo("chat.update").length >= 1,
+      "grouped render",
+    );
+    const before = slack.callsTo("chat.update").length;
+
+    ledger = [];
+    await answerNextPoll({ requests: [] });
+    await waitReal(() => gateway.calls.length >= 3, "two more polls");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(slack.callsTo("chat.update")).toHaveLength(before);
+  });
+
+  it("renders a recovered grouped card once its rows' details arrive", async () => {
+    // After a restart the card is rebuilt from the ledger. A join that was
+    // still waiting on its debounced render when the old instance stopped
+    // is in the ledger but not on the message: the first poll that fills
+    // in every row's details renders the card so it shows up.
+    const ref = "D100:500.1";
+    const controlPlane = createFakeControlPlane({
+      listUnsettledPrompts: async () =>
+        ["ap-1", "ap-2"].map((approvalId) => ({
+          approvalId,
+          agentChannelId: "p1",
+          externalThreadId: "D100",
+          externalMessageRef: ref,
+          expiresAt: new Date(Date.now() + 120_000).toISOString(),
+          createdAt: new Date().toISOString(),
+        })),
+    });
+    const manager = groupedManager(controlPlane);
+    await manager.recoverUnsettled();
+    gateway.script.push({
+      status: 200,
+      body: { requests: [contact("ap-1", "Ada"), contact("ap-2", "Grace")] },
+    });
+    manager.reconcile([presence()]);
+    await waitReal(
+      () => slack.callsTo("chat.update").length >= 1,
+      "recovered card rendered",
+    );
+    expect(slack.callsTo("chat.postMessage")).toHaveLength(0);
+    expect(lastBlocks()).toContain('"value":"ap-1,ap-2"');
+  });
+
+  it("renders a recovered grouped card when a row was decided in Slack while the adapter was down", async () => {
+    // ap-3 was decided by an events-arm click during the restart: it is no
+    // longer pending and the ledger has settled it, so its details never
+    // arrive. The card still renders the rows that are left.
+    const ref = "D100:500.2";
+    const recovered = ["ap-1", "ap-2", "ap-3"].map((approvalId) => ({
+      approvalId,
+      agentChannelId: "p1",
+      externalThreadId: "D100",
+      externalMessageRef: ref,
+      expiresAt: new Date(Date.now() + 120_000).toISOString(),
+      createdAt: new Date().toISOString(),
+    }));
+    let ledger = recovered;
+    const controlPlane = createFakeControlPlane({
+      listUnsettledPrompts: async () => ledger,
+    });
+    const manager = groupedManager(controlPlane);
+    await manager.recoverUnsettled();
+    ledger = recovered.filter((p) => p.approvalId !== "ap-3");
+    gateway.script.push({
+      status: 200,
+      body: { requests: [contact("ap-1", "Ada"), contact("ap-2", "Grace")] },
+    });
+    manager.reconcile([presence()]);
+    await waitReal(
+      () => slack.callsTo("chat.update").length >= 1,
+      "recovered card rendered",
+    );
+    const blocks = lastBlocks();
+    expect(blocks).toContain('"value":"ap-1,ap-2"');
+    expect(blocks).toContain("1 decided");
+  });
+});
+
+describe("grouped Slack card: a record per row", () => {
+  /** "Update Contact <name>": the record's row first, then the change. */
+  const update = (id: string, name: string, title = "After") =>
+    contact(id, name, {
+      method: "PATCH",
+      summary: {
+        action: `Update Contact ${name}`,
+        subject: { verb: "Update Contact", record: name, row: 0 },
+        details: [
+          {
+            label: "Contact",
+            value: `${name} (003QO00000Upd0pxAA)`,
+            url: `https://example.my.salesforce.com/${id}`,
+          },
+          { label: "Title", value: title },
+        ],
+      },
+    }) as PendingApproval;
+
+  const rowTexts = (blocks: unknown[]): string[] =>
+    (blocks as { type: string; text?: { text: string }; accessory?: unknown }[])
+      .filter((b) => b.type === "section" && b.accessory)
+      .map((b) => b.text!.text);
+
+  const plain = (row: string) => row.replace(/<[^|>]+\|([^>]+)>/g, "$1");
+
+  it("an update row leads with its record and names the field it changes", async () => {
+    // MUTATION-TESTED: the old row text read "Batch Test04 (003…) · After".
+    // Different changes, so each request gets its own row.
+    const { groupCardBlocks } = await import("./slack/approval-card");
+    const rows = rowTexts(
+      groupCardBlocks({
+        live: [
+          update("ap-1", "Batch Test04", "After"),
+          update("ap-2", "Batch Test05", "Before"),
+        ],
+        settled: [],
+      }),
+    ).map(plain);
+    expect(rows).toEqual([
+      "Batch Test04 · Title: After",
+      "Batch Test05 · Title: Before",
+    ]);
+  });
+
+  it("two records with the same name show their ids, so no two rows look alike", async () => {
+    // MUTATION-TESTED: lead with the bare name and both rows read
+    // "Alex Kim · Title: …", which can't be told apart.
+    const { groupCardBlocks } = await import("./slack/approval-card");
+    const twin = (id: string, recordId: string, title: string) =>
+      contact(id, "Alex Kim", {
+        method: "PATCH",
+        summary: {
+          action: "Update Contact Alex Kim",
+          subject: { verb: "Update Contact", record: "Alex Kim", row: 0 },
+          details: [
+            { label: "Contact", value: `Alex Kim (${recordId})` },
+            { label: "Title", value: title },
+          ],
+        },
+      }) as PendingApproval;
+    const rows = rowTexts(
+      groupCardBlocks({
+        live: [
+          twin("ap-1", "003QO00000AbCdEfGh", "A"),
+          twin("ap-2", "003QO00000QrStUvWx", "B"),
+        ],
+        settled: [],
+      }),
+    );
+    expect(rows).toEqual([
+      "Alex Kim (003QO00000AbCdEfGh) · Title: A",
+      "Alex Kim (003QO00000QrStUvWx) · Title: B",
+    ]);
+  });
+
+  it("shows a uniform batch as the change it makes, every record linked, no per-row list", async () => {
+    // MUTATION-TESTED: list the rows too and the card is the long wall of
+    // near-identical requests the summary replaces.
+    const { groupCardBlocks } = await import("./slack/approval-card");
+    const blocks = groupCardBlocks({
+      live: [
+        update("ap-1", "Batch Test01"),
+        update("ap-2", "Batch Test02"),
+        update("ap-3", "Batch Test03"),
+      ],
+      settled: [],
+      reviewUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+    const text = JSON.stringify(blocks);
+    expect(text).toContain("*Title → After* · 3 contacts");
+    expect(text).toContain(
+      "<https://example.my.salesforce.com/ap-1|Batch Test01>, <https://example.my.salesforce.com/ap-2|Batch Test02>",
+    );
+    expect(rowTexts(blocks)).toHaveLength(0);
+    expect(text).toContain(
+      "<https://app.example.com/w/ws1/agents/ag1/chat|review each request in OneCLI>",
+    );
+    // Approve all covers every summarized record.
+    expect(text).toContain('"value":"ap-1,ap-2,ap-3"');
+  });
+
+  it("links the review page on the batch card's FIRST post, not only on a re-render", async () => {
+    // The first post used to render the batch without its review link,
+    // which only appeared once something else changed the card.
+    const batch = { id: "b1", label: "Set Title", total: 3 };
+    const live = [
+      { ...update("ap-1", "Batch Test01"), batch },
+      { ...update("ap-2", "Batch Test02"), batch },
+      { ...update("ap-3", "Batch Test03"), batch },
+    ];
+    await slackApprovalCardUi.post({
+      credential: "xoxb-1",
+      channel: "D1",
+      approval: live[0]!,
+      batch: live,
+      reviewUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    } as never);
+    expect(slack.callsTo("chat.postMessage")[0]!.form.blocks).toContain(
+      "<https://app.example.com/w/ws1/agents/ag1/chat|review each request in OneCLI>",
+    );
+  });
+
+  it("lists rows by record name in natural order, like the web card", async () => {
+    // MUTATION-TESTED: arrival order lists 10 before 02.
+    const { groupCardBlocks } = await import("./slack/approval-card");
+    const rows = rowTexts(
+      groupCardBlocks({
+        live: [
+          update("ap-1", "Batch Test10", "A"),
+          update("ap-2", "Batch Test02", "B"),
+          update("ap-3", "Batch Test9", "C"),
+        ],
+        settled: [],
+      }),
+    );
+    expect(rows.map((r) => plain(r).split(" · ")[0])).toEqual([
+      "Batch Test02",
+      "Batch Test9",
+      "Batch Test10",
+    ]);
+  });
+});
+
+describe("grouped Slack card: waits for the whole batch", () => {
+  const t0 = Date.UTC(2026, 9, 1, 10, 0, 0);
+  const tagged = (n: number, total: number) =>
+    Array.from(
+      { length: n },
+      (_, i) =>
+        contact(`ap-${i}`, `Batch Test${String(i + 1).padStart(2, "0")}`, {
+          batch: { id: "t9", label: "Set Title", total },
+          createdAt: new Date(t0 + i * 10).toISOString(),
+        }) as PendingApproval,
+    );
+  const buttons = (blocks: unknown[]): string[] =>
+    (
+      (blocks as { type: string; elements?: { action_id?: string }[] }[]).find(
+        (b) => b.type === "actions",
+      )?.elements ?? []
+    ).map((e) => e.action_id ?? "");
+
+  it("offers no Approve all while a tagged batch is still arriving", async () => {
+    // MUTATION-TESTED: without the hold, Approve all 12 decides part of a
+    // 20-record task the reviewer believes is the whole of it.
+    const { groupCardBlocks } = await import("./slack/approval-card");
+    const blocks = groupCardBlocks({
+      live: tagged(12, 20),
+      settled: [],
+      now: t0 + 1_000,
+    });
+    expect(buttons(blocks)).toEqual(["channel_group_deny"]);
+    expect(JSON.stringify(blocks)).toContain(
+      "12 of 20 here, waiting for the rest… Approve all appears once they are in.",
+    );
+  });
+
+  it("offers Approve all once the whole batch is in", async () => {
+    const { groupCardBlocks } = await import("./slack/approval-card");
+    const blocks = groupCardBlocks({
+      live: tagged(20, 20),
+      settled: [],
+      now: t0 + 1_000,
+    });
+    expect(buttons(blocks)).toEqual([
+      "channel_group_approve",
+      "channel_group_deny",
+    ]);
+    expect(JSON.stringify(blocks)).not.toContain("waiting for the rest");
+  });
+
+  it("offers Approve all once the batch goes quiet, saying the rest may follow", async () => {
+    const { BATCH_SETTLE_MS } = await import("@onecli/api/lib/approval-groups");
+    const { groupCardBlocks } = await import("./slack/approval-card");
+    const blocks = groupCardBlocks({
+      live: tagged(19, 20),
+      settled: [],
+      now: t0 + 190 + BATCH_SETTLE_MS,
+    });
+    expect(buttons(blocks)).toContain("channel_group_approve");
+    expect(JSON.stringify(blocks)).toContain(
+      "19 of 20 here. The other one may only be sent after you decide these. Approve all covers the 19 shown.",
+    );
+  });
+});
+
+describe("grouped Slack card: Approve all covers only what it shows", () => {
+  it("carries exactly the listed ids when rows overflow the card", async () => {
+    const { groupCardBlocks } = await import("./slack/approval-card");
+    const long = "x".repeat(200);
+    const live = Array.from({ length: 50 }, (_, i) =>
+      contact(`ap-${i}`, `Name${i} ${long}`),
+    ) as PendingApproval[];
+    const blocks = groupCardBlocks({ live, settled: [] }) as {
+      type: string;
+      text?: { text: string };
+      elements?: {
+        action_id?: string;
+        value?: string;
+        text?: { text: string };
+      }[];
+    }[];
+    const actions = blocks.find((b) => b.type === "actions")!;
+    const approve = actions.elements!.find(
+      (e) => e.action_id === "channel_group_approve",
+    )!;
+    const carried = approve.value!.split(",");
+    const shownText = JSON.stringify(
+      blocks.filter((b) => b.type === "section"),
+    );
+    // Every carried id's row is on the card; nothing unseen rides along.
+    for (const id of carried) {
+      const n = id.replace("ap-", "");
+      expect(shownText).toContain(`Name${n} `);
+    }
+    expect(carried.length).toBeLessThan(50);
+    expect(approve.text!.text).toBe(`Approve these ${carried.length}`);
+    expect(shownText).toContain("Approve all never includes them");
+  });
+});
+
+describe("grouped Slack card: stays inside Slack's block limits", () => {
+  // Slack rejects a whole chat.update with invalid_blocks when any section
+  // text passes 3,000 characters, which would freeze the card.
+  const SECTION_MAX = 3_000;
+  const sectionTexts = (blocks: unknown[]): number[] =>
+    (blocks as { type: string; text?: { text: string } }[])
+      .filter((b) => b.type === "section")
+      .map((b) => b.text!.text.length);
+
+  it("bounds the odd-actions line when many rows each do something different", async () => {
+    const { groupCardBlocks } = await import("./slack/approval-card");
+    const long = "y".repeat(240); // the gateway's per-value cap
+    const live = Array.from({ length: APPROVAL_GROUP_MAX_IDS }, (_, i) =>
+      contact(`ap-${i}`, `Name${i}`, {
+        summary: { action: `Delete ${long}${i}`, details: [] },
+      }),
+    ) as PendingApproval[];
+    const blocks = groupCardBlocks({ live, settled: [] });
+    for (const n of sectionTexts(blocks)) {
+      expect(n).toBeLessThanOrEqual(SECTION_MAX);
+    }
+    expect(JSON.stringify(blocks)).toContain("Not all the same");
+  });
+
+  it("bounds the finished card's 'by' list when many people decided rows", async () => {
+    const { groupCardBlocks } = await import("./slack/approval-card");
+    const settled = Array.from({ length: 200 }, (_, i) => ({
+      id: `s-${i}`,
+      title: "Create Contact",
+      outcome: "approved" as const,
+      by: `${"Long Display Name ".repeat(5)}${i}`,
+    }));
+    const blocks = groupCardBlocks({ live: [], settled });
+    for (const n of sectionTexts(blocks)) {
+      expect(n).toBeLessThanOrEqual(SECTION_MAX);
+    }
+    expect(JSON.stringify(blocks)).toContain("200 requests");
+  });
+
+  it("fits every Slack limit when every field is at its upstream cap", async () => {
+    const { groupCardBlocks } = await import("./slack/approval-card");
+    // "&" escapes to "&amp;", so each value is five times longer on the card.
+    const amp = (n: number) => "&".repeat(n);
+    const link = `https://github.com/${"o".repeat(100)}/${"r".repeat(100)}/issues/${"9".repeat(12)}`;
+    const detail = { label: amp(240), value: amp(240), url: link };
+    const live = Array.from({ length: APPROVAL_GROUP_MAX_IDS }, (_, i) =>
+      contact(`${"a".repeat(60)}${String(i).padStart(4, "0")}`, `N${i}`, {
+        host: `${"h".repeat(249)}.com`,
+        summary: { action: `${amp(236)}${i}`, details: [detail, detail] },
+        agent: { id: "a", name: amp(255) },
+        batch: { id: "t", label: amp(120), total: 500 },
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    ) as PendingApproval[];
+    const settled = Array.from({ length: 200 }, (_, i) => ({
+      id: `s-${i}`,
+      title: amp(240),
+      outcome: "approved" as const,
+      by: `${amp(80)}${i}`,
+    }));
+    type Text = { text: string };
+    type Element = { text: Text | string; value?: string };
+    type Block = {
+      type: string;
+      text?: Text;
+      elements?: Element[];
+      accessory?: { options: { text: Text; value: string }[] };
+    };
+    const textOf = (e: Element) =>
+      typeof e.text === "string" ? e.text : e.text.text;
+    const liveCard = groupCardBlocks({ live, settled }) as Block[];
+    const doneCard = groupCardBlocks({ live: [], settled }) as Block[];
+    // Not vacuous: the live card has its header, 15 row menus and buttons.
+    expect(liveCard.filter((b) => b.accessory)).toHaveLength(15);
+    expect(liveCard.map((b) => b.type)).toEqual(
+      expect.arrayContaining(["header", "context", "actions"]),
+    );
+    for (const blocks of [liveCard, doneCard]) {
+      expect(blocks.length).toBeLessThanOrEqual(50);
+      for (const b of blocks) {
+        if (b.type === "header")
+          expect(b.text!.text.length).toBeLessThanOrEqual(150);
+        if (b.type === "section")
+          expect(b.text!.text.length).toBeLessThanOrEqual(SECTION_MAX);
+        if (b.type === "context") {
+          expect(b.elements!.length).toBeLessThanOrEqual(10);
+          for (const e of b.elements!)
+            expect(textOf(e).length).toBeLessThanOrEqual(SECTION_MAX);
+        }
+        for (const o of b.accessory?.options ?? []) {
+          expect(o.text.text.length).toBeLessThanOrEqual(75);
+          expect(o.value.length).toBeLessThanOrEqual(150);
+        }
+        if (b.type === "actions") {
+          for (const e of b.elements!) {
+            expect(textOf(e).length).toBeLessThanOrEqual(75);
+            expect(e.value!.length).toBeLessThanOrEqual(2_000);
+          }
+        }
+      }
+    }
+  });
+});
+
+describe("grouped Slack card: counts read right", () => {
+  it("says '1 approval needed' and '1 request', never '1 approvals' or '1 requests'", async () => {
+    const { groupCardBlocks } = await import("./slack/approval-card");
+    const settledRow = {
+      id: "s-1",
+      title: "Create Contact",
+      outcome: "approved" as const,
+    };
+    const live = groupCardBlocks({
+      live: [contact("ap-1", "Ada")] as PendingApproval[],
+      settled: [settledRow],
+    });
+    expect(JSON.stringify(live)).toContain("1 approval needed");
+    const done = groupCardBlocks({ live: [], settled: [settledRow] });
+    expect(JSON.stringify(done)).toContain("· 1 request\\n");
+  });
+});
+
+describe("Approve similar on a card", () => {
+  const update: PendingApproval = {
+    id: "ap-sim",
+    method: "PUT",
+    host: "api.attio.com",
+    path: "/v2/objects/companies/records/8422b746-59d3-4cfd-98f9-3b25dc9145d3",
+    agent: { id: "ag", name: "Sam's bot" },
+    summary: { action: "Update record", details: [] },
+  };
+  const buttons = (a: PendingApproval) =>
+    z
+      .array(
+        z.object({
+          type: z.string(),
+          elements: z
+            .array(
+              z.object({
+                action_id: z.string().optional(),
+                value: z.string().optional(),
+                text: z.unknown(),
+              }),
+            )
+            .optional(),
+        }),
+      )
+      .parse(approvalCardBlocks(a))
+      .filter((b) => b.type === "actions")
+      .flatMap((b) => b.elements ?? []);
+
+  it("shows the button only when the gateway offered it, valued with the id alone", () => {
+    expect(buttons(update).map((b) => b.action_id)).toEqual([
+      "channel_approve",
+      "channel_deny",
+    ]);
+    const offered = {
+      ...update,
+      similar: {
+        label: "Attio updates to companies",
+        windowMinutes: 15,
+        maxRequests: 100,
+      },
+    };
+    const els = buttons(offered);
+    expect(els.map((b) => b.action_id)).toEqual([
+      "channel_approve",
+      "channel_approve_similar",
+      "channel_deny",
+    ]);
+    expect(els[1]).toMatchObject({
+      value: "ap-sim",
+      text: { type: "plain_text", text: "Approve similar · 15 min" },
+    });
+    const card = JSON.stringify(approvalCardBlocks(offered));
+    expect(card).toContain(
+      "_Approve similar also allows up to 100 more Attio updates to companies from Sam's bot._",
+    );
+  });
+
+  it("escapes the label and agent name in the explanation", () => {
+    const card = JSON.stringify(
+      approvalCardBlocks({
+        ...update,
+        agent: { id: "ag", name: "<!channel>" },
+        similar: { label: "x <@U1> y", windowMinutes: 15, maxRequests: 100 },
+      }),
+    );
+    expect(card).not.toContain("<!channel>");
+    expect(card).not.toContain("<@U1>");
   });
 });

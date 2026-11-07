@@ -1,26 +1,11 @@
 import type { AppDefinition } from "./types";
-import { OAUTH_STATE_SECRET, SECRET_ENCRYPTION_KEY } from "../lib/env";
-
-// Derive PKCE verifier deterministically from the signed OAuth state using an
-// HMAC with the server's signing key. This avoids an in-memory store that
-// would break across serverless invocations or multi-instance deployments.
-// node:crypto is imported lazily inside the (server-only) OAuth handlers: this
-// definition module rides the client-reachable app registry, whose graph must
-// stay free of Node builtins.
-const deriveCodeVerifier = async (state: string): Promise<string> => {
-  const { createHmac } = await import("node:crypto");
-  const key = OAUTH_STATE_SECRET || SECRET_ENCRYPTION_KEY;
-  return createHmac("sha256", key).update(`pkce:${state}`).digest("base64url");
-};
-
-const deriveCodeChallenge = async (verifier: string): Promise<string> => {
-  const { createHash } = await import("node:crypto");
-  return createHash("sha256").update(verifier).digest("base64url");
-};
+import { pkceChallenge, pkceVerifier } from "./oauth/pkce";
 
 export const x: AppDefinition = {
   id: "x",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/x",
   name: "X",
+  apiDocsUrl: "https://docs.x.com/x-api/introduction",
   icon: "/icons/x.svg",
   darkIcon: "/icons/x-light.svg",
   description: "Posts, timelines, DMs, and account management.",
@@ -182,8 +167,7 @@ export const x: AppDefinition = {
         throw new Error("X OAuth client ID not configured");
       }
 
-      const verifier = await deriveCodeVerifier(state);
-      const challenge = await deriveCodeChallenge(verifier);
+      const challenge = await pkceChallenge(await pkceVerifier(state));
 
       const url = new URL("https://x.com/i/oauth2/authorize");
       url.searchParams.set("response_type", "code");
@@ -212,7 +196,7 @@ export const x: AppDefinition = {
       if (!callbackParams.state) {
         throw new Error("X callback missing state parameter");
       }
-      const codeVerifier = await deriveCodeVerifier(callbackParams.state);
+      const codeVerifier = await pkceVerifier(callbackParams.state);
 
       const basicAuth = Buffer.from(
         `${appCredentials.clientId}:${appCredentials.clientSecret}`,

@@ -39,10 +39,3 @@ export const setMembers = (groupId: string, userIds: string[]) =>
   apiPut<{ added: number; removed: number }>(`${base}/${groupId}/members`, {
     userIds,
   });
-
-/** Incremental, idempotent single-member ops (the scripting surface). */
-export const addMember = (groupId: string, userId: string) =>
-  apiPut<void>(`${base}/${groupId}/members/${userId}`, {});
-
-export const removeMember = (groupId: string, userId: string) =>
-  apiDelete(`${base}/${groupId}/members/${userId}`);

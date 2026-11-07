@@ -128,6 +128,15 @@ struct ParsedCondition {
 }
 
 fn parse_conditions(raw: &serde_json::Value) -> Option<Vec<ParsedCondition>> {
+    // A rule's `conditions` is EITHER behavioral (an array of body matchers,
+    // evaluated here) OR a connection's resource scope (an object such as
+    // `{"driveFolders": [...]}`, enforced by `ee::granular_access`). An object
+    // is therefore not a malformed condition list — it simply carries no body
+    // conditions — so skip it quietly instead of warning on every request.
+    // Anything else falls through to the parse below, which warns.
+    if raw.is_object() {
+        return None;
+    }
     let raw_conditions: Vec<RawCondition> = serde_json::from_value(raw.clone())
         .map_err(|e| warn!(error = %e, "failed to parse policy rule conditions"))
         .ok()?;
@@ -355,6 +364,19 @@ mod tests {
     fn malformed_conditions_json_matches() {
         let rule = make_rule(Some(serde_json::json!("not an array")));
         assert!(matches(&rule, ConditionBody::Full(b"anything")));
+    }
+
+    #[test]
+    fn resource_scope_object_carries_no_body_conditions() {
+        // A connection's resource scope rides in `conditions` as an object;
+        // it is enforced elsewhere (granular_access) and adds no body
+        // condition here — for either polarity.
+        let scope = serde_json::json!({ "driveFolders": ["A/B"] });
+        assert!(parse_conditions(&scope).is_none());
+        for action in [crate::PolicyAction::Allow, crate::PolicyAction::Block] {
+            let rule = rule_with_action(Some(scope.clone()), action);
+            assert!(matches(&rule, ConditionBody::Full(b"anything")));
+        }
     }
 
     // ── Truncation fail-closed law (#999) ────────────────────────────────

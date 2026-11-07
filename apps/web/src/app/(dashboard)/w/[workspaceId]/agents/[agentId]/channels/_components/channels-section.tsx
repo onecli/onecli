@@ -19,6 +19,14 @@ import {
   channelProviderUi,
 } from "@/lib/agents/channel-providers/registry";
 import { isPresenceConnected } from "@/lib/agents/channel-providers";
+import { useInstance } from "@/hooks/use-instance";
+
+/** The install-return toast. `pending` = installed but a step is left (the
+ * card below names it), so this section stays provider-neutral. */
+const installReturnToast = (name: string, pending: boolean): string =>
+  pending
+    ? `Installed in ${name}. One step left to finish.`
+    : `${name} connected`;
 
 /**
  * The agent's Channels section (step 6): one card PER PROVIDER the build
@@ -36,23 +44,28 @@ import { isPresenceConnected } from "@/lib/agents/channel-providers";
 export const ChannelsSection = () => {
   const agent = useAgentPageAgent();
   const qc = useQueryClient();
+  const instance = useInstance();
   const view = useAgentChannels(agent.id);
   const searchParams = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
 
   // The events-arm install opens `installUrl` in a popup; Slack's OAuth
-  // callback redirects that popup HERE with `?connected=slack`. The popup
-  // instance hands the result to its opener (the page the user is watching)
-  // and closes; a same-tab landing consumes the param directly. One-shot per
-  // mount, then stripped, so a refresh doesn't re-toast (the app-detail
-  // pattern).
+  // callback redirects that popup HERE with `?connected=slack`, or with
+  // `?installed=slack` for a socket install still waiting on its app-level
+  // token. The popup instance hands the result to its opener (the page the
+  // user is watching) and closes; a same-tab landing consumes the param
+  // directly. One-shot per mount, then stripped, so a refresh doesn't
+  // re-toast (the app-detail pattern).
   // A provider this build knows finishes the flow; anything else is left
   // alone (an older web against a newer control plane).
-  const connectedParam = searchParams.get("connected");
+  const installedParam = searchParams.get("installed");
+  const connectedParam = searchParams.get("connected") ?? installedParam;
   const connectedProvider = connectedParam
     ? channelProviderUi(connectedParam)
     : null;
+  // One step left, not done: the install still owes a pasted credential.
+  const awaitingStep = installedParam !== null;
   const consumedConnectedParam = useRef(false);
   useEffect(() => {
     if (consumedConnectedParam.current) return;
@@ -60,7 +73,11 @@ export const ChannelsSection = () => {
     consumedConnectedParam.current = true;
     if (window.opener) {
       (window.opener as Window).postMessage(
-        { type: "app-connected", provider: connectedProvider.id },
+        {
+          type: "app-connected",
+          provider: connectedProvider.id,
+          ...(awaitingStep && { pending: true }),
+        },
         window.location.origin,
       );
       window.close();
@@ -70,15 +87,16 @@ export const ChannelsSection = () => {
     // The sidebar/rail connected marks read the agent lists — root(), so
     // the sweep reaches the workspace-keyed sidebar key too.
     qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
-    toast.success(`${connectedProvider.name} connected`);
+    toast.success(installReturnToast(connectedProvider.name, awaitingStep));
     const params = new URLSearchParams(searchParams.toString());
     params.delete("connected");
+    params.delete("installed");
     const qs = params.toString();
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
-  }, [connectedProvider, qc, searchParams, router, pathname]);
+  }, [connectedProvider, awaitingStep, qc, searchParams, router, pathname]);
 
   const handleConnected = useCallback(
-    ({ provider }: AppConnectedEvent) => {
+    ({ provider, pending }: AppConnectedEvent) => {
       // Provider must match: a popup keeps posting to its opener across
       // client-side navigation, so an app-connect popup opened elsewhere can
       // land here too.
@@ -87,7 +105,7 @@ export const ChannelsSection = () => {
       qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
       // Same sweep as the same-tab landing above — the connected marks.
       qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
-      toast.success(`${ui.name} connected`);
+      toast.success(installReturnToast(ui.name, pending === true));
     },
     [qc],
   );
@@ -141,13 +159,17 @@ export const ChannelsSection = () => {
         );
         const hasOrgCredentials = orgIntegration?.hasCredentials ?? false;
         return presence && isPresenceConnected(presence) ? (
-          <ui.PresenceCard
-            key={ui.id}
-            agentId={agent.id}
-            agentName={agent.name}
-            presence={presence}
-            hasOrgCredentials={hasOrgCredentials}
-          />
+          <div key={ui.id} className="space-y-4">
+            <ui.PresenceCard
+              agentId={agent.id}
+              agentName={agent.name}
+              presence={presence}
+              hasOrgCredentials={hasOrgCredentials}
+            />
+            {ui.ReadAccessCard && instance?.entitled && (
+              <ui.ReadAccessCard agentId={agent.id} agentName={agent.name} />
+            )}
+          </div>
         ) : (
           <ui.AttachCard
             key={ui.id}
@@ -169,8 +191,11 @@ export const ChannelsSection = () => {
             }
             removed={presence?.status === "disabled"}
             identityName={presence?.identityName ?? null}
-            removedAppId={
-              presence?.status === "disabled" ? presence.externalId : null
+            // Only an unconnected presence reaches this branch, so any
+            // presence here is one a re-attach resumes.
+            resumeAppId={presence?.externalId ?? null}
+            awaitingTransportCredential={
+              presence?.awaitingTransportCredential ?? false
             }
           />
         );

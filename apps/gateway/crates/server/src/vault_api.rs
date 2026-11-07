@@ -2,6 +2,10 @@
 //!
 //! All handlers require `AuthUser` — authentication is enforced by the extractor
 //! before the handler runs. Provider is specified in the URL path.
+//!
+//! Pair and disconnect change which credential a workspace's vault serves, so
+//! both flush the workspace's cached CONNECT resolutions (which hold resolved
+//! values) — see [`crate::flush_workspace_cache`].
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -12,6 +16,8 @@ use tracing::{info_span, warn, Instrument};
 use context::auth::AuthUser;
 use context::GatewayState;
 use vault::VaultError;
+
+use crate::flush_workspace_cache;
 
 /// POST /v1/vault/:provider/pair
 /// Body: provider-specific JSON (e.g. `{ psk_hex, fingerprint_hex }` for Bitwarden)
@@ -28,13 +34,16 @@ pub async fn vault_pair(
             .pair(&auth.workspace_id, &provider, &params)
             .await
         {
-            Ok(result) => (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": "paired",
-                    "display_name": result.display_name,
-                })),
-            ),
+            Ok(result) => {
+                flush_workspace_cache(&state, &auth.workspace_id).await;
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "status": "paired",
+                        "display_name": result.display_name,
+                    })),
+                )
+            }
             Err(e) => {
                 warn!(error = %e, "vault pair failed");
                 (
@@ -97,10 +106,13 @@ pub async fn vault_disconnect(
             .disconnect(&auth.workspace_id, &provider)
             .await
         {
-            Ok(()) => (
-                StatusCode::OK,
-                Json(serde_json::json!({"status": "disconnected"})),
-            ),
+            Ok(()) => {
+                flush_workspace_cache(&state, &auth.workspace_id).await;
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({"status": "disconnected"})),
+                )
+            }
             Err(e) => {
                 warn!(error = %e, "vault disconnect failed");
                 (

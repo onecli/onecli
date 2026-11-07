@@ -4,11 +4,12 @@ import {
   getStartedPath,
   type GetStartedAgent,
 } from "./get-started-target";
+import type { AgentKind } from "@/lib/api/types";
 
 const agent = (
   id: string,
-  kind: string,
-  createdAt: string | Date,
+  kind: AgentKind,
+  createdAt: string,
 ): GetStartedAgent => ({ id, name: id, kind, createdAt });
 
 describe("firstHostedAgent", () => {
@@ -33,14 +34,6 @@ describe("firstHostedAgent", () => {
     expect(
       firstHostedAgent([agent("byo", "byo", "2026-01-01T00:00:00Z")]),
     ).toBe(undefined);
-  });
-
-  it("orders Date-valued reads too (the server action's shape)", () => {
-    const agents = [
-      agent("newer", "hosted", new Date("2026-03-01T00:00:00Z")),
-      agent("oldest", "hosted", new Date("2026-01-01T00:00:00Z")),
-    ];
-    expect(firstHostedAgent(agents)?.id).toBe("oldest");
   });
 });
 

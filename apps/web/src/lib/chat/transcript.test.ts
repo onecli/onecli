@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { TurnEvent } from "@/lib/api/types";
-import { foldTranscript, highestSeq, mergeEvents } from "./transcript";
+import {
+  foldTranscript,
+  highestSeq,
+  mergeEvents,
+  movesTurnStatus,
+  raisesApproval,
+} from "./transcript";
 
 /**
  * The reader's logic, tested where it can be: `apps/web` has no component
@@ -16,6 +22,22 @@ const event = (
 ): TurnEvent => ({ seq: (seq += 1), turnId, type, payload });
 
 describe("foldTranscript", () => {
+  it("folds SEND NOW's answer under the follow-up's own id, never under the turn", () => {
+    const [turn, followUp] = foldTranscript([
+      event("t1", "tool.started", { callId: "c1", name: "bash" }),
+      event("f1", "message.sent_now", { moved: true, toolName: "bash" }),
+    ]);
+    expect(turn?.sentNow).toBeUndefined();
+    expect(followUp?.sentNow).toEqual({ moved: true, toolName: "bash" });
+
+    // Only a literal `true` is a move, and a missing or non-string name is
+    // simply absent: the payload is sandbox-reported.
+    const [odd] = foldTranscript([
+      event("f2", "message.sent_now", { moved: "yes", toolName: 7 }),
+    ]);
+    expect(odd?.sentNow).toEqual({ moved: false });
+  });
+
   it("REPLACES delta text with the durable answer instead of appending", () => {
     // A live tail receives both the deltas and the final `text`. Appending
     // renders every answer twice — the single most likely way to get this
@@ -137,6 +159,35 @@ describe("foldTranscript", () => {
     ]);
   });
 
+  it("folds a command's exit status, and only an integer one", () => {
+    const turns = foldTranscript([
+      event("t1", "tool.finished", {
+        callId: "c1",
+        name: "bash",
+        output: "",
+        exitCode: 2,
+      }),
+      // Payloads are untrusted JSON: a non-integer status is not one.
+      event("t1", "tool.finished", {
+        callId: "c2",
+        name: "bash",
+        output: "",
+        exitCode: "2",
+      }),
+      event("t1", "tool.finished", {
+        callId: "c3",
+        name: "bash",
+        output: "",
+        exitCode: 1.5,
+      }),
+    ]);
+    expect(turns[0]?.tools).toEqual([
+      { callId: "c1", name: "bash", output: "", exitCode: 2 },
+      { callId: "c2", name: "bash", output: "" },
+      { callId: "c3", name: "bash", output: "" },
+    ]);
+  });
+
   it("logs an orphaned finish so late-started work is never invisible", () => {
     const turns = foldTranscript([
       event("t1", "tool.finished", { callId: "c9", name: "curl", output: "x" }),
@@ -144,6 +195,40 @@ describe("foldTranscript", () => {
     expect(turns[0]?.tools).toEqual([
       { callId: "c9", name: "curl", output: "x" },
     ]);
+  });
+
+  it("carries a tool call's input onto the started call", () => {
+    const turns = foldTranscript([
+      event("t1", "tool.started", { callId: "c1", name: "warehouse_query" }),
+      event("t1", "tool.finished", {
+        callId: "c1",
+        name: "warehouse_query",
+        input: '{"sql":"select 1"}',
+        output: "1",
+      }),
+    ]);
+    const expected = {
+      callId: "c1",
+      name: "warehouse_query",
+      input: '{"sql":"select 1"}',
+      output: "1",
+    };
+    expect(turns[0]?.tools).toEqual([expected]);
+  });
+
+  it("leaves input absent for older events, and for a non-string input", () => {
+    const turns = foldTranscript([
+      event("t1", "tool.finished", { callId: "c1", name: "bash", output: "a" }),
+      event("t1", "tool.finished", {
+        callId: "c2",
+        name: "bash",
+        input: { sql: "not a string" },
+        output: "b",
+      }),
+    ]);
+    for (const tool of turns[0]?.tools ?? []) {
+      expect("input" in tool).toBe(false);
+    }
   });
 
   it("tracks the live activity, and drops it when the turn ends", () => {
@@ -243,6 +328,30 @@ describe("foldTranscript", () => {
     expect(turns.map((t) => t.text)).toEqual(["first", "second"]);
   });
 
+  it("collects the approvals a supersede notice names, ignoring malformed stamps", () => {
+    const turns = foldTranscript([
+      event("t1", "notice", {
+        level: "info",
+        text: "Replaced by your message",
+        supersededApprovalIds: ["ap-1", "ap-2"],
+      }),
+      event("t1", "notice", { level: "warn", text: "Model fell back." }),
+      event("t1", "notice", {
+        level: "info",
+        text: "junk",
+        supersededApprovalIds: "ap-3",
+      }),
+      event("t1", "notice", {
+        level: "info",
+        text: "junk",
+        supersededApprovalIds: ["ap-4", 7],
+      }),
+    ]);
+    expect(turns[0]?.supersededApprovalIds).toEqual(["ap-1", "ap-2"]);
+    // A supersede notice never ends the turn: the agent goes on to revise.
+    expect(turns[0]?.ended).toBe(false);
+  });
+
   it("keeps a peer message beside its notice, and only when it is structured", () => {
     // The sender's record of an agent-to-agent message is a notice ("To
     // Ray: …") stamped with the structured `peerMessage`. The pair view
@@ -310,6 +419,35 @@ describe("foldTranscript", () => {
     expect([...(turns[0]?.peerMessagesOpeningTask ?? [])]).toEqual([0]);
     expect(turns[1]?.peerTaskClosed).toBe("reported");
   });
+  it("reads the desktop-takeover stamp by notice index, and ignores a malformed one", () => {
+    // The agent's ask (pending) and its settling line (done) are two
+    // notices on the same turn; the chat finds each stamp by the notice it
+    // rides. A stamp with an unknown outcome, or none, contributes nothing.
+    const turns = foldTranscript([
+      event("t1", "notice", { level: "warn", text: "Model fell back." }),
+      event("t1", "notice", {
+        level: "warn",
+        text: "Needs you on the desktop: sign in",
+        desktopRequest: { id: "req-1", outcome: "pending" },
+      }),
+      event("t1", "notice", {
+        level: "info",
+        text: "junk",
+        desktopRequest: { id: "req-1", outcome: "maybe" },
+      }),
+      event("t1", "notice", {
+        level: "info",
+        text: "Alex took over the desktop and is done.",
+        desktopRequest: { id: "req-1", outcome: "done" },
+      }),
+      event("t1", "turn.done"),
+    ]);
+    expect(turns[0]?.notices).toHaveLength(4);
+    expect([...(turns[0]?.desktopRequests ?? [])]).toEqual([
+      [1, { id: "req-1", outcome: "pending" }],
+      [3, { id: "req-1", outcome: "done" }],
+    ]);
+  });
 });
 
 describe("mergeEvents", () => {
@@ -355,5 +493,82 @@ describe("highestSeq", () => {
         { seq: 9, turnId: "t", type: "turn.done", payload: {} },
       ]),
     ).toBe(9);
+  });
+});
+
+describe("movesTurnStatus", () => {
+  const event = (type: TurnEvent["type"]): TurnEvent => ({
+    seq: 1,
+    turnId: "t",
+    type,
+    payload: {},
+  });
+
+  it("is true for the events that change a turn row's status", () => {
+    // A turn opening or closing, and a mid-run follow-up the run picked
+    // up (its row flips joined live, so the bubble under it
+    // must stop saying "folding it in" without waiting for the poll).
+    for (const type of [
+      "turn.started",
+      "turn.done",
+      "error",
+      "message.joined",
+    ] as const) {
+      expect(movesTurnStatus(event(type)), type).toBe(true);
+    }
+  });
+
+  it("is false for streamed content", () => {
+    for (const type of [
+      "text.delta",
+      "text",
+      "tool.started",
+      "tool.finished",
+      "notice",
+      // SEND NOW's answer: the row is still waiting; its join follows.
+      "message.sent_now",
+    ] as const) {
+      expect(movesTurnStatus(event(type)), type).toBe(false);
+    }
+  });
+});
+
+describe("raisesApproval", () => {
+  const finished = (name: unknown): TurnEvent => ({
+    seq: 1,
+    turnId: "t",
+    type: "tool.finished",
+    payload: { name },
+  });
+
+  it("is true when a tool that can hold an approval card finishes", () => {
+    for (const name of [
+      "propose_custom_connection",
+      "mcp__onecli__propose_custom_connection",
+      "mcp__onecli__send_message",
+      "mcp__onecli__read_conversation",
+      "mcp__onecli__send_as_me",
+      "mcp__onecli__edit_my_message",
+      "mcp__onecli__delete_my_message",
+      "message_agent",
+      "mcp__onecli__preview_expose",
+      "mcp__onecli__update_webhook",
+    ]) {
+      expect(raisesApproval(finished(name)), name).toBe(true);
+    }
+  });
+
+  it("is false for other tools, unfinished calls and malformed names", () => {
+    expect(raisesApproval(finished("bash"))).toBe(false);
+    expect(raisesApproval(finished("my_send_message_helper"))).toBe(false);
+    expect(raisesApproval(finished(42))).toBe(false);
+    expect(
+      raisesApproval({
+        seq: 1,
+        turnId: "t",
+        type: "tool.started",
+        payload: { name: "mcp__onecli__propose_custom_connection" },
+      }),
+    ).toBe(false);
   });
 });

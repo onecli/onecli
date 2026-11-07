@@ -64,8 +64,10 @@ const resolveMetadata = async (
 
 export const snowflake: AppDefinition = {
   id: "snowflake",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/snowflake",
   name: "Snowflake",
   icon: "/icons/snowflake.svg",
+  apiDocsUrl: "https://docs.snowflake.com/en/developer-guide/sql-api/index",
   description: "Run SQL and manage your Snowflake data cloud account.",
   connectionMethod: {
     type: "api_key",

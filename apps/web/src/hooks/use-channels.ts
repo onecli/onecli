@@ -1,20 +1,43 @@
 "use client";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 import { channels } from "@/lib/api";
 import type {
+  AgentChannelPresence,
+  AgentChannelsView,
+  AgentPeer,
+  ChannelPersonReach,
+  ChannelListenMode,
   ChannelProvider,
-  ChannelReachState,
+  ReachDecision,
+  ChannelSpaceReach,
   ChannelTransport,
   CompletePresenceInput,
 } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
+import {
+  listItem,
+  patchItem,
+  throughField,
+  type ItemLens,
+} from "@/lib/api/optimistic";
+import { useOptimisticMutation } from "@/hooks/use-optimistic-mutation";
 
 // Channel mutations are headless (the use-app-config convention): the callers
 // (the agent Channels section, the org settings cards) own the toasts. No
 // `invalidateGatewayCache()` anywhere — deliberate: the gateway reads none of
 // the channel tables (its approvals key is matched by raw string, not cached
 // config), so a flush would be pure noise.
+//
+// The Contacts choosers (who the agent answers, what it hears, whom it may
+// message, a peer's standing) are optimistic: the badge shows the new choice
+// on click and a failure puts it back with the reason. Their writes answer
+// with no row, so the settle refetch is what confirms them.
 
 /** The one payload the agent's Channels section renders: presences + posture
  * + org-integration availability + adapter liveness. */
@@ -103,111 +126,195 @@ export const useDetachChannel = (
   });
 };
 
-/** Settle one channel (channels view `spaces` rows): anyone in it, OneCLI
- * users only, or blocked entirely. */
-export const useSetReachState = (
+/** The app card's "Sync image" button: pull the app's current icon from
+ * the provider NOW. Headless like the other channel mutations; the card owns
+ * the toast. Always refetches the card and every agent read (lists and the
+ * detail), so a changed icon shows on the card, header and sidebar. */
+export const useSyncAgentIcon = (
   agentId: string,
   provider: ChannelProvider,
 ) => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: {
-      externalRef: string;
-      state: Exclude<ChannelReachState, "pending">;
-    }) =>
-      channels.setReachState(agentId, provider, input.externalRef, input.state),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
+    mutationFn: () => channels.syncIcon(agentId, provider),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.channels.agent(agentId) });
+      qc.invalidateQueries({ queryKey: queryKeys.agents.root() });
     },
   });
 };
 
-/** Settle one PERSON (channels view `people` rows): allowed, or not. */
+/** One reach row (a channel's or a person's) inside one presence of the
+ * agent's channels view. */
+const reachRow = <K extends "spaces" | "people">(
+  provider: ChannelProvider,
+  field: K,
+  externalRef: string,
+): ItemLens<
+  AgentChannelsView,
+  NonNullable<AgentChannelPresence[K]>[number]
+> => {
+  type Row = NonNullable<AgentChannelPresence[K]>[number];
+  const rows = listItem<Row>((r) => r.externalRef === externalRef);
+  const presence = listItem<AgentChannelPresence>(
+    (p) => p.provider === provider,
+  );
+  return throughField<AgentChannelsView, "presences", Row>("presences", {
+    get: (presences) => {
+      const found = presence.get(presences);
+      return found ? rows.get(found[field] ?? []) : undefined;
+    },
+    set: (presences, item, original) => {
+      const found = presence.get(presences);
+      if (!found) return presences;
+      // The presence as it was, so a rolled-back dismiss returns to its row.
+      const was = original && presence.get(original);
+      const next = rows.set(
+        found[field] ?? [],
+        item,
+        was?.[field] ?? undefined,
+      );
+      return presence.set(presences, { ...found, [field]: next });
+    },
+  });
+};
+
+const refreshChannels = (qc: QueryClient) =>
+  qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
+
+const reachLabel = (
+  qc: QueryClient,
+  agentId: string,
+  provider: ChannelProvider,
+  field: "spaces" | "people",
+  externalRef: string,
+) => {
+  const data = qc.getQueryData<AgentChannelsView>(
+    queryKeys.channels.agent(agentId),
+  );
+  const row = data && reachRow(provider, field, externalRef).get(data);
+  return row?.label ?? externalRef;
+};
+
+/** Settle one channel (channels view `spaces` rows): Always allow (the
+ * agent answers everyone there and may post) or Never. Instant. */
+export const useSetReachState = (agentId: string, provider: ChannelProvider) =>
+  useOptimisticMutation<
+    { kind: string },
+    { externalRef: string; state: ReachDecision }
+  >({
+    family: `channels:${agentId}`,
+    itemKey: ({ externalRef }) => `reach:${agentId}:space:${externalRef}`,
+    write: ({ externalRef, state }) =>
+      channels.setReachState(agentId, provider, externalRef, state),
+    apply: (qc, { externalRef, state }) =>
+      patchItem(
+        qc,
+        queryKeys.channels.agent(agentId),
+        reachRow(provider, "spaces", externalRef),
+        (row: ChannelSpaceReach | undefined) => (row ? { ...row, state } : row),
+      ),
+    refresh: refreshChannels,
+    failure: (qc, { externalRef }) =>
+      `Couldn't change who answers in ${reachLabel(qc, agentId, provider, "spaces", externalRef)}`,
+  });
+
+/** Promote (or demote) the agent in one channel: what it hears there.
+ * Instant. */
+export const useSetSpaceListen = (agentId: string, provider: ChannelProvider) =>
+  useOptimisticMutation<
+    { listen: ChannelListenMode },
+    { externalRef: string; listen: ChannelListenMode }
+  >({
+    family: `channels:${agentId}`,
+    itemKey: ({ externalRef }) => `listen:${agentId}:${externalRef}`,
+    write: ({ externalRef, listen }) =>
+      channels.setSpaceListen(agentId, provider, externalRef, listen),
+    apply: (qc, { externalRef, listen }) =>
+      patchItem(
+        qc,
+        queryKeys.channels.agent(agentId),
+        reachRow(provider, "spaces", externalRef),
+        (row: ChannelSpaceReach | undefined) =>
+          row ? { ...row, listen } : row,
+      ),
+    refresh: refreshChannels,
+    failure: (qc, { externalRef }) =>
+      `Couldn't change what the agent hears in ${reachLabel(qc, agentId, provider, "spaces", externalRef)}`,
+  });
+
+/** Settle one PERSON (channels view `people` rows): Always allow, or
+ * Never. Instant. */
 export const useSetPersonReachState = (
   agentId: string,
   provider: ChannelProvider,
-) => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (input: {
-      externalRef: string;
-      state: "approved" | "blocked";
-    }) =>
-      channels.setPersonReachState(
-        agentId,
-        provider,
-        input.externalRef,
-        input.state,
+) =>
+  useOptimisticMutation<
+    { kind: string },
+    { externalRef: string; state: ReachDecision }
+  >({
+    family: `channels:${agentId}`,
+    itemKey: ({ externalRef }) => `reach:${agentId}:person:${externalRef}`,
+    write: ({ externalRef, state }) =>
+      channels.setPersonReachState(agentId, provider, externalRef, state),
+    apply: (qc, { externalRef, state }) =>
+      patchItem(
+        qc,
+        queryKeys.channels.agent(agentId),
+        reachRow(provider, "people", externalRef),
+        (row: ChannelPersonReach | undefined) =>
+          row ? { ...row, state } : row,
       ),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
-    },
+    refresh: refreshChannels,
+    failure: (qc, { externalRef }) =>
+      `Couldn't change ${reachLabel(qc, agentId, provider, "people", externalRef)}`,
   });
-};
 
-/** DISMISS a person row - forget the decision; they re-knock if they write. */
+/** DISMISS a person row - forget the decision; they re-knock if they write.
+ * Instant: the row leaves on click and comes back if the server refuses. */
 export const useDismissPersonReach = (
   agentId: string,
   provider: ChannelProvider,
-) => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (input: { externalRef: string }) =>
-      channels.dismissPersonReach(agentId, provider, input.externalRef),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
-    },
+) =>
+  useOptimisticMutation<unknown, { externalRef: string }>({
+    family: `channels:${agentId}`,
+    itemKey: ({ externalRef }) => `reach:${agentId}:person:${externalRef}`,
+    write: ({ externalRef }) =>
+      channels.dismissPersonReach(agentId, provider, externalRef),
+    apply: (qc, { externalRef }) =>
+      patchItem(
+        qc,
+        queryKeys.channels.agent(agentId),
+        reachRow(provider, "people", externalRef),
+        () => undefined,
+      ),
+    refresh: refreshChannels,
+    failure: (qc, { externalRef }) =>
+      `Couldn't remove ${reachLabel(qc, agentId, provider, "people", externalRef)}`,
   });
-};
 
 /** DISMISS a channel row - forget it entirely; the next outside message
- * re-knocks and a re-mention re-links the threads. */
+ * re-knocks and a re-mention re-links the threads. Instant. */
 export const useDismissReachRow = (
   agentId: string,
   provider: ChannelProvider,
-) => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (input: { externalRef: string }) =>
-      channels.dismissReachRow(agentId, provider, input.externalRef),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.channels.all() });
-    },
+) =>
+  useOptimisticMutation<unknown, { externalRef: string }>({
+    family: `channels:${agentId}`,
+    itemKey: ({ externalRef }) => `reach:${agentId}:space:${externalRef}`,
+    write: ({ externalRef }) =>
+      channels.dismissReachRow(agentId, provider, externalRef),
+    apply: (qc, { externalRef }) =>
+      patchItem(
+        qc,
+        queryKeys.channels.agent(agentId),
+        reachRow(provider, "spaces", externalRef),
+        () => undefined,
+      ),
+    refresh: refreshChannels,
+    failure: (qc, { externalRef }) =>
+      `Couldn't remove ${reachLabel(qc, agentId, provider, "spaces", externalRef)}`,
   });
-};
-
-/** The agent's outbound address book — send_message's standing decisions. */
-export const useAgentContacts = (agentId: string) =>
-  useQuery({
-    queryKey: queryKeys.channels.contacts(agentId),
-    queryFn: () => channels.listContacts(agentId),
-  });
-
-/** Flip one contact's policy (`ask` revokes the standing permission). */
-export const useSetContactPolicy = (agentId: string) => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (input: {
-      contactId: string;
-      policy: "ask" | "allow" | "blocked";
-    }) => channels.setContactPolicy(agentId, input.contactId, input.policy),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.channels.contacts(agentId) });
-    },
-  });
-};
-
-/** Remove a contact row entirely — back to ask-by-default. */
-export const useDeleteContact = (agentId: string) => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (contactId: string) =>
-      channels.deleteContact(agentId, contactId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.channels.contacts(agentId) });
-    },
-  });
-};
 
 /** The agent's peers — other hosted agents and both sides' standing. */
 export const useAgentPeers = (agentId: string) =>
@@ -216,19 +323,42 @@ export const useAgentPeers = (agentId: string) =>
     queryFn: () => channels.listPeers(agentId),
   });
 
-/** Set THIS agent's side of a pair (`ask` revokes the standing permission). */
-export const useSetPeerPolicy = (agentId: string) => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (input: {
-      peerAgentId: string;
-      policy: "ask" | "allow" | "blocked";
-    }) => channels.setPeerPolicy(agentId, input.peerAgentId, input.policy),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.channels.peers(agentId) });
-    },
+const peerRow = (peerAgentId: string) =>
+  throughField<{ peers: AgentPeer[] }, "peers", AgentPeer>(
+    "peers",
+    listItem((p) => p.agentId === peerAgentId),
+  );
+
+const refreshPeers = (agentId: string) => (qc: QueryClient) =>
+  qc.invalidateQueries({ queryKey: queryKeys.channels.peers(agentId) });
+
+const peerName = (qc: QueryClient, agentId: string, peerAgentId: string) =>
+  qc
+    .getQueryData<{ peers: AgentPeer[] }>(queryKeys.channels.peers(agentId))
+    ?.peers.find((p) => p.agentId === peerAgentId)?.name ?? "this agent";
+
+/** Set THIS agent's side of a pair (`ask` revokes the standing permission).
+ * Instant. */
+export const useSetPeerPolicy = (agentId: string) =>
+  useOptimisticMutation<
+    { id: string; policy: string },
+    { peerAgentId: string; policy: "allow" | "blocked" }
+  >({
+    family: `peers:${agentId}`,
+    itemKey: ({ peerAgentId }) => `peer:${agentId}:${peerAgentId}`,
+    write: ({ peerAgentId, policy }) =>
+      channels.setPeerPolicy(agentId, peerAgentId, policy),
+    apply: (qc, { peerAgentId, policy }) =>
+      patchItem(
+        qc,
+        queryKeys.channels.peers(agentId),
+        peerRow(peerAgentId),
+        (p) => (p ? { ...p, myPolicy: policy } : p),
+      ),
+    refresh: refreshPeers(agentId),
+    failure: (qc, { peerAgentId }) =>
+      `Couldn't change your standing with ${peerName(qc, agentId, peerAgentId)}`,
   });
-};
 
 /** Continue THIS agent's paused pair conversation (the peer row's Resume). */
 export const useResumePeer = (agentId: string) => {
@@ -242,14 +372,55 @@ export const useResumePeer = (agentId: string) => {
   });
 };
 
-/** Forget a pair from THIS agent's side (policy, conversation, pending asks). */
-export const useForgetPeer = (agentId: string) => {
+/** Forget a pair from THIS agent's side (policy, conversation, pending asks).
+ * Instant: the row reads pristine on click (this side back to ask, no
+ * conversation, no pause); the refetch settles the rest, including a
+ * foreign peer leaving the list. A failure puts the pair back. */
+export const useForgetPeer = (agentId: string) =>
+  useOptimisticMutation<void, string>({
+    family: `peers:${agentId}`,
+    itemKey: (peerAgentId) => `peer:${agentId}:${peerAgentId}`,
+    write: (peerAgentId) => channels.forgetPeer(agentId, peerAgentId),
+    apply: (qc, peerAgentId) =>
+      patchItem(
+        qc,
+        queryKeys.channels.peers(agentId),
+        peerRow(peerAgentId),
+        (p): AgentPeer | undefined =>
+          p && {
+            ...p,
+            myPolicy: "ask",
+            conversationId: null,
+            paused: false,
+            taskOpen: false,
+          },
+      ),
+    refresh: refreshPeers(agentId),
+    failure: (qc, peerAgentId) =>
+      `Couldn't remove ${peerName(qc, agentId, peerAgentId)}`,
+  });
+
+/** The caller's own remembered senders on this agent, keyed by recipient. */
+export const useSendAsPreferences = (agentId: string) =>
+  useQuery({
+    queryKey: queryKeys.channels.sendAs(agentId),
+    queryFn: async () =>
+      new Map(
+        (await channels.sendAsPreferences(agentId)).preferences.map((p) => [
+          p.recipientRef,
+          p.sendAs,
+        ]),
+      ),
+    enabled: agentId.length > 0,
+  });
+
+/** Forget the caller's sender for one recipient: the next send asks again. */
+export const useForgetSendAsPreference = (agentId: string) => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (peerAgentId: string) =>
-      channels.forgetPeer(agentId, peerAgentId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.channels.peers(agentId) });
-    },
+    mutationFn: (recipientRef: string) =>
+      channels.forgetSendAsPreference(agentId, recipientRef),
+    onSettled: () =>
+      qc.invalidateQueries({ queryKey: queryKeys.channels.sendAs(agentId) }),
   });
 };

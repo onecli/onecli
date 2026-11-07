@@ -34,7 +34,11 @@ const EMPTY_WORKSPACE = `${P}empty`;
 const seedAgent = async (
   id: string,
   createdAt: Date,
-  opts: { workspaceId?: string; isDefault?: boolean } = {},
+  opts: {
+    workspaceId?: string;
+    isDefault?: boolean;
+    kind?: "byo" | "hosted";
+  } = {},
 ) =>
   db.agent.create({
     data: {
@@ -44,6 +48,7 @@ const seedAgent = async (
       identifier: id,
       accessToken: `aoc_${id}`,
       createdAt,
+      ...(opts.kind === undefined ? {} : { kind: opts.kind }),
       // Omitted = NULL, the state every new agent is born with.
       ...(opts.isDefault === undefined ? {} : { isDefault: opts.isDefault }),
     },
@@ -161,5 +166,44 @@ describe.skipIf(!PROOF_URL)("container-config agent resolution", () => {
       outcome: "no-legacy-default",
       hasAgents: false,
     });
+  });
+
+  it("a hosted agent is refused by name: its config would carry its gateway token", async () => {
+    // The route answers 403 HOSTED_AGENT. The sandbox gets this config
+    // server-side; no person ever needs it. The resolution carries no
+    // agent at all, so nothing downstream can build the config by mistake.
+    await seedAgent(`${P}hosted`, new Date("2026-07-01T00:00:00Z"), {
+      workspaceId: UNPINNED_WORKSPACE,
+      kind: "hosted",
+    });
+    try {
+      expect(await resolveAgent(UNPINNED_WORKSPACE, `${P}hosted`)).toEqual({
+        outcome: "hosted-agent",
+      });
+      // A BYO sibling in the same workspace still resolves.
+      expect(await resolveAgent(UNPINNED_WORKSPACE, `${P}unpinned-b`)).toEqual({
+        outcome: "resolved",
+        agent: { id: `${P}unpinned-b`, accessToken: `aoc_${P}unpinned-b` },
+      });
+    } finally {
+      await db.agent.delete({ where: { id: `${P}hosted` } });
+    }
+  });
+
+  it("a hosted LEGACY default is refused too: omission is no side door", async () => {
+    await db.agent.update({
+      where: { id: `${P}legacy` },
+      data: { kind: "hosted" },
+    });
+    try {
+      expect(await resolveAgent(WORKSPACE)).toEqual({
+        outcome: "hosted-agent",
+      });
+    } finally {
+      await db.agent.update({
+        where: { id: `${P}legacy` },
+        data: { kind: "byo" },
+      });
+    }
   });
 });

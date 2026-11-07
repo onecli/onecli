@@ -54,10 +54,12 @@ vi.mock("../services/workspace-access-check", () => ({
 }));
 
 // The observation point: capture the `redirectUri` each leg passes the
-// provider adapter — the value under test.
-const captured: { authUrl: string[]; exchange: string[] } = {
+// provider adapter — the value under test. `granted` is what the provider
+// reports back (both requested scopes unless a test narrows it).
+const captured: { authUrl: string[]; exchange: string[]; granted: string[] } = {
   authUrl: [],
   exchange: [],
+  granted: ["read", "write"],
 };
 
 vi.mock("../apps/registry", () => ({
@@ -68,7 +70,15 @@ vi.mock("../apps/registry", () => ({
           name: "OAuth App",
           connectionMethod: {
             type: "oauth",
-            defaultScopes: ["read"],
+            defaultScopes: ["read", "write"],
+            permissions: [
+              {
+                scope: "write",
+                name: "Write",
+                description: "Change things",
+                access: "write",
+              },
+            ],
             buildAuthUrl: async ({ redirectUri }: { redirectUri: string }) => {
               captured.authUrl.push(redirectUri);
               return `https://provider.example/auth?redirect=${encodeURIComponent(redirectUri)}`;
@@ -77,7 +87,7 @@ vi.mock("../apps/registry", () => ({
               captured.exchange.push(redirectUri);
               return {
                 credentials: { access_token: "tok" },
-                scopes: ["read"],
+                scopes: captured.granted,
                 metadata: { email: "acct@example.com" },
               };
             },
@@ -100,6 +110,7 @@ vi.mock("../services/connection-service", () => ({
   createConnection: async () => ({ id: "conn-new" }),
   reconnectConnection: async () => ({ id: "conn-old" }),
   linkConnectionToAppConfig: async () => undefined,
+  findInstallationConnection: async () => null,
 }));
 
 vi.mock("../lib/gateway-invalidate", () => ({
@@ -134,6 +145,7 @@ describe("oauth redirect_uri resolves to the API origin", () => {
     }
     captured.authUrl.length = 0;
     captured.exchange.length = 0;
+    captured.granted = ["read", "write"];
   });
 
   const splitHostEnv = () => {
@@ -267,5 +279,51 @@ describe("oauth redirect_uri resolves to the API origin", () => {
     expect(cb.headers.get("location")).toContain(
       "http://localhost:10254/app-connect/oauthapp?status=success",
     );
+  });
+});
+
+describe("oauth callback success redirect: partial grants", () => {
+  let app: Hono<ApiEnv>;
+
+  beforeAll(() => {
+    app = createApiApp({ getSession: async () => null });
+  });
+  afterEach(() => {
+    captured.granted = ["read", "write"];
+  });
+
+  // A re-authentication of an existing connection (the signed connectionId):
+  // the leg "Try again" runs, and the one whose landing must say what's still
+  // missing.
+  const reconnectLanding = async () => {
+    const state = signOAuthState({
+      workspaceId: "proj-1",
+      provider: "oauthapp",
+      nonce: generateNonce(),
+      origin: "https://dashboard.example.com",
+      connectionId: "conn-old",
+    });
+    const res = await app.request(
+      `/v1/apps/oauthapp/callback?code=abc123&state=${encodeURIComponent(state)}`,
+      { headers: { host: "arrived.example.com" } },
+    );
+    expect(res.status).toBe(302);
+    return Object.fromEntries(
+      new URL(res.headers.get("location") ?? "").searchParams,
+    );
+  };
+
+  it("names what wasn't granted and the connection to retry, in its workspace", async () => {
+    captured.granted = ["read"];
+    expect(await reconnectLanding()).toEqual({
+      status: "success",
+      missing: "write",
+      connectionId: "conn-old",
+      workspaceId: "proj-1",
+    });
+  });
+
+  it("adds nothing once everything requested is granted", async () => {
+    expect(await reconnectLanding()).toEqual({ status: "success" });
   });
 });

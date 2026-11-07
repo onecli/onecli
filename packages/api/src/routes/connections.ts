@@ -6,8 +6,10 @@ import {
   listConnections,
   listConnectionsByProvider,
   deleteConnection,
+  promoteConnectionToOrganization,
   updateConnectionLabel,
 } from "../services/connection-service";
+import { userIsOrgAdmin } from "../services/workspace-access-check";
 import {
   withAudit,
   AUDIT_ACTIONS,
@@ -164,6 +166,48 @@ export const connectionRoutes = () => {
     if (!updated) {
       return c.json({ error: "Connection not found" }, 404);
     }
+    return c.json(updated);
+  });
+
+  // ── POST /connections/:connectionId/promote ── move up to the org ──────
+  // Org admins only: an org connection is visible to every workspace.
+  app.post("/:connectionId/promote", async (c) => {
+    const auth = c.get("auth");
+    const workspaceId = requireWorkspaceId(auth);
+    if (!(await userIsOrgAdmin(auth.userId, auth.organizationId))) {
+      return c.json(
+        {
+          error: {
+            code: "FORBIDDEN",
+            message: "Only organization admins can share a connection",
+          },
+        },
+        403,
+      );
+    }
+    const connectionId = c.req.param("connectionId");
+    const updated = await withAudit(
+      () =>
+        promoteConnectionToOrganization(
+          workspaceId,
+          auth.organizationId,
+          connectionId,
+        ),
+      () => ({
+        organizationId: auth.organizationId,
+        workspaceId,
+        userId: auth.userId,
+        userEmail: auth.userEmail,
+        action: AUDIT_ACTIONS.UPDATE,
+        service: AUDIT_SERVICES.APP_CONNECTION,
+        source: AUDIT_SOURCE.API,
+        metadata: {
+          connectionId,
+          change: "promoted_to_organization",
+          fromWorkspaceId: workspaceId,
+        },
+      }),
+    );
     return c.json(updated);
   });
 

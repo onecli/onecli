@@ -2,19 +2,21 @@
 
 import {
   MessageScroller,
-  MessageScrollerButton,
   MessageScrollerContent,
   MessageScrollerItem,
   MessageScrollerProvider,
 } from "@onecli/ui/components/message-scroller";
 import { Bubble } from "@onecli/ui/components/bubble";
 import { Message, MessageContent } from "@onecli/ui/components/message";
+import { cn } from "@onecli/ui/lib/utils";
 import type { Turn } from "@/lib/api/types";
 import type { RenderedTurn } from "@/lib/chat/transcript";
 import { pairBubbles, taskClosedLine } from "@/lib/chat/pair-bubbles";
 import { FollowingViewport } from "../../chat/_components/following-viewport";
 import { LoadOlderSentinel } from "../../chat/_components/load-older-sentinel";
+import { ScrollToEndButton } from "../../chat/_components/scroll-to-end-button";
 import { TextBubbleContent } from "../../chat/_components/text-bubble-content";
+import { TRANSCRIPT_PADDING } from "../../chat/_components/transcript-layout";
 
 interface PairThreadProps {
   /** Which agent's pair conversation this is: its words are the dark side. */
@@ -62,7 +64,12 @@ export const PairThread = ({
     <MessageScrollerProvider autoScroll defaultScrollPosition="end">
       <MessageScroller className="min-h-0 flex-1">
         <FollowingViewport>
-          <MessageScrollerContent className="mx-auto w-full max-w-3xl gap-3 px-4 py-6">
+          <MessageScrollerContent
+            className={cn(
+              "mx-auto w-full max-w-3xl gap-3 px-4",
+              TRANSCRIPT_PADDING,
+            )}
+          >
             {onLoadOlder !== undefined && (
               <LoadOlderSentinel
                 hasOlder={hasOlder}
@@ -131,7 +138,7 @@ export const PairThread = ({
             )}
           </MessageScrollerContent>
         </FollowingViewport>
-        <MessageScrollerButton />
+        <ScrollToEndButton />
       </MessageScroller>
     </MessageScrollerProvider>
   );

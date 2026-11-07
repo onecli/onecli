@@ -1,16 +1,33 @@
-import { setCookie } from "hono/cookie";
+import { generateCookie, setCookie } from "hono/cookie";
+import { parse as parseCookies } from "hono/utils/cookie";
 import type { Context } from "hono";
 import { resolveOrgAppCredentials } from "./resolve-org-credentials";
 import { saveAppConfigWithoutDisconnect } from "../services/app-config-service";
 import { getApp } from "./registry";
-import { extractLabel } from "../lib/connection-display";
+import {
+  authorizeScopesFor,
+  redirectPathFor,
+  signedRedirectPath,
+} from "./oauth/groups";
+import { accessLevelFromState, resolveAccessLevel } from "./access-level";
+import {
+  extractLabel,
+  findDuplicateConnection,
+} from "../lib/connection-display";
+import { setPartialGrantParams } from "./missing-permissions";
 import {
   createConnection,
   reconnectConnection,
   linkConnectionToAppConfig,
   listConnectionsByProvider,
 } from "../services/connection-service";
-import { NODE_ENV } from "../lib/env";
+import { connectGitHubInstallation } from "../services/github-installation-connect-service";
+import {
+  recordAuditEvent,
+  AUDIT_ACTIONS,
+  AUDIT_SERVICES,
+  AUDIT_SOURCE,
+} from "../services/audit-service";
 import { getApiCallbackOrigin, getAppOrigin } from "../lib/request-origin";
 import { invalidateGatewayCacheForOrg } from "../lib/gateway-invalidate";
 import { initBlocklistDefaults } from "../services/app-blocklist-service";
@@ -18,12 +35,22 @@ import {
   signOAuthState,
   generateNonce,
   verifyOAuthState,
+  OAUTH_STATE_COOKIE,
+  oauthStateCookieOptions,
 } from "../lib/oauth-state";
 import { logger } from "../lib/logger";
+import {
+  SKILLS_ONLY_UNAVAILABLE,
+  SKILLS_PURPOSE,
+  isSkillsOnlyState,
+  signLibraryGrant,
+} from "../services/skill-library-grant";
+import { githubInstallsAreProven } from "./github-app";
 import { db } from "@onecli/db";
 import { ROLE_HIERARCHY } from "../providers";
 import type { AuthContext } from "../providers";
 import { CAPS } from "../lib/env";
+import type { ConnectResponse } from "./connect-credentials";
 
 /**
  * The org-door authorization shared by BOTH entry points: the canonical
@@ -72,8 +99,10 @@ const requireOrgDoor = async (
  * interceptor on the workspace authorize endpoint (`tryHandleOrgAuthorize`) —
  * responses are byte-identical between the two entry points.
  *
- * The redirect URI stays the shared `/v1/apps/:provider/callback` (the single
- * registered callback per provider); the org scope rides the signed state.
+ * The redirect URI is the per-app `/v1/apps/:provider/callback`, or, when the
+ * org's credentials are a vendor-shared client (e.g. its Google client), the
+ * vendor's single `/v1/apps/oauth/:group/callback`. The org scope and the
+ * exact redirect path ride the signed state.
  */
 export const orgAuthorize = async (
   auth: AuthContext,
@@ -93,6 +122,34 @@ export const orgAuthorize = async (
   }
 
   const connectionId = c.req.query("connectionId");
+  // "Install GitHub for skills only": the callback stores no connection
+  // (see `skill-library-grant`). GitHub App only.
+  const skillsOnly =
+    provider === "github-app" && c.req.query("purpose") === SKILLS_PURPOSE;
+
+  const accessLevel = resolveAccessLevel(
+    app.connectionMethod,
+    c.req.query("access_level"),
+  );
+  if (!accessLevel.ok) {
+    return Response.json({ error: accessLevel.error }, { status: 400 });
+  }
+
+  const resolved = await resolveOrgAppCredentials(orgId, app);
+  if (!resolved) {
+    return Response.json(
+      { error: `${app.name} is not configured. Missing required credentials.` },
+      { status: 400 },
+    );
+  }
+
+  const { values: creds } = resolved;
+  // A skills-only grant hands out read access by installation id, so it is
+  // only offered where GitHub proves the user can access that installation.
+  if (skillsOnly && !githubInstallsAreProven(creds.appId)) {
+    return Response.json({ error: SKILLS_ONLY_UNAVAILABLE }, { status: 400 });
+  }
+  const redirectPath = redirectPathFor(provider, resolved.configKey);
 
   // Same reasoning as the workspace-scoped authorize in `routes/apps.ts`: decide
   // the post-consent destination here, where the caller is authenticated, and
@@ -104,41 +161,36 @@ export const orgAuthorize = async (
     scope: "organization",
     nonce: generateNonce(),
     origin: getAppOrigin(c.req.raw),
+    redirectPath,
     ...(connectionId ? { connectionId } : {}),
+    ...(accessLevel.value ? { accessLevel: accessLevel.value } : {}),
+    // Who started it: a skills-only install hands its grant to this user.
+    ...(auth.userId ? { userId: auth.userId } : {}),
+    ...(skillsOnly ? { purpose: SKILLS_PURPOSE } : {}),
   });
-
-  const resolved = await resolveOrgAppCredentials(orgId, app);
-  if (!resolved) {
-    return Response.json(
-      { error: `${app.name} is not configured. Missing required credentials.` },
-      { status: 400 },
-    );
-  }
-
-  const { values: creds } = resolved;
 
   // The API origin the provider must send the browser back to — same rule as
   // the workspace-scoped legs in routes/apps.ts: an explicitly configured
   // API_URL wins, else the origin this request arrived on. Never the DEFAULTED
   // selfUrl constant, which strands a remote self-host on localhost.
   const baseUrl = getApiCallbackOrigin(c.req.raw);
-  const redirectUri = `${baseUrl}/v1/apps/${provider}/callback`;
-  const scopes = app.connectionMethod.defaultScopes ?? [];
+  const redirectUri = `${baseUrl}${redirectPath}`;
+  const scopes = authorizeScopesFor(app, resolved.configKey);
 
   const authUrl = await app.connectionMethod.buildAuthUrl({
     appCredentials: creds,
     redirectUri,
     scopes,
     state,
+    ...(accessLevel.value ? { accessLevel: accessLevel.value } : {}),
   });
 
-  setCookie(c, "oauth_state", state, {
-    httpOnly: true,
-    secure: NODE_ENV === "production",
-    sameSite: "Lax",
-    path: `/v1/apps/${provider}/callback`,
-    maxAge: 600,
-  });
+  setCookie(
+    c,
+    OAUTH_STATE_COOKIE,
+    state,
+    oauthStateCookieOptions(redirectPath),
+  );
 
   return c.redirect(authUrl);
 };
@@ -154,12 +206,38 @@ export const tryHandleOrgAuthorize = async (
   return orgAuthorize(auth, c, provider, orgId);
 };
 
+/**
+ * The org state a callback carries. The query's `state` is the normal case.
+ * Only a callback its provider declares stateless (a GitHub App setup
+ * redirect after "Configure") may fall back to this browser's `oauth_state`
+ * cookie: anywhere else a missing state would let a code from someone
+ * else's sign-in complete against this browser's pending org flow.
+ */
+const readOrgCallbackState = (
+  url: URL,
+  cookieHeader: string,
+  provider: string,
+): string | undefined => {
+  const fromQuery = url.searchParams.get("state");
+  if (fromQuery) return fromQuery;
+  const app = getApp(provider);
+  const params = Object.fromEntries(url.searchParams.entries());
+  if (
+    app?.connectionMethod.type !== "oauth" ||
+    !app.connectionMethod.acceptsCookieOnlyState?.(params)
+  ) {
+    return undefined;
+  }
+  return parseCookies(cookieHeader, OAUTH_STATE_COOKIE)[OAUTH_STATE_COOKIE];
+};
+
 export const tryHandleOrgCallback = async (
   request: Request,
   provider: string,
 ): Promise<Response | null> => {
   const url = new URL(request.url);
-  const stateParam = url.searchParams.get("state");
+  const cookieHeader = request.headers.get("cookie") ?? "";
+  const stateParam = readOrgCallbackState(url, cookieHeader, provider);
   if (!stateParam) return null;
 
   const state = verifyOAuthState(stateParam);
@@ -177,9 +255,24 @@ export const tryHandleOrgCallback = async (
   // only to a configured APP_URL. No `let` dance here — unlike the workspace
   // callback, nothing redirects before the state is checked.
   const appOrigin = getAppOrigin(request, state.origin);
+  const redirectPath = signedRedirectPath(state, provider);
 
+  // Every outcome but a continuation ends this browser's flow: the state
+  // cookie goes with it (as on the workspace callback), so a later stateless
+  // GitHub redirect can't pick up a finished flow's state.
+  const finish = (location: string) =>
+    new Response(null, {
+      status: 302,
+      headers: {
+        location,
+        "set-cookie": generateCookie(OAUTH_STATE_COOKIE, "", {
+          ...oauthStateCookieOptions(redirectPath),
+          maxAge: 0,
+        }),
+      },
+    });
   const errorRedirect = (msg: string) =>
-    Response.redirect(
+    finish(
       `${appOrigin}/app-connect/${provider}?status=error&message=${encodeURIComponent(msg)}`,
     );
 
@@ -198,20 +291,98 @@ export const tryHandleOrgCallback = async (
     // fails — both call getApiCallbackOrigin, and the provider sends the
     // browser back to the same origin the authorize leg derived.
     const baseUrl = getApiCallbackOrigin(request);
-    const redirectUri = `${baseUrl}/v1/apps/${provider}/callback`;
+    const redirectUri = `${baseUrl}${redirectPath}`;
     const callbackParams = Object.fromEntries(url.searchParams.entries());
 
-    const result = await app.connectionMethod.exchangeCode({
+    const accessLevel = accessLevelFromState(
+      app.connectionMethod,
+      state.accessLevel,
+    );
+    const exchangeParams = {
       appCredentials: resolved.values,
       callbackParams,
       redirectUri,
-    });
+      ...(accessLevel ? { accessLevel } : {}),
+      state,
+      stateCookie: parseCookies(cookieHeader, OAUTH_STATE_COOKIE)[
+        OAUTH_STATE_COOKIE
+      ],
+    };
 
-    const { credentials, scopes, metadata } = result;
+    // One more provider round trip before anything is stored: the next leg
+    // returns to this same callback path, bound to this browser's cookie.
+    const continuation =
+      await app.connectionMethod.continueCallback?.(exchangeParams);
+    if (continuation) {
+      return new Response(null, {
+        status: 302,
+        headers: {
+          location: continuation.continueAt,
+          "set-cookie": generateCookie(
+            OAUTH_STATE_COOKIE,
+            continuation.state,
+            oauthStateCookieOptions(redirectPath),
+          ),
+        },
+      });
+    }
+
+    const { credentials, scopes, metadata } =
+      await app.connectionMethod.exchangeCode(exchangeParams);
+
+    // Skills only: the ownership proof above passed; store NOTHING, hand the
+    // popup a signed grant the library's connect accepts (same org + user).
+    // Belt: never for an installation id nothing proved (the authorize leg
+    // refuses to start one, but the config may have changed since).
+    if (isSkillsOnlyState(state)) {
+      const userId = typeof state.userId === "string" ? state.userId : null;
+      const installationId = credentials.installation_id;
+      if (!githubInstallsAreProven(resolved.values.appId)) {
+        return errorRedirect(SKILLS_ONLY_UNAVAILABLE);
+      }
+      if (!userId || typeof installationId !== "string") {
+        return errorRedirect("Invalid state parameter");
+      }
+      const grant = signLibraryGrant({
+        organizationId,
+        userId,
+        grant: {
+          installationId,
+          account:
+            typeof metadata?.username === "string" ? metadata.username : null,
+          accountType:
+            typeof metadata?.accountType === "string"
+              ? metadata.accountType
+              : null,
+        },
+      });
+      // In the fragment: never sent to a server, so never in access logs.
+      return finish(
+        `${appOrigin}/app-connect/${provider}?status=library#g=${encodeURIComponent(grant)}`,
+      );
+    }
+
+    const initiatingUserId =
+      typeof state.userId === "string" ? state.userId : null;
+    if (provider === "github-app") {
+      if (
+        !initiatingUserId ||
+        (await requireOrgDoor(initiatingUserId, organizationId))
+      ) {
+        return errorRedirect("Organization access denied");
+      }
+    }
+    const githubActor =
+      provider === "github-app" && initiatingUserId
+        ? await db.user.findUnique({
+            where: { id: initiatingUserId },
+            select: { email: true },
+          })
+        : null;
 
     let reconnectId = state.connectionId as string | undefined;
 
-    if (!reconnectId) {
+    if (!reconnectId && provider !== "github-app") {
       const identity = extractLabel(metadata)?.toLowerCase().trim();
       if (identity) {
         const existing = await listConnectionsByProvider(
@@ -224,20 +395,38 @@ export const tryHandleOrgCallback = async (
         if (duplicate) reconnectId = duplicate.id;
       }
     }
-
-    if (reconnectId) {
-      await reconnectConnection({ organizationId }, reconnectId, credentials, {
-        scopes,
-        metadata,
-        appConfigId: resolved.appConfigId,
-      });
-    } else {
-      await createConnection({ organizationId }, provider, credentials, {
-        scopes,
-        metadata,
-        appConfigId: resolved.appConfigId,
-      });
+    // GitHub installation identity, dedupe and promotion are resolved under
+    // one transaction. Labels never identify a GitHub installation.
+    const githubResult =
+      provider === "github-app"
+        ? await connectGitHubInstallation({
+            scope: { organizationId },
+            organizationId,
+            credentials,
+            options: { scopes, metadata, appConfigId: resolved.appConfigId },
+            reconnectId,
+            allowPromotion: true,
+          })
+        : null;
+    if (githubResult?.status === "updated") {
+      return finish(`${appOrigin}/app-connect/${provider}?status=updated`);
     }
+
+    // The connection this consent landed on, created or re-authenticated.
+    const connection = githubResult
+      ? githubResult.connection
+      : reconnectId
+        ? await reconnectConnection(
+            { organizationId },
+            reconnectId,
+            credentials,
+            { scopes, metadata, appConfigId: resolved.appConfigId },
+          )
+        : await createConnection({ organizationId }, provider, credentials, {
+            scopes,
+            metadata,
+            appConfigId: resolved.appConfigId,
+          });
 
     if (app.blocklist?.length) {
       await initBlocklistDefaults({ organizationId }, provider, app.blocklist);
@@ -247,9 +436,30 @@ export const tryHandleOrgCallback = async (
     // just the workspace the dance started from.
     invalidateGatewayCacheForOrg(organizationId);
 
-    return Response.redirect(
-      `${appOrigin}/app-connect/${provider}?status=success`,
-    );
+    if (githubResult?.promoted && initiatingUserId) {
+      await recordAuditEvent({
+        organizationId,
+        userId: initiatingUserId,
+        userEmail: githubActor?.email ?? "",
+        action: AUDIT_ACTIONS.UPDATE,
+        service: AUDIT_SERVICES.APP_CONNECTION,
+        source: AUDIT_SOURCE.API,
+        metadata: {
+          connectionId: connection.id,
+          provider,
+          change: "promoted_to_organization",
+        },
+      });
+    }
+
+    const successParams = new URLSearchParams({ status: "success" });
+    // Same partial-grant warning as the workspace callback: the popup offers
+    // to re-authenticate this org connection.
+    setPartialGrantParams(successParams, provider, scopes, {
+      connectionId: connection.id,
+      scope: { orgId: organizationId },
+    });
+    return finish(`${appOrigin}/app-connect/${provider}?${successParams}`);
   } catch (err) {
     logger.error({ err, provider }, "Org OAuth callback failed");
     const message =
@@ -303,13 +513,11 @@ export const orgConnect = async (
     );
     const effectiveLabel =
       options?.label || extractLabel(options?.metadata) || null;
-    const duplicate = effectiveLabel
-      ? existing.find(
-          (c) =>
-            c.label?.toLowerCase().trim() ===
-            effectiveLabel.toLowerCase().trim(),
-        )
-      : existing[0];
+    const duplicate = findDuplicateConnection(
+      existing,
+      effectiveLabel,
+      options?.metadata,
+    );
 
     if (duplicate) {
       connection = await reconnectConnection(
@@ -352,7 +560,10 @@ export const orgConnect = async (
   // just the workspace the request was scoped to.
   invalidateGatewayCacheForOrg(organizationId);
 
-  return Response.json({ success: true });
+  return Response.json({
+    success: true,
+    connectionId: connection.id,
+  } satisfies ConnectResponse);
 };
 
 export const tryHandleOrgConnect = async (

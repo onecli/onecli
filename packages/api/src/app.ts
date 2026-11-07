@@ -16,6 +16,13 @@ import {
   initRuleActionGate,
 } from "./providers";
 import { ensureEditionDefaults } from "./edition-defaults";
+import {
+  initSandboxLifecycleHooks,
+  type SandboxLifecycleHooks,
+} from "./providers/hooks/sandbox-lifecycle-hooks";
+import { registerPlatformJob } from "./services/platform-jobs";
+import { memoryReviewJob } from "./services/memory-review-service";
+import { contextFitJob } from "./services/context-fit-service";
 import { registerEeRoutes } from "./ee";
 import { installLegacyProjectCompat } from "./lib/legacy-project-compat";
 import { errorHandler, notFoundHandler } from "./middleware/error-handler";
@@ -58,11 +65,28 @@ import { conversationRoutes, turnRoutes } from "./routes/conversations";
 import { orgChannelRoutes } from "./routes/org-channels";
 import { agentChannelRoutes } from "./routes/agent-channels";
 import { agentCronRoutes } from "./routes/agent-crons";
+import {
+  agentWebhookRoutes,
+  webhookReceiveRoutes,
+} from "./routes/agent-webhooks";
 import { agentMemoryRoutes } from "./routes/agent-memories";
+import { agentRunRoutes, workspaceRunRoutes } from "./routes/agent-runs";
+import { agentApprovalOutcomeRoutes } from "./routes/agent-approval-outcomes";
+import { agentUsageRoutes, usageRoutes } from "./routes/usage";
+import { agentEvalRoutes } from "./routes/agent-evals";
 import { userSkillRoutes } from "./routes/skills";
 import { orgSkillRoutes } from "./routes/org-skills";
+import {
+  agentLibrarySkillRoutes,
+  orgSkillLibraryRoutes,
+} from "./routes/skill-library";
 import { channelAdapterRoutes } from "./routes/channel-adapter";
 import { sshTerminatorRoutes } from "./routes/ssh-terminator";
+import {
+  previewAuthRoutes,
+  previewRelayRoutes,
+  sandboxPortRoutes,
+} from "./routes/sandbox-ports";
 import { channelInboundRoutes } from "./routes/channel-inbound";
 import { runnersRoutes } from "./routes/runners";
 import {
@@ -100,6 +124,18 @@ export interface CreateApiAppOptions {
    * it to mount a single router under test.
    */
   eeRoutes?: (app: Hono<ApiEnv>) => void;
+  /**
+   * A host's own routes, mounted on the `/v1` app after the shared surface
+   * (a hosted deployment's service channels). Absent: nothing extra is
+   * mounted and those paths do not exist.
+   */
+  hostRoutes?: (app: Hono<ApiEnv>) => void;
+  /**
+   * A host's sandbox-lifecycle extension (`SandboxLifecycleHooks`). Absent:
+   * every seam is a no-op and the lifecycle runs exactly as the shared code
+   * describes it.
+   */
+  sandboxLifecycleHooks?: SandboxLifecycleHooks;
   /** Override of the edition default (cloud: org-level app-config reads). */
   orgAppConfig?: OrgAppConfigProvider;
   /**
@@ -124,6 +160,10 @@ export const createApiApp = (
   options?: CreateApiAppOptions,
 ) => {
   ensureEditionDefaults();
+  // The platform's own jobs, on the poll (platform-jobs). Idempotent, so a
+  // second app in the same process registers nothing twice.
+  registerPlatformJob(memoryReviewJob);
+  registerPlatformJob(contextFitJob);
   initSession(session);
   if (options?.orgAppConfig) initOrgAppConfig(options.orgAppConfig);
   if (options?.selfUrl) initSelfUrl(options.selfUrl);
@@ -131,6 +171,7 @@ export const createApiApp = (
   if (options?.policyValidator) initPolicyValidator(options.policyValidator);
   if (options?.ruleActionGate) initRuleActionGate(options.ruleActionGate);
   if (options?.sessionHooks) initSessionHooks(options.sessionHooks);
+  initSandboxLifecycleHooks(options?.sandboxLifecycleHooks ?? {});
 
   const app = new Hono<ApiEnv>().basePath("/v1");
   app.onError(errorHandler);
@@ -158,9 +199,9 @@ export const createApiApp = (
   app.route("/apps", appRoutes());
   app.route("/connections", connectionRoutes());
   // Read-only policy reflections (step 9.7b) compose onto the same base paths.
-  // Since step 10 they are SHARED — onprem shows the credential-access dialog
-  // too — and each route redacts org-rule details via the roleResolver provider
-  // (null in onprem → fail-safe non-admin).
+  // Since step 10 they are SHARED: onprem shows effective access on the
+  // agent's Connections section too, and each route redacts org-rule details
+  // via the roleResolver provider (null in onprem → fail-safe non-admin).
   app.route("/policy", policyReflectRoutes());
   app.route("/agents", agentReflectRoutes());
   app.route("/connections", connectionReflectRoutes());
@@ -204,6 +245,8 @@ export const createApiApp = (
   app.route("/org/channels", orgChannelRoutes());
   // Org-tier skills (step 9) — free like channels, admin-gated writes.
   app.route("/org/skills", orgSkillRoutes());
+  // The org's connected Git repo of skills — free.
+  app.route("/org/skill-library", orgSkillLibraryRoutes());
   // Org credentials (secrets, connections, apps): free on every edition —
   // one org-level connection/secret serves every workspace. Admin-gated
   // writes like the other free /org routers.
@@ -221,7 +264,8 @@ export const createApiApp = (
   // outbound surface, authenticated by the `rnr_` family alone; `/runners` is
   // the read-only human view, on the normal user auth.
   // The conversation plane (step 4): conversations own their turns and
-  // transcript; `/turns` exists only for the abort verb, kept shallow.
+  // transcript; `/turns` exists only for the per-turn verbs (abort, send-now),
+  // kept shallow.
   app.route("/conversations", conversationRoutes());
   app.route("/turns", turnRoutes());
   app.route("/runner", runnerRoutes());
@@ -233,14 +277,38 @@ export const createApiApp = (
   // terminator secret only — the narrow terminator↔control-plane channel.
   // Dark (blanket 401) until SSH_TERMINATOR_SECRET is configured.
   app.route("/ssh-terminator", sshTerminatorRoutes());
+  // Sandbox ports (plans/sandbox-ports.md): the relay's static-secret
+  // channel, and the browser login handoff (dark without PREVIEW_* config).
+  app.route("/preview-relay", previewRelayRoutes());
+  app.route("/preview-auth", previewAuthRoutes());
+  // The agent's shared ports (the dashboard Ports tab): 3-segment paths, so
+  // the agents router's single-segment routes never shadow them.
+  app.route("/agents", sandboxPortRoutes());
   // The agent's channel presences, composed onto /agents ahead of the 410
   // shims (every path here is 2+ segments, so the agents router's
   // single-segment `/:agentId` routes never shadow it).
   app.route("/agents", agentChannelRoutes());
   // The agent's schedules (step 7) — same composition rule as channels.
   app.route("/agents", agentCronRoutes());
+  // Inbound webhooks: the agent's CRUD surface, and the public catch URL
+  // (token-authenticated only, so it sits outside every auth middleware).
+  app.route("/agents", agentWebhookRoutes());
+  app.route("/hooks", webhookReceiveRoutes());
   // The agent's memory (step 8) — same composition rule as channels.
   app.route("/agents", agentMemoryRoutes());
+  // Library skills from the org's connected Git repo.
+  app.route("/agents", agentLibrarySkillRoutes());
+  // The agent's runs (audit) and evals — same composition rule as channels.
+  app.route("/agents", agentRunRoutes());
+  app.route("/agents", agentEvalRoutes());
+  // How the agent's gateway approvals ended (the chat's settled cards).
+  app.route("/agents", agentApprovalOutcomeRoutes());
+  // The workspace's runs across agents (Activity's Runs tab).
+  app.route("/runs", workspaceRunRoutes());
+  // Runtime usage (awake time): the agent's, composed onto /agents like runs;
+  // the org's per-agent totals at /usage/runtime (org admin).
+  app.route("/agents", agentUsageRoutes());
+  app.route("/usage", usageRoutes());
   // 410 Gone for the old-model paths step 10 removed. LAST, so every live route
   // above wins the first-match — these only catch what no longer exists.
   app.route("/rules", removedRuleRoutes());
@@ -262,6 +330,7 @@ export const createApiApp = (
   } else {
     registerEeRoutes(app);
   }
+  options?.hostRoutes?.(app);
 
   return app;
 };

@@ -3,7 +3,7 @@ import {
   workItemSchema,
   type SupervisorMessage,
   type SupervisorTransport,
-  type WorkItem,
+  type SupervisorWorkItem,
 } from "@onecli/agent-protocol";
 import { log } from "../log";
 
@@ -23,7 +23,7 @@ export const createStdioTransport = (
   let closed = false;
 
   return {
-    async *incoming(): AsyncIterable<WorkItem> {
+    async *incoming(): AsyncIterable<SupervisorWorkItem> {
       if (closed) return;
       lines = createInterface({ input, crlfDelay: Infinity });
       for await (const line of lines) {
@@ -46,6 +46,13 @@ export const createStdioTransport = (
           continue;
         }
 
+        if (item.data.kind === "session" || item.data.kind === "ack") {
+          // The WS driver's transport-level items; stdio has no session.
+          log("warn", "stdio transport: ignoring transport-level item", {
+            kind: item.data.kind,
+          });
+          continue;
+        }
         yield item.data;
         if (item.data.kind === "shutdown") return;
       }

@@ -10,7 +10,7 @@ export default function CloudCustomPage() {
       <SecretsContent
         typeFilter="generic"
         renderCreateButton={(onCreate) => (
-          <CreateSecretButton onCreate={onCreate} label="Add Secret" />
+          <CreateSecretButton onCreate={onCreate} label="Add connection" />
         )}
       />
     </Suspense>

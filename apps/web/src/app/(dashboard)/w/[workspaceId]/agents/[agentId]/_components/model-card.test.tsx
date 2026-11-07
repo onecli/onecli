@@ -33,7 +33,7 @@ const view = (overrides: Partial<AgentModels> = {}): AgentModels => ({
     { id: "low", label: "Low" },
     { id: "high", label: "High" },
   ],
-  defaults: { model: "claude-sonnet-5", effort: null },
+  defaults: { model: "claude-sonnet-5", effort: "low" },
   selected: { model: "claude-sonnet-5", effort: null, overridden: false },
   degraded: false,
   ...overrides,
@@ -100,6 +100,43 @@ describe("ModelCard", () => {
     ready(view());
     render(<ModelCard agentId="a1" />);
     expect(screen.queryByRole("button", { name: /Save/ })).toBeNull();
+  });
+
+  it("names the default thinking level as a default, never as a choice", () => {
+    // Nothing chosen: the picker reads "Default (Low)", the level the default
+    // model runs at, so a default is never shown as the user's pick.
+    ready(view());
+    render(<ModelCard agentId="a1" />);
+    expect(screen.getByLabelText("Thinking")).toHaveTextContent(
+      "Default (Low)",
+    );
+  });
+
+  it("does not promise the default level for a model the user picked", () => {
+    // A chosen model with no chosen level runs at that model's own default.
+    ready(
+      view({
+        selected: { model: "claude-opus-5", effort: null, overridden: true },
+      }),
+    );
+    render(<ModelCard agentId="a1" />);
+    expect(screen.getByLabelText("Thinking")).toHaveTextContent(
+      "Model default",
+    );
+  });
+
+  it("shows a chosen thinking level as the choice it is", () => {
+    ready(
+      view({
+        selected: {
+          model: "claude-sonnet-5",
+          effort: "high",
+          overridden: true,
+        },
+      }),
+    );
+    render(<ModelCard agentId="a1" />);
+    expect(screen.getByLabelText("Thinking")).toHaveTextContent("High");
   });
 
   it("saves only the field that changed, and clears an override as null", async () => {

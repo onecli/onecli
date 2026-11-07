@@ -1,4 +1,9 @@
 import { z } from "zod";
+import {
+  MAX_CRON_GATE_CHARS,
+  MAX_CRON_GATE_DESCRIPTION_CHARS,
+} from "@onecli/agent-protocol";
+import { TIMEZONE_MAX_LENGTH } from "./timezone";
 
 /**
  * Zod surfaces for the agent-cron routes and the schedule_task MCP tool
@@ -21,21 +26,45 @@ export const CRON_DISABLED_REASONS = [
 ] as const;
 export type CronDisabledReason = (typeof CRON_DISABLED_REASONS)[number];
 
-export const CRON_OUTCOMES = ["ok", "failed", "skipped_busy"] as const;
+export const CRON_OUTCOMES = [
+  "ok",
+  "failed",
+  "stopped",
+  "skipped_busy",
+] as const;
 export type CronOutcome = (typeof CRON_OUTCOMES)[number];
 
 /** Bounds shared by the dashboard routes and the MCP tool. */
 export const CRON_NAME_MAX_LENGTH = 100;
 export const CRON_PROMPT_MAX_LENGTH = 10_000;
 export const CRON_SCHEDULE_MAX_LENGTH = 100;
-export const CRON_TIMEZONE_MAX_LENGTH = 100;
 
 const cronFields = {
   name: z.string().trim().min(1).max(CRON_NAME_MAX_LENGTH),
   prompt: z.string().trim().min(1).max(CRON_PROMPT_MAX_LENGTH),
   schedule: z.string().trim().min(1).max(CRON_SCHEDULE_MAX_LENGTH),
-  timezone: z.string().trim().min(1).max(CRON_TIMEZONE_MAX_LENGTH),
+  // Shape only here; the service resolves the zone and answers 422 with the
+  // reason, which the dashboard and the MCP tool both surface verbatim.
+  timezone: z.string().trim().min(1).max(TIMEZONE_MAX_LENGTH),
+  // Optional. Absent = unchanged on an edit; empty or null clears it (every
+  // fire runs the agent).
+  gate: z
+    .string()
+    .trim()
+    .max(MAX_CRON_GATE_CHARS)
+    .nullish()
+    .transform((gate) => (gate === undefined ? undefined : gate || null)),
+  // The gate in plain words, shown to people instead of the command.
+  gateDescription: z
+    .string()
+    .trim()
+    .max(MAX_CRON_GATE_DESCRIPTION_CHARS)
+    .nullish()
+    .transform((text) => (text === undefined ? undefined : text || null)),
 };
+
+/** Every field optional, for the edit doors; keys and types stay typed. */
+const cronFieldsPartial = z.object(cronFields).partial().shape;
 
 /** POST /v1/agents/:agentId/crons */
 export const createCronSchema = z.object(cronFields).strict();
@@ -43,15 +72,7 @@ export const createCronSchema = z.object(cronFields).strict();
 /** PATCH /v1/agents/:agentId/crons/:cronId — partial; `enabled` is the pause
  * switch (re-enabling clears an auto-disable reason). */
 export const updateCronSchema = z
-  .object({
-    ...Object.fromEntries(
-      Object.entries(cronFields).map(([key, schema]) => [
-        key,
-        schema.optional(),
-      ]),
-    ),
-    enabled: z.boolean().optional(),
-  })
+  .object({ ...cronFieldsPartial, enabled: z.boolean().optional() })
   .strict()
   .refine((body) => Object.keys(body).length > 0, {
     message: "Nothing to update",
@@ -69,5 +90,21 @@ export const cancelTaskArgsSchema = z
   })
   .strict();
 
+/** update_task: change an existing schedule in place (its id, history and
+ * conversation stay). Any subset of the create fields; `gate: null` removes
+ * the check. */
+export const updateTaskArgsSchema = z
+  .object({
+    cronId: z.string().trim().min(1).max(100),
+    ...cronFieldsPartial,
+  })
+  .strict();
+
 /** list_tasks takes no arguments. */
 export const listTasksArgsSchema = z.object({}).strict();
+
+/** The dialog's "When" words to read into a schedule (crons/parse). */
+export const parseCronWordsSchema = z.object({
+  text: z.string().trim().min(1).max(200),
+  timezone: z.string().min(1).max(TIMEZONE_MAX_LENGTH),
+});

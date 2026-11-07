@@ -28,8 +28,8 @@ export const AgentAvatarEditor = ({
     name: string;
     imageUrl?: string | null;
     /** Attached channel presences. A channel carrying a provider-served
-     * `settingsUrl` gets a deep-link menu item — the only door to things the
-     * provider exposes no API for (Slack's app PROFILE icon). */
+     * `settingsUrl` (opened where the app's PROFILE icon is set) gets a
+     * deep-link menu item. */
     channels?: { provider: string; settingsUrl?: string | null }[];
   };
 }) => {
@@ -57,7 +57,7 @@ export const AgentAvatarEditor = ({
           e.target.value = "";
         }}
       />
-      {agent.imageUrl ? (
+      {agent.imageUrl || settingsChannel ? (
         <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger asChild>
             <button
@@ -71,19 +71,13 @@ export const AgentAvatarEditor = ({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start">
             <DropdownMenuItem onClick={() => inputRef.current?.click()}>
-              <Upload className="size-4" /> Replace image
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              variant="destructive"
-              onClick={() => update.mutate({ agentId: agent.id, file: null })}
-            >
-              <Trash2 className="size-4" /> Remove image
+              <Upload className="size-4" />{" "}
+              {agent.imageUrl ? "Replace image" : "Upload image"}
             </DropdownMenuItem>
             {settingsChannel?.settingsUrl && (
               // The provider shows an app's PROFILE mark (sidebar, search)
-              // from its own settings page, not from per-message icons — and
-              // offers no API to set it. The honest door is a deep link, so
-              // the item renders for any provider that serves one.
+              // from its own settings page, not from per-message icons. The
+              // item renders for any provider that serves that page.
               <DropdownMenuItem asChild>
                 <a
                   href={settingsChannel.settingsUrl}
@@ -105,6 +99,14 @@ export const AgentAvatarEditor = ({
                   })()}{" "}
                   Set as {providerLabel(settingsChannel.provider)} app icon…
                 </a>
+              </DropdownMenuItem>
+            )}
+            {agent.imageUrl && (
+              <DropdownMenuItem
+                variant="destructive"
+                onClick={() => update.mutate({ agentId: agent.id, file: null })}
+              >
+                <Trash2 className="size-4" /> Remove image
               </DropdownMenuItem>
             )}
           </DropdownMenuContent>

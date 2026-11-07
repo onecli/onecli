@@ -8,12 +8,13 @@
 //!   restricts (e.g. a GitHub repo-scoped installation token). Enforcement is
 //!   upstream and transparent to the request path.
 //! * **Request-level** ([`RequestGuard`]) — inspect each request against the
-//!   policy and allow/deny at the gateway (e.g. a Dropbox folder allowlist).
-//!   Used when the provider's credential cannot be scoped.
+//!   policy and allow/deny at the gateway (e.g. a Dropbox or Google Drive
+//!   folder allowlist). Used when the provider's credential cannot be scoped.
+//!   A guard may do I/O (Drive verifies a file's live parent chain upstream).
 //!
 //! To add a provider: implement the matching trait in a submodule and register
 //! it in `request_guard` (request-level, keyed by the provider serving the
-//! host) or `token_scoper` (token-level, keyed by credential type).
+//! host + path — shared hosts like `www.googleapis.com` carry several) or `token_scoper` (token-level, keyed by credential type).
 //!
 //! A third seam, [`ResourceAxis`], is keyed by the policy's own shape rather
 //! than by host or credential type, so scope composition works where neither is
@@ -23,6 +24,7 @@
 
 mod dropbox;
 mod github;
+mod google_drive;
 
 use serde_json::Value;
 use tracing::warn;
@@ -37,21 +39,44 @@ pub struct Denial {
     pub allowed: Vec<String>,
     /// Stable label for telemetry / the red "Blocked" activity row.
     pub rule_name: &'static str,
+    /// Provider-specific guidance appended to the agent-facing message — how
+    /// the scope works and how to make a request that fits it. `None` keeps the
+    /// generic wording.
+    pub hint: Option<&'static str>,
 }
 
-/// Request-level enforcement: pure, synchronous request inspection (no I/O).
-pub trait RequestGuard: Sync {
-    /// Whether the JSON request body must be buffered to evaluate this request.
-    fn needs_body(&self, policy: &Value, host: &str, method: &str, path: &str) -> bool;
-    /// `Some(Denial)` blocks the request; `None` allows it.
-    fn check(
+/// Request-level enforcement: inspect one request against the provider's own
+/// allowlist. May do I/O, but every failure to verify must resolve to a denial
+/// (fail closed).
+///
+/// A guard is also the [`ResourceAxis`] its allowlist is written on. The
+/// dispatcher reads the policy against that axis before any guard runs, so a
+/// guard only ever sees its own non-empty, normalized entries — and a policy
+/// written on ANOTHER axis (a Drive scope on a Dropbox connection, say) is
+/// refused there, once for every provider, instead of reading as
+/// "unrestricted".
+#[async_trait::async_trait]
+pub trait RequestGuard: ResourceAxis {
+    /// Stable label for telemetry / the red "Blocked" activity row.
+    fn rule_name(&self) -> &'static str;
+    /// Provider-specific guidance for [`Denial::hint`].
+    fn hint(&self) -> Option<&'static str> {
+        None
+    }
+    /// Whether the request body must be buffered to evaluate this request.
+    fn needs_body(&self, host: &str, method: &str, path: &str) -> bool;
+    /// `Some(reason)` blocks the request; `None` allows it. `allowed` is
+    /// non-empty and normalized. `path` carries the query string; `headers`
+    /// are post-injection (the credential is present).
+    async fn check(
         &self,
-        policy: &Value,
+        allowed: &[String],
         host: &str,
+        method: &str,
         path: &str,
         headers: &hyper::HeaderMap,
         body: Option<&[u8]>,
-    ) -> Option<Denial>;
+    ) -> Option<String>;
 }
 
 /// Token-level enforcement: mint a scoped credential at refresh time.
@@ -100,13 +125,15 @@ pub trait ResourceAxis: Sync {
 
 static DROPBOX: dropbox::Dropbox = dropbox::Dropbox;
 static GITHUB: github::GithubApp = github::GithubApp;
-static AXES: &[&'static dyn ResourceAxis] = &[&GITHUB, &DROPBOX];
+static GOOGLE_DRIVE: google_drive::GoogleDrive = google_drive::GoogleDrive;
+static AXES: &[&'static dyn ResourceAxis] = &[&GITHUB, &DROPBOX, &GOOGLE_DRIVE];
 
-/// Request-level guard for a provider (resolved from the request host), if it
-/// enforces granular access that way.
+/// Request-level guard for a provider (resolved from the request host + path),
+/// if it enforces granular access that way.
 fn request_guard(provider: &str) -> Option<&'static dyn RequestGuard> {
     match provider {
         "dropbox" => Some(&DROPBOX),
+        "google-drive" => Some(&GOOGLE_DRIVE),
         _ => None,
     }
 }
@@ -120,36 +147,98 @@ fn token_scoper(cred_type: &str) -> Option<&'static dyn TokenScoper> {
     }
 }
 
-/// Resolve the request-level guard for the provider serving `host`. Returns the
-/// port-stripped host (which the guards compare against) alongside the guard.
-fn guard_for_host(host: &str) -> Option<(&str, &'static dyn RequestGuard)> {
+/// Resolve the request-level guard for the provider serving `host` + `path`.
+/// Path-aware because shared hosts (`www.googleapis.com`) carry several
+/// providers — a host-only lookup there names whichever registered first
+/// (Gmail), and Drive's guard would never run. Returns the port-stripped host
+/// (which the guards compare against) alongside the guard.
+fn guard_for_request<'a>(
+    host: &'a str,
+    path: &str,
+) -> Option<(&'a str, &'static dyn RequestGuard)> {
     let host = common::util::strip_port(host);
-    let (provider, _) = apps::provider_for_host(host)?;
+    let (provider, _) = apps::provider_for_host_and_path(host, path)?;
     Some((host, request_guard(provider)?))
 }
 
 /// Whether the request body must be buffered for request-level enforcement.
-/// `false` when there's no policy or the provider has no request-level guard.
+/// `false` when there's no policy, the provider has no request-level guard, or
+/// the guard has no allowlist to check the body against.
 pub fn needs_request_body(policy: Option<&Value>, host: &str, method: &str, path: &str) -> bool {
     let Some(policy) = policy else { return false };
-    let Some((host, guard)) = guard_for_host(host) else {
+    let Some((host, guard)) = guard_for_request(host, path) else {
         return false;
     };
-    guard.needs_body(policy, host, method, path)
+    matches!(guard_scope(policy, guard), GuardScope::Allowed(_))
+        && guard.needs_body(host, method, path)
 }
 
 /// Enforce request-level granular access. `None` = allowed (no policy, no
 /// request-level guard for this provider, or the request is in scope).
-pub fn enforce_request(
+pub async fn enforce_request(
     policy: Option<&Value>,
     host: &str,
+    method: &str,
     path: &str,
     headers: &hyper::HeaderMap,
     body: Option<&[u8]>,
 ) -> Option<Denial> {
     let policy = policy?;
-    let (host, guard) = guard_for_host(host)?;
-    guard.check(policy, host, path, headers, body)
+    let (host, guard) = guard_for_request(host, path)?;
+    let (reason, allowed, hint) = match guard_scope(policy, guard) {
+        GuardScope::Unrestricted => return None,
+        GuardScope::Unenforceable(reason) => (reason, Vec::new(), None),
+        GuardScope::Allowed(allowed) => {
+            let reason = guard
+                .check(&allowed, host, method, path, headers, body)
+                .await?;
+            (reason, allowed, guard.hint())
+        }
+    };
+    Some(Denial {
+        reason,
+        allowed,
+        rule_name: guard.rule_name(),
+        hint,
+    })
+}
+
+/// What a request guard has to enforce under a policy.
+enum GuardScope {
+    /// Not a resource policy (absent axis, `{}`, a behavioral array), or one
+    /// whose entries all name the provider's root: nothing to restrict.
+    Unrestricted,
+    /// The guard's own non-empty, normalized allowlist.
+    Allowed(Vec<String>),
+    /// A policy the guard can't enforce — written on ANOTHER provider's axis,
+    /// or not a list. Reading it as unrestricted would silently drop the
+    /// restriction, so every request is refused instead.
+    Unenforceable(String),
+}
+
+fn guard_scope(policy: &Value, guard: &dyn RequestGuard) -> GuardScope {
+    let Some(axis) = axis_of(policy) else {
+        return GuardScope::Unrestricted;
+    };
+    if axis.key() != guard.key() {
+        return GuardScope::Unenforceable(format!(
+            "`{}` scoping does not apply to this app",
+            axis.key()
+        ));
+    }
+    let Some(entries) = raw_entries(policy, axis) else {
+        return GuardScope::Unenforceable(format!("`{}` must be a list", axis.key()));
+    };
+    let allowed: Vec<String> = entries
+        .iter()
+        .map(|e| guard.normalize(e))
+        .filter(|e| !e.is_empty())
+        .collect();
+    if allowed.is_empty() {
+        GuardScope::Unrestricted
+    } else {
+        GuardScope::Allowed(allowed)
+    }
 }
 
 /// The axis a policy is written on, by its single key. `None` = not a
@@ -331,56 +420,209 @@ mod tests {
         );
     }
 
-    #[test]
-    fn enforce_request_dispatches_to_dropbox_guard() {
+    #[tokio::test]
+    async fn enforce_request_dispatches_to_dropbox_guard() {
         let policy = folder_policy();
         let headers = hyper::HeaderMap::new();
         // In-scope path → allowed.
         assert!(enforce_request(
             Some(&policy),
             "api.dropboxapi.com",
+            "POST",
             "/2/files/get_metadata",
             &headers,
             Some(br#"{"path":"/Marketing/x"}"#),
         )
+        .await
         .is_none());
         // Out-of-scope path → blocked, with the provider's rule label.
         let denial = enforce_request(
             Some(&policy),
             "api.dropboxapi.com",
+            "POST",
             "/2/files/get_metadata",
             &headers,
             Some(br#"{"path":"/Finance/x"}"#),
         )
+        .await
         .expect("out-of-scope path must be denied");
         assert_eq!(denial.rule_name, "Dropbox folder policy");
         assert_eq!(denial.allowed, vec!["/marketing".to_string()]);
     }
 
-    #[test]
-    fn enforce_request_ignores_providers_without_a_request_guard() {
+    #[tokio::test]
+    async fn enforce_request_ignores_providers_without_a_request_guard() {
         // GitHub enforces at the token level, so there is no request-level guard
         // and the gateway never blocks its requests here.
         let policy = serde_json::json!({ "repositories": ["org/a"] });
         assert!(enforce_request(
             Some(&policy),
             "api.github.com",
+            "POST",
             "/repos/org/a/contents/x",
             &hyper::HeaderMap::new(),
             None,
         )
+        .await
         .is_none());
     }
 
+    #[tokio::test]
+    async fn drive_guard_is_resolved_by_path_on_the_shared_google_host() {
+        let policy = json!({ "driveFolders": ["folderA"] });
+        let no_auth = hyper::HeaderMap::new();
+        // Drive paths reach the Drive guard: with no injected credential the
+        // ancestry can't be verified, so it fails closed (no network needed).
+        let denial = enforce_request(
+            Some(&policy),
+            "www.googleapis.com:443",
+            "GET",
+            "/drive/v3/files/abc",
+            &no_auth,
+            None,
+        )
+        .await
+        .expect("drive request without a credential must be denied");
+        assert_eq!(denial.rule_name, "Google Drive folder policy");
+        // Unsupported Drive surfaces are refused before any lookup.
+        assert!(enforce_request(
+            Some(&policy),
+            "www.googleapis.com",
+            "POST",
+            "/batch/drive/v3",
+            &no_auth,
+            Some(b""),
+        )
+        .await
+        .is_some());
+        // Another provider on the same host is not Drive's to judge (and a
+        // host-only lookup would have resolved Gmail for every path).
+        assert!(enforce_request(
+            Some(&policy),
+            "www.googleapis.com",
+            "GET",
+            "/gmail/v1/users/me/messages",
+            &no_auth,
+            None,
+        )
+        .await
+        .is_none());
+        assert!(needs_request_body(
+            Some(&policy),
+            "www.googleapis.com",
+            "POST",
+            "/upload/drive/v3/files?uploadType=multipart"
+        ));
+        assert!(!needs_request_body(
+            Some(&policy),
+            "www.googleapis.com",
+            "POST",
+            "/gmail/v1/users/me/messages/send"
+        ));
+    }
+
+    /// A policy written on ANOTHER provider's axis can't be enforced by a
+    /// request guard, so it must not read as "unrestricted" — for every guarded
+    /// provider alike. (Dropbox once let a `driveFolders` policy through.)
+    #[tokio::test]
+    async fn every_request_guard_refuses_a_policy_on_another_axis() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("authorization", "Bearer t".parse().unwrap());
+        let cases = [
+            // (foreign policy, host, path, body)
+            (
+                json!({ "folders": ["/x"] }),
+                "www.googleapis.com",
+                "/drive/v3/about",
+                None,
+            ),
+            (
+                json!({ "repositories": ["o/r"] }),
+                "www.googleapis.com",
+                "/drive/v3/about",
+                None,
+            ),
+            (
+                json!({ "driveFolders": ["A"] }),
+                "api.dropboxapi.com",
+                "/2/files/get_metadata",
+                Some(br#"{"path":"/x"}"#.as_slice()),
+            ),
+            (
+                json!({ "repositories": ["o/r"] }),
+                "api.dropboxapi.com",
+                "/2/files/get_metadata",
+                Some(br#"{"path":"/x"}"#.as_slice()),
+            ),
+        ];
+        for (policy, host, path, body) in cases {
+            let denial = enforce_request(Some(&policy), host, "POST", path, &headers, body)
+                .await
+                .unwrap_or_else(|| panic!("{policy} on {host} must deny"));
+            let key = policy.as_object().unwrap().keys().next().unwrap();
+            assert!(denial.reason.contains(key.as_str()), "{}", denial.reason);
+            assert!(denial.allowed.is_empty());
+            // Nothing to check a body against → no buffering for it either.
+            assert!(!needs_request_body(Some(&policy), host, "POST", path));
+        }
+        // A non-list value on the guard's own axis is not a scope either.
+        assert!(enforce_request(
+            Some(&json!({ "folders": "/x" })),
+            "api.dropboxapi.com",
+            "POST",
+            "/2/files/get_metadata",
+            &headers,
+            Some(br#"{"path":"/x"}"#),
+        )
+        .await
+        .is_some());
+        // A non-resource object (no axis) and a root-only allowlist restrict
+        // nothing.
+        for policy in [json!({}), json!({ "folders": ["/"] })] {
+            assert!(enforce_request(
+                Some(&policy),
+                "api.dropboxapi.com",
+                "POST",
+                "/2/files/get_metadata",
+                &headers,
+                Some(br#"{"path":"/x"}"#),
+            )
+            .await
+            .is_none());
+        }
+    }
+
     #[test]
-    fn enforce_request_allows_when_no_policy() {
+    fn drive_policies_compose_on_their_own_axis() {
+        assert_eq!(
+            intersect_policies(
+                Some(&json!({ "driveFolders": ["A"] })),
+                Some(&json!({ "driveFolders": ["A/B", "C"] })),
+            ),
+            Some(json!({ "driveFolders": ["A/B"] }))
+        );
+        assert!(denies_everything(Some(&json!({ "driveFolders": [] }))));
+        // Drive and Dropbox axes never overlap.
+        assert!(denies_everything(
+            intersect_policies(
+                Some(&json!({ "driveFolders": ["A"] })),
+                Some(&json!({ "folders": ["/A"] })),
+            )
+            .as_ref()
+        ));
+    }
+
+    #[tokio::test]
+    async fn enforce_request_allows_when_no_policy() {
         assert!(enforce_request(
             None,
             "api.dropboxapi.com",
+            "POST",
             "/2/files/get_metadata",
             &hyper::HeaderMap::new(),
             Some(br#"{"path":"/Finance/x"}"#),
         )
+        .await
         .is_none());
     }
 

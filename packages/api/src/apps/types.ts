@@ -1,20 +1,82 @@
+import type { OAuthStatePayload } from "../lib/oauth-state";
+
+/**
+ * Vendor OAuth client groups: apps from one vendor that authenticate through
+ * the same OAuth client (one Google Cloud OAuth client serves Gmail, Drive,
+ * Calendar, …). Used as the AppConfig `provider` key for shared configs.
+ */
+export const OAUTH_CLIENT_GROUP_IDS = [
+  "google",
+  "atlassian",
+  "microsoft",
+] as const;
+export type OAuthClientGroupId = (typeof OAUTH_CLIENT_GROUP_IDS)[number];
+
 export interface OAuthBuildAuthUrlParams {
   appCredentials: Record<string, string>;
   redirectUri: string;
   scopes: string[];
   state: string;
+  /** The validated access level the user picked (see `OAuthAccessLevels`).
+   *  Always set for an app that declares `accessLevels`, never otherwise. */
+  accessLevel?: string;
 }
 
 export interface OAuthExchangeCodeParams {
   appCredentials: Record<string, string>;
   callbackParams: Record<string, string>;
   redirectUri: string;
+  /** The access level the authorize leg used, read back from the signed
+   *  OAuth state (never from the unauthenticated callback request). */
+  accessLevel?: string;
+  /** The callback's state, already verified by the route. Present on every
+   *  callback the routes complete; optional so direct exchanges (tests) can
+   *  omit it. */
+  state?: OAuthStatePayload;
+  /** The raw `oauth_state` cookie this browser carries for the callback path,
+   *  so a multi-leg flow can bind a later leg to the browser that ran the
+   *  earlier one. */
+  stateCookie?: string;
+}
+
+/** One access level a provider offers on its consent screen. */
+export interface OAuthAccessLevelOption {
+  /** Value passed to `buildAuthUrl` / `exchangeCode` (e.g. Attio's `token_level`). */
+  value: string;
+  /** User-facing label, in the provider's own terminology. */
+  label: string;
+  /** One-line explanation shown with the option in the connect window. */
+  description: string;
+}
+
+/**
+ * Providers that issue tokens at more than one level (e.g. Attio's workspace-
+ * vs user-level tokens) declare the choices here. The connect window shows a
+ * picker, the authorize route validates the choice against `options`, and the
+ * signed OAuth state carries it to the callback.
+ */
+export interface OAuthAccessLevels {
+  label: string;
+  options: OAuthAccessLevelOption[];
+  /** Must be one of `options[].value`; used when the request names none. */
+  defaultValue: string;
 }
 
 export interface OAuthExchangeResult {
   credentials: Record<string, unknown>;
   scopes: string[];
   metadata?: Record<string, unknown>;
+}
+
+/**
+ * What `continueCallback` returns when the provider needs one more round trip
+ * before anything can be stored (e.g. GitHub App ownership proof). The route
+ * stores nothing: it sets `state` as this browser's `oauth_state` cookie and
+ * redirects to `continueAt`, whose return lands on the same callback path.
+ */
+export interface OAuthContinuation {
+  continueAt: string;
+  state: string;
 }
 
 /** Human-friendly description of an OAuth permission/scope. */
@@ -55,14 +117,17 @@ export type ConnectionMethod =
   | {
       type: "oauth";
       defaultScopes?: string[];
-      /** Human-friendly permission descriptions. No runtime reader since the
-       *  app-page permissions panel was removed — kept as source data for the
-       *  docs permission tables (the sync-app-docs skill reads it). */
+      /** Human-friendly permission descriptions. Names what a connection's
+       *  grant lacks (`missing-permissions.ts`: only requested scopes are ever
+       *  flagged) and feeds the docs permission tables (the sync-app-docs skill
+       *  reads it). */
       permissions?: OAuthPermission[];
       /** Providers that return the token in a URL fragment (#token=...) instead
        *  of a query parameter. The bridge page extracts the named param from the
        *  fragment and resubmits it as a query parameter for the server. */
       fragmentCallback?: { paramName: string };
+      /** Token levels the user may choose between at connect time. */
+      accessLevels?: OAuthAccessLevels;
       /** May be async: the registry graph is client-reachable, so a definition
        *  needing node builtins (PKCE/JWT crypto) must load them via a lazy
        *  `await import("node:crypto")` instead of a top-level import. */
@@ -72,23 +137,22 @@ export type ConnectionMethod =
       exchangeCode: (
         params: OAuthExchangeCodeParams,
       ) => Promise<OAuthExchangeResult>;
+      /** Optional step the callback runs before `exchangeCode`. A continuation
+       *  means "not yet": the browser goes on one more provider round trip
+       *  that returns to the same callback, and nothing is stored. */
+      continueCallback?: (
+        params: OAuthExchangeCodeParams,
+      ) => Promise<OAuthContinuation | null>;
+      /** Callbacks the provider sends WITHOUT the `state` it was given (a
+       *  GitHub App setup redirect after "Configure"). Only these may read
+       *  the state from this browser's `oauth_state` cookie instead; every
+       *  other callback must return its state, or a code from someone else's
+       *  sign-in could ride the cookie into this browser's org. */
+      acceptsCookieOnlyState?: (params: Record<string, string>) => boolean;
     }
   | {
       type: "api_key";
-      fields: {
-        name: string;
-        label: string;
-        description?: string;
-        placeholder: string;
-        /** When true, the field is not required. */
-        optional?: boolean;
-        /** When false, the field is shown as plain text instead of masked. */
-        secret?: boolean;
-        /** Optional clickable link shown under the field (e.g. where to create the key). */
-        helpUrl?: string;
-        /** Label for the help link; defaults to "Learn more". */
-        helpLabel?: string;
-      }[];
+      fields: DirectConnectField[];
       /** Resolve metadata for the connection (e.g., org name, dashboard URL). */
       resolveMetadata?: (
         fields: Record<string, string>,
@@ -96,17 +160,7 @@ export type ConnectionMethod =
     }
   | {
       type: "credentials_import";
-      fields: {
-        name: string;
-        label: string;
-        description?: string;
-        placeholder: string;
-        secret?: boolean;
-        /** When true, the field is not required. */
-        optional?: boolean;
-        /** When set, field is only shown when this group is active (e.g., "service_account"). */
-        group?: string;
-      }[];
+      fields: ConnectFormField[];
       exchangeCredentials: (
         fields: Record<string, string>,
       ) => Promise<OAuthExchangeResult>;
@@ -115,23 +169,109 @@ export type ConnectionMethod =
        *  them first — before `exchangeCredentials` runs. */
       serverFields?: ServerField[];
       /** Optional file import to auto-fill fields from a JSON file. */
-      fileImport?: {
-        /** Button label (e.g., "Import from credentials file"). */
-        label: string;
-        /** File input accept filter (e.g., ".json,application/json"). */
-        accept: string;
-        /** Maps JSON keys in the file to field names in the form. */
-        keyMap: Record<string, string>;
-      };
+      fileImport?: ConnectFileImport;
     };
+
+/** A credentials file the connect form can read to fill its fields. */
+export interface ConnectFileImport {
+  /** Button label (e.g., "Import from credentials file"). */
+  label: string;
+  /** File input accept filter (e.g., ".json,application/json"). */
+  accept: string;
+  /** Maps JSON keys in the file to field names in the form. */
+  keyMap: Record<string, string>;
+}
+
+/** A field of a direct-connect form (`api_key` or `credentials_import`). */
+export interface DirectConnectField {
+  name: string;
+  label: string;
+  description?: string;
+  placeholder: string;
+  /** When true, the field is not required. */
+  optional?: boolean;
+  /** Masked when true, plain text when false. Unset: masked for `api_key`,
+   *  plain text for `credentials_import`. */
+  secret?: boolean;
+  /** Optional clickable link shown under the field (e.g. where to create the key). */
+  helpUrl?: string;
+  /** Label for the help link; defaults to "Learn more". */
+  helpLabel?: string;
+  /** Fixed choices rendered as a dropdown instead of a text input (e.g. a
+   *  region). The server side (`resolveMetadata` / `exchangeCredentials`)
+   *  must still validate the value: a client can submit anything. */
+  options?: OAuthConfigFieldOption[];
+  /** Pre-selected choice for an `options` field; must be one of its
+   *  values. Submitted even if the user never opens the dropdown. */
+  defaultValue?: string;
+  /** Shown (and submitted) only while another field holds this value, e.g.
+   *  a CA certificate only when the server certificate is verified. */
+  showWhen?: { field: string; value: string };
+  /** A text file the user picks instead of pasting (a PEM certificate):
+   *  rendered as an upload button that reads the file into the value. */
+  fileUpload?: { accept: string; label: string };
+}
+
+/** Whether a field is on the form for these values: always, unless its
+ *  `showWhen` names another field's value that is not set. The form renders
+ *  and submits only these, and the server stores only these. */
+export const isConnectFieldShown = (
+  field: Pick<DirectConnectField, "showWhen">,
+  values: Record<string, string>,
+): boolean =>
+  !field.showWhen || values[field.showWhen.field] === field.showWhen.value;
+
+/** Any direct-connect field as the connect form renders it: a
+ *  `credentials_import` field may belong to a group of alternatives. */
+export interface ConnectFormField extends DirectConnectField {
+  /** When set, field is only shown when this group is active (e.g., "service_account"). */
+  group?: string;
+}
+
+export interface OAuthConfigFieldOption {
+  /** The stored value, which is what the server-side code switches on. */
+  value: string;
+  /** What the user sees on the toggle. */
+  label: string;
+  /** Shown under the control, as a warning, only while this option is
+   *  chosen (e.g. what "No encryption" exposes). */
+  warning?: string;
+}
 
 export interface OAuthConfigField {
   name: string;
   label: string;
   description?: string;
-  placeholder: string;
+  /** Text fields only; ignored when `options` is set. */
+  placeholder?: string;
   /** If true, stored encrypted in AppConfig.credentials. Otherwise in AppConfig.settings. */
   secret?: boolean;
+  /** Fixed choices rendered as a segmented control instead of a text input.
+   *  The stored value is always one of these `value`s, so whatever consumes
+   *  the setting can switch on them without a free-text fallback. */
+  options?: OAuthConfigFieldOption[];
+  /** Pre-selected choice for an `options` field; must be one of its values.
+   *  Submitted with the config even if the user never touches the control. */
+  defaultValue?: string;
+}
+
+/** A database wire protocol the gateway's database front door speaks. */
+export type DatabaseEngine = "postgres";
+
+/**
+ * A short note shown in the connect window above the Connect button, for a
+ * provider-side prerequisite the user should know before they're sent off
+ * (e.g. "an admin must install the app first"). Each part renders on its own
+ * line: `text` is the prerequisite, `fallback` is what someone who can't meet
+ * it should do instead, and `link` opens our docs in a new tab.
+ */
+export interface ConnectNote {
+  text: string;
+  fallback?: string;
+  link?: {
+    url: string;
+    label: string;
+  };
 }
 
 export interface AppDefinition {
@@ -149,6 +289,31 @@ export interface AppDefinition {
   additionalMethods?: ConnectionMethod[];
   /** Custom hint for the connection label field (e.g. 'e.g. "staging", "my-org"'). */
   labelHint?: string;
+  /**
+   * The provider's public API reference (https only). Rendered into a hosted
+   * agent's connected-apps section so its first call lands on the real,
+   * documented API rather than a guessed one. Curate only a link verified to
+   * resolve: an agent follows it.
+   */
+  apiDocsUrl?: string;
+  /**
+   * A machine-readable API spec (OpenAPI, https only), for an API the docs
+   * page above does not fully cover. Rendered beside the docs link so an
+   * agent reads exact parameter names and formats instead of guessing them.
+   * Curate only a link verified to resolve.
+   */
+  apiSpecUrl?: string;
+  connectNote?: ConnectNote;
+  /** A database app: agents reach it through the gateway's database front
+   *  door with a database client, never over HTTP. The engine names the
+   *  wire protocol the front door speaks for it. */
+  database?: { engine: DatabaseEngine };
+  /** The app's OneCLI setup guide, `https://onecli.sh/docs/integrations/<id>`.
+   *  The one docs link every connect surface shows, rendered as "Follow the
+   *  {app} setup guide". Set it only once the page exists; a link to a page
+   *  that doesn't exist sends a user mid-setup to a 404. Field-level `helpUrl`
+   *  stays for a pointer to the vendor's own docs about one value. */
+  setupGuideUrl?: string;
   /** Credential stubs for provisioners to write so MCP servers can boot. */
   credentialStubs?: {
     /** Full destination path (e.g., "~/.config/gcloud/application_default_credentials.json"). */
@@ -169,5 +334,11 @@ export interface AppDefinition {
     envDefaults?: Record<string, string>;
     /** Short hint shown above the credential fields (e.g., "Use credentials from a GitHub OAuth App"). */
     hint?: string;
+    /**
+     * Vendor OAuth client group (e.g. "google"). Apps in one group share one
+     * OAuth client: a config saved for any member is stored under the group
+     * key and serves every member app (see `apps/oauth/groups.ts`).
+     */
+    group?: OAuthClientGroupId;
   };
 }

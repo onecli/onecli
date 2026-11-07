@@ -1,4 +1,6 @@
 import type { ChannelPresenceStatus } from "./channels";
+import type { UnlistedChoice } from "@onecli/api/validations/grants";
+import type { MissingPermission } from "@onecli/api/apps/missing-permissions";
 
 export type AgentKind = "byo" | "hosted";
 
@@ -7,9 +9,9 @@ export interface AgentChannelRef {
   /** The app's handle in the workspace (Slack: "donna"), where known. */
   identityName: string | null;
   externalId: string;
-  /** The provider's settings page for this presence (where manual-only
-   * things like Slack's app profile icon live), or null. Optional: an older
-   * API answers without it. */
+  /** The provider's settings page for this presence, opened where the app's
+   * profile icon is set, or null. Optional: an older API answers without
+   * it. */
   settingsUrl?: string | null;
   /** Presence lifecycle — `pending_setup` until the install completes.
    * Optional: an older API answers without it, and absent must read as
@@ -21,7 +23,9 @@ export interface Agent {
   id: string;
   name: string;
   identifier: string;
-  accessToken: string;
+  /** BYO agents only: a hosted agent's gateway token never leaves the
+   * platform, so the API omits it. */
+  accessToken?: string;
   /** "byo" (bring-your-own: laptops, CI) | "hosted" (a platform-run sandbox). */
   kind: AgentKind;
   createdAt: string;
@@ -51,6 +55,25 @@ export interface CreatedAgent {
   /** LLM keys attached automatically at creation. Empty = the workspace has
    * no key yet, and the agent cannot run until one is added. */
   llmKeys: string[];
+}
+
+/**
+ * `GET /v1/agents/:id/sandbox`: the machine's lifecycle status. The
+ * vocabulary is `SANDBOX_STATUSES` in @onecli/api's sandbox-service (a
+ * server module the client bundle must not import); `null` = no machine (a
+ * BYO agent) or a status this client does not know.
+ */
+export type SandboxStatus =
+  | "unprovisioned"
+  | "starting"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "failed"
+  | "maintenance";
+
+export interface AgentSandbox {
+  status: SandboxStatus | null;
 }
 
 export interface AgentDetail {
@@ -83,6 +106,21 @@ export interface DropboxFolder {
   pathDisplay: string;
 }
 
+/** Mirrors packages/api/src/ee/services/google-drive-folder-service.ts. */
+export interface GoogleDriveFolder {
+  id: string;
+  name: string;
+  /** `shared` = a folder someone else shared with the account ("Shared with
+   * me"), listed at the top level. */
+  kind: "folder" | "sharedDrive" | "shared";
+  /** Direct children; null when the count couldn't be taken. */
+  subfolderCount: number | null;
+  fileCount: number | null;
+  /** Only the first page of children was counted: the counts are lower
+   * bounds (show "<n>+"). */
+  countCapped: boolean;
+}
+
 export interface Secret {
   id: string;
   name: string;
@@ -96,9 +134,10 @@ export interface Secret {
   metadata: Record<string, unknown> | null;
   scope: string | null;
   createdAt: string;
-  /** Latest injected upstream call failed with a status that indicts the key
-   * itself (401/403 auth, 402 billing, 429 limits). Cleared once a newer call
-   * lands with any other status. LLM keys only. */
+  /** Latest injected inference or model-list call to the key's host failed
+   * with a status that indicts the key itself (401/403 auth, 402 billing,
+   * 429 limits). Cleared once a newer such call lands with any other status,
+   * and never older than the key's last write. LLM keys only. */
   lastError: { status: number; at: string } | null;
 }
 
@@ -110,10 +149,17 @@ export interface CreatedSecret {
   pathPattern: string | null;
   createdAt: string;
   preview: string;
-  /** Agents the new workspace secret was auto-attached to: every agent for a
-   * custom secret, only the agents that could reach no LLM key at all for an
-   * LLM key. Always empty for an org-level secret. */
+  /** Agents the new workspace LLM key was auto-attached to: only the agents
+   * that could reach no LLM key at all. Always empty for a custom secret
+   * (the user picks its agents) and for an org-level secret. */
   attachedAgents: string[];
+}
+
+/** What a SecretDialog save produced: the secret it CREATED (the dialog's
+ * `onSaved` argument), so the caller can act on exactly it. */
+export interface SavedSecret {
+  id: string;
+  name: string;
 }
 
 export interface Connection {
@@ -125,6 +171,13 @@ export interface Connection {
   scope: string | null;
   metadata: unknown;
   connectedAt: string;
+  /** Set when the provider refused the saved login: reconnect to clear it. */
+  reauthRequiredAt?: string | null;
+  /** Requested permissions the user didn't grant on the consent screen.
+   * Reconnecting and allowing them clears it. */
+  missingPermissions?: MissingPermission[];
+  /** Built on another connection's grant (a shared GitHub App installation). */
+  sourceConnectionId?: string | null;
 }
 
 // A workspace row as returned by the workspace CRUD routes (rename / create).
@@ -133,6 +186,8 @@ export interface Workspace {
   name: string | null;
   slug: string | null;
   createdAt: string;
+  /** IANA zone the workspace's hosted agents keep time in; null = platform default. */
+  timezone: string | null;
 }
 
 // Workspace access bindings (the human sharing surface for a workspace). `role` is
@@ -288,14 +343,13 @@ export interface ResourceCounts {
   apps: number;
   llms: number;
   secrets: number;
-  /** How many of the workspace's agents are working in the background right
-   * now (step 13's held-awake signal). Optional for older APIs; absent = 0. */
-  agentsWorkingInBackground?: number;
 }
 
 export interface CreateAgentInput {
   name: string;
-  identifier: string;
+  /** Required for a BYO agent (the handle a machine is pinned to); a hosted
+   *  agent's is derived server-side from the name and follows renames. */
+  identifier?: string;
   /** Defaults to "byo" server-side. */
   kind?: AgentKind;
   /** Hosted only; server defaults it to "jcode". */
@@ -457,8 +511,8 @@ export interface PolicyRuleV2 {
   priority: number;
   enabled: boolean;
   isDefault: boolean;
-  /** Generation-stable identity — the key for diffing draft vs published
-   * (the row `id` regenerates on every publish). Empty on a virtual default. */
+  /** Generation-stable identity (the row `id` regenerates on every publish).
+   * Empty on a virtual default. */
   logicalId: string;
   source: PolicyRuleSource;
   name: string;
@@ -473,27 +527,15 @@ export interface PolicyRuleV2 {
   createdAt: string;
 }
 
-export interface PublishResult {
-  generation: number;
-  ruleCount: number;
-}
-
-/** The scope's most recent publish. `appliedBy` null = a system publish (the
- * boot seeder); a null response = never published. */
-export interface LastPublish {
-  generation: number;
-  ruleCount: number;
-  appliedAt: string;
-  appliedBy: { name: string | null; email: string } | null;
-}
-
 // ── Attach-model grants (plans/project-attach-model.md, step 2) ─────────────
-// Hand-mirrored from packages/api/src/services/grants-service.ts and
-// grants-summary-service.ts.
+// Hand-mirrored from packages/api/src/services/grants-service.ts.
 
 /** A grant's session policy ("Resources"): which repositories/folders the
  * connection's injected credential may reach. One strict axis per provider. */
-export type GrantResources = { repositories: string[] } | { folders: string[] };
+export type GrantResources =
+  | { repositories: string[] }
+  | { folders: string[] }
+  | { driveFolders: string[] };
 
 export interface AgentGrantConnection {
   connectionId: string;
@@ -503,6 +545,9 @@ export interface AgentGrantConnection {
   access: "full" | "custom";
   allow: string[];
   ask: string[];
+  /** Requests the catalog does not describe: GET/HEAD and the rest. */
+  otherReads: UnlistedChoice;
+  otherWrites: UnlistedChoice;
   /** Null = unrestricted. */
   resources: GrantResources | null;
 }
@@ -522,6 +567,23 @@ export interface AgentGrants {
   secrets: AgentGrantSecret[];
 }
 
+/** One agent's standing on one secret: a row of the custom connection's
+ * "choose agents" window (`GET /v1/secrets/:id/agents`). Hand-mirrored from
+ * grants-service.ts. */
+export interface SecretAgentAccessEntry {
+  agentId: string;
+  name: string;
+  /** A workspace grant (the switch's own state): detachable. */
+  granted: boolean;
+  /** Injected by an ORG rule with no workspace grant: on, and locked. */
+  orgGranted: boolean;
+}
+
+export interface SecretAgentAccess {
+  secretId: string;
+  agents: SecretAgentAccessEntry[];
+}
+
 export interface ConnectionGrants {
   connectionId: string;
   agents: {
@@ -529,38 +591,37 @@ export interface ConnectionGrants {
     access: "full" | "custom";
     allow: string[];
     ask: string[];
+    otherReads: UnlistedChoice;
+    otherWrites: UnlistedChoice;
+    /** Null = unrestricted. */
+    resources: GrantResources | null;
   }[];
 }
+
+/** What a customized grant does with requests its catalog does not
+ * describe ("All other reads" / "All other writes"). */
+export type { UnlistedChoice };
 
 /** `resources` is tri-state: ABSENT = preserve what the stack carries, NULL =
  * clear, OBJECT = set (server-validated per provider + edition). */
 export type ConnectionGrantInput =
   | { access: "full"; resources?: GrantResources | null }
+  /** The attach toggles: the server writes the product default for the
+   * provider (`defaultConnectionGrant`: read tools allowed, writes needing
+   * approval, requests outside the tool list needing approval unless the
+   * catalog was checked safe for reads; full access for an app with no tool
+   * list). */
+  | { access: "default"; resources?: GrantResources | null }
   | {
       access: "custom";
       allow: string[];
       ask: string[];
+      /** Absent = keep what the grant says (the provider's default on a
+       * first customization: needs approval; never for AWS). */
+      otherReads?: UnlistedChoice;
+      otherWrites?: UnlistedChoice;
       resources?: GrantResources | null;
     };
-
-export type GrantsSummaryEntry =
-  | {
-      kind: "app";
-      provider: string;
-      connectionId: string;
-      label: string | null;
-    }
-  | { kind: "secret" | "llm"; id: string; name: string };
-
-export interface AgentGrantsSummary {
-  mode: "all" | "grants";
-  entries: GrantsSummaryEntry[];
-  total: number;
-}
-
-export interface AgentWithGrantsSummary extends Agent {
-  grantsSummary: AgentGrantsSummary;
-}
 
 /** The current organization (`GET /v1/org`). `byoLegacy` is the org's
  * creation world on cloud:
@@ -575,6 +636,12 @@ export interface OrgInfo {
   slug: string;
   byoLegacy: boolean;
   byoEnabled: boolean;
+}
+
+/** `GET /v1/org/membership`: whether the caller is an org admin (always true
+ * where roles aren't enforced). Display only; admin routes re-check. */
+export interface OrgMembership {
+  isAdmin: boolean;
 }
 
 /** Runtime instance metadata (`GET /v1/instance`) — the browser's only
@@ -615,6 +682,14 @@ export interface InstanceInfo {
     /** Public SSH port. Optional: an older API answers without it (assume
      *  22). Default 22; self-host a high port. */
     port?: number;
+  };
+  /**
+   * Sandbox previews: present only when this deployment serves private
+   * preview links for ports on an agent's computer. Absent (an older API, or
+   * previews off) means the rail hides the agent's Ports section.
+   */
+  previews?: {
+    domain: string;
   };
 }
 
@@ -671,6 +746,8 @@ export type ConversationSource =
   | "slack"
   | "cron"
   | "watch"
+  | "eval"
+  | "memory_review"
   | "greeting";
 
 export interface Conversation {
@@ -709,6 +786,10 @@ export interface TurnUsage {
   inputTokens: number;
   outputTokens: number;
   cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
+  /** The prompt the call carried, normalized by the harness for its
+   *  provider's cache accounting; absent when it could not tell. */
+  promptTokens?: number;
 }
 
 /** OUR effort scale — the harness adapter translates it (§3.5). */
@@ -791,11 +872,11 @@ export interface Turn {
   error: string | null;
   /**
    * A machine-readable reason beside `error`, set only when the UI must do
-   * more than print the sentence: `"no_model_key"` / `"model_provider_error"`
-   * attach the Models-page fix link, and the lifecycle codes render as a
-   * quiet notice instead of the red box — none of which can be decided by
-   * matching on prose. The full vocabulary is TURN_ERROR_CODES in
-   * @onecli/api's conversation validations.
+   * more than print the sentence: the key codes (`"no_model_key"`,
+   * `"model_provider_error"`, `"model_key_not_attached"`, ...) attach the
+   * matching Models-page fix, which cannot be decided by matching on prose.
+   * The full vocabulary is TURN_ERROR_CODES in @onecli/api's conversation
+   * validations.
    */
   errorCode: string | null;
   usage: TurnUsage | null;
@@ -824,10 +905,29 @@ export type TurnEventKind =
   | "turn.done"
   | "error";
 
+/**
+ * Kinds that reach the live stream but never become rows: the streamed
+ * deltas, `message.joined`, the live pickup signal for a mid-run
+ * follow-up (its row flips to `joined` instead; the event is what tells an
+ * open tab to refetch now), and `message.sent_now`, the answer
+ * to a SEND NOW under that follow-up.
+ */
+export type LiveOnlyTurnEventKind =
+  | "text.delta"
+  | "thinking.delta"
+  | "message.joined"
+  | "message.sent_now";
+
+/** `POST /v1/turns/:id/send-now`: accepted; the outcome arrives on the
+ *  stream as `message.sent_now`. */
+export interface SendNowResult {
+  requested: true;
+}
+
 export interface TurnEvent {
   seq: number;
   turnId: string;
-  type: TurnEventKind | "text.delta" | "thinking.delta";
+  type: TurnEventKind | LiveOnlyTurnEventKind;
   payload: Record<string, unknown>;
 }
 

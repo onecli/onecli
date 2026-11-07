@@ -4,6 +4,7 @@
  * remote control plane by changing one env var, which is what keeps "deploy
  * elsewhere later" a config change rather than a re-architecture.
  */
+import { hostname } from "node:os";
 
 export interface SandboxLimits {
   memoryMb: number;
@@ -16,6 +17,10 @@ export interface RunnerConfig {
   token: string;
   controlPlaneUrl: string;
   name: string;
+  /** This process's name as one copy of the runner (its hostname by
+   * default): how the control plane tells the copies apart in its records
+   * and logs. */
+  replicaName: string;
   /** Backend id — CONFIG, never detection. The composition root maps it. */
   backend: string;
   agentImage: string;
@@ -26,6 +31,12 @@ export interface RunnerConfig {
   wsPort: number;
   /** How a sandbox addresses this runner — a container-network name. */
   advertisedHost: string;
+  /**
+   * The port sandboxes dial (`RUNNER_ADVERTISED_PORT`), defaulting to
+   * `wsPort`. Differs only when the copies sit behind a balancer whose
+   * front port is not their own (several copies on one host).
+   */
+  advertisedPort: number;
   maxSandboxes: number;
   limits: SandboxLimits;
   reconcileSeconds: number;
@@ -46,30 +57,34 @@ export interface RunnerConfig {
   /** Minimum age before a stale-label object may be reaped. */
   orphanGraceSeconds: number;
   /**
-   * The `cloud` backend's remote endpoint + shared service secret. No
-   * defaults, and required only when
-   * RUNNER_BACKEND=cloud — every other backend must not even be asked to
-   * carry them. Checked at boot so a missing value is one clear line, not a
-   * stream of 401s.
+   * The supervisor-session signing keyring (`RUNNER_SESSION_KEY`, raw:
+   * `kid.secret[,kid.secret…]` or a bare secret), parsed by the composition
+   * root. Null = resumption off: a runner restart severs every supervisor
+   * channel, as before the feature. Optional on purpose, so the key can
+   * deploy ahead of (or be rolled back after) the runner that uses it.
    */
-  sandboxManagerUrl: string | null;
-  sandboxManagerToken: string | null;
+  sessionKey: string | null;
   /**
-   * Ceiling on waiting for the backend to ACCEPT a park (never the archive
-   * itself, which completes backend-side): bounds the predecessor
-   * sandbox's termination grace plus slack.
+   * Sandbox ports (plans/sandbox-ports.md §11.3): the internal stream API the
+   * preview relay dials. Null = not served (any deployment that runs no
+   * relay). Enabled only when BOTH the port and a ≥32-char token are set,
+   * so a half-configured runner never opens an unauthenticated door.
+   * `advertisedUrl` is where the relay reaches this copy.
    */
-  cloudParkWaitSeconds: number;
+  portApi: {
+    port: number;
+    token: string;
+    host: string;
+    advertisedUrl: string;
+  } | null;
   /**
-   * Ceiling on waking a home: a wake may pay a still-finishing park, fresh
-   * capacity coming up, and a full restore.
+   * Exempt loopback (`localhost,127.0.0.1,::1`) from the sandbox's proxy
+   * env, so an agent's `curl localhost` reaches its own service instead of
+   * the gateway. On by default; only a harness that deliberately routes
+   * loopback THROUGH the gateway (the hosted e2e's stub upstream lives on
+   * the host's 127.0.0.1) turns it off.
    */
-  cloudWakeWaitSeconds: number;
-  /**
-   * How long a create watches the new sandbox for an image-pull refusal
-   * (the remote analogue of Docker's synchronous pull failure).
-   */
-  cloudImageWaitSeconds: number;
+  noProxyLoopback: boolean;
   /**
    * How many sandbox STARTS may execute concurrently. Default 1
    * keeps backend-touching work globally serialized — docker operations on
@@ -82,6 +97,35 @@ export interface RunnerConfig {
    * as a spurious START (the storm feedback loop).
    */
   lifecycleConcurrency: number;
+  /**
+   * The `kubernetes` backend's settings. Every address is a Service name in
+   * the release namespace (the chart wires them), and the sandbox namespace
+   * is where the Jobs/PVCs/Secrets land. Only read (and only validated) when
+   * RUNNER_BACKEND=kubernetes, which is why it is optional on the type: the
+   * docker and cloud arms, and every test fixture for them, never carry it.
+   */
+  kube?: {
+    namespace: string;
+    controlNamespace: string | null;
+    gatewayService: string;
+    gatewayPort: number;
+    /** The hostname sandboxes address the gateway by. MUST equal the host
+     * part of the api's ONECLI_AGENT_PROXY_ADDRESS, since that is the name
+     * inside every HTTPS_PROXY the control plane hands out. */
+    gatewayHost: string;
+    runnerService: string;
+    apiService: string;
+    apiPort: number;
+    storageClass: string | null;
+    homeSize: string;
+    /** Per-pod cap on node-local scratch (`ephemeral-storage` limit);
+     * null leaves it to the namespace's LimitRange, if any. */
+    ephemeralStorageLimit: string | null;
+    nodeSelector: Record<string, string>;
+    tolerations: unknown[];
+    runtimeClassName: string | null;
+    imagePullSecrets: string[];
+  };
 }
 
 const int = (raw: string | undefined, fallback: number): number => {
@@ -95,6 +139,98 @@ const bool = (raw: string | undefined, fallback: boolean): boolean =>
   raw === undefined || raw === "" ? fallback : raw !== "false" && raw !== "0";
 
 export class ConfigError extends Error {}
+
+/** `key=value,key2=value2` → a map; empty input → empty map. */
+const parseKeyValues = (raw: string | undefined): Record<string, string> =>
+  Object.fromEntries(
+    (raw ?? "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0)
+      .map((entry) => {
+        const index = entry.indexOf("=");
+        return index === -1
+          ? [entry, ""]
+          : [entry.slice(0, index), entry.slice(index + 1)];
+      }),
+  );
+
+/** A JSON array of toleration objects, or empty. Malformed input is a
+ * configuration error, never silently ignored. */
+const parseTolerations = (raw: string | undefined): unknown[] => {
+  if (!raw?.trim()) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new ConfigError("RUNNER_KUBE_TOLERATIONS must be a JSON array.");
+  }
+  if (!Array.isArray(parsed)) {
+    throw new ConfigError("RUNNER_KUBE_TOLERATIONS must be a JSON array.");
+  }
+  return parsed;
+};
+
+const list = (raw: string | undefined): string[] =>
+  (raw ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+
+/** A bare host: an IPv4/IPv6 address or a DNS name, nothing URL-shaped. */
+const BARE_HOST = /^(?:[A-Za-z0-9.-]{1,253}|\[?[0-9A-Fa-f:]{2,45}\]?)$/;
+/** Bind addresses that mean "every interface": not an address to dial. */
+const WILDCARD_HOSTS = new Set(["0.0.0.0", "::", "[::]"]);
+
+/** RUNNER_PORT_API_PORT + RUNNER_PORT_API_TOKEN, both or neither. The bind
+ * address defaults to loopback: on a Docker host a sandbox can reach the
+ * host's interfaces, so listening everywhere must be an explicit choice
+ * (the cluster deployment sets it, fenced by a NetworkPolicy).
+ *
+ * `advertisedUrl` is where the preview relay reaches THIS copy (each copy
+ * registers it; the relay dials the copy holding a sandbox's socket). A
+ * specific bind address announces itself; a wildcard bind must name the
+ * address it is reachable at (`RUNNER_PORT_API_ADVERTISED_HOST`, the pod's
+ * own address in the cluster). */
+const portApiConfig = (
+  env: NodeJS.ProcessEnv,
+): {
+  port: number;
+  token: string;
+  host: string;
+  advertisedUrl: string;
+} | null => {
+  const rawPort = env.RUNNER_PORT_API_PORT?.trim();
+  const token = env.RUNNER_PORT_API_TOKEN?.trim() ?? "";
+  if (!rawPort && !token) return null;
+  const port = Number(rawPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new ConfigError(
+      "RUNNER_PORT_API_PORT must be a TCP port when the port API is enabled.",
+    );
+  }
+  if (token.length < 32) {
+    throw new ConfigError(
+      "RUNNER_PORT_API_TOKEN must be at least 32 characters.",
+    );
+  }
+  const host = env.RUNNER_PORT_API_HOST?.trim() || "127.0.0.1";
+  const announced =
+    env.RUNNER_PORT_API_ADVERTISED_HOST?.trim() ||
+    (WILDCARD_HOSTS.has(host) ? "" : host);
+  if (!announced) {
+    throw new ConfigError(
+      "RUNNER_PORT_API_ADVERTISED_HOST must name this runner's reachable " +
+        "address when the port API listens on every interface.",
+    );
+  }
+  if (!BARE_HOST.test(announced) || WILDCARD_HOSTS.has(announced)) {
+    throw new ConfigError(
+      "RUNNER_PORT_API_ADVERTISED_HOST must be a bare host or IP address.",
+    );
+  }
+  return { port, token, host, advertisedUrl: `http://${announced}:${port}` };
+};
 
 export const loadConfig = (
   env: NodeJS.ProcessEnv = process.env,
@@ -114,26 +250,30 @@ export const loadConfig = (
   }
 
   const backend = env.RUNNER_BACKEND ?? "docker";
-  const sandboxManagerUrl = env.RUNNER_SANDBOX_MANAGER_URL?.trim() || null;
-  const sandboxManagerToken = env.RUNNER_SANDBOX_MANAGER_TOKEN?.trim() || null;
-  if (backend === "cloud" && (!sandboxManagerUrl || !sandboxManagerToken)) {
+  const kubeNamespace = env.RUNNER_KUBE_NAMESPACE?.trim() || "";
+  if (backend === "kubernetes" && !kubeNamespace) {
     throw new ConfigError(
-      'RUNNER_BACKEND="cloud" requires RUNNER_SANDBOX_MANAGER_URL and ' +
-        "RUNNER_SANDBOX_MANAGER_TOKEN — the cloud backend cannot reach its " +
-        "sandbox-manager without them.",
+      'RUNNER_BACKEND="kubernetes" requires RUNNER_KUBE_NAMESPACE, the ' +
+        "namespace sandboxes are created in.",
     );
   }
 
   return {
     token,
+    sessionKey: env.RUNNER_SESSION_KEY?.trim() || null,
     controlPlaneUrl: env.RUNNER_CONTROL_PLANE_URL ?? "http://localhost:10256",
     name: env.RUNNER_NAME ?? "runner",
+    replicaName: env.RUNNER_REPLICA_NAME?.trim() || hostname(),
     backend,
     agentImage: env.RUNNER_AGENT_IMAGE ?? "onecli-agent:dev",
     sandboxNetwork: env.RUNNER_SANDBOX_NETWORK ?? "onecli-sandboxes",
     networkInternal: bool(env.RUNNER_NETWORK_INTERNAL, true),
     wsPort: int(env.RUNNER_WS_PORT, 8484),
     advertisedHost: env.RUNNER_ADVERTISED_HOST ?? "runner",
+    advertisedPort: int(
+      env.RUNNER_ADVERTISED_PORT,
+      int(env.RUNNER_WS_PORT, 8484),
+    ),
     maxSandboxes: int(env.RUNNER_MAX_SANDBOXES, 4),
     limits: {
       memoryMb: int(env.RUNNER_SANDBOX_MEMORY_MB, 2048),
@@ -156,11 +296,36 @@ export const loadConfig = (
       .filter((entry) => entry.length > 0),
     orphanReap: bool(env.RUNNER_ORPHAN_REAP, true),
     orphanGraceSeconds: int(env.RUNNER_ORPHAN_GRACE_SECONDS, 3600),
-    sandboxManagerUrl,
-    sandboxManagerToken,
-    cloudParkWaitSeconds: int(env.RUNNER_CLOUD_PARK_WAIT_SECONDS, 120),
-    cloudWakeWaitSeconds: int(env.RUNNER_CLOUD_WAKE_WAIT_SECONDS, 900),
-    cloudImageWaitSeconds: int(env.RUNNER_CLOUD_IMAGE_WAIT_SECONDS, 240),
-    lifecycleConcurrency: int(env.RUNNER_LIFECYCLE_CONCURRENCY, 1),
+    portApi: portApiConfig(env),
+    noProxyLoopback: bool(env.RUNNER_NO_PROXY_LOOPBACK, true),
+    // The kubernetes backend's starts are remote operations, so the default
+    // serialization that protects a single Docker host would only
+    // head-of-line-block them here.
+    lifecycleConcurrency: int(
+      env.RUNNER_LIFECYCLE_CONCURRENCY,
+      backend === "kubernetes" ? 4 : 1,
+    ),
+    kube: {
+      namespace: kubeNamespace,
+      controlNamespace: env.RUNNER_KUBE_CONTROL_NAMESPACE?.trim() || null,
+      gatewayService:
+        env.RUNNER_KUBE_GATEWAY_SERVICE?.trim() || "onecli-gateway",
+      gatewayPort: int(env.RUNNER_KUBE_GATEWAY_PORT, 10255),
+      gatewayHost:
+        env.RUNNER_KUBE_GATEWAY_HOST?.trim() ||
+        env.RUNNER_KUBE_GATEWAY_SERVICE?.trim() ||
+        "onecli-gateway",
+      runnerService: env.RUNNER_KUBE_RUNNER_SERVICE?.trim() || "onecli-runner",
+      apiService: env.RUNNER_KUBE_API_SERVICE?.trim() || "onecli-api",
+      apiPort: int(env.RUNNER_KUBE_API_PORT, 10256),
+      storageClass: env.RUNNER_KUBE_STORAGE_CLASS?.trim() || null,
+      homeSize: env.RUNNER_KUBE_HOME_SIZE?.trim() || "20Gi",
+      ephemeralStorageLimit:
+        env.RUNNER_KUBE_EPHEMERAL_STORAGE_LIMIT?.trim() || null,
+      nodeSelector: parseKeyValues(env.RUNNER_KUBE_NODE_SELECTOR),
+      tolerations: parseTolerations(env.RUNNER_KUBE_TOLERATIONS),
+      runtimeClassName: env.RUNNER_KUBE_RUNTIME_CLASS?.trim() || null,
+      imagePullSecrets: list(env.RUNNER_KUBE_IMAGE_PULL_SECRETS),
+    },
   };
 };

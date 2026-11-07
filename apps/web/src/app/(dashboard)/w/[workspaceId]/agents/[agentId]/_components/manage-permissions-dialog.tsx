@@ -1,5 +1,6 @@
 "use client";
 
+import { displayConnectionLabel } from "@onecli/api/lib/connection-display";
 import { useEffect, useMemo, useState } from "react";
 import { Loader2, TriangleAlert } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
@@ -12,6 +13,7 @@ import {
   SheetFooter,
 } from "@onecli/ui/components/sheet";
 import { getApp } from "@onecli/api/apps/registry";
+import { canonicalPolicy } from "@onecli/api/lib/resource-axis";
 import type {
   AgentGrantConnection,
   Connection,
@@ -28,8 +30,9 @@ import {
 // resolveAlias in EE builds.
 import { ResourceScopeFields } from "@/lib/policy-editor/resource-scope";
 import { PermissionGroup } from "./permission-group";
+import { OtherRequestsSection } from "./other-requests-section";
 import type { ToolChoice } from "./tri-state-control";
-import { grantIntentFromChoices } from "./grant-intent";
+import { grantIntentFromChoices, type OtherChoices } from "./grant-intent";
 
 interface ManagePermissionsDialogProps {
   agentId: string;
@@ -45,30 +48,6 @@ interface ManagePermissionsDialogProps {
   readOnlyReason?: "org-granted" | "org-blocked";
   onClose: () => void;
 }
-
-/** Narrow the picker's generic policy object to the wire union. The provider
- * dialogs only ever emit one well-formed axis; anything else collapses to null
- * (unrestricted) rather than sending junk to the server. */
-const toGrantResources = (
-  policy: Record<string, unknown> | null,
-): GrantResources | null => {
-  if (policy === null) return null;
-  const repositories = policy["repositories"];
-  if (Array.isArray(repositories)) {
-    return {
-      repositories: repositories.filter(
-        (r): r is string => typeof r === "string",
-      ),
-    };
-  }
-  const folders = policy["folders"];
-  if (Array.isArray(folders)) {
-    return {
-      folders: folders.filter((f): f is string => typeof f === "string"),
-    };
-  }
-  return null;
-};
 
 /** Derive the dialog's tri-state from the stored grant: full access (or no
  * grant yet — Manage-before-attach) = everything allowed; a custom grant
@@ -89,6 +68,48 @@ const deriveChoices = (
       : "allow";
   }
   return choices;
+};
+
+/** The two catch-all rows as STORED: only a custom grant has them. Full
+ * access (or no grant yet) stores none (see `displayedOther`). */
+const storedOther = (
+  grant: AgentGrantConnection | undefined,
+): OtherChoices | null =>
+  grant?.access === "custom"
+    ? { otherReads: grant.otherReads, otherWrites: grant.otherWrites }
+    : null;
+
+/** What the two rows show, and what a save writes, is what will actually
+ * happen: the user's pick on that row; else the stored custom value; else,
+ * with no stored value (full access), Allowed while every tool is Allowed
+ * (the save stays full access) and the provider's default the moment the
+ * grid is customized (Needs approval; Never for `unlisted: "block"`), exactly
+ * how unlisted requests behave today.
+ *
+ * A catalog that blocks unlisted requests allows them only under full access
+ * (the API refuses Always allow on a customized grant), so there a row reads
+ * Allowed only while every tool is Allowed too; otherwise it falls back to
+ * its stored choice, else Never. */
+const displayedOther = (
+  edits: Partial<OtherChoices>,
+  stored: OtherChoices | null,
+  allToolsAllow: boolean,
+  unlisted: "block" | undefined,
+): OtherChoices => {
+  const fallback: ToolChoice = allToolsAllow
+    ? "allow"
+    : unlisted === "block"
+      ? "never"
+      : "ask";
+  const shown = (key: keyof OtherChoices): ToolChoice => {
+    const choice = edits[key] ?? stored?.[key] ?? fallback;
+    if (unlisted !== "block" || choice !== "allow" || allToolsAllow) {
+      return choice;
+    }
+    const kept = stored?.[key];
+    return kept !== undefined && kept !== "allow" ? kept : "never";
+  };
+  return { otherReads: shown("otherReads"), otherWrites: shown("otherWrites") };
 };
 
 export const ManagePermissionsDialog = ({
@@ -119,18 +140,22 @@ export const ManagePermissionsDialog = ({
 
   const [choices, setChoices] = useState<Record<string, ToolChoice>>({});
   const [initial, setInitial] = useState<Record<string, ToolChoice>>({});
+  const [otherEdits, setOtherEdits] = useState<Partial<OtherChoices>>({});
+  const [stored, setStored] = useState<OtherChoices | null>(null);
   const [resources, setResources] = useState<GrantResources | null>(null);
   const [initialResources, setInitialResources] =
     useState<GrantResources | null>(null);
   useEffect(() => {
     // Resources ride the same retarget seeding as the tri-state — so a
     // catalog-less provider (toolIds empty) never seeds or shows them either.
-    // Fine for github-app/dropbox (both cataloged); a future granular provider
+    // Fine for github-app/dropbox/google-drive (all cataloged); a future granular provider
     // without a tool catalog would need this revisited.
     if (connection === null || toolIds.length === 0) return;
     const derived = deriveChoices(toolIds, grant);
     setChoices(derived);
     setInitial(derived);
+    setOtherEdits({});
+    setStored(storedOther(grant));
     const seededResources = grant?.resources ?? null;
     setResources(seededResources);
     setInitialResources(seededResources);
@@ -174,19 +199,39 @@ export const ManagePermissionsDialog = ({
   // all-Never state is a detach, not a save (the server 422s it too).
   const allNever =
     toolIds.length > 0 && toolIds.every((id) => choices[id] === "never");
-  const unchanged = toolIds.every((id) => choices[id] === initial[id]);
+  const allowAll = (c: Record<string, ToolChoice>) =>
+    toolIds.length > 0 && toolIds.every((id) => c[id] === "allow");
+  const other = displayedOther(
+    otherEdits,
+    stored,
+    allowAll(choices),
+    definition?.unlisted,
+  );
+  const initialOther = displayedOther(
+    {},
+    stored,
+    allowAll(initial),
+    definition?.unlisted,
+  );
+  const unchanged =
+    toolIds.every((id) => choices[id] === initial[id]) &&
+    other.otherReads === initialOther.otherReads &&
+    other.otherWrites === initialOther.otherWrites;
+  // What a save writes.
+  const intent = grantIntentFromChoices(toolIds, choices, other);
   // Key-stable compare is enough: both sides come from the same source (the
   // stored grant, or the picker's committed draft).
   const resourcesUnchanged =
     JSON.stringify(resources) === JSON.stringify(initialResources);
-  // Presentational only: whether the grant is full as STORED, used for the
-  // notice about requests outside the list. It must NOT gate what
-  // `handleSave` writes (see `grantIntentFromChoices`).
+  // Whether the grant is full as STORED: the notice about requests outside
+  // the list, and the one case `unchanged` can't see on its own (a custom
+  // grant whose grid already shows full access, which a save converts). It
+  // must NOT gate what `handleSave` writes (see `grantIntentFromChoices`).
   const wasFull = grant === undefined || grant.access === "full";
+  const accessUnchanged = (intent.access === "full") === wasFull;
 
   const handleSave = () => {
     if (connection === null) return;
-    const base = grantIntentFromChoices(toolIds, choices);
     save.mutate(
       {
         agentId,
@@ -195,7 +240,7 @@ export const ManagePermissionsDialog = ({
         // server's PRESERVE arm — tools-only saves never hit the resources
         // validator (a free-plan agent with a carried restriction must still
         // be able to edit tools), and unchanged saves stay idempotent.
-        input: resourcesUnchanged ? base : { ...base, resources },
+        input: resourcesUnchanged ? intent : { ...intent, resources },
       },
       { onSuccess: () => onClose() },
     );
@@ -203,7 +248,9 @@ export const ManagePermissionsDialog = ({
 
   const app = connection ? getApp(connection.provider) : undefined;
   const title = connection
-    ? (connection.label ?? app?.name ?? connection.provider)
+    ? (displayConnectionLabel(connection.label, connection.metadata) ??
+      app?.name ??
+      connection.provider)
     : "";
 
   return (
@@ -244,11 +291,7 @@ export const ManagePermissionsDialog = ({
               {!readOnly && wasFull && (
                 <p className="text-muted-foreground text-xs">
                   This agent currently has full access. Saving a customization
-                  applies your choices to the tools listed here. Requests
-                  outside this list, including tools added later,{" "}
-                  {definition.unlisted === "block"
-                    ? "are blocked."
-                    : "need approval."}
+                  applies your choices below.
                 </p>
               )}
               {reflection.isError && (
@@ -265,7 +308,9 @@ export const ManagePermissionsDialog = ({
                 <ResourceScopeFields
                   connection={connection}
                   policy={resources}
-                  onChange={(p) => setResources(toGrantResources(p))}
+                  // The pickers emit one axis; `canonicalPolicy` narrows it to
+                  // the wire union (anything else → null, unrestricted).
+                  onChange={(p) => setResources(canonicalPolicy(p))}
                   readOnly={readOnly || save.isPending}
                   orgPolicy={reflection.data?.orgResources ?? null}
                 />
@@ -282,6 +327,15 @@ export const ManagePermissionsDialog = ({
                   onGroupSelect={setGroup}
                 />
               ))}
+              {!definition.exhaustive && (
+                <OtherRequestsSection
+                  other={other}
+                  unlisted={definition.unlisted}
+                  allToolsAllowed={allowAll(choices)}
+                  readOnly={readOnly || save.isPending}
+                  onChange={setOtherEdits}
+                />
+              )}
             </>
           )}
         </div>
@@ -300,7 +354,9 @@ export const ManagePermissionsDialog = ({
               onClick={handleSave}
               loading={save.isPending}
               disabled={
-                (unchanged && resourcesUnchanged) || allNever || save.isPending
+                (unchanged && resourcesUnchanged && accessUnchanged) ||
+                allNever ||
+                save.isPending
               }
             >
               {save.isPending ? "Saving…" : "Save"}

@@ -2,8 +2,10 @@ import type { AppDefinition } from "./types";
 
 export const linear: AppDefinition = {
   id: "linear",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/linear",
   name: "Linear",
   icon: "/icons/linear.svg",
+  apiDocsUrl: "https://linear.app/developers/graphql",
   darkIcon: "/icons/linear-light.svg",
   description: "Issues, projects, teams, and product development workflows.",
   connectionMethod: {

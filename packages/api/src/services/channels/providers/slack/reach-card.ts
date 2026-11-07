@@ -2,6 +2,7 @@ import { escapeSlackText, spaceOfThreadAddress } from "@onecli/channels/slack";
 // Type-only: erased at compile, so the service -> registry -> provider ->
 // reach-card import chain stays acyclic at runtime.
 import type { ReachDecision } from "../../agent-reach-service";
+import type { SpaceMembershipResult } from "../../types";
 import { parseSlackPresenceCredentials } from "./types";
 import {
   updateBlocksMessage,
@@ -9,11 +10,14 @@ import {
   conversationsMembers,
   conversationsOpen,
   postBlocksMessage,
+  postMessage,
   usersInfo,
   usersList,
   clampHeader,
   clampLabel,
+  SlackApiError,
 } from "@onecli/channels/slack";
+import { isSlackSystemUser } from "./interpret";
 
 /**
  * The Slack rendering of the reach card - the PLATFORM-composed owner DM
@@ -58,24 +62,29 @@ const neutralizeChosenLabel = (raw: string): string =>
  * generous enough for any room two agents actually talk in. */
 const APPS_IN_MAX_PAGES = 5;
 
+/** A profile photo the browser may load: an https URL, or nothing. */
+const httpsOrNull = (url: string | undefined): string | null =>
+  url && URL.canParse(url) && new URL(url).protocol === "https:" ? url : null;
+
 export const REACH_APPROVE_ACTION = "reach_approve";
-export const REACH_MEMBERS_ACTION = "reach_members";
 export const REACH_BLOCK_ACTION = "reach_block";
-/** Pre-rename alias: cards posted before the three-way settlement carry
- * this id. Mapped to `members_only` so an old card still settles. */
-export const REACH_DENY_ACTION = "reach_deny";
+/** Retired button ids still on cards posted earlier: the old "OneCLI users
+ * only" button (`reach_members`) and its pre-rename alias (`reach_deny`).
+ * They settle as `approved`, the same mapping the data migration applied
+ * to stored rows, so an old card still resolves. */
+const RETIRED_MEMBERS_ACTIONS = ["reach_members", "reach_deny"] as const;
 
 /**
  * The card's buttons, mapped to the settlement each one means. The single
  * place the click vocabulary is decided - both inbound arms (webhook and
- * adapter relay) read it, and the legacy `reach_deny` id keeps settling
- * cards that were posted before the third button existed.
+ * adapter relay) read it.
  */
 export const REACH_ACTION_DECISIONS: Record<string, ReachDecision> = {
   [REACH_APPROVE_ACTION]: "approved",
-  [REACH_MEMBERS_ACTION]: "members_only",
   [REACH_BLOCK_ACTION]: "blocked",
-  [REACH_DENY_ACTION]: "members_only",
+  ...Object.fromEntries(
+    RETIRED_MEMBERS_ACTIONS.map((id) => [id, "approved" as const]),
+  ),
 };
 
 export const reachCardBlocks = (input: {
@@ -110,11 +119,10 @@ export const reachCardBlocks = (input: {
 };
 
 /**
- * The PERSON card: two answers, because "OneCLI users only" says nothing
- * about one individual - either this human may talk to the agent or they
- * may not. Same trust shape as the space card: our template, every dynamic
- * field escaped and clamped, and the button values carry only the opaque
- * grant id.
+ * The PERSON card: two answers - either this human may message the agent
+ * directly or they may not. Same trust shape as the space card: our
+ * template, every dynamic field escaped and clamped, and the button values
+ * carry only the opaque grant id.
  */
 const personCardBlocks = (input: {
   grantId: string;
@@ -142,10 +150,11 @@ const personCardBlocks = (input: {
         text:
           `*${label}* messaged me directly, but they don't have a OneCLI` +
           ` account I can match. May I help them?\n` +
-          `_They can only reach me in this direct message - this says` +
-          ` nothing about any channel. Until you choose, I don't answer` +
-          ` them. You can change this anytime from ${agent}'s Channels` +
-          ` page._`,
+          `\u2022 *Always allow* - I answer them, and may message them myself.\n` +
+          `\u2022 *Never* - I ignore them, and won't message them.\n` +
+          `_This is about our direct message only - not any channel. Until` +
+          ` you choose, I don't answer them. You can change this anytime` +
+          ` from ${agent}'s Contacts page in OneCLI._`,
       },
     },
     {
@@ -154,14 +163,14 @@ const personCardBlocks = (input: {
         {
           type: "button",
           style: "primary",
-          text: { type: "plain_text", text: "Allow this person", emoji: false },
+          text: { type: "plain_text", text: "Always allow", emoji: false },
           action_id: REACH_APPROVE_ACTION,
           value: input.grantId,
         },
         {
           type: "button",
           style: "danger",
-          text: { type: "plain_text", text: "Don't allow", emoji: false },
+          text: { type: "plain_text", text: "Never", emoji: false },
           action_id: REACH_BLOCK_ACTION,
           value: input.grantId,
         },
@@ -197,11 +206,9 @@ const spaceCardBlocks = (input: {
           `I was added to *${label}*. How should I handle that channel?\n` +
           `\u2022 *Allow anyone here* - I answer everyone in the channel,` +
           ` including people without OneCLI accounts.\n` +
-          `\u2022 *OneCLI users only* - I answer just your linked` +
-          ` teammates.\n` +
           `\u2022 *Don't allow* - I stay silent in that channel.\n` +
           `_Until you choose, I answer nobody there. You can change this` +
-          ` anytime from ${agent}'s Channels page._`,
+          ` anytime from ${agent}'s Contacts page in OneCLI._`,
       },
     },
     {
@@ -212,12 +219,6 @@ const spaceCardBlocks = (input: {
           style: "primary",
           text: { type: "plain_text", text: "Allow anyone here", emoji: false },
           action_id: REACH_APPROVE_ACTION,
-          value: input.grantId,
-        },
-        {
-          type: "button",
-          text: { type: "plain_text", text: "OneCLI users only", emoji: false },
-          action_id: REACH_MEMBERS_ACTION,
           value: input.grantId,
         },
         {
@@ -251,14 +252,6 @@ const settledText = (input: {
       return person
         ? `\u2705 *${label}* - I'll answer them in our direct message (approved by ${by}).`
         : `\u2705 *${label}* - answering anyone in the channel (approved by ${by}).`;
-    // The three-settlement vocabulary. `denied`/`revoked` are the
-    // pre-rename spellings of the same outcome and settle identically, so
-    // a card posted before the rename still resolves to real copy instead
-    // of falling through to the generic default.
-    case "members_only":
-    case "denied":
-    case "revoked":
-      return `\ud83d\udd12 *${label}* - OneCLI users only (decided by ${by}).`;
     case "blocked":
       return person
         ? `\u26d4 *${label}* - not answering them (decided by ${by}).`
@@ -280,6 +273,7 @@ export const slackReach = {
    * (interpret.ts `groupThreadId`) - the space is the channel. Inverse
    * lives beside the renderer so provider-shaped reach logic has one home. */
   spaceOf: spaceOfThreadAddress,
+  spaceThreadPrefix: (externalRef: string): string => `${externalRef}:`,
 
   /** "#channel-name" for cards and the dashboard; null when the token
    * cannot read the channel (private, dead credential). Display only. */
@@ -298,22 +292,25 @@ export const slackReach = {
     }
   },
 
-  /** "@display-name" for the person card and the People rows; null when the
-   * token cannot read the user. Display only - matching stays on the id. */
-  async personLabel(input: {
+  /** The person's profile for the person card and the Direct message rows,
+   * from ONE `users.info` read: their plain display name ("Dana", never
+   * "@Dana": one shape whichever path first saw them) and their photo
+   * (`image_72`, https only, so a profile can never hand the browser another
+   * scheme). Display only - matching stays on the id. Null when the token
+   * cannot read the user. */
+  async personProfile(input: {
     credentialsJson: string | null;
     externalRef: string;
-  }): Promise<string | null> {
+  }): Promise<{ name: string | null; avatarUrl: string | null } | null> {
     if (!input.credentialsJson) return null;
     try {
       const creds = parseSlackPresenceCredentials(input.credentialsJson);
       if (!creds.botToken) return null;
-      const info = await usersInfo(creds.botToken, input.externalRef);
+      const { user } = await usersInfo(creds.botToken, input.externalRef);
       const name =
-        info.user.profile?.display_name ||
-        info.user.profile?.real_name ||
-        info.user.name;
-      return name ? `@${name}` : null;
+        user.profile?.display_name || user.profile?.real_name || user.name;
+      const photo = user.profile?.image_72 ?? user.profile?.image_48;
+      return { name: name || null, avatarUrl: httpsOrNull(photo) };
     } catch {
       return null;
     }
@@ -395,6 +392,11 @@ export const slackReach = {
     isApp: boolean;
   } | null> {
     if (!input.credentialsJson) return null;
+    // Slack's system accounts are never guests (defense in depth behind the
+    // interpreter, which already keeps them off every speaker door): their
+    // directory entry reads same-tenant, which is exactly how "@Slack"
+    // once became a person knock.
+    if (isSlackSystemUser(input.externalUserId)) return null;
     try {
       const creds = parseSlackPresenceCredentials(input.credentialsJson);
       if (!creds.botToken) return null;
@@ -477,6 +479,43 @@ export const slackReach = {
     }
   },
 
+  async spaceMembership(input: {
+    credentialsJson: string | null;
+    externalRef: string;
+    signal?: AbortSignal;
+  }): Promise<SpaceMembershipResult> {
+    if (!input.credentialsJson) return { kind: "unknown" };
+    let botToken: string | undefined;
+    try {
+      botToken = parseSlackPresenceCredentials(input.credentialsJson).botToken;
+    } catch {
+      return { kind: "unknown" };
+    }
+    if (!botToken) return { kind: "unknown" };
+    try {
+      const info = await conversationsInfo(botToken, input.externalRef, {
+        signal: input.signal,
+      });
+      if (info.channel.is_member === false) return { kind: "gone" };
+      return { kind: info.channel.is_member === true ? "member" : "unknown" };
+    } catch (err) {
+      // A private channel the bot was removed from is invisible to its
+      // token: Slack answers `channel_not_found` (verified in prod
+      // 2026-10-18 right after a kick). That, and only that, is a definite
+      // "gone" among the refusals; everything else (rate limit, missing
+      // scope, dead token, network) is unknown and changes nothing.
+      if (err instanceof SlackApiError && err.code === "channel_not_found") {
+        return { kind: "gone" };
+      }
+      return {
+        kind: "unknown",
+        ...(err instanceof SlackApiError && err.retryAfterMs !== undefined
+          ? { retryAfterMs: err.retryAfterMs }
+          : {}),
+      };
+    }
+  },
+
   card: {
     async post(input: {
       credentialsJson: string;
@@ -525,4 +564,38 @@ export const slackReach = {
       });
     },
   },
+
+  /** Tell an approved person they're in, in their DM with the agent. Both
+   * names are escaped and clamped; the template is ours. */
+  async notifyApproved(input: {
+    credentialsJson: string;
+    recipientExternalUserId: string;
+    agentName: string;
+    decidedByName: string | null;
+  }): Promise<void> {
+    const creds = parseSlackPresenceCredentials(input.credentialsJson);
+    if (!creds.botToken) return;
+    const im = await conversationsOpen(
+      creds.botToken,
+      input.recipientExternalUserId,
+    );
+    await postMessage(creds.botToken, {
+      channel: im.channel.id,
+      text: approvedNoticeText(input),
+    });
+  },
+};
+
+/** The approved person's notice. Exported for the renderer test. */
+export const approvedNoticeText = (input: {
+  agentName: string;
+  decidedByName: string | null;
+}): string => {
+  const flat = (raw: string) =>
+    clampHeader(neutralizeChosenLabel(escapeSlackText(raw)));
+  const agent = flat(input.agentName);
+  const by = input.decidedByName
+    ? `${flat(input.decidedByName)} approved you`
+    : "You've been approved";
+  return `${by}. You can talk to me (${agent}) now, just send your message again here.`;
 };

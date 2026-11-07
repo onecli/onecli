@@ -1,0 +1,129 @@
+import { describe, expect, it } from "vitest";
+import {
+  MAX_AGENT_CONNECTION_API_HOSTS,
+  agentConnectionSchema,
+} from "@onecli/agent-protocol";
+import { catalogFactsFor } from "./agent-connection-catalog";
+import { getApps } from "../apps/registry";
+import {
+  allGroupTools,
+  getAppPermissionDefinitions,
+  hostPatternsOf,
+} from "../apps/app-permissions";
+
+describe("catalogFactsFor", () => {
+  it("names Granola's PUBLIC API host, never the desktop host agents guessed", () => {
+    const facts = catalogFactsFor("granola");
+    expect(facts.apiHosts).toEqual(["public-api.granola.ai"]);
+    expect(facts.apiHosts).not.toContain("api.granola.ai");
+    expect(facts.endpoints?.[0]).toBe("GET /v1/notes");
+    expect(facts.docsUrl).toBe("https://docs.granola.ai/introduction");
+  });
+
+  it("gives tenant-only apps no fixed host: their bound host is the answer", () => {
+    expect(catalogFactsFor("salesforce").apiHosts).toEqual([]);
+    expect(catalogFactsFor("snowflake").apiHosts).toEqual([]);
+  });
+
+  // Linear's rows are discriminated by `graphqlOps` and carry no method;
+  // the protocol is POST, and the first render said `GET /graphql`.
+  it("names POST for a GraphQL tool with no declared method", () => {
+    expect(catalogFactsFor("linear").endpoints).toEqual(["POST /graphql"]);
+  });
+
+  // Fireflies' MCP row has neither a method nor a GraphQL kind: there is no
+  // single method to show, so it yields no sample rather than an invented one.
+  it("skips a method-less tool that is not GraphQL", () => {
+    expect(catalogFactsFor("fireflies").endpoints).toEqual(["POST /graphql"]);
+  });
+
+  // GitHub's first read tool is git's smart-HTTP transport on `github.com`
+  // (`/*/*/git-upload-pack`): a template no agent can call with curl. Its
+  // three fixed hosts (github.com, api.github.com, raw.githubusercontent.com)
+  // are over the cap, so no one host is named; the docs link carries it.
+  it("skips a wildcard-leading path and leads with a real API call", () => {
+    const facts = catalogFactsFor("github");
+    expect(facts.endpoints?.[0]).toBe("GET /repos/*/*");
+    expect(facts.endpoints?.join(" ")).not.toContain("git-upload-pack");
+    expect(facts.apiHosts).toEqual([]);
+    expect(facts.docsUrl).toBe("https://docs.github.com/en/rest");
+  });
+
+  // AWS answers on dozens of fixed service hosts; the first two would be
+  // read as THE hosts to call (one of them, `lambda.amazonaws.com`, does not
+  // even resolve). Over the cap, the line carries none.
+  it("lists no host for an app with more fixed hosts than the wire carries", () => {
+    const def = getAppPermissionDefinitions().find((d) => d.provider === "aws");
+    const fixed = new Set(
+      def!.groups
+        .flatMap(allGroupTools)
+        .flatMap(hostPatternsOf)
+        .filter((h) => !h.includes("*")),
+    );
+    expect(fixed.size).toBeGreaterThan(MAX_AGENT_CONNECTION_API_HOSTS);
+    expect(catalogFactsFor("aws").apiHosts).toEqual([]);
+    expect(catalogFactsFor("aws").endpoints).not.toContain("GET /");
+  });
+
+  it("is empty for an unknown provider", () => {
+    expect(catalogFactsFor("not-a-provider")).toEqual({
+      apiHosts: [],
+      endpoints: [],
+      docsUrl: null,
+      specUrl: null,
+    });
+  });
+
+  // A database's catalog rows are the policy zone's synthetic requests
+  // (`GET /sql/read` on `*.postgres.onecli.invalid`): sampling them would
+  // teach an agent to call a path that is not an API.
+  it("gives a database app its docs but no HTTP hosts or endpoints", () => {
+    const facts = catalogFactsFor("postgres");
+    expect(facts.apiHosts).toEqual([]);
+    expect(facts.endpoints).toEqual([]);
+    expect(facts.docsUrl).toMatch(/^https:\/\/www\.postgresql\.org\//);
+  });
+
+  // The call rules send the agent to the docs before it guesses a
+  // parameter, so a line without a docs link leaves it nothing to read.
+  // Over the whole registry, not only the permission catalog: a connection
+  // renders for any registered app (JFrog has no catalog and still renders).
+  it("every app names its API docs", () => {
+    const missing = getApps()
+      .filter((app) => !catalogFactsFor(app.id).docsUrl)
+      .map((app) => app.id);
+    expect(missing).toEqual([]);
+  });
+
+  // Navan's docs page covers Expense only; bookings are documented solely
+  // in its OpenAPI file (epoch-second dates), which the agent must reach.
+  it("links Navan's bookings OpenAPI spec beside its Expense docs", () => {
+    const facts = catalogFactsFor("navan");
+    expect(facts.docsUrl).toBe("https://docs.navan.com/api/");
+    expect(facts.specUrl).toBe("https://app.navan.com/api/public-api.yml");
+    expect(facts.endpoints).toContain("GET /v1/bookings");
+  });
+
+  it("every catalog provider's facts fit the wire schema", () => {
+    for (const def of getAppPermissionDefinitions()) {
+      const wire = {
+        provider: def.provider,
+        name: def.provider,
+        label: null,
+        host: null,
+        ...catalogFactsFor(def.provider),
+      };
+      expect(agentConnectionSchema.safeParse(wire).success, def.provider).toBe(
+        true,
+      );
+    }
+  });
+
+  it("never emits a sample an agent cannot type: a method and a concrete path", () => {
+    for (const def of getAppPermissionDefinitions()) {
+      for (const line of catalogFactsFor(def.provider).endpoints ?? []) {
+        expect(line, def.provider).toMatch(/^[A-Z]+ \/[^*]/);
+      }
+    }
+  });
+});

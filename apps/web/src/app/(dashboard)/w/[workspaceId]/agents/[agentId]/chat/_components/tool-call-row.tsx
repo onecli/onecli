@@ -2,43 +2,51 @@
 
 import { ChevronRight, Loader2 } from "lucide-react";
 import {
-  activityForTool,
+  activityForToolCall,
   bareToolName,
-  finishedActivityForTool,
 } from "@onecli/agent-protocol/activity";
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@onecli/ui/components/collapsible";
+import { toolInputPreview } from "@/lib/chat/tool-display";
 import type { ToolCall } from "@/lib/chat/transcript";
-import { stepFailed, ToolOutput } from "./tool-output";
+import { ToolInput } from "./tool-input";
+import { ToolOutput } from "./tool-output";
 
 /**
  * One step inside a tool group's card, modeled on Claude's run view:
  *
- *   Ran a command >             (done; click to see the output)
- *   Ran a command  Failed >     (the step failed, "Failed" in red)
- *   ⟳ Running a command         (still going)
+ *   Ran a command  ls -la /data >          (done; click for request + output)
+ *   Ran a command  grep x  exit 1 >        (the command exited non-zero)
+ *   Ran a command  Failed >                (the tool failed, "Failed" in red)
+ *   ⟳ Running a command                    (still going)
  *
  * No status icons on finished rows: the words carry the state, and red is
- * reserved for the one thing worth noticing, a failed step. Expanding shows
- * the tool's name and its output (ToolOutput). The label comes from the
- * shared phrase table, never the raw tool name (sandbox-controlled text).
+ * reserved for the one thing worth noticing, a step whose TOOL failed. A
+ * command that ran and exited non-zero is not that: `grep` exits 1 when it
+ * finds nothing, which is often the answer. Its status shows as a muted
+ * `exit N`. The label comes from the shared phrase table, never the raw tool
+ * name (sandbox-controlled text); the preview is the call's primary argument,
+ * when the harness reported one (it arrives with the call's result, so a live
+ * chat row gets it as the step finishes). Expanding shows the tool's name,
+ * its request (ToolInput) and its output (ToolOutput).
  *
- * SECURITY: `tool.name` and `tool.output` are untrusted sandbox text. Both
- * render as text, never as markup or markdown.
+ * SECURITY: `tool.name`, `tool.input` and `tool.output` are untrusted
+ * sandbox text. All render as text, never as markup or markdown.
  */
 export const ToolCallRow = ({
   tool,
   turnEnded,
 }: {
   tool: ToolCall;
-  /** A finished turn can't still be running a tool — render the orphan done. */
+  /** A finished turn can't still be running a tool: render the orphan done. */
   turnEnded: boolean;
 }) => {
   const running = tool.output === undefined && !turnEnded;
-  const failed = !running && stepFailed(tool);
+  const failed = !running && tool.isError === true;
+  const preview = toolInputPreview(tool.input);
 
   const label = (
     <>
@@ -48,12 +56,26 @@ export const ToolCallRow = ({
           aria-hidden
         />
       )}
-      <span className="min-w-0 truncate">
-        {running
-          ? activityForTool(tool.name)
-          : finishedActivityForTool(tool.name)}
+      <span className="shrink-0">
+        {activityForToolCall(tool.name, tool.input, running, tool)}
       </span>
+      {preview && (
+        <code
+          translate="no"
+          className="text-foreground/80 min-w-0 truncate font-mono text-xs"
+        >
+          {preview}
+        </code>
+      )}
       {running && <span className="sr-only">running</span>}
+      {tool.exitCode !== undefined && (
+        <span
+          translate="no"
+          className="text-muted-foreground shrink-0 font-mono text-[11px] leading-none"
+        >
+          exit {tool.exitCode}
+        </span>
+      )}
       {failed && (
         <span className="shrink-0 text-[11px] leading-none text-red-700 dark:text-red-400">
           Failed
@@ -62,7 +84,7 @@ export const ToolCallRow = ({
     </>
   );
 
-  if (!tool.output) {
+  if (!tool.input && !tool.output) {
     return (
       <div className="text-muted-foreground flex items-center gap-1.5 px-3 py-2 text-sm">
         {label}
@@ -86,7 +108,8 @@ export const ToolCallRow = ({
         >
           {bareToolName(tool.name) || "tool"}
         </p>
-        <ToolOutput text={tool.output} failed={failed} />
+        {tool.input && <ToolInput text={tool.input} />}
+        {tool.output && <ToolOutput text={tool.output} failed={failed} />}
       </CollapsibleContent>
     </Collapsible>
   );

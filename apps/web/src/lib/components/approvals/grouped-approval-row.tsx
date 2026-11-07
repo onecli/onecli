@@ -1,16 +1,19 @@
 "use client";
 
-import { Check, Info, X } from "lucide-react";
+import { Check, Info, TriangleAlert, X } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { cn } from "@onecli/ui/lib/utils";
 import type {
   ApprovalDecisionInput,
   ApprovalDetail,
+  GroupedOutcome,
   PendingApproval,
-  SettledOutcome,
 } from "@/lib/api/approvals";
 import { ApprovalLink } from "./approval-link";
 import { rowsBesideTitle, subjectRow } from "./approval-rows";
+import { withDecidedVia } from "./decided-via";
+import { approvalResultLine } from "@onecli/api/lib/approval-result";
+import type { ApprovalResult } from "@/lib/api/approval-outcomes";
 
 /** Fields a row shows: the record's identifying values, never all of it. */
 const ROW_FIELDS = 3;
@@ -28,6 +31,10 @@ interface GroupRowLayout {
  * Contact <name>"), each leads with its own record, linked: that is what
  * the reviewer decides on. The rest are the first fields beside the title,
  * a first + last name read as one.
+ *
+ * After a record lead, a field is shown WITH its label ("Title: After"):
+ * the row already says which record, so a bare value would read like
+ * another name ("Batch Test04 · Batch Test") and hide what changes.
  */
 export const groupRowFields = (
   a: PendingApproval,
@@ -57,11 +64,14 @@ export const groupRowFields = (
           ...rest.filter((d) => d !== first && d !== last),
         ]
       : rest;
-  return [...lead, ...named].slice(0, ROW_FIELDS);
+  const labelled = lead.length
+    ? named.map((d) => ({ ...d, value: `${d.label}: ${d.value}` }))
+    : named;
+  return [...lead, ...labelled].slice(0, ROW_FIELDS);
 };
 
 const OUTCOME_BADGE: Record<
-  SettledOutcome,
+  GroupedOutcome,
   { label: string; icon: typeof Check | null; className: string }
 > = {
   approved: {
@@ -80,8 +90,13 @@ const OUTCOME_BADGE: Record<
     icon: null,
     className: "border-border text-muted-foreground",
   },
-  decided: {
-    label: "Decided elsewhere",
+  unknown: {
+    label: "No longer waiting",
+    icon: null,
+    className: "border-border text-muted-foreground",
+  },
+  cancelled: {
+    label: "Cancelled",
     icon: null,
     className: "border-border text-muted-foreground",
   },
@@ -96,18 +111,29 @@ const OUTCOME_BADGE: Record<
 export const GroupedApprovalRow = ({
   approval,
   layout,
+  ordinal,
   odd,
   busy,
   outcome,
+  via,
+  result,
   onDecide,
   onDetails,
 }: {
   approval: PendingApproval;
   layout: GroupRowLayout;
+  /** Its place on the card, for a row with no fields of its own: it reads
+   * "Request 2" rather than the card's title again (an odd row's action
+   * already leads it). */
+  ordinal?: number;
   /** Not the card's main action: flagged so it can't hide in the batch. */
   odd: boolean;
   busy: boolean;
-  outcome?: SettledOutcome;
+  outcome?: GroupedOutcome;
+  /** Where a person decided it (`slack`, `web`), when known. */
+  via?: string;
+  /** What an approved request actually did upstream, when known. */
+  result?: ApprovalResult;
   onDecide: (decision: ApprovalDecisionInput) => void;
   onDetails: () => void;
 }) => {
@@ -117,8 +143,14 @@ export const GroupedApprovalRow = ({
   // its record ("Update Contact · Olivia Martinez", not the name twice).
   const oddLabel =
     (layout.ownRecord && approval.summary?.subject?.verb) || action;
-  const name = fields[0]?.value ?? action;
+  const own = ordinal === undefined ? action : `Request ${ordinal}`;
+  const name = fields[0]?.value ?? own;
   const badge = outcome ? OUTCOME_BADGE[outcome] : null;
+  // An approval that did not do what it said: the row says so (the short
+  // count on the badge, the reason on hover).
+  const resultLine =
+    outcome === "approved" ? approvalResultLine(result) : undefined;
+  const failure = resultLine?.failed ? resultLine : undefined;
   return (
     <li
       className={cn(
@@ -141,7 +173,7 @@ export const GroupedApprovalRow = ({
             <ApprovalLink href={d.url}>{d.value}</ApprovalLink>
           </span>
         ))}
-        {fields.length === 0 && action}
+        {fields.length === 0 && own}
       </p>
       <Button
         variant="ghost"
@@ -155,13 +187,29 @@ export const GroupedApprovalRow = ({
       {badge ? (
         <span
           role="status"
+          title={failure?.text}
           className={cn(
             "inline-flex h-6 shrink-0 items-center gap-1 rounded-md border px-1.5 text-xs font-medium",
-            badge.className,
+            failure
+              ? "border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-300"
+              : badge.className,
           )}
         >
-          {badge.icon && <badge.icon aria-hidden="true" className="size-3.5" />}
-          {badge.label}
+          {failure ? (
+            <TriangleAlert aria-hidden="true" className="size-3.5" />
+          ) : (
+            badge.icon && <badge.icon aria-hidden="true" className="size-3.5" />
+          )}
+          {outcome ? withDecidedVia(badge.label, outcome, via) : badge.label}
+          {failure && (
+            <>
+              {/* The badge fits the count; the whole line (with the
+                  upstream's reason) is the tooltip, and what a screen reader
+                  reads, so it never depends on a mouse hover. */}
+              <span aria-hidden="true"> · {failure.short}</span>
+              <span className="sr-only"> · {failure.text}</span>
+            </>
+          )}
         </span>
       ) : (
         <>

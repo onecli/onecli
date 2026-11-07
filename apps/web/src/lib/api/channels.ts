@@ -1,4 +1,11 @@
-import { apiDelete, apiGet, apiPost, apiPut } from "./client";
+import {
+  apiDelete,
+  apiGet,
+  apiPatch,
+  apiPost,
+  apiPut,
+  workspaceScope,
+} from "./client";
 
 /**
  * Channels (plans/hosted-agents-v2.md step 6): the agent-level presence
@@ -28,41 +35,47 @@ export interface AgentChannelPresence {
   identityRef: string | null;
   /** The app's handle in the workspace (Slack: "donna"), where we know it. */
   identityName: string | null;
+  /** The app's PROFILE icon (provider CDN URL) as last read, or null while it
+   * still shows the provider's stock mark. Absent on older servers. */
+  iconUrl?: string | null;
+  /** A pending socket presence a consent install left one step short: only
+   * the app-level token is left to paste. Absent on older servers. */
+  awaitingTransportCredential?: boolean;
   tenant: { externalId: string; name: string | null };
   /** The member who attached this presence, for the "Managed by" line. */
   managedBy: { name: string | null; email: string } | null;
   /** Group threads the presence is live in (direct DMs stay private). */
   groupThreads: { externalThreadId: string; createdAt: string }[];
-  /** Per-space reach: every channel the presence is in or was asked about.
-   * `members_only` = no grant (today's default). Absent on older servers. */
+  /** Per-space reach: every channel the presence is in or was asked about
+   * (`pending` until someone decides). Absent on older servers. */
   spaces?: ChannelSpaceReach[];
   /** Absent on older servers that predate the person lane. */
   people?: ChannelPersonReach[];
 }
 
 /**
- * How a channel is settled. `pending` means nobody has answered yet, and the
- * agent answers NO ONE there until someone does - it is a real state, not a
- * flavor of "off". The server normalizes the pre-rename `denied`/`revoked`
- * spellings to `members_only`, so they never reach this type.
+ * How a channel (or person) is settled. `pending` means nobody has answered
+ * yet, and the agent answers NO ONE there until someone does - it is a real
+ * state, not a flavor of "off".
  */
-export type ChannelReachState =
-  | "pending"
-  | "approved"
-  | "members_only"
-  | "blocked";
+export type ChannelReachState = "pending" | "approved" | "blocked";
 
-/** One PERSON's reach row: someone who messaged the agent directly with no
- * OneCLI account to match. Two settlements only - "members_only" describes
- * a population, not a person - though a legacy row can still read as one,
- * so the type stays the full union and the UI treats anything that is not
- * `approved`/`pending` as "not allowed". */
+/** A human's answer about a channel or person: Always allow, or Never. */
+export type ReachDecision = Exclude<ChannelReachState, "pending">;
+
+/** One PERSON's reach row: someone the agent DMs with, or who DM'd it. Their
+ * one setting decides their direct messages and the agent's own messages
+ * to them: allowed, Never, or still pending. */
 export interface ChannelPersonReach {
   externalRef: string;
-  /** "@display-name" when known; fall back to the ref. */
+  /** Their display name when known; fall back to the ref. */
   label: string | null;
   state: ChannelReachState;
   decidedAt: string | null;
+  /** Their profile photo (provider CDN, https), when the provider has one. */
+  avatarUrl: string | null;
+  /** A workspace owner: always shown, a fixed Always allow. */
+  isOwner: boolean;
 }
 
 /** One channel's reach row on a presence. */
@@ -72,6 +85,8 @@ export interface ChannelSpaceReach {
   label: string | null;
   state: ChannelReachState;
   decidedAt: string | null;
+  /** What the agent hears here. Optional: an older API omits it (= mentions). */
+  listen?: ChannelListenMode;
 }
 
 export interface AgentChannelsView {
@@ -104,14 +119,17 @@ export interface ChannelSetupMaterial {
 export interface CreatePresenceResult {
   presenceId: string;
   transport: ChannelTransport;
-  /** Events arm: the one-click consent URL. */
+  /** The one-click consent URL: always on events, and on socket when the
+   * deployment has the public HTTPS origin Slack's redirect needs. */
   installUrl: string | null;
   /** Socket arm: where the app-level token is generated + Install lives. */
   settingsUrl: string;
 }
 
 export interface CompletePresenceInput {
-  botToken: string;
+  /** Omitted on the socket arm after its one-click install: the server
+   * already holds the bot token. */
+  botToken?: string;
   appToken?: string;
   signingSecret?: string;
   appId?: string;
@@ -187,8 +205,33 @@ const agentBase = (agentId: string, sub = "") =>
 
 // ── Agent-level surface ─────────────────────────────────────────────────────
 
+/** The caller's own remembered sender for one recipient (send_message's
+ * "send as the agent or as you?" choice). */
+export interface SendAsPreference {
+  recipientRef: string;
+  sendAs: "agent" | "you";
+}
+
+export const sendAsPreferences = (agentId: string) =>
+  apiGet<{ preferences: SendAsPreference[] }>(
+    `/v1/agents/${encodeURIComponent(agentId)}/send-as-preferences`,
+  );
+
+export const forgetSendAsPreference = (agentId: string, recipientRef: string) =>
+  apiDelete(
+    `/v1/agents/${encodeURIComponent(agentId)}/send-as-preferences/${encodeURIComponent(recipientRef)}`,
+  );
+
 export const agentView = (agentId: string) =>
   apiGet<AgentChannelsView>(agentBase(agentId));
+
+/** Pull the app's icon from the provider now ("Sync image"). `changed` =
+ * the agent's image was just replaced by a new app icon. */
+export const syncIcon = (agentId: string, provider: ChannelProvider) =>
+  apiPost<{ changed: boolean }>(
+    agentBase(agentId, `/${provider}/icon/sync`),
+    {},
+  );
 
 export const manifest = (
   agentId: string,
@@ -215,25 +258,25 @@ export const attach = (
     input ?? {},
   );
 
-/** Settle one channel: open it to everyone in it (same Slack workspace),
- * keep it to OneCLI users only, or block the agent there entirely. */
+/** Settle one channel: answer everyone in it (same Slack workspace), or
+ * keep the agent silent there. */
 export const setReachState = (
   agentId: string,
   provider: ChannelProvider,
   externalRef: string,
-  state: Exclude<ChannelReachState, "pending">,
+  state: ReachDecision,
 ) =>
   apiPut<{ kind: string }>(
     agentBase(agentId, `/${provider}/reach/${encodeURIComponent(externalRef)}`),
     { state },
   );
 
-/** Settle one PERSON: may they message this agent, or not. */
+/** Settle one PERSON: Always allow, or Never. */
 export const setPersonReachState = (
   agentId: string,
   provider: ChannelProvider,
   externalRef: string,
-  state: "approved" | "blocked",
+  state: ReachDecision,
 ) =>
   apiPut<{ kind: string }>(
     agentBase(
@@ -289,6 +332,52 @@ export const detach = (
 
 export const orgView = () => apiGet<OrgChannelsView>("/v1/org/channels");
 
+/** Where one agent stands in a provider, on the org Channels page. */
+export type OrgChannelAgentState = "none" | "pending" | "active" | "attention";
+
+export interface OrgChannelAgent {
+  id: string;
+  name: string;
+  imageUrl: string | null;
+  state: OrgChannelAgentState;
+  /** `pending` only: the transport the half-finished app was stamped with.
+   * A socket app finishes by pasting tokens on the agent's own page. */
+  pendingTransport: ChannelTransport | null;
+  /** Live in Slack: where to open it and how to @mention it. */
+  slack: { appId: string; teamId: string; handle: string | null } | null;
+}
+
+export interface OrgChannelWorkspace {
+  id: string;
+  name: string | null;
+  agents: OrgChannelAgent[];
+}
+
+export interface OrgChannelAgents {
+  /** What a fresh add from the org page would be stamped with. */
+  posture: { transport: ChannelTransport };
+  workspaces: OrgChannelWorkspace[];
+}
+
+/** Every hosted agent in the org, by workspace, with its Slack state. */
+export const orgAgents = (provider: ChannelProvider) =>
+  apiGet<OrgChannelAgents>(
+    `/v1/org/channels/${encodeURIComponent(provider)}/agents`,
+  );
+
+/** The org page's one-click attach: the agent's own guided create, scoped
+ * to the agent's workspace explicitly (the org page's URL carries none). */
+export const attachInWorkspace = (
+  workspaceId: string,
+  agentId: string,
+  provider: ChannelProvider,
+) =>
+  apiPost<CreatePresenceResult>(
+    agentBase(agentId, `/${provider}`),
+    {},
+    workspaceScope(workspaceId),
+  );
+
 /** Connect or refresh the org's automation credential (Slack: the
  * app-configuration refresh token). The server rotates it to validate. */
 export const putCredentials = (provider: ChannelProvider, credential: string) =>
@@ -333,6 +422,29 @@ export const inspectSharedInstall = (
     { headers: { "X-Organization-Id": organizationId } },
   );
 
+/** Finish an AGENT's own app install that began in Slack (no state names the
+ * agent): the server offers the code to the org's waiting agent apps. A miss
+ * leaves the code spendable for the shared-app inspect. A matched socket app
+ * is installed but still awaits its app-level token. */
+export const finishAgentInstall = (
+  provider: ChannelProvider,
+  code: string,
+  organizationId: string,
+) =>
+  apiPost<{
+    agent: {
+      id: string;
+      workspaceId: string;
+      /** Absent on older servers. */
+      awaitingTransportCredential?: boolean;
+    } | null;
+    sharedAppConfigured: boolean;
+  }>(
+    `/v1/org/channels/${provider}/agent-install`,
+    { code },
+    { headers: { "X-Organization-Id": organizationId } },
+  );
+
 export const finishSharedInstall = (
   provider: ChannelProvider,
   claim: string,
@@ -361,10 +473,12 @@ export type ActionApprovalStatus =
 /** The agent's action approvals — pending first is the caller's sort. */
 
 export interface ActionApprovalDecisionInput {
-  /** approve_always = approve AND stop asking about this recipient. */
-  decision: "approve" | "approve_always" | "reject";
+  /** On a standing question, approve is Always allow and reject is Never. */
+  decision: "approve" | "reject";
   /** Dashboard-only: relayed verbatim to the agent on reject. */
   reason?: string;
+  /** The picked option on a choice card ("agent" | "you", or "allow"). */
+  choice?: "agent" | "you" | "allow";
 }
 
 export const decideActionApproval = (
@@ -375,39 +489,30 @@ export const decideActionApproval = (
   apiPost<{
     kind: "decided" | "already_settled";
     status?: ActionApprovalStatus;
+    /** The handler's own outcome line (e.g. "Sent to Sam."). */
+    note?: string;
   }>(`/v1/agents/${agentId}/approvals/${approvalId}/decision`, input);
 
-export interface AgentContact {
-  id: string;
-  kind: "person" | "channel" | "app";
-  externalRef: string;
-  displayName: string;
-  policy: "ask" | "allow" | "blocked";
-  updatedAt: string;
-}
-
-/** The agent's outbound address book (send_message's standing decisions). */
-export const listContacts = (agentId: string) =>
-  apiGet<{ contacts: AgentContact[] }>(`/v1/agents/${agentId}/contacts`);
-
-/** Flip a contact's policy — `ask` is the revoke direction. */
-export const setContactPolicy = (
+/** Approve an agent-proposed custom connection WITH the key the person
+ * typed. The key travels only in this request body. */
+export const approveCustomConnection = (
   agentId: string,
-  contactId: string,
-  policy: "ask" | "allow" | "blocked",
+  approvalId: string,
+  value: string,
 ) =>
-  apiPut<{ id: string; policy: string }>(
-    `/v1/agents/${agentId}/contacts/${contactId}`,
-    { policy },
-  );
-
-export const deleteContact = (agentId: string, contactId: string) =>
-  apiDelete(`/v1/agents/${agentId}/contacts/${contactId}`);
+  apiPost<{
+    kind: "decided";
+    status: ActionApprovalStatus;
+  }>(`/v1/agents/${agentId}/approvals/${approvalId}/custom-connection`, {
+    value,
+  });
 
 /** One of the agent's peers (PR 5b): another hosted agent it may message. */
 export interface AgentPeer {
   agentId: string;
   name: string;
+  /** The peer's uploaded avatar, when it has one. */
+  imageUrl: string | null;
   /** The peer's workspace when it is not this agent's own; null otherwise. */
   workspaceName: string | null;
   /** THIS agent's side of the relationship. */
@@ -444,13 +549,28 @@ export const resumePeer = (agentId: string, peerAgentId: string) =>
     {},
   );
 
-/** Set THIS agent's side of a pair — `ask` is the revoke direction. */
+/** Set THIS agent's side of a pair: Always allow, or Never. */
 export const setPeerPolicy = (
   agentId: string,
   peerAgentId: string,
-  policy: "ask" | "allow" | "blocked",
+  policy: "allow" | "blocked",
 ) =>
   apiPut<{ id: string; policy: string }>(
     `/v1/agents/${encodeURIComponent(agentId)}/links/${encodeURIComponent(peerAgentId)}`,
     { policy },
+  );
+
+/** What the agent hears in one channel: "mentions" (default) or "all" - it
+ * is the channel's point of contact and decides on its own when to answer. */
+export type ChannelListenMode = "mentions" | "all";
+
+export const setSpaceListen = (
+  agentId: string,
+  provider: ChannelProvider,
+  externalRef: string,
+  listen: ChannelListenMode,
+) =>
+  apiPatch<{ listen: ChannelListenMode }>(
+    agentBase(agentId, `/${provider}/reach/${encodeURIComponent(externalRef)}`),
+    { listen },
   );

@@ -18,8 +18,8 @@ import {
 import { StatusBadge } from "./status-badge";
 import { DecisionBadge } from "./decision-badge";
 import { MethodBadge } from "./method-badge";
-import { ProviderIcon } from "./provider-icon";
-import { formatRelative, formatUTC } from "@onecli/api/lib/format";
+import { ProviderLabel } from "./provider-label";
+import { TimeCell } from "./time-cell";
 import { getProviderIcon } from "@onecli/api/apps/provider-icons";
 import {
   isBlockedRequest,
@@ -28,28 +28,11 @@ import {
   isRateLimitedRequest,
   getApprovalDecision,
   getApprovalId,
+  getDatabaseRequestView,
   type RequestLogEntry,
 } from "@onecli/api/services/request-log-service";
 import { ApprovalActions } from "@/lib/components/approvals";
 import type { PendingApproval } from "@/lib/api/approvals";
-
-const localTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-
-const DateCell = ({ dateStr }: { dateStr: string }) => (
-  <Tooltip>
-    <TooltipTrigger asChild>
-      <span className="text-muted-foreground cursor-default text-xs tabular-nums">
-        {formatRelative(dateStr)}
-      </span>
-    </TooltipTrigger>
-    <TooltipContent side="bottom" align="start" className="text-xs">
-      <p>{formatUTC(dateStr)}</p>
-      <p className="text-muted-foreground">
-        {new Date(dateStr).toLocaleString()} ({localTz})
-      </p>
-    </TooltipContent>
-  </Tooltip>
-);
 
 interface ActivityTableProps {
   logs: RequestLogEntry[];
@@ -98,6 +81,7 @@ export const ActivityTable = ({
               ? liveApprovals.get(approvalId)
               : undefined;
             const decision = getApprovalDecision(log);
+            const db = getDatabaseRequestView(log);
             return (
               <TableRow
                 key={log.id}
@@ -105,7 +89,7 @@ export const ActivityTable = ({
                 onClick={() => onRowClick(log)}
               >
                 <TableCell>
-                  <DateCell dateStr={log.createdAt} />
+                  <TimeCell iso={log.createdAt} />
                 </TableCell>
                 <TableCell>
                   <span className="text-sm truncate block max-w-[7rem]">
@@ -117,29 +101,50 @@ export const ActivityTable = ({
                   </span>
                 </TableCell>
                 <TableCell>
-                  <MethodBadge method={log.method} />
+                  <MethodBadge method={db?.kind ?? log.method} />
                 </TableCell>
                 <TableCell className="max-w-[18rem]">
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium truncate">
-                      {log.host.replace(/:(?:443|80)$/, "")}
+                  {db ? (
+                    // A database row: its connection, and the statement on one
+                    // line (full text in the tooltip and the details dialog),
+                    // never the synthetic policy host and path.
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium truncate">
+                        {db.connection ?? "PostgreSQL"}
+                      </div>
+                      {db.statement && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <div className="text-muted-foreground truncate font-mono text-xs">
+                              {db.statement.replace(/\s+/g, " ")}
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent
+                            side="bottom"
+                            className="max-w-md font-mono text-xs [overflow-wrap:anywhere]"
+                          >
+                            {db.statement}
+                          </TooltipContent>
+                        </Tooltip>
+                      )}
                     </div>
-                    <div className="text-muted-foreground truncate font-mono text-xs">
-                      {log.path || "/"}
+                  ) : (
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium truncate">
+                        {log.host.replace(/:(?:443|80)$/, "")}
+                      </div>
+                      <div className="text-muted-foreground truncate font-mono text-xs">
+                        {log.path || "/"}
+                      </div>
                     </div>
-                  </div>
+                  )}
                 </TableCell>
                 <TableCell>
                   <div className="flex items-center gap-1.5 min-w-0">
                     <Tooltip>
                       <TooltipTrigger asChild>
-                        <div className="flex items-center gap-1.5 min-w-0">
-                          <span className="shrink-0">
-                            <ProviderIcon provider={log.provider} size={14} />
-                          </span>
-                          <span className="text-sm truncate">
-                            {providerInfo?.name ?? log.provider}
-                          </span>
+                        <div className="min-w-0">
+                          <ProviderLabel provider={log.provider} />
                         </div>
                       </TooltipTrigger>
                       <TooltipContent side="top">

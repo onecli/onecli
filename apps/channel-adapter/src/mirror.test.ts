@@ -1,11 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   MAX_OUTBOUND_ATTACHMENT_BYTES,
+  type AdapterReplyItem,
   type AdapterWorkItem,
   type AdapterWorkTurn,
 } from "@onecli/agent-protocol";
-import type { ControlPlaneClient } from "./control-plane";
-import { mirrorFinishedTurn } from "./mirror";
+import {
+  BLOCKED_BY_POLICY_MESSAGE,
+  GATEWAY_UNAVAILABLE_MESSAGE,
+  HOME_READ_ONLY_HELD_MESSAGE,
+  HOME_READ_ONLY_MESSAGE,
+  MODEL_EMPTY_RESPONSE_MESSAGE,
+  MODEL_KEY_UNREADABLE_MESSAGE,
+  MODEL_REFUSED_MESSAGE,
+} from "@onecli/api/validations/conversation";
+import { ControlPlaneError, type ControlPlaneClient } from "./control-plane";
+import {
+  dropDanglingLeadIn,
+  mirrorFinishedTurn,
+  mirrorFollowUpReply,
+} from "./mirror";
 import { slackMirrorPosts } from "./slack/mirror-posts";
 import { slackAdapterProvider } from "./slack/adapter-provider";
 import {
@@ -198,7 +212,7 @@ describe("what gets posted", () => {
 
     const posted = slack.callsTo("chat.postMessage");
     expect(posted.map((call) => call.form.text)).toEqual([
-      "_(from the web)_ Deploy it &lt;now&gt;",
+      "_(:globe_with_meridians:)_ Deploy it &lt;now&gt;",
       "It is done &lt;ok&gt;",
     ]);
     expect(posted.every((call) => call.form.channel === "D100")).toBe(true);
@@ -242,13 +256,15 @@ describe("what gets posted", () => {
     });
 
     const posted = slack.callsTo("chat.postMessage");
-    expect(posted[0]?.form.text).toBe(`_(from the web)_ ${humanWords}`);
+    expect(posted[0]?.form.text).toBe(
+      `_(:globe_with_meridians:)_ ${humanWords}`,
+    );
     expect(posted[0]?.form.text).not.toContain(
       "[Context from your automated runs",
     );
   });
 
-  it("posts a scheduled run's report as ONE labeled message — never '(from the web)'", async () => {
+  it("posts a scheduled run's report as ONE labeled message, never a web quote", async () => {
     // A cron delivery is platform-materialized: its message is the schedule
     // header, not a person's question, and attributing automation to a human
     // is the mislabel this arm exists to prevent. MUTATION-PROOF: drop the
@@ -306,6 +322,24 @@ describe("what gets posted", () => {
     expect(posted.map((call) => call.form.text)).toEqual([
       ':stopwatch: Watch on "tests"\nTests passed &lt;ok&gt;',
     ]);
+  });
+
+  it("never mirrors a platform resume prompt (source approval): only the agent's answer posts", async () => {
+    const controlPlane = createFakeControlPlane(transcriptWith("Sent to Sam."));
+
+    await mirror({
+      controlPlane,
+      workItem: item({
+        source: "approval",
+        userId: null,
+        message:
+          "Sent as Helper to Sam. Already delivered: don't send it again. Confirm in one short line.",
+      }),
+    });
+
+    const texts = slack.callsTo("chat.postMessage").map((c) => c.form.text);
+    expect(texts).toEqual(["Sent to Sam."]);
+    expect(texts.join("\n")).not.toMatch(/Already delivered|one short line/);
   });
 
   it("posts only the answer for a provider-sourced turn", async () => {
@@ -369,6 +403,47 @@ describe("what gets posted", () => {
     expect(button?.url).toBe(
       "https://app.example.com/w/ws1/agents/ag1/chat?attach=google-calendar",
     );
+  });
+
+  it("cards an access_restricted answer as one Attach row: the switch beats its connect alternative", async () => {
+    // The gateway's answer for an account that is off for this agent names
+    // the switch first and a connect link for the same app second. One row,
+    // Attach, and both links leave the prose. MUTATION-PROOF: drop the
+    // attach-wins replacement in cardLinks and the connect-first ordering
+    // below cards a Connect button.
+    const attach =
+      "https://app.example.com/w/ws1/agents/ag1/connections?attach=resend";
+    const connect =
+      "https://app.example.com/w/ws1/connections?connect=resend&source=agent&agent_name=Bot";
+    const controlPlane = createFakeControlPlane(
+      transcriptWith(
+        `Resend is already connected but off for me.\nConnect another one: ${connect}\nOr turn the existing one on: ${attach}\nTell me when it's on.`,
+      ),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack" }),
+      chatUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    const blocks = JSON.parse(posted[0]!.form.blocks!) as {
+      type: string;
+      text?: { text: string };
+      elements?: { type: string; text?: { text: string }; url?: string }[];
+    }[];
+    const buttons = blocks
+      .filter((b) => b.type === "actions")
+      .flatMap((b) => b.elements ?? [])
+      .filter((el) => el.type === "button");
+    expect(buttons.map((b) => [b.text?.text, b.url])).toEqual([
+      ["Attach", "https://app.example.com/w/ws1/agents/ag1/chat?attach=resend"],
+    ]);
+    expect(blocks[0]?.text?.text).not.toContain("attach=resend");
+    expect(blocks[0]?.text?.text).not.toContain("connect=resend");
+    expect(blocks[0]?.text?.text).toContain("Tell me when it's on.");
   });
 
   it("posts the plain answer when no chat URL is configured — a card button never carries a model-authored URL", async () => {
@@ -476,6 +551,140 @@ describe("what gets posted", () => {
     expect(posted).toHaveLength(1);
     expect(posted[0]!.form.blocks).toBeUndefined();
     expect(posted[0]!.form.text).toContain("reconnect=gmail");
+  });
+
+  it("keeps app-page links that need a reconnect or an org's approval in the prose, never on an Attach card", async () => {
+    // MUTATION-PROOF: drop the non-attach guard in findConnectLinkMatches and
+    // this fails: both links would card as "Attach an account to this agent",
+    // a fix for neither the rejected login nor the GitHub org's refusal.
+    const reconnect =
+      "https://app.example.com/w/ws1/connections/apps/gmail?reconnect=conn-1";
+    const orgAccess =
+      "https://app.example.com/w/ws1/connections/apps/github?org_access=acme";
+    const controlPlane = createFakeControlPlane(
+      transcriptWith(`Reconnect Gmail: ${reconnect}\nAsk acme: ${orgAccess}`),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack" }),
+      chatUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.form.blocks).toBeUndefined();
+    expect(posted[0]!.form.text).toContain(reconnect);
+    expect(posted[0]!.form.text).toContain(orgAccess);
+  });
+
+  it("drops the lead-in that only introduced a lifted link — no dangling 'open this link:'", async () => {
+    // The reported message: the link moved into the card, and its sentence was
+    // left ending in a colon that pointed at nothing.
+    const controlPlane = createFakeControlPlane(
+      transcriptWith(
+        "Salesforce isn't connected anymore - the connection was removed. To reconnect, open this link:\n\nhttps://app.example.com/w/ws1/connections?connect=salesforce&source=agent\n\nOnce it's reconnected, let me know.",
+      ),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack" }),
+      chatUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    const text = (
+      JSON.parse(posted[0]!.form.blocks!) as { text?: { text: string } }[]
+    )[0]?.text?.text;
+    expect(text).not.toContain("open this link");
+    expect(text).toBe(
+      "Salesforce isn't connected anymore - the connection was removed.\n\nOnce it's reconnected, let me know.",
+    );
+  });
+
+  it("keeps a colon-ended sentence that is not about the link", async () => {
+    const controlPlane = createFakeControlPlane(
+      transcriptWith(
+        "Two things to check:\n\nhttps://app.example.com/w/ws1/connections?connect=salesforce\n\nand the rest.",
+      ),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack" }),
+      chatUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+
+    const text = (
+      JSON.parse(slack.callsTo("chat.postMessage")[0]!.form.blocks!) as {
+        text?: { text: string };
+      }[]
+    )[0]?.text?.text;
+    expect(text).toContain("Two things to check:");
+  });
+
+  /** The first section's text of the one posted card message. */
+  const cardProse = async (answer: string): Promise<string | undefined> => {
+    await mirror({
+      controlPlane: createFakeControlPlane(transcriptWith(answer)),
+      workItem: item({ source: "slack" }),
+      chatUrl: "https://app.example.com/w/ws1/agents/ag1/chat",
+    });
+    const blocks = JSON.parse(
+      slack.callsTo("chat.postMessage")[0]!.form.blocks!,
+    ) as { type: string; text?: { text: string } }[];
+    return blocks.find((b) => b.type === "section")?.text?.text;
+  };
+
+  it("keeps a lifted line's neighbors intact: indentation, list tightness, one break", async () => {
+    // MUTATION-PROOF: each line pins one splice rule. Skip whitespace past
+    // the line break and the nested bullet loses its indent; owe "\n\n"
+    // regardless and the tight list splits; append a break per lift and two
+    // adjacent lifts stack blank lines.
+    const sf = "https://app.example.com/w/ws1/connections?connect=salesforce";
+    const gm = "https://app.example.com/w/ws1/connections?connect=gmail";
+    expect(
+      await cardProse(
+        `Steps:\n\n1. Connect Salesforce:\n   ${sf}\n   - it takes a minute\n2. Come back.`,
+      ),
+    ).toBe(
+      "Steps:\n\n1. Connect Salesforce:\n   • it takes a minute\n2. Come back.",
+    );
+    slack.calls.length = 0;
+    expect(
+      await cardProse(`Steps:\n- Open the app\n- ${sf}\n- Come back`),
+    ).toBe("Steps:\n• Open the app\n• Come back");
+    slack.calls.length = 0;
+    expect(
+      await cardProse(
+        `Intro.\n\nConnect here:\n${sf}\n\nAnd here:\n${gm}\n\nEnd.`,
+      ),
+    ).toBe("Intro.\n\nEnd.");
+  });
+
+  it("lifts a CRLF-terminated link line and its lead-in", async () => {
+    expect(
+      await cardProse(
+        "Use this link:\r\n\r\nhttps://app.example.com/w/ws1/connections?connect=salesforce\r\n\r\nThanks.",
+      ),
+    ).toBe("Thanks.");
+  });
+
+  it("takes a quote line's markup and lead-in with the link, keeps a presenting 'Here is'", async () => {
+    const sf = "https://app.example.com/w/ws1/connections?connect=salesforce";
+    // MUTATION-PROOF: lift only a bare line and this quote keeps an empty
+    // "> " line and its dangling "Reconnect here:".
+    expect(
+      await cardProse(
+        `> Salesforce token expired.\n> Reconnect here:\n> ${sf}\n\nThanks.`,
+      ),
+    ).toBe("> Salesforce token expired.\n\nThanks.");
+    slack.calls.length = 0;
+    // An opening "Here" presents what follows: the model's own content.
+    expect(
+      await cardProse(`Here is what I found:\n\n${sf}\n\n- 3 open deals`),
+    ).toBe("Here is what I found:\n\n• 3 open deals");
   });
 
   it("lifts a markdown-form connect link out whole — no '[label]()' remnant", async () => {
@@ -910,6 +1119,29 @@ describe("what gets posted", () => {
     expect(posted.at(-1)).not.toContain("RUNNING CI");
   });
 
+  it("a deliberate [no reply] posts NOTHING in the channel (point-of-contact silence)", async () => {
+    // MUTATION-PROOF: drop the `isNoReply` check in the answer precedence
+    // and the literal token is posted into the customer's channel.
+    for (const answer of ["[no reply]", "  **[No Reply]**  "]) {
+      const before = slack.callsTo("chat.postMessage").length;
+      const controlPlane = createFakeControlPlane(transcriptWith(answer));
+      await mirror({ controlPlane, workItem: item({ source: "slack" }) });
+      expect(slack.callsTo("chat.postMessage").length).toBe(before);
+    }
+  });
+
+  it("a real answer that merely MENTIONS [no reply] still posts", async () => {
+    const controlPlane = createFakeControlPlane(
+      transcriptWith(
+        'I usually answer "[no reply]" when I have nothing to add.',
+      ),
+    );
+    await mirror({ controlPlane, workItem: item({ source: "slack" }) });
+    expect(slack.callsTo("chat.postMessage").at(-1)?.form.text).toContain(
+      "nothing to add",
+    );
+  });
+
   it("quotes web-sourced questions VERBATIM — markdown in a human's words is not converted", async () => {
     // The attributed mirror is a quote, not a rendering: a person who typed
     // literal asterisks said literal asterisks.
@@ -921,7 +1153,7 @@ describe("what gets posted", () => {
     });
 
     expect(slack.callsTo("chat.postMessage")[0]?.form.text).toBe(
-      "_(from the web)_ is **this** bold?",
+      "_(:globe_with_meridians:)_ is **this** bold?",
     );
   });
 
@@ -936,7 +1168,7 @@ describe("what gets posted", () => {
     // Italic: the attribution is metadata and must stay quieter than the
     // quoted words themselves.
     expect(slack.callsTo("chat.postMessage")[0]?.form.text).toBe(
-      "_(from the web · Jonathan &lt;j&gt;)_ Deploy it &lt;now&gt;",
+      "_(:globe_with_meridians: · Jonathan &lt;j&gt;)_ Deploy it &lt;now&gt;",
     );
   });
 
@@ -963,20 +1195,20 @@ describe("what gets posted", () => {
     });
 
     expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
-      "_(from the web · Bob)_ from Bob",
-      "_(from the web)_ from a deleted user",
-      "_(from the web · Alice)_ old control plane",
+      "_(:globe_with_meridians: · Bob)_ from Bob",
+      "_(:globe_with_meridians:)_ from a deleted user",
+      "_(:globe_with_meridians: · Alice)_ old control plane",
       "Covers all.",
     ]);
   });
 
-  it("posts a peer task's report as ONE captioned message with the speech-balloon icon — the agent's own words, never '(from the web)'", async () => {
+  it("posts a peer task's report as ONE captioned message with the speech-balloon icon: the agent's own words, never a web quote", async () => {
     // A peer task's report is materialized into the person's conversation
     // under `peer_task` (the PR after 5b): the message is the platform's
     // caption ("After talking with Ray"), the body the agent's report for
     // the person. It rides the automation post so the caption says where
     // the words came from. MUTATION-PROOF: drop "peer_task" from
-    // AUTOMATION_SOURCES and this posts "(from the web)" instead.
+    // AUTOMATION_SOURCES and this posts a web quote instead.
     const controlPlane = createFakeControlPlane(
       transcriptWith("Ray says <it is> 20:42."),
     );
@@ -1026,8 +1258,404 @@ describe("what gets posted", () => {
     });
 
     expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
-      "_(from the web)_ web follow-up &lt;one&gt;",
+      "_(:globe_with_meridians:)_ web follow-up &lt;one&gt;",
       "Covers both &lt;asks&gt;",
+    ]);
+  });
+
+  it("posts a joined WAKE follow-up as its automation caption, never as a web quote", async () => {
+    // Live 2026-10-03: a wake that joined the turn mirrored as a web quote
+    // ("[Watch on process ...]") with the platform's whole
+    // instruction, as if a person had typed it. A wake is the platform
+    // speaking: caption only (the answer below is its report).
+    // MUTATION-PROOF: drop the follow-up automation arm and the first post
+    // is the web quote again.
+    const controlPlane = createFakeControlPlane(transcriptWith("PR is green."));
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack" }),
+        followUps: [
+          {
+            message:
+              '[Watch on process "PR 1209 CI watcher" fired: the process exited with code 0 — triggered automatically, not by a person typing. Do the task below.]\n\nRe-check CI.',
+            source: "watch",
+            userName: null,
+          },
+        ],
+      },
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted.map((call) => call.form.text)).toEqual([
+      ':stopwatch: Watch on process "PR 1209 CI watcher" fired: the process exited with code 0',
+      "PR is green.",
+    ]);
+    expect(JSON.parse(posted[0]?.form.blocks ?? "[]")).toEqual([
+      {
+        type: "context",
+        elements: [
+          {
+            type: "mrkdwn",
+            text: ':stopwatch: Watch on process "PR 1209 CI watcher" fired: the process exited with code 0',
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("posts each follow-up's own reply right under it, before the turn's answer", async () => {
+    // The agent answered the mid-turn message, then kept working.
+    // The reply is stored under the follow-up's own id, and the thread
+    // shows it under the message it answers, the web's layout. A
+    // Slack-sourced follow-up is already in the thread, so only its reply
+    // posts. MUTATION-PROOF: skip the reply post and the person's question
+    // reads as ignored again.
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          {
+            seq: 1,
+            turnId: "f1",
+            type: "text",
+            payload: { text: "Using <Q3>." },
+          },
+          { seq: 2, turnId: "f2", type: "text", payload: { text: "Sure." } },
+          {
+            seq: 3,
+            turnId: "t1",
+            type: "text",
+            payload: { text: "Report sent." },
+          },
+        ],
+        nextSince: 4,
+        hasMore: false,
+      }),
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack" }),
+        followUps: [
+          { id: "f1", message: "use the Q3 numbers", source: "web" },
+          { id: "f2", message: "and email it", source: "slack" },
+        ],
+      },
+    });
+
+    expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
+      "_(:globe_with_meridians:)_ use the Q3 numbers",
+      "Using &lt;Q3&gt;.",
+      "Sure.",
+      "Report sent.",
+    ]);
+  });
+
+  it("posts a reply in the thread its message was asked in", async () => {
+    // The turn's own thread rule, per message: a follow-up typed in a DM
+    // thread gets its answer in that thread, even when the turn's own
+    // message sits at the top of the DM.
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          { seq: 1, turnId: "f1", type: "text", payload: { text: "On it." } },
+          { seq: 2, turnId: "t1", type: "text", payload: { text: "Done." } },
+        ],
+        nextSince: 3,
+        hasMore: false,
+      }),
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack" }),
+        followUps: [
+          {
+            id: "f1",
+            message: "and this",
+            source: "slack",
+            sourceThreadId: "1699.555",
+          },
+        ],
+      },
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted.map((c) => [c.form.text, c.form.thread_ts])).toEqual([
+      ["On it.", "1699.555"],
+      ["Done.", undefined],
+    ]);
+  });
+
+  it("skips a follow-up the reply feed already posted mid-run, words and reply both", async () => {
+    // The early post claimed and posted the exchange while the turn ran (a
+    // web-sourced follow-up's words ahead of its reply); the close must
+    // post none of it again. MUTATION-PROOF: ignore `replyPosted` and
+    // "use the Q3 numbers" and "Using Q3." post again below.
+    const claims: string[] = [];
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          {
+            seq: 1,
+            turnId: "f1",
+            type: "text",
+            payload: { text: "Using Q3." },
+          },
+          { seq: 2, turnId: "f2", type: "text", payload: { text: "Sure." } },
+          { seq: 3, turnId: "t1", type: "text", payload: { text: "Done." } },
+        ],
+        nextSince: 4,
+        hasMore: false,
+      }),
+      claimReply: async (followUpId) => {
+        claims.push(followUpId);
+        return true;
+      },
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack" }),
+        followUps: [
+          {
+            id: "f1",
+            message: "use the Q3 numbers",
+            source: "web",
+            replyPosted: true,
+          },
+          { id: "f2", message: "and email it", source: "slack" },
+        ],
+      },
+    });
+
+    expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
+      "Sure.",
+      "Done.",
+    ]);
+    // Only the unposted reply was claimed; the posted one never reached the
+    // control plane again.
+    expect(claims).toEqual(["f2"]);
+  });
+
+  it("posts NO reply at the close when the claim is lost (a feed poll got there first)", async () => {
+    // The close and a reply feed poll can race on the same reply; the
+    // compare-and-set decides, and the loser posts nothing.
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          { seq: 1, turnId: "f1", type: "text", payload: { text: "On it." } },
+          { seq: 2, turnId: "t1", type: "text", payload: { text: "Done." } },
+        ],
+        nextSince: 3,
+        hasMore: false,
+      }),
+      claimReply: async () => false,
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack" }),
+        followUps: [{ id: "f1", message: "and this", source: "slack" }],
+      },
+    });
+
+    expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
+      "Done.",
+    ]);
+  });
+
+  it("an OLDER control plane without the claim route still gets its replies at the close", async () => {
+    // Version skew: no claim route means no reply feed either, so this pass
+    // is the only poster and must keep posting (a 404 is not a lost claim).
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          { seq: 1, turnId: "f1", type: "text", payload: { text: "On it." } },
+          { seq: 2, turnId: "t1", type: "text", payload: { text: "Done." } },
+        ],
+        nextSince: 3,
+        hasMore: false,
+      }),
+      claimReply: async () => {
+        throw new ControlPlaneError(404, "control plane answered 404");
+      },
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack" }),
+        followUps: [{ id: "f1", message: "and this", source: "slack" }],
+      },
+    });
+
+    expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
+      "On it.",
+      "Done.",
+    ]);
+  });
+  it("posts no reply for an older control plane's follow-up (no id)", async () => {
+    // Version skew: a control plane that predates per-follow-up ids sends
+    // none, so the mirror cannot know which text is whose and posts exactly
+    // what it did before.
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          { seq: 1, turnId: "f1", type: "text", payload: { text: "On it." } },
+          { seq: 2, turnId: "t1", type: "text", payload: { text: "Done." } },
+        ],
+        nextSince: 3,
+        hasMore: false,
+      }),
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack" }),
+        followUps: [{ message: "and this", source: "web" }],
+      },
+    });
+
+    expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
+      "_(:globe_with_meridians:)_ and this",
+      "Done.",
+    ]);
+  });
+
+  it("answers a top-level DM message at the top level, even when its turn was asked in a thread", async () => {
+    // The address is the MESSAGE's, not the turn's: a follow-up typed at
+    // the top of the DM while a threaded question runs must not have its
+    // reply buried in that thread. MUTATION-PROOF: derive the reply's
+    // target from the turn's and the reply posts into thread 1699.123.
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          { seq: 1, turnId: "f1", type: "text", payload: { text: "On it." } },
+          { seq: 2, turnId: "t1", type: "text", payload: { text: "Done." } },
+        ],
+        nextSince: 3,
+        hasMore: false,
+      }),
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack", sourceThreadId: "1699.123" }),
+        followUps: [
+          {
+            id: "f1",
+            message: "and this",
+            source: "slack",
+            sourceThreadId: null,
+          },
+        ],
+      },
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted.map((c) => [c.form.text, c.form.thread_ts])).toEqual([
+      ["On it.", undefined],
+      ["Done.", "1699.123"],
+    ]);
+  });
+
+  it("posts a joined wake's reply as its caption's body, the web's layout", async () => {
+    // The agent said something back to the wake before working on: on the
+    // web that reply sits under the wake's header, so on Slack it is the
+    // caption's body. MUTATION-PROOF: keep the caption body-less and the
+    // reply never reaches the thread.
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          {
+            seq: 1,
+            turnId: "w1",
+            type: "text",
+            payload: { text: "CI went green." },
+          },
+          { seq: 2, turnId: "t1", type: "text", payload: { text: "Done." } },
+        ],
+        nextSince: 3,
+        hasMore: false,
+      }),
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack" }),
+        followUps: [
+          {
+            id: "w1",
+            message: '[Watch on process "ci" fired]\n\nRe-check CI.',
+            source: "watch",
+            userName: null,
+          },
+        ],
+      },
+    });
+
+    expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
+      ':stopwatch: Watch on process "ci" fired\nCI went green.',
+      "Done.",
+    ]);
+  });
+
+  it("posts a wake that joined a WAKE, and its reply, ahead of the report", async () => {
+    // A batch finishing seconds apart: the second wake joins the first's
+    // run. The web shows its header (and the reply to it) above the report;
+    // before this the mirror posted the report alone. MUTATION-PROOF: skip
+    // the follow-ups on an automated turn and the joined wake vanishes.
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          {
+            seq: 1,
+            turnId: "w2",
+            type: "text",
+            payload: { text: "The second job passed too." },
+          },
+          {
+            seq: 2,
+            turnId: "t1",
+            type: "text",
+            payload: { text: "Both jobs passed." },
+          },
+        ],
+        nextSince: 3,
+        hasMore: false,
+      }),
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({
+          source: "watch",
+          message: '[Watch on process "job-1" fired]\n\nReport.',
+        }),
+        followUps: [
+          {
+            id: "w2",
+            message: '[Watch on process "job-2" fired]\n\nReport.',
+            source: "watch",
+            userName: null,
+          },
+        ],
+      },
+    });
+
+    expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
+      ':stopwatch: Watch on process "job-2" fired\nThe second job passed too.',
+      ':stopwatch: Watch on process "job-1" fired\nBoth jobs passed.',
     ]);
   });
 
@@ -1150,6 +1778,94 @@ describe("what gets posted", () => {
     expect(posted[0]?.form.text).toBe("No key &lt;yet&gt;.");
     expect("blocks" in posted[0]!.form).toBe(false);
   });
+
+  it("posts the attach-key card when the key exists but is not attached", async () => {
+    // The gateway's `access_restricted` on a model call: the workspace holds
+    // a key this agent was not given. Same card family, the attach verb.
+    const controlPlane = createFakeControlPlane(transcriptWith(null));
+
+    await mirror({
+      controlPlane,
+      modelsUrl: "https://app.example.com/w/ws1/agents/ag1/models",
+      workItem: item({
+        source: "slack",
+        error: "This agent doesn't have access to your model key yet.",
+        errorCode: "model_key_not_attached",
+      }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    const blocks = JSON.parse(posted[0]!.form.blocks!) as {
+      type: string;
+      text?: { text: string };
+      elements?: { text?: { text: string }; url?: string }[];
+    }[];
+    expect(blocks[0]?.text?.text).toBe(
+      "*This agent doesn't have access to your model key*",
+    );
+    const button = blocks.find((b) => b.type === "actions")?.elements?.[0];
+    expect(button?.url).toBe("https://app.example.com/w/ws1/agents/ag1/models");
+    expect(button?.text?.text).toBe("Attach the key");
+  });
+
+  it("posts the re-enter card when the agent's key could not be read", async () => {
+    // The gateway's `credential_unavailable`: the agent HAS the key, but its
+    // saved value could not be read. Same card family, the re-enter verb,
+    // and never the usage-limit wording of a provider refusal.
+    const controlPlane = createFakeControlPlane(transcriptWith(null));
+
+    await mirror({
+      controlPlane,
+      modelsUrl: "https://app.example.com/w/ws1/agents/ag1/models",
+      workItem: item({
+        source: "slack",
+        error: MODEL_KEY_UNREADABLE_MESSAGE,
+        errorCode: "model_key_unreadable",
+      }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    const blocks = JSON.parse(posted[0]!.form.blocks!) as {
+      type: string;
+      text?: { text: string };
+      elements?: { text?: { text: string }; url?: string }[];
+    }[];
+    expect(blocks[0]?.text?.text).toBe(
+      "*OneCLI couldn't read this agent's model key*",
+    );
+    expect(posted[0]!.form.blocks).not.toMatch(/usage limit/i);
+    const button = blocks.find((b) => b.type === "actions")?.elements?.[0];
+    expect(button?.url).toBe("https://app.example.com/w/ws1/agents/ag1/models");
+    expect(button?.text?.text).toBe("Re-enter the key");
+  });
+
+  it.each([
+    ["blocked_by_policy", BLOCKED_BY_POLICY_MESSAGE],
+    ["gateway_unavailable", GATEWAY_UNAVAILABLE_MESSAGE],
+    // A read-only home: the Slack reply is the canonical sentence, never
+    // the kernel's "Read-only file system (os error 30)".
+    ["home_read_only", HOME_READ_ONLY_MESSAGE],
+    ["home_read_only_held", HOME_READ_ONLY_HELD_MESSAGE],
+  ])(
+    "posts the canonical sentence for %s as plain text, no card",
+    async (errorCode, error) => {
+      const controlPlane = createFakeControlPlane(transcriptWith(null));
+
+      await mirror({
+        controlPlane,
+        modelsUrl: "https://app.example.com/w/ws1/agents/ag1/models",
+        workItem: item({ source: "slack", error, errorCode }),
+      });
+
+      const posted = slack.callsTo("chat.postMessage");
+      expect(posted).toHaveLength(1);
+      expect(posted[0]?.form.text).toBe(error);
+      // No fix is a click away, so there is no button to offer.
+      expect("blocks" in posted[0]!.form).toBe(false);
+    },
+  );
 
   it("posts the provider-error card — headline, context line, and a button to the Models page", async () => {
     // The supervisor now produces `model_provider_error` and finishTurn's
@@ -1298,6 +2014,145 @@ describe("what gets posted", () => {
   });
 });
 
+describe("the early reply post (a reply posts while the turn runs)", () => {
+  const replyItem = (
+    overrides: Partial<AdapterReplyItem> = {},
+  ): AdapterReplyItem => ({
+    linkId: "l1",
+    presenceId: "p1",
+    conversationId: "cv1",
+    externalThreadId: "D100",
+    kind: "direct",
+    turnId: "t1",
+    followUp: {
+      id: "f1",
+      message: "and check the linter",
+      source: "slack",
+      userName: null,
+      sourceThreadId: "1699.555",
+    },
+    reply: "On it, <checking> now.",
+    ...overrides,
+  });
+  const post = (
+    controlPlane: ControlPlaneClient,
+    overrides: Partial<AdapterReplyItem> = {},
+  ) =>
+    mirrorFollowUpReply({
+      controlPlane,
+      credential: "xoxb-bot",
+      provider: "slack",
+      posts: slackMirrorPosts,
+      removalEventFor: slackAdapterProvider.removalEventFor,
+      threadAddress: slackAdapterProvider.threadAddress,
+      iconUrl: null,
+      item: replyItem(overrides),
+      onLog: () => {},
+    });
+
+  it("claims BEFORE posting, then posts the reply in the thread it was asked in, escaped", async () => {
+    const order: string[] = [];
+    const controlPlane = createFakeControlPlane({
+      claimReply: async (followUpId) => {
+        order.push(`claim:${followUpId}`);
+        return true;
+      },
+    });
+    slack.onCall = (call) => order.push(call.method);
+
+    await post(controlPlane);
+
+    // A Slack-sourced follow-up is already in the thread: only its reply
+    // posts.
+    expect(order).toEqual(["claim:f1", "chat.postMessage"]);
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted.map((c) => [c.form.text, c.form.thread_ts])).toEqual([
+      ["On it, &lt;checking&gt; now.", "1699.555"],
+    ]);
+  });
+
+  it("a deliberate silence ([no reply]) is claimed but never posted", async () => {
+    // A point-of-contact follow-up the agent chose to sit out. The claim
+    // stamps it handled, so the reply feed stops serving it on every poll.
+    // MUTATION-PROOF: drop the guard and "[no reply]" lands in a human
+    // thread; drop the claim and the feed re-serves it forever.
+    let claims = 0;
+    const controlPlane = createFakeControlPlane({
+      claimReply: async () => {
+        claims += 1;
+        return true;
+      },
+    });
+
+    await post(controlPlane, { reply: "[no reply]" });
+
+    expect(claims).toBe(1);
+    expect(slack.callsTo("chat.postMessage")).toHaveLength(0);
+  });
+
+  it("posts a web-sourced follow-up's attributed words AHEAD of its reply, as one exchange", async () => {
+    // The person typed on the web while the agent worked: the thread has
+    // not seen their words yet, so the mirror posts them first (attributed
+    // to their author, quoted not rendered), then the reply, both where the
+    // turn was asked. MUTATION-PROOF: post the reply alone and the thread
+    // shows an answer to a message it never saw.
+    const controlPlane = createFakeControlPlane();
+
+    await post(controlPlane, {
+      followUp: {
+        id: "f1",
+        message: "use the <Q3> numbers",
+        source: "web",
+        userName: "Jonathan",
+        sourceThreadId: null,
+      },
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted.map((c) => [c.form.text, c.form.thread_ts])).toEqual([
+      [
+        "_(:globe_with_meridians: · Jonathan)_ use the &lt;Q3&gt; numbers",
+        undefined,
+      ],
+      ["On it, &lt;checking&gt; now.", undefined],
+    ]);
+  });
+
+  it("posts NOTHING when the claim is lost", async () => {
+    const controlPlane = createFakeControlPlane({
+      claimReply: async () => false,
+    });
+
+    await post(controlPlane);
+
+    expect(slack.calls).toEqual([]);
+  });
+
+  it("a post refused with a DEAD-credential code is relayed as the provider's removal event", async () => {
+    // Same relay as the completion pass: the claim is spent either way (no
+    // retry into a double post), and the presence learns it is dead.
+    const ingested: unknown[] = [];
+    const controlPlane = createFakeControlPlane({
+      ingest: async (request) => {
+        ingested.push(request);
+        return { kind: "duplicate" as const };
+      },
+    });
+    slack.respond("chat.postMessage", () => ({
+      ok: false,
+      error: "account_inactive",
+    }));
+
+    await post(controlPlane);
+
+    expect(ingested).toHaveLength(1);
+    expect(ingested[0]).toMatchObject({
+      presenceId: "p1",
+      eventId: "dead-credential:f1",
+    });
+  });
+});
+
 describe("failure surfacing — never silent on a terminal outcome", () => {
   /** A transcript holding arbitrary events for t1. */
   const transcriptOf = (
@@ -1333,10 +2188,64 @@ describe("failure surfacing — never silent on a terminal outcome", () => {
     );
   });
 
+  it.each([
+    ["model_refused", MODEL_REFUSED_MESSAGE],
+    ["model_empty_response", MODEL_EMPTY_RESPONSE_MESSAGE],
+  ])(
+    "an unanswered turn (%s) posts its canonical sentence: never silence",
+    async (errorCode, sentence) => {
+      // The shape the control plane closes a model's refusal or empty answer
+      // with: failed, coded, canonical copy on the row, and a transcript that
+      // holds only the run's start and clean end (no text, no error event).
+      // Before, the same turn closed `done` with nothing and posted nothing.
+      const controlPlane = createFakeControlPlane(
+        transcriptOf([
+          { type: "turn.started", payload: {} },
+          { type: "turn.done", payload: {} },
+        ]),
+      );
+
+      await mirror({
+        controlPlane,
+        workItem: item({
+          source: "slack",
+          status: "failed",
+          error: sentence,
+          errorCode,
+        }),
+      });
+
+      const posted = slack.callsTo("chat.postMessage");
+      expect(posted).toHaveLength(1);
+      expect(posted[0]?.form.text).toContain(sentence);
+      expect(posted[0]?.form.text).not.toMatch(/stop_reason|guardrail/);
+    },
+  );
+
+  it("the SAME turn closed `done` (the old outcome) posts nothing: why it must close failed", async () => {
+    // The before-state, kept as a pin: a successful turn with no words is the
+    // mirror's legitimate quiet (a deliberate no-reply), so the only way a
+    // refusal reaches the thread is the failed close the supervisor now sends.
+    const controlPlane = createFakeControlPlane(
+      transcriptOf([
+        { type: "turn.started", payload: {} },
+        { type: "turn.done", payload: {} },
+      ]),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack", status: "done" }),
+    });
+
+    expect(slack.callsTo("chat.postMessage")).toHaveLength(0);
+  });
+
   it("a FAILED turn with only a transcript error event posts that message", async () => {
-    // Uncoded harness failures leave their text ONLY in the durable error
-    // event (the supervisor sends no turn.result error for them) — the
-    // mirror must read it, like the web's transcript fold does.
+    // A turn closed with `turn.error = NULL` (an older supervisor that sent
+    // no turn.result error for uncoded failures, or a lost report) leaves
+    // its text ONLY in the durable error event — the mirror must read it,
+    // like the web's transcript fold does.
     const controlPlane = createFakeControlPlane(
       transcriptOf([
         { type: "error", payload: { message: "the harness said why" } },
@@ -1377,6 +2286,43 @@ describe("failure surfacing — never silent on a terminal outcome", () => {
     expect(posted[0]?.form.text).not.toContain("raw vendor wording");
   });
 
+  it.each([
+    ["the transcript error event", { eventError: true }],
+    ["turn.error", { eventError: false }],
+  ])(
+    "a raw provider body in %s posts the generic failure line, never the blob",
+    async (_where, { eventError }) => {
+      // An uncoded failure whose text is a provider's response body: a shared
+      // room gets a sentence, and nothing of the payload.
+      const raw =
+        'Claude API error (500 Internal Server Error): {"type":"error","error":{"type":"api_error","message":"Internal server error"},"request_id":"req_123"}';
+      const controlPlane = createFakeControlPlane(
+        transcriptOf(
+          eventError ? [{ type: "error", payload: { message: raw } }] : [],
+        ),
+      );
+
+      await mirror({
+        controlPlane,
+        workItem: item({
+          source: "slack",
+          status: "failed",
+          ...(!eventError && { error: raw }),
+        }),
+      });
+
+      const posted = slack.callsTo("chat.postMessage");
+      expect(posted).toHaveLength(1);
+      expect(posted[0]?.form.text).toContain(
+        "The agent ran into an error and couldn",
+      );
+      expect(posted[0]?.form.text).not.toContain("api_error");
+      expect(posted[0]?.form.text).not.toContain("req_123");
+      // Not a key problem as far as anyone knows: no model-key door.
+      expect(JSON.stringify(posted[0]?.form)).not.toMatch(/model key/i);
+    },
+  );
+
   it("a FAILED turn with partial answer text posts the text AND the failure line", async () => {
     // A partial answer must never masquerade as a normal reply.
     const controlPlane = createFakeControlPlane(
@@ -1407,6 +2353,44 @@ describe("failure surfacing — never silent on a terminal outcome", () => {
     expect(posted).toHaveLength(1);
     expect(posted[0]?.form.text).toBe("_Stopped._");
   });
+
+  it("an ABORTED turn that had already said something posts that, then the closure word (the web's layout)", async () => {
+    // Caught live with Slack's native Stop button: the agent had
+    // already said a line, so the mirror posted it as a normal answer and
+    // nothing else, and the person who clicked Stop saw no sign it took.
+    // MUTATION-PROOF: drop the stoppedAfterText arm and only one post lands.
+    const controlPlane = createFakeControlPlane(
+      transcriptWith("Looking into it now"),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack", status: "aborted" }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(2);
+    expect(posted[0]?.form.text).toContain("Looking into it now");
+    expect(posted[1]?.form.text).toBe("_Stopped._");
+  });
+
+  it("an ABORTED turn carrying an error posts the error alone (the web's precedence)", async () => {
+    const controlPlane = createFakeControlPlane(
+      transcriptWith("Looking into it now"),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({
+        source: "slack",
+        status: "aborted",
+        error: "The sandbox went away.",
+      }),
+    });
+
+    const texts = slack.callsTo("chat.postMessage").map((c) => c.form.text);
+    expect(texts).not.toContain("_Stopped._");
+  });
 });
 
 describe("post failure after the cursor advanced", () => {
@@ -1434,6 +2418,52 @@ describe("post failure after the cursor advanced", () => {
 });
 
 describe("outbound mentions — resolve, render, report", () => {
+  it("resolves mentions in a follow-up's reply in the SAME call as the answer's", async () => {
+    // A reply is model text like the answer: its @[Name] must ping too, and
+    // the mirror must not spend one resolve call per message.
+    const asked: string[][] = [];
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          {
+            seq: 1,
+            turnId: "f1",
+            type: "text",
+            payload: { text: "Asking @[Dan Abramov] now." },
+          },
+          { seq: 2, turnId: "t1", type: "text", payload: { text: "Done." } },
+        ],
+        nextSince: 3,
+        hasMore: false,
+      }),
+      resolveMentions: async (_presenceId, names) => {
+        asked.push(names);
+        return [
+          {
+            kind: "resolved",
+            name: "dan abramov",
+            externalUserId: "U0DAN1",
+            displayName: "Dan Abramov",
+          },
+        ];
+      },
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack" }),
+        followUps: [{ id: "f1", message: "loop in Dan", source: "slack" }],
+      },
+    });
+
+    expect(asked).toEqual([["dan abramov"]]);
+    expect(slack.callsTo("chat.postMessage").map((c) => c.form.text)).toEqual([
+      "Asking <@U0DAN1> now.",
+      "Done.",
+    ]);
+  });
+
   it("resolves @[Name] through the control plane and posts a real mention", async () => {
     let asked: { presenceId: string; names: string[] } | null = null;
     const controlPlane = createFakeControlPlane({
@@ -1555,6 +2585,49 @@ describe("outbound mentions — resolve, render, report", () => {
     // The token stays visible as literal text in the automation post.
     const posted = slack.callsTo("chat.postMessage");
     expect(JSON.stringify(posted[0]?.form)).toContain("@[Dan]");
+  });
+
+  it("a joined wake's reply never resolves mentions either (it posts as an automation body)", async () => {
+    // Same rule, one level down: the reply to a wake rides its caption,
+    // so it is automation text. MUTATION-PROOF: scan every reply and the
+    // wake's @[Dan] is sent to resolve.
+    const asked: string[][] = [];
+    const controlPlane = createFakeControlPlane({
+      readTranscript: async () => ({
+        events: [
+          {
+            seq: 1,
+            turnId: "w1",
+            type: "text",
+            payload: { text: "Pinging @[Dan] about CI." },
+          },
+          { seq: 2, turnId: "t1", type: "text", payload: { text: "Done." } },
+        ],
+        nextSince: 3,
+        hasMore: false,
+      }),
+      resolveMentions: async (_presenceId, names) => {
+        asked.push(names);
+        return [];
+      },
+    });
+
+    await mirror({
+      controlPlane,
+      workItem: {
+        ...item({ source: "slack" }),
+        followUps: [
+          {
+            id: "w1",
+            message: '[Watch on process "ci" fired]\n\nRe-check CI.',
+            source: "watch",
+            userName: null,
+          },
+        ],
+      },
+    });
+
+    expect(asked).toEqual([]);
   });
 });
 
@@ -2049,5 +3122,85 @@ describe("the agent's files (send_file) — one share after the answer", () => {
     expect(
       slack.callsTo("chat.postMessage").some((c) => c.form.text === "Done."),
     ).toBe(true);
+  });
+});
+
+describe("dropDanglingLeadIn", () => {
+  it("drops a trailing clause that points at the link, keeping the sentence before it", () => {
+    expect(
+      dropDanglingLeadIn(
+        "Salesforce was removed. To reconnect, open this link:\n\n",
+      ),
+    ).toBe("Salesforce was removed.");
+    expect(dropDanglingLeadIn("Click here:\n")).toBe("");
+    // A (re)connect imperative opening the clause points at the lifted
+    // CONNECT link as surely as "link" does.
+    expect(
+      dropDanglingLeadIn("Status: disconnected. Reconnect Salesforce:\n"),
+    ).toBe("Status: disconnected.");
+    expect(dropDanglingLeadIn("To connect Gmail:\n")).toBe("");
+  });
+
+  it("keeps a statement that only mentions connecting", () => {
+    // MUTATION-PROOF: match the verb anywhere in the clause and this
+    // explanation is dropped as if it were a pointer at the link.
+    expect(
+      dropDanglingLeadIn("Sorry. I couldn't connect to it because:\n"),
+    ).toBe("Sorry. I couldn't connect to it because:\n");
+  });
+
+  it("leaves text alone when the clause is not a pointer or there is no colon", () => {
+    expect(dropDanglingLeadIn("Two things to check:\n")).toBe(
+      "Two things to check:\n",
+    );
+    expect(dropDanglingLeadIn("All done.\n")).toBe("All done.\n");
+  });
+
+  it("never splits a list marker or an abbreviation off as a sentence end", () => {
+    // MUTATION-PROOF: treat "1." as a sentence end and the item collapses to
+    // a bare "1." (the reported numbering glitch); treat "e.g." as one and a
+    // lone "e.g." is left behind.
+    expect(dropDanglingLeadIn("Next steps:\n1. Open the URL below:\n")).toBe(
+      "Next steps:\n1. Open the URL below:\n",
+    );
+    expect(dropDanglingLeadIn("e.g. use this link:\n")).toBe("");
+  });
+
+  it("keeps a list item: dropping it would leave an empty bullet", () => {
+    expect(dropDanglingLeadIn("- Open this link:\n")).toBe(
+      "- Open this link:\n",
+    );
+    expect(dropDanglingLeadIn("2) Click here:\n")).toBe("2) Click here:\n");
+  });
+
+  it("reads only the clause's last colon segment", () => {
+    // MUTATION-PROOF: test the whole clause and "Here's" matches `here`,
+    // dropping a statement that only happens to open with it.
+    expect(
+      dropDanglingLeadIn("Here's what happened: the token expired:\n"),
+    ).toBe("Here's what happened: the token expired:\n");
+  });
+
+  it("takes emphasis and heading markup with the lead-in, never half of a pair", () => {
+    expect(
+      dropDanglingLeadIn("You need to authorize it. **Click here:**\n"),
+    ).toBe("You need to authorize it.");
+    expect(dropDanglingLeadIn("Intro.\n## Reconnect here:\n")).toBe("Intro.");
+    // The closing `**` has no opener inside the clause: keep it all.
+    expect(dropDanglingLeadIn("**Done. Click here:**\n")).toBe(
+      "**Done. Click here:**\n",
+    );
+  });
+
+  it("stays linear on hostile model output (no backtracking)", () => {
+    // A bounded scan: each call is O(1) in the answer's length. The
+    // generous budget absorbs CI noise (the mrkdwn suite's precedent) and
+    // still fails any reintroduced quadratic or backtracking pass.
+    const t = performance.now();
+    dropDanglingLeadIn(`${"a ".repeat(20_000)}link:`);
+    dropDanglingLeadIn(`${" ".repeat(40_000)}x`);
+    dropDanglingLeadIn(`${"a".repeat(40_000)}link:`);
+    dropDanglingLeadIn(`${"1. ".repeat(13_000)}link:`);
+    expect(performance.now() - t).toBeLessThan(500);
   });
 });

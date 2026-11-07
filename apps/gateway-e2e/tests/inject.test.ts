@@ -1,5 +1,6 @@
 import { describe, expect } from "vitest";
 
+import { addSecret, grantSecret } from "../src/fixtures.js";
 import { throughProxy } from "../src/proxy.js";
 import { scenario, type Cx } from "../src/scenario.js";
 
@@ -191,6 +192,102 @@ describe("injection shapes", () => {
     expect(seen?.header("authorization")).toBeUndefined();
   });
 
+  // The regression guard for a production bug: an org-scoped API key and a
+  // workspace-scoped OAuth token both reached one agent. They write DIFFERENT
+  // header shapes, so the later rule did not override the earlier one: the org
+  // API-key rule ran first, set `x-api-key` and removed `authorization`, and
+  // the workspace OAuth rule (a replace-if-present) then had nothing to
+  // replace. The workspace's own choice of credential was silently swapped for
+  // the org's, and Anthropic 400'd the resulting `/v1/models` calls. Only the
+  // workspace one may survive.
+  scenario(
+    "collapses two Anthropic credentials to the workspace one",
+    async (cx) => {
+      const upstream = await cx.upstream();
+      await cx.seed({
+        grantAll: true,
+        secrets: [
+          {
+            type: "anthropic",
+            hostPattern: "127.0.0.1",
+            value: "sk-ant-oat-workspace-token",
+            scope: "workspace",
+          },
+          {
+            type: "anthropic",
+            hostPattern: "127.0.0.1",
+            value: "sk-ant-api03-org-key",
+            scope: "organization",
+          },
+        ],
+      });
+      const gw = await cx.startGateway();
+
+      await throughProxy(gw.origin, {
+        url: upstream.url("/v1/models"),
+        token: cx.ids.agentToken,
+        // An OAuth credential injects via ReplaceHeader, which only fires when
+        // the header is already present, the shape a real Anthropic SDK sends.
+        headers: { authorization: "Bearer client-supplied-token" },
+      });
+
+      const [seen] = await upstream.waitForRequests(1);
+      // The workspace credential wins outright: its token is on the wire and
+      // the org key never appears. Before the fix this read the other way
+      // round: `authorization` undefined, `x-api-key` holding the org key.
+      expect(seen?.header("authorization")).toBe(
+        "Bearer sk-ant-oat-workspace-token",
+      );
+      expect(seen?.header("x-api-key")).toBeUndefined();
+    },
+  );
+
+  // Two Anthropic keys in ONE workspace, both attached: the API side hands
+  // the container the lower-id key's auth mode, so the gateway must inject
+  // that same key whatever order the rows come back in. The lower id (the
+  // API key) is inserted LAST, so a pick left to Postgres row order would
+  // take the OAuth token and send an API-key request with no credential.
+  scenario(
+    "two same-scope Anthropic keys resolve to the lower id",
+    async (cx) => {
+      const upstream = await cx.upstream();
+      await cx.seed({
+        grantAll: true,
+        secrets: [
+          {
+            type: "anthropic",
+            hostPattern: "127.0.0.1",
+            value: "sk-ant-oat-higher-id-token",
+          },
+        ],
+      });
+      // Sorts before the seeded `<ws>-sec-0` ("a" < "s").
+      const lowerId = `${cx.ids.workspace}-a-lower-id`;
+      await addSecret(
+        cx.db.prisma,
+        cx.ids,
+        {
+          type: "anthropic",
+          hostPattern: "127.0.0.1",
+          value: "sk-ant-api03-lower-id-key",
+        },
+        lowerId,
+      );
+      await grantSecret(cx.db.prisma, cx.ids, lowerId);
+      const gw = await cx.startGateway();
+
+      await throughProxy(gw.origin, {
+        url: upstream.url("/v1/messages"),
+        token: cx.ids.agentToken,
+        headers: { "x-api-key": "placeholder" },
+      });
+
+      const [seen] = await upstream.waitForRequests(1);
+      expect(seen?.header("x-api-key")).toBe("sk-ant-api03-lower-id-key");
+      expect(seen?.header("authorization")).toBeUndefined();
+    },
+  );
+
   scenario("injects a credential into a query parameter", async (cx) => {
     const upstream = await cx.upstream();
     await cx.seed({
@@ -327,5 +424,122 @@ describe("secret scope", () => {
     // Both target the same header. Org first, workspace second, last write wins
     // — so the more specific level overrides the broader one.
     expect(seen?.header("x-test-key")).toBe(SECRET);
+  });
+});
+
+/**
+ * Two custom secrets filling the same header on one host: the agent picks
+ * one with `x-onecli-connection-id`, exactly like two accounts of one app.
+ */
+describe("custom secret disambiguation", () => {
+  const COLLIDING = {
+    grantAll: true,
+    secrets: [
+      {
+        name: "Staging key",
+        hostPattern: "127.0.0.1",
+        headerName: "x-test-key",
+        value: "staging-value",
+      },
+      {
+        name: "Prod key",
+        hostPattern: "127.0.0.1",
+        headerName: "x-test-key",
+        value: "prod-value",
+      },
+    ],
+  } as const;
+
+  scenario("answers 409 with both secrets when unpinned", async (cx) => {
+    const upstream = await cx.upstream();
+    await cx.seed(COLLIDING);
+    const gw = await cx.startGateway();
+
+    const res = await throughProxy(gw.origin, {
+      url: upstream.url("/v1/models"),
+      token: cx.ids.agentToken,
+    });
+
+    expect(res.status).toBe(409);
+    expect(res.header("x-should-retry")).toBe("false");
+    const body = res.json() as {
+      error: string;
+      header: string;
+      connections: Array<{ id: string; label: string; provider: string }>;
+    };
+    expect(body).toMatchObject({
+      error: "multiple_connections",
+      header: "x-onecli-connection-id",
+    });
+    expect(body.connections.map((c) => c.id).sort()).toEqual([
+      `${cx.ids.workspace}-sec-0`,
+      `${cx.ids.workspace}-sec-1`,
+    ]);
+    expect(body.connections.map((c) => c.label).sort()).toEqual([
+      "Prod key",
+      "Staging key",
+    ]);
+    expect(body.connections.every((c) => c.provider === "custom")).toBe(true);
+    // No value ever reaches the agent.
+    expect(res.body).not.toContain("prod-value");
+    expect(res.body).not.toContain("staging-value");
+  });
+
+  scenario("injects only the pinned secret", async (cx) => {
+    const upstream = await cx.upstream();
+    await cx.seed(COLLIDING);
+    const gw = await cx.startGateway();
+
+    const res = await throughProxy(gw.origin, {
+      url: upstream.url("/v1/models"),
+      token: cx.ids.agentToken,
+      headers: { "x-onecli-connection-id": `${cx.ids.workspace}-sec-1` },
+    });
+
+    expect(res.status).toBe(200);
+    const [seen] = await upstream.waitForRequests(1);
+    expect(seen?.header("x-test-key")).toBe("prod-value");
+    // The pin is a gateway instruction, never forwarded upstream.
+    expect(seen?.header("x-onecli-connection-id")).toBeUndefined();
+    // Both choices are advertised for the next request.
+    expect(res.header("x-onecli-connections")).toContain(
+      `${cx.ids.workspace}-sec-0`,
+    );
+  });
+
+  scenario("rejects a pin outside the agent's pool", async (cx) => {
+    const upstream = await cx.upstream();
+    await cx.seed(COLLIDING);
+    const gw = await cx.startGateway();
+
+    const res = await throughProxy(gw.origin, {
+      url: upstream.url("/v1/models"),
+      token: cx.ids.agentToken,
+      headers: { "x-onecli-connection-id": "someone-elses-secret" },
+    });
+
+    expect(res.status).toBe(404);
+    expect(res.json()).toMatchObject({ error: "connection_not_found" });
+  });
+
+  scenario("different headers on one host are not a conflict", async (cx) => {
+    const upstream = await cx.upstream();
+    await cx.seed({
+      grantAll: true,
+      secrets: [
+        { hostPattern: "127.0.0.1", headerName: "x-key-a", value: "a" },
+        { hostPattern: "127.0.0.1", headerName: "x-key-b", value: "b" },
+      ],
+    });
+    const gw = await cx.startGateway();
+
+    await throughProxy(gw.origin, {
+      url: upstream.url("/v1/models"),
+      token: cx.ids.agentToken,
+    });
+
+    const [seen] = await upstream.waitForRequests(1);
+    expect(seen?.header("x-key-a")).toBe("a");
+    expect(seen?.header("x-key-b")).toBe("b");
   });
 });

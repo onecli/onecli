@@ -20,6 +20,20 @@ describe("safeHttpsUrl", () => {
       expect(safeHttpsUrl(bad), String(bad)).toBeNull();
     }
   });
+
+  it("keeps every record-page shape the gateway builds, unchanged", () => {
+    // One per gateway template (`summary::record_links`).
+    for (const page of [
+      "https://github.com/acme/web/issues/42",
+      "https://www.notion.so/0123456789abcdef0123456789abcdef",
+      "https://trello.com/c/5f1a2b3c4d5e6f7a8b9c0d1e",
+      "https://app.todoist.com/app/task/6Xm2Pq9RtV4wZc8K",
+      "https://docs.google.com/spreadsheets/d/1SheetId_42/edit",
+      "https://drive.google.com/open?id=1AbCdEf98765",
+    ]) {
+      expect(safeHttpsUrl(page), page).toBe(page);
+    }
+  });
 });
 
 describe("ApprovalLink", () => {

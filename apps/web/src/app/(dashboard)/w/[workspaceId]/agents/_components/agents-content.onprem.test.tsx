@@ -30,19 +30,9 @@ vi.mock("@/hooks/use-agents", () => ({
   }),
 }));
 
-vi.mock("@/hooks/use-grants", () => ({
-  useGrantsSummary: () => ({ data: [] }),
-}));
-
 vi.mock("@/hooks/use-hosted-availability", () => ({
   useHostedAvailability: () => "ready",
   useHomeDurabilityMessage: () => null,
-}));
-
-vi.mock("./agent-card", () => ({
-  AgentCard: ({ agent }: { agent: { name: string } }) => (
-    <div>{agent.name}</div>
-  ),
 }));
 
 vi.mock("next/navigation", () => ({
@@ -59,13 +49,22 @@ beforeAll(() => {
   Element.prototype.releasePointerCapture = vi.fn();
 });
 
-const { AgentsContent } = await import("./agents-content");
+const { AgentCreateControl } = await import("./agent-create-control");
+const { useAgentCreateFlow } = await import("./use-agent-create-flow");
+
+// The create door as every entry point mounts it (the agents page's empty
+// state, the sidebar's New agent row). With an agent in the workspace the
+// page itself forwards to it, so the door is rendered directly.
+const Door = () => {
+  const flow = useAgentCreateFlow([{ kind: "byo" }], false);
+  return <AgentCreateControl flow={flow} />;
+};
 
 // The mounted create dialogs embed SecretDialog, which reads the query client.
 const renderPage = () =>
   render(
     <QueryClientProvider client={new QueryClient()}>
-      <AgentsContent />
+      <Door />
     </QueryClientProvider>,
   );
 

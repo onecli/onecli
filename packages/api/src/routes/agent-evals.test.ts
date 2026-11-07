@@ -1,0 +1,407 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+/**
+ * The agent EVALS HTTP contract: token families, status codes, body
+ * validation at the boundary, and audit records that carry IDs only. The
+ * DB laws (admission, the cap, tenancy) live in agent-eval-service.pg.test.ts;
+ * the service is mocked here.
+ */
+
+const ORG_KEY = "oc_org_test-key";
+const RUNNER_TOKEN = "rnr_a-runner";
+
+vi.hoisted(() => {
+  process.env.NEXT_PUBLIC_EDITION = "onprem";
+});
+
+const mocks = vi.hoisted(() => ({
+  listQuestions: vi.fn(),
+  listRuns: vi.fn(),
+  saveQuestion: vi.fn(),
+  archiveQuestion: vi.fn(),
+  startRun: vi.fn(),
+  stopRun: vi.fn(),
+  getRun: vi.fn(),
+  getEvalSchedule: vi.fn(),
+  saveEvalSchedule: vi.fn(),
+  deleteEvalSchedule: vi.fn(),
+  listEvalReportChannels: vi.fn(),
+  runEvalScheduleNow: vi.fn(),
+  auditCreate:
+    vi.fn<(arg: { data: Record<string, unknown> }) => Promise<unknown>>(),
+}));
+
+vi.mock("@onecli/db", () => ({
+  Prisma: { JsonNull: null },
+  db: {
+    apiKey: {
+      findUnique: async ({ where }: { where: { key: string } }) =>
+        where.key === ORG_KEY
+          ? { userId: "user-1", organizationId: "org-1", scope: "organization" }
+          : null,
+      findFirst: async () => null,
+    },
+    runner: {
+      findUnique: async ({ where }: { where: { token: string } }) =>
+        where.token === RUNNER_TOKEN ? { id: "r-1", name: "laptop" } : null,
+    },
+    user: { findUnique: async () => ({ email: "admin@example.com" }) },
+    organizationMember: {
+      findUnique: async () => ({
+        organizationId: "org-1",
+        userId: "user-1",
+        role: "owner",
+      }),
+    },
+    workspace: {
+      findFirst: async ({ where }: { where: { id: string } }) =>
+        where.id === "p1" ? { id: "p1" } : null,
+    },
+    auditLog: { create: mocks.auditCreate },
+  },
+}));
+
+vi.mock("../services/agent-eval-service", () => ({
+  listQuestions: mocks.listQuestions,
+  listRuns: mocks.listRuns,
+  saveQuestion: mocks.saveQuestion,
+  archiveQuestion: mocks.archiveQuestion,
+  startRun: mocks.startRun,
+  stopRun: mocks.stopRun,
+  getRun: mocks.getRun,
+}));
+
+vi.mock("../services/eval-schedule-service", () => ({
+  getEvalSchedule: mocks.getEvalSchedule,
+  saveEvalSchedule: mocks.saveEvalSchedule,
+  deleteEvalSchedule: mocks.deleteEvalSchedule,
+  listEvalReportChannels: mocks.listEvalReportChannels,
+}));
+
+vi.mock("../services/eval-schedule-fire-service", () => ({
+  runEvalScheduleNow: mocks.runEvalScheduleNow,
+}));
+
+const { createApiApp } = await import("../app");
+const { ServiceError } = await import("../services/errors");
+
+const app = createApiApp({ getSession: async () => null });
+
+const AUTH = {
+  authorization: `Bearer ${ORG_KEY}`,
+  "x-workspace-id": "p1",
+  "content-type": "application/json",
+};
+
+const QUESTION = {
+  question: "How many customers do we have?",
+  expected: "42",
+  kind: "numeric",
+  expectedApps: [],
+};
+
+const send = (path: string, method: string, body?: unknown) =>
+  app.request(path, {
+    method,
+    headers: AUTH,
+    ...(body !== undefined && { body: JSON.stringify(body) }),
+  });
+
+const auditRows = () => mocks.auditCreate.mock.calls.map(([arg]) => arg.data);
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.auditCreate.mockResolvedValue({});
+  mocks.listQuestions.mockResolvedValue([]);
+  mocks.listRuns.mockResolvedValue([]);
+  mocks.saveQuestion.mockResolvedValue({ id: "q-1", ...QUESTION });
+  mocks.archiveQuestion.mockResolvedValue(undefined);
+  mocks.startRun.mockResolvedValue({ id: "run-1", total: 3 });
+  mocks.stopRun.mockResolvedValue(undefined);
+  mocks.getRun.mockResolvedValue({ id: "run-1" });
+  mocks.getEvalSchedule.mockResolvedValue(null);
+  mocks.saveEvalSchedule.mockResolvedValue({ schedule: "0 9 * * *" });
+  mocks.deleteEvalSchedule.mockResolvedValue(undefined);
+  mocks.listEvalReportChannels.mockResolvedValue([]);
+  mocks.runEvalScheduleNow.mockResolvedValue({ id: "run-1" });
+});
+
+describe("authentication", () => {
+  it.each([
+    ["/v1/agents/ag-1/evals", "GET"],
+    ["/v1/agents/ag-1/evals/questions", "POST"],
+    ["/v1/agents/ag-1/evals/questions/q-1", "PUT"],
+    ["/v1/agents/ag-1/evals/questions/q-1", "DELETE"],
+    ["/v1/agents/ag-1/evals/runs", "POST"],
+    ["/v1/agents/ag-1/evals/runs/run-1", "GET"],
+    ["/v1/agents/ag-1/evals/runs/run-1/stop", "POST"],
+    ["/v1/agents/ag-1/evals/schedule", "PUT"],
+    ["/v1/agents/ag-1/evals/schedule", "DELETE"],
+    ["/v1/agents/ag-1/evals/schedule/channels", "GET"],
+    ["/v1/agents/ag-1/evals/schedule/run", "POST"],
+  ])("refuses %s %s without credentials", async (path, method) => {
+    const res = await app.request(path, { method });
+    expect(res.status).toBe(401);
+  });
+
+  it("refuses a RUNNER token: token families do not cross", async () => {
+    const res = await app.request("/v1/agents/ag-1/evals/runs", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${RUNNER_TOKEN}`,
+        "x-workspace-id": "p1",
+      },
+    });
+    expect(res.status).toBe(401);
+    expect(mocks.startRun).not.toHaveBeenCalled();
+  });
+
+  it("refuses an org key that names no workspace", async () => {
+    const res = await app.request("/v1/agents/ag-1/evals", {
+      headers: { authorization: `Bearer ${ORG_KEY}` },
+    });
+    expect(res.status).toBe(401);
+    expect(mocks.listQuestions).not.toHaveBeenCalled();
+  });
+});
+
+describe("questions", () => {
+  it("lists questions and runs with the cap, scoped to the workspace", async () => {
+    const res = await send("/v1/agents/ag-1/evals", "GET");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      questions: [],
+      runs: [],
+      schedule: null,
+      maxQuestions: 50,
+    });
+    expect(mocks.listQuestions).toHaveBeenCalledWith("p1", "ag-1");
+    expect(mocks.listRuns).toHaveBeenCalledWith("p1", "ag-1");
+    expect(mocks.getEvalSchedule).toHaveBeenCalledWith("p1", "ag-1", "user-1");
+  });
+
+  it("creates with 201 and audits IDs only, never the question text", async () => {
+    const res = await send("/v1/agents/ag-1/evals/questions", "POST", QUESTION);
+    expect(res.status).toBe(201);
+    expect(mocks.saveQuestion).toHaveBeenCalledWith(
+      "p1",
+      "ag-1",
+      null,
+      QUESTION,
+    );
+    const [row] = auditRows();
+    expect(row).toMatchObject({ action: "create", service: "eval" });
+    expect(JSON.stringify(row)).not.toContain(QUESTION.question);
+  });
+
+  it.each([
+    ["no body", undefined],
+    ["an empty question", { ...QUESTION, question: "  " }],
+    [
+      "a number check that is not one number",
+      { ...QUESTION, expected: "about 3 million in 2024" },
+    ],
+    ["an unknown check kind", { ...QUESTION, kind: "semantic" }],
+    [
+      "too many apps",
+      {
+        ...QUESTION,
+        expectedApps: Array.from({ length: 21 }, (_, i) => `a${i}`),
+      },
+    ],
+  ])("refuses %s with 422 before reaching the service", async (_, body) => {
+    const res = await send("/v1/agents/ag-1/evals/questions", "POST", body);
+    expect(res.status).toBe(422);
+    expect(mocks.saveQuestion).not.toHaveBeenCalled();
+    expect(mocks.auditCreate).not.toHaveBeenCalled();
+  });
+
+  it("edits with PUT and archives with 204", async () => {
+    expect(
+      (await send("/v1/agents/ag-1/evals/questions/q-1", "PUT", QUESTION))
+        .status,
+    ).toBe(200);
+    expect(mocks.saveQuestion).toHaveBeenCalledWith(
+      "p1",
+      "ag-1",
+      "q-1",
+      QUESTION,
+    );
+    const res = await send("/v1/agents/ag-1/evals/questions/q-1", "DELETE");
+    expect(res.status).toBe(204);
+    expect(mocks.archiveQuestion).toHaveBeenCalledWith("p1", "ag-1", "q-1");
+    expect(auditRows().map((r) => r.action)).toEqual(["update", "delete"]);
+  });
+
+  it("maps a missing question to 404 and writes no audit row", async () => {
+    mocks.archiveQuestion.mockRejectedValue(
+      new ServiceError("NOT_FOUND", "Test question not found"),
+    );
+    const res = await send("/v1/agents/ag-1/evals/questions/q-x", "DELETE");
+    expect(res.status).toBe(404);
+    expect(mocks.auditCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe("runs", () => {
+  it("starts a run with 202 and audits it", async () => {
+    const res = await send("/v1/agents/ag-1/evals/runs", "POST");
+    expect(res.status).toBe(202);
+    expect(mocks.startRun).toHaveBeenCalledWith(
+      "p1",
+      "org-1",
+      "user-1",
+      "ag-1",
+    );
+    expect(auditRows()).toEqual([
+      expect.objectContaining({
+        action: "run",
+        service: "eval",
+        metadata: { agentId: "ag-1", runId: "run-1", questions: 3 },
+      }),
+    ]);
+  });
+
+  it("maps a second run while one is active to 409", async () => {
+    mocks.startRun.mockRejectedValue(
+      new ServiceError("CONFLICT", "Tests are already running"),
+    );
+    const res = await send("/v1/agents/ag-1/evals/runs", "POST");
+    expect(res.status).toBe(409);
+    expect(mocks.auditCreate).not.toHaveBeenCalled();
+  });
+
+  it("reads one run, scoped to the workspace and agent", async () => {
+    const res = await send("/v1/agents/ag-1/evals/runs/run-1", "GET");
+    expect(res.status).toBe(200);
+    expect(mocks.getRun).toHaveBeenCalledWith("p1", "ag-1", "run-1");
+  });
+
+  it("stops that one run, as the acting user, and audits it", async () => {
+    const res = await send("/v1/agents/ag-1/evals/runs/run-1/stop", "POST");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ id: "run-1" });
+    expect(mocks.stopRun).toHaveBeenCalledWith("p1", "ag-1", "run-1", "user-1");
+    expect(auditRows()).toEqual([
+      expect.objectContaining({
+        action: "update",
+        service: "eval",
+        metadata: { agentId: "ag-1", runId: "run-1", stopped: true },
+      }),
+    ]);
+  });
+
+  it("maps stopping a run that already ended to 409, unaudited", async () => {
+    mocks.stopRun.mockRejectedValue(
+      new ServiceError("CONFLICT", "These tests already finished"),
+    );
+    const res = await send("/v1/agents/ag-1/evals/runs/run-1/stop", "POST");
+    expect(res.status).toBe(409);
+    expect(mocks.auditCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe("schedule", () => {
+  const SCHEDULE = { schedule: "0 9 * * 1-5", timezone: "Asia/Jerusalem" };
+
+  it("saves with PUT as the acting user, defaulting to enabled, and audits it", async () => {
+    const res = await send("/v1/agents/ag-1/evals/schedule", "PUT", SCHEDULE);
+    expect(res.status).toBe(200);
+    expect(mocks.saveEvalSchedule).toHaveBeenCalledWith(
+      "p1",
+      "ag-1",
+      "user-1",
+      { ...SCHEDULE, enabled: true },
+    );
+    expect(auditRows()).toEqual([
+      expect.objectContaining({
+        action: "update",
+        service: "eval",
+        metadata: { agentId: "ag-1", ...SCHEDULE, enabled: true },
+      }),
+    ]);
+  });
+
+  it.each([
+    ["no body", undefined],
+    ["an empty schedule", { ...SCHEDULE, schedule: " " }],
+    ["no timezone", { schedule: "0 9 * * *" }],
+    ["an unknown field", { ...SCHEDULE, createdByUserId: "someone-else" }],
+  ])("refuses %s with 422 before reaching the service", async (_, body) => {
+    const res = await send("/v1/agents/ag-1/evals/schedule", "PUT", body);
+    expect(res.status).toBe(422);
+    expect(mocks.saveEvalSchedule).not.toHaveBeenCalled();
+    expect(mocks.auditCreate).not.toHaveBeenCalled();
+  });
+
+  it("maps an expression croner refuses to 422 with its message", async () => {
+    mocks.saveEvalSchedule.mockRejectedValue(
+      new ServiceError("UNPROCESSABLE", "Invalid schedule expression: bad"),
+    );
+    const res = await send("/v1/agents/ag-1/evals/schedule", "PUT", SCHEDULE);
+    expect(res.status).toBe(422);
+    expect(mocks.auditCreate).not.toHaveBeenCalled();
+  });
+
+  it("saves where results go, and audits the destination's name, never its id", async () => {
+    mocks.saveEvalSchedule.mockResolvedValue({
+      schedule: "0 9 * * *",
+      report: {
+        to: "channel",
+        channelRef: "C0123ABCD",
+        channelLabel: "#qa",
+        when: "changes",
+      },
+    });
+    const body = {
+      ...SCHEDULE,
+      report: { to: "channel", channelRef: "C0123ABCD", when: "changes" },
+    };
+    const res = await send("/v1/agents/ag-1/evals/schedule", "PUT", body);
+    expect(res.status).toBe(200);
+    expect(mocks.saveEvalSchedule).toHaveBeenCalledWith(
+      "p1",
+      "ag-1",
+      "user-1",
+      { ...body, enabled: true },
+    );
+    expect(auditRows()[0]?.metadata).toMatchObject({
+      reportTo: "channel",
+      reportChannel: "#qa",
+      reportWhen: "changes",
+    });
+  });
+
+  it("lists the channels results can go to", async () => {
+    mocks.listEvalReportChannels.mockResolvedValue([
+      { ref: "C0123ABCD", name: "#qa", private: false },
+    ]);
+    const res = await send("/v1/agents/ag-1/evals/schedule/channels", "GET");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([
+      { ref: "C0123ABCD", name: "#qa", private: false },
+    ]);
+    expect(mocks.listEvalReportChannels).toHaveBeenCalledWith("p1", "ag-1");
+  });
+
+  it("removes with 204 and fires now with 202, both audited", async () => {
+    expect(
+      (await send("/v1/agents/ag-1/evals/schedule", "DELETE")).status,
+    ).toBe(204);
+    expect(mocks.deleteEvalSchedule).toHaveBeenCalledWith("p1", "ag-1");
+    expect(
+      (await send("/v1/agents/ag-1/evals/schedule/run", "POST")).status,
+    ).toBe(202);
+    expect(mocks.runEvalScheduleNow).toHaveBeenCalledWith("p1", "ag-1");
+    expect(auditRows().map((row) => row.action)).toEqual(["delete", "run"]);
+  });
+
+  it("maps a missing schedule to 404", async () => {
+    mocks.deleteEvalSchedule.mockRejectedValue(
+      new ServiceError("NOT_FOUND", "No eval schedule"),
+    );
+    const res = await send("/v1/agents/ag-1/evals/schedule", "DELETE");
+    expect(res.status).toBe(404);
+    expect(mocks.auditCreate).not.toHaveBeenCalled();
+  });
+});

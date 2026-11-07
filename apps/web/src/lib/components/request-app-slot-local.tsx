@@ -8,8 +8,9 @@ import type { RequestAppSlotProps } from "@/lib/components/request-app-slot";
  * the Resend/Discord plumbing behind that dialog isn't configured, so a
  * GitHub issue is the honest channel.
  *
- * Ignores the controlled-dialog props (`requestOpen` etc.) — there is no
- * dialog to open, the slot is a plain link.
+ * The app name the user searched for pre-fills the issue title, the same
+ * prefill the cloud dialog gets. The controlled-dialog props (`requestOpen`
+ * etc.) are ignored: there is no dialog to open, the slot is a plain link.
  */
 
 const ISSUE_BODY_TEMPLATE = `**Website:**
@@ -17,17 +18,18 @@ const ISSUE_BODY_TEMPLATE = `**Website:**
 **How you'd use this with OneCLI:**
 `;
 
-const GITHUB_ISSUE_URL = `https://github.com/onecli/onecli/issues/new?${new URLSearchParams(
-  {
+export const appRequestIssueUrl = (appName?: string): string =>
+  `https://github.com/onecli/onecli/issues/new?${new URLSearchParams({
     labels: "app request",
-    title: "App request: ",
+    title: `App request: ${appName?.trim() ?? ""}`,
     body: ISSUE_BODY_TEMPLATE,
-  },
-).toString()}`;
+  }).toString()}`;
 
-export const LocalRequestAppSlot = ({}: RequestAppSlotProps = {}) => (
+export const LocalRequestAppSlot = ({
+  initialName,
+}: RequestAppSlotProps = {}) => (
   <a
-    href={GITHUB_ISSUE_URL}
+    href={appRequestIssueUrl(initialName)}
     target="_blank"
     rel="noopener noreferrer"
     className="group flex items-center justify-between rounded-xl border border-dashed border-muted-foreground/40 bg-card/40 px-4 py-3 transition-colors cursor-pointer hover:bg-accent/50 hover:border-solid"

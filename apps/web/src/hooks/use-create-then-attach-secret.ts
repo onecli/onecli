@@ -1,16 +1,14 @@
-import { useMemo, useRef } from "react";
 import { useAttachSecret } from "@/hooks/use-grants";
-import { secrets as secretsApi } from "@/lib/api";
-import type { CreateSecretInput } from "@onecli/api/validations/secret";
+import type { SavedSecret } from "@/lib/api";
 
 /**
- * The create-then-attach seam behind every in-place "add a key/secret" door:
- * SecretDialog's `onSaved` carries no id, so the create call is intercepted
- * (the SecretActions seam) to remember it, and the attach to THIS agent fires
- * after the save completes. The ref is consumed exactly once, so an id-less
- * save (an edit) can never replay a stale attach.
+ * The create-then-attach seam behind every in-place "add a key/secret" door
+ * on an agent's page: a workspace secret is on for no agent by default, so
+ * one minted from THIS agent's context is attached to it the moment the save
+ * completes. SecretDialog's `onSaved` carries the created secret; an edit
+ * carries none, so it can never replay an attach.
  *
- * `onSaved` is deliberately recreated per render — never memoized — so
+ * `onSaved` is deliberately recreated per render (never memoized), so
  * `onAttached` is never a stale closure.
  */
 export const useCreateThenAttachSecret = (
@@ -18,26 +16,13 @@ export const useCreateThenAttachSecret = (
   opts?: { onAttached?: () => void },
 ) => {
   const attachSecret = useAttachSecret();
-  const createdSecretId = useRef<string | null>(null);
-  const secretActions = useMemo(
-    () => ({
-      createSecret: async (input: CreateSecretInput) => {
-        const created = await secretsApi.create(input);
-        createdSecretId.current = created.id;
-        return created;
-      },
-    }),
-    [],
-  );
   const onAttached = opts?.onAttached;
-  const onSaved = () => {
-    const secretId = createdSecretId.current;
-    createdSecretId.current = null;
-    if (!secretId) return;
+  const onSaved = (created: SavedSecret | undefined) => {
+    if (!created) return;
     attachSecret.mutate(
-      { agentId, secretId },
+      { agentId, secretId: created.id },
       onAttached ? { onSuccess: onAttached } : {},
     );
   };
-  return { secretActions, onSaved };
+  return { onSaved };
 };

@@ -8,8 +8,11 @@ import {
 
 export const outlookMail: AppDefinition = {
   id: "outlook-mail",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/outlook-mail",
   name: "Outlook Mail",
   icon: "/icons/outlook-mail.svg",
+  apiDocsUrl:
+    "https://learn.microsoft.com/en-us/graph/api/overview?view=graph-rest-1.0",
   description: "Read, compose, and send emails via Microsoft Outlook.",
   connectionMethod: {
     type: "oauth",
@@ -47,6 +50,7 @@ export const outlookMail: AppDefinition = {
   },
   configurable: {
     fields: microsoftConfigFields,
+    group: "microsoft",
     envDefaults: microsoftEnvDefaults,
   },
 };

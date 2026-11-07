@@ -17,6 +17,7 @@ import {
   updateAgent,
   deleteAgent,
   regenerateAgentToken,
+  restartAgent,
 } from "../services/agent-service";
 import {
   createAgentSchema,
@@ -32,6 +33,8 @@ import {
 import { readCappedBinaryBody } from "@onecli/channels";
 import { ensureDirectConversation } from "../services/conversation-service";
 import { greetEmptyDirectThread } from "../services/greeting-service";
+import { warmAgentSandbox } from "../services/sandbox-warm-service";
+import { getAgentSandboxStatus } from "../services/sandbox-service";
 import { getAgentModels } from "../services/agent-models-service";
 import { agentsIncludeSchema } from "../validations/grants";
 import { listAgentsWithGrantsSummary } from "../services/grants-summary-service";
@@ -43,7 +46,7 @@ export const agentRoutes = () => {
   app.use("*", authMiddleware);
 
   // GET /agents[?include=grants-summary] — the plain list, or (the first
-  // `?include=` projection) each agent with its attach-list chips summary.
+  // `?include=` projection) each agent with its attach summary.
   app.get("/", async (c) => {
     const auth = c.get("auth");
     const workspaceId = requireWorkspaceId(auth);
@@ -82,7 +85,13 @@ export const agentRoutes = () => {
     // identifier consumes no slot. Skip the quota check when it already exists
     // so createAgent returns the canonical 409 instead of a 403 that shadows it
     // at the cap and breaks idempotent ensureAgent. See onecli/node-sdk#40.
-    if (!(await agentExistsByIdentifier(workspaceId, parsed.data.identifier))) {
+    // A derived identifier (hosted, none sent) is never an existing one: the
+    // service picks a free suffix, so every such create is a new agent.
+    const identifier = parsed.data.identifier;
+    if (
+      identifier === undefined ||
+      !(await agentExistsByIdentifier(workspaceId, identifier))
+    ) {
       await getResourceHooks().beforeCreateAgent(
         auth.organizationId,
         workspaceId,
@@ -97,12 +106,12 @@ export const agentRoutes = () => {
       workspaceId,
       {
         name: parsed.data.name,
-        identifier: parsed.data.identifier,
+        identifier,
         kind: parsed.data.kind,
         harness: parsed.data.harness,
         instructions: parsed.data.instructions,
       },
-      // The grantor recorded on every grant the service auto-attaches.
+      // The grantor recorded on an auto-attached LLM key grant.
       auth.userId,
     );
     invalidateGatewayCache(c.req.raw);
@@ -276,6 +285,12 @@ export const agentRoutes = () => {
         },
         auth.userId,
       );
+      // A person opening the thread is about to type: start a parked box
+      // now so the message finds it awake (a greeting above may already
+      // have woken it; this is then a no-op). Session callers only, for the
+      // greeting's reason: an API-key caller's open is not a person about
+      // to type, and must not start a machine as a side effect.
+      await warmAgentSandbox(workspaceId, conversation.agentId);
     }
     return c.json(conversation);
   });
@@ -289,16 +304,47 @@ export const agentRoutes = () => {
     return c.body(null, 204);
   });
 
-  // POST /agents/:agentId/regenerate-token
+  // POST /agents/:agentId/regenerate-token: rotates the agent's proxy token.
+  // Audited: it is a credential lifecycle event, and since the dashboard
+  // button was removed this route (CLI/API) is its only door.
   app.post("/:agentId/regenerate-token", async (c) => {
     const auth = c.get("auth");
+    const workspaceId = requireWorkspaceId(auth);
     const agentId = c.req.param("agentId");
-    const result = await regenerateAgentToken(
-      requireWorkspaceId(auth),
-      agentId,
-    );
+    const result = await regenerateAgentToken(workspaceId, agentId);
+    await recordAuditEvent({
+      workspaceId,
+      userId: auth.userId,
+      userEmail: auth.userEmail,
+      action: AUDIT_ACTIONS.REGENERATE,
+      service: AUDIT_SERVICES.AGENT,
+      source: AUDIT_SOURCE.API,
+      metadata: { agentId },
+    });
     invalidateGatewayCache(c.req.raw);
     return c.json(result);
+  });
+
+  // POST /agents/:agentId/restart: "Restart agent". Every conversation of
+  // this hosted agent starts fresh and its sandbox stops, so the next message
+  // cold-starts it. Audited (the agent-image pattern): it ends work in
+  // flight, and this route is its only door. No gateway cache flush: the
+  // gateway reads none of what it changes.
+  app.post("/:agentId/restart", async (c) => {
+    const auth = c.get("auth");
+    const workspaceId = requireWorkspaceId(auth);
+    const agentId = c.req.param("agentId");
+    await restartAgent(workspaceId, agentId);
+    await recordAuditEvent({
+      workspaceId,
+      userId: auth.userId,
+      userEmail: auth.userEmail,
+      action: AUDIT_ACTIONS.RESTART,
+      service: AUDIT_SERVICES.AGENT,
+      source: AUDIT_SOURCE.API,
+      metadata: { agentId },
+    });
+    return c.json({ success: true });
   });
 
   // POST /agents/:agentId/ssh-certificate: mint a
@@ -331,6 +377,41 @@ export const agentRoutes = () => {
   // PATCH /:agentId/secret-mode was removed in attach-model step 5 — the
   // sub-path 410 lives in `removedAgentEquipmentRoutes`, mounted after this
   // router.
+
+  // GET /agents/:agentId/sandbox: the machine's lifecycle status, and only
+  // that (`{ status }`, `null` for a BYO agent). The onboarding boot screen
+  // polls it to open its door once the box is `running`. Not-found-shaped
+  // inside the service: a foreign agent reads as `null`, never as 404.
+  app.get("/:agentId/sandbox", async (c) => {
+    const auth = c.get("auth");
+    return c.json(
+      await getAgentSandboxStatus(
+        requireWorkspaceId(auth),
+        c.req.param("agentId"),
+      ),
+    );
+  });
+
+  // POST /agents/:agentId/wake: a person is heading for this agent (the
+  // page opened, the Chat button hovered, the row in the list), so start a
+  // parked box now. A hint, idempotent and best-effort (sandbox-warm-service
+  // holds the fences: `stopped` only, never a keyless agent, never
+  // engagement), answered 204 whether or not anything moved. SESSION CALLERS
+  // ONLY, the thread-open door's rule: a program's call is not a person
+  // about to type, and must not start a machine as a side effect. Not
+  // audited, like the thread open: nothing durable changes that a person
+  // chose.
+  app.post("/:agentId/wake", async (c) => {
+    const auth = c.get("auth");
+    if (auth.scope !== "session") {
+      throw new ServiceError(
+        "FORBIDDEN",
+        "Waking an agent ahead of a message is a dashboard action.",
+      );
+    }
+    await warmAgentSandbox(requireWorkspaceId(auth), c.req.param("agentId"));
+    return c.body(null, 204);
+  });
 
   return app;
 };

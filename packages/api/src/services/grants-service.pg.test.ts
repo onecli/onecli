@@ -49,6 +49,8 @@ const CONN_WORK = `${P}conn-work`;
 const CONN_PERSONAL = `${P}conn-personal`;
 const CONN_ORG = `${P}conn-orgshared`;
 const CONN_FOREIGN = `${P}conn-foreign`;
+/** A connection on a HELD catalog (no `unlistedReads` opt-in). */
+const CONN_HELD = `${P}conn-cloudflare`;
 const SECRET = `${P}secret`;
 
 const SCOPE = { workspaceId: WORKSPACE, organizationId: ORG };
@@ -150,6 +152,7 @@ beforeAll(async () => {
     organizationId: ORG,
   });
   await conn(CONN_FOREIGN, { workspaceId: OTHER_WORKSPACE });
+  await conn(CONN_HELD, { provider: "cloudflare" });
   await db.secret.create({
     data: {
       id: SECRET,
@@ -205,10 +208,11 @@ const decide = async (opts: {
   path: string;
   method: string;
   winner?: string;
+  host?: string;
 }) => {
   const rules = await engineRules();
   return evaluator.evaluateNew(rules, {
-    host: GMAIL_HOST,
+    host: opts.host ?? GMAIL_HOST,
     path: opts.path,
     method: opts.method,
     agentId: AGENT,
@@ -226,6 +230,76 @@ const grantRows = (extra: Record<string, unknown> = {}) =>
   });
 
 describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
+  it("default attach: reads (listed and unlisted) allowed, writes and unlisted writes need approval", async () => {
+    await grants.setConnectionGrant(
+      SCOPE,
+      AGENT,
+      CONN_WORK,
+      { access: "default" },
+      null,
+    );
+    const read = await decide({
+      path: "/gmail/v1/users/me/messages/abc",
+      method: "GET",
+      winner: CONN_WORK,
+    });
+    expect(read.action).toBe("allow");
+    expect(read.requireApproval).toBeFalsy();
+    expect(
+      await decide({
+        path: "/gmail/v1/users/me/drafts",
+        method: "POST",
+        winner: CONN_WORK,
+      }),
+    ).toMatchObject({ action: "allow", requireApproval: true });
+    // An unlisted read rides on "Other reads", allowed by default.
+    const unlistedRead = await decide({
+      path: "/gmail/v1/users/me/history",
+      method: "GET",
+      winner: CONN_WORK,
+    });
+    expect(unlistedRead.action).toBe("allow");
+    expect(unlistedRead.requireApproval).toBeFalsy();
+    // An unlisted write rides on "Other writes", still held for approval.
+    expect(
+      await decide({
+        path: "/gmail/v1/users/me/history",
+        method: "POST",
+        winner: CONN_WORK,
+      }),
+    ).toMatchObject({ action: "allow", requireApproval: true });
+  });
+
+  it("default attach on a held catalog: unlisted reads need approval, listed reads stay allowed", async () => {
+    await grants.setConnectionGrant(
+      SCOPE,
+      AGENT,
+      CONN_HELD,
+      { access: "default" },
+      null,
+    );
+    expect(
+      (await grants.getAgentGrants(SCOPE, AGENT)).connections.find(
+        (c) => c.connectionId === CONN_HELD,
+      ),
+    ).toMatchObject({ otherReads: "ask", otherWrites: "ask" });
+    const cloudflare = (path: string) =>
+      decide({
+        host: "api.cloudflare.com",
+        path,
+        method: "GET",
+        winner: CONN_HELD,
+      });
+    // A read tool the catalog lists is allowed outright.
+    const listed = await cloudflare("/client/v4/zones");
+    expect(listed.action).toBe("allow");
+    expect(listed.requireApproval).toBeFalsy();
+    // The tunnel token GET is outside the tool list: held for a human.
+    expect(
+      await cloudflare("/client/v4/accounts/a1/cfd_tunnel/t1/token"),
+    ).toMatchObject({ action: "allow", requireApproval: true });
+  });
+
   it("full attach: one whole-app allow rule that decides via the winner and injects", async () => {
     const result = await grants.setConnectionGrant(
       SCOPE,
@@ -362,6 +436,60 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
       _max: { generation: true },
     });
     expect(genAfter._max.generation).toBe(genBefore._max.generation);
+  });
+
+  it("all other reads / writes: the split publishes its method, decides, reads back, and survives a tools-only save", async () => {
+    const save = (extra: Record<string, unknown> = {}) =>
+      grants.setConnectionGrant(
+        SCOPE,
+        AGENT,
+        CONN_WORK,
+        { access: "custom", allow: ["create_draft"], ask: [], ...extra },
+        null,
+      );
+    await save({ otherReads: "allow", otherWrites: "ask" });
+
+    // The narrowed (stricter, writes) row carries its method on BOTH the
+    // draft and the published copy the gateway loads.
+    for (const status of ["draft", "published"]) {
+      const rows = await grantRows({ status });
+      const writes = rows.find((r) => r.name.endsWith(": all other writes"));
+      const reads = rows.find((r) => r.name.endsWith(": all other reads"));
+      expect(writes?.targets[0]?.method, status).toBe("!GET,HEAD");
+      expect(reads?.targets[0]?.method ?? null, status).toBeNull();
+    }
+
+    // An unlisted read passes the grant, an unlisted write is held.
+    const read = { path: "/gmail/v1/users/me/history", winner: CONN_WORK };
+    expect(await decide({ ...read, method: "GET" })).toEqual({
+      action: "allow",
+    });
+    expect(await decide({ ...read, method: "POST" })).toMatchObject({
+      action: "allow",
+      requireApproval: true,
+    });
+
+    const listed = async () =>
+      (await grants.getAgentGrants(SCOPE, AGENT)).connections.find(
+        (c) => c.connectionId === CONN_WORK,
+      );
+    expect(await listed()).toMatchObject({
+      otherReads: "allow",
+      otherWrites: "ask",
+    });
+
+    // A tools-only save (an older client, the SDK) keeps both choices, and
+    // the same save again writes nothing.
+    await save({ ask: ["get_message"] });
+    expect(await listed()).toMatchObject({
+      ask: ["get_message"],
+      otherReads: "allow",
+      otherWrites: "ask",
+    });
+    expect(await decide({ ...read, method: "GET" })).toEqual({
+      action: "allow",
+    });
+    expect((await save({ ask: ["get_message"] })).changed).toBe(false);
   });
 
   it("repairs hand-edit drift on the next write", async () => {

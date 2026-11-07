@@ -11,10 +11,11 @@ import { fetchTranscript, runTurn, transcriptText } from "../src/v1.js";
 /**
  * THE ZERO-CREDENTIAL PROOF, from the agent's own path: an HTTP call made
  * INSIDE the sandbox (the fake's `http` op rides the container's proxy env +
- * MITM CA, exactly as any agent traffic does) transits the per-test gateway,
- * which injects the granted anthropic key — witnessed on BOTH sides: the
- * stub upstream records the real secret in `x-api-key`, and the transcript
- * records the 200. No fake behavior can forge the stub-side witness.
+ * MITM CA, exactly as any agent traffic does, to a NAMED upstream, as any
+ * agent traffic is) transits the per-test gateway, which injects the granted
+ * anthropic key — witnessed on BOTH sides: the stub upstream records the real
+ * secret in `x-api-key`, and the transcript records the 200. No fake behavior
+ * can forge the stub-side witness.
  *
  * And door 1's negative: an agent with NO injectable key is answered in the
  * thread (`no_model_key`), and no sandbox ever starts for it.
@@ -32,7 +33,7 @@ scenario(
     });
     const secretValue = `sk-ant-e2e-${cx.ids.nonce}`;
     await seedAnthropicGrant(cx.prisma, cx.ids, {
-      hostPattern: "127.0.0.1",
+      hostPattern: upstream.host,
       value: secretValue,
     });
     stack.runner.pump();
@@ -45,7 +46,7 @@ scenario(
       stack.v1,
       conversation.id,
       fakeDirective([
-        http(`https://127.0.0.1:${upstream.port}/v1/messages`, {
+        http(upstream.url("/v1/messages"), {
           method: "POST",
           headers: { "x-api-key": "placeholder" },
           body: JSON.stringify({ probe: true }),

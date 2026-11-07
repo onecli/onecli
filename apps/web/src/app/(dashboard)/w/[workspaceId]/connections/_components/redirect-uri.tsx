@@ -4,6 +4,12 @@ import { Check, Copy } from "lucide-react";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { API_ORIGIN } from "@/lib/api-fetch";
 import { IS_CLOUD } from "@/lib/env";
+import {
+  appCallbackPath,
+  groupOf,
+  oauthClientGroupName,
+  vendorCallbackPath,
+} from "@onecli/api/apps/oauth/groups";
 
 // The OAuth callback is served by the api-server in every edition, so the
 // displayed redirect URI must be its origin (the server computes its own
@@ -29,7 +35,12 @@ const styles = IS_CLOUD
     };
 
 export const RedirectUri = ({ provider }: { provider: string }) => {
-  const redirectUri = `${useBaseUrl()}/v1/apps/${provider}/callback`;
+  // Credentials saved here for a grouped app become the vendor's shared client,
+  // which uses ONE redirect URI for every app of that vendor.
+  const group = groupOf(provider);
+  const redirectUri = `${useBaseUrl()}${
+    group ? vendorCallbackPath(group) : appCallbackPath(provider)
+  }`;
   const { copied, copy } = useCopyToClipboard();
 
   return (
@@ -58,7 +69,9 @@ export const RedirectUri = ({ provider }: { provider: string }) => {
         </button>
       </div>
       <p className={styles.hint}>
-        Add this to your OAuth app&apos;s allowed redirect URIs.
+        {group
+          ? `Add this to your ${oauthClientGroupName(group)} OAuth app's allowed redirect URIs. One URI covers every ${oauthClientGroupName(group)} app.`
+          : "Add this to your OAuth app's allowed redirect URIs."}
       </p>
     </div>
   );

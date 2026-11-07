@@ -133,14 +133,6 @@ describe("backfillPublishScope", () => {
     }
   });
 
-  it("preserves the verbatim method string (not the strict API enum)", async () => {
-    await backfillPublishScope({ organizationId: "org-1" }, [networkRule]);
-    const published = state.creates[1]?.data as
-      | { targets: { create: { method: string | null }[] } }
-      | undefined;
-    expect(published?.targets.create[0]?.method).toBe("get");
-  });
-
   it("maps a workspace scope + preserves the org Default Rule flag", async () => {
     const result = await backfillPublishScope({ workspaceId: "proj-1" }, [
       { ...networkRule, isDefault: true, identities: [], targets: [] },

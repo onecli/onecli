@@ -104,6 +104,12 @@ export const createProcessObserver = (
                 // The MAX, not the default: a day-long build's wake must
                 // still land.
                 expiresInSeconds: WATCH_EXPIRES_MAX_SECONDS,
+                // AGENT-armed, translated: the agent asked its harness to
+                // wake it about this task, which is exactly a process_watch
+                // by another door, so it holds the box the same way (the
+                // background cap bounds it). Only the turn-end safety net,
+                // which nobody asked for, is the platform's own.
+                origin: "agent",
               },
               context,
             );
